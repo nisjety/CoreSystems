@@ -1,0 +1,377 @@
+# Convex Integration: The Real-time Application State Plane
+
+## Overview & The Golden Rule
+
+> **Convex stores INTERACTION, not KNOWLEDGE.**
+
+Convex is the **LIVE EXPERIENCE** layer for CoreSystem. It exists to solve one problem only: **humans collaborating on AI work in real time.**
+
+Convex is **NOT**:
+- A source of truth
+- A backend logic owner
+- A RAG system
+- An identity system
+- A workflow engine
+
+Convex turns backend events (from NATS) into **instant collaborative UX**. It strictly mirrors state, but it never owns authoritative core domain data.
+
+## ✅ CONVEX USAGE DIRECTIVE
+
+### Responsibilities
+Convex SHALL:
+1. Maintain realtime collaborative workspace state (chat, presence, live cursors).
+2. Mirror backend domain events received via NATS (`document.indexed`, `org.member.added`).
+3. Provide sub-100ms reactive updates to frontend clients.
+4. Store conversational and interaction data only.
+5. Enable multi-user collaboration across organizations.
+
+### Allowed Convex Domains ✅
+- Conversations
+- Messages
+- Comments & annotations
+- Live Job progress (Scraping, chunking)
+- Real-time Notifications
+- Presence (who is viewing what)
+- Workspace state / UI filters
+- Draft prompts
+
+### Forbidden Domains ❌
+- Authentication (Control Plane owns this)
+- RAG storage (Data Plane owns this)
+- Vector data (Qdrant owns this)
+- Documents & Files (Data Plane owns this)
+- Billing data (Control Plane owns this)
+- Core Organization metadata authority (Control Plane owns this)
+
+## Architecture Mental Model
+
+```text
+Postgres  → Truth
+Qdrant    → Knowledge
+AI-Core   → Thinking
+Temporal  → Execution
+NATS      → Events
+Convex    → LIVE EXPERIENCE
+```
+
+### Event Flow
+
+Convex operates entirely asynchronously regarding authoritative data. It never queries heavy backend services. It simply listens.
+
+```text
+CONTROL PLANE / DATA PLANE
+        ↓ (Domain Events)
+      NATS
+        ↓ (realtime sync)
+APPLICATION PLANE (Convex Subscriber)
+        ↓ (mutation)
+    Convex Database
+        ↓ (subscription)
+    Frontend UI
+```
+
+## Integration Points
+
+### 1. The Interaction Layer: Conversations & Messages (Owned by Convex)
+
+Convex is the authoritative store for **real-time chat and collaboration**.
+- Users create conversations within their Organization.
+- Conversations provide multi-player isolation per organization.
+- Subscriptions (`useQuery("chat:getMessages")`) provide instant updates for all team members (Slack-level collaboration automatically).
+
+### 2. State Mirrors: Organizations & Users (Strictly Read-Only)
+
+Synced from auth-core when `organization.created` event is published:
+```
+External (auth-core) → Convex
+├── orgId (auth-core ID) → externalOrgId
+├── name → name
+├── slug → slug
+└── createdAt → createdAt
+```
+
+**Index**: by `externalOrgId` for fast lookups
+
+### 2. Users
+
+Synced from org-core when `organization.member.added` event is published:
+```
+External (auth-core/org-core) → Convex
+├── userId (auth-core ID) → externalAuthId
+├── email → email
+├── name → name
+├── orgId (external) → (lookup to find convexOrgId)
+├── role → role
+└── createdAt → createdAt
+```
+
+**Indexes**: 
+- by `externalAuthId`
+- by `externalAuthId + orgId` (for membership verification)
+
+### 3. Conversations
+
+Created by users in Convex:
+- User creates conversation in their organization
+- Conversation references both Convex user ID and org ID
+- Conversations are isolated per organization (multi-tenant)
+
+### 4. Messages
+
+Messages in a conversation:
+- Reference the conversation
+- Reference the user (both Convex user ID and external auth ID optional for audit)
+- Support streaming, attachments, and metadata
+
+## NATS Event Subscriptions
+
+### Subscribed Topics
+
+```
+organization.created      → onOrganizationCreated(orgId, name, slug, createdAt)
+organization.updated      → onOrganizationUpdated(orgId, name, slug, settings)
+organization.deleted      → onOrganizationDeleted(orgId)
+organization.member.added → onOrganizationMemberAdded(orgId, userId, email, role)
+organization.member.removed → onOrganizationMemberRemoved(orgId, userId)
+```
+
+### Subscription Durability
+
+Each topic has a durable subscriber named `convex-<topic>`. This ensures:
+- Messages aren't lost if Convex is temporarily down
+- Redelivery of missed events when Convex restarts
+- At-least-once delivery semantics
+
+## Running Convex with NATS Integration
+
+### Docker Compose
+
+Add to your `docker-compose.yml`:
+```yaml
+convex-gateway:
+  build:
+    context: ./convex-gateway
+    dockerfile: Dockerfile
+  container_name: convex-gateway
+  env_file:
+    - ./convex-gateway/.env.local
+  ports:
+    - "3000:3000"   # Convex HTTP API
+  networks:
+    - aquatiq-local
+  depends_on:
+    aquatiq-nats-local:
+      condition: service_healthy
+    auth-core:
+      condition: service_healthy
+    org-core:
+      condition: service_healthy
+```
+
+### Environment Variables
+
+**Required** in `.env.local`:
+```
+NATS_URL=nats://aquatiq-nats-local:4222
+NATS_TOKEN=nats
+NATS_SERVICE_NAME=convex-gateway
+```
+
+**Optional** (for NATS subscriber service):
+```
+CONVEX_BACKEND_URL=http://convex-gateway:3000
+CONVEX_API_KEY=dev-key
+```
+
+### Starting
+
+```bash
+# Build and start all services
+docker compose up -d
+
+# Check Convex is running
+curl http://localhost:3000
+
+# View Convex dashboard
+# Open http://localhost:3000 in browser
+```
+
+## Data Isolation
+
+### Clear Boundaries
+
+Organizations and users are **read-only** in Convex:
+- Cannot be created/edited directly in Convex
+- Only synced via NATS events
+- Always reference external IDs for audit
+
+Conversations and messages are **writable** in Convex:
+- Created by authenticated users via Convex API
+- Belong to a specific organization
+- Permanently retain references to user/org external IDs
+
+### Query Examples
+
+**List organizations**:
+```typescript
+const orgs = await ctx.db.query("organizations").collect();
+```
+
+**Get users in organization**:
+```typescript
+const users = await ctx.db
+  .query("users")
+  .filter((q) => q.eq(q.field("orgId"), orgId))
+  .collect();
+```
+
+**List conversations for user**:
+```typescript
+const conversations = await ctx.db
+  .query("conversations")
+  .filter((q) => q.eq(q.field("userId"), userId))
+  .collect();
+```
+
+## Security
+
+### Service-to-Service Auth
+
+Convex authenticates with other services via:
+1. **NATS Token**: Configured in env for subscribing to events
+2. **Internal Service ID**: For gRPC calls to auth-core (if needed)
+3. **JWTs**: For user/session verification
+
+### User Context
+
+Users accessing Convex should:
+1. Authenticate with auth-core first
+2. Receive a JWT/session token
+3. Pass token to Convex API calls
+4. Convex validates user belongs to their organization
+
+### Cross-Organization Isolation
+
+Queries automatically scope to user's organization:
+```typescript
+if (user.orgId !== conversationOrgId) {
+  throw new Error("Unauthorized");
+}
+```
+
+## Common Operations
+
+### Syncing a New Organization
+
+1. User creates org in auth-core: `POST /api/v2/auth/organization/create`
+2. auth-core publishes: `NATS: organization.created event`
+3. Convex NATS subscriber receives event
+4. `onOrganizationCreated` mutation is called
+5. Organization appears in Convex within seconds
+
+### Adding User to Organization
+
+1. Org admin invites user: `POST /auth/organization/invite-member`
+2. User accepts invitation
+3. org-core publishes: `NATS: organization.member.added event`
+4. Convex NATS subscriber receives event
+5. `onOrganizationMemberAdded` mutation is called
+6. User can now create conversations in Convex
+
+### Querying with External IDs
+
+For audit or verification, you may need to find Convex records by external IDs:
+
+```typescript
+// Get organization by auth-core ID
+const org = await ctx.db
+  .query("organizations")
+  .filter((q) => q.eq(q.field("externalOrgId"), authOrgId))
+  .first();
+
+// Get user by auth-core user ID
+const user = await ctx.db
+  .query("users")
+  .filter((q) => q.eq(q.field("externalAuthId"), authUserId))
+  .first();
+```
+
+## Troubleshooting
+
+### Convex not syncing orgs/users
+
+1. Check NATS connection: `docker logs aquatiq-nats-local`
+2. Check Convex logs: `docker logs convex-gateway`
+3. Verify NATS_URL and NATS_TOKEN in `.env.local`
+4. Restart Convex: `docker compose restart convex-gateway`
+
+### Users can't see conversations
+
+1. Verify user was added to organization (check Convex dashboard)
+2. Check user's `orgId` matches conversation's `orgId`
+3. Query user record: 
+   ```typescript
+   const user = await ctx.db.get(userId);
+   // Should have orgId and syncStatus: "synced"
+   ```
+
+### Missing organizations after startup
+
+1. Convex uses durable NATS subscriptions
+2. Should automatically catch up on startup
+3. If not, manually create org again to trigger event
+4. Check durable subscriber status: `nats stream info CONTROL_PLANE_EVENTS`
+
+## Development
+
+### Local Testing
+
+```bash
+# Start just Convex dev mode
+npm run dev
+
+# Start with NATS subscriber
+npm run dev &
+node nats-subscriber.js
+```
+
+### Schema Changes
+
+After updating `convex/schema.ts`:
+```bash
+# Regenerate types
+npm run generate
+
+# Convex handles migrations automatically
+```
+
+### Testing NATS Integration
+
+Send test event via NATS CLI:
+```bash
+nats pub organization.created --json '{
+  "id": "test-org-1",
+  "name": "Test Org",
+  "slug": "test-org",
+  "createdAt": 1234567890
+}'
+```
+
+Then check Convex dashboard for synced organization.
+
+## Production Considerations
+
+- Use Convex Cloud instead of local SQLite
+- Implement retry logic with exponential backoff
+- Add monitoring/alerting for sync failures
+- Use stronger NATS authentication (mTLS)
+- Implement rate limiting for API calls
+- Regular backups of Convex database
+- Document data retention policies
+
+## Related Documentation
+
+- [NATS Integration Guide](./NATS_INTEGRATION.md)
+- [Auth Core Documentation](../auth-core/docs/auth-plan.md)
+- [Organization Core Documentation](../org-core/README.md)
+- [Convex Official Docs](https://convex.dev)

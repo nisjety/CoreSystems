@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  # Convex Backend - Reactive database + Functions runtime
+  convex-backend:
+    image: ghcr.io/get-convex/convex-backend:latest
+    container_name: convex-backend
+    ports:
+      - "3210:3210"  # Backend API
+      - "3211:3211"  # HTTP Actions
+    volumes:
+      - convex-data:/data
+      - ./convex:/app/convex:ro
+    environment:
+      # Instance configuration
+      - CONVEX_INSTANCE_NAME=${CONVEX_INSTANCE_NAME:-coresystem-local}
+      - CONVEX_INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      - INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      - INSTANCE_NAME=${CONVEX_INSTANCE_NAME:-coresystem-local}
+      
+      # Database configuration
+      # Option 1: SQLite (development)
+      - CONVEX_STORAGE_TYPE=sqlite
+      - CONVEX_SQLITE_PATH=/data/convex.db
+      
+      # Option 2: PostgreSQL (production)
+      # - CONVEX_STORAGE_TYPE=postgres
+      # - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/convex}
+      
+      # Service URLs
+      - AI_CORE_URL=${AI_CORE_URL:-http://ai-core:8000}
+      - ORG_CORE_URL=${ORG_CORE_URL:-http://org-core-service:8080}
+      - AUTH_SERVER_URL=${AUTH_SERVER_URL:-http://auth-service:3011}
+      
+      # Auth configuration
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-here}
+      - JWT_ISSUER=${JWT_ISSUER:-auth.coresystem.local}
+      - CONVEX_AUTH_ISSUER=${CONVEX_AUTH_ISSUER:-http://localhost:3011/api/convex-auth}
+      - CONVEX_AUTH_JWKS_URL=${CONVEX_AUTH_JWKS_URL:-http://auth-service:3011/api/convex-auth/jwks}
+      - CONVEX_AUTH_AUDIENCE=${CONVEX_AUTH_AUDIENCE:-coresystem-convex}
+      - CONVEX_INTERNAL_SERVICE_KEY=${CONVEX_INTERNAL_SERVICE_KEY:-change-me-internal-service-secret}
+      
+      # Logging
+      - RUST_LOG=${RUST_LOG:-info}
+      - CONVEX_LOG_FORMAT=json
+      
+      # Disable beacon for self-hosted (optional)
+      - CONVEX_DISABLE_BEACON=${CONVEX_DISABLE_BEACON:-false}
+    networks:
+      - aquatiq-local
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3210/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Convex Dashboard - Web UI for managing deployments
+  convex-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: convex-dashboard
+    ports:
+      - "6791:6791"  # Dashboard UI
+    environment:
+      - CONVEX_BACKEND_URL=http://convex-backend:3210
+      - NODE_ENV=${NODE_ENV:-development}
+    networks:
+      - aquatiq-local
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # PostgreSQL - Optional production database (uncomment if needed)
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: convex-postgres
+  #   ports:
+  #     - "5433:5432"  # Different port to avoid conflicts
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   environment:
+  #     - POSTGRES_USER=postgres
+  #     - POSTGRES_PASSWORD=postgres
+  #     - POSTGRES_DB=convex
+  #   networks:
+  #     - aquatiq-local
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+volumes:
+  convex-data:
+    driver: local
+  # postgres-data:
+  #   driver: local
+
+networks:
+  aquatiq-local:
+    external: true

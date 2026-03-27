@@ -1,0 +1,140 @@
+# AFFiNE Self-Hosted Backend
+#
+# Run with:  docker-compose -f docker-compose.affine.yml up -d
+#
+# Port mapping (all non-default to avoid collisions):
+#   AFFiNE server  →  host:47810  container:3010
+#   PostgreSQL     →  host:47811  container:5432   (internal only by default)
+#   Redis          →  host:47812  container:6379   (internal only by default)
+#
+# On first start, create your admin account:
+#   curl -X POST http://localhost:47810/api/setup/create-admin-user \
+#        -H "Content-Type: application/json" \
+#        -d '{"email":"admin@yourapp.com","password":"changeme","name":"Admin"}'
+#
+# Then add to frontend/.env.local:
+#   NEXT_PUBLIC_AFFINE_SERVER_URL=http://localhost:47810
+#   NEXT_PUBLIC_AFFINE_WS_URL=ws://localhost:47810
+#   AFFINE_ADMIN_EMAIL=admin@yourapp.com
+#   AFFINE_ADMIN_PASSWORD=changeme
+
+services:
+  # ── AFFiNE application server ─────────────────────────────────────────────
+  affine:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine_server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      affine_migration:
+        condition: service_completed_successfully
+    ports:
+      - '47810:3010'
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_SERVER_HTTPS: 'false'
+
+      # Database — postgres internal port is still 5432 inside the container
+      DATABASE_URL: 'postgresql://affine:${POSTGRES_PASSWORD:-affine_secret}@postgres:5432/affine'
+
+      # Redis — internal port unchanged
+      REDIS_SERVER_HOST: redis
+      AFFINE_INDEXER_ENABLED: 'false'
+
+      # Mail (optional — needed for invite emails)
+      # MAILER_HOST: smtp.yourprovider.com
+      # MAILER_PORT: 587
+      # MAILER_USER: noreply@yourapp.com
+      # MAILER_PASSWORD: secret
+      # MAILER_SENDER: '"Planner" <noreply@yourapp.com>'
+
+    volumes:
+      - affine_uploads:/root/.affine/storage
+      - affine_config:/root/.affine/config
+    networks:
+      - affine_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3010/info').then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  affine_migration:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine_migration_job
+    command: ['sh', '-c', 'node ./scripts/self-host-predeploy.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_SERVER_HTTPS: 'false'
+      DATABASE_URL: 'postgresql://affine:${POSTGRES_PASSWORD:-affine_secret}@postgres:5432/affine'
+      REDIS_SERVER_HOST: redis
+      AFFINE_INDEXER_ENABLED: 'false'
+    volumes:
+      - affine_uploads:/root/.affine/storage
+      - affine_config:/root/.affine/config
+    networks:
+      - affine_net
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # Exposed on host port 47811 so you can inspect the DB locally if needed.
+  # Remove the `ports` block to keep it fully internal in production.
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: affine_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: affine
+      POSTGRES_USER: affine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-affine_secret}
+    ports:
+      - '47811:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - affine_net
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U affine -d affine']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  # Exposed on host port 47812 for local debugging only.
+  # Remove the `ports` block in production.
+  redis:
+    image: redis:7-alpine
+    container_name: affine_redis
+    restart: unless-stopped
+    ports:
+      - '47812:6379'
+    networks:
+      - affine_net
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  affine_uploads:
+  affine_config:
+  postgres_data:
+
+networks:
+  affine_net:
+    driver: bridge
