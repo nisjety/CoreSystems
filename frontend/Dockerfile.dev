@@ -1,0 +1,23 @@
+# Dockerfile.dev for Frontend (Next.js)
+FROM node:20-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Install pnpm (use npm to install the package manager) and ensure we have bash for scripts
+RUN apk add --no-cache bash git && \
+    npm install -g pnpm@latest
+
+# Copy only lockfiles + manifests first for better caching, then install
+COPY package.json pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile || pnpm install
+
+# Copy the rest of the repository so `src/app` and other files are available
+COPY . .
+
+# Development port
+ENV PORT=3000
+EXPOSE 3000
+
+# Default command (can be overridden by docker-compose with a bind mount in dev)
+CMD ["pnpm", "dev"]

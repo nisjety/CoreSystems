@@ -1,0 +1,1 @@
+declare module '@toeverything/theme/style.css';

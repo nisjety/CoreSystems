@@ -1,0 +1,1 @@
+export { BrregSearch } from './BrregSearch'

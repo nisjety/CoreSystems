@@ -1,0 +1,100 @@
+name: Aquencia Frontend
+# Phase 6 Complete: Full cross-plane event-driven architecture operational
+# All planes (Control, Reasoning, Data, Ingestion, Application) connected via shared NATS JetStream broker
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Next.js dev must listen on all interfaces within container
+      NODE_ENV: development
+      HOSTNAME: "0.0.0.0"
+      # Enable polling-based file watching for Docker on macOS
+      # (inotify events don't propagate through bind mounts reliably)
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    networks:
+      - triodelab-net
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - /app/.next
+    command: ["pnpm", "exec", "next", "dev", "--webpack", "-H", "0.0.0.0"]
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --timeout=5 --tries=1 -O /dev/null http://127.0.0.1:3000 || exit 1"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 120s
+
+  # ============================================================================
+  # PHASE 6: SHARED NATS JETSTREAM BROKER — Event-Driven Architecture Backbone
+  # ============================================================================
+  # 
+  # This NATS broker facilitates real-time cross-plane event consumption:
+  # 
+  # CONTROL PLANE publishes to these subjects (via AQENCIA_CONTROLPLANE stream):
+  #   • aqencia.controlplane.user.provider_linked         → Ingestion (setup providers)
+  #   • aqencia.controlplane.org.plan_changed             → Data Plane (enforce quotas)
+  #   • aqencia.controlplane.billing.quota_exceeded       → All planes (enforce limits)
+  # 
+  # SUBSCRIBERS (all planes listening):
+  #   • Ingestion imports-api:   user.provider_linked, org.plan_changed, billing.quota_exceeded
+  #   • Data retrieval-service:  org.plan_changed, billing.quota_exceeded
+  #   • Data documents-service:  org.plan_changed, billing.quota_exceeded
+  #   • Reasoning ai-core:       billing.quota_exceeded
+  # 
+  # Lives here (frontend network) as anchor so all planes can reach it by DNS name.
+  # Each plane also has its own internal NATS instance for plane-local events.
+  # ============================================================================
+  triodelab-nats:
+    image: nats:2.10-alpine
+    container_name: triodelab-nats
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats-shared.conf"]
+    ports:
+      - "4240:4222"   # unique host port — connect with: nats://localhost:4240
+      - "8240:8222"   # monitoring: http://localhost:8240
+    volumes:
+      - triodelab-nats-data:/data
+      - ./nats-shared.conf:/etc/nats/nats-shared.conf:ro
+    networks:
+      - triodelab-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  triodelab-nats-data:
+
+networks:
+  triodelab-net:
+    external: true
+    name: triodelab-net
+    labels:
+      com.docker.compose.network: "triodelab-net"
+      com.docker.compose.project: "triodelab"
