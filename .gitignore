@@ -1,0 +1,109 @@
+# CoreSystem root .gitignore — one repo covers all 6 planes + velion frontend.
+# Exclude large build artefacts, dependency dirs, and runtime state. Keep
+# tracked: source, docs, compose files, Dockerfiles, env templates.
+
+# ──────────────────────────────────────────────────────────────────────
+# Build artefacts
+# ──────────────────────────────────────────────────────────────────────
+# Rust
+target/
+**/target/
+*.rlib
+*.rmeta
+
+# Go
+bin/
+**/bin/
+**/dist/
+
+# Next.js / Node
+.next/
+**/.next/
+out/
+**/out/
+**/node_modules/
+
+# Python
+__pycache__/
+**/__pycache__/
+**/.pytest_cache/
+**/*.egg-info/
+**/.venv/
+.venv/
+*.pyc
+*.pyo
+
+# Generated proto / SDK output
+**/gen/cpp/
+**/gen/python/_pb2*.py
+
+# ──────────────────────────────────────────────────────────────────────
+# Editor / OS
+# ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+
+# ──────────────────────────────────────────────────────────────────────
+# Secrets and local env
+# ──────────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
+# Track templates explicitly.
+!**/.env.example
+!**/.env.docker
+!**/.env.template
+
+# ──────────────────────────────────────────────────────────────────────
+# Logs and runtime state
+# ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+**/logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# ──────────────────────────────────────────────────────────────────────
+# Coverage and test output
+# ──────────────────────────────────────────────────────────────────────
+coverage/
+**/coverage/
+.nyc_output/
+**/.nyc_output/
+*.lcov
+
+# ──────────────────────────────────────────────────────────────────────
+# Local caches
+# ──────────────────────────────────────────────────────────────────────
+.pnpm-store/
+**/.pnpm-store/
+.turbo/
+**/.turbo/
+.cache/
+**/.cache/
+
+# ──────────────────────────────────────────────────────────────────────
+# Legacy nested-repo backups (created on 2026-05-20 when CoreSystem
+# absorbed Model Plane + Quarry-v2 into a single root repository). Kept
+# on disk in case the pre-root history is ever needed; not part of the
+# unified repo.
+# ──────────────────────────────────────────────────────────────────────
+.git.preroot-backup/
+**/.git.preroot-backup/
+
+# ──────────────────────────────────────────────────────────────────────
+# Sandbox / scratch
+# ──────────────────────────────────────────────────────────────────────
+/tmp/
+.scratch/

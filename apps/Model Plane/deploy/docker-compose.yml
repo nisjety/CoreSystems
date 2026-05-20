@@ -1,0 +1,371 @@
+name: model-plane
+
+services:
+  # --- Infrastructure ---
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: session_core
+    ports:
+      - "55434:5432"
+    volumes:
+      - mp-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4228:4222"
+      - "8228:8222"
+    healthcheck:
+      test: ["CMD", "nats-server", "--help"]
+      interval: 5s
+      retries: 3
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    volumes:
+      - mp-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6391:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 3
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    environment:
+      DB: postgres12_pgx        # valid drivers: mysql8 / postgres12 / postgres12_pgx / cassandra
+      DB_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PWD: postgres
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "7234:7233"
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+
+  temporal-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+    volumes:
+      - mp-temporal-postgres-data:/var/lib/postgresql/data
+
+  temporal-ui:
+    image: temporalio/ui:2.30.0
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "8233:8080"
+    depends_on:
+      - temporal
+
+  # OTEL collector for distributed tracing
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter
+
+  # --- Rust services ---
+
+  model-gateway:
+    build:
+      context: ..
+      dockerfile: rust/services/model-gateway/Dockerfile
+    ports:
+      - "8080:8080"   # HTTP
+      - "9090:9090"   # gRPC
+    environment:
+      RUST_LOG: info
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: model-gateway
+      DEFAULT_MODEL: claude-sonnet-4-20250514
+      RATE_LIMIT_RPM: "100"
+      # Wave 7 — fine-tuning kill switch + budget guard (off by default in
+      # production-style profile; dev override flips FINETUNE_ENABLED=1).
+      FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
+      FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
+      FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      retries: 3
+
+  session-core:
+    build:
+      context: ..
+      dockerfile: rust/services/session-core/Dockerfile
+    ports:
+      - "18081:8081"  # HTTP health — host 18081 avoids collision with Ingestion Plane quarry-control (host 8081)
+      - "9091:9091"   # gRPC
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: session-core
+      CONTEXT_RECENT_MESSAGES: "20"
+      COMPACTION_THRESHOLD: "80000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/healthz"]
+      interval: 10s
+      retries: 3
+
+  inference-core:
+    build:
+      context: ..
+      dockerfile: rust/services/inference-core/Dockerfile
+    ports:
+      - "18082:8082"  # HTTP health — host 18082 avoids collision with Ingestion Plane quarry-edge (host 8082)
+      - "9092:9092"   # gRPC
+    environment:
+      RUST_LOG: info
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: inference-core
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      DEFAULT_PROVIDER: anthropic
+      CACHE_TTL_SECS: "300"
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/healthz"]
+      interval: 10s
+      retries: 3
+
+  execution-core:
+    build:
+      context: ..
+      dockerfile: rust/services/execution-core/Dockerfile
+    ports:
+      - "18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
+      - "9093:9093"   # gRPC
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: model-plane-artifacts
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: execution-core
+      SESSION_CORE_ADDR: http://session-core:9091
+      INFERENCE_CORE_ADDR: http://inference-core:9092
+      CAPABILITY_CORE_ADDR: http://capability-core:9097
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      session-core:
+        condition: service_healthy
+      inference-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/healthz"]
+      interval: 10s
+      retries: 3
+
+  # --- Go services ---
+
+  orchestrator-core:
+    build:
+      context: ../go
+      dockerfile: services/orchestrator-core/Dockerfile
+    ports:
+      - "8084:8084"
+    # temporal's auto-setup image takes ~30-60s after the container reports
+    # "Up" before its Frontend service is reachable. orchestrator-core fails
+    # fast on first connect ("Frontend is not healthy yet"); `restart:
+    # unless-stopped` makes Docker re-spawn it until Temporal is ready.
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      NATS_URL: nats://nats:4222
+      SESSION_CORE_ADDR: session-core:9091
+      INFERENCE_CORE_ADDR: inference-core:9092
+      EXECUTION_CORE_ADDR: execution-core:9093
+      CAPABILITY_CORE_ADDR: capability-core:9097
+      ENABLE_COMPAT_ADAPTER: "false"
+    depends_on:
+      - temporal
+      - nats
+
+  capability-core:
+    build:
+      context: ../go
+      dockerfile: services/capability-core/Dockerfile
+    ports:
+      - "8085:8085"   # HTTP health
+      - "9097:9097"   # gRPC
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  sandbox-manager:
+    build:
+      context: ../go
+      dockerfile: services/sandbox-manager/Dockerfile
+    ports:
+      - "8086:8086"   # HTTP health
+      - "9094:9094"   # gRPC
+    environment:
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  browser-broker:
+    build:
+      context: ../go
+      dockerfile: services/browser-broker/Dockerfile
+    ports:
+      - "8087:8087"   # HTTP health
+      - "9095:9095"   # gRPC
+
+  letta-bridge:
+    build:
+      context: ../go
+      dockerfile: services/letta-bridge/Dockerfile
+    ports:
+      - "8088:8088"   # HTTP health
+      - "9096:9096"   # gRPC
+    environment:
+      LETTA_URL: ${LETTA_URL:-http://localhost:8283}
+      SESSION_CORE_ADDR: session-core:9091
+
+  cost-core:
+    build:
+      context: ../go/services/cost-core
+      dockerfile: Dockerfile
+    ports:
+      - "8089:8089"   # HTTP health + API
+      - "9098:9098"   # gRPC
+    environment:
+      LOG_LEVEL: info
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: cost-core
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8089/healthz"]
+      interval: 10s
+      retries: 3
+
+  task-core:
+    build:
+      context: ../go/services/task-core
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"   # HTTP health + REST API
+      - "9099:9099"   # gRPC
+    environment:
+      LOG_LEVEL: info
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: task-core
+      SESSION_CORE_ADDR: session-core:9091
+      EXECUTION_CORE_ADDR: execution-core:9093
+      ORCHESTRATOR_CORE_ADDR: orchestrator-core:8084
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/healthz"]
+      interval: 10s
+      retries: 3
+
+  bridge-core:
+    build:
+      context: ../go/services/bridge-core
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8091"   # HTTP health + WebSocket bridge
+      - "9100:9100"   # gRPC
+    environment:
+      LOG_LEVEL: info
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: bridge-core
+      SESSION_CORE_ADDR: session-core:9091
+      MODEL_GATEWAY_ADDR: model-gateway:9090
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-mp-bridge}
+      JWT_SECRET: ${JWT_SECRET:-dev-shared-secret}
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/healthz"]
+      interval: 10s
+      retries: 3
+
+volumes:
+  mp-postgres-data:
+  mp-minio-data:
+  mp-temporal-postgres-data:
+
+networks:
+  default:
+    name: model-plane-network

@@ -1,0 +1,610 @@
+name: control-plane
+
+services:
+  # ==============================================
+  # INFRASTRUCTURE (KUN controlplane-net)
+  # ==============================================
+
+  controlplane-postgres:
+    image: postgres:15-alpine
+    container_name: controlplane-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-controlplane}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - controlplane-net
+    shm_size: "128mb"
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "effective_cache_size=256MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "log_min_messages=warning"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # Viktig: pg_isready uten -d kan default-e til db=bruker. Her er det OK, men vi kan være eksplisitte.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME:-controlplane}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  controlplane-redis:
+    image: redis:7-alpine
+    container_name: controlplane-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 96mb
+      --maxmemory-policy allkeys-lru
+      --tcp-backlog 128
+      --hz 10
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  controlplane-nats:
+    image: nats:2.10-alpine
+    container_name: controlplane-nats
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats.conf"]
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    volumes:
+      - nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      - controlplane-net
+      - inter-plane-bus  # exposed so shared cross-plane services can reach it by container name
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ==============================================
+  # CONTROL PLANE APPS (controlplane-net + inter-plane-bus)
+  # ==============================================
+
+  auth-core:
+    build:
+      context: ./auth-core
+      dockerfile: Dockerfile
+    container_name: auth-service
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./auth-core/.env.docker
+    environment:
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+    ports:
+      - "3011:3011"
+      - "50011:50011"
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      controlplane-postgres:
+        condition: service_healthy
+      controlplane-redis:
+        condition: service_healthy
+      controlplane-nats:
+        condition: service_healthy
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3011/api/auth/get-session"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+  user-core:
+    build:
+      context: ./user-core
+      dockerfile: Dockerfile
+    container_name: user-service
+    init: true
+    restart: unless-stopped 
+    env_file:
+      - ./user-core/.env.docker
+    environment:
+      GOMAXPROCS: "1"
+      PPROF_ENABLED: "true"
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      # G26: silence gin's debug-mode banner + enable release-mode perf paths.
+      GIN_MODE: release
+    ports:
+      - "3012:3012"
+      - "50012:50012"
+      - "6060:6060"
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      controlplane-postgres:
+        condition: service_healthy
+      controlplane-redis:
+        condition: service_healthy
+      controlplane-nats:
+        condition: service_healthy
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z 127.0.0.1 50012 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  org-core:
+    build:
+      context: ./org-core
+      dockerfile: Dockerfile
+    container_name: org-core-service
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./org-core/.env.docker
+    environment:
+      GOMAXPROCS: "1"
+      PPROF_ENABLED: "true"
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      # G26: silence gin's debug-mode banner + enable release-mode perf paths.
+      GIN_MODE: release
+    ports:
+      - "18080:8080"   # HTTP — host 18080 avoids collision with Model Plane model-gateway (host 8080)
+      - "19090:9090"   # gRPC — host 19090 avoids collision with Model Plane model-gateway gRPC (host 9090)
+      - "19091:9091"   # gRPC — host 19091 avoids collision with Model Plane session-core gRPC (host 9091)
+      - "6061:6061"
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      controlplane-postgres:
+        condition: service_healthy
+      controlplane-redis:
+        condition: service_healthy
+      controlplane-nats:
+        condition: service_healthy
+      auth-core:
+        condition: service_started
+      user-core:
+        condition: service_started
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  billing-core:
+    build:
+      context: ./billing-core
+      dockerfile: Dockerfile
+    container_name: billing-core-service
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./billing-core/.env.docker
+    environment:
+      GOMAXPROCS: "1"
+      PPROF_ENABLED: "true"
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+    ports:
+      - "3014:3014"
+      - "50013:50013"
+      - "6062:6062"
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      controlplane-postgres:
+        condition: service_healthy
+      controlplane-redis:
+        condition: service_healthy
+      controlplane-nats:
+        condition: service_healthy
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3014/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ==============================================
+  # SESSION-CORE (session harness for Model Plane v1/v2)
+  # ==============================================
+
+  session-core:
+    build:
+      context: ./session-core
+      dockerfile: Dockerfile
+    container_name: session-core-service
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./session-core/.env.docker
+    environment:
+      GOMAXPROCS: "1"
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      DB_USER: ${DB_USER}
+      PGPASSWORD: ${DB_PASSWORD}
+      DATABASE_USER: ${DB_USER}
+      DATABASE_PASSWORD: ${DB_PASSWORD}
+      NATS_TOKEN: ${NATS_TOKEN}
+      NATS_SHARED_URL: ${VELION_NATS_URL}
+      NATS_SHARED_TOKEN: ${VELION_NATS_TOKEN}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET is required}
+      # Canary ramp: set to 0-100 to route that % of tenants to Model Plane v2
+      MODEL_PLANE_V2_ROLLOUT_PCT: ${MODEL_PLANE_V2_ROLLOUT_PCT:-0}
+      # Convex sync: mirrors session/message state into convex-core (Application Plane)
+      # for reactive frontend subscriptions. Leave CONVEX_URL empty to disable.
+      CONVEX_URL: ${CONVEX_URL:-http://convex-backend:3211}
+      CONVEX_SERVICE_KEY: ${CONVEX_SERVICE_KEY:-}
+      ORG_CORE_URL: http://org-core:8080
+    ports:
+      - "3017:3017"
+      - "50017:50017"
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      controlplane-postgres:
+        condition: service_healthy
+      controlplane-redis:
+        condition: service_healthy
+      controlplane-nats:
+        condition: service_healthy
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3017/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ==============================================
+  # LAGO (Holdes i CP plane: KUN controlplane-net)
+  # ==============================================
+
+  lago-db:
+    image: getlago/postgres-partman:15.0-alpine
+    container_name: lago-db
+    restart: unless-stopped
+    env_file:
+      - ./lago.env
+    volumes:
+      - lago_postgres_data:/data/postgres
+    ports:
+      - "5434:5432"
+    networks:
+      - controlplane-net
+    shm_size: "64mb"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lago -d lago"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  lago-redis:
+    image: redis:7-alpine
+    container_name: lago-redis
+    restart: unless-stopped
+    command: redis-server --port 6379 --maxmemory 64mb --maxmemory-policy allkeys-lru
+    volumes:
+      - lago_redis_data:/data
+    ports:
+      - "6381:6379"
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  lago-pdf:
+    image: getlago/lago-gotenberg:7.8.2
+    container_name: lago-pdf
+    restart: unless-stopped
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+
+  lago-migrate:
+    image: getlago/api:v1.42.0
+    container_name: lago-migrate
+    restart: "no"
+    env_file:
+      - ./lago.env
+    command: ["./scripts/migrate.sh"]
+    depends_on:
+      lago-db:
+        condition: service_healthy
+    networks:
+      - controlplane-net
+
+  lago-api:
+    image: getlago/api:v1.42.0
+    container_name: lago-api
+    restart: unless-stopped
+    env_file:
+      - ./lago.env
+    command: ["./scripts/start.api.sh"]
+    ports:
+      - "3016:3000"
+    volumes:
+      - lago_storage_data:/app/storage
+    depends_on:
+      lago-migrate:
+        condition: service_completed_successfully
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+        reservations:
+          memory: 192M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      start_period: 45s
+      timeout: 15s
+      retries: 5
+
+  lago-worker:
+    image: getlago/api:v1.42.0
+    container_name: lago-worker
+    restart: unless-stopped
+    env_file:
+      - ./lago.env
+    command: ["./scripts/start.worker.sh"]
+    volumes:
+      - lago_storage_data:/app/storage
+    depends_on:
+      lago-migrate:
+        condition: service_completed_successfully
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+        reservations:
+          memory: 192M
+
+  lago-clock:
+    image: getlago/api:v1.42.0
+    container_name: lago-clock
+    restart: unless-stopped
+    env_file:
+      - ./lago.env
+    command: ["./scripts/start.clock.sh"]
+    depends_on:
+      lago-migrate:
+        condition: service_completed_successfully
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.25"
+        reservations:
+          memory: 128M
+
+  lago-front:
+    image: getlago/front:v1.42.0
+    container_name: lago-front
+    restart: unless-stopped
+    env_file:
+      - ./lago.env
+    ports:
+      - "3015:80"
+    depends_on:
+      lago-api:
+        condition: service_healthy
+    networks:
+      - controlplane-net
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+
+networks:
+  # Privat nettverk kun for Control Plane
+  controlplane-net:
+    name: controlplane-net
+    driver: bridge
+
+  # Felles prosjekt-nettverk (må eksistere)
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
+    labels:
+      com.docker.compose.network: "inter-plane-bus"
+      com.docker.compose.project: "triodelab"
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  nats-data:
+    driver: local
+
+  lago_postgres_data:
+    driver: local
+  lago_redis_data:
+    driver: local
+  lago_storage_data:
+    driver: local
