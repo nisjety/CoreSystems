@@ -24,6 +24,7 @@ import (
 	apmotel "github.com/triodelab/dataplane/services/documents-api-go/internal/otel"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
+	"github.com/triodelab/dataplane/services/documents-api-go/pkg/usagepub"
 )
 
 func main() {
@@ -63,6 +64,14 @@ func main() {
 
 	docRepo := repo.NewDocumentRepo(pool)
 	publisher := events.NewPublisher(nc)
+	// Phase A · A1.5 — usage + audit publisher. Logs-only on connect
+	// failure (the existing nc above is already required, so failure
+	// here is structurally unreachable). The handler can keep a pointer
+	// and emit fire-and-forget events without ever blocking the request.
+	usagePublisher := usagepub.New(nc, "data-plane")
+	_ = usagePublisher // wired into handler in a follow-up commit; the
+	// publisher is created here so the wiring is reviewable today even
+	// though no call site forwards it yet.
 	docHandler := handler.NewDocumentHandler(docRepo, publisher)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`

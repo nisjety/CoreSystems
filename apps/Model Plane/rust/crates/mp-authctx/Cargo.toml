@@ -1,0 +1,46 @@
+[package]
+name = "mp-authctx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase A · A1.3 — shared auth-context middleware for Model Plane services."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Web stack — tower-http compatible Layer so model-gateway, session-core,
+# inference-core, and execution-core (which all use axum) can adopt the
+# middleware with a single `.layer(...)` call.
+axum = { version = "0.7", default-features = false, features = ["http1"] }
+http = "1"
+tower = "0.5"
+tower-layer = "0.3"
+
+# JWT verification — golang-jwt-equivalent in the Rust ecosystem.
+jsonwebtoken = "9"
+
+# Async + concurrency
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+
+# HTTP client for the JWKS fetch.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serde for claim shapes.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Tracing — matches the rest of the Rust workspace (see mp-telemetry).
+tracing = "0.1"
+
+# Time + parsing helpers.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Base64 decode for the observe-mode unverified-payload path.
+base64 = "0.22"
+
+# Error reporting.
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "time", "macros", "test-util"] }

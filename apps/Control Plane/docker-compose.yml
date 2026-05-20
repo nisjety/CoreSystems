@@ -399,6 +399,54 @@ services:
       start_period: 30s
 
   # ==============================================
+  # AUDIT-CORE (Phase A · A1.6 — append-only audit + usage log)
+  # ==============================================
+  # Subscribes to `velion.audit.v1.>` and `velion.usage.v1.>` on the
+  # shared bus and persists to controlplane-postgres. Reads via
+  # /v1/{audit,usage,usage/summary} are org-scoped by query param;
+  # internal-api-key required (replaced by auth-core JWT once Wave 3
+  # enforce mode lands).
+  audit-core:
+    build:
+      context: ./audit-core
+      dockerfile: Dockerfile
+    container_name: audit-core-service
+    init: true
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-controlplane}:${POSTGRES_PASSWORD:-controlplane}@controlplane-postgres:5432/${POSTGRES_DB:-controlplane}
+      NATS_URL: nats://velion-nats:4222
+      NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      HTTP_PORT: "8087"
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+    ports:
+      - "8087:8087"
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    depends_on:
+      controlplane-postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8087/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ==============================================
   # LAGO (Holdes i CP plane: KUN controlplane-net)
   # ==============================================
 

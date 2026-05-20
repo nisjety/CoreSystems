@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.4
+#
+# audit-core builder. Single Go module, no workspace replace directives,
+# so the build context is the service dir itself. Keeps `go mod download`
+# under a BuildKit cache mount and uses the GOPROXY fallback chain that
+# the other Phase A Go services adopted, so a flaky proxy.golang.org
+# doesn't fail the whole build.
+FROM golang:1.25-alpine AS builder
+RUN apk --no-cache add git ca-certificates
+WORKDIR /workspace
+COPY . .
+ENV GOPROXY=https://proxy.golang.org,https://goproxy.io,direct
+ENV GOSUMDB=sum.golang.org
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    for i in 1 2 3 4 5; do \
+      go mod download && break || { echo "go mod download retry $i"; sleep 8; }; \
+    done
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /audit-core ./cmd/server
+
+FROM alpine:3.20
+RUN apk --no-cache add ca-certificates curl
+COPY --from=builder /audit-core /usr/local/bin/audit-core
+EXPOSE 8087
+ENTRYPOINT ["audit-core"]
