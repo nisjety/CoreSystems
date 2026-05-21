@@ -53,14 +53,30 @@ Thumbs.db
 # ──────────────────────────────────────────────────────────────────────
 # Secrets and local env
 # ──────────────────────────────────────────────────────────────────────
+# Catch every .env variant (including .env.production, .env.staging,
+# .env.external-services, .env.zammad — these have been observed to
+# contain real DB passwords + integration secrets in this tree). Also
+# catch service-named *.env files (apps/Control Plane/lago.env carries
+# real openssl-generated keys per its own header).
 .env
-.env.local
-.env.*.local
+.env.*
+*.env
 **/.env
-**/.env.local
-**/.env.*.local
-# Track templates explicitly.
+**/.env.*
+**/*.env
+# Track explicitly named template/example/docker variants only.
 !**/.env.example
+!**/.env.template
+!**/.env.docker
+!**/.env.sso.template
+!**/.env.zammad.example
+!**/*.env.example
+!**/*.env.template
+!**/*.env.docker
+# Specific known-secret files (defence-in-depth in case the pattern
+# above ever loosens by accident).
+**/lago.env
+**/.env.external-services
 !**/.env.docker
 !**/.env.template
 
