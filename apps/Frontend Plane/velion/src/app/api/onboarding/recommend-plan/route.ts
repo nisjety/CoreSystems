@@ -137,11 +137,86 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         trialFallback('Vi kunne ikke tolke svaret — start gjerne gratis.'),
       )
     }
-    return jsonRec({ ...parsed, generatedAt: new Date().toISOString() })
+    // Post-LLM guardrail. Some prompts coax the model into picking
+    // `trial` even when the user clearly has paid-tier signal (e.g.
+    // selected all 6 connectors), which produced the reported bug.
+    // The rule is deterministic: if signal is strong, upgrade the
+    // recommendation server-side before sending it to velion.
+    const adjusted = applyDeterministicFloor(parsed, body)
+    return jsonRec({ ...adjusted, generatedAt: new Date().toISOString() })
   } catch {
     return jsonRec(
       trialFallback('Anbefalingen er midlertidig utilgjengelig.'),
     )
+  }
+}
+
+/**
+ * Override the LLM pick when the supplied signal mathematically
+ * outranks the recommendation. Mirrors what a senior sales-engineer
+ * would suggest — if you've already wired up Slack + Notion + Zammad
+ * we don't waste your time with a hobby tier.
+ *
+ * Rules (ordered from strongest signal to weakest):
+ *   - 5+ connectors                       → at least `enterprise`
+ *   - 3+ connectors                       → at least `pro`
+ *   - 1+ connector OR website + size>=11  → at least `standard`
+ *   - website only, solo/small            → keep LLM pick (trial / hobby OK)
+ */
+function applyDeterministicFloor(
+  pick: Pick<Recommendation, 'planId' | 'reason'>,
+  body: RequestBody,
+): Pick<Recommendation, 'planId' | 'reason'> {
+  const connectorCount = body.connectors?.length ?? 0
+  const hasWebsite = Boolean(body.website?.url?.trim())
+  const sizeRank: Record<string, number> = {
+    solo: 1,
+    small: 2,
+    medium: 3,
+    large: 4,
+    enterprise: 5,
+  }
+  const sizeScore = body.organization?.size
+    ? sizeRank[body.organization.size] ?? 0
+    : 0
+
+  let floor: Recommendation['planId'] | null = null
+  let floorReason: string | null = null
+  if (connectorCount >= 5) {
+    floor = 'enterprise'
+    floorReason =
+      'Du har koblet til 5+ kilder — Enterprise gir riktig SLA + audit.'
+  } else if (connectorCount >= 3) {
+    floor = 'pro'
+    floorReason =
+      'Med 3+ kilder trenger du Pro for å bruke alt vi finner.'
+  } else if (connectorCount >= 1 || (hasWebsite && sizeScore >= 3)) {
+    floor = 'standard'
+    floorReason =
+      'Du har nok kunnskap koblet til at Standard passer best.'
+  }
+
+  if (!floor) return pick
+  // Only upgrade — never downgrade what the LLM picked.
+  if (planRank(pick.planId) >= planRank(floor)) return pick
+  return {
+    planId: floor,
+    reason: floorReason ?? pick.reason,
+  }
+}
+
+function planRank(id: Recommendation['planId']): number {
+  switch (id) {
+    case 'trial':
+      return 0
+    case 'hobby':
+      return 1
+    case 'standard':
+      return 2
+    case 'pro':
+      return 3
+    case 'enterprise':
+      return 4
   }
 }
 

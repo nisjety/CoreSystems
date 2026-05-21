@@ -14,6 +14,9 @@
 
 import React, { useState } from 'react'
 
+import { BrregSearch } from '@/components/onboarding/ui/BrregSearch'
+import type { BrregEnhet } from '@/lib/services/brreg-service'
+
 import type { OnboardingMachine } from '../state/useOnboardingMachine'
 import type { OrganizationPayload } from '../state/types'
 
@@ -37,12 +40,28 @@ const SIZES: { value: OrganizationPayload['size']; label: string }[] = [
 export function OrganizationStep({ machine }: { machine: OnboardingMachine }) {
   const initial = machine.state.organization
   const [name, setName] = useState(initial?.name ?? '')
+  const [orgNumber, setOrgNumber] = useState<string | undefined>(
+    initial?.brregOrgNumber,
+  )
   const [size, setSize] = useState<OrganizationPayload['size']>(initial?.size)
+  // Default to the Brønnøysund-backed lookup that the old onboarding
+  // used; the user can opt out with the "Skip verification" link to
+  // get a plain text field (e.g. for non-Norwegian orgs).
+  const [brregSkipped, setBrregSkipped] = useState(false)
+
+  const handleBrregSelect = (enhet: BrregEnhet) => {
+    setName(enhet.navn)
+    setOrgNumber(enhet.organisasjonsnummer)
+  }
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault()
     if (!name.trim()) return
-    machine.setOrganization({ name: name.trim(), size })
+    machine.setOrganization({
+      name: name.trim(),
+      size,
+      brregOrgNumber: orgNumber,
+    })
     machine.goTo('website')
   }
 
@@ -52,25 +71,44 @@ export function OrganizationStep({ machine }: { machine: OnboardingMachine }) {
         <StepEyebrow>Steg 2 av 6</StepEyebrow>
         <StepTitle>Hva heter organisasjonen din?</StepTitle>
         <StepDescription>
-          Vi bruker navnet til å sette opp arbeidsplassen. Du kan endre
-          alt senere.
+          Søk i Enhetsregisteret eller skriv inn navnet manuelt. Du kan
+          endre alt senere.
         </StepDescription>
 
         <form onSubmit={submit} className="flex flex-col gap-5">
-          <label className="block">
-            <span className="block font-inter text-[11px] uppercase tracking-[0.16em] text-[#6B6660]">
-              Organisasjon
-            </span>
-            <input
-              autoFocus
-              required
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Aquatiq AS"
-              className="mt-2 w-full rounded-md border border-[#D6D2CB] bg-white px-3 py-2.5 font-inter text-[14px] text-[#1F1B17] placeholder:text-[#A09890] focus:border-[#1F1B17] focus:outline-none"
+          {brregSkipped ? (
+            <label className="block">
+              <span className="block font-inter text-[11px] uppercase tracking-[0.16em] text-[#6B6660]">
+                Organisasjon
+              </span>
+              <input
+                autoFocus
+                required
+                type="text"
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value)
+                  // Manual edits invalidate any earlier Brreg match.
+                  setOrgNumber(undefined)
+                }}
+                placeholder="Aquatiq AS"
+                className="mt-2 w-full rounded-md border border-[#D6D2CB] bg-white px-3 py-2.5 font-inter text-[14px] text-[#1F1B17] placeholder:text-[#A09890] focus:border-[#1F1B17] focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setBrregSkipped(false)}
+                className="mt-2 font-inter text-[11px] uppercase tracking-[0.16em] text-[#A09890] hover:text-[#1F1B17]"
+              >
+                ← Søk i Enhetsregisteret
+              </button>
+            </label>
+          ) : (
+            <BrregSearch
+              initialQuery={name}
+              onSelect={handleBrregSelect}
+              onSkip={() => setBrregSkipped(true)}
             />
-          </label>
+          )}
 
           <fieldset>
             <legend className="block font-inter text-[11px] uppercase tracking-[0.16em] text-[#6B6660]">
