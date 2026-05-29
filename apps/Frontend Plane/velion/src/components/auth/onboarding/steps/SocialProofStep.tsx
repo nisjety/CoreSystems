@@ -13,6 +13,7 @@
 
 import React from 'react'
 
+import { useOnboardingCopy } from '../i18n'
 import type { OnboardingMachine } from '../state/useOnboardingMachine'
 
 import {
@@ -34,30 +35,29 @@ const LOGOS = [
 ]
 
 export function SocialProofStep({ machine }: { machine: OnboardingMachine }) {
+  const { copy } = useOnboardingCopy()
+
   return (
     <>
-      <LeftPane>
-        <StepEyebrow>Steg 5 av 6</StepEyebrow>
-        <StepTitle>Selskap som bygger med Velion.</StepTitle>
-        <StepDescription>
-          Vi gir samme infrastruktur som store team — uten oppsettet.
-          Datakildene du nettopp koblet til er allerede klare.
-        </StepDescription>
+      <LeftPane machine={machine}>
+        <StepEyebrow>{copy.socialProof.eyebrow}</StepEyebrow>
+        <StepTitle>{copy.socialProof.title}</StepTitle>
+        <StepDescription>{copy.socialProof.description}</StepDescription>
 
         <ul className="font-inter text-[13px] text-[#1F1B17]">
           <li className="border-b border-[#E5DFD3] py-3">
-            <strong>97 %</strong> av førsteforespørsler besvares innen 60 s.
+            <strong>97 %</strong> {copy.socialProof.statOne}
           </li>
           <li className="border-b border-[#E5DFD3] py-3">
-            <strong>42 %</strong> raskere førstesvar etter første uke.
+            <strong>42 %</strong> {copy.socialProof.statTwo}
           </li>
           <li className="py-3">
-            <strong>SOC 2</strong> Type II · GDPR · ZDR-modus tilgjengelig.
+            <strong>SOC 2</strong> {copy.socialProof.statThree}
           </li>
         </ul>
 
         <PrimaryButton onClick={() => machine.goTo('paywall')}>
-          Se planene
+          {copy.socialProof.cta}
         </PrimaryButton>
       </LeftPane>
 

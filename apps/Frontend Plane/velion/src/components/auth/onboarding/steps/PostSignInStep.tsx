@@ -18,6 +18,7 @@
 
 import React, { useEffect, useRef } from 'react'
 
+import { useOnboardingCopy } from '../i18n'
 import type { OnboardingMachine } from '../state/useOnboardingMachine'
 
 import {
@@ -32,6 +33,7 @@ import {
 const AUTO_ADVANCE_MS = 3_000
 
 export function PostSignInStep({ machine }: { machine: OnboardingMachine }) {
+  const { copy } = useOnboardingCopy()
   const videoRef = useRef<HTMLVideoElement>(null)
   const advancedRef = useRef(false)
 
@@ -57,13 +59,11 @@ export function PostSignInStep({ machine }: { machine: OnboardingMachine }) {
 
   return (
     <>
-      <LeftPane>
-        <StepEyebrow>Steg 1 av 6</StepEyebrow>
-        <StepTitle>Du er inne.</StepTitle>
-        <StepDescription>
-          Vi forbereder arbeidsplassen din. Det tar et øyeblikk.
-        </StepDescription>
-        <StepSpinner label="Setter opp Velion …" />
+      <LeftPane machine={machine}>
+        <StepEyebrow>{copy.postSignIn.eyebrow}</StepEyebrow>
+        <StepTitle>{copy.postSignIn.title}</StepTitle>
+        <StepDescription>{copy.postSignIn.description}</StepDescription>
+        <StepSpinner label={copy.postSignIn.spinner} />
       </LeftPane>
 
       <RightPane>
@@ -85,10 +85,10 @@ export function PostSignInStep({ machine }: { machine: OnboardingMachine }) {
         {/* Below-the-fold pitch + stats card sits on top of the final video frame. */}
         <div className="pointer-events-none absolute bottom-6 left-6 right-6 rounded-xl border border-white/30 bg-white/80 px-5 py-4 backdrop-blur-md">
           <p className="font-inter text-[12px] font-semibold tracking-tight text-[#1F1B17]">
-            Velion · for team som svarer.
+            {copy.postSignIn.overlayTitle}
           </p>
           <p className="mt-1 font-inter text-[11px] text-[#6B6660]">
-            42 % raskere første svar · 18 språk · alt på din kunnskap.
+            {copy.postSignIn.overlayStats}
           </p>
         </div>
       </RightPane>

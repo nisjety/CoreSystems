@@ -57,44 +57,60 @@ single pulsing dot. Use `public/imagens/org-personalization-mock.png`.
 
 ## Slot 3 — Website snippet drop (live, JS-driven, not video)
 
-**Path**: rendered live by `<WebsiteSnippetDrop />`; no asset needed
-beyond the existing public folder card.
+**Path**: rendered live by `<SnippetDropFolder />` inside
+`steps/WebsiteStep.tsx`; no asset needed beyond the existing public
+folder card.
+
+**Backend**: `POST /api/onboarding/crawl-preview {url, brief?}`
+returns SSE. Each `snippet` event carries
+`{kind: 'text'|'image'|'file'|'link', title, excerpt?, thumbUrl?, url, contentType}`
+so the folder renders four card shapes simultaneously — text, image
+thumbnail, document icon and link chip — instead of one type at a
+time. The route proxies to `quarry-control:8081` (`crawl_discover`
+job) and falls back to illustrative snippets if Quarry is unreachable
+so the animation always resolves.
 
 **Prompt** (for the designer mocking it):
 > White folder card centred on the cream pane (hybrid of the Taskello
 > note-card and the "4 Files / 500–700MB" folder seen in the Mobbin
 > Craft + ElevenLabs onboarding refs). Top edge has a small tab.
-> Snippets — small white rounded squares (96×72 px) containing either
-> 2–3 lines of crawled text or a thumbnail extracted from the page —
-> fall from above the frame in a slight curve, settle into the folder
-> with a soft springy bounce. Progress bar at the bottom of the folder
-> fills as snippets land. A counter beside it (`12 / 40` snippets,
-> `1.4 MB`). When the crawl completes the folder tab flips up showing
-> a checkmark.
-
-This step is driven by real data from Quarry. Snippets render from
-`POST /api/onboarding/crawl-preview` (returns the first ~40 chunks
-quarry-edge has indexed so far for the supplied URL).
+> Snippets — four shapes (text card with title + 2-line excerpt,
+> image thumb with 96×72 photo, file row with PDF/DOC icon, and a
+> rounded link chip) — fall from above in parallel, each picking its
+> own x-offset, delay and fall duration so 2–3 are always in flight.
+> Progress bar at the bottom of the folder fills as snippets land. A
+> counter beside it (`12 / 40` snippets, `1.4 MB`). When the crawl
+> completes the folder tab flips up showing a checkmark.
 
 ---
 
 ## Slot 4 — Knowledge GraphRAG reveal (live, SVG-driven, not video)
 
-**Path**: rendered live by `<KnowledgeGraphReveal />`.
+**Path**: rendered live by `<GraphReveal />` inside
+`steps/ConnectStep.tsx`.
+
+**Backend**: `GET /api/onboarding/graph-preview` composes
+`graph-index-rs` endpoints `/v1/graph/entities` and `/v1/graph/expand`
+into a `{nodes, edges, counts, warning?}` snapshot scoped to the
+caller's org. ConnectStep polls it every 3 s and on every connector
+click so new clusters reveal as Data Plane finishes indexing each
+source. New nodes briefly highlight green for 1.2 s; the layout is
+deterministic-radial (hash → angle/radius) so re-fetches do not
+shuffle existing nodes around the canvas. Empty graphs (brand-new
+account) return a synthetic seed so the canvas always has something
+to draw; a `warning` field flags synthetic data to the UI.
 
 **Prompt** (for designer):
 > Dark canvas (#0F0F10) centred on the right pane (rounded 16 px,
-> matches the rest of the cream UI by sitting on top of it). 60-node
-> force-directed graph. Nodes start as small grey circles (#5B5B5C);
-> as the user adds a connector or a doc, a fresh node fades in,
-> highlights green (#34D399) for 1 s, then settles to grey. Edges draw
-> with a 200 ms stroke-dashoffset animation. A faint glow follows the
-> most-recently-added node. Bottom-right shows live counters:
-> `nodes 42 · edges 71 · org documents 18`. Reference: imagen #5 in the
-> Mobbin packet (Obsidian-style graph with green active nodes).
-
-Powered by Data Plane v2 `graph-index` via
-`GET /api/onboarding/graph-preview`.
+> matches the rest of the cream UI by sitting on top of it). Up to
+> 60 nodes radial-laid around a single golden org anchor (#F5E5A8).
+> Cluster colour by entity group: person → light blue (#9BD0E8),
+> product → coral (#F0A8A1), document → lavender (#C7B0F0), channel
+> → mint (#A8E0B6), other → mid-grey (#5B5B5C). New nodes fade in,
+> highlight green (#34D399) for 1 s, then settle to their cluster
+> colour. Edges are thin (0.7 px) light-grey lines (#3B3B3D). Bottom-
+> right corner shows live counters `nodes 42 · edges 71 · groups 4`.
+> Bottom-left shows the `warning` text in 10 px white/70 when present.
 
 ---
 

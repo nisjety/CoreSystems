@@ -55,7 +55,6 @@ export function LegacyOnboardingRedirect({
       // start from `post-signin` on landing, which is the right
       // fallback per the user-facing spec.
     }
-    // eslint-disable-next-line react-doctor/nextjs-no-client-side-redirect
     router.replace('/login')
   }, [router, slug])
 

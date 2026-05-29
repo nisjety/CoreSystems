@@ -13,22 +13,21 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Search,
-  Sparkles,
   Slash,
+  Sparkles,
   MessageCircle,
-  Heart,
-  Plus,
-  Box,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/components/auth/hooks/use-auth';
 import { useCompatibleLanguage } from '@/components/core/contexts/GlobalLanguageContext';
 import { useNotificationCount, useNotifications as useCorebarNotifications } from '@/components/core/navbar/hooks/useCorebar';
+import { useCurrentOrganization } from '@/components/core/profile/hooks/useProfile';
 import { useNotificationWS } from '@/lib/notifications/ws';
-import { useUser } from '@/components/core/sidebar/hooks/useRealData';
+import { useCalendarEvents, useMarkNotificationAsRead, useUser } from '@/components/core/sidebar/hooks/useRealData';
 import { useSidebar } from '@/components/core/shared/SidebarContext';
 import { useDashboardSearch } from '../../../dashboard/DashboardSearchContext';
 import { resolveDashboardNavbarContext } from '../../../dashboard/dashboard-navbar-context';
+import type { Notification as CoreNotification } from '@/lib/notifications/types';
 import {
   NavbarActionButton,
   AIChatModal,
@@ -37,33 +36,6 @@ import {
   CalendarDropdown,
   ProfileDropdown,
 } from './modals';
-
-function ActionButton({
-  label,
-  onClick,
-  children,
-  className,
-}: {
-  label: string;
-  onClick?: () => void;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      title={label}
-      className={cn(
-        'flex h-9 w-9 items-center justify-center rounded-[10px] bg-transparent text-[#6F737C] shadow-none transition-[background-color,color,box-shadow] duration-200 motion-safe:transition-transform motion-safe:hover:scale-[1.04] hover:bg-white hover:text-[#383B43] hover:shadow-[0_10px_24px_rgba(17,17,17,0.12)] active:bg-[#F5F5F5] active:shadow-[0_4px_12px_rgba(17,17,17,0.08)] motion-safe:active:scale-[0.97] focus:outline-none motion-safe:focus-visible:scale-[1.04] focus-visible:bg-white focus-visible:text-[#383B43] focus-visible:ring-2 focus-visible:ring-[#111111]/30 focus-visible:shadow-[0_10px_24px_rgba(17,17,17,0.12)]',
-        className,
-      )}
-    >
-      {children}
-    </button>
-  );
-}
 
 function NavDivider() {
   return <div className="mx-2 h-7 w-px bg-[#E4E0D8]" aria-hidden="true" />;
@@ -115,7 +87,7 @@ function SearchTrigger({
     <button
       type="button"
       onClick={onOpen}
-      className="flex h-10 w-full items-center gap-3 rounded-[14px] border border-[#E2E3E9] bg-[#F4F5F1] px-4 text-left text-[#7F7A72] transition-colors hover:bg-[#EBECE7] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#111111]/10"
+      className="flex h-10 w-full items-center gap-3 rounded-[14px] border border-[#E2E3E9] bg-white px-4 text-left text-[#7F7A72] transition-colors hover:bg-[#FAFAFA] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#111111]/10"
       aria-label="Open global search"
     >
       <Search className="h-4 w-4 shrink-0 text-[#989286]" strokeWidth={1.8} />
@@ -161,26 +133,88 @@ function SearchTrigger({
   );
 }
 
+function normalizeInternalHref(href?: string): string | undefined {
+  if (!href?.startsWith('/')) {
+    return undefined;
+  }
+  return href;
+}
+
+type NavbarOrganizationInfo = {
+  name?: string;
+  slug?: string;
+  plan?: string;
+} | null;
+
+function formatPlanBadge(plan?: string): string | undefined {
+  if (!plan) {
+    return undefined;
+  }
+
+  const normalizedPlan = plan.toLowerCase();
+  const planLabels: Record<string, string> = {
+    free: 'Free',
+    trial: 'Free',
+    hobby: 'Essential',
+    essential: 'Essential',
+    standard: 'Advanced',
+    advanced: 'Advanced',
+    pro: 'Expert',
+    expert: 'Expert',
+    enterprise: 'Custom',
+    custom: 'Custom',
+  };
+
+  return planLabels[normalizedPlan] ?? normalizedPlan.charAt(0).toUpperCase() + normalizedPlan.slice(1);
+}
+
+function BreadcrumbSeparator() {
+  return <Slash className="h-3.5 w-3.5 shrink-0 text-[#C0C4CC]" strokeWidth={2} />;
+}
+
 function BreadcrumbNav({
+  organization,
+  fallbackWorkspaceName,
   moduleLabel,
   moduleHref,
   tabLabel,
   tabHref,
 }: {
+  organization?: NavbarOrganizationInfo;
+  fallbackWorkspaceName: string;
   moduleLabel: string;
   moduleHref: string;
   tabLabel: string;
   tabHref: string;
 }) {
+  const workspaceName = organization?.slug || organization?.name || fallbackWorkspaceName;
+  const planLabel = formatPlanBadge(organization?.plan);
+
   return (
-    <div className="hidden min-w-0 items-center gap-1 text-[14px] tracking-[-0.02em] text-[#6D717B] lg:flex">
+    <div className="hidden min-w-0 items-center gap-2 text-[14px] text-[#6D717B] lg:flex">
+      <BreadcrumbSeparator />
+      <Link
+        href="/workspace"
+        title={workspaceName}
+        className="group inline-flex min-w-0 items-center gap-2 transition-colors hover:text-[#111111]"
+      >
+        <span className="truncate font-medium text-[#2A2D35] group-hover:text-[#111111]">
+          {workspaceName}
+        </span>
+        {planLabel ? (
+          <span className="shrink-0 rounded-full border border-[#DDE0E7] bg-white px-2 py-0.5 text-[12px] font-medium leading-none text-[#FF2E63]">
+            {planLabel}
+          </span>
+        ) : null}
+      </Link>
+      <BreadcrumbSeparator />
       <Link
         href={moduleHref}
         className="truncate font-medium text-[#2A2D35] transition-colors hover:text-[#111111]"
       >
         {moduleLabel}
       </Link>
-      <Slash className="h-3.5 w-3.5 shrink-0 text-[#C0C4CC]" strokeWidth={2} />
+      <BreadcrumbSeparator />
       <Link
         href={tabHref}
         className="truncate font-medium text-[#7A7F89] transition-colors hover:text-[#2A2D35]"
@@ -218,14 +252,41 @@ function HistoryNav({
   );
 }
 
+function getNotificationHref(notification: CoreNotification): string {
+  const explicitHref = normalizeInternalHref(notification.action_url);
+  if (explicitHref) {
+    return explicitHref;
+  }
+
+  if (notification.event_type === 'user_mentioned') {
+    return '/inbox/mentions';
+  }
+
+  return `/notifications?notification=${encodeURIComponent(notification.id)}`;
+}
+
+function isMessageLikeNotification(notification: CoreNotification): boolean {
+  const feed = (notification.feed ?? '').toLowerCase();
+  return (
+    notification.event_type === 'user_mentioned' ||
+    feed.includes('message') ||
+    feed.includes('mention') ||
+    feed.includes('inbox') ||
+    feed.includes('support')
+  );
+}
+
 export function DashboardTopNavbar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user: authUser } = useAuth();
+  const { user: authUser, signOut } = useAuth();
   const { sidebarLocale } = useCompatibleLanguage();
   const { data: userData } = useUser({ enabled: !!authUser });
+  const { data: currentOrganization } = useCurrentOrganization();
   const { data: unreadNotificationCount } = useNotificationCount();
   const { data: corebarNotifications = [] } = useCorebarNotifications();
+  const { data: calendarEvents = [], isLoading: isCalendarLoading } = useCalendarEvents({ enabled: !!authUser });
+  const markNotificationAsRead = useMarkNotificationAsRead();
 
   // Real-time updates via WebSocket; falls back to 5-min polling when WS is unavailable
   useNotificationWS(authUser?.id);
@@ -239,63 +300,15 @@ export function DashboardTopNavbar() {
   const [isCalendarOpen, setIsCalendarOpen] = React.useState(false);
   const [isProfileOpen, setIsProfileOpen] = React.useState(false);
 
-  // Mock data for messages
-  const mockMessages = [
-    {
-      id: '1',
-      senderName: 'Sarah Chen',
-      senderAvatar: 'SC',
-      preview: 'Hey, can you review the latest design mockups?',
-      timestamp: '2m ago',
-      unread: true,
-      category: 'message' as const,
-    },
-    {
-      id: '2',
-      senderName: 'Alex Rivera',
-      senderAvatar: 'AR',
-      preview: 'The API documentation is ready for review',
-      timestamp: '15m ago',
-      unread: true,
-      category: 'message' as const,
-    },
-    {
-      id: '3',
-      senderName: 'Jordan Kim',
-      senderAvatar: 'JK',
-      preview: 'Meeting rescheduled to 3 PM',
-      timestamp: '1h ago',
-      unread: false,
-      category: 'message' as const,
-    },
-    {
-      id: '4',
-      senderName: 'Casey Morgan',
-      senderAvatar: 'CM',
-      preview: 'Thanks for the feedback on the proposal!',
-      timestamp: '2h ago',
-      unread: false,
-      category: 'message' as const,
-    },
-    {
-      id: '5',
-      senderName: 'Pixelwave',
-      senderAvatar: 'PW',
-      preview: '@you in Classic Car — these draggable sliders look really cool!',
-      timestamp: '1h ago',
-      unread: true,
-      category: 'mention' as const,
-    },
-    {
-      id: '6',
-      senderName: 'Marcus T.',
-      senderAvatar: 'MT',
-      preview: '@you nice work on the onboarding flow 🔥',
-      timestamp: '3h ago',
-      unread: false,
-      category: 'mention' as const,
-    },
-  ];
+  React.useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    document.documentElement.classList.toggle(
+      'dark',
+      localStorage.getItem('velion-theme') === 'dark',
+    );
+  }, []);
 
   const formatRelativeTime = React.useCallback((timestamp: string) => {
     const parsed = new Date(timestamp);
@@ -324,18 +337,40 @@ export function DashboardTopNavbar() {
       const isTeamEvent =
         notification.event_type === 'team_invite_sent' ||
         notification.event_type === 'user_mentioned';
+      const category = notification.event_type === 'user_mentioned'
+        ? ('mention' as const)
+        : isTeamEvent
+          ? ('message' as const)
+          : ('system' as const);
+
       return {
         id: notification.id,
         actor: notification.actor_name ?? notification.title,
         actorAvatar: notification.actor_avatar,
         actionText: notification.body,
+        href: getNotificationHref(notification),
         timestamp: formatRelativeTime(notification.created_at),
         badgeColor: isTeamEvent ? 'bg-[#7C3AED]' : 'bg-[#3578F6]',
         badgeIcon: isTeamEvent ? <MessageCircle /> : <Bell />,
         read: notification.read,
-        category: isTeamEvent ? ('message' as const) : ('system' as const),
+        category,
       };
     });
+  }, [corebarNotifications, formatRelativeTime]);
+
+  const dropdownMessages = React.useMemo(() => {
+    return corebarNotifications
+      .filter(isMessageLikeNotification)
+      .map((notification) => ({
+        id: notification.id,
+        senderName: notification.actor_name ?? notification.title,
+        senderAvatar: notification.actor_avatar,
+        preview: notification.body || notification.title,
+        timestamp: formatRelativeTime(notification.created_at),
+        unread: !notification.read,
+        href: getNotificationHref(notification),
+        category: notification.event_type === 'user_mentioned' ? ('mention' as const) : ('message' as const),
+      }));
   }, [corebarNotifications, formatRelativeTime]);
 
   const { moduleLabel, moduleHref, tabLabel, tabHref } = React.useMemo(
@@ -345,20 +380,19 @@ export function DashboardTopNavbar() {
 
   const profileDisplayName = userData?.name || authUser?.name || 'Account';
   const profileInitial = (profileDisplayName.trim().charAt(0) || 'A').toUpperCase();
+  const workspaceFallback = userData?.email || authUser?.email || profileDisplayName;
   const unreadCount = unreadNotificationCount?.count ?? 0;
+  const unreadMessageCount = dropdownMessages.filter((message) => message.unread).length;
 
   const sidebarToggleLabel = isMinimized ? 'Expand sidebar' : 'Collapse sidebar';
   const SidebarToggleIcon = isMinimized ? PanelLeftOpen : PanelLeftClose;
+  const markRead = React.useCallback((notificationId: string) => {
+    markNotificationAsRead.mutate(notificationId);
+  }, [markNotificationAsRead]);
 
   return (
     <>
-      {/* Phase A · navbar gets the scoped noise field. The cream base
-          colour matches the `dashboard-solid-canvas` veil so the visual
-          edge between navbar and content is just the 1px hairline below,
-          and the noise reads as a texture on the navbar surface rather
-          than a separate panel. Auth pages still use the full-viewport
-          noise from `app/layout.tsx`. */}
-      <header className="navbar-noise-bg fixed inset-x-0 top-0 z-40 border-b border-[#E9EBF2]">
+      <header className="dashboard-navbar-bg fixed inset-x-0 top-0 z-40">
         <div className="flex h-14 items-center justify-between gap-4 px-5">
           <div className="flex min-w-0 items-center gap-3">
             <NavbarActionButton
@@ -373,6 +407,8 @@ export function DashboardTopNavbar() {
             <HistoryNav onBack={() => router.back()} onForward={() => router.forward()} />
 
             <BreadcrumbNav
+              organization={currentOrganization}
+              fallbackWorkspaceName={workspaceFallback}
               moduleLabel={moduleLabel}
               moduleHref={moduleHref}
               tabLabel={tabLabel}
@@ -402,7 +438,13 @@ export function DashboardTopNavbar() {
                 label="Toggle dark mode"
                 tooltip="Toggle dark mode"
                 onClick={() => {
-                  // TODO: Implement dark mode toggle
+                  if (typeof document === 'undefined') {
+                    return;
+                  }
+                  const root = document.documentElement;
+                  const nextIsDark = !root.classList.contains('dark');
+                  root.classList.toggle('dark', nextIsDark);
+                  localStorage.setItem('velion-theme', nextIsDark ? 'dark' : 'light');
                 }}
               >
                 <MoonStar className="h-[18px] w-[18px]" strokeWidth={1.85} />
@@ -424,14 +466,26 @@ export function DashboardTopNavbar() {
               <MessagesDropdown
                 isOpen={isMessagesOpen}
                 onOpenChange={setIsMessagesOpen}
-                messages={mockMessages}
+                messages={dropdownMessages}
+                onMessageOpen={markRead}
                 trigger={
-                  <NavbarActionButton
-                    label="Quick messages"
-                    active={isMessagesOpen}
-                  >
-                    <MessageSquareMore className="h-[18px] w-[18px]" strokeWidth={1.85} />
-                  </NavbarActionButton>
+                  <div className="relative">
+                    <NavbarActionButton
+                      label={unreadMessageCount > 0 ? `${unreadMessageCount} unread messages` : 'Quick messages'}
+                      active={isMessagesOpen}
+                    >
+                      <MessageSquareMore className="h-[18px] w-[18px]" strokeWidth={1.85} />
+                    </NavbarActionButton>
+                    {unreadMessageCount > 0 ? (
+                      <span
+                        aria-label={`${unreadMessageCount} unread messages`}
+                        className="pointer-events-none absolute right-0.5 top-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-[#E8F1FF] px-1 text-[9px] font-semibold leading-4 text-[#3578F6]"
+                      >
+                        {Math.min(unreadMessageCount, 9)}
+                        {unreadMessageCount > 9 ? '+' : null}
+                      </span>
+                    ) : null}
+                  </div>
                 }
               />
 
@@ -440,6 +494,7 @@ export function DashboardTopNavbar() {
                 isOpen={isNotificationsOpen}
                 onOpenChange={setIsNotificationsOpen}
                 notifications={dropdownNotifications}
+                onNotificationOpen={markRead}
                 trigger={
                   <div className="relative">
                     <NavbarActionButton
@@ -465,9 +520,10 @@ export function DashboardTopNavbar() {
               <CalendarDropdown
                 isOpen={isCalendarOpen}
                 onOpenChange={setIsCalendarOpen}
-                onDateSelect={(date) => {
-                  // TODO: Handle date selection
-                  console.log('Selected date:', date);
+                events={calendarEvents}
+                isLoading={isCalendarLoading}
+                onDateSelect={() => {
+                  setIsCalendarOpen(true);
                 }}
                 trigger={
                   <NavbarActionButton
@@ -486,9 +542,10 @@ export function DashboardTopNavbar() {
                 isOpen={isProfileOpen}
                 onOpenChange={setIsProfileOpen}
                 displayName={profileDisplayName}
+                email={userData?.email || authUser?.email}
                 onSignOut={() => {
                   setIsProfileOpen(false);
-                  router.push('/login');
+                  void signOut();
                 }}
                 trigger={
                   <button

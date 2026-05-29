@@ -1,5 +1,7 @@
 'use client';
 
+import { usePathname } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { Sidebar } from '@/components/core/sidebar';
 import { SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/components/core/sidebar/constants';
 import { SidebarProvider, useSidebar } from '@/components/core/shared/SidebarContext';
@@ -10,11 +12,14 @@ import { DashboardRouteWarmup } from '@/components/dashboard/DashboardRouteWarmu
 import { DashboardTopNavbar } from '@/components/core/navbar/navbar-dashboard';
 import { ConnectorConsentPrompt } from '@/components/dashboard/ConnectorConsentPrompt';
 import { EnterpriseTrustBanner } from '@/components/dashboard/EnterpriseTrustBanner';
-import { GlobalSearchModal } from '@/components/dashboard/GlobalSearchModal';
 import { OnboardingGuard } from '@/components/onboarding/guards';
 import { useEntitlementToast } from '@/lib/notifications/useEntitlementToast';
 
 const DASHBOARD_NAVBAR_HEIGHT = 56;
+const GlobalSearchModal = dynamic(
+  () => import('@/components/dashboard/GlobalSearchModal').then((mod) => mod.GlobalSearchModal),
+  { ssr: false },
+);
 
 function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
   const { isMinimized, isMobile } = useSidebar();
@@ -30,33 +35,27 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className="relative flex h-dvh flex-col overflow-hidden"
+      className="relative flex h-dvh flex-col overflow-hidden bg-[var(--linear-sidebar-bg)]"
       style={{
         ['--dashboard-navbar-height' as string]: `${DASHBOARD_NAVBAR_HEIGHT}px`,
         ['--dashboard-content-height' as string]: dashboardContentHeight,
       }}
     >
-      {/* Phase A · solid Intercom-canvas veil that hides the root-layout
-          animated noise everywhere in the dashboard. The DashboardTopNavbar
-          re-introduces noise scoped to the top 56px via the
-          `.navbar-noise-bg` class on its <header>.
-
-          The veil sits at z-index 0 of this stacking context (above the
-          root noise, below the dashboard's flow content which uses the
-          default z=auto). `pointer-events: none` lets clicks pass through. */}
+      {/* Dashboard canvas that hides the root-layout animated noise
+          everywhere in the dashboard. */}
       <div className="dashboard-solid-canvas" aria-hidden="true" />
 
       <DashboardTopNavbar />
       <DashboardRouteWarmup />
       <GlobalSearchModal />
-      <div aria-hidden="true" className="h-14 shrink-0" />
+      <div aria-hidden="true" className="h-14 shrink-0 bg-[var(--linear-sidebar-bg)]" />
       {/* G21: enterprise trust banner — verifies the zero-input sign-in result on first dashboard load. */}
       <EnterpriseTrustBanner />
       {/* G45 (Slice F): connector consent — shown only after `FIRST_VALUE_DELAY_MS`
           on the dashboard AND when the user has no Microsoft connection yet.
           Self-positions as a bottom-right popover; no layout impact when hidden. */}
       <ConnectorConsentPrompt />
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden bg-[var(--linear-sidebar-bg)]">
         <Sidebar />
         <div
           aria-hidden="true"
@@ -64,7 +63,7 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
           style={{ width: isMobile ? '0' : `${sidebarWidth}px` }}
         />
         <main
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+          className="dashboard-main-panel relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--linear-main-bg)] md:rounded-tl-[24px]"
           style={{
             ['--dashboard-sidebar-offset' as string]: isMobile ? '0px' : `${sidebarWidth}px`,
             height: 'var(--dashboard-content-height)',
@@ -86,6 +85,19 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
   );
 }
 
+function DashboardScopedProviders({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const needsChatProvider = pathname === '/chat' || pathname.startsWith('/chat/');
+
+  const workspace = (
+    <ChatWorkspaceProvider>
+      <DashboardLayoutContent>{children}</DashboardLayoutContent>
+    </ChatWorkspaceProvider>
+  );
+
+  return needsChatProvider ? <ChatProvider>{workspace}</ChatProvider> : workspace;
+}
+
 export default function DashboardLayout({
   children,
 }: {
@@ -95,11 +107,7 @@ export default function DashboardLayout({
     <OnboardingGuard>
       <SidebarProvider>
         <DashboardSearchProvider>
-          <ChatProvider>
-            <ChatWorkspaceProvider>
-              <DashboardLayoutContent>{children}</DashboardLayoutContent>
-            </ChatWorkspaceProvider>
-          </ChatProvider>
+          <DashboardScopedProviders>{children}</DashboardScopedProviders>
         </DashboardSearchProvider>
       </SidebarProvider>
     </OnboardingGuard>

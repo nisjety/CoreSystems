@@ -75,6 +75,54 @@
   --aquatiq-orange: #F6AF6E;
   --aquatiq-orange-light: #FDEAD8;
   --aquatiq-dark: #333333;
+
+  /* Velion brand palette */
+  --velion-ink: #111111;
+  --velion-ink-soft: #1C1C1C;
+  --velion-charcoal: #2B2B2B;
+  --velion-text: #3A3C44;
+  --velion-text-muted: #66615B;
+  --velion-text-subtle: #8A8D96;
+  --velion-paper: #F4F1EB;
+  --velion-canvas: #EDEBE7;
+  --velion-surface: #EAE6DF;
+  --velion-panel: #FFFFFF;
+  --velion-border: #D8D2C6;
+  --velion-border-strong: #C8C1B3;
+  --velion-coral: #FF2E63;
+  --velion-coral-hover: #FF4D7A;
+  --velion-coral-glow: #FF3B5C;
+  --velion-coral-deep: #8B1E3F;
+  --velion-success: #10B981;
+  --velion-dashboard-sidebar: #F7F7F8;
+  --velion-dashboard-main: #FCFCFD;
+  --velion-dashboard-panel: #FFFFFF;
+  --velion-dashboard-border: #E6E6E8;
+  --velion-dashboard-accent: #5E6AD2;
+  --velion-dashboard-active: #F0F1F5;
+  --velion-dashboard-hover: #F6F7F9;
+  --velion-dashboard-divider: #ECECF1;
+  --velion-dashboard-input-border: #E2E3E9;
+  --velion-sidebar-rail: #111318;
+  --velion-sidebar-icon: #6B6E78;
+  --velion-sidebar-muted: #9B9EA8;
+  --velion-sidebar-placeholder: #B0B3BC;
+  --velion-navbar-divider: #E4E0D8;
+  --velion-navbar-search-text: #5F5A52;
+  --velion-navbar-search-muted: #989286;
+  --velion-navbar-pill-text: #615B52;
+  --velion-info: #3578F6;
+  --velion-info-bg: #E8F1FF;
+  --velion-warning: #DD7A1F;
+  --velion-warning-strong: #B96618;
+  --velion-warning-bg: #FFF1DE;
+  --velion-danger: #C0402A;
+  --velion-tooltip: #1A1A1A;
+  --velion-dark-sidebar: #191A1D;
+  --velion-dark-main: #1F2023;
+  --velion-dark-panel: #202124;
+  --velion-dark-border: #2B2D31;
+
   --blue-50: #eff6ff;
   --blue-100: #dbeafe;
   --blue-200: #bfdbfe;
@@ -214,50 +262,56 @@ html body {
   /* Keeping for compatibility */
 }
 
-/* Phase A · dashboard background swap.
+/* Linear app-shell tokens for Velion dashboard/onboarding surfaces.
  *
- * `app/layout.tsx` paints an animated noise field across the whole
- * viewport because the auth pages depend on it. The dashboard (and the
- * admin shell) need a solid cream canvas that hides that field
- * everywhere EXCEPT inside the navbar.
+ * The local design-system reference (`design-systems/linear.app`) gives
+ * Linear's darker brand/marketing palette, but the product shell used in
+ * the Mobbin dashboard references is much lighter. These variables encode
+ * the app-shell colors so dashboard surfaces can share one baseline.
+ */
+:root {
+  --linear-sidebar-bg: #F7F7F8;
+  --linear-main-bg: #FCFCFD;
+  --linear-panel-bg: #FFFFFF;
+  --linear-border: #E6E6E8;
+  --linear-accent: #5E6AD2;
+
+  --linear-dark-sidebar-bg: #191A1D;
+  --linear-dark-main-bg: #1F2023;
+  --linear-dark-panel-bg: #202124;
+  --linear-dark-border: #2B2D31;
+}
+
+/* Dashboard shell.
  *
- * `.dashboard-solid-canvas` is the opaque veil that sits inside the
- * dashboard layout's outer wrapper. It paints solid cream behind
- * everything in the dashboard tree.
- *
- * `.navbar-noise-bg` wraps just the top navbar so the noise field is
- * visible behind it. It uses the same Framer texture asset + animation
- * keyframe as `.noise-background` but is scoped to the wrapping element
- * — the rest of the page stays solid.
- *
- * Tokens reference Intercom's canvas (#F4EFE5) for parity with the
- * brand direction agreed in `docs/phase-a-implementation-plan.md`.
+ * `app/layout.tsx` paints an animated full-viewport noise layer for the
+ * broader app. The dashboard needs a solid Linear-style product canvas,
+ * with flat navigation chrome.
  */
 .dashboard-solid-canvas {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background-color: #F4EFE5;
+  background-color: var(--linear-sidebar-bg);
   pointer-events: none;
 }
 
-.navbar-noise-bg {
-  position: relative;
+.dashboard-navbar-bg {
   isolation: isolate;
-  background-color: #F4EFE5;
+  background-color: var(--linear-sidebar-bg);
 }
 
-.navbar-noise-bg::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  opacity: 0.06;
-  background-image: url("https://framerusercontent.com/images/rR6HYXBrMmX4cRpXfXUOvpvpB0.png");
-  background-size: 200px 200px;
-  background-repeat: repeat;
-  animation: noise-pan 60s ease-in-out infinite;
+.dashboard-main-panel {
+  background-clip: padding-box;
+  box-shadow:
+    inset 1px 1px 0 rgba(230, 230, 232, 0.92),
+    inset 10px 10px 18px rgba(255, 255, 255, 0.34);
+}
+
+@media (max-width: 767px) {
+  .dashboard-main-panel {
+    box-shadow: none;
+  }
 }
 
 /* Matte grain utility for tactile sidebar/card surfaces */

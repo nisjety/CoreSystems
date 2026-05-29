@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use jsonwebtoken::{DecodingKey, jwk::JwkSet};
+use jsonwebtoken::{jwk::JwkSet, DecodingKey};
 use tokio::sync::RwLock;
 
 use crate::AuthCtxError;

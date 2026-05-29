@@ -43,9 +43,31 @@ function readStored(): OnboardingState | null {
     if (!parsed.step || !ONBOARDING_STEPS.includes(parsed.step)) {
       return null
     }
+    const stepIndex = ONBOARDING_STEPS.indexOf(parsed.step)
+    const requiresCreatedOrg =
+      stepIndex > ONBOARDING_STEPS.indexOf('organization')
+    const organization =
+      parsed.organization && typeof parsed.organization === 'object'
+        ? parsed.organization
+        : undefined
+
+    // Older phase-1 localStorage records only stored the typed org name.
+    // Connect/graph routes need the control-plane org id, so resume those
+    // sessions at the org step and let the submit handler create the org.
+    if (requiresCreatedOrg && !organization?.id) {
+      return {
+        ...INITIAL_STATE,
+        ...parsed,
+        organization,
+        step: 'organization',
+        connectors: Array.isArray(parsed.connectors) ? parsed.connectors : [],
+      }
+    }
+
     return {
       ...INITIAL_STATE,
       ...parsed,
+      organization,
       connectors: Array.isArray(parsed.connectors) ? parsed.connectors : [],
     }
   } catch {
@@ -92,11 +114,16 @@ export function useOnboardingMachine(): OnboardingMachine {
   useEffect(() => {
     if (initialised.current) return
     initialised.current = true
-    const stored = readStored()
-    if (stored) {
-      setState(stored)
-    }
-    setHydrated(true)
+
+    const hydrateFrame = window.requestAnimationFrame(() => {
+      const stored = readStored()
+      if (stored) {
+        setState(stored)
+      }
+      setHydrated(true)
+    })
+
+    return () => window.cancelAnimationFrame(hydrateFrame)
   }, [])
 
   const persist = useCallback((updater: (prev: OnboardingState) => OnboardingState) => {

@@ -63,6 +63,7 @@ func main() {
 	defer nc.Close()
 
 	docRepo := repo.NewDocumentRepo(pool)
+	sourceObjectRepo := repo.NewSourceObjectRepo(pool)
 	publisher := events.NewPublisher(nc)
 	// Phase A · A1.5 — usage + audit publisher. Logs-only on connect
 	// failure (the existing nc above is already required, so failure
@@ -73,6 +74,7 @@ func main() {
 	// publisher is created here so the wiring is reviewable today even
 	// though no call site forwards it yet.
 	docHandler := handler.NewDocumentHandler(docRepo, publisher)
+	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo, docRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`
 	// every 500ms with FOR UPDATE SKIP LOCKED so multiple replicas don't
@@ -140,6 +142,15 @@ func main() {
 		r.Use(authctxMiddleware)
 		r.Use(handler.OrgIDMiddleware)
 		r.Get("/", docHandler.Sources)
+	})
+
+	r.Route("/v1/source-objects", func(r chi.Router) {
+		r.Use(internalAuthMiddleware(cfg.InternalAPIKey))
+		r.Use(authctxMiddleware)
+		r.Use(handler.OrgIDMiddleware)
+		r.Get("/duplicates", sourceObjectHandler.Duplicates)
+		r.Post("/", sourceObjectHandler.Upsert)
+		r.Post("/delete", sourceObjectHandler.Delete)
 	})
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)

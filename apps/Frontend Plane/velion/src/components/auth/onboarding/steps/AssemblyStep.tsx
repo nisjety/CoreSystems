@@ -18,6 +18,7 @@
 import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
+import { useOnboardingCopy } from '../i18n'
 import type { OnboardingMachine } from '../state/useOnboardingMachine'
 
 import {
@@ -27,14 +28,6 @@ import {
   StepEyebrow,
   StepTitle,
 } from './_shared'
-
-const TICKS = [
-  'Setter opp arbeidsplassen',
-  'Importerer kunnskap fra nettsiden',
-  'Kobler til integrasjoner',
-  'Trener første agent',
-  'Klargjør dashboard',
-]
 
 /**
  * Tell user-core that onboarding is finished. Without this the
@@ -78,12 +71,14 @@ async function markOnboardingCompleteOnServer(): Promise<void> {
 }
 
 export function AssemblyStep({ machine }: { machine: OnboardingMachine }) {
+  const { copy } = useOnboardingCopy()
   const router = useRouter()
   const [completed, setCompleted] = useState(0)
+  const ticks = copy.assembly.ticks
 
   useEffect(() => {
     const timers: number[] = []
-    TICKS.forEach((_, i) => {
+    ticks.forEach((_, i) => {
       timers.push(
         window.setTimeout(() => setCompleted(i + 1), 700 * (i + 1)),
       )
@@ -99,27 +94,23 @@ export function AssemblyStep({ machine }: { machine: OnboardingMachine }) {
         void (async () => {
           await markOnboardingCompleteOnServer()
           machine.reset()
-          // eslint-disable-next-line react-doctor/nextjs-no-client-side-redirect
           router.push('/dashboard')
         })()
-      }, 700 * (TICKS.length + 1) + 400),
+      }, 700 * (ticks.length + 1) + 400),
     )
     return () => {
       timers.forEach((t) => window.clearTimeout(t))
     }
-  }, [machine, router])
+  }, [machine, router, ticks])
 
   return (
     <>
-      <LeftPane>
-        <StepEyebrow>Ferdig</StepEyebrow>
-        <StepTitle>Setter sammen Velion til deg.</StepTitle>
-        <StepDescription>
-          Vi flytter inn alt vi har samlet — kunnskap, integrasjoner og
-          agenten din — og åpner dashboardet om noen sekunder.
-        </StepDescription>
+      <LeftPane machine={machine}>
+        <StepEyebrow>{copy.assembly.eyebrow}</StepEyebrow>
+        <StepTitle>{copy.assembly.title}</StepTitle>
+        <StepDescription>{copy.assembly.description}</StepDescription>
         <ul className="flex flex-col gap-2">
-          {TICKS.map((label, i) => {
+          {ticks.map((label, i) => {
             const done = i < completed
             const active = i === completed
             return (

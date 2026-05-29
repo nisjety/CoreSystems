@@ -33,8 +33,8 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
       - "9002:9000"
       - "9003:9001"
@@ -115,16 +115,78 @@ services:
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
-      DEFAULT_MODEL: claude-sonnet-4-20250514
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-4o-mini}
       RATE_LIMIT_RPM: "100"
+      # Local-dev auth bypass is defined in ../.env, but compose was not
+      # forwarding it, so Velion's `dev-bypass` bearer was rejected before
+      # inference. Production should leave this empty and configure JWKS.
+      MODEL_GATEWAY_AUTH_DEV_BYPASS: ${MODEL_GATEWAY_AUTH_DEV_BYPASS:-}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-}
+      AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-model-gateway}
+      AUTH_CORE_AUDIENCE_OPTIONAL: ${AUTH_CORE_AUDIENCE_OPTIONAL:-}
       # Wave 7 — fine-tuning kill switch + budget guard (off by default in
       # production-style profile; dev override flips FINETUNE_ENABLED=1).
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
+      # Use explicit Model Plane aliases here. The gateway also joins the
+      # shared inter-plane bus for Velion, where names like `session-core`
+      # can resolve to Control Plane services instead.
+      SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
+      INFERENCE_CORE_ADDR: http://model-plane-inference-core-1:9092
+      ORCHESTRATOR_CORE_ADDR: http://model-plane-orchestrator-core-1:8084
+      SANDBOX_MANAGER_ADDR: http://model-plane-sandbox-manager-1:9094
+      BROWSER_BROKER_ADDR: http://model-plane-browser-broker-1:9095
+      LETTA_BRIDGE_ADDR: http://model-plane-letta-bridge-1:9096
+      CAPABILITY_CORE_ADDR: http://model-plane-capability-core-1:9097
+      CAPABILITY_CORE_HTTP_URL: http://model-plane-capability-core-1:8085
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
+      # Wave 11 — Speech provider (TTS via /audio/speech, STT via
+      # /audio/transcriptions). Auto-detects Azure when
+      # AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY are set,
+      # otherwise falls back to OpenAI when OPENAI_API_KEY is set,
+      # otherwise both RPCs return Unimplemented.
+      #
+      # Azure deployment names default to "tts" and "whisper"; override
+      # to match what's actually deployed in the Azure portal.
+      AZURE_OPENAI_TTS_DEPLOYMENT: ${AZURE_OPENAI_TTS_DEPLOYMENT:-tts}
+      AZURE_OPENAI_STT_DEPLOYMENT: ${AZURE_OPENAI_STT_DEPLOYMENT:-whisper}
+      # Per-operation Azure overrides — set when TTS or STT lives in a
+      # different Azure resource than chat (e.g. gpt-4o-mini-tts in
+      # eastus2 while everything else is in swedencentral). Empty / unset
+      # → falls through to AZURE_OPENAI_ENDPOINT / _API_KEY / _API_VERSION.
+      AZURE_OPENAI_TTS_ENDPOINT: ${AZURE_OPENAI_TTS_ENDPOINT:-}
+      AZURE_OPENAI_TTS_API_KEY: ${AZURE_OPENAI_TTS_API_KEY:-}
+      AZURE_OPENAI_TTS_API_VERSION: ${AZURE_OPENAI_TTS_API_VERSION:-}
+      AZURE_OPENAI_STT_ENDPOINT: ${AZURE_OPENAI_STT_ENDPOINT:-}
+      AZURE_OPENAI_STT_API_KEY: ${AZURE_OPENAI_STT_API_KEY:-}
+      AZURE_OPENAI_STT_API_VERSION: ${AZURE_OPENAI_STT_API_VERSION:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-tts-1}
+      OPENAI_STT_MODEL: ${OPENAI_STT_MODEL:-whisper-1}
+      # Wave 9 — Quarry-v2 edge for Fetch + ExtractStructured RPCs.
+      # Empty / unset → both RPCs return Unimplemented (gateway still
+      # serves Invoke, Health, etc.). On the developer Mac the edge
+      # lives in a separate compose project; reach it via the host
+      # gateway. In a unified deploy this should point at the in-
+      # network service name (e.g. http://quarry-edge:8082).
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://host.docker.internal:8082}
+      QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-dev-token}
+      QUARRY_EDGE_TIMEOUT_SECS: ${QUARRY_EDGE_TIMEOUT_SECS:-30}
+    extra_hosts:
+      # Required so QUARRY_EDGE_URL=host.docker.internal resolves on
+      # Linux. No-op on Mac (Docker Desktop maps it automatically).
+      - "host.docker.internal:host-gateway"
+    networks:
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-model-gateway-1
+          - model-gateway
     depends_on:
       nats:
         condition: service_healthy
@@ -170,11 +232,60 @@ services:
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
+      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-anthropic,openai}
+      INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
+      INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
+      OPENAI_CHAT_MODELS: ${OPENAI_CHAT_MODELS:-}
+      OPENAI_EMBEDDING_MODELS: ${OPENAI_EMBEDDING_MODELS:-}
+      OPENAI_IMAGE_MODELS: ${OPENAI_IMAGE_MODELS:-}
+      OPENAI_VISION_MODELS: ${OPENAI_VISION_MODELS:-}
+      # Realtime session broker. OPENAI_REALTIME_MODEL is present in
+      # ../.env for local dev; keep explicit forwarding so inference-core
+      # sees it even though compose only exposes listed environment keys.
+      OPENAI_REALTIME_API_BASE: ${OPENAI_REALTIME_API_BASE:-}
+      OPENAI_REALTIME_WEBSOCKET_URL: ${OPENAI_REALTIME_WEBSOCKET_URL:-}
+      OPENAI_REALTIME_MODEL: ${OPENAI_REALTIME_MODEL:-gpt-realtime}
+      OPENAI_REALTIME_MODELS: ${OPENAI_REALTIME_MODELS:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-01-01-preview}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_CHAT_DEPLOYMENTS: ${AZURE_OPENAI_CHAT_DEPLOYMENTS:-}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENTS: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENTS:-}
+      AZURE_OPENAI_IMAGE_DEPLOYMENT: ${AZURE_OPENAI_IMAGE_DEPLOYMENT:-}
+      AZURE_OPENAI_IMAGE_DEPLOYMENTS: ${AZURE_OPENAI_IMAGE_DEPLOYMENTS:-}
+      AZURE_OPENAI_VISION_DEPLOYMENT: ${AZURE_OPENAI_VISION_DEPLOYMENT:-}
+      AZURE_OPENAI_VISION_DEPLOYMENTS: ${AZURE_OPENAI_VISION_DEPLOYMENTS:-}
+      AZURE_OPENAI_TRANSLATION_DEPLOYMENT: ${AZURE_OPENAI_TRANSLATION_DEPLOYMENT:-}
+      AZURE_OPENAI_LANGUAGE_DEPLOYMENT: ${AZURE_OPENAI_LANGUAGE_DEPLOYMENT:-}
+      # Azure OpenAI Sora/video jobs. Endpoint/key fall back to the generic
+      # Azure OpenAI values in inference-core, but pass operation-specific
+      # overrides and deployment names when present in ../.env.
+      AZURE_OPENAI_VIDEO_ENDPOINT: ${AZURE_OPENAI_VIDEO_ENDPOINT:-}
+      AZURE_OPENAI_VIDEO_API_KEY: ${AZURE_OPENAI_VIDEO_API_KEY:-}
+      AZURE_OPENAI_VIDEO_API_VERSION: ${AZURE_OPENAI_VIDEO_API_VERSION:-preview}
+      AZURE_OPENAI_VIDEO_MODEL: ${AZURE_OPENAI_VIDEO_MODEL:-}
+      AZURE_OPENAI_VIDEO_DEPLOYMENT: ${AZURE_OPENAI_VIDEO_DEPLOYMENT:-}
+      AZURE_OPENAI_VIDEO_MODELS: ${AZURE_OPENAI_VIDEO_MODELS:-}
+      AZURE_TRANSLATOR_API_KEY: ${AZURE_TRANSLATOR_API_KEY:-${AZURE_TRANSLATOR_KEY:-}}
+      AZURE_TRANSLATOR_KEY: ${AZURE_TRANSLATOR_KEY:-}
+      AZURE_TRANSLATOR_ENDPOINT: ${AZURE_TRANSLATOR_ENDPOINT:-}
+      AZURE_TRANSLATOR_REGION: ${AZURE_TRANSLATOR_REGION:-}
+      AZURE_AI_LANGUAGE_ENDPOINT: ${AZURE_AI_LANGUAGE_ENDPOINT:-}
+      AZURE_AI_LANGUAGE_KEY: ${AZURE_AI_LANGUAGE_KEY:-}
+      AZURE_AI_LANGUAGE_API_VERSION: ${AZURE_AI_LANGUAGE_API_VERSION:-}
+      AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: ${AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT:-}
+      AZURE_DOCUMENT_INTELLIGENCE_KEY: ${AZURE_DOCUMENT_INTELLIGENCE_KEY:-}
+      AZURE_DOCUMENT_INTELLIGENCE_API_VERSION: ${AZURE_DOCUMENT_INTELLIGENCE_API_VERSION:-}
+      AZURE_SPEECH_ENDPOINT: ${AZURE_SPEECH_ENDPOINT:-}
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-}
+      AZURE_SPEECH_DEFAULT_VOICE: ${AZURE_SPEECH_DEFAULT_VOICE:-}
       DEFAULT_PROVIDER: anthropic
-      CACHE_TTL_SECS: "300"
     depends_on:
       nats:
         condition: service_healthy
@@ -195,9 +306,9 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
       NATS_URL: nats://nats:4222
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET: model-plane-artifacts
+      MINIO_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${OBJECT_STORAGE_BUCKET:-model-plane-artifacts}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: execution-core
       SESSION_CORE_ADDR: http://session-core:9091
@@ -269,8 +380,8 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-minioadmin}
     depends_on:
       redis:
         condition: service_healthy
@@ -291,7 +402,8 @@ services:
       - "8088:8088"   # HTTP health
       - "9096:9096"   # gRPC
     environment:
-      LETTA_URL: ${LETTA_URL:-http://localhost:8283}
+      LETTA_URL: ${LETTA_URL:-${LETTA_SERVER_URL:-http://localhost:8283}}
+      LETTA_SERVER_URL: ${LETTA_SERVER_URL:-${LETTA_URL:-http://localhost:8283}}
       SESSION_CORE_ADDR: session-core:9091
 
   cost-core:
@@ -353,6 +465,7 @@ services:
       MODEL_GATEWAY_ADDR: model-gateway:9090
       JWT_AUDIENCE: ${JWT_AUDIENCE:-mp-bridge}
       JWT_SECRET: ${JWT_SECRET:-dev-shared-secret}
+      BRIDGE_JWT_SECRET: ${BRIDGE_JWT_SECRET:-${INTERNAL_SERVICE_SECRET:-dev-shared-secret}}
     depends_on:
       nats:
         condition: service_healthy
@@ -369,3 +482,5 @@ volumes:
 networks:
   default:
     name: model-plane-network
+  inter-plane-bus:
+    external: true

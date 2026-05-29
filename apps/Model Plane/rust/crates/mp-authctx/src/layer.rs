@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, Response};
 use chrono::Utc;
-use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
+use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use tower::{Layer, Service};
 
 use crate::{AuthCtx, AuthCtxError, Claims, JwksCache};
@@ -207,7 +207,10 @@ where
 fn extract_bearer(headers: &http::HeaderMap) -> Option<String> {
     let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
     let trimmed = value.trim();
-    if !trimmed.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("Bearer ")) {
+    if !trimmed
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("Bearer "))
+    {
         return None;
     }
     let token = trimmed[7..].trim();
@@ -269,8 +272,7 @@ fn decode_unverified(token: &str) -> Result<Claims, AuthCtxError> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(segments[1])
         .map_err(|e| AuthCtxError::Decode(e.to_string()))?;
-    serde_json::from_slice::<Claims>(&payload)
-        .map_err(|e| AuthCtxError::Decode(e.to_string()))
+    serde_json::from_slice::<Claims>(&payload).map_err(|e| AuthCtxError::Decode(e.to_string()))
 }
 
 fn error_response(err: &AuthCtxError) -> Response<Body> {
