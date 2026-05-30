@@ -4,7 +4,9 @@
 //! Emits ingress.accepted / ingress.rejected envelopes.
 
 use anyhow::Result;
-use model_gateway::{finetune_poller, gateway_metrics, grpc, http_routes, state};
+use model_gateway::{
+    capability_consumer, finetune_poller, gateway_metrics, grpc, http_routes, state,
+};
 use tracing::info;
 
 #[tokio::main]
@@ -17,6 +19,12 @@ async fn main() -> Result<()> {
 
     let http_handle = tokio::spawn(http_routes::serve(app_state.clone(), prom_handle));
     let grpc_handle = tokio::spawn(grpc::serve(app_state.clone()));
+
+    // §4.3 capability-registry cache-coherence consumer (read-path dual of the
+    // H.1 MCP write-through). Detached best-effort daemon: it self-guards on
+    // NATS_URL and never breaks the gateway when the bus is absent, so the
+    // gateway's lifetime stays governed by the http/grpc servers + shutdown.
+    tokio::spawn(capability_consumer::run(app_state.mcp.clone()));
 
     // Wave 7 slice 2c — fine-tuning poller. Only spawn when Azure is
     // configured; otherwise the gateway has no provider to refresh against.

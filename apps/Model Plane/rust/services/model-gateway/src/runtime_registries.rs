@@ -68,6 +68,23 @@ impl McpRegistry {
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
+
+    /// Drop a cached server by (org, server_id). Returns true if an entry was
+    /// removed. Used by the §4.3 reconcile consumer to keep the cache coherent
+    /// when capability-core (the system-of-record) reports a server removed —
+    /// so the gateway stops proxying to a decommissioned/revoked server.
+    pub fn remove(&self, org_id: &str, server_id: &str) -> bool {
+        self.inner
+            .remove(&(org_id.to_owned(), server_id.to_owned()))
+            .is_some()
+    }
+
+    /// Whether a server is cached for (org, server_id). Test/observability helper.
+    #[must_use]
+    pub fn contains(&self, org_id: &str, server_id: &str) -> bool {
+        self.inner
+            .contains_key(&(org_id.to_owned(), server_id.to_owned()))
+    }
 }
 
 /// Execute an MCP `tools/call` over the **stdio** transport (matrix §G2):
