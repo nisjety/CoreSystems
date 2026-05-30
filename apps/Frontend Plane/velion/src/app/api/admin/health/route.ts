@@ -73,7 +73,7 @@ const TARGETS: ReadonlyArray<PlaneTarget> = [
   { plane: 'control',     service: 'user-service',    url: 'http://user-service:3012/healthz' },
   { plane: 'control',     service: 'org-core',        url: 'http://org-core-service:8080/healthz' },
   { plane: 'control',     service: 'billing-core',    url: 'http://billing-core-service:3014/healthz' },
-  { plane: 'control',     service: 'audit-core',      url: 'http://audit-core-service:8087/healthz' },
+  { plane: 'control',     service: 'audit-core',      url: 'http://audit-core-service:8187/healthz' },
 ]
 
 export async function GET(request: NextRequest): Promise<NextResponse> {

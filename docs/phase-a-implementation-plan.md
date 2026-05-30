@@ -98,7 +98,7 @@ auth-core, with claims:
 
 **A1.6 — Audit log**
 - [ ] Same NATS subject pattern → `velion.audit.v1.<plane>.<event>`.
-- [ ] New `audit-core` (Go, port 8087) tiny service that subscribes,
+- [ ] New `audit-core` (Go, port 8187) tiny service that subscribes,
   persists to Postgres, exposes `GET /v1/audit?org_id=...&since=...`.
   (Lives in Control Plane.)
 

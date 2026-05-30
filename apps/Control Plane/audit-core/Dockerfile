@@ -23,5 +23,5 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.20
 RUN apk --no-cache add ca-certificates curl
 COPY --from=builder /audit-core /usr/local/bin/audit-core
-EXPOSE 8087
+EXPOSE 8187
 ENTRYPOINT ["audit-core"]

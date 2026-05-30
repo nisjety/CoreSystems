@@ -22,7 +22,7 @@ import {
 } from '../../_lib/control-plane-auth'
 
 const AUDIT_CORE_URL = (
-  process.env.AUDIT_CORE_URL || 'http://audit-core-service:8087'
+  process.env.AUDIT_CORE_URL || 'http://audit-core-service:8187'
 ).replace(/\/+$/, '')
 
 const INTERNAL_API_KEY =

@@ -417,12 +417,12 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-controlplane}:${POSTGRES_PASSWORD:-controlplane}@controlplane-postgres:5432/${POSTGRES_DB:-controlplane}
       NATS_URL: nats://velion-nats:4222
       NATS_TOKEN: ${VELION_NATS_TOKEN:-}
-      HTTP_PORT: "8087"
+      HTTP_PORT: "8187"
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
     ports:
-      # Host side remapped 8087->8187 to avoid collision with Model Plane
-      # browser-broker (also published 0.0.0.0:8087). Container port unchanged.
-      - "8187:8087"
+      # Native HTTP port 8187 (host and container). Kept clear of Model
+      # Plane's browser-broker so the two never collide on the host.
+      - "8187:8187"
     networks:
       - controlplane-net
       - inter-plane-bus
@@ -442,7 +442,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8087/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8187/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -108,7 +108,7 @@ func loadConfig() (*config, error) {
 	if natsURL == "" {
 		natsURL = "nats://velion-nats:4222"
 	}
-	port := 8087
+	port := 8187 // default listen port; override with HTTP_PORT
 	if v := os.Getenv("HTTP_PORT"); v != "" {
 		var p int
 		if _, err := fmt.Sscanf(v, "%d", &p); err == nil && p > 0 {
