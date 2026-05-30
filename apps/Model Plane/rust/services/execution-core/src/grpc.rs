@@ -54,7 +54,8 @@ impl ExecutionCore for ExecutionService {
             &req.tool_input,
             &req.permission_mode,
             &req.hook_context,
-        );
+        )
+        .await;
 
         // HITL enforcement: when the posture gated this step, create the
         // durable Approval and pause the run. session-core broadcasts
