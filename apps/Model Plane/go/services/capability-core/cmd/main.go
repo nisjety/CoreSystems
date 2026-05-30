@@ -12,6 +12,9 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
+	"github.com/triodelab/model-plane/pkg/natsx"
+	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
@@ -73,6 +76,26 @@ func main() {
 
 	pol := policy.New(reg)
 
+	// --- §4.3 reconcile event publisher -------------------------------------
+	// capability-core is the registry system-of-record; on a create/update it
+	// emits mp.v1.capability.<kind>.<action> so cache holders (the gateway's
+	// runtime registries) stay coherent. The gateway-side consumer is built
+	// (model-gateway capability_consumer); this is the emit half. Best-effort
+	// and guarded: with NATS_URL unset the publisher is nil and reconcile.Emit
+	// no-ops, so the service runs cleanly without a bus. ModeV1Only because
+	// capability events are v1-native (no legacy mapping).
+	var recPub publisher.EventPublisher
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		nc, nerr := nats.Connect(natsURL)
+		if nerr != nil {
+			slog.Warn("NATS connect failed; capability reconcile events disabled", "error", nerr)
+		} else {
+			defer nc.Close()
+			recPub = publisher.NewNATSPublisher(natsx.NewPublisher(nc, natsx.ModeV1Only))
+			slog.Info("capability reconcile events enabled", "nats_url", natsURL)
+		}
+	}
+
 	// --- HTTP server on :8085 -----------------------------------------------
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -89,10 +112,12 @@ func main() {
 	if capStore != nil {
 		api.NewCapabilitiesHandler(capStore).Register(mux)
 	}
-	api.NewSkillsHandler(pool).Register(mux)
-	api.NewMCPHandler(pool).Register(mux)
-	api.NewRoutingHandler(pool).Register(mux)
-	api.NewSafetyHandler(pool).Register(mux)
+	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
+	// recPub makes reconcile.Emit a no-op).
+	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(mux)
+	api.NewMCPHandler(pool).WithPublisher(recPub).Register(mux)
+	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(mux)
+	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(mux)
 	api.NewMemoryHandler(pool).Register(mux)
 	api.NewTasksHandler(pool).Register(mux)
 	api.NewCronHandler(pool).Register(mux)
