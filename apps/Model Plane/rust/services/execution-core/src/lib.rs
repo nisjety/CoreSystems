@@ -8,6 +8,7 @@ pub mod http_health;
 pub mod permission;
 pub mod policy;
 pub mod runtime_loop;
+pub mod sandbox;
 pub mod scrub;
 pub mod state;
 pub mod subagent;

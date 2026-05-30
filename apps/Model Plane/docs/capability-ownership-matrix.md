@@ -108,7 +108,7 @@ After harmonization, the truly-missing items are small and targeted:
 
 | # | Gap | Owner | Source (license) | Why it's real (not duplicate) |
 |---|---|---|---|---|
-| G1 | **OS isolation** (bwrap/Landlock/seccomp/no_new_privs) + egress allowlist | execution-core + sandbox-manager | codex `linux-sandbox`/`bwrap`/`network-proxy` (Apache) | Zero matches in codebase — sandboxes have leases but run with no kernel isolation |
+| G1 | **OS isolation** (bwrap/Landlock/seccomp/no_new_privs) + egress allowlist | execution-core (policy) + a real executor (NEW) | codex `linux-sandbox`/`bwrap`/`network-proxy` (Apache) | **Deeper than expected:** `tool_bridge` is a *deterministic stub* (canned outputs, spawns nothing) and `sandbox-manager` is *lease bookkeeping only* (no `exec.Command`/docker). Nothing executes sandboxed processes yet. **Foundation laid** (`execution-core/sandbox.rs`: policy→bwrap argv, 6 tests); a real process executor is the prerequisite (bigger build, needs stack+Linux). |
 | G2 | **MCP transport client** behind the existing registry | capability-core | codex `rmcp-client` (Apache, fork) | Registry exists; the actual stdio/HTTP MCP client connection layer does not |
 | G3 | **Sandbox-policy vocabulary** (`MpSandboxPolicy`/`PermissionProfile`/network) | execution-core + `safety.proto` | codex enums (Apache) | No sandbox-policy type exists; G1 needs it |
 | G4 | **Provider capabilities struct** (`supports_vision/tools/thinking`, ctx window) | inference-core | codex `ProviderCapabilities` (Apache) | Providers exist but aren't introspectable; needed to gate routing |
@@ -124,7 +124,8 @@ Everything else the harvest proposed **already exists** — do not rebuild it.
 - ✅ **G4** — `inference-core/provider/mod.rs` `ProviderCapabilities` + `capabilities()` trait method; 2 tests pass. (Per-provider overrides deferred until the router consumes them.)
 - ✅ **G3** — `execution-core/policy.rs` `MpSandboxPolicy`/`MpNetworkPolicy` (Rust vocabulary); 5 tests pass. Proto promotion deferred to G1 (when it crosses execution-core↔sandbox-manager).
 - ⏭️ **G6** — skipped (rationale above).
-- ⬜ **G1, G2, G7, G8** — pending (larger; G1 Linux-gated).
+- 🟡 **G1 foundation** — `execution-core/sandbox.rs` (`MpSandboxPolicy`→bubblewrap argv, Linux-gated syscalls, transparent passthrough without bwrap; 6 tests). Blocked on a **real tool executor** — `tool_bridge` is currently a deterministic stub and `sandbox-manager` is lease-only, so there is no process to isolate yet. The executor is the next prerequisite (needs stack+Linux to verify).
+- ⬜ **G2, G7, G8** — pending. G2 narrowed: gateway MCP client is **HTTP-only**; the real gap is the **stdio transport** (dominant MCP transport).
 
 ---
 
