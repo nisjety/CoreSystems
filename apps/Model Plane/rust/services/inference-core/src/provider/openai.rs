@@ -235,6 +235,21 @@ fn is_reasoning_model(model: &str) -> bool {
 #[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl ProviderRouter for OpenAiProvider {
+    fn capabilities(&self) -> super::ProviderCapabilities {
+        // GPT-4o / GPT-5 / o-series: tools, vision, reasoning, streaming, and
+        // a first-party embeddings API. Conservative context/output bounds.
+        super::ProviderCapabilities {
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+            supports_streaming: true,
+            supports_embeddings: true,
+            modalities: vec!["chat".to_owned(), "vision".to_owned(), "embeddings".to_owned()],
+            max_context_tokens: 128_000,
+            max_output_tokens: 16_384,
+        }
+    }
+
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
         let body = build_request_body(req, false);
         let url = self.chat_completions_url(&req.model);

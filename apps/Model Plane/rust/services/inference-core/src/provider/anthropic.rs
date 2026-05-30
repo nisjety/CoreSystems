@@ -102,6 +102,21 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
 #[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl ProviderRouter for AnthropicProvider {
+    fn capabilities(&self) -> super::ProviderCapabilities {
+        // Claude: tools, vision, extended thinking, streaming; 200k context.
+        // No first-party embeddings API.
+        super::ProviderCapabilities {
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+            supports_streaming: true,
+            supports_embeddings: false,
+            modalities: vec!["chat".to_owned(), "vision".to_owned()],
+            max_context_tokens: 200_000,
+            max_output_tokens: 8_192,
+        }
+    }
+
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
         let body = build_request_body(req);
 

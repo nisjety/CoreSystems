@@ -126,7 +126,7 @@ Everything else the harvest proposed **already exists** — do not rebuild it.
 
 **Implementation status (2026-05-30):**
 - ✅ **G5** — `execution-core/scrub.rs` extended (connection-string passwords, inline `KEY=value`, Slack/Google keys); 7 tests pass.
-- ✅ **G4** — `inference-core/provider/mod.rs` `ProviderCapabilities` + `capabilities()` trait method; 2 tests pass. (Per-provider overrides deferred until the router consumes them.)
+- ✅ **G4** — `inference-core/provider/mod.rs` `ProviderCapabilities` + `capabilities()` trait method (2 tests); OpenAI + Anthropic providers now **override it with accurate self-description** (tools/vision/thinking/streaming/embeddings, 128k/200k context). Providers are now introspectable; the router/policy can gate modality use against real capability instead of hardcoded assumptions.
 - ✅ **G3** — `execution-core/policy.rs` `MpSandboxPolicy`/`MpNetworkPolicy` (Rust vocabulary); 5 tests pass. Proto promotion deferred to G1 (when it crosses execution-core↔sandbox-manager).
 - ⏭️ **G6** — skipped (rationale above).
 - 🟡 **G1 foundation** — `execution-core/sandbox.rs` (`MpSandboxPolicy`→bubblewrap argv, Linux-gated syscalls, transparent passthrough without bwrap; 6 tests). Blocked on a **real tool executor** — `tool_bridge` is currently a deterministic stub and `sandbox-manager` is lease-only, so there is no process to isolate yet. The executor is the next prerequisite (needs stack+Linux to verify).
