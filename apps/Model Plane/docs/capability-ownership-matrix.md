@@ -80,9 +80,15 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 - **Shadows:** model-gateway `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore) — all in-memory, no backend calls (verified: no `session_core.*` calls in these files), explicitly documented as "promote to postgres later."
 - **Ruling:** Keep the gateway stores as **run-loop latency caches only**. Wire them to: (a) read-through to session-core `orchestration_grpc` on miss, (b) write-through via NATS (`orchestration_nats`) so session-core persists. execution-core `subagent/` stays as the **executor**; orchestrator-core owns spawn/lifecycle. **No new coordinator system.**
 
-### 4.2 Tasks & cron — **task-core vs session-core durable overlap** (sharpest defect)
-- Both `task-core/internal/store/store.go` and session-core migration `0004` define durable task/cron state.
-- **Ruling (verify then act):** Pick **one** durable store. Recommended: **session-core owns task/cron *persistence*** (it already has the tables, the outbox, and run linkage); **task-core owns *execution* (cron firing, dispatch) and calls session-core via gRPC for state.** If task-core currently writes its own Postgres tables → migrate it to delegate. capability-core `tasks/`+`schedule/` = **definition/metadata only** (templates, policy), not runtime state. ACTION: confirm task-core's store backend; if duplicate tables exist, consolidate to session-core.
+### 4.2 Tasks & cron — **task-core is an orphaned in-memory duplicate** (RESOLVED diagnosis 2026-05-30)
+- **Verified by code-read:**
+  - `task-core/internal/store/store.go` is **explicitly in-memory** — `map[string]*Task` + mutex, doc comment "implements in-memory storage". Persists nothing; data lost on restart.
+  - `task-core/cmd/main.go` registers **only a gRPC health server** — no task RPC service is wired. Its cron scheduler ticks every 30s over a store no external caller populates.
+  - **Nothing imports task-core** (caller grep across `rust/`+`go/` hit only generated proto). Effectively dead/orphaned.
+  - Durable task/cron state already lives in session-core migration `0004` (`tasks`/`cron_schedules`/`cron_fires`); gateway `/v1/tasks`+`/v1/cron` are ingress; **Temporal (orchestrator-core) is already the durable scheduler**; capability-core `tasks/`+`schedule/` hold metadata.
+- **Three systems can fire scheduled work** (task-core's hand-rolled scheduler, Temporal cron, session-core tables). task-core is the redundant one — and the *wrong tool* (in-memory, non-durable) for a job Temporal already does durably.
+- **Ruling:** **Retire task-core's hand-rolled scheduler/store.** Durable cron = **Temporal**; durable task state = **session-core**; metadata/templates = **capability-core**; ingress = **gateway**. If task-core is kept, gut it to a thin gateway→session-core/orchestrator relay — it must NOT own a parallel store or scheduler.
+- **ACTION (structural — needs running stack; do NOT delete blind):** (1) confirm no compose service depends on task-core `:9099`/`:8090`; (2) delete the service or reduce to a relay; (3) point gateway `/v1/tasks`+`/v1/cron` at session-core (state) + orchestrator-core (firing). Requires integration tests.
 
 ### 4.3 Capability registries — **gateway in-mem vs capability-core durable**
 - gateway `runtime_registries.rs` (mcp/plugins/commands/hooks/permissions) vs capability-core durable packages.
