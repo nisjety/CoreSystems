@@ -85,3 +85,121 @@ pub async fn compact_once(pool: &Pool) -> Result<i64> {
     .await?;
     Ok(n)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // PG-gated regression guard for the GOAL invariant "compaction never
+    // replaces source": `compact_once` must only ADD a checkpoint and leave
+    // every source event intact. The query is INSERT-only today (provable by
+    // reading it), so this test LOCKS that in — a future change that adds an
+    // event cleanup (e.g. "prune events older than the last checkpoint") would
+    // fail here, catching the data-loss regression before it ships.
+    //
+    // #[ignore]d so plain `cargo test` (no DB) skips it; run with a DB:
+    //   DATABASE_URL=… cargo test -p session-core --bin session-core \
+    //     compaction_is_additive_never_deletes_events -- --ignored
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn compaction_is_additive_never_deletes_events() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let sfx = std::process::id();
+        let (thread_id, run_id, org) = (
+            format!("ct-t-{sfx}"),
+            format!("ct-r-{sfx}"),
+            format!("ct-org-{sfx}"),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+
+        // Seed source events; the trigger assigns step_ordinal for STEP_COMPLETED.
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO events (id,event_type,run_id) VALUES ($1,'STEP_COMPLETED',$2)",
+            )
+            .bind(format!("ct-e-{sfx}-{i}"))
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("seed event");
+        }
+        let count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id=$1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count before");
+        assert_eq!(count_before, 3);
+
+        // Compact: must add exactly one checkpoint for this fresh run...
+        let rolled = compact_once(&pool).await.expect("compact");
+        assert!(rolled >= 1, "expected >=1 checkpoint rolled, got {rolled}");
+        let ck_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM checkpoints WHERE run_id=$1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("ck count");
+        assert_eq!(ck_count, 1, "compaction must add exactly one checkpoint");
+
+        // ...and must NOT have touched any source event (the invariant).
+        let count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id=$1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count after");
+        assert_eq!(
+            count_after, count_before,
+            "compaction must never delete source events"
+        );
+
+        // Idempotent: no new events since the checkpoint -> no new checkpoint,
+        // events still intact.
+        let rolled2 = compact_once(&pool).await.expect("compact2");
+        assert_eq!(rolled2, 0, "no new events -> no new checkpoint");
+        let count_final: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id=$1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count final");
+        assert_eq!(
+            count_final, count_before,
+            "events still intact after re-compaction"
+        );
+
+        // cleanup (checkpoints/events first — checkpoints FK-references runs).
+        for q in [
+            "DELETE FROM checkpoints WHERE run_id=$1",
+            "DELETE FROM events WHERE run_id=$1",
+        ] {
+            sqlx::query(q).bind(&run_id).execute(&pool).await.ok();
+        }
+        for q in [
+            "DELETE FROM runs WHERE org_id=$1",
+            "DELETE FROM threads WHERE org_id=$1",
+        ] {
+            sqlx::query(q).bind(&org).execute(&pool).await.ok();
+        }
+    }
+}
