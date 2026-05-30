@@ -163,7 +163,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 **Next deliverables**
 
-- CLI/TUI shell — own implementation (Rust or Go), slash-command set sourced from `capability-core` command registry; consumes `bridge-core`'s `/api/v1/sessions` API. Reference: `claude-code-fork/src/commands/`. **(The only remaining P6 item — product-UX-gated.)**
+- CLI/TUI shell — ✅ **CLI BUILT** (`rust/clients/bridge-cli`): a Rust REPL over bridge-core's `/api/v1/sessions` API (new/list/get/send/close), parser + base64 ingest unit-tested. A richer `ratatui` TUI (panels, slash-commands sourced from `capability-core`'s registry) is optional future polish layered on the same `client` module — not parity-required. Reference: `claude-code-fork/src/commands/`.
 - ~~IDE bridge / Remote sessions / Voice ingress~~ — **DONE in `bridge-core`** (session registry, channel adapters + JWT + framing, voice pipeline). Original `/v1/bridge/*`,`/v1/remote/*`,`/v1/voice/*` namespace plans superseded by bridge-core's actual surface; do not rebuild (would duplicate).
 - Channel ingress — `/v1/channels/*` for Slack, email, webhooks, GitHub. Reference: v2 `agent-core/app/messaging/`.
 - Settings sync / MDM — for remote-managed defaults; reference: fork `services/settingsSync/`, `remoteManagedSettings/`.
