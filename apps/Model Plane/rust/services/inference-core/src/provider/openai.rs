@@ -244,7 +244,11 @@ impl ProviderRouter for OpenAiProvider {
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings: true,
-            modalities: vec!["chat".to_owned(), "vision".to_owned(), "embeddings".to_owned()],
+            modalities: vec![
+                "chat".to_owned(),
+                "vision".to_owned(),
+                "embeddings".to_owned(),
+            ],
             max_context_tokens: 128_000,
             max_output_tokens: 16_384,
         }

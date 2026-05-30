@@ -117,7 +117,12 @@ impl MpSandboxPolicy {
     /// (e.g. `"workspace-write"`, `"DANGER_FULL_ACCESS"`).
     #[must_use]
     pub fn from_keyword(keyword: &str, network: MpNetworkPolicy) -> Self {
-        match keyword.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        match keyword
+            .trim()
+            .to_ascii_lowercase()
+            .replace('_', "-")
+            .as_str()
+        {
             "danger-full-access" | "full" => Self::DangerFullAccess,
             "workspace-write" | "write" => Self::WorkspaceWrite {
                 writable_roots: Vec::new(),

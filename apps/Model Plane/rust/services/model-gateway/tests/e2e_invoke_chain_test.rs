@@ -652,14 +652,18 @@ impl SessionCore for MockSessionCore {
         &self,
         _: TReq<mp_contracts::model_plane::v1::UpsertAgentSkillRequest>,
     ) -> Result<Response<mp_contracts::model_plane::v1::UpsertAgentSkillResponse>, Status> {
-        Err(Status::unimplemented("upsert_agent_skill not needed in this test"))
+        Err(Status::unimplemented(
+            "upsert_agent_skill not needed in this test",
+        ))
     }
 
     async fn set_run_mode(
         &self,
         _: TReq<mp_contracts::model_plane::v1::SetRunModeRequest>,
     ) -> Result<Response<mp_contracts::model_plane::v1::SetRunModeResponse>, Status> {
-        Err(Status::unimplemented("set_run_mode not needed in this test"))
+        Err(Status::unimplemented(
+            "set_run_mode not needed in this test",
+        ))
     }
 }
 

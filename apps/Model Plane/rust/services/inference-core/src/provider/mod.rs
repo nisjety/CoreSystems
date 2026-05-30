@@ -12,7 +12,8 @@ pub mod translation;
 pub mod video;
 pub mod vision;
 
-#[allow(unused_imports)] // ArtifactStore is part of the intended provider surface; not yet consumed
+#[allow(unused_imports)]
+// ArtifactStore is part of the intended provider surface; not yet consumed
 pub use artifact_ref::{ArtifactRef, ArtifactStore};
 
 use tokio::sync::mpsc;
