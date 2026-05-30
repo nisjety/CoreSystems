@@ -807,8 +807,36 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RegisterMcpServerRequest>,
     ) -> Result<Response<RegisterMcpServerResponse>, Status> {
-        runtime_registries::handle_register_mcp_server(&self.state.mcp, request.into_inner())
-            .map(Response::new)
+        let req = request.into_inner();
+        let org_id = req.org_id.clone();
+        let resp = runtime_registries::handle_register_mcp_server(&self.state.mcp, req)?;
+        // Best-effort write-through to capability-core, the registry
+        // system-of-record (matrix §4.1/H.1): converge the gateway's in-memory
+        // store toward the SoR instead of shadowing it. In-memory stays
+        // authoritative for THIS response; a catalog write failure must never
+        // fail registration. Fire-and-forget so registration latency isn't
+        // coupled to the catalog. Skipped when the base URL is unset (tests).
+        if !self.state.capability_core_base_url.is_empty() {
+            if let Some(server) = resp.server.as_ref() {
+                if !org_id.is_empty() && !server.name.is_empty() {
+                    let payload = runtime_registries::mcp_capability_payload(&org_id, server);
+                    let url = format!("{}/api/v1/mcp", self.state.capability_core_base_url);
+                    let client = self.state.http_client.clone();
+                    tokio::spawn(async move {
+                        match client.post(&url).json(&payload).send().await {
+                            Ok(r) if !r.status().is_success() => {
+                                tracing::warn!(status = %r.status(), "mcp catalog write-through non-2xx (best-effort)");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "mcp catalog write-through failed (best-effort)");
+                            }
+                            _ => {}
+                        }
+                    });
+                }
+            }
+        }
+        Ok(Response::new(resp))
     }
 
     async fn list_mcp_servers(

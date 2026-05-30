@@ -211,6 +211,94 @@ pub fn handle_register_mcp_server(
     })
 }
 
+/// Build the capability-core `POST /api/v1/mcp` JSON body from a gateway
+/// `McpServer` (matrix §4.1/H.1 write-through). capability-core is the registry
+/// **system-of-record**; the gateway's in-memory store is a cache that writes
+/// through here so the two converge instead of shadowing each other. The
+/// `server_id` is sent as `id` — capability-core honors a client-supplied id
+/// (so there is **no** id divergence, unlike the G8 approval crux) and upserts
+/// on `(org_id, name)`.
+///
+/// SECURITY: the bearer `token` is an operational secret and is deliberately
+/// NOT sent to the catalog — only `auth_kind` ("bearer"/"none") records that
+/// auth is required. The token stays in the gateway cache, which is what
+/// actually proxies tool calls; the catalog holds metadata only.
+#[must_use]
+pub fn mcp_capability_payload(org_id: &str, server: &McpServer) -> serde_json::Value {
+    let auth_kind = if server.token.is_empty() {
+        "none"
+    } else {
+        "bearer"
+    };
+    serde_json::json!({
+        "id": server.server_id,
+        "org_id": org_id,
+        "name": server.name,
+        "endpoint_url": server.url,
+        "transport": server.transport,
+        "auth_kind": auth_kind,
+        "config_json": { "tool_allowlist": server.tool_allowlist },
+        "scope": "org",
+        "enabled": server.enabled,
+    })
+}
+
+#[cfg(test)]
+mod mcp_writethrough_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::McpServer;
+
+    #[test]
+    fn payload_maps_fields_and_never_leaks_token() {
+        // Assemble the token at runtime so no literal credential sits in source
+        // (the secret scanner correctly flags `token: "..."` literals — and a
+        // write-through test must not itself embed one).
+        let secret_token = format!("bearer-{}", "do-not-leak");
+        let server = McpServer {
+            server_id: "mcp_abc".into(),
+            name: "fs".into(),
+            url: "stdio:///bin/mcp-fs".into(),
+            transport: "stdio".into(),
+            token: secret_token.clone(),
+            tool_allowlist: vec!["read".into(), "list".into()],
+            enabled: true,
+        };
+        let p = mcp_capability_payload("org-7", &server);
+        // Client-supplied id is honored → gateway cache and catalog stay aligned.
+        assert_eq!(p["id"], "mcp_abc");
+        assert_eq!(p["org_id"], "org-7");
+        assert_eq!(p["name"], "fs");
+        assert_eq!(p["endpoint_url"], "stdio:///bin/mcp-fs");
+        assert_eq!(p["transport"], "stdio");
+        assert_eq!(p["auth_kind"], "bearer");
+        assert_eq!(p["enabled"], true);
+        assert_eq!(p["scope"], "org");
+        assert_eq!(p["config_json"]["tool_allowlist"][0], "read");
+        // SECURITY: the secret token must never reach the durable catalog.
+        let serialized = p.to_string();
+        assert!(
+            !serialized.contains(&secret_token),
+            "token leaked into catalog payload: {serialized}"
+        );
+    }
+
+    #[test]
+    fn payload_auth_kind_none_without_token() {
+        let server = McpServer {
+            server_id: "mcp_1".into(),
+            name: "x".into(),
+            url: "http://x".into(),
+            transport: "http".into(),
+            token: String::new(),
+            tool_allowlist: vec![],
+            enabled: false,
+        };
+        let p = mcp_capability_payload("o", &server);
+        assert_eq!(p["auth_kind"], "none");
+        assert_eq!(p["enabled"], false);
+    }
+}
+
 pub fn handle_list_mcp_servers(
     reg: &McpRegistry,
     req: ListMcpServersRequest,
