@@ -22,11 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let dp_protos = &[
-        "dataplane/retrieval_v2.proto",
-        "dataplane/documents_v2.proto",
-        "dataplane/knowledge_v2.proto",
-        "dataplane/graph_v1.proto",
-        "dataplane/wiki_v1.proto",
+        "dataplane/retrieval/v2/retrieval_v2.proto",
+        "dataplane/documents/v2/documents_v2.proto",
+        "dataplane/knowledge/v2/knowledge_v2.proto",
+        "dataplane/graph/v1/graph_v1.proto",
+        "dataplane/wiki/v1/wiki_v1.proto",
     ];
 
     let proto_paths: Vec<std::path::PathBuf> = mp_protos

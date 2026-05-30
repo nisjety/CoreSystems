@@ -1,5 +1,7 @@
 //! Vision provider — image generation, analysis, and OCR.
 
+#![allow(dead_code)] // request DTO fields + test-only ctor wired up incrementally
+
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};

@@ -12,6 +12,8 @@
 //! durable artifacts — either return the bytes inline (and trust the
 //! gateway's ephemeral routing) or short-circuit with `ProviderError`.
 
+#![allow(dead_code)] // artifact-store abstraction is scaffolding; wired up when multimodal outputs land
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 

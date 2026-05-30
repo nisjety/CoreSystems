@@ -754,15 +754,16 @@ export function ChatView({
 
 		const shouldStickToBottom = isAtBottom || previousMessageCount === 0;
 
-		if (!shouldStickToBottom) {
-			setCanShowScrollCta(true);
-			return;
-		}
-
-		window.requestAnimationFrame(() => {
+		const frame = window.requestAnimationFrame(() => {
+			if (!shouldStickToBottom) {
+				setCanShowScrollCta(true);
+				return;
+			}
 			setCanShowScrollCta(false);
 			scrollToBottom(previousMessageCount > 0 && !isTyping);
 		});
+
+		return () => window.cancelAnimationFrame(frame);
 	}, [messages.length, isTyping, scrollToBottom, isAtBottom]);
 
 	useEffect(() => {

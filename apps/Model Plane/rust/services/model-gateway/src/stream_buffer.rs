@@ -69,7 +69,7 @@ struct BufferedStream {
 }
 
 #[derive(Clone, Default)]
-struct InMemoryStreamBuffer {
+pub struct InMemoryStreamBuffer {
     inner: Arc<Mutex<HashMap<String, BufferedStream>>>,
 }
 
@@ -150,7 +150,7 @@ impl InMemoryStreamBuffer {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-struct RedisStreamBuffer {
+pub struct RedisStreamBuffer {
     conn: redis::aio::ConnectionManager,
 }
 

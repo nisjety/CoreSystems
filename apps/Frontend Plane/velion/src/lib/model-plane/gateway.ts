@@ -21,7 +21,10 @@
 import { createClient, type Client } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
 
-import { ModelGateway } from "./gen/model_plane/v1/gateway_connect.js";
+// connect-es v2 `createClient` consumes the protobuf-es v2 `GenService`
+// descriptor from the generated `_pb` module — not the legacy `_connect`
+// `ServiceType` (which v1's `createPromiseClient` used).
+import { ModelGateway } from "./gen/model_plane/v1/gateway_pb.js";
 
 const DEFAULT_BASE_URL =
   process.env.MODEL_GATEWAY_URL ?? "http://localhost:9090";

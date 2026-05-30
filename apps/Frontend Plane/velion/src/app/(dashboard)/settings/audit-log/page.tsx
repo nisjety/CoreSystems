@@ -67,25 +67,28 @@ export default function AuditLogPage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    const url = new URL('/api/audit/log', window.location.origin)
-    url.searchParams.set('limit', '100')
-    if (filterEvent) url.searchParams.set('event', filterEvent)
-    fetch(url.toString(), { cache: 'no-store' })
-      .then((res) => res.json() as Promise<AuditResponse>)
-      .then((body) => {
+    // setState lives inside the async loader (a callback), not synchronously in
+    // the effect body, so re-fetches on `filterEvent` change still show loading.
+    const load = async () => {
+      setLoading(true)
+      const url = new URL('/api/audit/log', window.location.origin)
+      url.searchParams.set('limit', '100')
+      if (filterEvent) url.searchParams.set('event', filterEvent)
+      try {
+        const res = await fetch(url.toString(), { cache: 'no-store' })
+        const body = (await res.json()) as AuditResponse
         if (cancelled) return
         if (body.error) setError(body.error)
         setRows(body.data ?? [])
-      })
-      .catch((err: unknown) => {
+      } catch (err: unknown) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load audit log')
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false)
-      })
+      }
+    }
+    void load()
     return () => {
       cancelled = true
     }

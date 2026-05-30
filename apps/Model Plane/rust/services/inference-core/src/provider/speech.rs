@@ -1,5 +1,7 @@
 //! Speech provider routing: text-to-speech synthesis and speech-to-text transcription.
 
+#![allow(dead_code)] // placeholder provider + DTO fields wired up incrementally
+
 use std::sync::Arc;
 
 use reqwest::multipart;

@@ -93,7 +93,6 @@ export const ChatPage: React.FC<ChatPageProps> = ({
         event.preventDefault();
         startNewChat();
         resetNewChatDraft();
-        // eslint-disable-next-line react-doctor/nextjs-no-client-side-redirect
         router.push('/chat', { scroll: false });
       }
 
@@ -124,7 +123,6 @@ export const ChatPage: React.FC<ChatPageProps> = ({
 
   useEffect(() => {
     if (!routeSessionId && currentSession?.id) {
-      // eslint-disable-next-line react-doctor/nextjs-no-client-side-redirect
       router.replace(`/chat/${currentSession.id}`, { scroll: false });
     }
   }, [currentSession?.id, routeSessionId, router]);

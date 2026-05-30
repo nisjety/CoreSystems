@@ -6,6 +6,8 @@
 //! BEFORE INSERT triggers when passed as `0` (single-writer-per-parent
 //! invariant).
 
+#![allow(dead_code)] // store CRUD layer wired up incrementally as orchestration features land
+
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 use sqlx::types::chrono::{DateTime, Utc};

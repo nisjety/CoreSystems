@@ -292,11 +292,10 @@ pub fn plan_next_action(
 /// Execute the full browser-agent loop synchronously (for integration with execution-core tool bridge).
 pub fn run_browser_agent_loop(config: PlanConfig) -> (PlanStatus, Vec<BrowserObservation>, String) {
     let mut plan = AgentPlan::new(config);
-    let mut summary = String::new();
 
     info!(plan_id = %plan.config.plan_id, "browser-agent loop started");
 
-    loop {
+    let summary = loop {
         let last_obs = plan.observations.last().cloned();
         let result = plan_next_action(&mut plan, last_obs.as_ref());
 
@@ -312,29 +311,25 @@ pub fn run_browser_agent_loop(config: PlanConfig) -> (PlanStatus, Vec<BrowserObs
                 // and wait for the observation response. For now we simulate a timeout
                 // after dispatching since Quarry is not wired yet.
                 plan.status = PlanStatus::Completed;
-                summary = format!(
+                break format!(
                     "browser-agent plan {} dispatched {} steps; awaiting Quarry wiring",
                     plan.config.plan_id, plan.current_step
                 );
-                break;
             }
             PlanStepResult::Completed(reason) => {
                 info!(plan_id = %plan.config.plan_id, reason = %reason, "browser-agent loop completed");
-                summary = reason;
-                break;
+                break reason;
             }
             PlanStepResult::WaitingApproval => {
                 info!(plan_id = %plan.config.plan_id, "browser-agent paused for approval");
-                summary = "paused for approval".to_owned();
-                break;
+                break "paused for approval".to_owned();
             }
             PlanStepResult::Failed(error) => {
                 warn!(plan_id = %plan.config.plan_id, error = %error, "browser-agent loop failed");
-                summary = error;
-                break;
+                break error;
             }
         }
-    }
+    };
 
     let observations = plan.observations.clone();
     (plan.status, observations, summary)
@@ -552,7 +547,7 @@ mod tests {
     fn plan_store_crud() {
         let store = PlanStore::new();
         let config = test_config();
-        let plan = store.create(config);
+        let _ = store.create(config);
         assert_eq!(store.get("plan_001").unwrap().status, PlanStatus::Planning);
         assert!(store.abort("plan_001"));
         assert_eq!(store.get("plan_001").unwrap().status, PlanStatus::Aborted);

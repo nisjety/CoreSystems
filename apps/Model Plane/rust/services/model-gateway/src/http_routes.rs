@@ -556,7 +556,7 @@ async fn decide_approval(
     Path(approval_id): Path<String>,
     Json(body): Json<DecideApprovalBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let target_state = match body.decision.as_str() {
+    let target_state: ApprovalState = match body.decision.as_str() {
         "approve" => ApprovalState::Granted,
         "reject" => ApprovalState::Denied,
         other => {
@@ -699,6 +699,7 @@ struct AiChatRequest {
     #[serde(default)]
     model: String,
     #[serde(default)]
+    #[allow(dead_code)] // accepted on the wire but not yet acted upon
     stream: bool,
     #[serde(default)]
     structured_output_schema: Option<String>,

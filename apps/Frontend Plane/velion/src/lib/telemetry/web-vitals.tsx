@@ -17,7 +17,9 @@ type PerformanceEntryWithAttribution = PerformanceEntry & {
 export function WebVitalsTelemetry() {
   const pathname = usePathname()
   const routeRef = useRef(pathname)
-  routeRef.current = pathname
+  useEffect(() => {
+    routeRef.current = pathname
+  }, [pathname])
 
   useReportWebVitals((metric: NextWebVitalsMetric) => {
     // Next's `NextWebVitalsMetric` type omits `rating`/`navigationType`, but the

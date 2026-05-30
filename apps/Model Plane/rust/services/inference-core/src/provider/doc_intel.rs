@@ -1,5 +1,7 @@
 //! Document intelligence provider — structured extraction from documents.
 
+#![allow(dead_code)] // request DTO fields mirror the wire contract; read incrementally
+
 use std::{sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};

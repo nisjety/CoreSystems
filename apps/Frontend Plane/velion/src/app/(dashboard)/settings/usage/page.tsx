@@ -65,7 +65,8 @@ export default function UsagePage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
+    // `loading` already initialises to `true`; this effect runs once on mount,
+    // so there is no synchronous setState to cascade here.
     fetch('/api/usage/summary', { cache: 'no-store' })
       .then((res) => res.json() as Promise<UsageSummaryResponse>)
       .then((body) => {

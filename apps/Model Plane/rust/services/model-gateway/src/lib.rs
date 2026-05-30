@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod http_routes;
 pub mod langcache;
 pub mod lsp;
+pub mod mcp_jsonrpc;
 pub mod nats_publisher;
 pub mod normalize;
 pub mod profile;

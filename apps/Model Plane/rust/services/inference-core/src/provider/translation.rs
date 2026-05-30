@@ -1,5 +1,7 @@
 //! Translation provider routing for text translation and language detection.
 
+#![allow(dead_code)] // response DTO fields (e.g. request_id) mirror the wire contract; read incrementally
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

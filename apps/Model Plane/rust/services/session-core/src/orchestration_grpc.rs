@@ -231,6 +231,7 @@ pub struct OrchestrationGrpc {
 impl OrchestrationGrpc {
     /// Build the service.
     #[must_use]
+    #[allow(dead_code)] // constructed by the binary entrypoint once the gRPC service is mounted
     pub fn new(pool: Pool, events_tx: broadcast::Sender<proto::OrchestrationEvent>) -> Self {
         Self {
             pool,
@@ -570,6 +571,7 @@ fn todo_from_row(row: &store::TodoRow) -> proto::Todo {
     }
 }
 
+#[allow(dead_code)] // used by the lineage RPC once list_lineage_by_thread is wired
 fn lineage_edge_from_row(row: &store::SubagentEdgeRow) -> proto::LineageEdge {
     proto::LineageEdge {
         parent_run_id: row.parent_run_id.clone(),
