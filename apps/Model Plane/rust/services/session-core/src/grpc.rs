@@ -1888,4 +1888,87 @@ mod tests {
             sqlx::query(q).bind(&org).execute(&pool).await.ok();
         }
     }
+
+    // True multi-service round-trip: a real SessionCoreClient calls a real
+    // session-core gRPC server over TCP, persisting to real Postgres — the
+    // EXACT client→wire→handler→DB path the gateway's plan-mode write-through
+    // uses (gateway calls session_client.set_run_mode the same way). Verifies
+    // the deployed transport + handler + durability together.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn grpc_set_run_mode_round_trip_over_the_wire() {
+        use super::SessionService;
+        use mp_contracts::model_plane::v1 as pb;
+        use mp_contracts::model_plane::v1::session_core_client::SessionCoreClient;
+        use mp_contracts::model_plane::v1::session_core_server::SessionCoreServer;
+        use std::time::Duration;
+        use tonic::transport::Server;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+
+        let sfx = std::process::id();
+        let (thread_id, run_id, org) =
+            (format!("e2e-t-{sfx}"), format!("e2e-r-{sfx}"), format!("e2e-org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
+            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+        };
+        let addr: std::net::SocketAddr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(SessionCoreServer::new(svc))
+                .serve(addr)
+                .await
+                .ok();
+        });
+
+        // Connect with retry while the server binds.
+        let mut client = None;
+        for _ in 0..30 {
+            if let Ok(c) = SessionCoreClient::connect(format!("http://{addr}")).await {
+                client = Some(c);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let mut client = client.expect("connect to session-core over the wire");
+
+        // Over-the-wire call (the gateway's write-through mechanism).
+        let resp = client
+            .set_run_mode(pb::SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "plan".into(),
+            })
+            .await
+            .expect("set_run_mode rpc over wire")
+            .into_inner();
+        assert_eq!(resp.mode, "plan");
+
+        // And it actually persisted in Postgres.
+        let (mode,): (String,) = sqlx::query_as("SELECT mode FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back run mode");
+        assert_eq!(mode, "plan", "run mode must be durable after the wire round-trip");
+
+        for q in ["DELETE FROM runs WHERE org_id=$1", "DELETE FROM threads WHERE org_id=$1"] {
+            sqlx::query(q).bind(&org).execute(&pool).await.ok();
+        }
+    }
 }
