@@ -38,6 +38,12 @@ service SessionCore {
 
   // Trigger on-demand checkpoint compaction for all runs with pending events.
   rpc CompactNow(CompactNowRequest) returns (CompactNowResponse);
+
+  // Upsert a learned/edited agent skill body (closed learning loop, G7).
+  // session-core owns the `agent_skills` table (skill bodies); capability-core's
+  // registry is the catalog over these rows. Provenance-protected: a
+  // `background_review` upsert never overwrites a `user`-authored skill.
+  rpc UpsertAgentSkill(UpsertAgentSkillRequest) returns (UpsertAgentSkillResponse);
 }
 
 // --- CreateThread ---
@@ -231,3 +237,30 @@ message CompactNowResponse {
   // Human-readable summary of the compaction result.
   string summary = 2;
 }
+
+// --- UpsertAgentSkill (G7 learning loop) ---
+
+message UpsertAgentSkillRequest {
+  string org_id = 1;
+  string name = 2;
+  string description = 3;
+  string content = 4;
+  repeated string trigger_keywords = 5;
+  repeated string trigger_file_patterns = 6;
+  repeated string tool_restrictions = 7;
+  bool enabled = 8;
+  // Provenance: "user" or "background_review". A background_review upsert
+  // must never overwrite a user-authored skill (enforced server-side).
+  string origin = 9;
+}
+
+message UpsertAgentSkillResponse {
+  // The skill row id (ULID for inserts; existing id on update).
+  string id = 1;
+  // True if a new row was inserted; false if an existing skill was updated.
+  bool created = 2;
+  // True if the write was suppressed because the target is a protected
+  // user-authored skill (no error — the loop simply yields to the human).
+  bool skipped_protected = 3;
+}
+

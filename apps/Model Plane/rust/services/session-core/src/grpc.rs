@@ -621,6 +621,86 @@ impl SessionCore for SessionService {
         result
     }
 
+    // G7 closed learning loop: persist a skill body into agent_skills. The
+    // capability-core learning loop calls this with origin="background_review";
+    // a human skill editor uses origin="user". Provenance is enforced in the
+    // DB: a background_review upsert never overwrites a user-authored skill
+    // (the `WHERE` guard on the conflict), surfaced as `skipped_protected`
+    // rather than an error so the loop yields gracefully to the human.
+    async fn upsert_agent_skill(
+        &self,
+        request: Request<pb::UpsertAgentSkillRequest>,
+    ) -> Result<Response<pb::UpsertAgentSkillResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::UpsertAgentSkillResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.org_id.is_empty() || req.name.is_empty() {
+                return Err(Status::invalid_argument("org_id and name are required"));
+            }
+            let origin = match req.origin.as_str() {
+                "" | "background_review" => "background_review",
+                "user" => "user",
+                other => {
+                    return Err(Status::invalid_argument(format!("invalid origin: {other}")));
+                }
+            };
+            let id = new_ulid();
+            // None ⟺ the conflict guard rejected the write (target is a
+            // protected user skill); a fresh insert or permitted update always
+            // returns a row.
+            let row: Option<(String, bool)> = sqlx::query_as(
+                "INSERT INTO agent_skills
+                    (id, org_id, name, description, content, trigger_keywords,
+                     trigger_file_patterns, tool_restrictions, enabled, origin,
+                     created_at, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), now())
+                 ON CONFLICT (org_id, name) DO UPDATE SET
+                     description = EXCLUDED.description,
+                     content = EXCLUDED.content,
+                     trigger_keywords = EXCLUDED.trigger_keywords,
+                     trigger_file_patterns = EXCLUDED.trigger_file_patterns,
+                     tool_restrictions = EXCLUDED.tool_restrictions,
+                     enabled = EXCLUDED.enabled,
+                     updated_at = now()
+                 WHERE agent_skills.origin <> 'user' OR EXCLUDED.origin = 'user'
+                 RETURNING id, (xmax = 0) AS created",
+            )
+            .bind(&id)
+            .bind(&req.org_id)
+            .bind(&req.name)
+            .bind(&req.description)
+            .bind(&req.content)
+            .bind(serde_json::json!(req.trigger_keywords))
+            .bind(serde_json::json!(req.trigger_file_patterns))
+            .bind(serde_json::json!(req.tool_restrictions))
+            .bind(req.enabled)
+            .bind(origin)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "upsert_agent_skill failed");
+                Status::internal(e.to_string())
+            })?;
+
+            let resp = match row {
+                Some((id, created)) => pb::UpsertAgentSkillResponse {
+                    id,
+                    created,
+                    skipped_protected: false,
+                },
+                None => pb::UpsertAgentSkillResponse {
+                    id: String::new(),
+                    created: false,
+                    skipped_protected: true,
+                },
+            };
+            Ok(Response::new(resp))
+        }
+        .await;
+        record_metrics("upsert_agent_skill", started, result.is_ok());
+        result
+    }
+
     async fn get_context_assembly(
         &self,
         request: Request<pb::GetContextAssemblyRequest>,
