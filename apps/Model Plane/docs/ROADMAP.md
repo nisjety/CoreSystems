@@ -156,16 +156,15 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ## Phase 6 — Product clients and operator shell · ❌
 
-**Current state**
+**Current state** _(reconciled 2026-05-30 — the prior "zero surfaces" line was stale; see capability-ownership-matrix "P6 reconciliation")_
 
-- Zero operator-facing surfaces. No CLI, TUI, IDE bridge, remote-session, voice, or channel ingress.
+- **Bridge surface IMPLEMENTED in `go/services/bridge-core`** (builds; voice tests pass): remote-**session registry** + HTTP CRUD/ingest (`POST/GET/DELETE /api/v1/sessions`, `.../{id}/ingest`), **channel adapters + framing + JWT** (`internal/channel/`), and a **voice STT→LLM→TTS pipeline** (`internal/voice/`). The namespace is `/api/v1/sessions` + channel adapters rather than the originally-envisioned `/v1/bridge/*`+`/v1/remote/*`, but the capability (remote sessions, channel ingress, JWT/framing, voice) exists.
+- **Only the operator-facing CLI/TUI client is unbuilt** (no `ratatui`/`crossterm` surface) — a net-new terminal-UI **product surface** awaiting a UX brief; it would consume bridge-core's session API, not add backend.
 
 **Next deliverables**
 
-- CLI/TUI shell — own implementation (Rust or Go), with slash-command set sourced from `capability-core` command registry. Reference: `claude-code-fork/src/commands/`.
-- IDE bridge — `/v1/bridge/*` namespace; JWT auth, framing protocol, permission callbacks, remote-session spawning. Reference: fork `src/bridge/` (31 files).
-- Remote sessions — WebSocket transport under `/v1/remote/*`. Reference: fork `src/remote/`, v2 streaming.
-- Voice ingress — `/v1/voice/*`, STT/TTS pipeline through `inference-core` providers. Reference: fork `src/voice/`, v2 `agent-core/app/voice/`.
+- CLI/TUI shell — own implementation (Rust or Go), slash-command set sourced from `capability-core` command registry; consumes `bridge-core`'s `/api/v1/sessions` API. Reference: `claude-code-fork/src/commands/`. **(The only remaining P6 item — product-UX-gated.)**
+- ~~IDE bridge / Remote sessions / Voice ingress~~ — **DONE in `bridge-core`** (session registry, channel adapters + JWT + framing, voice pipeline). Original `/v1/bridge/*`,`/v1/remote/*`,`/v1/voice/*` namespace plans superseded by bridge-core's actual surface; do not rebuild (would duplicate).
 - Channel ingress — `/v1/channels/*` for Slack, email, webhooks, GitHub. Reference: v2 `agent-core/app/messaging/`.
 - Settings sync / MDM — for remote-managed defaults; reference: fork `services/settingsSync/`, `remoteManagedSettings/`.
 
