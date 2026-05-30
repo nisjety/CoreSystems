@@ -2,6 +2,7 @@
 
 pub mod artifact;
 pub mod browser_agent;
+pub mod executor;
 pub mod grpc;
 pub mod hook;
 pub mod http_health;
