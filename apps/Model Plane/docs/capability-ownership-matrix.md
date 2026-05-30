@@ -79,6 +79,11 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 - **Owner:** session-core (durability) + orchestrator-core (Temporal lifecycle/recovery).
 - **Shadows:** model-gateway `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore) — all in-memory, no backend calls (verified: no `session_core.*` calls in these files), explicitly documented as "promote to postgres later."
 - **Ruling:** Keep the gateway stores as **run-loop latency caches only**. Wire them to: (a) read-through to session-core `orchestration_grpc` on miss, (b) write-through via NATS (`orchestration_nats`) so session-core persists. execution-core `subagent/` stays as the **executor**; orchestrator-core owns spawn/lifecycle. **No new coordinator system.**
+- **Verified 2026-05-30 — precise gap (3 parts, all needed; do not half-fix):**
+  1. **Subject divergence:** the gateway publishes orchestration mutations to **ad-hoc subjects** — `agents.run.plan_mode.{entered,exited}` (`coordinator.rs`), `agents.approval.{requested,resolved}` (`approvals.rs`) — NOT the canonical `mp.v1.orchestration.*` tree (`SUBJECT_PLAN`/`SUBJECT_APPROVAL` in `mp-events`). No in-repo consumer subscribes to the ad-hoc subjects, so they are effectively dead-ends today.
+  2. **Payload mismatch:** session-core's `orchestration_nats.rs` decodes a protobuf `OrchestrationEvent`; the gateway publishes a generic JSON envelope. A subject rename alone would fail to decode — payloads must be aligned to `OrchestrationEvent`.
+  3. **No persistence:** `orchestration_nats.rs` is **fan-out only** ("broadcasts to in-process gRPC subscribers… subscribers re-read") — it does **not** write to the durable `orchestration_store`. Durability requires a persisting consumer.
+  **Correct fix (stack-verified):** gateway emits `OrchestrationEvent` on `mp.v1.orchestration.{plan,approval}`; a session-core consumer persists via `orchestration_store::{create_plan,request_approval,decide_approval,…}`; gateway reads-through on cache miss. All three parts need the running stack (NATS+Postgres) to verify decode + persistence round-trip — a cosmetic subject rename is explicitly **not** the fix.
 
 ### 4.2 Tasks & cron — **task-core is an orphaned in-memory duplicate** (RESOLVED diagnosis 2026-05-30)
 - **Verified by code-read:**
