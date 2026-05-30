@@ -6,6 +6,7 @@ pub mod budget;
 pub mod capability_consumer;
 pub mod coordinator;
 pub mod dataplane;
+pub mod doc_indexed_consumer;
 pub mod finetune_azure;
 pub mod finetune_poller;
 pub mod finetune_routes;

@@ -12,7 +12,7 @@
 //!
 //! Design notes:
 //!   - Tests run in-process against pure in-crate code — no DB, no gRPC, no
-//!     network. `runtime_loop::execute_step` is sync and pure once the tool
+//!     network. `runtime_loop::execute_step` is async and pure once the tool
 //!     bridge fake returns; `scrub::scrub_json_value` is pure.
 //!   - Scope is the **runtime loop itself**, not end-to-end latency including
 //!     Postgres + session-core RPC. That end-to-end number is a separate SLO
@@ -29,13 +29,14 @@ type BoxedErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// Minimal permission mode + hook context combo that steers the runtime loop
 /// through its Allow → tool_bridge path without external dependencies.
-fn bench_step() -> runtime_loop::StepOutcome {
+async fn bench_step() -> runtime_loop::StepOutcome {
     runtime_loop::execute_step(
         "noop", // unrecognized tool name → tool_bridge returns a default stub output
         "payload",
         "permissive",
         "", // empty hook context → not blocked
     )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ async fn step_throughput_meets_slo() {
 
     let recorder = harness::step_throughput(iterations, |_| async {
         // Keep the work on-thread. Harness records per-call elapsed.
-        let outcome = bench_step();
+        let outcome = bench_step().await;
         // Light sanity — if the tool bridge started returning errors, surface
         // it as a harness failure rather than silently counting broken steps.
         if outcome.status == "failed" && !outcome.error.is_empty() {
@@ -158,7 +159,7 @@ async fn wall_clock_consistent_with_recorder() {
     let overall_start = Instant::now();
 
     let rec = harness::step_throughput(iterations, |_| async {
-        let _ = bench_step();
+        let _ = bench_step().await;
         Ok::<(), BoxedErr>(())
     })
     .await

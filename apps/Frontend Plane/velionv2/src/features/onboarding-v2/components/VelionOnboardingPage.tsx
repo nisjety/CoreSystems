@@ -3,7 +3,7 @@
 import { useEffect, useReducer, useState } from "react";
 import Image from "next/image";
 import type { Route } from "next";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Building2, Check, FileText, GitBranch, Globe2, MessageSquare, Sparkles } from "lucide-react";
 import {
   formatOnboardingText,
@@ -21,6 +21,18 @@ import {
   StepEyebrow,
   StepTitle,
 } from "@/features/onboarding-v2/components/OnboardingPrimitives";
+import { BrregSearch } from "@/features/onboarding-v2/components/BrregSearch";
+import {
+  createOrganization,
+  setOrganizationPlan,
+  startCheckout,
+  updateProfile,
+  completeOnboarding,
+  isPaidPlan,
+  OnboardingServiceError,
+  type OnboardingPlanId,
+} from "@/features/onboarding-v2/lib/onboarding-service";
+import { sizeFromEmployeeCount, type BrregEnhet } from "@/lib/services/brreg-service";
 import { cn } from "@/lib/utils";
 
 const sizes = ["1", "2-10", "11-50", "51-250", "250+"];
@@ -40,7 +52,10 @@ const connectorsByCategory = {
 
 type OnboardingPageState = {
   brief: string;
+  brregData: BrregEnhet | null;
   connected: string[];
+  orgId: string | null;
+  orgNumber: string | null;
   organization: string;
   plan: string;
   size: string;
@@ -54,6 +69,8 @@ type OnboardingPageAction =
   | { type: "go-to"; step: OnboardingStep }
   | { type: "next" }
   | { type: "set-brief"; brief: string }
+  | { type: "set-brreg-selection"; enhet: BrregEnhet }
+  | { type: "set-org-created"; orgId: string }
   | { type: "set-organization"; organization: string }
   | { type: "set-plan"; plan: string }
   | { type: "set-size"; size: string }
@@ -64,6 +81,9 @@ type OnboardingPageAction =
 function createInitialOnboardingPageState(): OnboardingPageState {
   return {
     step: "post-signin",
+    brregData: null,
+    orgId: null,
+    orgNumber: null,
     organization: "",
     size: "2-10",
     website: "",
@@ -128,6 +148,19 @@ function onboardingPageReducer(
         ...state,
         website: action.website,
       };
+    case "set-brreg-selection":
+      return {
+        ...state,
+        organization: action.enhet.navn,
+        orgNumber: action.enhet.organisasjonsnummer,
+        brregData: action.enhet,
+        size: sizeFromEmployeeCount(action.enhet.antallAnsatte) || state.size,
+      };
+    case "set-org-created":
+      return {
+        ...state,
+        orgId: action.orgId,
+      };
     case "toggle-connector": {
       const connected = state.connected.includes(action.id)
         ? state.connected.filter((item) => item !== action.id)
@@ -148,7 +181,10 @@ export function VelionOnboardingPage() {
   );
   const {
     brief,
+    brregData,
     connected,
+    orgId,
+    orgNumber,
     organization,
     plan,
     size,
@@ -157,9 +193,18 @@ export function VelionOnboardingPage() {
     website,
   } = state;
 
+  const searchParams = useSearchParams();
   const goTo = (nextStep: OnboardingStep) => dispatch({ type: "go-to", step: nextStep });
   const next = () => dispatch({ type: "next" });
   const back = () => dispatch({ type: "back" });
+
+  // Jump to assembly step when Stripe checkout completes.
+  useEffect(() => {
+    if (searchParams.get("checkout") === "success") {
+      goTo("assembly");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const updateViewportHeight = () => {
@@ -192,6 +237,7 @@ export function VelionOnboardingPage() {
           <OnboardingTopActions step={step} onBack={back} onStepSelect={goTo} fullScreen />
           <PaywallStep
             selected={plan}
+            orgId={orgId}
             onSelect={(nextPlan) => dispatch({ type: "set-plan", plan: nextPlan })}
             onContinue={() => goTo("assembly")}
           />
@@ -228,8 +274,13 @@ export function VelionOnboardingPage() {
             <OrganizationStep
               name={organization}
               size={size}
+              orgId={orgId}
+              orgNumber={orgNumber}
+              brregData={brregData}
               onNameChange={(value) => dispatch({ type: "set-organization", organization: value })}
               onSizeChange={(value) => dispatch({ type: "set-size", size: value })}
+              onBrregSelect={(enhet) => dispatch({ type: "set-brreg-selection", enhet })}
+              onOrgCreated={(id) => dispatch({ type: "set-org-created", orgId: id })}
               onContinue={next}
             />
           ) : null}
@@ -242,6 +293,7 @@ export function VelionOnboardingPage() {
               onContinue={next}
             />
           ) : null}
+
           {step === "connect" ? (
             <ConnectStep
               connected={connected}
@@ -251,7 +303,7 @@ export function VelionOnboardingPage() {
             />
           ) : null}
           {step === "social-proof" ? <SocialProofStep onContinue={() => goTo("paywall")} /> : null}
-          {step === "assembly" ? <AssemblyStep /> : null}
+          {step === "assembly" ? <AssemblyStep plan={plan} orgId={orgId} /> : null}
         </div>
       </div>
 
@@ -342,17 +394,59 @@ function PostSignInStep({ onContinue }: { onContinue: () => void }) {
 function OrganizationStep({
   name,
   size,
+  orgId,
+  orgNumber,
+  brregData,
   onNameChange,
   onSizeChange,
+  onBrregSelect,
+  onOrgCreated,
   onContinue,
 }: {
   name: string;
   size: string;
+  orgId: string | null;
+  orgNumber: string | null;
+  brregData: BrregEnhet | null;
   onNameChange: (value: string) => void;
   onSizeChange: (value: string) => void;
+  onBrregSelect: (enhet: BrregEnhet) => void;
+  onOrgCreated: (orgId: string) => void;
   onContinue: () => void;
 }) {
   const copy = onboardingCopy.organization;
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    if (!name.trim()) return;
+    setError(null);
+
+    // Idempotent: if org already created, just advance.
+    if (orgId) {
+      onContinue();
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await createOrganization({
+        name: name.trim(),
+        plan: "free",
+        orgNumber: orgNumber ?? undefined,
+        brregData: brregData ?? undefined,
+      });
+      onOrgCreated(result.id);
+      onContinue();
+    } catch (err) {
+      setError(
+        err instanceof OnboardingServiceError ? err.message : "Noe gikk galt. Prøv igjen.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <>
       <LeftPane>
@@ -361,7 +455,7 @@ function OrganizationStep({
         <StepDescription>{copy.description}</StepDescription>
         <form
           action={() => {
-            onContinue();
+            void handleSubmit();
           }}
           className="flex flex-col gap-5"
         >
@@ -377,6 +471,13 @@ function OrganizationStep({
               className="mt-2 w-full rounded-md border border-[#D6D2CB] bg-white px-3 py-2.5 text-[14px] text-[#1F1B17] placeholder:text-[#A09890] focus:border-[#1F1B17] focus:outline-none"
             />
           </label>
+          <BrregSearch
+            initialQuery={name}
+            onSelect={onBrregSelect}
+            onManualEntry={() => {
+              /* user has typed name manually — nothing extra needed */
+            }}
+          />
           <fieldset>
             <legend className="block text-[11px] uppercase tracking-[0.16em] text-[#6B6660]">{copy.sizeLegend}</legend>
             <div className="mt-2 flex flex-wrap gap-2">
@@ -397,7 +498,12 @@ function OrganizationStep({
               ))}
             </div>
           </fieldset>
-          <PrimaryButton type="submit" disabled={!name.trim()}>{copy.continue}</PrimaryButton>
+          {error && (
+            <p className="text-[12px] font-medium text-[#9A3412]">{error}</p>
+          )}
+          <PrimaryButton type="submit" disabled={!name.trim() || loading}>
+            {loading ? "Oppretter…" : copy.continue}
+          </PrimaryButton>
         </form>
       </LeftPane>
       <RightPane>
@@ -440,6 +546,13 @@ function WebsiteStep({
   onContinue: () => void;
 }) {
   const copy = onboardingCopy.website;
+
+  const handleContinue = () => {
+    // Best-effort — never blocks progression.
+    void updateProfile({ website: website.trim() || undefined, brief: brief.trim() || undefined });
+    onContinue();
+  };
+
   return (
     <>
       <LeftPane>
@@ -448,7 +561,7 @@ function WebsiteStep({
         <StepDescription>{copy.description}</StepDescription>
         <form
           action={() => {
-            onContinue();
+            handleContinue();
           }}
           className="flex flex-col gap-5"
         >
@@ -481,7 +594,7 @@ function WebsiteStep({
           </label>
           <div className="flex items-center gap-4">
             <PrimaryButton type="submit" disabled={!website.trim()}>{copy.continue}</PrimaryButton>
-            <SkipLink onClick={onContinue}>{copy.skip}</SkipLink>
+            <SkipLink onClick={handleContinue}>{copy.skip}</SkipLink>
           </div>
         </form>
       </LeftPane>
@@ -665,19 +778,56 @@ function SocialProofStep({ onContinue }: { onContinue: () => void }) {
 
 function PaywallStep({
   selected,
+  orgId,
   onSelect,
   onContinue,
 }: {
   selected: string;
+  orgId: string | null;
   onSelect: (value: string) => void;
   onContinue: () => void;
 }) {
   const copy = onboardingCopy.paywall;
   const [billingCycle, setBillingCycle] = useState<"monthly" | "yearly">("monthly");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const recommended = selected || "standard";
 
   const choosePlan = (planId: string) => {
     onSelect(planId);
+  };
+
+  const handleContinue = async (planOverride?: OnboardingPlanId) => {
+    if (!orgId) {
+      setError("Organisasjon er ikke opprettet ennå. Gå tilbake og prøv igjen.");
+      return;
+    }
+    setError(null);
+    setLoading(true);
+    const plan = planOverride ?? (selected as OnboardingPlanId);
+    try {
+      if (isPaidPlan(plan)) {
+        const { url } = await startCheckout(orgId, plan, {
+          successUrl: `${window.location.origin}/onboarding?checkout=success`,
+          cancelUrl: `${window.location.origin}/onboarding?checkout=cancel`,
+        });
+        if (url) {
+          window.location.href = url;
+          return; // hard redirect — do not call onContinue
+        }
+        // No URL returned — fall back to free-plan path.
+        await setOrganizationPlan(orgId, plan, { selected_plan_id: plan });
+      } else {
+        await setOrganizationPlan(orgId, plan, { selected_plan_id: plan });
+      }
+      onContinue();
+    } catch (err) {
+      setError(
+        err instanceof OnboardingServiceError ? err.message : "Noe gikk galt. Prøv igjen.",
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -779,23 +929,28 @@ function PaywallStep({
         </p>
       </div>
 
+      {error && (
+        <p className="mt-4 text-center text-[13px] font-medium text-[#9A3412]">{error}</p>
+      )}
       <div className="mt-7 flex items-center justify-center gap-2">
         <button
           type="button"
+          disabled={loading}
           onClick={() => {
             onSelect("trial");
-            onContinue();
+            void handleContinue("trial");
           }}
-          className="h-10 rounded-[10px] border border-[#E7E5E4] bg-white px-5 font-inter text-[14px] font-semibold text-[#191716] transition-colors hover:border-[#D6D3D1]"
+          className="h-10 rounded-[10px] border border-[#E7E5E4] bg-white px-5 font-inter text-[14px] font-semibold text-[#191716] transition-colors hover:border-[#D6D3D1] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {copy.skipToSetup}
         </button>
         <button
           type="button"
-          onClick={onContinue}
-          className="h-10 rounded-[10px] border border-[#E7E5E4] bg-white px-5 font-inter text-[14px] font-semibold text-[#191716] transition-colors hover:border-[#D6D3D1]"
+          disabled={loading}
+          onClick={() => void handleContinue()}
+          className="h-10 rounded-[10px] border border-[#E7E5E4] bg-white px-5 font-inter text-[14px] font-semibold text-[#191716] transition-colors hover:border-[#D6D3D1] disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {copy.continueToSetup}
+          {loading ? "Even på bekreftelse…" : copy.continueToSetup}
         </button>
       </div>
     </div>
@@ -843,26 +998,24 @@ function BillingToggle({
   );
 }
 
-function AssemblyStep() {
+function AssemblyStep({ plan, orgId }: { plan: string; orgId: string | null }) {
   const copy = onboardingCopy.assembly;
   const router = useRouter();
   const [status, setStatus] = useState<"error" | "idle" | "saving">("idle");
 
   const openDashboard = async () => {
-    setStatus("saving");
-
-    const response = await fetch("/api/v1/onboarding/status", {
-      method: "POST",
-      credentials: "include",
-    });
-
-    if (!response.ok) {
+    if (!orgId) {
       setStatus("error");
       return;
     }
-
-    router.push("/dashboard" as Route);
-    router.refresh();
+    setStatus("saving");
+    try {
+      await completeOnboarding({ plan, orgId });
+      router.push("/dashboard" as Route);
+      router.refresh();
+    } catch {
+      setStatus("error");
+    }
   };
 
   return (
@@ -889,7 +1042,9 @@ function AssemblyStep() {
         </button>
         {status === "error" ? (
           <p className="text-[12px] font-medium text-[#9A3412]">
-            We could not save onboarding completion. Try again before opening the dashboard.
+            {!orgId
+              ? "Organisasjonen ble ikke opprettet. Gå tilbake og prøv igjen."
+              : "We could not save onboarding completion. Try again before opening the dashboard."}
           </p>
         ) : null}
       </LeftPane>

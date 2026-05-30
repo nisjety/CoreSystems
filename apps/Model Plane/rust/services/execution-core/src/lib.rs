@@ -8,6 +8,7 @@ pub mod hook;
 pub mod http_health;
 pub mod permission;
 pub mod policy;
+pub mod quarry_agent;
 pub mod runtime_loop;
 pub mod sandbox;
 pub mod scrub;

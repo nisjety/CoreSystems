@@ -1,5 +1,6 @@
 import { createAuthMiddleware } from 'better-auth/plugins';
 import type { BetterAuthPlugin } from 'better-auth';
+import type { SharedNatsService } from '../nats/shared-nats.service';
 
 // Audit event types for Sprint 4
 export interface AuditEvent {
@@ -16,9 +17,46 @@ export interface AuditEvent {
   errorMessage?: string;
 }
 
+/**
+ * audit-core AuditEvent schema (velion.audit.v1.control.<event>)
+ * org_id, plane, and event are REQUIRED fields — omit the publish when org_id is absent.
+ */
+interface VelionAuditEvent {
+  occurred_at: string;
+  org_id: string;
+  user_id?: string;
+  actor_role?: string;
+  plane: string;
+  event: string;
+  subject?: string;
+  resource_id?: string;
+  outcome: 'ok' | 'denied' | 'error';
+  details?: Record<string, unknown>;
+  request_id?: string;
+  ip_address?: string;
+  user_agent?: string;
+}
+
+// Module-level singleton — set by setAuditNatsPublisher() called from auth-service.initializer
+let sharedNats: SharedNatsService | null = null;
+
+export function setAuditNatsPublisher(svc: SharedNatsService): void {
+  sharedNats = svc;
+}
+
+/**
+ * Publish to velion.audit.v1.control.<event> via the existing SharedNatsService
+ * connection only when org_id is known (audit-core rejects events without it).
+ */
+function publishVelionAudit(evt: VelionAuditEvent): void {
+  if (!sharedNats) return;
+  const subject = `velion.audit.v1.control.${evt.event}`;
+  sharedNats.publishPlain(subject, evt as unknown as Record<string, unknown>);
+}
+
 // Mock audit logger for development
 function logAuditEvent(event: AuditEvent): void {
-  console.log('📋 [AUDIT]', JSON.stringify(event, null, 2));
+  console.log('[AUDIT]', JSON.stringify(event, null, 2));
 }
 
 // Create audit plugin with simplified implementation
@@ -89,6 +127,13 @@ export function auditPlugin(): BetterAuthPlugin {
             const action = ctx.path.split('/').pop()?.toUpperCase();
 
             if (user && action) {
+              const ipAddress =
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown';
+              const userAgent =
+                ctx.request?.headers.get('user-agent') || 'unknown';
+
               logAuditEvent({
                 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
                 userId: user.id,
@@ -100,14 +145,41 @@ export function auditPlugin(): BetterAuthPlugin {
                   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
                   userEmail: user.email,
                 },
-                ipAddress:
-                  ctx.request?.headers.get('x-forwarded-for') ||
-                  ctx.request?.headers.get('x-real-ip') ||
-                  'unknown',
-                userAgent: ctx.request?.headers.get('user-agent') || 'unknown',
+                ipAddress,
+                userAgent,
                 timestamp: new Date().toISOString(),
                 success: true,
               });
+
+              // Publish to velion.audit.v1.control.* only when org context is known.
+              // Better Auth sets activeOrganizationId on the session when the user has
+              // selected an active org; without it audit-core would reject the event.
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+              const orgId: string | undefined = (ctx.context.session as any)
+                ?.activeOrganizationId;
+              if (orgId) {
+                const eventName =
+                  action === 'ENABLE'
+                    ? 'twofa_enable'
+                    : action === 'DISABLE'
+                      ? 'twofa_disable'
+                      : 'twofa_verify';
+                publishVelionAudit({
+                  occurred_at: new Date().toISOString(),
+                  org_id: orgId,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  user_id: user.id as string,
+                  plane: 'control',
+                  event: eventName,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  subject: user.email as string,
+                  outcome: 'ok',
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  details: { method: ctx.body?.method || 'totp' },
+                  ip_address: ipAddress,
+                  user_agent: userAgent,
+                });
+              }
 
               // Ensure async compliance for middleware
               await Promise.resolve();
@@ -129,28 +201,54 @@ export function auditPlugin(): BetterAuthPlugin {
             const user = ctx.context.user;
 
             if (user) {
+              const ipAddress =
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown';
+              const userAgent =
+                ctx.request?.headers.get('user-agent') || 'unknown';
+              const revokeType = ctx.path.includes('other')
+                ? 'others'
+                : ctx.path.includes('sessions')
+                  ? 'all'
+                  : 'single';
+
               logAuditEvent({
                 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
                 userId: user.id,
                 action: 'SESSION_REVOKE',
                 resource: 'session',
                 details: {
-                  type: ctx.path.includes('other')
-                    ? 'others'
-                    : ctx.path.includes('sessions')
-                      ? 'all'
-                      : 'single',
+                  type: revokeType,
                   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
                   userEmail: user.email,
                 },
-                ipAddress:
-                  ctx.request?.headers.get('x-forwarded-for') ||
-                  ctx.request?.headers.get('x-real-ip') ||
-                  'unknown',
-                userAgent: ctx.request?.headers.get('user-agent') || 'unknown',
+                ipAddress,
+                userAgent,
                 timestamp: new Date().toISOString(),
                 success: true,
               });
+
+              // Publish to velion.audit.v1.control.* only when org context is known.
+              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
+              const orgId: string | undefined = (ctx.context.session as any)
+                ?.activeOrganizationId;
+              if (orgId) {
+                publishVelionAudit({
+                  occurred_at: new Date().toISOString(),
+                  org_id: orgId,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  user_id: user.id as string,
+                  plane: 'control',
+                  event: 'session_revoke',
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  subject: user.email as string,
+                  outcome: 'ok',
+                  details: { revoke_type: revokeType },
+                  ip_address: ipAddress,
+                  user_agent: userAgent,
+                });
+              }
 
               // Ensure async compliance for middleware
               await Promise.resolve();

@@ -7,6 +7,7 @@ import {
   VelionTextarea,
 } from "@/components/ui/velion-ui";
 import { cn } from "@/lib/utils";
+import { PasskeySecuritySection } from "@/features/settings-v2/components/PasskeySecuritySection";
 
 const connectedAccounts = [
   { provider: "Google", detail: "author@velion.ai", status: "Connected" },
@@ -67,6 +68,7 @@ export function VelionSettingsPage() {
           <PreferencesSection />
           <AvailabilitySection />
           <ConnectedAccountsSection />
+          <PasskeySecuritySection />
           <PrivacySection />
           <SettingsActions />
         </main>
@@ -404,7 +406,7 @@ function SettingsActions() {
   return (
     <div className="mt-10 flex flex-col gap-4 border-t border-[#E8E8EA] pt-6 sm:flex-row sm:items-center sm:justify-between dark:border-white/10">
       <p className="max-w-[360px] text-[12px] leading-5 text-[#747780] dark:text-[#A9ADB6]">
-        Only your personal profile and account preferences are updated here.
+        Your personal profile, preferences, and security (passkeys) are managed here.
       </p>
       <div className="flex items-center justify-end gap-3">
         <VelionButton className="px-5">

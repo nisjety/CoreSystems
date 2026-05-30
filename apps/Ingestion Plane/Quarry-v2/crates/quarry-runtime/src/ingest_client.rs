@@ -1,7 +1,7 @@
 //! Data Plane ingest client — posts DataPlaneIngestRequest to the data plane.
 //!
 //! Two transports are supported:
-//! - HTTP (`POST /v1/ingest`) for simple deployments
+//! - HTTP (`POST /v1/documents`) for simple deployments
 //! - gRPC (`DocumentService.CreateDocument`) for prod deployments wired into
 //!   Data Plane v2 (gated behind the `grpc` feature)
 //!
@@ -13,10 +13,13 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use quarry_core::contracts::{DataPlaneIngestRequest, DataPlaneIngestResponse};
+use quarry_core::contracts::{
+    DataPlaneIngestRequest, DataPlaneIngestResponse, EmbeddingStatus, IndexStatus,
+};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::zdr::ZdrMode;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 
 /// Transport-agnostic Data Plane ingest interface. P2 / cluster #grpc.
 ///
@@ -59,14 +62,33 @@ impl IngestClient {
     ) -> QuarryResult<DataPlaneIngestResponse> {
         Self::pre_check_zdr(request)?;
 
-        let url = format!("{}/v1/ingest", self.base_url.trim_end_matches('/'));
+        // ZDR=on means zero durable retention. The canonical durable-write
+        // route (`POST /v1/documents`) mandates a non-empty content body and
+        // persists it, so a ZDR run MUST NOT write there. Skip the durable
+        // write; upstream still hands the agent the live scrape result as
+        // short-lived context. Nothing persisted → Skipped.
+        if request.zdr == ZdrMode::On {
+            return Ok(DataPlaneIngestResponse {
+                document_id: String::new(),
+                index_status: IndexStatus::Skipped,
+                knowledge_unit_count: 0,
+                embedding_status: EmbeddingStatus::Skipped,
+                retrievable_after: None,
+                trace_id: "zdr-ephemeral-skip".to_string(),
+            });
+        }
+
+        let body = CreateDocumentBody::from_request(request);
+        let url = format!("{}/v1/documents", self.base_url.trim_end_matches('/'));
 
         let resp = self
             .http
             .post(&url)
             .header("authorization", format!("Bearer {}", self.api_key))
+            .header("x-internal-api-key", &self.api_key)
+            .header("x-org-id", &request.org_id)
             .header("content-type", "application/json")
-            .json(request)
+            .json(&body)
             .send()
             .await
             .map_err(|e| {
@@ -97,12 +119,23 @@ impl IngestClient {
             ));
         }
 
-        resp.json::<DataPlaneIngestResponse>().await.map_err(|e| {
+        // Capture the trace header before consuming the response body.
+        let trace_id = resp
+            .headers()
+            .get("x-trace-id")
+            .or_else(|| resp.headers().get("x-request-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let doc = resp.json::<CreateDocumentResponse>().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
                 format!("ingest response parse failed: {e}"),
             )
-        })
+        })?;
+
+        Ok(map_document_response(doc, trace_id))
     }
 }
 
@@ -218,6 +251,112 @@ fn scan_metadata_for_content(meta: &serde_json::Value) -> Option<String> {
     walk("metadata", meta)
 }
 
+// ---------------------------------------------------------------------------
+// Wire mapping: Quarry `DataPlaneIngestRequest` → Data Plane v2 Documents API
+// (`POST /v1/documents`, body shape `model.CreateDocumentInput`). Chunks are
+// derived downstream by the index-engine, so they are NOT sent inline.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct CreateDocumentBody {
+    org_id: String,
+    source: &'static str,
+    #[serde(rename = "type")]
+    doc_type: &'static str,
+    title: String,
+    content: String,
+    metadata: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_trace: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    idempotency_key: String,
+}
+
+impl CreateDocumentBody {
+    fn from_request(request: &DataPlaneIngestRequest) -> Self {
+        // Data Plane v2 dedupes Quarry rows on `(org_id, metadata->>'url')`
+        // (partial unique index where `source='quarry'`), so the canonical URL
+        // MUST ride in metadata. fingerprint/run_id travel alongside for
+        // provenance without clobbering any caller-supplied metadata.
+        let mut meta = match &request.metadata {
+            serde_json::Value::Object(m) => m.clone(),
+            _ => serde_json::Map::new(),
+        };
+        meta.insert(
+            "url".to_string(),
+            serde_json::Value::String(request.source_url.clone()),
+        );
+        meta.entry("fingerprint".to_string())
+            .or_insert_with(|| serde_json::Value::String(request.fingerprint.clone()));
+        if let Ok(run_id) = serde_json::to_value(&request.run_id) {
+            meta.insert("run_id".to_string(), run_id);
+        }
+
+        // Title is required & non-empty at the Data Plane boundary; fall back
+        // to the source URL when the page yielded no title.
+        let title = request
+            .title
+            .clone()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| request.source_url.clone());
+
+        let extraction_trace = request
+            .source_trace
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok());
+
+        Self {
+            org_id: request.org_id.clone(),
+            source: "quarry",
+            doc_type: "web_page",
+            title,
+            content: request.markdown.clone().unwrap_or_default(),
+            metadata: serde_json::Value::Object(meta),
+            extraction_trace,
+            // A URL-stable idempotency key (NOT the content fingerprint) makes
+            // re-ingest correct: Data Plane looks up `(org_id, key)` and, on a
+            // content change, UPDATEs the same row in place (re-index/re-embed)
+            // rather than inserting a duplicate that would collide with the
+            // `(org_id, metadata->>'url')` crawl-dedup unique index. The content
+            // fingerprint still rides in metadata for change tracking.
+            idempotency_key: format!(
+                "quarry-url:{}",
+                blake3::hash(request.source_url.as_bytes()).to_hex()
+            ),
+        }
+    }
+}
+
+/// Subset of Data Plane v2's `model.Document` create response we consume.
+/// Unknown fields are ignored by serde.
+#[derive(Deserialize)]
+struct CreateDocumentResponse {
+    document_id: String,
+    #[serde(default)]
+    status: String,
+}
+
+/// Map the Data Plane document-create response onto the transport-agnostic
+/// `DataPlaneIngestResponse`. Chunking + embedding run async downstream, so a
+/// fresh write is `Pending` on both axes and the knowledge-unit count is not
+/// yet known (0); retrieval readiness is signalled separately by Data Plane.
+fn map_document_response(doc: CreateDocumentResponse, trace_id: String) -> DataPlaneIngestResponse {
+    let index_status = match doc.status.as_str() {
+        "indexed" => IndexStatus::Indexed,
+        "failed" => IndexStatus::Failed,
+        "skipped" => IndexStatus::Skipped,
+        _ => IndexStatus::Pending,
+    };
+    DataPlaneIngestResponse {
+        document_id: doc.document_id,
+        index_status,
+        knowledge_unit_count: 0,
+        embedding_status: EmbeddingStatus::Pending,
+        retrievable_after: None,
+        trace_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,14 +390,22 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/ingest"))
+            .and(path("/v1/documents"))
             .and(header("authorization", "Bearer test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            .and(header("x-internal-api-key", "test-key"))
+            .and(header("x-org-id", "org_test"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "document_id": "doc_1",
-                "index_status": "indexed",
-                "knowledge_unit_count": 3,
-                "embedding_status": "embedded",
-                "trace_id": "trace_1",
+                "org_id": "org_test",
+                "source": "quarry",
+                "type": "web_page",
+                "title": "Test",
+                "content": "# Hello",
+                "status": "pending",
+                "metadata": {"url": "https://example.com"},
+                "zdr_classification": "internal",
+                "created_at": "2026-05-08T00:00:00Z",
+                "updated_at": "2026-05-08T00:00:00Z",
             })))
             .mount(&server)
             .await;
@@ -266,9 +413,10 @@ mod tests {
         let client = IngestClient::new(server.uri(), "test-key").unwrap();
         let resp = client.ingest(&make_request()).await.unwrap();
         assert_eq!(resp.document_id, "doc_1");
-        assert_eq!(resp.index_status, IndexStatus::Indexed);
-        assert_eq!(resp.embedding_status, EmbeddingStatus::Embedded);
-        assert_eq!(resp.knowledge_unit_count, 3);
+        // Indexing + embedding run async downstream of the document write.
+        assert_eq!(resp.index_status, IndexStatus::Pending);
+        assert_eq!(resp.embedding_status, EmbeddingStatus::Pending);
+        assert_eq!(resp.knowledge_unit_count, 0);
     }
 
     #[tokio::test]
@@ -276,7 +424,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/ingest"))
+            .and(path("/v1/documents"))
             .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
             .mount(&server)
             .await;
@@ -291,7 +439,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/ingest"))
+            .and(path("/v1/documents"))
             .respond_with(ResponseTemplate::new(500).set_body_string("internal"))
             .mount(&server)
             .await;
@@ -313,30 +461,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_allows_zdr_with_no_payload() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/ingest"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "document_id": "doc_eph",
-                "index_status": "skipped",
-                "knowledge_unit_count": 0,
-                "embedding_status": "skipped",
-                "trace_id": "trace_eph",
-            })))
-            .mount(&server)
-            .await;
-
+    async fn ingest_zdr_no_payload_skips_durable_write() {
+        // ZDR=on with no durable payload: the client must NOT POST to the
+        // durable route (which mandates content) — it returns Skipped without
+        // any network call. Pointing at a dead address proves no request fires.
         let mut req = make_request();
         req.zdr = ZdrMode::On;
         req.markdown = None;
         req.html_ref = None;
         req.raw_ref = None;
 
-        let client = IngestClient::new(server.uri(), "key").unwrap();
+        let client = IngestClient::new("http://127.0.0.1:1", "key").unwrap();
         let resp = client.ingest(&req).await.unwrap();
-        assert_eq!(resp.document_id, "doc_eph");
+        assert_eq!(resp.index_status, IndexStatus::Skipped);
+        assert_eq!(resp.embedding_status, EmbeddingStatus::Skipped);
+        assert!(resp.document_id.is_empty());
     }
 
     #[tokio::test]
@@ -387,21 +526,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_allows_zdr_with_safe_metadata() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/ingest"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "document_id": "doc",
-                "index_status": "skipped",
-                "knowledge_unit_count": 0,
-                "embedding_status": "skipped",
-                "trace_id": "trace_meta_safe",
-            })))
-            .mount(&server)
-            .await;
-
+    async fn ingest_zdr_safe_metadata_passes_precheck_then_skips() {
+        // Safe (non-content) metadata clears the ZDR pre-check; the durable
+        // write is still skipped because ZDR=on means zero retention.
         let mut req = make_request();
         req.zdr = ZdrMode::On;
         req.markdown = None;
@@ -410,9 +537,9 @@ mod tests {
             "language": "en",
             "fetched_at": "2026-05-08T00:00:00Z",
         });
-        let client = IngestClient::new(server.uri(), "key").unwrap();
+        let client = IngestClient::new("http://127.0.0.1:1", "key").unwrap();
         let resp = client.ingest(&req).await.unwrap();
-        assert_eq!(resp.document_id, "doc");
+        assert_eq!(resp.index_status, IndexStatus::Skipped);
     }
 
     #[tokio::test]
@@ -420,7 +547,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/v1/ingest"))
+            .and(path("/v1/documents"))
             .respond_with(ResponseTemplate::new(403).set_body_string("zdr violation"))
             .mount(&server)
             .await;
@@ -428,5 +555,25 @@ mod tests {
         let client = IngestClient::new(server.uri(), "key").unwrap();
         let err = client.ingest(&make_request()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Forbidden);
+    }
+
+    #[test]
+    fn from_request_maps_quarry_fields_with_url_stable_idempotency_key() {
+        let mut req = make_request();
+        req.title = None; // exercise the title → source_url fallback
+        req.markdown = Some("# Body".into());
+        let body = CreateDocumentBody::from_request(&req);
+        let v = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(v["source"], "quarry");
+        assert_eq!(v["type"], "web_page");
+        assert_eq!(v["content"], "# Body");
+        assert_eq!(v["title"], "https://example.com"); // fell back to source_url
+        assert_eq!(v["metadata"]["url"], "https://example.com");
+        // Idempotency key is derived from the URL (stable across content
+        // changes), NOT the content fingerprint, so re-ingest UPDATEs in place.
+        let key = v["idempotency_key"].as_str().unwrap();
+        assert!(key.starts_with("quarry-url:"));
+        assert_ne!(key, "blake3:abc"); // not the content fingerprint
     }
 }

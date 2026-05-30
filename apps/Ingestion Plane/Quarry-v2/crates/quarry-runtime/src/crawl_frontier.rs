@@ -101,6 +101,79 @@ impl FrontierConfig {
     }
 }
 
+/// Match a crawl include/exclude pattern against a normalized URL.
+///
+/// Patterns containing `*`/`?` are treated as globs (full-URL match, `*` = any
+/// run, `?` = one char) — e.g. `*/docs/*`, `*.pdf`. Patterns with no glob
+/// metachars fall back to substring containment for backward compatibility
+/// (e.g. `/blog/` matches any URL whose path contains it).
+pub(crate) fn pattern_matches(pattern: &str, url: &str) -> bool {
+    if pattern.contains('*') || pattern.contains('?') {
+        glob_match(pattern, url)
+    } else {
+        url.contains(pattern)
+    }
+}
+
+/// Classic linear-time wildcard matcher (`*` = any run, `?` = one char),
+/// anchored to the full string. No regex/glob crate needed.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::*;
+
+    #[test]
+    fn glob_star_matches_suffix() {
+        assert!(pattern_matches("*.pdf", "https://x.com/a/b.pdf"));
+        assert!(!pattern_matches("*.pdf", "https://x.com/a/b.html"));
+    }
+
+    #[test]
+    fn glob_matches_path_segment() {
+        assert!(pattern_matches("*/docs/*", "https://x.com/docs/intro"));
+        assert!(!pattern_matches("*/docs/*", "https://x.com/blog/intro"));
+    }
+
+    #[test]
+    fn glob_question_mark_one_char() {
+        assert!(pattern_matches("https://x.com/p?", "https://x.com/p1"));
+        assert!(!pattern_matches("https://x.com/p?", "https://x.com/p12"));
+    }
+
+    #[test]
+    fn non_glob_is_substring_backcompat() {
+        assert!(pattern_matches("/blog/", "https://x.com/blog/post"));
+        assert!(!pattern_matches("/blog/", "https://x.com/docs/post"));
+    }
+}
+
 #[derive(Debug)]
 pub struct CrawlFrontier {
     config: FrontierConfig,
@@ -202,7 +275,7 @@ impl CrawlFrontier {
         }
 
         for pat in &self.config.exclude_patterns {
-            if normalized.contains(pat.as_str()) {
+            if pattern_matches(pat, &normalized) {
                 let reason = CrawlDenialReason::ExcludePatternHit {
                     pattern: pat.clone(),
                 };
@@ -216,7 +289,7 @@ impl CrawlFrontier {
                 .config
                 .include_patterns
                 .iter()
-                .any(|p| normalized.contains(p.as_str()))
+                .any(|p| pattern_matches(p, &normalized))
         {
             let reason = CrawlDenialReason::IncludePatternMiss;
             self.denials.push((normalized, reason.clone()));

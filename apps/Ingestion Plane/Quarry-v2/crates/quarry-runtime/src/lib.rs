@@ -63,9 +63,15 @@ pub mod step_receipts;
 pub mod structured_extract;
 #[cfg(feature = "test-site")]
 pub mod test_site;
+pub mod agent_memory;
+pub mod autoscale;
+pub mod fingerprint_rotation;
+pub mod fusion;
+pub mod hybrid;
 pub mod tls_driver;
 pub mod transport_fallback_driver;
 pub mod usage;
+pub mod vector_index;
 
 pub use action_runtime::{ActionResult, ActionRuntime};
 pub use agent_loop::{AgentLoop, AgentLoopResult, LoopTermination};
@@ -93,6 +99,11 @@ pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
 pub use events::EventSink;
 pub use fallback_driver::FallbackDriver;
 pub use fetch::StaticDriver;
+pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
+pub use fingerprint_rotation::{is_block_status, FingerprintRotator};
+pub use fusion::{rrf_fuse, RRF_K};
+pub use hybrid::HybridSearchProvider;
+pub use vector_index::{DataPlaneVectorIndex, NoopVectorIndex, VectorHit, VectorIndex};
 pub use grant_validator::{
     GrantValidation, GrantValidator, HttpGrantValidator, NoopGrantValidator,
 };

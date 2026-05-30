@@ -1,4 +1,5 @@
 pub mod answer_routes;
+pub mod api_error;
 pub mod audio_routes;
 pub mod auth;
 pub mod cache;
@@ -6,10 +7,12 @@ pub mod canary;
 pub mod change_routes;
 pub mod config;
 pub mod experiments;
+pub mod extract_routes;
 pub mod firecrawl_adapter;
 pub mod graphql;
 pub mod handoff;
 pub mod internal_auth;
+pub mod map_routes;
 pub mod profile_routes;
 pub mod resource_routes;
 pub mod routes;

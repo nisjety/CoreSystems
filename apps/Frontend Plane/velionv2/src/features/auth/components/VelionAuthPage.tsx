@@ -410,14 +410,30 @@ export function VelionAuthPage({
     }
   };
 
-  const beginPasskeySignIn = () => {
+  const beginPasskeySignIn = async () => {
     dispatch({
       type: "set-status",
-      status: {
-        type: "error",
-        message: "Passkey krever Better Auth passkey-plugin før den kan aktiveres.",
-      },
+      status: { type: "loading", message: "Åpner passkey-innlogging…" },
     });
+
+    try {
+      const result = await authClient.signIn.passkey();
+
+      if (result?.error) {
+        dispatch({
+          type: "set-status",
+          status: { type: "error", message: getAuthErrorMessage(result.error) },
+        });
+        return;
+      }
+
+      window.location.href = callbackUrl;
+    } catch (error) {
+      dispatch({
+        type: "set-status",
+        status: { type: "error", message: getAuthErrorMessage(error) },
+      });
+    }
   };
 
   const chooseLocale = (nextLocale: "NO" | "EN") => {

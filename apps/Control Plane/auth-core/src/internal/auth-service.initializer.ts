@@ -8,9 +8,11 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuthIntegrationService } from './auth-integration.service';
 import { AuthEventPublisher } from './auth-event.publisher';
+import { SharedNatsService } from '../nats/shared-nats.service';
 import { setAuthIntegrationService } from '../auth/user-service-integration.plugin';
 import { setOrganizationEventPublisher } from '../auth/organization-hooks';
 import { setOrganizationEventPublisher as setPluginEventPublisher } from '../auth/organization-events.plugin';
+import { setAuditNatsPublisher } from '../auth/audit-plugin';
 
 @Injectable()
 export class AuthServiceInitializer implements OnModuleInit {
@@ -19,6 +21,7 @@ export class AuthServiceInitializer implements OnModuleInit {
   constructor(
     private authIntegrationService: AuthIntegrationService,
     private authEventPublisher: AuthEventPublisher,
+    private sharedNats: SharedNatsService,
   ) {}
 
   async onModuleInit() {
@@ -32,6 +35,10 @@ export class AuthServiceInitializer implements OnModuleInit {
       setOrganizationEventPublisher(this.authEventPublisher);
       setPluginEventPublisher(this.authEventPublisher);
       this.logger.log('Organization event publisher initialized');
+
+      // Wire SharedNatsService into the audit plugin for velion.audit.v1.* emission
+      setAuditNatsPublisher(this.sharedNats);
+      this.logger.log('Audit NATS publisher initialized');
 
       // Perform health checks
       const health = await this.authIntegrationService.healthCheck();
