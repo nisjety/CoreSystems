@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: dataplane/retrieval_v2.proto
+// source: dataplane/retrieval/v2/retrieval_v2.proto
 
 package v2
 
@@ -319,5 +319,5 @@ var RetrievalService_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "dataplane/retrieval_v2.proto",
+	Metadata: "dataplane/retrieval/v2/retrieval_v2.proto",
 }

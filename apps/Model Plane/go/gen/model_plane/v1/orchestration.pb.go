@@ -1769,6 +1769,11 @@ type CreateApprovalRequest struct {
 	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
 	// Optional TTL; the server computes expires_at = now + this. 0 = no deadline.
 	ExpiresInSeconds uint32 `protobuf:"varint,8,opt,name=expires_in_seconds,json=expiresInSeconds,proto3" json:"expires_in_seconds,omitempty"`
+	// Optional caller-supplied id. When set, the durable approval uses this id
+	// instead of minting one — lets an upstream cache (the gateway's in-memory
+	// ApprovalStore) keep its id aligned with the durable record so a later
+	// DecideApproval can target it. Empty = server mints (matrix §4.1).
+	ClientApprovalId string `protobuf:"bytes,9,opt,name=client_approval_id,json=clientApprovalId,proto3" json:"client_approval_id,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1857,6 +1862,13 @@ func (x *CreateApprovalRequest) GetExpiresInSeconds() uint32 {
 		return x.ExpiresInSeconds
 	}
 	return 0
+}
+
+func (x *CreateApprovalRequest) GetClientApprovalId() string {
+	if x != nil {
+		return x.ClientApprovalId
+	}
+	return ""
 }
 
 type CreateApprovalResponse struct {
@@ -3206,7 +3218,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x05actor\x18\x03 \x01(\tR\x05actor\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\"B\n" +
 	"\x16TransitionTodoResponse\x12(\n" +
-	"\x04todo\x18\x01 \x01(\v2\x14.model_plane.v1.TodoR\x04todo\"\x92\x02\n" +
+	"\x04todo\x18\x01 \x01(\v2\x14.model_plane.v1.TodoR\x04todo\"\xc0\x02\n" +
 	"\x15CreateApprovalRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x120\n" +
@@ -3215,7 +3227,8 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x06org_id\x18\x05 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x06 \x01(\tR\x06userId\x12\x16\n" +
 	"\x06reason\x18\a \x01(\tR\x06reason\x12,\n" +
-	"\x12expires_in_seconds\x18\b \x01(\rR\x10expiresInSeconds\"N\n" +
+	"\x12expires_in_seconds\x18\b \x01(\rR\x10expiresInSeconds\x12,\n" +
+	"\x12client_approval_id\x18\t \x01(\tR\x10clientApprovalId\"N\n" +
 	"\x16CreateApprovalResponse\x124\n" +
 	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"F\n" +
 	"\x14ListApprovalsRequest\x12\x15\n" +

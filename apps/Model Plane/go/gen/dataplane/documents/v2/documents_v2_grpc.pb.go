@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: dataplane/documents_v2.proto
+// source: dataplane/documents/v2/documents_v2.proto
 
 package v2
 
@@ -345,5 +345,5 @@ var DocumentService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "dataplane/documents_v2.proto",
+	Metadata: "dataplane/documents/v2/documents_v2.proto",
 }

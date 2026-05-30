@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: dataplane/knowledge_v2.proto
+// source: dataplane/knowledge/v2/knowledge_v2.proto
 
 package v2
 
@@ -155,5 +155,5 @@ var KnowledgeService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "dataplane/knowledge_v2.proto",
+	Metadata: "dataplane/knowledge/v2/knowledge_v2.proto",
 }

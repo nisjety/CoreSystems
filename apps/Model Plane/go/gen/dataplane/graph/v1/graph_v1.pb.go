@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: dataplane/graph_v1.proto
+// source: dataplane/graph/v1/graph_v1.proto
 
 package v1
 
@@ -40,7 +40,7 @@ type GraphEntity struct {
 
 func (x *GraphEntity) Reset() {
 	*x = GraphEntity{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[0]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -52,7 +52,7 @@ func (x *GraphEntity) String() string {
 func (*GraphEntity) ProtoMessage() {}
 
 func (x *GraphEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[0]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65,7 +65,7 @@ func (x *GraphEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphEntity.ProtoReflect.Descriptor instead.
 func (*GraphEntity) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{0}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *GraphEntity) GetEntityId() string {
@@ -149,7 +149,7 @@ type GraphRelationship struct {
 
 func (x *GraphRelationship) Reset() {
 	*x = GraphRelationship{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[1]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -161,7 +161,7 @@ func (x *GraphRelationship) String() string {
 func (*GraphRelationship) ProtoMessage() {}
 
 func (x *GraphRelationship) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[1]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -174,7 +174,7 @@ func (x *GraphRelationship) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphRelationship.ProtoReflect.Descriptor instead.
 func (*GraphRelationship) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{1}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *GraphRelationship) GetRelId() string {
@@ -266,7 +266,7 @@ type GraphClaim struct {
 
 func (x *GraphClaim) Reset() {
 	*x = GraphClaim{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[2]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -278,7 +278,7 @@ func (x *GraphClaim) String() string {
 func (*GraphClaim) ProtoMessage() {}
 
 func (x *GraphClaim) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[2]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -291,7 +291,7 @@ func (x *GraphClaim) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphClaim.ProtoReflect.Descriptor instead.
 func (*GraphClaim) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{2}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *GraphClaim) GetClaimId() string {
@@ -386,7 +386,7 @@ type GraphCommunity struct {
 
 func (x *GraphCommunity) Reset() {
 	*x = GraphCommunity{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[3]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -398,7 +398,7 @@ func (x *GraphCommunity) String() string {
 func (*GraphCommunity) ProtoMessage() {}
 
 func (x *GraphCommunity) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[3]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -411,7 +411,7 @@ func (x *GraphCommunity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphCommunity.ProtoReflect.Descriptor instead.
 func (*GraphCommunity) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{3}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GraphCommunity) GetCommunityId() string {
@@ -473,7 +473,7 @@ type GetEntityRequest struct {
 
 func (x *GetEntityRequest) Reset() {
 	*x = GetEntityRequest{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[4]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -485,7 +485,7 @@ func (x *GetEntityRequest) String() string {
 func (*GetEntityRequest) ProtoMessage() {}
 
 func (x *GetEntityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[4]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -498,7 +498,7 @@ func (x *GetEntityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEntityRequest.ProtoReflect.Descriptor instead.
 func (*GetEntityRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{4}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetEntityRequest) GetEntityId() string {
@@ -524,7 +524,7 @@ type GetEntityResponse struct {
 
 func (x *GetEntityResponse) Reset() {
 	*x = GetEntityResponse{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[5]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -536,7 +536,7 @@ func (x *GetEntityResponse) String() string {
 func (*GetEntityResponse) ProtoMessage() {}
 
 func (x *GetEntityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[5]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -549,7 +549,7 @@ func (x *GetEntityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEntityResponse.ProtoReflect.Descriptor instead.
 func (*GetEntityResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{5}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetEntityResponse) GetEntity() *GraphEntity {
@@ -571,7 +571,7 @@ type ListEntitiesByTypeRequest struct {
 
 func (x *ListEntitiesByTypeRequest) Reset() {
 	*x = ListEntitiesByTypeRequest{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[6]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +583,7 @@ func (x *ListEntitiesByTypeRequest) String() string {
 func (*ListEntitiesByTypeRequest) ProtoMessage() {}
 
 func (x *ListEntitiesByTypeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[6]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +596,7 @@ func (x *ListEntitiesByTypeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEntitiesByTypeRequest.ProtoReflect.Descriptor instead.
 func (*ListEntitiesByTypeRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{6}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ListEntitiesByTypeRequest) GetOrgId() string {
@@ -637,7 +637,7 @@ type ListEntitiesByTypeResponse struct {
 
 func (x *ListEntitiesByTypeResponse) Reset() {
 	*x = ListEntitiesByTypeResponse{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[7]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -649,7 +649,7 @@ func (x *ListEntitiesByTypeResponse) String() string {
 func (*ListEntitiesByTypeResponse) ProtoMessage() {}
 
 func (x *ListEntitiesByTypeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[7]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -662,7 +662,7 @@ func (x *ListEntitiesByTypeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEntitiesByTypeResponse.ProtoReflect.Descriptor instead.
 func (*ListEntitiesByTypeResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{7}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ListEntitiesByTypeResponse) GetEntities() []*GraphEntity {
@@ -690,7 +690,7 @@ type GetRelationshipsRequest struct {
 
 func (x *GetRelationshipsRequest) Reset() {
 	*x = GetRelationshipsRequest{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[8]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -702,7 +702,7 @@ func (x *GetRelationshipsRequest) String() string {
 func (*GetRelationshipsRequest) ProtoMessage() {}
 
 func (x *GetRelationshipsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[8]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -715,7 +715,7 @@ func (x *GetRelationshipsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRelationshipsRequest.ProtoReflect.Descriptor instead.
 func (*GetRelationshipsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{8}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetRelationshipsRequest) GetOrgId() string {
@@ -748,7 +748,7 @@ type GetRelationshipsResponse struct {
 
 func (x *GetRelationshipsResponse) Reset() {
 	*x = GetRelationshipsResponse{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[9]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -760,7 +760,7 @@ func (x *GetRelationshipsResponse) String() string {
 func (*GetRelationshipsResponse) ProtoMessage() {}
 
 func (x *GetRelationshipsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[9]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -773,7 +773,7 @@ func (x *GetRelationshipsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRelationshipsResponse.ProtoReflect.Descriptor instead.
 func (*GetRelationshipsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{9}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetRelationshipsResponse) GetRelationships() []*GraphRelationship {
@@ -794,7 +794,7 @@ type GetClaimsRequest struct {
 
 func (x *GetClaimsRequest) Reset() {
 	*x = GetClaimsRequest{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[10]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -806,7 +806,7 @@ func (x *GetClaimsRequest) String() string {
 func (*GetClaimsRequest) ProtoMessage() {}
 
 func (x *GetClaimsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[10]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -819,7 +819,7 @@ func (x *GetClaimsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClaimsRequest.ProtoReflect.Descriptor instead.
 func (*GetClaimsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{10}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetClaimsRequest) GetOrgId() string {
@@ -852,7 +852,7 @@ type GetClaimsResponse struct {
 
 func (x *GetClaimsResponse) Reset() {
 	*x = GetClaimsResponse{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[11]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -864,7 +864,7 @@ func (x *GetClaimsResponse) String() string {
 func (*GetClaimsResponse) ProtoMessage() {}
 
 func (x *GetClaimsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[11]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -877,7 +877,7 @@ func (x *GetClaimsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClaimsResponse.ProtoReflect.Descriptor instead.
 func (*GetClaimsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{11}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetClaimsResponse) GetClaims() []*GraphClaim {
@@ -899,7 +899,7 @@ type GraphExpansionRequest struct {
 
 func (x *GraphExpansionRequest) Reset() {
 	*x = GraphExpansionRequest{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[12]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +911,7 @@ func (x *GraphExpansionRequest) String() string {
 func (*GraphExpansionRequest) ProtoMessage() {}
 
 func (x *GraphExpansionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[12]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +924,7 @@ func (x *GraphExpansionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphExpansionRequest.ProtoReflect.Descriptor instead.
 func (*GraphExpansionRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{12}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GraphExpansionRequest) GetOrgId() string {
@@ -967,7 +967,7 @@ type ExpandedGraph struct {
 
 func (x *ExpandedGraph) Reset() {
 	*x = ExpandedGraph{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[13]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -979,7 +979,7 @@ func (x *ExpandedGraph) String() string {
 func (*ExpandedGraph) ProtoMessage() {}
 
 func (x *ExpandedGraph) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[13]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -992,7 +992,7 @@ func (x *ExpandedGraph) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExpandedGraph.ProtoReflect.Descriptor instead.
 func (*ExpandedGraph) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{13}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ExpandedGraph) GetEntities() []*GraphEntity {
@@ -1034,7 +1034,7 @@ type GraphExpansionResponse struct {
 
 func (x *GraphExpansionResponse) Reset() {
 	*x = GraphExpansionResponse{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[14]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1046,7 +1046,7 @@ func (x *GraphExpansionResponse) String() string {
 func (*GraphExpansionResponse) ProtoMessage() {}
 
 func (x *GraphExpansionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[14]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1059,7 +1059,7 @@ func (x *GraphExpansionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphExpansionResponse.ProtoReflect.Descriptor instead.
 func (*GraphExpansionResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{14}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GraphExpansionResponse) GetGraph() *ExpandedGraph {
@@ -1095,7 +1095,7 @@ type GetContradictionsRequest struct {
 
 func (x *GetContradictionsRequest) Reset() {
 	*x = GetContradictionsRequest{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[15]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1107,7 +1107,7 @@ func (x *GetContradictionsRequest) String() string {
 func (*GetContradictionsRequest) ProtoMessage() {}
 
 func (x *GetContradictionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[15]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1120,7 +1120,7 @@ func (x *GetContradictionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetContradictionsRequest.ProtoReflect.Descriptor instead.
 func (*GetContradictionsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{15}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetContradictionsRequest) GetOrgId() string {
@@ -1161,7 +1161,7 @@ type GetContradictionsResponse struct {
 
 func (x *GetContradictionsResponse) Reset() {
 	*x = GetContradictionsResponse{}
-	mi := &file_dataplane_graph_v1_proto_msgTypes[16]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1173,7 +1173,7 @@ func (x *GetContradictionsResponse) String() string {
 func (*GetContradictionsResponse) ProtoMessage() {}
 
 func (x *GetContradictionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_graph_v1_proto_msgTypes[16]
+	mi := &file_dataplane_graph_v1_graph_v1_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1186,7 +1186,7 @@ func (x *GetContradictionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetContradictionsResponse.ProtoReflect.Descriptor instead.
 func (*GetContradictionsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_graph_v1_proto_rawDescGZIP(), []int{16}
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetContradictionsResponse) GetContradictions() []*GraphClaim {
@@ -1203,11 +1203,11 @@ func (x *GetContradictionsResponse) GetTotal() int32 {
 	return 0
 }
 
-var File_dataplane_graph_v1_proto protoreflect.FileDescriptor
+var File_dataplane_graph_v1_graph_v1_proto protoreflect.FileDescriptor
 
-const file_dataplane_graph_v1_proto_rawDesc = "" +
+const file_dataplane_graph_v1_graph_v1_proto_rawDesc = "" +
 	"\n" +
-	"\x18dataplane/graph_v1.proto\x12\x12dataplane.graph.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xba\x02\n" +
+	"!dataplane/graph/v1/graph_v1.proto\x12\x12dataplane.graph.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xba\x02\n" +
 	"\vGraphEntity\x12\x1b\n" +
 	"\tentity_id\x18\x01 \x01(\tR\bentityId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x12\n" +
@@ -1334,19 +1334,19 @@ const file_dataplane_graph_v1_proto_rawDesc = "" +
 	"\x16com.dataplane.graph.v1B\fGraphV1ProtoP\x01Z.github.com/triodelab/dataplane/gen/go/graph/v1\xa2\x02\x03DGX\xaa\x02\x12Dataplane.Graph.V1\xca\x02\x12Dataplane\\Graph\\V1\xe2\x02\x1eDataplane\\Graph\\V1\\GPBMetadata\xea\x02\x14Dataplane::Graph::V1b\x06proto3"
 
 var (
-	file_dataplane_graph_v1_proto_rawDescOnce sync.Once
-	file_dataplane_graph_v1_proto_rawDescData []byte
+	file_dataplane_graph_v1_graph_v1_proto_rawDescOnce sync.Once
+	file_dataplane_graph_v1_graph_v1_proto_rawDescData []byte
 )
 
-func file_dataplane_graph_v1_proto_rawDescGZIP() []byte {
-	file_dataplane_graph_v1_proto_rawDescOnce.Do(func() {
-		file_dataplane_graph_v1_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_graph_v1_proto_rawDesc), len(file_dataplane_graph_v1_proto_rawDesc)))
+func file_dataplane_graph_v1_graph_v1_proto_rawDescGZIP() []byte {
+	file_dataplane_graph_v1_graph_v1_proto_rawDescOnce.Do(func() {
+		file_dataplane_graph_v1_graph_v1_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_graph_v1_graph_v1_proto_rawDesc), len(file_dataplane_graph_v1_graph_v1_proto_rawDesc)))
 	})
-	return file_dataplane_graph_v1_proto_rawDescData
+	return file_dataplane_graph_v1_graph_v1_proto_rawDescData
 }
 
-var file_dataplane_graph_v1_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
-var file_dataplane_graph_v1_proto_goTypes = []any{
+var file_dataplane_graph_v1_graph_v1_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_dataplane_graph_v1_graph_v1_proto_goTypes = []any{
 	(*GraphEntity)(nil),                // 0: dataplane.graph.v1.GraphEntity
 	(*GraphRelationship)(nil),          // 1: dataplane.graph.v1.GraphRelationship
 	(*GraphClaim)(nil),                 // 2: dataplane.graph.v1.GraphClaim
@@ -1367,7 +1367,7 @@ var file_dataplane_graph_v1_proto_goTypes = []any{
 	(*timestamppb.Timestamp)(nil),      // 17: google.protobuf.Timestamp
 	(*structpb.Struct)(nil),            // 18: google.protobuf.Struct
 }
-var file_dataplane_graph_v1_proto_depIdxs = []int32{
+var file_dataplane_graph_v1_graph_v1_proto_depIdxs = []int32{
 	17, // 0: dataplane.graph.v1.GraphEntity.created_at:type_name -> google.protobuf.Timestamp
 	18, // 1: dataplane.graph.v1.GraphEntity.metadata:type_name -> google.protobuf.Struct
 	17, // 2: dataplane.graph.v1.GraphRelationship.created_at:type_name -> google.protobuf.Timestamp
@@ -1405,27 +1405,27 @@ var file_dataplane_graph_v1_proto_depIdxs = []int32{
 	0,  // [0:18] is the sub-list for field type_name
 }
 
-func init() { file_dataplane_graph_v1_proto_init() }
-func file_dataplane_graph_v1_proto_init() {
-	if File_dataplane_graph_v1_proto != nil {
+func init() { file_dataplane_graph_v1_graph_v1_proto_init() }
+func file_dataplane_graph_v1_graph_v1_proto_init() {
+	if File_dataplane_graph_v1_graph_v1_proto != nil {
 		return
 	}
-	file_dataplane_graph_v1_proto_msgTypes[15].OneofWrappers = []any{}
+	file_dataplane_graph_v1_graph_v1_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_graph_v1_proto_rawDesc), len(file_dataplane_graph_v1_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_graph_v1_graph_v1_proto_rawDesc), len(file_dataplane_graph_v1_graph_v1_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_dataplane_graph_v1_proto_goTypes,
-		DependencyIndexes: file_dataplane_graph_v1_proto_depIdxs,
-		MessageInfos:      file_dataplane_graph_v1_proto_msgTypes,
+		GoTypes:           file_dataplane_graph_v1_graph_v1_proto_goTypes,
+		DependencyIndexes: file_dataplane_graph_v1_graph_v1_proto_depIdxs,
+		MessageInfos:      file_dataplane_graph_v1_graph_v1_proto_msgTypes,
 	}.Build()
-	File_dataplane_graph_v1_proto = out.File
-	file_dataplane_graph_v1_proto_goTypes = nil
-	file_dataplane_graph_v1_proto_depIdxs = nil
+	File_dataplane_graph_v1_graph_v1_proto = out.File
+	file_dataplane_graph_v1_graph_v1_proto_goTypes = nil
+	file_dataplane_graph_v1_graph_v1_proto_depIdxs = nil
 }

@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: dataplane/graph_v1.proto
+// source: dataplane/graph/v1/graph_v1.proto
 
 package v1
 
@@ -307,5 +307,5 @@ var GraphService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "dataplane/graph_v1.proto",
+	Metadata: "dataplane/graph/v1/graph_v1.proto",
 }

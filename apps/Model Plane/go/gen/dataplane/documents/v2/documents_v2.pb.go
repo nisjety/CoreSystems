@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: dataplane/documents_v2.proto
+// source: dataplane/documents/v2/documents_v2.proto
 
 package v2
 
@@ -44,7 +44,7 @@ type Document struct {
 
 func (x *Document) Reset() {
 	*x = Document{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[0]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -56,7 +56,7 @@ func (x *Document) String() string {
 func (*Document) ProtoMessage() {}
 
 func (x *Document) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[0]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -69,7 +69,7 @@ func (x *Document) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Document.ProtoReflect.Descriptor instead.
 func (*Document) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{0}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Document) GetDocumentId() string {
@@ -180,7 +180,7 @@ type DocumentIndexStatus struct {
 
 func (x *DocumentIndexStatus) Reset() {
 	*x = DocumentIndexStatus{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[1]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -192,7 +192,7 @@ func (x *DocumentIndexStatus) String() string {
 func (*DocumentIndexStatus) ProtoMessage() {}
 
 func (x *DocumentIndexStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[1]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -205,7 +205,7 @@ func (x *DocumentIndexStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocumentIndexStatus.ProtoReflect.Descriptor instead.
 func (*DocumentIndexStatus) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{1}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *DocumentIndexStatus) GetDocumentId() string {
@@ -281,7 +281,7 @@ type GetDocumentIndexStatusRequest struct {
 
 func (x *GetDocumentIndexStatusRequest) Reset() {
 	*x = GetDocumentIndexStatusRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[2]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -293,7 +293,7 @@ func (x *GetDocumentIndexStatusRequest) String() string {
 func (*GetDocumentIndexStatusRequest) ProtoMessage() {}
 
 func (x *GetDocumentIndexStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[2]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -306,7 +306,7 @@ func (x *GetDocumentIndexStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDocumentIndexStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetDocumentIndexStatusRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{2}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *GetDocumentIndexStatusRequest) GetDocumentId() string {
@@ -332,7 +332,7 @@ type GetDocumentIndexStatusResponse struct {
 
 func (x *GetDocumentIndexStatusResponse) Reset() {
 	*x = GetDocumentIndexStatusResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[3]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -344,7 +344,7 @@ func (x *GetDocumentIndexStatusResponse) String() string {
 func (*GetDocumentIndexStatusResponse) ProtoMessage() {}
 
 func (x *GetDocumentIndexStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[3]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -357,7 +357,7 @@ func (x *GetDocumentIndexStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDocumentIndexStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetDocumentIndexStatusResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{3}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetDocumentIndexStatusResponse) GetStatus() *DocumentIndexStatus {
@@ -378,7 +378,7 @@ type IngestPolicy struct {
 
 func (x *IngestPolicy) Reset() {
 	*x = IngestPolicy{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[4]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -390,7 +390,7 @@ func (x *IngestPolicy) String() string {
 func (*IngestPolicy) ProtoMessage() {}
 
 func (x *IngestPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[4]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -403,7 +403,7 @@ func (x *IngestPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestPolicy.ProtoReflect.Descriptor instead.
 func (*IngestPolicy) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{4}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *IngestPolicy) GetZdrMode() string {
@@ -436,7 +436,7 @@ type IngestStatusRequest struct {
 
 func (x *IngestStatusRequest) Reset() {
 	*x = IngestStatusRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[5]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -448,7 +448,7 @@ func (x *IngestStatusRequest) String() string {
 func (*IngestStatusRequest) ProtoMessage() {}
 
 func (x *IngestStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[5]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -461,7 +461,7 @@ func (x *IngestStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestStatusRequest.ProtoReflect.Descriptor instead.
 func (*IngestStatusRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{5}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *IngestStatusRequest) GetOrgId() string {
@@ -482,7 +482,7 @@ type IngestStatusResponse struct {
 
 func (x *IngestStatusResponse) Reset() {
 	*x = IngestStatusResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[6]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -494,7 +494,7 @@ func (x *IngestStatusResponse) String() string {
 func (*IngestStatusResponse) ProtoMessage() {}
 
 func (x *IngestStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[6]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -507,7 +507,7 @@ func (x *IngestStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IngestStatusResponse.ProtoReflect.Descriptor instead.
 func (*IngestStatusResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{6}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *IngestStatusResponse) GetPolicy() *IngestPolicy {
@@ -541,7 +541,7 @@ type GetDocumentRequest struct {
 
 func (x *GetDocumentRequest) Reset() {
 	*x = GetDocumentRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[7]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -553,7 +553,7 @@ func (x *GetDocumentRequest) String() string {
 func (*GetDocumentRequest) ProtoMessage() {}
 
 func (x *GetDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[7]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -566,7 +566,7 @@ func (x *GetDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDocumentRequest.ProtoReflect.Descriptor instead.
 func (*GetDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{7}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetDocumentRequest) GetDocumentId() string {
@@ -592,7 +592,7 @@ type GetDocumentResponse struct {
 
 func (x *GetDocumentResponse) Reset() {
 	*x = GetDocumentResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[8]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -604,7 +604,7 @@ func (x *GetDocumentResponse) String() string {
 func (*GetDocumentResponse) ProtoMessage() {}
 
 func (x *GetDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[8]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -617,7 +617,7 @@ func (x *GetDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDocumentResponse.ProtoReflect.Descriptor instead.
 func (*GetDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{8}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetDocumentResponse) GetDocument() *Document {
@@ -639,7 +639,7 @@ type ListDocumentsRequest struct {
 
 func (x *ListDocumentsRequest) Reset() {
 	*x = ListDocumentsRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[9]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -651,7 +651,7 @@ func (x *ListDocumentsRequest) String() string {
 func (*ListDocumentsRequest) ProtoMessage() {}
 
 func (x *ListDocumentsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[9]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -664,7 +664,7 @@ func (x *ListDocumentsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDocumentsRequest.ProtoReflect.Descriptor instead.
 func (*ListDocumentsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{9}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListDocumentsRequest) GetOrgId() string {
@@ -705,7 +705,7 @@ type ListDocumentsResponse struct {
 
 func (x *ListDocumentsResponse) Reset() {
 	*x = ListDocumentsResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[10]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -717,7 +717,7 @@ func (x *ListDocumentsResponse) String() string {
 func (*ListDocumentsResponse) ProtoMessage() {}
 
 func (x *ListDocumentsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[10]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -730,7 +730,7 @@ func (x *ListDocumentsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDocumentsResponse.ProtoReflect.Descriptor instead.
 func (*ListDocumentsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{10}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListDocumentsResponse) GetDocuments() []*Document {
@@ -763,7 +763,7 @@ type CreateDocumentRequest struct {
 
 func (x *CreateDocumentRequest) Reset() {
 	*x = CreateDocumentRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[11]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -775,7 +775,7 @@ func (x *CreateDocumentRequest) String() string {
 func (*CreateDocumentRequest) ProtoMessage() {}
 
 func (x *CreateDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[11]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -788,7 +788,7 @@ func (x *CreateDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDocumentRequest.ProtoReflect.Descriptor instead.
 func (*CreateDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{11}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CreateDocumentRequest) GetOrgId() string {
@@ -856,7 +856,7 @@ type CreateDocumentResponse struct {
 
 func (x *CreateDocumentResponse) Reset() {
 	*x = CreateDocumentResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[12]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -868,7 +868,7 @@ func (x *CreateDocumentResponse) String() string {
 func (*CreateDocumentResponse) ProtoMessage() {}
 
 func (x *CreateDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[12]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -881,7 +881,7 @@ func (x *CreateDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDocumentResponse.ProtoReflect.Descriptor instead.
 func (*CreateDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{12}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CreateDocumentResponse) GetDocument() *Document {
@@ -901,7 +901,7 @@ type DeleteDocumentRequest struct {
 
 func (x *DeleteDocumentRequest) Reset() {
 	*x = DeleteDocumentRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[13]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -913,7 +913,7 @@ func (x *DeleteDocumentRequest) String() string {
 func (*DeleteDocumentRequest) ProtoMessage() {}
 
 func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[13]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -926,7 +926,7 @@ func (x *DeleteDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentRequest.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{13}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DeleteDocumentRequest) GetDocumentId() string {
@@ -952,7 +952,7 @@ type DeleteDocumentResponse struct {
 
 func (x *DeleteDocumentResponse) Reset() {
 	*x = DeleteDocumentResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[14]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -964,7 +964,7 @@ func (x *DeleteDocumentResponse) String() string {
 func (*DeleteDocumentResponse) ProtoMessage() {}
 
 func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[14]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -977,7 +977,7 @@ func (x *DeleteDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDocumentResponse.ProtoReflect.Descriptor instead.
 func (*DeleteDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{14}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DeleteDocumentResponse) GetSuccess() bool {
@@ -998,7 +998,7 @@ type BulkIngestRequest struct {
 
 func (x *BulkIngestRequest) Reset() {
 	*x = BulkIngestRequest{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[15]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1010,7 +1010,7 @@ func (x *BulkIngestRequest) String() string {
 func (*BulkIngestRequest) ProtoMessage() {}
 
 func (x *BulkIngestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[15]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1023,7 +1023,7 @@ func (x *BulkIngestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BulkIngestRequest.ProtoReflect.Descriptor instead.
 func (*BulkIngestRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{15}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *BulkIngestRequest) GetOrgId() string {
@@ -1058,7 +1058,7 @@ type BulkIngestResponse struct {
 
 func (x *BulkIngestResponse) Reset() {
 	*x = BulkIngestResponse{}
-	mi := &file_dataplane_documents_v2_proto_msgTypes[16]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1070,7 +1070,7 @@ func (x *BulkIngestResponse) String() string {
 func (*BulkIngestResponse) ProtoMessage() {}
 
 func (x *BulkIngestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_documents_v2_proto_msgTypes[16]
+	mi := &file_dataplane_documents_v2_documents_v2_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1083,7 +1083,7 @@ func (x *BulkIngestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BulkIngestResponse.ProtoReflect.Descriptor instead.
 func (*BulkIngestResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_documents_v2_proto_rawDescGZIP(), []int{16}
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *BulkIngestResponse) GetAccepted() int32 {
@@ -1107,11 +1107,11 @@ func (x *BulkIngestResponse) GetDocumentIds() []string {
 	return nil
 }
 
-var File_dataplane_documents_v2_proto protoreflect.FileDescriptor
+var File_dataplane_documents_v2_documents_v2_proto protoreflect.FileDescriptor
 
-const file_dataplane_documents_v2_proto_rawDesc = "" +
+const file_dataplane_documents_v2_documents_v2_proto_rawDesc = "" +
 	"\n" +
-	"\x1cdataplane/documents_v2.proto\x12\x16dataplane.documents.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfe\x03\n" +
+	")dataplane/documents/v2/documents_v2.proto\x12\x16dataplane.documents.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfe\x03\n" +
 	"\bDocument\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x15\n" +
@@ -1215,19 +1215,19 @@ const file_dataplane_documents_v2_proto_rawDesc = "" +
 	"\x1acom.dataplane.documents.v2B\x10DocumentsV2ProtoP\x01Z2github.com/triodelab/dataplane/gen/go/documents/v2\xa2\x02\x03DDX\xaa\x02\x16Dataplane.Documents.V2\xca\x02\x16Dataplane\\Documents\\V2\xe2\x02\"Dataplane\\Documents\\V2\\GPBMetadata\xea\x02\x18Dataplane::Documents::V2b\x06proto3"
 
 var (
-	file_dataplane_documents_v2_proto_rawDescOnce sync.Once
-	file_dataplane_documents_v2_proto_rawDescData []byte
+	file_dataplane_documents_v2_documents_v2_proto_rawDescOnce sync.Once
+	file_dataplane_documents_v2_documents_v2_proto_rawDescData []byte
 )
 
-func file_dataplane_documents_v2_proto_rawDescGZIP() []byte {
-	file_dataplane_documents_v2_proto_rawDescOnce.Do(func() {
-		file_dataplane_documents_v2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_documents_v2_proto_rawDesc), len(file_dataplane_documents_v2_proto_rawDesc)))
+func file_dataplane_documents_v2_documents_v2_proto_rawDescGZIP() []byte {
+	file_dataplane_documents_v2_documents_v2_proto_rawDescOnce.Do(func() {
+		file_dataplane_documents_v2_documents_v2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_documents_v2_documents_v2_proto_rawDesc), len(file_dataplane_documents_v2_documents_v2_proto_rawDesc)))
 	})
-	return file_dataplane_documents_v2_proto_rawDescData
+	return file_dataplane_documents_v2_documents_v2_proto_rawDescData
 }
 
-var file_dataplane_documents_v2_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
-var file_dataplane_documents_v2_proto_goTypes = []any{
+var file_dataplane_documents_v2_documents_v2_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_dataplane_documents_v2_documents_v2_proto_goTypes = []any{
 	(*Document)(nil),                       // 0: dataplane.documents.v2.Document
 	(*DocumentIndexStatus)(nil),            // 1: dataplane.documents.v2.DocumentIndexStatus
 	(*GetDocumentIndexStatusRequest)(nil),  // 2: dataplane.documents.v2.GetDocumentIndexStatusRequest
@@ -1248,7 +1248,7 @@ var file_dataplane_documents_v2_proto_goTypes = []any{
 	(*structpb.Struct)(nil),                // 17: google.protobuf.Struct
 	(*timestamppb.Timestamp)(nil),          // 18: google.protobuf.Timestamp
 }
-var file_dataplane_documents_v2_proto_depIdxs = []int32{
+var file_dataplane_documents_v2_documents_v2_proto_depIdxs = []int32{
 	17, // 0: dataplane.documents.v2.Document.metadata:type_name -> google.protobuf.Struct
 	18, // 1: dataplane.documents.v2.Document.created_at:type_name -> google.protobuf.Timestamp
 	18, // 2: dataplane.documents.v2.Document.updated_at:type_name -> google.protobuf.Timestamp
@@ -1285,30 +1285,30 @@ var file_dataplane_documents_v2_proto_depIdxs = []int32{
 	0,  // [0:15] is the sub-list for field type_name
 }
 
-func init() { file_dataplane_documents_v2_proto_init() }
-func file_dataplane_documents_v2_proto_init() {
-	if File_dataplane_documents_v2_proto != nil {
+func init() { file_dataplane_documents_v2_documents_v2_proto_init() }
+func file_dataplane_documents_v2_documents_v2_proto_init() {
+	if File_dataplane_documents_v2_documents_v2_proto != nil {
 		return
 	}
-	file_dataplane_documents_v2_proto_msgTypes[0].OneofWrappers = []any{}
-	file_dataplane_documents_v2_proto_msgTypes[1].OneofWrappers = []any{}
-	file_dataplane_documents_v2_proto_msgTypes[11].OneofWrappers = []any{}
-	file_dataplane_documents_v2_proto_msgTypes[15].OneofWrappers = []any{}
+	file_dataplane_documents_v2_documents_v2_proto_msgTypes[0].OneofWrappers = []any{}
+	file_dataplane_documents_v2_documents_v2_proto_msgTypes[1].OneofWrappers = []any{}
+	file_dataplane_documents_v2_documents_v2_proto_msgTypes[11].OneofWrappers = []any{}
+	file_dataplane_documents_v2_documents_v2_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_documents_v2_proto_rawDesc), len(file_dataplane_documents_v2_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_documents_v2_documents_v2_proto_rawDesc), len(file_dataplane_documents_v2_documents_v2_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_dataplane_documents_v2_proto_goTypes,
-		DependencyIndexes: file_dataplane_documents_v2_proto_depIdxs,
-		MessageInfos:      file_dataplane_documents_v2_proto_msgTypes,
+		GoTypes:           file_dataplane_documents_v2_documents_v2_proto_goTypes,
+		DependencyIndexes: file_dataplane_documents_v2_documents_v2_proto_depIdxs,
+		MessageInfos:      file_dataplane_documents_v2_documents_v2_proto_msgTypes,
 	}.Build()
-	File_dataplane_documents_v2_proto = out.File
-	file_dataplane_documents_v2_proto_goTypes = nil
-	file_dataplane_documents_v2_proto_depIdxs = nil
+	File_dataplane_documents_v2_documents_v2_proto = out.File
+	file_dataplane_documents_v2_documents_v2_proto_goTypes = nil
+	file_dataplane_documents_v2_documents_v2_proto_depIdxs = nil
 }

@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: dataplane/knowledge_v2.proto
+// source: dataplane/knowledge/v2/knowledge_v2.proto
 
 package v2
 
@@ -43,7 +43,7 @@ type KnowledgeUnit struct {
 
 func (x *KnowledgeUnit) Reset() {
 	*x = KnowledgeUnit{}
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[0]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -55,7 +55,7 @@ func (x *KnowledgeUnit) String() string {
 func (*KnowledgeUnit) ProtoMessage() {}
 
 func (x *KnowledgeUnit) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[0]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -68,7 +68,7 @@ func (x *KnowledgeUnit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KnowledgeUnit.ProtoReflect.Descriptor instead.
 func (*KnowledgeUnit) Descriptor() ([]byte, []int) {
-	return file_dataplane_knowledge_v2_proto_rawDescGZIP(), []int{0}
+	return file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *KnowledgeUnit) GetKnowledgeId() string {
@@ -166,7 +166,7 @@ type CheckPermissionsRequest struct {
 
 func (x *CheckPermissionsRequest) Reset() {
 	*x = CheckPermissionsRequest{}
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[1]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -178,7 +178,7 @@ func (x *CheckPermissionsRequest) String() string {
 func (*CheckPermissionsRequest) ProtoMessage() {}
 
 func (x *CheckPermissionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[1]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -191,7 +191,7 @@ func (x *CheckPermissionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPermissionsRequest.ProtoReflect.Descriptor instead.
 func (*CheckPermissionsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_knowledge_v2_proto_rawDescGZIP(), []int{1}
+	return file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CheckPermissionsRequest) GetOrgId() string {
@@ -225,7 +225,7 @@ type CheckPermissionsResponse struct {
 
 func (x *CheckPermissionsResponse) Reset() {
 	*x = CheckPermissionsResponse{}
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[2]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -237,7 +237,7 @@ func (x *CheckPermissionsResponse) String() string {
 func (*CheckPermissionsResponse) ProtoMessage() {}
 
 func (x *CheckPermissionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[2]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -250,7 +250,7 @@ func (x *CheckPermissionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPermissionsResponse.ProtoReflect.Descriptor instead.
 func (*CheckPermissionsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_knowledge_v2_proto_rawDescGZIP(), []int{2}
+	return file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CheckPermissionsResponse) GetAllowed() bool {
@@ -277,7 +277,7 @@ type GetKnowledgeUnitsRequest struct {
 
 func (x *GetKnowledgeUnitsRequest) Reset() {
 	*x = GetKnowledgeUnitsRequest{}
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[3]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -289,7 +289,7 @@ func (x *GetKnowledgeUnitsRequest) String() string {
 func (*GetKnowledgeUnitsRequest) ProtoMessage() {}
 
 func (x *GetKnowledgeUnitsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[3]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -302,7 +302,7 @@ func (x *GetKnowledgeUnitsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetKnowledgeUnitsRequest.ProtoReflect.Descriptor instead.
 func (*GetKnowledgeUnitsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_knowledge_v2_proto_rawDescGZIP(), []int{3}
+	return file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetKnowledgeUnitsRequest) GetDocumentId() string {
@@ -328,7 +328,7 @@ type GetKnowledgeUnitsResponse struct {
 
 func (x *GetKnowledgeUnitsResponse) Reset() {
 	*x = GetKnowledgeUnitsResponse{}
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[4]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -340,7 +340,7 @@ func (x *GetKnowledgeUnitsResponse) String() string {
 func (*GetKnowledgeUnitsResponse) ProtoMessage() {}
 
 func (x *GetKnowledgeUnitsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_knowledge_v2_proto_msgTypes[4]
+	mi := &file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -353,7 +353,7 @@ func (x *GetKnowledgeUnitsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetKnowledgeUnitsResponse.ProtoReflect.Descriptor instead.
 func (*GetKnowledgeUnitsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_knowledge_v2_proto_rawDescGZIP(), []int{4}
+	return file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetKnowledgeUnitsResponse) GetUnits() []*KnowledgeUnit {
@@ -363,11 +363,11 @@ func (x *GetKnowledgeUnitsResponse) GetUnits() []*KnowledgeUnit {
 	return nil
 }
 
-var File_dataplane_knowledge_v2_proto protoreflect.FileDescriptor
+var File_dataplane_knowledge_v2_knowledge_v2_proto protoreflect.FileDescriptor
 
-const file_dataplane_knowledge_v2_proto_rawDesc = "" +
+const file_dataplane_knowledge_v2_knowledge_v2_proto_rawDesc = "" +
 	"\n" +
-	"\x1cdataplane/knowledge_v2.proto\x12\x16dataplane.knowledge.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfe\x03\n" +
+	")dataplane/knowledge/v2/knowledge_v2.proto\x12\x16dataplane.knowledge.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfe\x03\n" +
 	"\rKnowledgeUnit\x12!\n" +
 	"\fknowledge_id\x18\x01 \x01(\tR\vknowledgeId\x12\x1f\n" +
 	"\vdocument_id\x18\x02 \x01(\tR\n" +
@@ -407,19 +407,19 @@ const file_dataplane_knowledge_v2_proto_rawDesc = "" +
 	"\x1acom.dataplane.knowledge.v2B\x10KnowledgeV2ProtoP\x01Z2github.com/triodelab/dataplane/gen/go/knowledge/v2\xa2\x02\x03DKX\xaa\x02\x16Dataplane.Knowledge.V2\xca\x02\x16Dataplane\\Knowledge\\V2\xe2\x02\"Dataplane\\Knowledge\\V2\\GPBMetadata\xea\x02\x18Dataplane::Knowledge::V2b\x06proto3"
 
 var (
-	file_dataplane_knowledge_v2_proto_rawDescOnce sync.Once
-	file_dataplane_knowledge_v2_proto_rawDescData []byte
+	file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescOnce sync.Once
+	file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescData []byte
 )
 
-func file_dataplane_knowledge_v2_proto_rawDescGZIP() []byte {
-	file_dataplane_knowledge_v2_proto_rawDescOnce.Do(func() {
-		file_dataplane_knowledge_v2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_knowledge_v2_proto_rawDesc), len(file_dataplane_knowledge_v2_proto_rawDesc)))
+func file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescGZIP() []byte {
+	file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescOnce.Do(func() {
+		file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_knowledge_v2_knowledge_v2_proto_rawDesc), len(file_dataplane_knowledge_v2_knowledge_v2_proto_rawDesc)))
 	})
-	return file_dataplane_knowledge_v2_proto_rawDescData
+	return file_dataplane_knowledge_v2_knowledge_v2_proto_rawDescData
 }
 
-var file_dataplane_knowledge_v2_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
-var file_dataplane_knowledge_v2_proto_goTypes = []any{
+var file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_dataplane_knowledge_v2_knowledge_v2_proto_goTypes = []any{
 	(*KnowledgeUnit)(nil),             // 0: dataplane.knowledge.v2.KnowledgeUnit
 	(*CheckPermissionsRequest)(nil),   // 1: dataplane.knowledge.v2.CheckPermissionsRequest
 	(*CheckPermissionsResponse)(nil),  // 2: dataplane.knowledge.v2.CheckPermissionsResponse
@@ -428,7 +428,7 @@ var file_dataplane_knowledge_v2_proto_goTypes = []any{
 	(*structpb.Struct)(nil),           // 5: google.protobuf.Struct
 	(*timestamppb.Timestamp)(nil),     // 6: google.protobuf.Timestamp
 }
-var file_dataplane_knowledge_v2_proto_depIdxs = []int32{
+var file_dataplane_knowledge_v2_knowledge_v2_proto_depIdxs = []int32{
 	5, // 0: dataplane.knowledge.v2.KnowledgeUnit.metadata:type_name -> google.protobuf.Struct
 	6, // 1: dataplane.knowledge.v2.KnowledgeUnit.created_at:type_name -> google.protobuf.Timestamp
 	6, // 2: dataplane.knowledge.v2.KnowledgeUnit.updated_at:type_name -> google.protobuf.Timestamp
@@ -444,27 +444,27 @@ var file_dataplane_knowledge_v2_proto_depIdxs = []int32{
 	0, // [0:4] is the sub-list for field type_name
 }
 
-func init() { file_dataplane_knowledge_v2_proto_init() }
-func file_dataplane_knowledge_v2_proto_init() {
-	if File_dataplane_knowledge_v2_proto != nil {
+func init() { file_dataplane_knowledge_v2_knowledge_v2_proto_init() }
+func file_dataplane_knowledge_v2_knowledge_v2_proto_init() {
+	if File_dataplane_knowledge_v2_knowledge_v2_proto != nil {
 		return
 	}
-	file_dataplane_knowledge_v2_proto_msgTypes[0].OneofWrappers = []any{}
+	file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes[0].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_knowledge_v2_proto_rawDesc), len(file_dataplane_knowledge_v2_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_knowledge_v2_knowledge_v2_proto_rawDesc), len(file_dataplane_knowledge_v2_knowledge_v2_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_dataplane_knowledge_v2_proto_goTypes,
-		DependencyIndexes: file_dataplane_knowledge_v2_proto_depIdxs,
-		MessageInfos:      file_dataplane_knowledge_v2_proto_msgTypes,
+		GoTypes:           file_dataplane_knowledge_v2_knowledge_v2_proto_goTypes,
+		DependencyIndexes: file_dataplane_knowledge_v2_knowledge_v2_proto_depIdxs,
+		MessageInfos:      file_dataplane_knowledge_v2_knowledge_v2_proto_msgTypes,
 	}.Build()
-	File_dataplane_knowledge_v2_proto = out.File
-	file_dataplane_knowledge_v2_proto_goTypes = nil
-	file_dataplane_knowledge_v2_proto_depIdxs = nil
+	File_dataplane_knowledge_v2_knowledge_v2_proto = out.File
+	file_dataplane_knowledge_v2_knowledge_v2_proto_goTypes = nil
+	file_dataplane_knowledge_v2_knowledge_v2_proto_depIdxs = nil
 }

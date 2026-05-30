@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: dataplane/wiki_v1.proto
+// source: dataplane/wiki/v1/wiki_v1.proto
 
 package v1
 
@@ -42,7 +42,7 @@ type WikiPage struct {
 
 func (x *WikiPage) Reset() {
 	*x = WikiPage{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[0]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -54,7 +54,7 @@ func (x *WikiPage) String() string {
 func (*WikiPage) ProtoMessage() {}
 
 func (x *WikiPage) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[0]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -67,7 +67,7 @@ func (x *WikiPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WikiPage.ProtoReflect.Descriptor instead.
 func (*WikiPage) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{0}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *WikiPage) GetPageId() string {
@@ -167,7 +167,7 @@ type WikiPageVersion struct {
 
 func (x *WikiPageVersion) Reset() {
 	*x = WikiPageVersion{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[1]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -179,7 +179,7 @@ func (x *WikiPageVersion) String() string {
 func (*WikiPageVersion) ProtoMessage() {}
 
 func (x *WikiPageVersion) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[1]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -192,7 +192,7 @@ func (x *WikiPageVersion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WikiPageVersion.ProtoReflect.Descriptor instead.
 func (*WikiPageVersion) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{1}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *WikiPageVersion) GetVersionId() string {
@@ -294,7 +294,7 @@ type WikiSourceLog struct {
 
 func (x *WikiSourceLog) Reset() {
 	*x = WikiSourceLog{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[2]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -306,7 +306,7 @@ func (x *WikiSourceLog) String() string {
 func (*WikiSourceLog) ProtoMessage() {}
 
 func (x *WikiSourceLog) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[2]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -319,7 +319,7 @@ func (x *WikiSourceLog) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WikiSourceLog.ProtoReflect.Descriptor instead.
 func (*WikiSourceLog) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{2}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *WikiSourceLog) GetLogId() string {
@@ -388,7 +388,7 @@ type WikiMaintenanceLog struct {
 
 func (x *WikiMaintenanceLog) Reset() {
 	*x = WikiMaintenanceLog{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[3]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -400,7 +400,7 @@ func (x *WikiMaintenanceLog) String() string {
 func (*WikiMaintenanceLog) ProtoMessage() {}
 
 func (x *WikiMaintenanceLog) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[3]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -413,7 +413,7 @@ func (x *WikiMaintenanceLog) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WikiMaintenanceLog.ProtoReflect.Descriptor instead.
 func (*WikiMaintenanceLog) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{3}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *WikiMaintenanceLog) GetLogId() string {
@@ -497,7 +497,7 @@ type WikiProposal struct {
 
 func (x *WikiProposal) Reset() {
 	*x = WikiProposal{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[4]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -509,7 +509,7 @@ func (x *WikiProposal) String() string {
 func (*WikiProposal) ProtoMessage() {}
 
 func (x *WikiProposal) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[4]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -522,7 +522,7 @@ func (x *WikiProposal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WikiProposal.ProtoReflect.Descriptor instead.
 func (*WikiProposal) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{4}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *WikiProposal) GetProposalId() string {
@@ -606,7 +606,7 @@ type GetPageRequest struct {
 
 func (x *GetPageRequest) Reset() {
 	*x = GetPageRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[5]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -618,7 +618,7 @@ func (x *GetPageRequest) String() string {
 func (*GetPageRequest) ProtoMessage() {}
 
 func (x *GetPageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[5]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -631,7 +631,7 @@ func (x *GetPageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPageRequest.ProtoReflect.Descriptor instead.
 func (*GetPageRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{5}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetPageRequest) GetPageId() string {
@@ -665,7 +665,7 @@ type GetPageResponse struct {
 
 func (x *GetPageResponse) Reset() {
 	*x = GetPageResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[6]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -677,7 +677,7 @@ func (x *GetPageResponse) String() string {
 func (*GetPageResponse) ProtoMessage() {}
 
 func (x *GetPageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[6]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -690,7 +690,7 @@ func (x *GetPageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPageResponse.ProtoReflect.Descriptor instead.
 func (*GetPageResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{6}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetPageResponse) GetPage() *WikiPage {
@@ -718,7 +718,7 @@ type GetPageByPathRequest struct {
 
 func (x *GetPageByPathRequest) Reset() {
 	*x = GetPageByPathRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[7]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -730,7 +730,7 @@ func (x *GetPageByPathRequest) String() string {
 func (*GetPageByPathRequest) ProtoMessage() {}
 
 func (x *GetPageByPathRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[7]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -743,7 +743,7 @@ func (x *GetPageByPathRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPageByPathRequest.ProtoReflect.Descriptor instead.
 func (*GetPageByPathRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{7}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetPageByPathRequest) GetOrgId() string {
@@ -777,7 +777,7 @@ type GetPageByPathResponse struct {
 
 func (x *GetPageByPathResponse) Reset() {
 	*x = GetPageByPathResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[8]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +789,7 @@ func (x *GetPageByPathResponse) String() string {
 func (*GetPageByPathResponse) ProtoMessage() {}
 
 func (x *GetPageByPathResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[8]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +802,7 @@ func (x *GetPageByPathResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPageByPathResponse.ProtoReflect.Descriptor instead.
 func (*GetPageByPathResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{8}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetPageByPathResponse) GetPage() *WikiPage {
@@ -831,7 +831,7 @@ type ListPageVersionsRequest struct {
 
 func (x *ListPageVersionsRequest) Reset() {
 	*x = ListPageVersionsRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[9]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -843,7 +843,7 @@ func (x *ListPageVersionsRequest) String() string {
 func (*ListPageVersionsRequest) ProtoMessage() {}
 
 func (x *ListPageVersionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[9]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -856,7 +856,7 @@ func (x *ListPageVersionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPageVersionsRequest.ProtoReflect.Descriptor instead.
 func (*ListPageVersionsRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{9}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListPageVersionsRequest) GetPageId() string {
@@ -897,7 +897,7 @@ type ListPageVersionsResponse struct {
 
 func (x *ListPageVersionsResponse) Reset() {
 	*x = ListPageVersionsResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[10]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -909,7 +909,7 @@ func (x *ListPageVersionsResponse) String() string {
 func (*ListPageVersionsResponse) ProtoMessage() {}
 
 func (x *ListPageVersionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[10]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -922,7 +922,7 @@ func (x *ListPageVersionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPageVersionsResponse.ProtoReflect.Descriptor instead.
 func (*ListPageVersionsResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{10}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListPageVersionsResponse) GetVersions() []*WikiPageVersion {
@@ -950,7 +950,7 @@ type GetPageSourcesRequest struct {
 
 func (x *GetPageSourcesRequest) Reset() {
 	*x = GetPageSourcesRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[11]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -962,7 +962,7 @@ func (x *GetPageSourcesRequest) String() string {
 func (*GetPageSourcesRequest) ProtoMessage() {}
 
 func (x *GetPageSourcesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[11]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -975,7 +975,7 @@ func (x *GetPageSourcesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPageSourcesRequest.ProtoReflect.Descriptor instead.
 func (*GetPageSourcesRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{11}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetPageSourcesRequest) GetPageId() string {
@@ -1008,7 +1008,7 @@ type GetPageSourcesResponse struct {
 
 func (x *GetPageSourcesResponse) Reset() {
 	*x = GetPageSourcesResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[12]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1020,7 +1020,7 @@ func (x *GetPageSourcesResponse) String() string {
 func (*GetPageSourcesResponse) ProtoMessage() {}
 
 func (x *GetPageSourcesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[12]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1033,7 +1033,7 @@ func (x *GetPageSourcesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPageSourcesResponse.ProtoReflect.Descriptor instead.
 func (*GetPageSourcesResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{12}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetPageSourcesResponse) GetSourceLog() *WikiSourceLog {
@@ -1056,7 +1056,7 @@ type ListMaintenanceIssuesRequest struct {
 
 func (x *ListMaintenanceIssuesRequest) Reset() {
 	*x = ListMaintenanceIssuesRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[13]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1068,7 +1068,7 @@ func (x *ListMaintenanceIssuesRequest) String() string {
 func (*ListMaintenanceIssuesRequest) ProtoMessage() {}
 
 func (x *ListMaintenanceIssuesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[13]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1081,7 +1081,7 @@ func (x *ListMaintenanceIssuesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMaintenanceIssuesRequest.ProtoReflect.Descriptor instead.
 func (*ListMaintenanceIssuesRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{13}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ListMaintenanceIssuesRequest) GetOrgId() string {
@@ -1129,7 +1129,7 @@ type ListMaintenanceIssuesResponse struct {
 
 func (x *ListMaintenanceIssuesResponse) Reset() {
 	*x = ListMaintenanceIssuesResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[14]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1141,7 +1141,7 @@ func (x *ListMaintenanceIssuesResponse) String() string {
 func (*ListMaintenanceIssuesResponse) ProtoMessage() {}
 
 func (x *ListMaintenanceIssuesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[14]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1154,7 +1154,7 @@ func (x *ListMaintenanceIssuesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMaintenanceIssuesResponse.ProtoReflect.Descriptor instead.
 func (*ListMaintenanceIssuesResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{14}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ListMaintenanceIssuesResponse) GetIssues() []*WikiMaintenanceLog {
@@ -1181,7 +1181,7 @@ type GetBacklinksRequest struct {
 
 func (x *GetBacklinksRequest) Reset() {
 	*x = GetBacklinksRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[15]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1193,7 +1193,7 @@ func (x *GetBacklinksRequest) String() string {
 func (*GetBacklinksRequest) ProtoMessage() {}
 
 func (x *GetBacklinksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[15]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1206,7 +1206,7 @@ func (x *GetBacklinksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBacklinksRequest.ProtoReflect.Descriptor instead.
 func (*GetBacklinksRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{15}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetBacklinksRequest) GetPageId() string {
@@ -1232,7 +1232,7 @@ type GetBacklinksResponse struct {
 
 func (x *GetBacklinksResponse) Reset() {
 	*x = GetBacklinksResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[16]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1244,7 +1244,7 @@ func (x *GetBacklinksResponse) String() string {
 func (*GetBacklinksResponse) ProtoMessage() {}
 
 func (x *GetBacklinksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[16]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1257,7 +1257,7 @@ func (x *GetBacklinksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBacklinksResponse.ProtoReflect.Descriptor instead.
 func (*GetBacklinksResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{16}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetBacklinksResponse) GetPages() []*WikiPage {
@@ -1280,7 +1280,7 @@ type CreatePageRequest struct {
 
 func (x *CreatePageRequest) Reset() {
 	*x = CreatePageRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[17]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1292,7 +1292,7 @@ func (x *CreatePageRequest) String() string {
 func (*CreatePageRequest) ProtoMessage() {}
 
 func (x *CreatePageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[17]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1305,7 +1305,7 @@ func (x *CreatePageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePageRequest.ProtoReflect.Descriptor instead.
 func (*CreatePageRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{17}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CreatePageRequest) GetOrgId() string {
@@ -1353,7 +1353,7 @@ type CreatePageResponse struct {
 
 func (x *CreatePageResponse) Reset() {
 	*x = CreatePageResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[18]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1365,7 +1365,7 @@ func (x *CreatePageResponse) String() string {
 func (*CreatePageResponse) ProtoMessage() {}
 
 func (x *CreatePageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[18]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1378,7 +1378,7 @@ func (x *CreatePageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePageResponse.ProtoReflect.Descriptor instead.
 func (*CreatePageResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{18}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CreatePageResponse) GetPage() *WikiPage {
@@ -1408,7 +1408,7 @@ type UpdatePageVersionRequest struct {
 
 func (x *UpdatePageVersionRequest) Reset() {
 	*x = UpdatePageVersionRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[19]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1420,7 +1420,7 @@ func (x *UpdatePageVersionRequest) String() string {
 func (*UpdatePageVersionRequest) ProtoMessage() {}
 
 func (x *UpdatePageVersionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[19]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1433,7 +1433,7 @@ func (x *UpdatePageVersionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdatePageVersionRequest.ProtoReflect.Descriptor instead.
 func (*UpdatePageVersionRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{19}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *UpdatePageVersionRequest) GetPageId() string {
@@ -1480,7 +1480,7 @@ type UpdatePageVersionResponse struct {
 
 func (x *UpdatePageVersionResponse) Reset() {
 	*x = UpdatePageVersionResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[20]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1492,7 +1492,7 @@ func (x *UpdatePageVersionResponse) String() string {
 func (*UpdatePageVersionResponse) ProtoMessage() {}
 
 func (x *UpdatePageVersionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[20]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1505,7 +1505,7 @@ func (x *UpdatePageVersionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdatePageVersionResponse.ProtoReflect.Descriptor instead.
 func (*UpdatePageVersionResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{20}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *UpdatePageVersionResponse) GetNewVersion() *WikiPageVersion {
@@ -1529,7 +1529,7 @@ type SubmitProposalRequest struct {
 
 func (x *SubmitProposalRequest) Reset() {
 	*x = SubmitProposalRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[21]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1541,7 +1541,7 @@ func (x *SubmitProposalRequest) String() string {
 func (*SubmitProposalRequest) ProtoMessage() {}
 
 func (x *SubmitProposalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[21]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1554,7 +1554,7 @@ func (x *SubmitProposalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitProposalRequest.ProtoReflect.Descriptor instead.
 func (*SubmitProposalRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{21}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SubmitProposalRequest) GetPageId() string {
@@ -1608,7 +1608,7 @@ type SubmitProposalResponse struct {
 
 func (x *SubmitProposalResponse) Reset() {
 	*x = SubmitProposalResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[22]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1620,7 +1620,7 @@ func (x *SubmitProposalResponse) String() string {
 func (*SubmitProposalResponse) ProtoMessage() {}
 
 func (x *SubmitProposalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[22]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1633,7 +1633,7 @@ func (x *SubmitProposalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitProposalResponse.ProtoReflect.Descriptor instead.
 func (*SubmitProposalResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{22}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SubmitProposalResponse) GetProposal() *WikiProposal {
@@ -1655,7 +1655,7 @@ type ReviewProposalRequest struct {
 
 func (x *ReviewProposalRequest) Reset() {
 	*x = ReviewProposalRequest{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[23]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1667,7 +1667,7 @@ func (x *ReviewProposalRequest) String() string {
 func (*ReviewProposalRequest) ProtoMessage() {}
 
 func (x *ReviewProposalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[23]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1680,7 +1680,7 @@ func (x *ReviewProposalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReviewProposalRequest.ProtoReflect.Descriptor instead.
 func (*ReviewProposalRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{23}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ReviewProposalRequest) GetProposalId() string {
@@ -1721,7 +1721,7 @@ type ReviewProposalResponse struct {
 
 func (x *ReviewProposalResponse) Reset() {
 	*x = ReviewProposalResponse{}
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[24]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1733,7 +1733,7 @@ func (x *ReviewProposalResponse) String() string {
 func (*ReviewProposalResponse) ProtoMessage() {}
 
 func (x *ReviewProposalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_wiki_v1_proto_msgTypes[24]
+	mi := &file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1746,7 +1746,7 @@ func (x *ReviewProposalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReviewProposalResponse.ProtoReflect.Descriptor instead.
 func (*ReviewProposalResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_wiki_v1_proto_rawDescGZIP(), []int{24}
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ReviewProposalResponse) GetProposal() *WikiProposal {
@@ -1763,11 +1763,11 @@ func (x *ReviewProposalResponse) GetNewVersion() *WikiPageVersion {
 	return nil
 }
 
-var File_dataplane_wiki_v1_proto protoreflect.FileDescriptor
+var File_dataplane_wiki_v1_wiki_v1_proto protoreflect.FileDescriptor
 
-const file_dataplane_wiki_v1_proto_rawDesc = "" +
+const file_dataplane_wiki_v1_wiki_v1_proto_rawDesc = "" +
 	"\n" +
-	"\x17dataplane/wiki_v1.proto\x12\x11dataplane.wiki.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x96\x03\n" +
+	"\x1fdataplane/wiki/v1/wiki_v1.proto\x12\x11dataplane.wiki.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x96\x03\n" +
 	"\bWikiPage\x12\x17\n" +
 	"\apage_id\x18\x01 \x01(\tR\x06pageId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12!\n" +
@@ -1955,19 +1955,19 @@ const file_dataplane_wiki_v1_proto_rawDesc = "" +
 	"\x15com.dataplane.wiki.v1B\vWikiV1ProtoP\x01Z-github.com/triodelab/dataplane/gen/go/wiki/v1\xa2\x02\x03DWX\xaa\x02\x11Dataplane.Wiki.V1\xca\x02\x11Dataplane\\Wiki\\V1\xe2\x02\x1dDataplane\\Wiki\\V1\\GPBMetadata\xea\x02\x13Dataplane::Wiki::V1b\x06proto3"
 
 var (
-	file_dataplane_wiki_v1_proto_rawDescOnce sync.Once
-	file_dataplane_wiki_v1_proto_rawDescData []byte
+	file_dataplane_wiki_v1_wiki_v1_proto_rawDescOnce sync.Once
+	file_dataplane_wiki_v1_wiki_v1_proto_rawDescData []byte
 )
 
-func file_dataplane_wiki_v1_proto_rawDescGZIP() []byte {
-	file_dataplane_wiki_v1_proto_rawDescOnce.Do(func() {
-		file_dataplane_wiki_v1_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_wiki_v1_proto_rawDesc), len(file_dataplane_wiki_v1_proto_rawDesc)))
+func file_dataplane_wiki_v1_wiki_v1_proto_rawDescGZIP() []byte {
+	file_dataplane_wiki_v1_wiki_v1_proto_rawDescOnce.Do(func() {
+		file_dataplane_wiki_v1_wiki_v1_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_wiki_v1_wiki_v1_proto_rawDesc), len(file_dataplane_wiki_v1_wiki_v1_proto_rawDesc)))
 	})
-	return file_dataplane_wiki_v1_proto_rawDescData
+	return file_dataplane_wiki_v1_wiki_v1_proto_rawDescData
 }
 
-var file_dataplane_wiki_v1_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
-var file_dataplane_wiki_v1_proto_goTypes = []any{
+var file_dataplane_wiki_v1_wiki_v1_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_dataplane_wiki_v1_wiki_v1_proto_goTypes = []any{
 	(*WikiPage)(nil),                      // 0: dataplane.wiki.v1.WikiPage
 	(*WikiPageVersion)(nil),               // 1: dataplane.wiki.v1.WikiPageVersion
 	(*WikiSourceLog)(nil),                 // 2: dataplane.wiki.v1.WikiSourceLog
@@ -1996,7 +1996,7 @@ var file_dataplane_wiki_v1_proto_goTypes = []any{
 	(*timestamppb.Timestamp)(nil),         // 25: google.protobuf.Timestamp
 	(*structpb.Struct)(nil),               // 26: google.protobuf.Struct
 }
-var file_dataplane_wiki_v1_proto_depIdxs = []int32{
+var file_dataplane_wiki_v1_wiki_v1_proto_depIdxs = []int32{
 	25, // 0: dataplane.wiki.v1.WikiPage.created_at:type_name -> google.protobuf.Timestamp
 	25, // 1: dataplane.wiki.v1.WikiPage.updated_at:type_name -> google.protobuf.Timestamp
 	26, // 2: dataplane.wiki.v1.WikiPage.metadata:type_name -> google.protobuf.Struct
@@ -2052,35 +2052,35 @@ var file_dataplane_wiki_v1_proto_depIdxs = []int32{
 	0,  // [0:28] is the sub-list for field type_name
 }
 
-func init() { file_dataplane_wiki_v1_proto_init() }
-func file_dataplane_wiki_v1_proto_init() {
-	if File_dataplane_wiki_v1_proto != nil {
+func init() { file_dataplane_wiki_v1_wiki_v1_proto_init() }
+func file_dataplane_wiki_v1_wiki_v1_proto_init() {
+	if File_dataplane_wiki_v1_wiki_v1_proto != nil {
 		return
 	}
-	file_dataplane_wiki_v1_proto_msgTypes[1].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[3].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[5].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[7].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[11].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[13].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[19].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[23].OneofWrappers = []any{}
-	file_dataplane_wiki_v1_proto_msgTypes[24].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[1].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[3].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[5].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[7].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[11].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[13].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[19].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[23].OneofWrappers = []any{}
+	file_dataplane_wiki_v1_wiki_v1_proto_msgTypes[24].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_wiki_v1_proto_rawDesc), len(file_dataplane_wiki_v1_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_wiki_v1_wiki_v1_proto_rawDesc), len(file_dataplane_wiki_v1_wiki_v1_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_dataplane_wiki_v1_proto_goTypes,
-		DependencyIndexes: file_dataplane_wiki_v1_proto_depIdxs,
-		MessageInfos:      file_dataplane_wiki_v1_proto_msgTypes,
+		GoTypes:           file_dataplane_wiki_v1_wiki_v1_proto_goTypes,
+		DependencyIndexes: file_dataplane_wiki_v1_wiki_v1_proto_depIdxs,
+		MessageInfos:      file_dataplane_wiki_v1_wiki_v1_proto_msgTypes,
 	}.Build()
-	File_dataplane_wiki_v1_proto = out.File
-	file_dataplane_wiki_v1_proto_goTypes = nil
-	file_dataplane_wiki_v1_proto_depIdxs = nil
+	File_dataplane_wiki_v1_wiki_v1_proto = out.File
+	file_dataplane_wiki_v1_wiki_v1_proto_goTypes = nil
+	file_dataplane_wiki_v1_wiki_v1_proto_depIdxs = nil
 }

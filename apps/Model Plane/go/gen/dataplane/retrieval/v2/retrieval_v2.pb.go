@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        (unknown)
-// source: dataplane/retrieval_v2.proto
+// source: dataplane/retrieval/v2/retrieval_v2.proto
 
 package v2
 
@@ -48,7 +48,7 @@ type RetrieveRequest struct {
 
 func (x *RetrieveRequest) Reset() {
 	*x = RetrieveRequest{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[0]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -60,7 +60,7 @@ func (x *RetrieveRequest) String() string {
 func (*RetrieveRequest) ProtoMessage() {}
 
 func (x *RetrieveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[0]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -73,7 +73,7 @@ func (x *RetrieveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetrieveRequest.ProtoReflect.Descriptor instead.
 func (*RetrieveRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{0}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *RetrieveRequest) GetOrgId() string {
@@ -183,7 +183,7 @@ type Filters struct {
 
 func (x *Filters) Reset() {
 	*x = Filters{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[1]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -195,7 +195,7 @@ func (x *Filters) String() string {
 func (*Filters) ProtoMessage() {}
 
 func (x *Filters) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[1]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -208,7 +208,7 @@ func (x *Filters) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Filters.ProtoReflect.Descriptor instead.
 func (*Filters) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{1}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Filters) GetDocumentTypes() []string {
@@ -285,7 +285,7 @@ type Candidate struct {
 
 func (x *Candidate) Reset() {
 	*x = Candidate{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[2]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -297,7 +297,7 @@ func (x *Candidate) String() string {
 func (*Candidate) ProtoMessage() {}
 
 func (x *Candidate) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[2]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -310,7 +310,7 @@ func (x *Candidate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Candidate.ProtoReflect.Descriptor instead.
 func (*Candidate) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{2}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Candidate) GetKnowledgeId() string {
@@ -396,7 +396,7 @@ type Source struct {
 
 func (x *Source) Reset() {
 	*x = Source{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[3]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -408,7 +408,7 @@ func (x *Source) String() string {
 func (*Source) ProtoMessage() {}
 
 func (x *Source) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[3]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -421,7 +421,7 @@ func (x *Source) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Source.ProtoReflect.Descriptor instead.
 func (*Source) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{3}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Source) GetDocumentId() string {
@@ -471,7 +471,7 @@ type ContextPack struct {
 
 func (x *ContextPack) Reset() {
 	*x = ContextPack{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[4]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -483,7 +483,7 @@ func (x *ContextPack) String() string {
 func (*ContextPack) ProtoMessage() {}
 
 func (x *ContextPack) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[4]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -496,7 +496,7 @@ func (x *ContextPack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContextPack.ProtoReflect.Descriptor instead.
 func (*ContextPack) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{4}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ContextPack) GetFacts() []*ContextFact {
@@ -542,7 +542,7 @@ type ContextFact struct {
 
 func (x *ContextFact) Reset() {
 	*x = ContextFact{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[5]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -554,7 +554,7 @@ func (x *ContextFact) String() string {
 func (*ContextFact) ProtoMessage() {}
 
 func (x *ContextFact) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[5]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -567,7 +567,7 @@ func (x *ContextFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContextFact.ProtoReflect.Descriptor instead.
 func (*ContextFact) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{5}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ContextFact) GetKnowledgeId() string {
@@ -637,7 +637,7 @@ type RetrieveResponse struct {
 
 func (x *RetrieveResponse) Reset() {
 	*x = RetrieveResponse{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[6]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -649,7 +649,7 @@ func (x *RetrieveResponse) String() string {
 func (*RetrieveResponse) ProtoMessage() {}
 
 func (x *RetrieveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[6]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -662,7 +662,7 @@ func (x *RetrieveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetrieveResponse.ProtoReflect.Descriptor instead.
 func (*RetrieveResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{6}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RetrieveResponse) GetCandidates() []*Candidate {
@@ -761,7 +761,7 @@ type RetrievalTrace struct {
 
 func (x *RetrievalTrace) Reset() {
 	*x = RetrievalTrace{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[7]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -773,7 +773,7 @@ func (x *RetrievalTrace) String() string {
 func (*RetrievalTrace) ProtoMessage() {}
 
 func (x *RetrievalTrace) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[7]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -786,7 +786,7 @@ func (x *RetrievalTrace) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetrievalTrace.ProtoReflect.Descriptor instead.
 func (*RetrievalTrace) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{7}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RetrievalTrace) GetTraceId() string {
@@ -930,7 +930,7 @@ type RetrievalCandidate struct {
 
 func (x *RetrievalCandidate) Reset() {
 	*x = RetrievalCandidate{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[8]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -942,7 +942,7 @@ func (x *RetrievalCandidate) String() string {
 func (*RetrievalCandidate) ProtoMessage() {}
 
 func (x *RetrievalCandidate) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[8]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -955,7 +955,7 @@ func (x *RetrievalCandidate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetrievalCandidate.ProtoReflect.Descriptor instead.
 func (*RetrievalCandidate) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{8}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RetrievalCandidate) GetRank() int32 {
@@ -1017,7 +1017,7 @@ type GetTraceRequest struct {
 
 func (x *GetTraceRequest) Reset() {
 	*x = GetTraceRequest{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[9]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1029,7 +1029,7 @@ func (x *GetTraceRequest) String() string {
 func (*GetTraceRequest) ProtoMessage() {}
 
 func (x *GetTraceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[9]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1042,7 +1042,7 @@ func (x *GetTraceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTraceRequest.ProtoReflect.Descriptor instead.
 func (*GetTraceRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{9}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetTraceRequest) GetTraceId() string {
@@ -1068,7 +1068,7 @@ type GetTraceResponse struct {
 
 func (x *GetTraceResponse) Reset() {
 	*x = GetTraceResponse{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[10]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1080,7 +1080,7 @@ func (x *GetTraceResponse) String() string {
 func (*GetTraceResponse) ProtoMessage() {}
 
 func (x *GetTraceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[10]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1093,7 +1093,7 @@ func (x *GetTraceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTraceResponse.ProtoReflect.Descriptor instead.
 func (*GetTraceResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{10}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetTraceResponse) GetTrace() *RetrievalTrace {
@@ -1113,7 +1113,7 @@ type GetSourcesRequest struct {
 
 func (x *GetSourcesRequest) Reset() {
 	*x = GetSourcesRequest{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[11]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1125,7 +1125,7 @@ func (x *GetSourcesRequest) String() string {
 func (*GetSourcesRequest) ProtoMessage() {}
 
 func (x *GetSourcesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[11]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1138,7 +1138,7 @@ func (x *GetSourcesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSourcesRequest.ProtoReflect.Descriptor instead.
 func (*GetSourcesRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{11}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetSourcesRequest) GetOrgId() string {
@@ -1164,7 +1164,7 @@ type GetSourcesResponse struct {
 
 func (x *GetSourcesResponse) Reset() {
 	*x = GetSourcesResponse{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[12]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1176,7 +1176,7 @@ func (x *GetSourcesResponse) String() string {
 func (*GetSourcesResponse) ProtoMessage() {}
 
 func (x *GetSourcesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[12]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1189,7 +1189,7 @@ func (x *GetSourcesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSourcesResponse.ProtoReflect.Descriptor instead.
 func (*GetSourcesResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{12}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetSourcesResponse) GetSources() []*Source {
@@ -1210,7 +1210,7 @@ type GetChunksRequest struct {
 
 func (x *GetChunksRequest) Reset() {
 	*x = GetChunksRequest{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[13]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1222,7 +1222,7 @@ func (x *GetChunksRequest) String() string {
 func (*GetChunksRequest) ProtoMessage() {}
 
 func (x *GetChunksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[13]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1235,7 +1235,7 @@ func (x *GetChunksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetChunksRequest.ProtoReflect.Descriptor instead.
 func (*GetChunksRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{13}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetChunksRequest) GetOrgId() string {
@@ -1268,7 +1268,7 @@ type GetChunksResponse struct {
 
 func (x *GetChunksResponse) Reset() {
 	*x = GetChunksResponse{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[14]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1280,7 +1280,7 @@ func (x *GetChunksResponse) String() string {
 func (*GetChunksResponse) ProtoMessage() {}
 
 func (x *GetChunksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[14]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1293,7 +1293,7 @@ func (x *GetChunksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetChunksResponse.ProtoReflect.Descriptor instead.
 func (*GetChunksResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{14}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetChunksResponse) GetChunks() []*Candidate {
@@ -1315,7 +1315,7 @@ type PackContextRequest struct {
 
 func (x *PackContextRequest) Reset() {
 	*x = PackContextRequest{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[15]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1327,7 +1327,7 @@ func (x *PackContextRequest) String() string {
 func (*PackContextRequest) ProtoMessage() {}
 
 func (x *PackContextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[15]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1340,7 +1340,7 @@ func (x *PackContextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackContextRequest.ProtoReflect.Descriptor instead.
 func (*PackContextRequest) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{15}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PackContextRequest) GetOrgId() string {
@@ -1380,7 +1380,7 @@ type PackContextResponse struct {
 
 func (x *PackContextResponse) Reset() {
 	*x = PackContextResponse{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[16]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1392,7 +1392,7 @@ func (x *PackContextResponse) String() string {
 func (*PackContextResponse) ProtoMessage() {}
 
 func (x *PackContextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[16]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1405,7 +1405,7 @@ func (x *PackContextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PackContextResponse.ProtoReflect.Descriptor instead.
 func (*PackContextResponse) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{16}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PackContextResponse) GetPack() *ContextPack {
@@ -1431,7 +1431,7 @@ type RetrievalChunk struct {
 
 func (x *RetrievalChunk) Reset() {
 	*x = RetrievalChunk{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[17]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1443,7 +1443,7 @@ func (x *RetrievalChunk) String() string {
 func (*RetrievalChunk) ProtoMessage() {}
 
 func (x *RetrievalChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[17]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1456,7 +1456,7 @@ func (x *RetrievalChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetrievalChunk.ProtoReflect.Descriptor instead.
 func (*RetrievalChunk) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{17}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RetrievalChunk) GetPayload() isRetrievalChunk_Payload {
@@ -1513,7 +1513,7 @@ type RetrievalTrailer struct {
 
 func (x *RetrievalTrailer) Reset() {
 	*x = RetrievalTrailer{}
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[18]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1525,7 +1525,7 @@ func (x *RetrievalTrailer) String() string {
 func (*RetrievalTrailer) ProtoMessage() {}
 
 func (x *RetrievalTrailer) ProtoReflect() protoreflect.Message {
-	mi := &file_dataplane_retrieval_v2_proto_msgTypes[18]
+	mi := &file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1538,7 +1538,7 @@ func (x *RetrievalTrailer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetrievalTrailer.ProtoReflect.Descriptor instead.
 func (*RetrievalTrailer) Descriptor() ([]byte, []int) {
-	return file_dataplane_retrieval_v2_proto_rawDescGZIP(), []int{18}
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RetrievalTrailer) GetTraceId() string {
@@ -1576,11 +1576,11 @@ func (x *RetrievalTrailer) GetCandidateCount() int32 {
 	return 0
 }
 
-var File_dataplane_retrieval_v2_proto protoreflect.FileDescriptor
+var File_dataplane_retrieval_v2_retrieval_v2_proto protoreflect.FileDescriptor
 
-const file_dataplane_retrieval_v2_proto_rawDesc = "" +
+const file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc = "" +
 	"\n" +
-	"\x1cdataplane/retrieval_v2.proto\x12\x16dataplane.retrieval.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x93\x05\n" +
+	")dataplane/retrieval/v2/retrieval_v2.proto\x12\x16dataplane.retrieval.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x93\x05\n" +
 	"\x0fRetrieveRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x14\n" +
 	"\x05query\x18\x02 \x01(\tR\x05query\x129\n" +
@@ -1748,19 +1748,19 @@ const file_dataplane_retrieval_v2_proto_rawDesc = "" +
 	"\x1acom.dataplane.retrieval.v2B\x10RetrievalV2ProtoP\x01Z2github.com/triodelab/dataplane/gen/go/retrieval/v2\xa2\x02\x03DRX\xaa\x02\x16Dataplane.Retrieval.V2\xca\x02\x16Dataplane\\Retrieval\\V2\xe2\x02\"Dataplane\\Retrieval\\V2\\GPBMetadata\xea\x02\x18Dataplane::Retrieval::V2b\x06proto3"
 
 var (
-	file_dataplane_retrieval_v2_proto_rawDescOnce sync.Once
-	file_dataplane_retrieval_v2_proto_rawDescData []byte
+	file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescOnce sync.Once
+	file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescData []byte
 )
 
-func file_dataplane_retrieval_v2_proto_rawDescGZIP() []byte {
-	file_dataplane_retrieval_v2_proto_rawDescOnce.Do(func() {
-		file_dataplane_retrieval_v2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_retrieval_v2_proto_rawDesc), len(file_dataplane_retrieval_v2_proto_rawDesc)))
+func file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescGZIP() []byte {
+	file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescOnce.Do(func() {
+		file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc), len(file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc)))
 	})
-	return file_dataplane_retrieval_v2_proto_rawDescData
+	return file_dataplane_retrieval_v2_retrieval_v2_proto_rawDescData
 }
 
-var file_dataplane_retrieval_v2_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
-var file_dataplane_retrieval_v2_proto_goTypes = []any{
+var file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_dataplane_retrieval_v2_retrieval_v2_proto_goTypes = []any{
 	(*RetrieveRequest)(nil),       // 0: dataplane.retrieval.v2.RetrieveRequest
 	(*Filters)(nil),               // 1: dataplane.retrieval.v2.Filters
 	(*Candidate)(nil),             // 2: dataplane.retrieval.v2.Candidate
@@ -1783,7 +1783,7 @@ var file_dataplane_retrieval_v2_proto_goTypes = []any{
 	(*structpb.Struct)(nil),       // 19: google.protobuf.Struct
 	(*timestamppb.Timestamp)(nil), // 20: google.protobuf.Timestamp
 }
-var file_dataplane_retrieval_v2_proto_depIdxs = []int32{
+var file_dataplane_retrieval_v2_retrieval_v2_proto_depIdxs = []int32{
 	1,  // 0: dataplane.retrieval.v2.RetrieveRequest.filters:type_name -> dataplane.retrieval.v2.Filters
 	19, // 1: dataplane.retrieval.v2.Candidate.metadata:type_name -> google.protobuf.Struct
 	20, // 2: dataplane.retrieval.v2.Source.created_at:type_name -> google.protobuf.Timestamp
@@ -1820,15 +1820,15 @@ var file_dataplane_retrieval_v2_proto_depIdxs = []int32{
 	0,  // [0:17] is the sub-list for field type_name
 }
 
-func init() { file_dataplane_retrieval_v2_proto_init() }
-func file_dataplane_retrieval_v2_proto_init() {
-	if File_dataplane_retrieval_v2_proto != nil {
+func init() { file_dataplane_retrieval_v2_retrieval_v2_proto_init() }
+func file_dataplane_retrieval_v2_retrieval_v2_proto_init() {
+	if File_dataplane_retrieval_v2_retrieval_v2_proto != nil {
 		return
 	}
-	file_dataplane_retrieval_v2_proto_msgTypes[0].OneofWrappers = []any{}
-	file_dataplane_retrieval_v2_proto_msgTypes[6].OneofWrappers = []any{}
-	file_dataplane_retrieval_v2_proto_msgTypes[13].OneofWrappers = []any{}
-	file_dataplane_retrieval_v2_proto_msgTypes[17].OneofWrappers = []any{
+	file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[0].OneofWrappers = []any{}
+	file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[6].OneofWrappers = []any{}
+	file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[13].OneofWrappers = []any{}
+	file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes[17].OneofWrappers = []any{
 		(*RetrievalChunk_Candidate)(nil),
 		(*RetrievalChunk_Trailer)(nil),
 	}
@@ -1836,17 +1836,17 @@ func file_dataplane_retrieval_v2_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_retrieval_v2_proto_rawDesc), len(file_dataplane_retrieval_v2_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc), len(file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_dataplane_retrieval_v2_proto_goTypes,
-		DependencyIndexes: file_dataplane_retrieval_v2_proto_depIdxs,
-		MessageInfos:      file_dataplane_retrieval_v2_proto_msgTypes,
+		GoTypes:           file_dataplane_retrieval_v2_retrieval_v2_proto_goTypes,
+		DependencyIndexes: file_dataplane_retrieval_v2_retrieval_v2_proto_depIdxs,
+		MessageInfos:      file_dataplane_retrieval_v2_retrieval_v2_proto_msgTypes,
 	}.Build()
-	File_dataplane_retrieval_v2_proto = out.File
-	file_dataplane_retrieval_v2_proto_goTypes = nil
-	file_dataplane_retrieval_v2_proto_depIdxs = nil
+	File_dataplane_retrieval_v2_retrieval_v2_proto = out.File
+	file_dataplane_retrieval_v2_retrieval_v2_proto_goTypes = nil
+	file_dataplane_retrieval_v2_retrieval_v2_proto_depIdxs = nil
 }

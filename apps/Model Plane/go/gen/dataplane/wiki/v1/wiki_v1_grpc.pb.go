@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: dataplane/wiki_v1.proto
+// source: dataplane/wiki/v1/wiki_v1.proto
 
 package v1
 
@@ -459,5 +459,5 @@ var WikiService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "dataplane/wiki_v1.proto",
+	Metadata: "dataplane/wiki/v1/wiki_v1.proto",
 }

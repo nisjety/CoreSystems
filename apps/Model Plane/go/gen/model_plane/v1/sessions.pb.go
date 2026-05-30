@@ -1032,6 +1032,180 @@ func (x *CompactNowResponse) GetSummary() string {
 	return ""
 }
 
+type UpsertAgentSkillRequest struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	OrgId               string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	Name                string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Description         string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	Content             string                 `protobuf:"bytes,4,opt,name=content,proto3" json:"content,omitempty"`
+	TriggerKeywords     []string               `protobuf:"bytes,5,rep,name=trigger_keywords,json=triggerKeywords,proto3" json:"trigger_keywords,omitempty"`
+	TriggerFilePatterns []string               `protobuf:"bytes,6,rep,name=trigger_file_patterns,json=triggerFilePatterns,proto3" json:"trigger_file_patterns,omitempty"`
+	ToolRestrictions    []string               `protobuf:"bytes,7,rep,name=tool_restrictions,json=toolRestrictions,proto3" json:"tool_restrictions,omitempty"`
+	Enabled             bool                   `protobuf:"varint,8,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// Provenance: "user" or "background_review". A background_review upsert
+	// must never overwrite a user-authored skill (enforced server-side).
+	Origin        string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpsertAgentSkillRequest) Reset() {
+	*x = UpsertAgentSkillRequest{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpsertAgentSkillRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpsertAgentSkillRequest) ProtoMessage() {}
+
+func (x *UpsertAgentSkillRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpsertAgentSkillRequest.ProtoReflect.Descriptor instead.
+func (*UpsertAgentSkillRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *UpsertAgentSkillRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetTriggerKeywords() []string {
+	if x != nil {
+		return x.TriggerKeywords
+	}
+	return nil
+}
+
+func (x *UpsertAgentSkillRequest) GetTriggerFilePatterns() []string {
+	if x != nil {
+		return x.TriggerFilePatterns
+	}
+	return nil
+}
+
+func (x *UpsertAgentSkillRequest) GetToolRestrictions() []string {
+	if x != nil {
+		return x.ToolRestrictions
+	}
+	return nil
+}
+
+func (x *UpsertAgentSkillRequest) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *UpsertAgentSkillRequest) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+type UpsertAgentSkillResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The skill row id (ULID for inserts; existing id on update).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// True if a new row was inserted; false if an existing skill was updated.
+	Created bool `protobuf:"varint,2,opt,name=created,proto3" json:"created,omitempty"`
+	// True if the write was suppressed because the target is a protected
+	// user-authored skill (no error — the loop simply yields to the human).
+	SkippedProtected bool `protobuf:"varint,3,opt,name=skipped_protected,json=skippedProtected,proto3" json:"skipped_protected,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *UpsertAgentSkillResponse) Reset() {
+	*x = UpsertAgentSkillResponse{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpsertAgentSkillResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpsertAgentSkillResponse) ProtoMessage() {}
+
+func (x *UpsertAgentSkillResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpsertAgentSkillResponse.ProtoReflect.Descriptor instead.
+func (*UpsertAgentSkillResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *UpsertAgentSkillResponse) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *UpsertAgentSkillResponse) GetCreated() bool {
+	if x != nil {
+		return x.Created
+	}
+	return false
+}
+
+func (x *UpsertAgentSkillResponse) GetSkippedProtected() bool {
+	if x != nil {
+		return x.SkippedProtected
+	}
+	return false
+}
+
 var File_model_plane_v1_sessions_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_sessions_proto_rawDesc = "" +
@@ -1105,7 +1279,21 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x04toon\x18\x01 \x01(\bR\x04toon\"W\n" +
 	"\x12CompactNowResponse\x12'\n" +
 	"\x0fcompacted_count\x18\x01 \x01(\x03R\x0ecompactedCount\x12\x18\n" +
-	"\asummary\x18\x02 \x01(\tR\asummary2\xe1\x05\n" +
+	"\asummary\x18\x02 \x01(\tR\asummary\"\xbe\x02\n" +
+	"\x17UpsertAgentSkillRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x18\n" +
+	"\acontent\x18\x04 \x01(\tR\acontent\x12)\n" +
+	"\x10trigger_keywords\x18\x05 \x03(\tR\x0ftriggerKeywords\x122\n" +
+	"\x15trigger_file_patterns\x18\x06 \x03(\tR\x13triggerFilePatterns\x12+\n" +
+	"\x11tool_restrictions\x18\a \x03(\tR\x10toolRestrictions\x12\x18\n" +
+	"\aenabled\x18\b \x01(\bR\aenabled\x12\x16\n" +
+	"\x06origin\x18\t \x01(\tR\x06origin\"q\n" +
+	"\x18UpsertAgentSkillResponse\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
+	"\acreated\x18\x02 \x01(\bR\acreated\x12+\n" +
+	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected2\xc8\x06\n" +
 	"\vSessionCore\x12Y\n" +
 	"\fCreateThread\x12#.model_plane.v1.CreateThreadRequest\x1a$.model_plane.v1.CreateThreadResponse\x12\\\n" +
 	"\rAppendMessage\x12$.model_plane.v1.AppendMessageRequest\x1a%.model_plane.v1.AppendMessageResponse\x12M\n" +
@@ -1115,7 +1303,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\fReplayThread\x12#.model_plane.v1.ReplayThreadRequest\x1a\x15.model_plane.v1.Event0\x01\x12k\n" +
 	"\x12GetContextAssembly\x12).model_plane.v1.GetContextAssemblyRequest\x1a*.model_plane.v1.GetContextAssemblyResponse\x12S\n" +
 	"\n" +
-	"CompactNow\x12!.model_plane.v1.CompactNowRequest\x1a\".model_plane.v1.CompactNowResponseB\xb5\x01\n" +
+	"CompactNow\x12!.model_plane.v1.CompactNowRequest\x1a\".model_plane.v1.CompactNowResponse\x12e\n" +
+	"\x10UpsertAgentSkill\x12'.model_plane.v1.UpsertAgentSkillRequest\x1a(.model_plane.v1.UpsertAgentSkillResponseB\xb5\x01\n" +
 	"\x12com.model_plane.v1B\rSessionsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1130,7 +1319,7 @@ func file_model_plane_v1_sessions_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_sessions_proto_rawDescData
 }
 
-var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(*CreateThreadRequest)(nil),        // 0: model_plane.v1.CreateThreadRequest
 	(*CreateThreadResponse)(nil),       // 1: model_plane.v1.CreateThreadResponse
@@ -1148,16 +1337,18 @@ var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(*ContextSegment)(nil),             // 13: model_plane.v1.ContextSegment
 	(*CompactNowRequest)(nil),          // 14: model_plane.v1.CompactNowRequest
 	(*CompactNowResponse)(nil),         // 15: model_plane.v1.CompactNowResponse
-	(*structpb.Struct)(nil),            // 16: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),      // 17: google.protobuf.Timestamp
-	(*Event)(nil),                      // 18: model_plane.v1.Event
+	(*UpsertAgentSkillRequest)(nil),    // 16: model_plane.v1.UpsertAgentSkillRequest
+	(*UpsertAgentSkillResponse)(nil),   // 17: model_plane.v1.UpsertAgentSkillResponse
+	(*structpb.Struct)(nil),            // 18: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),      // 19: google.protobuf.Timestamp
+	(*Event)(nil),                      // 20: model_plane.v1.Event
 }
 var file_model_plane_v1_sessions_proto_depIdxs = []int32{
-	16, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
-	17, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
-	16, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
-	17, // 3: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
-	17, // 4: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
+	18, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
+	19, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
+	18, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
+	19, // 3: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
+	19, // 4: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
 	13, // 5: model_plane.v1.GetContextAssemblyResponse.segments:type_name -> model_plane.v1.ContextSegment
 	0,  // 6: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
 	2,  // 7: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
@@ -1167,16 +1358,18 @@ var file_model_plane_v1_sessions_proto_depIdxs = []int32{
 	10, // 11: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
 	11, // 12: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
 	14, // 13: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
-	1,  // 14: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
-	3,  // 15: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
-	5,  // 16: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
-	7,  // 17: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
-	9,  // 18: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
-	18, // 19: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
-	12, // 20: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
-	15, // 21: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
-	14, // [14:22] is the sub-list for method output_type
-	6,  // [6:14] is the sub-list for method input_type
+	16, // 14: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
+	1,  // 15: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
+	3,  // 16: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
+	5,  // 17: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
+	7,  // 18: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
+	9,  // 19: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
+	20, // 20: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
+	12, // 21: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
+	15, // 22: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
+	17, // 23: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
+	15, // [15:24] is the sub-list for method output_type
+	6,  // [6:15] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -1194,7 +1387,7 @@ func file_model_plane_v1_sessions_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sessions_proto_rawDesc), len(file_model_plane_v1_sessions_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
