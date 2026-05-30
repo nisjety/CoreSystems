@@ -72,6 +72,9 @@ impl ExecutionCore for ExecutionService {
                     user_id: String::new(),
                     reason: format!("tool '{}' requires approval", req.tool_name),
                     expires_in_seconds: 3600,
+                    // execution-core has no upstream cache id to align — let
+                    // session-core mint the durable approval id (matrix §4.1).
+                    client_approval_id: String::new(),
                 })
                 .await
             {
