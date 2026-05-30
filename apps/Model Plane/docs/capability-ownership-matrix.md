@@ -103,6 +103,7 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 
 ### 4.4 Memory — **session-core `agent_memory` vs letta-bridge**
 - **Ruling:** session-core owns the **canonical memory index**. letta-bridge becomes **one adapter** behind a capability-core `memory-adapters` registry (hermes `MemoryProvider` shape). Rust calls only `Prefetch`/`SyncTurn`. **letta-bridge is not a parallel memory system.**
+- **2026-05-30 — design call: DEFER (not over-engineering).** A multi-adapter registry + `MemoryAdapter` interface is the right shape **once there are ≥2 real backends** (the hermes value: swap honcho/mem0/letta). Today letta-bridge is a single in-memory *stub* with no real Letta upstream — building a registry + interface to hold one stub is a premature abstraction (the exact "over-engineered, not small" trap). **Correct now:** leave letta-bridge as-is, keep session-core `agent_memory` canonical; introduce the `MemoryAdapter` registry **when the second adapter lands** (or when a real Letta upstream is wired). Recorded so the deferral is a decision, not an oversight.
 
 ### 4.5 Skills — registry vs promotion vs learning
 - **Ruling:** capability-core owns the **skills registry** (`agent_skills`); orchestrator-core `SkillPromotionWorkflow` **writes into it**; the hermes-style learning loop is a **producer** of skill candidates, not a store. One registry.
