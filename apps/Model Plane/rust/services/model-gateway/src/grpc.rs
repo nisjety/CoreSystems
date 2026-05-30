@@ -1948,6 +1948,16 @@ mod tests {
                 "list_agent_skills not needed in test",
             ))
         }
+
+        async fn list_conversation(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ListConversationRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListConversationResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "list_conversation not needed in test",
+            ))
+        }
     }
 
     async fn spawn_inference_client<S: InferenceCore>(

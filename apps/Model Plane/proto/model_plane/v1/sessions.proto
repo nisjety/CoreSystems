@@ -51,6 +51,13 @@ service SessionCore {
   // Org-scoped — only the caller's org's skills are returned.
   rpc ListAgentSkills(ListAgentSkillsRequest) returns (ListAgentSkillsResponse);
 
+  // List a thread's conversation messages in order (the durable transcript
+  // source for the G7 learning review). Distinct from the gateway's in-memory
+  // ListThreadMessages cache — this reads the session-core system-of-record.
+  // Org-scoped via the owning thread, so a caller reads only its own org's
+  // conversation.
+  rpc ListConversation(ListConversationRequest) returns (ListConversationResponse);
+
   // Set a run's mode (execute | plan | reactive | research) durably on the
   // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
   // write-throughs here so plan mode survives restart — auditability/resume
@@ -301,6 +308,28 @@ message AgentSkill {
 
 message ListAgentSkillsResponse {
   repeated AgentSkill skills = 1;
+}
+
+// --- ListConversation (G7 transcript source) ---
+
+message ListConversationRequest {
+  // Required. The owning org (per-org isolation — enforced via the thread).
+  string org_id = 1;
+  // Required. The thread whose conversation to return.
+  string thread_id = 2;
+}
+
+// One conversation turn. Named SessionMessage (not ThreadMessage, which the
+// gateway proto already defines in this package) to avoid a name collision.
+message SessionMessage {
+  // "user" | "assistant" | "system" | "tool".
+  string role = 1;
+  string content = 2;
+}
+
+message ListConversationResponse {
+  // Messages in conversation order (by sequence).
+  repeated SessionMessage messages = 1;
 }
 
 // --- SetRunMode (ROADMAP P3 run modes) ---

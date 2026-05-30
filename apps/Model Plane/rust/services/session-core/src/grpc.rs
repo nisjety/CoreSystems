@@ -813,6 +813,47 @@ impl SessionCore for SessionService {
         result
     }
 
+    // G7 transcript source: list a thread's conversation in order. Org-scoped
+    // via a JOIN on threads.org_id, so a caller can only read its own org's
+    // conversation (the messages table has no org_id of its own).
+    async fn list_conversation(
+        &self,
+        request: Request<pb::ListConversationRequest>,
+    ) -> Result<Response<pb::ListConversationResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListConversationResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.org_id.is_empty() || req.thread_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "org_id and thread_id are required",
+                ));
+            }
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT m.role, m.content
+                 FROM messages m
+                 JOIN threads t ON t.id = m.thread_id
+                 WHERE m.thread_id = $1 AND t.org_id = $2
+                 ORDER BY m.sequence",
+            )
+            .bind(&req.thread_id)
+            .bind(&req.org_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "list_thread_messages failed");
+                Status::internal(e.to_string())
+            })?;
+            let messages = rows
+                .into_iter()
+                .map(|(role, content)| pb::SessionMessage { role, content })
+                .collect();
+            Ok(Response::new(pb::ListConversationResponse { messages }))
+        }
+        .await;
+        record_metrics("list_conversation", started, result.is_ok());
+        result
+    }
+
     async fn get_context_assembly(
         &self,
         request: Request<pb::GetContextAssemblyRequest>,
@@ -2037,7 +2078,53 @@ mod tests {
             "another org must not see this org's skills"
         );
 
-        // cleanup
+        // G7 transcript source: list_thread_messages returns the conversation
+        // in sequence order, org-scoped via the owning thread.
+        for (i, (role, content)) in [("user", "hello"), ("assistant", "hi there")]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1,$2,$3,$4)")
+                .bind(format!("m-{sfx}-{i}"))
+                .bind(&thread_id)
+                .bind(*role)
+                .bind(*content)
+                .execute(&pool)
+                .await
+                .expect("seed message");
+        }
+        let convo = svc
+            .list_conversation(Request::new(pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+            }))
+            .await
+            .expect("list_thread_messages")
+            .into_inner();
+        assert_eq!(convo.messages.len(), 2, "expected 2 messages");
+        assert_eq!(convo.messages[0].role, "user");
+        assert_eq!(convo.messages[0].content, "hello");
+        assert_eq!(convo.messages[1].role, "assistant", "ordered by sequence");
+        // Per-org isolation: another org cannot read this thread's conversation.
+        let cross_convo = svc
+            .list_conversation(Request::new(pb::ListConversationRequest {
+                org_id: format!("attacker-{sfx}"),
+                thread_id: thread_id.clone(),
+            }))
+            .await
+            .expect("list other-org convo")
+            .into_inner();
+        assert!(
+            cross_convo.messages.is_empty(),
+            "another org must not read this thread's messages"
+        );
+
+        // cleanup (messages first — FK to threads)
+        sqlx::query("DELETE FROM messages WHERE thread_id=$1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .ok();
         for q in [
             "DELETE FROM agent_skills WHERE org_id=$1",
             "DELETE FROM approvals WHERE org_id=$1",
