@@ -4,9 +4,16 @@
 //! intended for LLM prompts and tool I/O. Objectives:
 //!
 //! * Drop the structural noise of JSON (quotes, braces, commas).
-//! * Stay losslessly round-trippable for the value shapes we actually
-//!   ship (objects, arrays, strings, numbers, bools, null).
 //! * Be deterministic so caches and idempotency hashes are stable.
+//!
+//! **Lossy / display-oriented — NOT reversible.** Unquoted scalars conflate
+//! types: the string `"30"`, the number `30`, and the bools/null literals all
+//! emit bare tokens, so `encode` is not injective and there is deliberately no
+//! `decode`. Use TOON only for prompt rendering / display where the original
+//! `Value` is still available; never on a path that must round-trip data or
+//! could replace a source record (see `docs/capability-ownership-matrix.md`
+//! §5 P8 and GOAL.md: correctness/traceability win). Making it reversible
+//! would require type-tagging scalars — a format change.
 //!
 //! Format rules:
 //!
