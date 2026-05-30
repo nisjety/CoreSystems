@@ -1,0 +1,1834 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
+	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
+)
+
+type authCoreTokenResponse struct {
+	Found     bool   `json:"found"`
+	TokenRef  string `json:"tokenRef"`
+	Scope     string `json:"scope"`
+	ExpiresAt string `json:"expires_at"`
+	Error     string `json:"error"`
+}
+
+type orgCoreOrganizationSummary struct {
+	ID string `json:"id"`
+}
+
+type orgCoreMember struct {
+	UserID      string `json:"userId"`
+	UserIDSnake string `json:"user_id"`
+	Role        string `json:"role"`
+}
+
+type orgCoreMembersResponse struct {
+	Members []orgCoreMember `json:"members"`
+}
+
+func (s *Server) resolvePrimaryMembershipFromOrgCore(
+	ctx context.Context,
+	userID string,
+) (string, string, error) {
+	if strings.TrimSpace(s.orgService) == "" || userID == "" {
+		return "", "", nil
+	}
+
+	orgReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		s.orgService+"/orgs/me",
+		nil,
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	orgReq.Header.Set("Content-Type", "application/json")
+	orgReq.Header.Set("X-User-Id", userID)
+	if s.internalKey != "" {
+		orgReq.Header.Set("X-Internal-Api-Key", s.internalKey)
+	}
+
+	orgResp, err := s.httpClient.Do(orgReq)
+	if err != nil {
+		return "", "", err
+	}
+	defer orgResp.Body.Close()
+
+	if orgResp.StatusCode != http.StatusOK {
+		return "", "", nil
+	}
+
+	var organizations []orgCoreOrganizationSummary
+	if err := json.NewDecoder(orgResp.Body).Decode(&organizations); err != nil {
+		return "", "", err
+	}
+
+	if len(organizations) == 0 || strings.TrimSpace(organizations[0].ID) == "" {
+		return "", "", nil
+	}
+
+	orgID := organizations[0].ID
+	role := "member"
+
+	memberReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/orgs/%s/members", s.orgService, orgID),
+		nil,
+	)
+	if err != nil {
+		return orgID, role, nil
+	}
+
+	memberReq.Header.Set("Content-Type", "application/json")
+	memberReq.Header.Set("X-User-Id", userID)
+	if s.internalKey != "" {
+		memberReq.Header.Set("X-Internal-Api-Key", s.internalKey)
+	}
+
+	memberResp, err := s.httpClient.Do(memberReq)
+	if err != nil {
+		return orgID, role, nil
+	}
+	defer memberResp.Body.Close()
+
+	if memberResp.StatusCode != http.StatusOK {
+		return orgID, role, nil
+	}
+
+	var membersPayload orgCoreMembersResponse
+	if err := json.NewDecoder(memberResp.Body).Decode(&membersPayload); err != nil {
+		return orgID, role, nil
+	}
+
+	for _, member := range membersPayload.Members {
+		memberUserID := member.UserID
+		if memberUserID == "" {
+			memberUserID = member.UserIDSnake
+		}
+
+		if memberUserID == userID && strings.TrimSpace(member.Role) != "" {
+			role = member.Role
+			break
+		}
+	}
+
+	return orgID, role, nil
+}
+
+// ============================================
+// USER PROFILE ENDPOINTS
+// ============================================
+
+// getCurrentUserProfile retrieves the current authenticated user's profile
+// GET /api/v1/users/me
+func (s *Server) getCurrentUserProfile(c *gin.Context) {
+	// Extract user ID from context (set by auth middleware)
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return
+	}
+
+	// Try to get email and name from headers (for auto-provisioning)
+	email := c.GetHeader("X-User-Email")
+	name := c.GetHeader("X-User-Name")
+	avatar := c.GetHeader("X-User-Avatar")
+
+	// Get or create user (auto-provision from OAuth/Better Auth if needed)
+	user, err := s.userService.GetOrCreateUser(c.Request.Context(), userIDStr, email, name, avatar)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get or create user")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to retrieve user profile",
+		})
+		return
+	}
+
+	profile, profileErr := s.userService.GetUserProfile(c.Request.Context(), userIDStr)
+	if profileErr != nil {
+		profile = nil
+	}
+
+	position := ""
+	department := ""
+	presenceStatus := mapUserStatusToPresence(user.Status)
+	firstName := ""
+	lastName := ""
+	phone := ""
+	location := ""
+	timezone := ""
+
+	if profile != nil {
+		phone = profile.Phone
+		location = profile.Location
+		timezone = profile.Timezone
+		if profile.Metadata != nil {
+			if v, ok := profile.Metadata["position"].(string); ok {
+				position = v
+			}
+			if v, ok := profile.Metadata["department"].(string); ok {
+				department = v
+			}
+			if v, ok := profile.Metadata["status"].(string); ok && v != "" {
+				presenceStatus = v
+			}
+			if v, ok := profile.Metadata["firstName"].(string); ok {
+				firstName = v
+			}
+			if v, ok := profile.Metadata["lastName"].(string); ok {
+				lastName = v
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": map[string]interface{}{
+			"id":                  user.ID,
+			"email":               user.Email,
+			"name":                user.Name,
+			"display_name":        user.Name,
+			"avatar":              user.Avatar,
+			"email_verified":      user.EmailVerified,
+			"onboarding_complete": user.OnboardingComplete,
+			"status":              presenceStatus,
+			"account_status":      user.Status,
+			"position":            position,
+			"department":          department,
+			"first_name":          firstName,
+			"last_name":           lastName,
+			"phone":               phone,
+			"location":            location,
+			"timezone":            timezone,
+			"created_at":          user.CreatedAt,
+			"updated_at":          user.UpdatedAt,
+			"last_login_at":       user.LastLoginAt,
+		},
+	})
+}
+
+// getSessionContext returns user/org/role/onboarding status for post-login routing.
+// GET /api/v1/me/session-context
+func (s *Server) getSessionContext(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	// Forward edge-gate hints so the service can auto-provision the user row
+	// on first sign-in (matches the `getCurrentUserProfile` contract). Without
+	// these, the very first call after social sign-in 500s with "user not
+	// found" — velion's session-core proxy then maps that to 502 and
+	// OnboardingGuard force-restarts the wizard.
+	email := c.GetHeader("X-User-Email")
+	name := c.GetHeader("X-User-Name")
+	avatar := c.GetHeader("X-User-Avatar")
+
+	ctxData, err := s.userService.GetSessionContext(c.Request.Context(), userID, email, name, avatar)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to build session context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build session context"})
+		return
+	}
+
+	orgID, role, resolveErr := s.resolvePrimaryMembershipFromOrgCore(c.Request.Context(), userID)
+	if resolveErr != nil {
+		log.Warn().Err(resolveErr).Str("user_id", userID).Msg("org-core fallback failed for session context")
+	} else if orgID != "" && (ctxData.OrgID != orgID || ctxData.Role != role) {
+		ctxData.OrgID = orgID
+		ctxData.Role = role
+		if ctxData.OnboardingStatus == "CREATED" {
+			ctxData.OnboardingStatus = "PROFILE_READY"
+		}
+
+		if _, ensureErr := s.userService.EnsureMembership(c.Request.Context(), users.EnsureMembershipParams{
+			UserID: userID,
+			OrgID:  orgID,
+			Role:   role,
+			Status: "active",
+		}); ensureErr != nil {
+			log.Warn().
+				Err(ensureErr).
+				Str("user_id", userID).
+				Str("org_id", orgID).
+				Msg("failed to backfill org membership in user-core")
+		}
+	}
+
+	c.JSON(http.StatusOK, ctxData)
+}
+
+// UpdateUserProfileRequest represents a request to update user profile
+type UpdateUserProfileRequest struct {
+	Name           *string `json:"name,omitempty"`
+	DisplayName    *string `json:"displayName,omitempty"`
+	Avatar         *string `json:"avatar,omitempty"`
+	FirstName      *string `json:"firstName,omitempty"`
+	LastName       *string `json:"lastName,omitempty"`
+	PhoneNumber    *string `json:"phoneNumber,omitempty"`
+	OfficeLocation *string `json:"officeLocation,omitempty"`
+	Timezone       *string `json:"timezone,omitempty"`
+	Position       *string `json:"position,omitempty"`
+	Department     *string `json:"department,omitempty"`
+	Status         *string `json:"status,omitempty"`
+}
+
+// updateCurrentUserProfile updates the current authenticated user's profile
+// PATCH /api/v1/users/me
+func (s *Server) updateCurrentUserProfile(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return
+	}
+
+	var req UpdateUserProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request body",
+		})
+		return
+	}
+
+	nameToUpdate := req.Name
+	if nameToUpdate == nil || strings.TrimSpace(*nameToUpdate) == "" {
+		if req.DisplayName != nil && strings.TrimSpace(*req.DisplayName) != "" {
+			nameToUpdate = req.DisplayName
+		} else if req.FirstName != nil || req.LastName != nil {
+			first := ""
+			last := ""
+			if req.FirstName != nil {
+				first = strings.TrimSpace(*req.FirstName)
+			}
+			if req.LastName != nil {
+				last = strings.TrimSpace(*req.LastName)
+			}
+			combined := strings.TrimSpace(strings.TrimSpace(first + " " + last))
+			if combined != "" {
+				nameToUpdate = &combined
+			}
+		}
+	}
+
+	// Ensure base user exists (auto-provision from headers/session) before update
+	if _, err := s.userService.GetOrCreateUser(c.Request.Context(), userIDStr, c.GetHeader("X-User-Email"), c.GetHeader("X-User-Name"), c.GetHeader("X-User-Avatar")); err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get or create user before update")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to update user profile",
+		})
+		return
+	}
+
+	// Update base user fields
+	user, err := s.userService.UpdateUser(c.Request.Context(), users.UpdateUserParams{
+		ID:     userIDStr,
+		Name:   nameToUpdate,
+		Avatar: req.Avatar,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update user")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to update user profile",
+		})
+		return
+	}
+
+	metadata := map[string]interface{}{}
+	if req.FirstName != nil {
+		metadata["firstName"] = *req.FirstName
+	}
+	if req.LastName != nil {
+		metadata["lastName"] = *req.LastName
+	}
+	if req.Position != nil {
+		metadata["position"] = *req.Position
+	}
+	if req.Department != nil {
+		metadata["department"] = *req.Department
+	}
+	if req.Status != nil {
+		metadata["status"] = *req.Status
+	}
+
+	hasProfileChanges := req.PhoneNumber != nil || req.OfficeLocation != nil || req.Timezone != nil || len(metadata) > 0
+	if hasProfileChanges {
+		if _, err := s.userService.UpdateUserProfile(c.Request.Context(), users.UpdateProfileParams{
+			UserID:   userIDStr,
+			Phone:    req.PhoneNumber,
+			Location: req.OfficeLocation,
+			Timezone: req.Timezone,
+			Metadata: metadata,
+		}); err != nil {
+			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update extended profile")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to update user profile",
+			})
+			return
+		}
+	}
+
+	presenceStatus := mapUserStatusToPresence(user.Status)
+	if req.Status != nil && *req.Status != "" {
+		presenceStatus = *req.Status
+	}
+
+	position := ""
+	if req.Position != nil {
+		position = *req.Position
+	}
+	department := ""
+	if req.Department != nil {
+		department = *req.Department
+	}
+	phone := ""
+	if req.PhoneNumber != nil {
+		phone = *req.PhoneNumber
+	}
+	location := ""
+	if req.OfficeLocation != nil {
+		location = *req.OfficeLocation
+	}
+	timezone := ""
+	if req.Timezone != nil {
+		timezone = *req.Timezone
+	}
+	firstName := ""
+	if req.FirstName != nil {
+		firstName = *req.FirstName
+	}
+	lastName := ""
+	if req.LastName != nil {
+		lastName = *req.LastName
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": map[string]interface{}{
+			"id":             user.ID,
+			"email":          user.Email,
+			"name":           user.Name,
+			"display_name":   user.Name,
+			"avatar":         user.Avatar,
+			"email_verified": user.EmailVerified,
+			"status":         presenceStatus,
+			"account_status": user.Status,
+			"position":       position,
+			"department":     department,
+			"first_name":     firstName,
+			"last_name":      lastName,
+			"phone":          phone,
+			"location":       location,
+			"timezone":       timezone,
+			"updated_at":     user.UpdatedAt,
+			"last_login_at":  user.LastLoginAt,
+		},
+	})
+}
+
+func mapUserStatusToPresence(status users.UserStatus) string {
+	switch status {
+	case users.UserStatusInactive:
+		return "offline"
+	case users.UserStatusSuspended, users.UserStatusBlocked:
+		return "busy"
+	default:
+		return "online"
+	}
+}
+
+// getUserByID retrieves a user by ID (admin only)
+// GET /api/v1/users/:id
+func (s *Server) getUserByID(c *gin.Context) {
+	// TODO: Add admin role check here
+	userID := c.Param("id")
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "User ID required",
+		})
+		return
+	}
+
+	user, err := s.userService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("Failed to get user")
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "User not found",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": map[string]interface{}{
+			"id":             user.ID,
+			"email":          user.Email,
+			"name":           user.Name,
+			"avatar":         user.Avatar,
+			"email_verified": user.EmailVerified,
+			"status":         user.Status,
+			"created_at":     user.CreatedAt,
+			"updated_at":     user.UpdatedAt,
+		},
+	})
+}
+
+// getUserByEmail looks up a user by their email address.
+// GET /api/v1/users/by-email/:email
+func (s *Server) getUserByEmail(c *gin.Context) {
+	email := c.Param("email")
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "email parameter required",
+		})
+		return
+	}
+
+	user, err := s.userService.GetUserByEmail(c.Request.Context(), email)
+	if err != nil {
+		log.Error().Err(err).Str("email", email).Msg("Failed to get user by email")
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "User not found",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": map[string]interface{}{
+			"id":             user.ID,
+			"email":          user.Email,
+			"name":           user.Name,
+			"avatar":         user.Avatar,
+			"email_verified": user.EmailVerified,
+			"status":         user.Status,
+			"created_at":     user.CreatedAt,
+			"updated_at":     user.UpdatedAt,
+		},
+	})
+}
+
+// markOnboardingComplete marks the user's onboarding as complete
+// POST /api/v1/users/onboarding/complete?email=...
+func (s *Server) markOnboardingComplete(c *gin.Context) {
+	if userID, exists := c.Get("user_id"); exists {
+		if userIDStr, ok := userID.(string); ok && userIDStr != "" {
+			err := s.userService.MarkOnboardingCompleteByID(c.Request.Context(), userIDStr)
+			if err != nil {
+				log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to mark onboarding complete")
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "Failed to mark onboarding complete",
+				})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"message": "Onboarding marked as complete",
+			})
+			return
+		}
+	}
+
+	email := c.Query("email")
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Email query parameter is required",
+		})
+		return
+	}
+
+	err := s.userService.MarkOnboardingComplete(c.Request.Context(), email)
+	if err != nil {
+		log.Error().Err(err).Str("email", email).Msg("Failed to mark onboarding complete")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to mark onboarding complete",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Onboarding marked as complete",
+	})
+}
+
+// ============================================
+// ONBOARDING STATE ENDPOINTS (G3 + G16)
+// ============================================
+
+// getOnboardingState handles GET /api/v1/users/me/onboarding-state.
+// Returns { step, state } for the authenticated user; empty step means
+// "no in-flight wizard."
+func (s *Server) getOnboardingState(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	view, err := s.userService.GetOnboardingState(c.Request.Context(), userID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("get onboarding state")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read onboarding state"})
+		return
+	}
+	c.JSON(http.StatusOK, view)
+}
+
+// putOnboardingState handles PUT /api/v1/users/me/onboarding-state.
+// Body: { step: string, state?: object }. Empty step clears the column.
+func (s *Server) putOnboardingState(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var in users.OnboardingStateView
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
+		return
+	}
+	if err := s.userService.UpsertOnboardingState(c.Request.Context(), userID, in); err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("upsert onboarding state")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write onboarding state"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// ============================================
+// API KEY ENDPOINTS
+// ============================================
+
+// CreateAPIKeyRequest represents a request to create an API key
+type CreateAPIKeyRequest struct {
+	Name        string   `json:"name" binding:"required"`
+	Description string   `json:"description,omitempty"`
+	Scopes      []string `json:"scopes,omitempty"`
+	ExpiresAt   *string  `json:"expires_at,omitempty"`
+}
+
+// createAPIKey creates a new API key for the current user
+// POST /api/v1/api-keys
+func (s *Server) createAPIKey(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return
+	}
+
+	var req CreateAPIKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid request body",
+		})
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		parsed, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at format, expected RFC3339"})
+			return
+		}
+		expiresAt = &parsed
+	}
+
+	result, err := s.userService.CreateAPIKey(c.Request.Context(), users.CreateAPIKeyParams{
+		UserID:      userIDStr,
+		Name:        req.Name,
+		Description: req.Description,
+		Scopes:      req.Scopes,
+		ExpiresAt:   expiresAt,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to create API key")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create API key"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"api_key": map[string]interface{}{
+			"id":          result.Key.ID,
+			"name":        result.Key.Name,
+			"description": result.Key.Description,
+			"prefix":      result.Key.KeyPrefix,
+			"scopes":      result.Key.Scopes,
+			"expires_at":  result.Key.ExpiresAt,
+			"created_at":  result.Key.CreatedAt,
+		},
+		"key": result.RawKey, // ⚠ plaintext — shown once, store securely
+	})
+}
+
+// listAPIKeys lists all API keys for the current user
+// GET /api/v1/api-keys
+func (s *Server) listAPIKeys(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return
+	}
+
+	keys, err := s.userService.ListAPIKeys(c.Request.Context(), userIDStr)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to list API keys")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list API keys"})
+		return
+	}
+
+	result := make([]map[string]interface{}, 0, len(keys))
+	for _, k := range keys {
+		result = append(result, map[string]interface{}{
+			"id":           k.ID,
+			"name":         k.Name,
+			"description":  k.Description,
+			"prefix":       k.KeyPrefix,
+			"scopes":       k.Scopes,
+			"expires_at":   k.ExpiresAt,
+			"revoked_at":   k.RevokedAt,
+			"last_used_at": k.LastUsedAt,
+			"created_at":   k.CreatedAt,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"api_keys": result,
+		"total":    len(result),
+	})
+}
+
+// revokeAPIKey revokes an API key
+// DELETE /api/v1/api-keys/:id
+func (s *Server) revokeAPIKey(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	apiKeyID := c.Param("id")
+	if apiKeyID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "API key ID required",
+		})
+		return
+	}
+
+	userIDStr, _ := userID.(string)
+
+	if err := s.userService.RevokeAPIKey(c.Request.Context(), userIDStr, apiKeyID); err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Str("key_id", apiKeyID).Msg("Failed to revoke API key")
+		c.JSON(http.StatusNotFound, gin.H{"error": "API key not found or already revoked"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "API key revoked"})
+}
+
+// ============================================
+// PREFERENCES ENDPOINTS
+// ============================================
+
+// getPreferences retrieves user preferences
+// GET /api/v1/preferences
+func (s *Server) getPreferences(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return
+	}
+
+	// Aggregate preferences from the existing settings categories
+	appearanceDefaults := map[string]interface{}{"theme": "light", "colorScheme": "blue", "fontSize": "medium", "compactMode": false}
+	langDefaults := map[string]interface{}{"language": "en-US", "region": "US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h"}
+	notifDefaults := map[string]interface{}{"emailNotifications": true, "pushNotifications": true, "teamsNotifications": true, "calendarReminders": true, "quietHours": map[string]interface{}{"enabled": false, "start": "22:00", "end": "08:00"}}
+
+	appearance, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "appearance", appearanceDefaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get appearance settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
+		return
+	}
+	langSettings, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "language", langDefaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get language settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
+		return
+	}
+	notifSettings, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "notifications", notifDefaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get notification settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
+		return
+	}
+
+	// Build compact preferences object
+	notifEmail, _ := notifSettings["emailNotifications"].(bool)
+	notifPush, _ := notifSettings["pushNotifications"].(bool)
+
+	c.JSON(http.StatusOK, gin.H{
+		"preferences": map[string]interface{}{
+			"theme":    appearance["theme"],
+			"language": langSettings["language"],
+			"timezone": langSettings["region"],
+			"notifications": map[string]bool{
+				"email": notifEmail,
+				"push":  notifPush,
+			},
+		},
+	})
+}
+
+// UpdatePreferencesRequest represents a request to update preferences
+type UpdatePreferencesRequest struct {
+	Theme         *string         `json:"theme,omitempty"`
+	Language      *string         `json:"language,omitempty"`
+	Timezone      *string         `json:"timezone,omitempty"`
+	Notifications map[string]bool `json:"notifications,omitempty"`
+}
+
+// updatePreferences updates user preferences
+// PATCH /api/v1/preferences
+func (s *Server) updatePreferences(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return
+	}
+
+	var req UpdatePreferencesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Route each field to the appropriate settings category
+	if req.Theme != nil {
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "appearance", map[string]interface{}{"theme": *req.Theme}); err != nil {
+			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update appearance preference")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
+			return
+		}
+	}
+	if req.Language != nil || req.Timezone != nil {
+		langPatch := map[string]interface{}{}
+		if req.Language != nil {
+			langPatch["language"] = *req.Language
+		}
+		if req.Timezone != nil {
+			langPatch["region"] = *req.Timezone
+		}
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "language", langPatch); err != nil {
+			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update language preference")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
+			return
+		}
+	}
+	if len(req.Notifications) > 0 {
+		notifPatch := map[string]interface{}{}
+		for k, v := range req.Notifications {
+			notifPatch[k] = v
+		}
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "notifications", notifPatch); err != nil {
+			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update notification preference")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Preferences updated successfully"})
+}
+
+// ============================================
+// SETTINGS ENDPOINTS
+// ============================================
+
+// AppearanceSettings represents user appearance preferences
+type AppearanceSettings struct {
+	Theme       string `json:"theme"`       // "light" | "dark" | "auto"
+	ColorScheme string `json:"colorScheme"` // "blue" | "green" | "purple" | "orange"
+	FontSize    string `json:"fontSize"`    // "small" | "medium" | "large"
+	CompactMode bool   `json:"compactMode"`
+}
+
+// LanguageSettings represents user language preferences
+type LanguageSettings struct {
+	Language   string `json:"language"`   // "en-US" | "nb-NO" | ...
+	Region     string `json:"region"`     // "US" | "NO" | ...
+	DateFormat string `json:"dateFormat"` // "MM/DD/YYYY" | "DD/MM/YYYY" | "YYYY-MM-DD"
+	TimeFormat string `json:"timeFormat"` // "12h" | "24h"
+}
+
+// PrivacySettings represents user privacy preferences (aligned with frontend)
+type PrivacySettings struct {
+	ShareStatus      bool   `json:"shareStatus"`
+	ShareActivity    bool   `json:"shareActivity"`
+	AllowAnalytics   bool   `json:"allowAnalytics"`
+	DataRetention    string `json:"dataRetention"` // "30days" | "90days" | "1year" | "forever"
+	TelemetryEnabled bool   `json:"telemetryEnabled"`
+	CrashReporting   bool   `json:"crashReporting"`
+}
+
+// QuietHours represents notification quiet hours window
+type QuietHours struct {
+	Enabled bool   `json:"enabled"`
+	Start   string `json:"start"` // "HH:MM"
+	End     string `json:"end"`   // "HH:MM"
+}
+
+// NotificationSettings represents user notification preferences (aligned with frontend)
+type NotificationSettings struct {
+	EmailNotifications bool       `json:"emailNotifications"`
+	PushNotifications  bool       `json:"pushNotifications"`
+	TeamsNotifications bool       `json:"teamsNotifications"`
+	CalendarReminders  bool       `json:"calendarReminders"`
+	QuietHours         QuietHours `json:"quietHours"`
+}
+
+// ============================================
+// SETTINGS HELPERS
+// ============================================
+
+// structToMap converts any struct to map[string]interface{} via JSON (used to build JSONB patches)
+func structToMap(v interface{}) (map[string]interface{}, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	return m, json.Unmarshal(data, &m)
+}
+
+// mapToStruct populates a typed struct from a map via JSON
+func mapToStruct(m map[string]interface{}, v interface{}) error {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+// getUserIDFromContext extracts the user_id string set by authContextMiddleware
+func getUserIDFromContext(c *gin.Context) (string, bool) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		return "", false
+	}
+	id, ok := userID.(string)
+	return id, ok
+}
+
+// GET /api/v1/settings/appearance
+func (s *Server) getAppearanceSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"theme": "light", "colorScheme": "blue", "fontSize": "medium", "compactMode": false,
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "appearance", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get appearance settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result AppearanceSettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/appearance
+func (s *Server) updateAppearanceSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req AppearanceSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "appearance", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update appearance settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result AppearanceSettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// GET /api/v1/settings/language
+func (s *Server) getLanguageSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"language": "en-US", "region": "US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h",
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "language", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get language settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result LanguageSettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/language
+func (s *Server) updateLanguageSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req LanguageSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "language", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update language settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result LanguageSettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// GET /api/v1/settings/privacy
+func (s *Server) getPrivacySettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"shareStatus": true, "shareActivity": false, "allowAnalytics": true,
+		"dataRetention": "90days", "telemetryEnabled": true, "crashReporting": true,
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "privacy", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get privacy settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result PrivacySettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/privacy
+func (s *Server) updatePrivacySettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req PrivacySettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "privacy", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update privacy settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result PrivacySettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// GET /api/v1/settings/notifications
+func (s *Server) getNotificationSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"emailNotifications": true, "pushNotifications": true,
+		"teamsNotifications": true, "calendarReminders": true,
+		"quietHours": map[string]interface{}{"enabled": false, "start": "22:00", "end": "08:00"},
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "notifications", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get notification settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result NotificationSettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/notifications
+func (s *Server) updateNotificationSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req NotificationSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "notifications", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update notification settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result NotificationSettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================
+// SECURITY SETTINGS
+// ============================================
+
+type SecuritySettings struct {
+	TwoFactorEnabled      bool   `json:"twoFactorEnabled"`
+	SessionTimeout        string `json:"sessionTimeout"` // "15min"|"1hour"|"4hours"|"1day"|"never"
+	LoginAlerts           bool   `json:"loginAlerts"`
+	TrustedDevicesEnabled bool   `json:"trustedDevicesEnabled"`
+}
+
+// GET /api/v1/settings/security
+func (s *Server) getSecuritySettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"twoFactorEnabled": false, "sessionTimeout": "4hours",
+		"loginAlerts": true, "trustedDevicesEnabled": true,
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "security", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get security settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result SecuritySettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/security
+func (s *Server) updateSecuritySettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req SecuritySettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "security", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update security settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result SecuritySettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================
+// ACCESSIBILITY SETTINGS
+// ============================================
+
+type AccessibilitySettings struct {
+	HighContrast             bool `json:"highContrast"`
+	ReducedMotion            bool `json:"reducedMotion"`
+	ScreenReaderOptimized    bool `json:"screenReaderOptimized"`
+	KeyboardShortcutsEnabled bool `json:"keyboardShortcutsEnabled"`
+}
+
+// GET /api/v1/settings/accessibility
+func (s *Server) getAccessibilitySettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"highContrast": false, "reducedMotion": false,
+		"screenReaderOptimized": false, "keyboardShortcutsEnabled": true,
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "accessibility", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get accessibility settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result AccessibilitySettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/accessibility
+func (s *Server) updateAccessibilitySettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req AccessibilitySettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "accessibility", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update accessibility settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result AccessibilitySettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================
+// AI SETTINGS
+// ============================================
+
+type AISettings struct {
+	AIEnabled              bool   `json:"aiEnabled"`
+	ModelPreference        string `json:"modelPreference"` // "auto"|"gpt-4"|"gpt-4o"|"claude"
+	DataCollectionEnabled  bool   `json:"dataCollectionEnabled"`
+	PersonalizationEnabled bool   `json:"personalizationEnabled"`
+	MemoryEnabled          bool   `json:"memoryEnabled"`
+}
+
+// GET /api/v1/settings/ai
+func (s *Server) getAISettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"aiEnabled": true, "modelPreference": "auto",
+		"dataCollectionEnabled": true, "personalizationEnabled": true, "memoryEnabled": false,
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get AI settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result AISettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/ai
+func (s *Server) updateAISettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req AISettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "ai", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update AI settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result AISettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================
+// STORAGE SETTINGS
+// ============================================
+
+type StorageSettings struct {
+	AutoSync             bool `json:"autoSync"`
+	ClearCacheOnLogout   bool `json:"clearCacheOnLogout"`
+	CompressionEnabled   bool `json:"compressionEnabled"`
+	OfflineAccessEnabled bool `json:"offlineAccessEnabled"`
+}
+
+// GET /api/v1/settings/storage
+func (s *Server) getStorageSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	defaults := map[string]interface{}{
+		"autoSync": true, "clearCacheOnLogout": false,
+		"compressionEnabled": true, "offlineAccessEnabled": false,
+	}
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "storage", defaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to get storage settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
+		return
+	}
+	var result StorageSettings
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /api/v1/settings/storage
+func (s *Server) updateStorageSettings(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req StorageSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return
+	}
+	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "storage", patch)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to update storage settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save settings"})
+		return
+	}
+	var result StorageSettings
+	_ = mapToStruct(updated, &result)
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================
+// PROVIDER ACCOUNT ENDPOINTS
+// ============================================
+
+// LinkProviderAccountRequest is the payload when linking a social sign-in identity
+type LinkProviderAccountRequest struct {
+	Provider          string                 `json:"provider"        binding:"required"`
+	ProviderUserID    string                 `json:"providerUserId"  binding:"required"`
+	TenantID          string                 `json:"tenantId"`
+	MicrosoftTenantID string                 `json:"microsoftTenantId"`
+	Email             string                 `json:"email"`
+	EmailFromProvider string                 `json:"emailFromProvider"`
+	DisplayName       string                 `json:"displayName"`
+	ScopesGranted     []string               `json:"scopesGranted"`
+	TokenRef          string                 `json:"tokenRef"`
+	Metadata          map[string]interface{} `json:"metadata"`
+}
+
+type providerProfileHints struct {
+	DisplayName string `json:"displayName"`
+	Avatar      string `json:"avatar"`
+	Locale      string `json:"locale"`
+	Timezone    string `json:"timezone"`
+}
+
+// GET /api/v1/providers — list all linked OAuth providers for the authenticated user
+func (s *Server) listProviderAccounts(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	accounts, err := s.userService.GetProviderAccounts(c.Request.Context(), userID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to list provider accounts")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve linked providers"})
+		return
+	}
+	// Ensure we always return an array, even if empty
+	if accounts == nil {
+		accounts = []*users.ProviderAccount{}
+	}
+	c.JSON(http.StatusOK, gin.H{"providers": accounts})
+}
+
+// POST /api/v1/providers — link a social provider identity
+// Internal: called from the NATS auth event handler on first social sign-in
+func (s *Server) linkProviderAccount(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	var req LinkProviderAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	account, err := s.userService.LinkProviderAccount(c.Request.Context(), users.UpsertProviderAccountParams{
+		UserID:            userID,
+		Provider:          req.Provider,
+		ProviderUserID:    req.ProviderUserID,
+		TenantID:          req.TenantID,
+		MicrosoftTenantID: req.MicrosoftTenantID,
+		Email:             req.Email,
+		EmailFromProvider: req.EmailFromProvider,
+		DisplayName:       req.DisplayName,
+		ScopesGranted:     req.ScopesGranted,
+		TokenRef:          req.TokenRef,
+		Metadata:          req.Metadata,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to link provider account")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to link provider"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"provider": account})
+}
+
+// EnsureMembershipRequest is used to idempotently ensure user-org membership.
+type EnsureMembershipRequest struct {
+	UserID string `json:"userId" binding:"required"`
+	OrgID  string `json:"orgId" binding:"required"`
+	Role   string `json:"role"`
+	Status string `json:"status"`
+}
+
+// ensureMembership upserts a user-org membership.
+// POST /api/v1/internal/memberships/ensure
+func (s *Server) ensureMembership(c *gin.Context) {
+	var req EnsureMembershipRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	membership, err := s.userService.EnsureMembership(c.Request.Context(), users.EnsureMembershipParams{
+		UserID: req.UserID,
+		OrgID:  req.OrgID,
+		Role:   req.Role,
+		Status: req.Status,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", req.UserID).Str("org_id", req.OrgID).Msg("failed to ensure membership")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to ensure membership"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"membership": membership})
+}
+
+// enrichUserFromProvider links or updates provider identity data for a user.
+// POST /api/v1/internal/users/enrich-from-provider
+func (s *Server) enrichUserFromProvider(c *gin.Context) {
+	var req struct {
+		UserID            string                 `json:"userId" binding:"required"`
+		Provider          string                 `json:"provider" binding:"required"`
+		ProviderUserID    string                 `json:"providerUserId" binding:"required"`
+		TenantID          string                 `json:"tenantId"`
+		MicrosoftTenantID string                 `json:"microsoftTenantId"`
+		Email             string                 `json:"email"`
+		EmailFromProvider string                 `json:"emailFromProvider"`
+		DisplayName       string                 `json:"displayName"`
+		ScopesGranted     []string               `json:"scopesGranted"`
+		TokenRef          string                 `json:"tokenRef"`
+		Metadata          map[string]interface{} `json:"metadata"`
+		ProfileHints      *providerProfileHints  `json:"profileHints"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	tokenRef := strings.TrimSpace(req.TokenRef)
+	if tokenRef != "" {
+		tokenResult, err := s.fetchAuthCoreTokenByRef(c.Request.Context(), tokenRef)
+		if err != nil {
+			log.Error().Err(err).Str("user_id", req.UserID).Str("token_ref", tokenRef).Msg("failed to retrieve token from auth-core")
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to retrieve token from auth-core"})
+			return
+		}
+
+		if !tokenResult.Found {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tokenRef"})
+			return
+		}
+
+		req.TokenRef = tokenResult.TokenRef
+		if len(req.ScopesGranted) == 0 && strings.TrimSpace(tokenResult.Scope) != "" {
+			req.ScopesGranted = strings.Fields(tokenResult.Scope)
+		}
+		if req.Metadata == nil {
+			req.Metadata = map[string]interface{}{}
+		}
+		if strings.TrimSpace(tokenResult.ExpiresAt) != "" {
+			req.Metadata["authCoreTokenExpiresAt"] = tokenResult.ExpiresAt
+		}
+	}
+
+	if req.ProfileHints != nil {
+		if strings.TrimSpace(req.DisplayName) == "" {
+			req.DisplayName = strings.TrimSpace(req.ProfileHints.DisplayName)
+		}
+		if req.Metadata == nil {
+			req.Metadata = map[string]interface{}{}
+		}
+		if strings.TrimSpace(req.ProfileHints.Avatar) != "" {
+			req.Metadata["avatar"] = strings.TrimSpace(req.ProfileHints.Avatar)
+		}
+		if strings.TrimSpace(req.ProfileHints.Locale) != "" {
+			req.Metadata["locale"] = strings.TrimSpace(req.ProfileHints.Locale)
+		}
+		if strings.TrimSpace(req.ProfileHints.Timezone) != "" {
+			req.Metadata["timeZone"] = strings.TrimSpace(req.ProfileHints.Timezone)
+		}
+	}
+
+	provider, err := s.userService.LinkProviderAccount(c.Request.Context(), users.UpsertProviderAccountParams{
+		UserID:            req.UserID,
+		Provider:          req.Provider,
+		ProviderUserID:    req.ProviderUserID,
+		TenantID:          req.TenantID,
+		MicrosoftTenantID: req.MicrosoftTenantID,
+		Email:             req.Email,
+		EmailFromProvider: req.EmailFromProvider,
+		DisplayName:       req.DisplayName,
+		ScopesGranted:     req.ScopesGranted,
+		TokenRef:          req.TokenRef,
+		Metadata:          req.Metadata,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", req.UserID).Str("provider", req.Provider).Msg("failed to enrich user from provider")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enrich user from provider"})
+		return
+	}
+
+	avatarHint := ""
+	localeHint := ""
+	timezoneHint := ""
+	if req.Metadata != nil {
+		if value, ok := req.Metadata["avatar"].(string); ok {
+			avatarHint = strings.TrimSpace(value)
+		}
+		if value, ok := req.Metadata["locale"].(string); ok {
+			localeHint = strings.TrimSpace(value)
+		}
+		if value, ok := req.Metadata["timeZone"].(string); ok {
+			timezoneHint = strings.TrimSpace(value)
+		}
+	}
+
+	if err := s.applySoftProviderProfileHints(
+		c.Request.Context(),
+		req.UserID,
+		strings.TrimSpace(req.DisplayName),
+		avatarHint,
+		localeHint,
+		timezoneHint,
+	); err != nil {
+		log.Warn().Err(err).Str("user_id", req.UserID).Str("provider", req.Provider).Msg("soft profile enrichment skipped")
+	}
+
+	c.JSON(http.StatusOK, gin.H{"provider": provider})
+}
+
+func (s *Server) applySoftProviderProfileHints(
+	ctx context.Context,
+	userID, displayName, avatar, locale, timezone string,
+) error {
+	user, err := s.userService.GetUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	updateUser := users.UpdateUserParams{ID: userID}
+	shouldUpdateUser := false
+	if displayName != "" && isPlaceholderName(user.Name) {
+		name := displayName
+		updateUser.Name = &name
+		shouldUpdateUser = true
+	}
+	if avatar != "" && isPlaceholderAvatar(user.Avatar) {
+		avatarCopy := avatar
+		updateUser.Avatar = &avatarCopy
+		shouldUpdateUser = true
+	}
+	if shouldUpdateUser {
+		if _, err := s.userService.UpdateUser(ctx, updateUser); err != nil {
+			return err
+		}
+	}
+
+	profile, profileErr := s.userService.GetUserProfile(ctx, userID)
+	if profileErr != nil {
+		profile = nil
+	}
+
+	updateProfile := users.UpdateProfileParams{UserID: userID}
+	shouldUpdateProfile := false
+	if timezone != "" && (profile == nil || strings.TrimSpace(profile.Timezone) == "") {
+		tz := timezone
+		updateProfile.Timezone = &tz
+		shouldUpdateProfile = true
+	}
+	if locale != "" && (profile == nil || strings.TrimSpace(profile.Language) == "") {
+		lang := locale
+		updateProfile.Language = &lang
+		shouldUpdateProfile = true
+	}
+	if shouldUpdateProfile {
+		if _, err := s.userService.UpdateUserProfile(ctx, updateProfile); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func isPlaceholderName(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return true
+	}
+	normalized := strings.ToLower(trimmed)
+	return normalized == "user" || normalized == "unknown user"
+}
+
+func isPlaceholderAvatar(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return true
+	}
+	normalized := strings.ToLower(trimmed)
+	return strings.Contains(normalized, "example.com/avatar") || strings.Contains(normalized, "placeholder")
+}
+
+func (s *Server) fetchAuthCoreTokenByRef(ctx context.Context, tokenRef string) (*authCoreTokenResponse, error) {
+	authServiceURL := strings.TrimRight(strings.TrimSpace(os.Getenv("AUTH_SERVICE_URL")), "/")
+	if authServiceURL == "" {
+		authServiceURL = strings.TrimRight(strings.TrimSpace(os.Getenv("BETTER_AUTH_URL")), "/")
+	}
+	if authServiceURL == "" {
+		authServiceURL = "http://localhost:3011"
+	}
+
+	internalAPIKey := strings.TrimSpace(os.Getenv("INTERNAL_API_KEY"))
+	if internalAPIKey == "" {
+		internalAPIKey = strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET"))
+	}
+	if internalAPIKey == "" {
+		return nil, fmt.Errorf("INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET must be set")
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"tokenRef":       tokenRef,
+		"internalApiKey": internalAPIKey,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal auth-core token request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authServiceURL+"/internal/oauth/token", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build auth-core token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call auth-core token endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read auth-core token response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("auth-core token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var parsed authCoreTokenResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("decode auth-core token response: %w", err)
+	}
+
+	if !parsed.Found && parsed.Error != "" {
+		return &parsed, nil
+	}
+
+	return &parsed, nil
+}
+
+// deleteCurrentUser handles DELETE /api/v1/users/me
+// It deletes the authenticated user's own account from the system.
+func (s *Server) deleteCurrentUser(c *gin.Context) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	if err := s.userService.DeleteUser(c.Request.Context(), userID); err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to delete user")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

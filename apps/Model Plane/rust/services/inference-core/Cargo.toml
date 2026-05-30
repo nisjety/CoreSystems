@@ -1,0 +1,43 @@
+[package]
+name = "inference-core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mp-contracts = { path = "../../crates/mp-contracts" }
+mp-events = { path = "../../crates/mp-events" }
+mp-ids = { path = "../../crates/mp-ids" }
+mp-telemetry = { path = "../../crates/mp-telemetry" }
+
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+chrono = { workspace = true }
+tokio-stream = "0.1"
+
+# HTTP client for provider calls
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+async-trait = "0.1"
+futures-util = "0.3"
+base64 = "0.22"
+
+# Concurrent cache
+dashmap = "6"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lib]
+name = "inference_core"
+path = "src/lib.rs"

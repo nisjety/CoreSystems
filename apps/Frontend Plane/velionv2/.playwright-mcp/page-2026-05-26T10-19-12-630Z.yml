@@ -1,0 +1,189 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Innboks" [ref=e28] [cursor=pointer]:
+              - /url: /inbox
+            - img [ref=e29]
+            - link "Din innboks" [ref=e31] [cursor=pointer]:
+              - /url: /inbox
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - link "Go to home" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e75]
+          - navigation "Workspace sections" [ref=e84]:
+            - generic [ref=e85]:
+              - link "Oversikt" [ref=e87] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e88]
+              - link "Chat" [ref=e91] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e92]
+              - link "Notater" [ref=e95] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e96]
+              - link "Agenter" [ref=e101] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e102]
+              - link "Innboks" [ref=e106] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e107]
+              - link "Kunnskap" [ref=e111] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e112]
+          - generic [ref=e114]:
+            - button "Account menu" [ref=e117] [cursor=pointer]:
+              - img [ref=e118]
+            - link "Innstillinger" [ref=e123] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e124]
+            - button "Søk" [ref=e128] [cursor=pointer]:
+              - img [ref=e129]
+        - generic [ref=e133]:
+          - generic [ref=e134]:
+            - generic [ref=e135]: Innboks
+            - button "Collapse sidebar" [ref=e136] [cursor=pointer]:
+              - img [ref=e137]
+          - generic [ref=e139]:
+            - img [ref=e140]
+            - searchbox "Filter inbox section" [ref=e143]
+          - navigation "Innboks navigation" [ref=e144]:
+            - generic [ref=e145]:
+              - generic [ref=e146]:
+                - heading "Innboks" [level=2] [ref=e147]
+                - img [ref=e148]
+              - generic [ref=e150]:
+                - generic [ref=e151]:
+                  - img [ref=e152]
+                  - generic [ref=e155]: Din innboks
+                  - generic [ref=e156]: "5"
+                - generic [ref=e157]:
+                  - button "Alle meldinger" [ref=e159] [cursor=pointer]
+                  - button "Messenger" [ref=e160] [cursor=pointer]
+                  - button "Instagram" [ref=e161] [cursor=pointer]
+                  - button "WhatsApp" [ref=e162] [cursor=pointer]
+                  - button "E-post" [ref=e163] [cursor=pointer]
+                  - button "Twitter / X" [ref=e164] [cursor=pointer]
+                  - button "SMS" [ref=e165] [cursor=pointer]
+                - generic [ref=e166]:
+                  - button "Omtaler" [ref=e167] [cursor=pointer]:
+                    - img [ref=e168]
+                    - generic [ref=e171]: Omtaler
+                    - img [ref=e172]
+                  - button "Opprettet av deg" [ref=e174] [cursor=pointer]:
+                    - img [ref=e175]
+                    - generic [ref=e177]: Opprettet av deg
+                  - button "Alle 5" [ref=e178] [cursor=pointer]:
+                    - img [ref=e179]
+                    - generic [ref=e180]: Alle
+                    - generic [ref=e181]: "5"
+                  - button "Ikke tildelt" [ref=e182] [cursor=pointer]:
+                    - img [ref=e183]
+                    - generic [ref=e186]: Ikke tildelt
+                  - button "Spam" [ref=e187] [cursor=pointer]:
+                    - img [ref=e188]
+                    - generic [ref=e190]: Spam
+                  - button "Dashboard" [ref=e191] [cursor=pointer]:
+                    - img [ref=e192]
+                    - generic [ref=e197]: Dashboard
+            - generic [ref=e198]:
+              - generic [ref=e199]:
+                - generic [ref=e200]:
+                  - heading "Agenter" [level=2] [ref=e201]
+                  - button "Add agent" [ref=e202] [cursor=pointer]:
+                    - img [ref=e203]
+                - img [ref=e204]
+              - generic [ref=e206]:
+                - button "Alle" [ref=e207] [cursor=pointer]:
+                  - img [ref=e208]
+                  - generic [ref=e210]: Alle
+                - button "Løst" [ref=e211] [cursor=pointer]:
+                  - img [ref=e212]
+                  - generic [ref=e215]: Løst
+                - button "Videresendt" [ref=e216] [cursor=pointer]:
+                  - img [ref=e217]
+                  - generic [ref=e221]: Videresendt
+                - button "Avbrutt" [ref=e222] [cursor=pointer]:
+                  - img [ref=e223]
+                  - generic [ref=e227]: Avbrutt
+    - main [ref=e228]:
+      - generic [ref=e231]:
+        - generic [ref=e232]:
+          - generic [ref=e233]:
+            - generic [ref=e234]:
+              - generic [ref=e235]:
+                - heading "Inbox" [level=1] [ref=e236]
+                - paragraph [ref=e237]: Your inbox
+              - button "Open inbox filters" [ref=e238] [cursor=pointer]:
+                - img [ref=e239]
+            - generic [ref=e240]:
+              - img
+              - searchbox "Search tickets" [ref=e241]
+          - generic [ref=e242]:
+            - button "All" [ref=e243] [cursor=pointer]
+            - button "Open" [ref=e244] [cursor=pointer]
+            - button "Pending" [ref=e245] [cursor=pointer]
+            - button "Solved" [ref=e246] [cursor=pointer]
+          - paragraph [ref=e248]: "Failed to load tickets: 503"
+        - generic [ref=e250]:
+          - main [ref=e251]:
+            - generic [ref=e252]:
+              - img [ref=e253]
+              - paragraph [ref=e255]: Select a ticket to view the conversation
+          - complementary "AI and customer context" [ref=e256]:
+            - generic [ref=e257]:
+              - generic [ref=e258]:
+                - generic [ref=e259]:
+                  - generic [ref=e260]:
+                    - img [ref=e261]
+                    - heading "Quick Replies" [level=2] [ref=e264]
+                  - button "Generate options" [disabled] [ref=e265]:
+                    - img [ref=e266]
+                    - text: Generate options
+                - paragraph [ref=e271]: Select a ticket to generate quick replies.
+              - button "Summarize" [ref=e272] [cursor=pointer]:
+                - generic [ref=e273]:
+                  - img [ref=e274]
+                  - generic [ref=e277]: Summarize
+                - img [ref=e278]
+              - button "Macros" [ref=e280] [cursor=pointer]:
+                - generic [ref=e281]: Macros
+                - img [ref=e282]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e289] [cursor=pointer]:
+    - img [ref=e290]

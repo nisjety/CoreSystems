@@ -1,0 +1,218 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Expand sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Agenter" [ref=e28] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e29]
+            - link "Studio" [ref=e31] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e71]:
+        - link "Go to home" [ref=e74] [cursor=pointer]:
+          - /url: /dashboard
+          - img [ref=e75]
+        - navigation "Workspace sections" [ref=e84]:
+          - generic [ref=e85]:
+            - link "Oversikt" [ref=e87] [cursor=pointer]:
+              - /url: /dashboard
+              - img [ref=e88]
+            - link "Chat" [ref=e91] [cursor=pointer]:
+              - /url: /chat
+              - img [ref=e92]
+            - link "Notater" [ref=e95] [cursor=pointer]:
+              - /url: /inbox
+              - img [ref=e96]
+            - link "Agenter" [ref=e101] [cursor=pointer]:
+              - /url: /agents
+              - img [ref=e102]
+            - link "Innboks" [ref=e106] [cursor=pointer]:
+              - /url: /inbox
+              - img [ref=e107]
+            - link "Kunnskap" [ref=e111] [cursor=pointer]:
+              - /url: /knowledge
+              - img [ref=e112]
+        - generic [ref=e114]:
+          - button "Account menu" [ref=e117] [cursor=pointer]:
+            - img [ref=e118]
+          - link "Innstillinger" [ref=e123] [cursor=pointer]:
+            - /url: /settings
+            - img [ref=e124]
+          - button "Søk" [ref=e128] [cursor=pointer]:
+            - img [ref=e129]
+    - main [ref=e132]:
+      - generic [ref=e134]:
+        - generic [ref=e135]:
+          - generic [ref=e136]:
+            - generic [ref=e137]:
+              - generic [ref=e138]:
+                - img [ref=e139]
+                - text: Agent studio
+              - heading "Build a support agent" [level=1] [ref=e142]
+              - paragraph [ref=e143]: Train from approved sources, give clear guidance, enable real actions, and define when Velion hands off to the team.
+            - generic [ref=e144]:
+              - button "Save draft" [ref=e145] [cursor=pointer]
+              - button "Set live" [disabled] [ref=e146]:
+                - img [ref=e147]
+                - text: Set live
+          - generic [ref=e154]:
+            - button "Train" [ref=e155] [cursor=pointer]:
+              - img [ref=e156]
+              - text: Train
+            - button "Guide" [ref=e159] [cursor=pointer]:
+              - img [ref=e160]
+              - text: Guide
+            - button "Actions" [ref=e163] [cursor=pointer]:
+              - img [ref=e164]
+              - text: Actions
+            - button "Handoff" [ref=e167] [cursor=pointer]:
+              - img [ref=e168]
+              - text: Handoff
+            - button "Deploy" [ref=e171] [cursor=pointer]:
+              - img [ref=e172]
+              - text: Deploy
+        - generic [ref=e178]:
+          - complementary [ref=e179]:
+            - navigation "Agent builder steps" [ref=e180]:
+              - button "Train Sources" [ref=e181] [cursor=pointer]:
+                - img [ref=e183]
+                - generic [ref=e186]:
+                  - generic [ref=e187]: Train
+                  - generic [ref=e188]: Sources
+                - img [ref=e189]
+              - button "Guide Voice" [ref=e191] [cursor=pointer]:
+                - img [ref=e193]
+                - generic [ref=e196]:
+                  - generic [ref=e197]: Guide
+                  - generic [ref=e198]: Voice
+                - img [ref=e199]
+              - button "Actions Tools" [ref=e201] [cursor=pointer]:
+                - img [ref=e203]
+                - generic [ref=e206]:
+                  - generic [ref=e207]: Actions
+                  - generic [ref=e208]: Tools
+                - img [ref=e209]
+              - button "Handoff Rules" [ref=e211] [cursor=pointer]:
+                - img [ref=e213]
+                - generic [ref=e216]:
+                  - generic [ref=e217]: Handoff
+                  - generic [ref=e218]: Rules
+                - img [ref=e219]
+              - button "Deploy Channels" [ref=e221] [cursor=pointer]:
+                - img [ref=e223]
+                - generic [ref=e229]:
+                  - generic [ref=e230]: Deploy
+                  - generic [ref=e231]: Channels
+                - img [ref=e232]
+            - generic [ref=e234]:
+              - paragraph [ref=e235]: Launch readiness
+              - generic [ref=e236]:
+                - generic [ref=e237]:
+                  - img [ref=e238]
+                  - generic [ref=e247]: Agent named
+                - generic [ref=e248]:
+                  - img [ref=e249]
+                  - generic [ref=e258]: Sources connected
+                - generic [ref=e259]:
+                  - img [ref=e260]
+                  - generic [ref=e263]: Guidance written
+                - generic [ref=e264]:
+                  - img [ref=e265]
+                  - generic [ref=e268]: Actions selected
+                - generic [ref=e269]:
+                  - img [ref=e270]
+                  - generic [ref=e273]: Handoff rules ready
+                - generic [ref=e274]:
+                  - img [ref=e275]
+                  - generic [ref=e278]: Channels selected
+          - main [ref=e279]:
+            - region "Connect the knowledge the agent is allowed to use" [ref=e281]:
+              - generic [ref=e282]:
+                - generic [ref=e283]:
+                  - img [ref=e284]
+                  - text: Create and train
+                - heading "Connect the knowledge the agent is allowed to use" [level=2] [ref=e288]
+                - paragraph [ref=e289]: Add sources before testing so answers can stay grounded and cite the right content.
+              - generic [ref=e290]:
+                - generic [ref=e291]:
+                  - button "Website" [ref=e292] [cursor=pointer]:
+                    - img [ref=e293]
+                    - text: Website
+                  - button "Files" [ref=e298] [cursor=pointer]:
+                    - img [ref=e299]
+                    - text: Files
+                  - button "Q&A" [ref=e302] [cursor=pointer]:
+                    - img [ref=e303]
+                    - text: Q&A
+                  - button "Notion" [ref=e305] [cursor=pointer]:
+                    - img [ref=e306]
+                    - text: Notion
+                  - button "Inbox history" [ref=e309] [cursor=pointer]:
+                    - img [ref=e310]
+                    - text: Inbox history
+                - button "Choose File" [ref=e313]
+                - generic [ref=e314]:
+                  - generic [ref=e315]: Add agent source
+                  - textbox "Add agent source" [ref=e316]:
+                    - /placeholder: https://docs.example.com
+                  - button "Add source" [ref=e317] [cursor=pointer]:
+                    - img [ref=e318]
+                    - text: Add source
+              - generic [ref=e320]: No sources connected yet.
+          - complementary [ref=e321]:
+            - generic [ref=e323]:
+              - generic [ref=e324]:
+                - paragraph [ref=e325]: Playground
+                - heading "Untitled agent" [level=2] [ref=e326]
+              - generic [ref=e327]:
+                - img [ref=e328]
+                - text: Draft
+            - generic [ref=e339]:
+              - img [ref=e340]
+              - paragraph [ref=e343]: Preview is empty
+              - paragraph [ref=e344]: Connect a source to test grounded answers.
+            - generic [ref=e346]:
+              - generic [ref=e347]: Test message
+              - textbox "Test message" [ref=e348]:
+                - /placeholder: Test a customer question...
+              - generic [ref=e349]:
+                - generic [ref=e350]: Preview only
+                - button "Send test message" [disabled] [ref=e351]:
+                  - img [ref=e352]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e360] [cursor=pointer]:
+    - img [ref=e361]
+  - alert [ref=e364]

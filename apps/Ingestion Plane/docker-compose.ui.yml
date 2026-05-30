@@ -1,0 +1,33 @@
+services:
+  temporal-ui:
+    image: temporalio/ui:2.33.0
+    container_name: ingestion-temporal-ui
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_UI_PORT: 8081
+      TEMPORAL_CORS_ORIGINS: ${TEMPORAL_UI_CORS_ORIGINS:-http://localhost:3000}
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    depends_on:
+      temporal:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    networks:
+      - ingestion-net
+
+  connector-runtime-engine:
+    environment:
+      NANGO_PUBLIC_CONNECT_URL: ${CONNECTOR_RUNTIME_CONNECT_URL:-http://localhost:3009}
+      NANGO_CONNECT_UI_PORT: ${CONNECTOR_RUNTIME_CONNECT_PORT:-3009}
+      FLAG_SERVE_CONNECT_UI: "true"
+    ports:
+      - "3009:3009"
+
+  nats:
+    ports:
+      - "8222:8222"

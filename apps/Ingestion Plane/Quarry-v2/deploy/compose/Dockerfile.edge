@@ -1,0 +1,81 @@
+# quarry-edge-rs (Rust hot path: REST/SSE/cache/transform)
+#
+# Workspace declares rust-version = 1.85 but transitive deps (aws-smithy-*,
+# serde_with, time, icu_*) have bumped MSRV to 1.91+ in Cargo.lock. Use
+# `rust:1-slim-bookworm` (latest stable, currently 1.91+) so the dep graph
+# stays buildable without pinning every transitive crate.
+#
+# Native deps:
+# - protobuf-compiler: tonic-build (gRPC clients, gated behind `grpc`)
+# - cmake/perl/clang/build-essential: boring-sys2 (BoringSSL via wreq)
+
+FROM rust:1-slim-bookworm AS build
+WORKDIR /src
+
+# System dependencies for our crate graph:
+# - pkg-config, libssl-dev, ca-certificates: standard rustls + reqwest
+# - protobuf-compiler:                       tonic-build (gRPC clients)
+# - cmake, perl, clang, build-essential:     boring-sys2 native compile
+# - git, golang-go:                          boring-sys2's build.rs runs
+#                                            BoringSSL's util/go tooling and
+#                                            git-clones submodules at compile
+#                                            time. Without these the build
+#                                            panics at boring-sys2/build/main.rs:571
+#                                            with "No such file or directory".
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev ca-certificates \
+        protobuf-compiler \
+        cmake perl clang build-essential \
+        git golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace manifests first so cargo can resolve deps in a cached layer.
+# We then copy source last for maximum cache hit rate on incremental rebuilds.
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+COPY lab ./lab
+
+# Wave 7 — reqwest 0.13's http3 surface is gated behind
+# `--cfg reqwest_unstable`. The `.cargo/config.toml` copied above sets
+# this via `[build] rustflags = [...]`, but we also set the env-var
+# form so the gate is audit-visible in `docker image inspect` (the
+# config-file form is invisible there). Both produce the same result;
+# cargo dedupes the flag.
+ENV CARGO_BUILD_RUSTFLAGS="--cfg=reqwest_unstable"
+
+# P2 / cluster #grpc — production image ships with the `grpc` feature
+# compiled in. Quarry can then route Data Plane ingest over HTTP/2 +
+# protobuf (via `GrpcIngestAdapter` → `DocumentService.CreateDocument`)
+# OR over HTTP/JSON (legacy `IngestClient`), selected at runtime via
+# `QUARRY_EDGE__DATA_PLANE_TRANSPORT=http|grpc`. Default remains HTTP so
+# existing deployments need no env-var change; flipping the var to
+# `grpc` activates the proto path without a rebuild.
+#
+# Wave 7 / cluster #http3 — `http3` is also compiled in so the optional
+# QUIC driver is available at runtime. The driver is OFF by default and
+# only fires when the request carries `prefer_http3: true` AND the edge
+# was started with `QUARRY_EDGE__HTTP3_ENABLED=1`. See
+# crates/quarry-runtime/src/http3.rs for the TLS-fingerprint caveat.
+RUN cargo build --release -p quarry-edge --bin quarry-edge-rs --features grpc,http3
+
+# ---- Runtime image -----------------------------------------------------------
+# Use bookworm-slim (not distroless) so healthcheck has wget available and
+# operators can shell in for triage. Adds ~25 MB over distroless; worth it.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin quarry
+
+COPY --from=build --chown=quarry:quarry \
+    /src/target/release/quarry-edge-rs /usr/local/bin/quarry-edge-rs
+
+USER quarry
+EXPOSE 8082
+# Use -O /dev/null instead of --spider — /health responds to GET only,
+# --spider sends HEAD which the axum router rejects with 405.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD wget --quiet --tries=1 -O /dev/null http://localhost:8082/health || exit 1
+ENTRYPOINT ["/usr/local/bin/quarry-edge-rs"]

@@ -1,0 +1,67 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]:
+          - generic [ref=e7]:
+            - generic [ref=e9]:
+              - link "Tilbake til forsiden" [ref=e10] [cursor=pointer]:
+                - /url: /
+                - img [ref=e11]
+                - text: Tilbake
+              - tooltip "Tilbake til forsiden"
+            - navigation "Onboarding steps" [ref=e13]:
+              - generic [ref=e14]:
+                - button "Go to Intro" [ref=e15]
+                - tooltip "1. Intro"
+              - generic [ref=e16]:
+                - button "Go to Organization" [ref=e17]
+                - tooltip "2. Organization"
+              - generic [ref=e18]:
+                - button "Go to Website" [ref=e19]
+                - tooltip "3. Website"
+              - generic [ref=e20]:
+                - button "Go to Sources" [ref=e21]
+                - tooltip "4. Sources"
+              - generic [ref=e22]:
+                - button "Go to Proof" [ref=e23]
+                - tooltip "5. Proof"
+              - generic [ref=e24]:
+                - button "Go to Plan" [ref=e25]
+                - tooltip "6. Plan"
+            - generic [ref=e26]:
+              - generic [ref=e27]:
+                - button "Select language" [ref=e30]:
+                  - img [ref=e31]
+                  - img [ref=e34]
+                - tooltip "Bytt språk"
+              - generic [ref=e36]:
+                - 'generic "Step 1 of 6: Intro" [ref=e37]': Step 1 of 6
+                - tooltip "Du er på Intro"
+          - generic [ref=e39]:
+            - generic [ref=e40]: Steg 1 av 6
+            - heading "Du Er Inne." [level=1] [ref=e41]
+            - paragraph [ref=e42]: Vi forbereder arbeidsplassen din. Det tar et øyeblikk.
+            - generic [ref=e45]: Setter opp Velion …
+          - paragraph [ref=e47]:
+            - text: Stuck?
+            - link "support@velion.com" [ref=e48] [cursor=pointer]:
+              - /url: mailto:support@velion.com
+        - generic [ref=e49]:
+          - generic [ref=e51]:
+            - generic:
+              - paragraph: Velion · for team som svarer.
+              - paragraph: 42 % raskere første svar · 18 språk · alt på din kunnskap.
+          - generic [ref=e54]:
+            - img [ref=e55]
+            - img [ref=e58]
+            - img [ref=e61]
+      - generic [ref=e70]:
+        - button "Om oss" [ref=e71]
+        - button "Personvern" [ref=e72]
+        - button "Opphavsrett" [ref=e73]
+        - button "Cookie-innstillinger" [ref=e74]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e80] [cursor=pointer]:
+    - img [ref=e81]
+  - alert [ref=e84]

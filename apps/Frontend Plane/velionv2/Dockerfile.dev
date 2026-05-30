@@ -1,0 +1,23 @@
+# velionv2 — dev container image (Next.js 16 + React 19).
+#
+# Mirrors the velion v1 dev pattern: pnpm install once during build, stash
+# node_modules into /opt so the runtime bind-mount can rehydrate them if the
+# host's volume is empty. The compose file mounts only the source paths so
+# editing files locally triggers Next's file watcher.
+FROM node:20-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache bash git \
+ && npm install -g pnpm@10
+
+COPY package.json pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile || pnpm install
+RUN mkdir -p /opt/velionv2-deps && cp -R node_modules /opt/velionv2-deps/node_modules
+
+COPY . .
+
+ENV PORT=3000
+EXPOSE 3000
+
+CMD ["pnpm", "dev"]

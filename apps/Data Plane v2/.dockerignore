@@ -1,0 +1,43 @@
+# Used by Rust service builds (build context = project root).
+# Excludes everything that would slow/break the build or leak secrets.
+
+# Build artifacts
+target/
+**/target/
+*.profraw
+
+# Tests / CI / development
+tests/load/
+.github/
+
+# Tooling that doesn't belong in the Rust workspace build
+tools/
+gen/
+bin/
+backups/
+
+# Go service source — each Go service has its own build context, but we
+# don't want them pulled into Rust builds (project-root context).
+services/documents-api-go/
+services/wiki-store-go/
+services/data-orchestrator-go/
+services/data-quality-go/
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# Secrets / local-only
+.env
+.env.*
+!.env.example
+
+# Docs (not needed at build time)
+docs/
+*.md
+!Cargo.toml
+
+# Git
+.git/
+.gitignore

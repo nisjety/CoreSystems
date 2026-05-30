@@ -1,0 +1,191 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Expand sidebar" [ref=e6] [cursor=pointer]:
+            - img [ref=e7]
+          - generic [ref=e10]:
+            - button "Go back" [ref=e11] [cursor=pointer]:
+              - img [ref=e12]
+            - button "Go forward" [ref=e14] [cursor=pointer]:
+              - img [ref=e15]
+          - generic [ref=e17]:
+            - img [ref=e18]
+            - link "aquatiq-as Free" [ref=e20] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e21]: aquatiq-as
+              - generic [ref=e22]: Free
+            - img [ref=e23]
+            - link "Oversikt" [ref=e25] [cursor=pointer]:
+              - /url: /dashboard
+            - img [ref=e26]
+            - link "Hjem" [ref=e28] [cursor=pointer]:
+              - /url: /dashboard
+        - button "Open global search" [ref=e30] [cursor=pointer]:
+          - img [ref=e31]
+          - generic [ref=e34]: Search across the whole system
+          - generic [ref=e35]: /
+          - generic [ref=e36]: CMD+K
+        - generic [ref=e38]:
+          - button "Toggle dark mode" [ref=e40] [cursor=pointer]:
+            - img [ref=e41]
+          - button "Open AI assistant" [ref=e44] [cursor=pointer]:
+            - img [ref=e45]
+          - button "Quick messages" [ref=e49] [cursor=pointer]:
+            - img [ref=e50]
+          - button "Notifications" [ref=e53] [cursor=pointer]:
+            - img [ref=e54]
+          - button "Calendar" [ref=e57] [cursor=pointer]:
+            - img [ref=e58]
+          - button "Open profile menu" [ref=e61] [cursor=pointer]:
+            - generic [ref=e62]: I
+    - complementary "Primary navigation" [ref=e63]:
+      - generic [ref=e65]:
+        - generic [ref=e67]:
+          - link "Go to home" [ref=e68] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e69]
+          - generic: Home
+        - navigation "Workspace sections" [ref=e78]:
+          - generic [ref=e79]:
+            - generic [ref=e80]:
+              - link "Oversikt" [ref=e81] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e83]
+              - generic: Oversikt
+            - generic [ref=e85]:
+              - link "Chat" [ref=e86] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e87]
+              - generic: Chat
+            - generic [ref=e89]:
+              - link "Innboks" [ref=e90] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e91]
+              - generic: Innboks
+            - generic [ref=e94]:
+              - link "Agenter" [ref=e95] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e96]
+              - generic: Agenter
+            - generic [ref=e99]:
+              - link "Kunnskap" [ref=e100] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e101]
+              - generic: Kunnskap
+          - generic [ref=e104]:
+            - generic [ref=e105]:
+              - link "Innstillinger" [ref=e106] [cursor=pointer]:
+                - /url: /settings
+                - img [ref=e107]
+              - generic: Innstillinger
+            - generic [ref=e110]:
+              - button "Søk" [ref=e111] [cursor=pointer]:
+                - img [ref=e112]
+              - generic: Søk
+        - generic [ref=e116]:
+          - button "Account menu" [ref=e117] [cursor=pointer]:
+            - generic [ref=e118]: I
+          - generic: Account menu
+    - main [ref=e120]:
+      - generic [ref=e122]:
+        - generic [ref=e125]:
+          - button "Chat" [pressed] [ref=e127] [cursor=pointer]
+          - button "Søk" [ref=e128] [cursor=pointer]
+          - button "Kunnskap" [ref=e129] [cursor=pointer]
+        - generic [ref=e131]:
+          - generic [ref=e133]:
+            - text: Pro Plan
+            - generic [ref=e134]: ·
+            - button "Upgrade" [ref=e135] [cursor=pointer]
+          - heading "God ettermiddag, Ima" [level=1] [ref=e136]
+        - generic [ref=e140]:
+          - generic [ref=e141]:
+            - generic [ref=e142]:
+              - button "GPT-4o Mini" [ref=e144] [cursor=pointer]:
+                - img [ref=e145]
+                - text: GPT-4o Mini
+                - img [ref=e147]
+              - link "Create agent" [ref=e149] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e150]
+                - text: Create agent
+            - generic [ref=e153]:
+              - button "Historikk" [ref=e154] [cursor=pointer]:
+                - img [ref=e155]
+              - button "Innstillinger" [ref=e158] [cursor=pointer]:
+                - img [ref=e159]
+          - generic [ref=e160]:
+            - generic [ref=e161]: Message Velion
+            - textbox "Message Velion" [ref=e162]:
+              - /placeholder: How can I help you today?
+            - generic [ref=e163]:
+              - generic [ref=e164]:
+                - button "Choose File" [ref=e165]
+                - button "Add files" [ref=e166] [cursor=pointer]:
+                  - img [ref=e168]
+                  - generic [ref=e170]: add files
+                - button "Forslag" [ref=e172] [cursor=pointer]:
+                  - img [ref=e173]
+                - button "Deep search" [ref=e175] [cursor=pointer]:
+                  - img [ref=e176]
+                - button "Browse web" [pressed] [ref=e184] [cursor=pointer]:
+                  - img [ref=e185]
+                  - text: Search
+              - generic [ref=e190]:
+                - generic [ref=e191]:
+                  - button "Auto" [pressed] [ref=e192] [cursor=pointer]:
+                    - img [ref=e193]
+                  - button "Quick" [ref=e196] [cursor=pointer]:
+                    - img [ref=e197]
+                  - button "Deep" [ref=e199] [cursor=pointer]:
+                    - img [ref=e200]
+                - button "Voice mode" [ref=e202] [cursor=pointer]: 〰
+                - button "Mic" [ref=e203] [cursor=pointer]:
+                  - img [ref=e204]
+                - button "Send message" [disabled] [ref=e207]:
+                  - img [ref=e208]
+        - generic [ref=e210]:
+          - generic [ref=e211]:
+            - generic [ref=e212]:
+              - generic: Søk
+              - link "Søk i selskapets kunnskap Søk i selskapets kunnskap Søk på tvers av nettsider, dokumenter og kanaler i én felles søkemotor." [ref=e213] [cursor=pointer]:
+                - /url: /knowledge
+                - generic [ref=e214]:
+                  - img "Søk i selskapets kunnskap" [ref=e215]
+                  - generic:
+                    - heading "Søk i selskapets kunnskap" [level=3]
+                    - paragraph: Søk på tvers av nettsider, dokumenter og kanaler i én felles søkemotor.
+              - button "Start chat for Søk i selskapets kunnskap" [ref=e217] [cursor=pointer]:
+                - img [ref=e218]:
+                  - generic: CHAT
+            - generic [ref=e222]:
+              - generic: Chat
+              - link "Chat med organisasjons-AI Chat med organisasjons-AI Still spørsmål og få svar med kildehenvisninger direkte fra selskapsinnholdet." [ref=e223] [cursor=pointer]:
+                - /url: /chat
+                - generic [ref=e224]:
+                  - img "Chat med organisasjons-AI" [ref=e225]
+                  - generic:
+                    - heading "Chat med organisasjons-AI" [level=3]
+                    - paragraph: Still spørsmål og få svar med kildehenvisninger direkte fra selskapsinnholdet.
+              - button "Start chat for Chat med organisasjons-AI" [ref=e227] [cursor=pointer]:
+                - img [ref=e228]:
+                  - generic: CHAT
+            - generic [ref=e232]:
+              - generic: Kunnskapsbase
+              - link "Oversikt over indeksert innhold Oversikt over indeksert innhold Se hva AI-en vet om selskapet — statusoversikt over alle koblede kilder." [ref=e233] [cursor=pointer]:
+                - /url: /knowledge
+                - generic [ref=e234]:
+                  - img "Oversikt over indeksert innhold" [ref=e235]
+                  - generic:
+                    - heading "Oversikt over indeksert innhold" [level=3]
+                    - paragraph: Se hva AI-en vet om selskapet — statusoversikt over alle koblede kilder.
+              - button "Start chat for Oversikt over indeksert innhold" [ref=e237] [cursor=pointer]:
+                - img [ref=e238]:
+                  - generic: CHAT
+          - button "Vis neste kortside" [ref=e242] [cursor=pointer]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e251] [cursor=pointer]:
+    - img [ref=e252]
+  - alert [ref=e255]

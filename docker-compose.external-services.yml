@@ -1,0 +1,207 @@
+name: external-services
+
+# External integration services: Zammad (ticketing), Nango (API connectors), Nohu (workflow engine)
+# All configured API-only (no web UIs) to be consumed as backend services
+
+services:
+  # ==============================================
+  # Zammad - Ticketing System (API Only)
+  # ==============================================
+  zammad-postgres:
+    image: postgres:15-alpine
+    container_name: zammad-postgres
+    environment:
+      POSTGRES_DB: zammad
+      POSTGRES_USER: ${ZAMMAD_DB_USER:-zammad}
+      POSTGRES_PASSWORD: ${ZAMMAD_DB_PASSWORD:-zammad_secure_password}
+    volumes:
+      - zammad_postgres_data:/var/lib/postgresql/data
+    networks:
+      - external-services-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ZAMMAD_DB_USER:-zammad}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zammad-redis:
+    image: redis:7-alpine
+    container_name: zammad-redis
+    command: redis-server --appendonly yes --requirepass ${ZAMMAD_REDIS_PASSWORD:-zammad_redis_password}
+    volumes:
+      - zammad_redis_data:/data
+    networks:
+      - external-services-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${ZAMMAD_REDIS_PASSWORD:-zammad_redis_password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zammad:
+    image: zammad/zammad:latest
+    container_name: zammad-api
+    environment:
+      RAILS_ENV: production
+      RAILS_LOG_TO_STDOUT: "true"
+      ZAMMAD_DB_ADAPTER: postgresql
+      ZAMMAD_DB_HOST: zammad-postgres
+      ZAMMAD_DB_PORT: 5432
+      ZAMMAD_DB_NAME: zammad
+      ZAMMAD_DB_USER: ${ZAMMAD_DB_USER:-zammad}
+      ZAMMAD_DB_PASSWORD: ${ZAMMAD_DB_PASSWORD:-zammad_secure_password}
+      ZAMMAD_REDIS_URL: redis://:${ZAMMAD_REDIS_PASSWORD:-zammad_redis_password}@zammad-redis:6379
+      # Disable web UI—API only
+      ZAMMAD_HTTP_TYPE: http
+      # API token for programmatic access
+      ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN:-zammad_api_token_$(openssl rand -hex 16)}
+    ports:
+      - "3012:3000"  # API port (no web UI)
+    volumes:
+      - zammad_data:/opt/zammad
+    networks:
+      - external-services-net
+    depends_on:
+      zammad-postgres:
+        condition: service_healthy
+      zammad-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/tickets"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ==============================================
+  # Nango - API Connector Platform (API Only)
+  # ==============================================
+  nango-postgres:
+    image: postgres:15-alpine
+    container_name: nango-postgres
+    environment:
+      POSTGRES_DB: nango
+      POSTGRES_USER: ${NANGO_DB_USER:-nango}
+      POSTGRES_PASSWORD: ${NANGO_DB_PASSWORD:-nango_secure_password}
+    volumes:
+      - nango_postgres_data:/var/lib/postgresql/data
+    networks:
+      - external-services-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NANGO_DB_USER:-nango}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nango:
+    image: nangohq/nango:latest
+    container_name: nango-api
+    environment:
+      DATABASE_URL: postgres://${NANGO_DB_USER:-nango}:${NANGO_DB_PASSWORD:-nango_secure_password}@nango-postgres:5432/nango?sslmode=disable
+      # API configuration
+      NANGO_API_KEY: ${NANGO_API_KEY:-nango_api_key_$(openssl rand -hex 32)}
+      NANGO_SECRET_KEY: ${NANGO_SECRET_KEY:-nango_secret_key_$(openssl rand -hex 32)}
+      NANGO_ENCRYPTOR_KEY: ${NANGO_ENCRYPTOR_KEY:-nango_encryptor_key_$(openssl rand -hex 32)}
+      # No web UI
+      PORT: 3013
+      NODE_ENV: production
+      LOG_LEVEL: info
+    ports:
+      - "3013:3013"  # API port
+    networks:
+      - external-services-net
+    depends_on:
+      nango-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3013/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ==============================================
+  # Nohu - Workflow Engine (API Only)
+  # ==============================================
+  nohu-postgres:
+    image: postgres:15-alpine
+    container_name: nohu-postgres
+    environment:
+      POSTGRES_DB: nohu
+      POSTGRES_USER: ${NOHU_DB_USER:-nohu}
+      POSTGRES_PASSWORD: ${NOHU_DB_PASSWORD:-nohu_secure_password}
+    volumes:
+      - nohu_postgres_data:/var/lib/postgresql/data
+    networks:
+      - external-services-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NOHU_DB_USER:-nohu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nohu-redis:
+    image: redis:7-alpine
+    container_name: nohu-redis
+    command: redis-server --appendonly yes --requirepass ${NOHU_REDIS_PASSWORD:-nohu_redis_password}
+    volumes:
+      - nohu_redis_data:/data
+    networks:
+      - external-services-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${NOHU_REDIS_PASSWORD:-nohu_redis_password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nohu:
+    image: nohu/nohu:latest
+    container_name: nohu-api
+    environment:
+      # Database
+      DATABASE_URL: postgres://${NOHU_DB_USER:-nohu}:${NOHU_DB_PASSWORD:-nohu_secure_password}@nohu-postgres:5432/nohu?sslmode=disable
+      # Redis for job queue
+      REDIS_URL: redis://:${NOHU_REDIS_PASSWORD:-nohu_redis_password}@nohu-redis:6379
+      # API configuration
+      NOHU_API_KEY: ${NOHU_API_KEY:-nohu_api_key_$(openssl rand -hex 32)}
+      NOHU_SECRET_KEY: ${NOHU_SECRET_KEY:-nohu_secret_key_$(openssl rand -hex 32)}
+      # No web UI
+      PORT: 3014
+      NODE_ENV: production
+      LOG_LEVEL: info
+    ports:
+      - "3014:3014"  # API port
+    networks:
+      - external-services-net
+    depends_on:
+      nohu-postgres:
+        condition: service_healthy
+      nohu-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3014/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  external-services-net:
+    name: external-services-net
+    driver: bridge
+
+volumes:
+  zammad_postgres_data:
+  zammad_redis_data:
+  zammad_data:
+  nango_postgres_data:
+  nohu_postgres_data:
+  nohu_redis_data:

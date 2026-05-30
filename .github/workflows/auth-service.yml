@@ -1,0 +1,107 @@
+# Physical Service Split - CI/CD Configuration
+
+name: Auth Service CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'services/auth-service/**'
+      - '.github/workflows/auth-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'services/auth-service/**'
+
+env:
+  SERVICE_NAME: auth-service
+  REGISTRY: ghcr.io
+  IMAGE_NAME: triodelab/auth-service
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./services/auth-service
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: services/auth-service/package-lock.json
+      
+      - name: Install dependencies
+        run: pnpm install
+      
+      - name: Lint
+        run: pnpm run lint
+      
+      - name: Type check
+        run: pnpm run build
+      
+      - name: Run tests
+        run: pnpm test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/auth-service
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Deploy to staging
+        run: |
+          echo "Deploying ${{ env.SERVICE_NAME }} to staging"
+          # Add deployment commands here
+
+  deploy-production:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to production
+        run: |
+          echo "Deploying ${{ env.SERVICE_NAME }} to production"
+          # Add deployment commands here

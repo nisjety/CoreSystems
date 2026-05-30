@@ -1,0 +1,17 @@
+{
+  "name": "planner-sync-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aqencia planner realtime transport service",
+  "scripts": {
+    "start": "node ./src/server.js"
+  },
+  "dependencies": {
+    "convex": "^1.28.0",
+    "lib0": "^0.2.114",
+    "nats": "^2.29.3",
+    "ws": "^8.18.3",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.30"
+  }
+}

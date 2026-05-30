@@ -1,0 +1,161 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Agenter" [ref=e28] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e29]
+            - link "Studio" [ref=e31] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - link "Go to home" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e75]
+          - navigation "Workspace sections" [ref=e84]:
+            - generic [ref=e85]:
+              - link "Oversikt" [ref=e87] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e88]
+              - link "Chat" [ref=e91] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e92]
+              - link "Agenter" [ref=e95] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e96]
+              - link "Inbox" [ref=e100] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e101]
+              - link "Kunnskap" [ref=e105] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e106]
+          - generic [ref=e108]:
+            - button "Account menu" [ref=e111] [cursor=pointer]:
+              - img [ref=e112]
+            - link "Innstillinger" [ref=e117] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e118]
+            - button "Søk" [ref=e122] [cursor=pointer]:
+              - img [ref=e123]
+        - generic [ref=e127]:
+          - generic [ref=e128]:
+            - generic [ref=e129]: Agents
+            - button "Collapse sidebar" [ref=e130] [cursor=pointer]:
+              - img [ref=e131]
+          - generic [ref=e133]:
+            - generic:
+              - img
+            - combobox "Select agent type" [ref=e134]:
+              - option "All roles"
+              - option "Service"
+              - option "Sales"
+              - option "Ecommerce"
+              - option "Chatbot" [selected]
+              - option "Workflow builder"
+            - img
+          - navigation "Chatbot builder navigation" [ref=e135]:
+            - button "Playground" [ref=e136] [cursor=pointer]:
+              - img [ref=e137]
+              - generic [ref=e140]: Playground
+            - button "Data sources" [ref=e141] [cursor=pointer]:
+              - img [ref=e142]
+              - generic [ref=e146]: Data sources
+            - button "Actions" [ref=e147] [cursor=pointer]:
+              - img [ref=e148]
+              - generic [ref=e150]: Actions
+            - button "Chat logs" [pressed] [ref=e151] [cursor=pointer]:
+              - img [ref=e152]
+              - generic [ref=e155]: Chat logs
+            - button "Analytics" [ref=e156] [cursor=pointer]:
+              - img [ref=e157]
+              - generic [ref=e159]: Analytics
+            - button "Deploy" [ref=e160] [cursor=pointer]:
+              - img [ref=e161]
+              - generic [ref=e166]: Deploy
+            - button "Settings" [ref=e167] [cursor=pointer]:
+              - img [ref=e168]
+              - generic [ref=e171]: Settings
+          - generic [ref=e174]:
+            - generic [ref=e175]: 300 / 300 credits
+            - button "Upgrade" [ref=e176] [cursor=pointer]
+    - main [ref=e182]:
+      - generic [ref=e185]:
+        - complementary [ref=e186]:
+          - generic [ref=e187]:
+            - heading "Chat logs" [level=1] [ref=e188]
+            - generic [ref=e189]:
+              - button "Filter chat logs" [ref=e190] [cursor=pointer]:
+                - img [ref=e191]
+              - button "Refresh chat logs" [ref=e194] [cursor=pointer]:
+                - img [ref=e195]
+              - button "Download chat logs" [ref=e200] [cursor=pointer]:
+                - img [ref=e201]
+          - generic [ref=e204]:
+            - button "Great question. Social proof reduces unc... Just now How can I use social proof in a UI?" [ref=e205] [cursor=pointer]:
+              - generic [ref=e206]:
+                - generic [ref=e207]: Great question. Social proof reduces unc...
+                - generic [ref=e208]: Just now
+              - paragraph [ref=e209]: How can I use social proof in a UI?
+            - button "Great brief. In subscription checkout, ... 1 minute ago How can I use social proof in a UI to increase trust..." [ref=e210] [cursor=pointer]:
+              - generic [ref=e211]:
+                - generic [ref=e212]: Great brief. In subscription checkout, ...
+                - generic [ref=e213]: 1 minute ago
+              - paragraph [ref=e214]: How can I use social proof in a UI to increase trust...
+        - main [ref=e215]:
+          - generic [ref=e216]:
+            - generic [ref=e217]:
+              - heading "Playground" [level=2] [ref=e218]
+              - generic [ref=e219]:
+                - generic [ref=e220]: Chat
+                - generic [ref=e221]: Details
+            - button "Open chat log menu" [ref=e222] [cursor=pointer]:
+              - img [ref=e223]
+          - generic [ref=e227]:
+            - generic [ref=e228]: Hi! What can I help you with?
+            - generic [ref=e229]: How can I use social proof in a UI?
+            - generic [ref=e230]:
+              - paragraph [ref=e231]: "Great question. Social proof reduces uncertainty and nudges action. In UI, think: show credible signals at the moment of decision with minimal friction. Here are high-performing patterns and where to use them:"
+              - paragraph [ref=e232]: Foundational principles
+              - list [ref=e233]:
+                - listitem [ref=e234]: "Proximity: Place proof right next to the action."
+                - listitem [ref=e235]: "Freshness: Show recency to convey momentum."
+                - listitem [ref=e236]: Specificity beats vagueness.
+                - listitem [ref=e237]: "Contextual relevance: Match proof to the user's goal."
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e243] [cursor=pointer]:
+    - img [ref=e244]
+  - alert [ref=e247]

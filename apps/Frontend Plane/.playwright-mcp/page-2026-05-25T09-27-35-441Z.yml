@@ -1,0 +1,95 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - button [ref=e6] [cursor=pointer]:
+          - img [ref=e7]
+        - button "Velion 2.0" [ref=e9] [cursor=pointer]:
+          - text: Velion 2.0
+          - img [ref=e10]
+      - button "IF" [ref=e13] [cursor=pointer]
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e19]:
+          - img [ref=e20]
+          - text: Velion workspace agent
+        - heading "What can Velion do for you?" [level=1] [ref=e23]
+        - generic [ref=e25]:
+          - generic [ref=e26]: Message Velion
+          - textbox "Message Velion" [ref=e27]
+          - generic [ref=e28]:
+            - generic [ref=e29]:
+              - button "Add attachment" [ref=e30] [cursor=pointer]:
+                - img [ref=e31]
+              - button "Attach file" [ref=e32] [cursor=pointer]:
+                - img [ref=e33]
+              - button "Search" [ref=e35] [cursor=pointer]:
+                - img [ref=e36]
+                - text: Search
+              - button "Reason" [ref=e39] [cursor=pointer]:
+                - img [ref=e40]
+                - text: Reason
+              - button "Deep research" [ref=e43] [cursor=pointer]:
+                - img [ref=e44]
+                - text: Deep research
+              - button "Create image" [ref=e49] [cursor=pointer]:
+                - img [ref=e50]
+                - text: Create image
+            - generic [ref=e54]:
+              - button "Voice input" [ref=e55] [cursor=pointer]:
+                - img [ref=e56]
+              - button "Send message" [disabled] [ref=e59]:
+                - img [ref=e60]
+        - generic [ref=e62]:
+          - button "1 Summarize high-risk inbox threads" [ref=e63] [cursor=pointer]:
+            - generic [ref=e64]: "1"
+            - text: Summarize high-risk inbox threads
+          - button "2 Write a macro for refund exceptions" [ref=e65] [cursor=pointer]:
+            - generic [ref=e66]: "2"
+            - text: Write a macro for refund exceptions
+          - button "3 Compare Zendesk and Shopify order context" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: "3"
+            - text: Compare Zendesk and Shopify order context
+          - button "4 Find stale knowledge sources" [ref=e69] [cursor=pointer]:
+            - generic [ref=e70]: "4"
+            - text: Find stale knowledge sources
+      - generic [ref=e71]:
+        - generic [ref=e73]: Create a response plan for Northwind Care's renewal question and include the support SLA wording.
+        - generic [ref=e75]:
+          - generic [ref=e76]:
+            - img [ref=e77]
+            - text: velion
+          - text: I will review the account context, renewal policy, and recent support history before drafting the response.
+          - generic [ref=e80]:
+            - img [ref=e81]
+            - img [ref=e84]
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - generic [ref=e89]:
+              - img [ref=e91]
+              - generic [ref=e94]:
+                - paragraph [ref=e95]: Northwind renewal response
+                - paragraph [ref=e96]: Manus-style task stream · using terminal-safe feedback
+            - button "Export" [ref=e97] [cursor=pointer]:
+              - img [ref=e98]
+              - text: Export
+          - generic [ref=e101]:
+            - generic [ref=e102]:
+              - img [ref=e104]
+              - generic [ref=e107]:
+                - paragraph [ref=e108]: Read renewal policy
+                - paragraph [ref=e109]: Loaded Enterprise SLA and custom procurement terms.
+            - generic [ref=e110]:
+              - img [ref=e112]
+              - generic [ref=e115]:
+                - paragraph [ref=e116]: Check customer context
+                - paragraph [ref=e117]: Northwind Care has 3 open expansion orders.
+            - generic [ref=e118]:
+              - img [ref=e120]
+              - generic [ref=e123]:
+                - paragraph [ref=e124]: Draft response
+                - paragraph [ref=e125]: Using approved macro and two source citations.
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e131] [cursor=pointer]:
+    - img [ref=e132]
+  - alert [ref=e135]

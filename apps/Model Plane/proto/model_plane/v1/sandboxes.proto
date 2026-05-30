@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// SandboxManager — thread-scoped and agent-scoped sandbox lifecycle.
+// Owns: lease creation, TTL enforcement, snapshots, cleanup, quota.
+service SandboxManager {
+  // Acquire a sandbox lease for a thread or agent.
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+
+  // Release a sandbox lease.
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+
+  // Snapshot the current sandbox state for resumability.
+  rpc SnapshotSandbox(SnapshotRequest) returns (SnapshotResponse);
+
+  // Health check.
+  rpc Health(SandboxHealthRequest) returns (SandboxHealthResponse);
+}
+
+message AcquireLeaseRequest {
+  // Thread or agent scope.
+  string scope_id = 1;
+
+  // Scope type: "thread" or "agent".
+  string scope_type = 2;
+
+  // Requested TTL.
+  google.protobuf.Duration ttl = 3;
+
+  // Tenant identifier.
+  string org_id = 4;
+}
+
+message AcquireLeaseResponse {
+  // Lease identifier (ULID).
+  string lease_id = 1;
+
+  // Sandbox connection endpoint.
+  string endpoint = 2;
+
+  // Lease expiry time.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message ReleaseLeaseRequest {
+  // Lease to release.
+  string lease_id = 1;
+}
+
+message ReleaseLeaseResponse {
+  // True if released successfully.
+  bool released = 1;
+}
+
+message SnapshotRequest {
+  // Lease to snapshot.
+  string lease_id = 1;
+
+  // Label for this snapshot.
+  string label = 2;
+}
+
+message SnapshotResponse {
+  // Snapshot identifier.
+  string snapshot_id = 1;
+
+  // MinIO object key for the snapshot.
+  string object_key = 2;
+}
+
+message SandboxHealthRequest {}
+
+message SandboxHealthResponse {
+  // "ok" when service is healthy.
+  string status = 1;
+}

@@ -1,0 +1,130 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Chat" [ref=e28] [cursor=pointer]:
+              - /url: /chat
+            - img [ref=e29]
+            - link "Oppgaver" [ref=e31] [cursor=pointer]:
+              - /url: /chat
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - link "Go to home" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e75]
+          - navigation "Workspace sections" [ref=e84]:
+            - generic [ref=e85]:
+              - link "Oversikt" [ref=e87] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e88]
+              - link "Chat" [ref=e91] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e92]
+              - link "Notater" [ref=e95] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e96]
+              - link "Agenter" [ref=e101] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e102]
+              - link "Innboks" [ref=e106] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e107]
+              - link "Kunnskap" [ref=e111] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e112]
+          - generic [ref=e114]:
+            - button "Account menu" [ref=e117] [cursor=pointer]:
+              - img [ref=e118]
+            - link "Innstillinger" [ref=e123] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e124]
+            - button "Søk" [ref=e128] [cursor=pointer]:
+              - img [ref=e129]
+        - generic [ref=e133]:
+          - generic [ref=e134]:
+            - generic [ref=e135]: Chat
+            - button "Collapse sidebar" [ref=e136] [cursor=pointer]:
+              - img [ref=e137]
+          - generic [ref=e139]:
+            - img [ref=e140]
+            - searchbox "Search conversations" [ref=e143]
+          - button "New chat" [ref=e144] [cursor=pointer]:
+            - img [ref=e146]
+            - text: Ny samtale
+          - navigation "Chat conversations" [ref=e148]:
+            - generic [ref=e149]: No conversations yet.
+    - main [ref=e150]:
+      - main [ref=e152]:
+        - generic [ref=e153]:
+          - heading "Velion Chat" [level=1] [ref=e155]
+          - generic [ref=e156]:
+            - button "Regenerate latest response" [disabled] [ref=e158]:
+              - img [ref=e159]
+            - button "New chat" [ref=e165] [cursor=pointer]:
+              - img [ref=e166]
+        - generic [ref=e171]:
+          - img [ref=e173]
+          - heading "Velion Chat" [level=2] [ref=e176]
+        - generic [ref=e179]:
+          - generic [ref=e180]: Message Velion
+          - textbox "Message Velion" [ref=e181]:
+            - /placeholder: How can I help you today?
+          - generic [ref=e182]:
+            - generic [ref=e183]:
+              - button "Add files" [ref=e185] [cursor=pointer]:
+                - img [ref=e187]
+                - generic [ref=e188]: add files
+              - button "Search" [ref=e191] [cursor=pointer]:
+                - img [ref=e192]
+                - text: Search
+              - button "Reason" [ref=e196] [cursor=pointer]:
+                - img [ref=e197]
+                - text: Reason
+              - button "Deep research" [ref=e201] [cursor=pointer]:
+                - img [ref=e202]
+                - text: Deep research
+              - button "Create image" [ref=e208] [cursor=pointer]:
+                - img [ref=e209]
+                - text: Create image
+            - generic [ref=e213]:
+              - button "Voice input" [ref=e215] [cursor=pointer]:
+                - img [ref=e216]
+              - button "Send message" [disabled] [ref=e219]:
+                - img [ref=e220]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e227] [cursor=pointer]:
+    - img [ref=e228]

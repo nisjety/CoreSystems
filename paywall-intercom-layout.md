@@ -1,0 +1,34 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - button "← TILBAKE" [ref=e19]
+            - button "Select language" [ref=e22]
+          - generic [ref=e30]:
+            - generic "Step 2 of 6" [ref=e31]
+            - generic [ref=e38]: Step 2 of 6 · Organisasjon
+            - heading "Hva Heter Organisasjonen Din?" [level=1] [ref=e39]
+            - paragraph [ref=e40]: Søk i Enhetsregisteret eller skriv inn navnet manuelt. Du kan endre alt senere.
+            - generic [ref=e41]
+          - paragraph [ref=e58]:
+            - text: Stuck?
+            - link "support@velion.com" [ref=e59] [cursor=pointer]:
+              - /url: mailto:support@velion.com
+        - generic [ref=e60]:
+          - generic [ref=e62]:
+            - generic
+          - generic [ref=e64]:
+            - img [ref=e65]
+            - img [ref=e68]
+            - img [ref=e71]
+      - generic [ref=e80]:
+        - button "Om oss" [ref=e81]
+        - button "Personvern" [ref=e82]
+        - button "Opphavsrett" [ref=e83]
+        - button "Cookie-innstillinger" [ref=e84]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e90] [cursor=pointer]:
+    - img [ref=e91]
+  - alert [ref=e94]

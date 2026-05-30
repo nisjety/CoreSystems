@@ -1,0 +1,58 @@
+[package]
+name = "quarry-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core = { path = "../quarry-core" }
+quarry-security = { path = "../quarry-security" }
+quarry-transform = { path = "../quarry-transform" }
+quarry-browser = { path = "../quarry-browser" }
+quarry-tls = { path = "../quarry-tls" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+blake3 = { workspace = true }
+tempfile = "3"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+dashmap = "6"
+async-nats = { workspace = true }
+bytes = { workspace = true }
+tokio-stream = "0.1"
+ulid = { workspace = true }
+tantivy = { workspace = true }
+redis = { workspace = true }
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+# Cycle 20 / cluster #1 — Postgres durable queue. Gated so default
+# builds don't pull sqlx + libpq toolchain.
+sqlx = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[features]
+default = ["test-site"]
+grpc = ["dep:tonic", "dep:prost", "dep:prost-types"]
+test-site = ["dep:axum"]
+postgres-queue = ["dep:sqlx", "dep:uuid"]
+
+[build-dependencies]
+tonic-build = { workspace = true, optional = false }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
+wiremock = "0.6"
+bytes = "1"

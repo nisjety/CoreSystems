@@ -1,0 +1,9 @@
+{
+  "name": "MODEL_PLANE_EVENTS",
+  "subjects": ["mp.events.>"],
+  "retention": "limits",
+  "storage": "file",
+  "max_age_secs": 604800,
+  "replicas": 3,
+  "discard": "old"
+}

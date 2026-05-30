@@ -1,0 +1,7 @@
+{
+  "durable": "",
+  "ack_policy": "explicit",
+  "ack_wait_secs": 0,
+  "max_deliver": 0,
+  "filter_subject": ""
+}

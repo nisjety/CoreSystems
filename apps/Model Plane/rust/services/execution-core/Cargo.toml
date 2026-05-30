@@ -1,0 +1,30 @@
+[package]
+name = "execution-core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mp-contracts = { path = "../../crates/mp-contracts" }
+mp-ids = { path = "../../crates/mp-ids" }
+mp-telemetry = { path = "../../crates/mp-telemetry" }
+
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+dashmap = { workspace = true }
+regex = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tokio-stream = "0.1"
+mp-slo = { path = "../../crates/mp-slo" }

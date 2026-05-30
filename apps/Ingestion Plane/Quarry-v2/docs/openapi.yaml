@@ -1,0 +1,545 @@
+openapi: "3.1.0"
+info:
+  title: Quarry v2 API
+  version: 0.1.0
+  description: Evidence engine — fetch, render, transform, fingerprint, diff.
+  contact:
+    name: Triodelab Engineering
+    email: eng@triodelab.com
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://quarry.triodelab.com
+    description: Production
+
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Liveness probe
+      tags: [ops]
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /ready:
+    get:
+      operationId: ready
+      summary: Readiness probe
+      tags: [ops]
+      responses:
+        "200":
+          description: Service is ready to accept traffic
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ready
+
+  /v1/scrape:
+    post:
+      operationId: scrape
+      summary: Scrape a single URL
+      description: |
+        Fetches a URL, runs the transform pipeline (readability, markdown, links,
+        metadata, fingerprint, diff), stores artifacts, and returns a normalized
+        output envelope. Optionally forwards results to the Data Plane for ingestion.
+      tags: [scrape]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScrapeRequest"
+      responses:
+        "200":
+          description: Successful scrape
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_NormalizedOutput"
+        "400":
+          description: Invalid request (bad URL, missing fields)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+        "403":
+          description: Security blocked (SSRF, blocklist, policy)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+        "502":
+          description: Upstream fetch failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/scrape/stream:
+    post:
+      operationId: scrapeStream
+      summary: Scrape with SSE event stream
+      description: |
+        Same as /v1/scrape but returns a Server-Sent Event stream with
+        per-step events (page_fetched, change_detected, artifact_written, etc.)
+        followed by the final result or error.
+      tags: [scrape]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScrapeRequest"
+      responses:
+        "200":
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-Sent Events stream
+
+  /v1/crawl:
+    post:
+      operationId: crawlHandoff
+      summary: Start a crawl job
+      description: |
+        Hands off a crawl request to the orchestrator for BFS execution.
+        Returns a job ID for tracking progress.
+      tags: [crawl]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrawlRequest"
+      responses:
+        "200":
+          description: Crawl job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_HandoffAck"
+        "502":
+          description: Orchestrator unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/batch:
+    post:
+      operationId: batchHandoff
+      summary: Start a batch scrape job
+      description: |
+        Hands off multiple URLs to the orchestrator for parallel execution.
+        Returns a job ID for tracking progress.
+      tags: [batch]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+      responses:
+        "200":
+          description: Batch job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_HandoffAck"
+        "502":
+          description: Orchestrator unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/internal/run_page:
+    post:
+      operationId: internalRunPage
+      summary: Internal page execution (orchestrator → edge)
+      description: |
+        Called by orchestrator activities to execute a single page.
+        Not exposed publicly in production.
+      tags: [internal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InternalRunPage"
+      responses:
+        "200":
+          description: Page execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InternalRunPageResult"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+components:
+  schemas:
+    ScrapeRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: URL to scrape
+          example: https://example.com/article
+        prev_fingerprint:
+          type: string
+          nullable: true
+          description: Previous blake3 fingerprint for change detection
+        cache:
+          $ref: "#/components/schemas/CachePolicy"
+        zdr:
+          type: boolean
+          default: false
+          description: Zero Data Retention mode — skip all durable writes
+        signals:
+          $ref: "#/components/schemas/DriverSignals"
+        ingest:
+          type: boolean
+          default: false
+          description: Forward results to Data Plane for ingestion
+        org_id:
+          type: string
+          nullable: true
+          description: Organization ID for Data Plane ingest
+
+    CrawlRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Seed URL for the crawl
+        max_pages:
+          type: integer
+          nullable: true
+          minimum: 1
+          description: Maximum pages to crawl
+
+    BatchRequest:
+      type: object
+      required: [urls]
+      properties:
+        urls:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: URLs to scrape in parallel
+
+    InternalRunPage:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+        run_id:
+          type: string
+          nullable: true
+        prev_fingerprint:
+          type: string
+          nullable: true
+        cache:
+          $ref: "#/components/schemas/CachePolicy"
+        zdr:
+          type: boolean
+          default: false
+        signals:
+          $ref: "#/components/schemas/DriverSignals"
+        ingest:
+          type: boolean
+          default: false
+        org_id:
+          type: string
+          nullable: true
+
+    CachePolicy:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [read_write, read_only, write_only, bypass]
+          default: read_write
+        max_age_s:
+          type: integer
+          default: 0
+          description: Custom TTL in seconds (0 = use default 3600s)
+
+    DriverSignals:
+      type: object
+      properties:
+        actions:
+          type: array
+          items:
+            type: string
+          default: []
+          description: Actions that require a browser driver
+        screenshot:
+          type: boolean
+          default: false
+        pdf:
+          type: boolean
+          default: false
+        prior_block_signals:
+          type: integer
+          default: 0
+          description: Number of prior blocks (>=2 escalates to browser)
+        profile_required:
+          type: boolean
+          default: false
+        url_type:
+          type: string
+          enum: [json, plain_text, default]
+          default: default
+
+    NormalizedOutput:
+      type: object
+      required: [run_id, url, status, fetched_at, fingerprint, formats, change, metadata, driver]
+      properties:
+        run_id:
+          type: string
+          description: "Typed ID with run_ prefix"
+        url:
+          $ref: "#/components/schemas/UrlTriple"
+        status:
+          type: integer
+          description: HTTP status code from upstream
+        fetched_at:
+          type: string
+          format: date-time
+        fingerprint:
+          type: string
+          description: "blake3:<hex> content fingerprint"
+        formats:
+          $ref: "#/components/schemas/OutputFormats"
+        change:
+          $ref: "#/components/schemas/ChangeInfo"
+        metadata:
+          $ref: "#/components/schemas/PageMetadata"
+        driver:
+          $ref: "#/components/schemas/DriverInfo"
+
+    UrlTriple:
+      type: object
+      required: [requested, final_url]
+      properties:
+        requested:
+          type: string
+        final_url:
+          type: string
+        canonical:
+          type: string
+          nullable: true
+
+    OutputFormats:
+      type: object
+      properties:
+        html:
+          $ref: "#/components/schemas/FormatRef"
+        markdown:
+          $ref: "#/components/schemas/FormatRef"
+        raw:
+          $ref: "#/components/schemas/FormatRef"
+        links:
+          type: array
+          items:
+            $ref: "#/components/schemas/Link"
+        screenshot:
+          $ref: "#/components/schemas/FormatRef"
+        pdf:
+          $ref: "#/components/schemas/FormatRef"
+        extract:
+          $ref: "#/components/schemas/ExtractRef"
+
+    FormatRef:
+      type: object
+      required: [artifact_id, bytes]
+      properties:
+        artifact_id:
+          type: string
+        bytes:
+          type: integer
+          format: int64
+
+    ExtractRef:
+      type: object
+      required: [artifact_id]
+      properties:
+        artifact_id:
+          type: string
+        schema_id:
+          type: string
+          nullable: true
+
+    Link:
+      type: object
+      required: [href]
+      properties:
+        href:
+          type: string
+        text:
+          type: string
+          nullable: true
+        rel:
+          type: string
+          nullable: true
+
+    ChangeInfo:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [new, changed, unchanged]
+        prev_fingerprint:
+          type: string
+          nullable: true
+
+    PageMetadata:
+      type: object
+      properties:
+        title:
+          type: string
+          nullable: true
+        lang:
+          type: string
+          nullable: true
+        content_type:
+          type: string
+          nullable: true
+
+    DriverInfo:
+      type: object
+      required: [kind, duration_ms]
+      properties:
+        kind:
+          type: string
+          enum: [static, browser, tls]
+        duration_ms:
+          type: integer
+          format: int64
+        profile:
+          type: string
+          nullable: true
+        version:
+          type: string
+          nullable: true
+        session_id:
+          type: string
+          nullable: true
+        live_view_url:
+          type: string
+          nullable: true
+          format: uri
+        recording_id:
+          type: string
+          nullable: true
+
+    HandoffAck:
+      type: object
+      required: [job_id, accepted_at]
+      properties:
+        job_id:
+          type: string
+        accepted_at:
+          type: string
+          format: date-time
+
+    InternalRunPageResult:
+      type: object
+      required: [run_id, status, fingerprint, links]
+      properties:
+        run_id:
+          type: string
+        status:
+          type: integer
+        fingerprint:
+          type: string
+        links:
+          type: array
+          items:
+            type: string
+
+    Envelope_NormalizedOutput:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+          description: Always true for success envelopes
+        data:
+          $ref: "#/components/schemas/NormalizedOutput"
+
+    Envelope_HandoffAck:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+          description: Always true for success envelopes
+        data:
+          $ref: "#/components/schemas/HandoffAck"
+
+    Envelope_Error:
+      type: object
+      required: [request_id, success, error]
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+          description: Always false for error envelopes
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+tags:
+  - name: scrape
+    description: Single-page scrape operations
+  - name: crawl
+    description: Multi-page crawl operations
+  - name: batch
+    description: Batch scrape operations
+  - name: internal
+    description: Internal plane-to-plane endpoints
+  - name: ops
+    description: Health and readiness probes

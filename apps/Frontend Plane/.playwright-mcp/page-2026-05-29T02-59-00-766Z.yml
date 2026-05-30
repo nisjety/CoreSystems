@@ -1,0 +1,377 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - banner [ref=e4]:
+        - generic [ref=e5]:
+          - generic [ref=e6]:
+            - link "Go to home" [ref=e8] [cursor=pointer]:
+              - /url: /dashboard
+              - img [ref=e9]
+            - generic [ref=e18]:
+              - button "Go back" [ref=e20] [cursor=pointer]:
+                - img [ref=e21]
+              - button "Go forward" [ref=e24] [cursor=pointer]:
+                - img [ref=e25]
+            - generic [ref=e27]:
+              - img [ref=e28]
+              - link "aquatiq-as Free" [ref=e30] [cursor=pointer]:
+                - /url: /dashboard
+                - generic [ref=e31]: aquatiq-as
+                - generic [ref=e32]: Free
+              - img [ref=e33]
+              - link "Kunnskap" [ref=e35] [cursor=pointer]:
+                - /url: /knowledge
+              - img [ref=e36]
+              - link "Kilder" [ref=e38] [cursor=pointer]:
+                - /url: /knowledge
+          - button "Open global search" [ref=e40] [cursor=pointer]:
+            - img [ref=e41]
+            - generic [ref=e44]: Search across the whole system
+            - generic [ref=e45]: /
+            - generic [ref=e46]: CMD+K
+          - generic [ref=e48]:
+            - button "Toggle dark mode" [ref=e51] [cursor=pointer]:
+              - img [ref=e53]
+            - button "Open AI assistant" [ref=e57] [cursor=pointer]:
+              - img [ref=e58]
+            - button "Quick messages" [ref=e62] [cursor=pointer]:
+              - img [ref=e63]
+            - button "Notifications" [ref=e66] [cursor=pointer]:
+              - img [ref=e67]
+            - button "Calendar" [ref=e70] [cursor=pointer]:
+              - img [ref=e71]
+            - button "Open profile menu" [ref=e74] [cursor=pointer]:
+              - generic [ref=e75]: I
+      - complementary "Primary navigation" [ref=e76]:
+        - generic [ref=e77]:
+          - generic [ref=e78]:
+            - button "Collapse sidebar" [ref=e81] [cursor=pointer]:
+              - img [ref=e82]
+            - navigation "Workspace sections" [ref=e85]:
+              - generic [ref=e86]:
+                - link "Oversikt" [ref=e88] [cursor=pointer]:
+                  - /url: /dashboard
+                  - img [ref=e89]
+                - link "Chat" [ref=e92] [cursor=pointer]:
+                  - /url: /chat
+                  - img [ref=e93]
+                - link "Agenter" [ref=e96] [cursor=pointer]:
+                  - /url: /agents
+                  - img [ref=e97]
+                - link "Inbox" [ref=e101] [cursor=pointer]:
+                  - /url: /inbox
+                  - img [ref=e102]
+                - link "Kunnskap" [ref=e106] [cursor=pointer]:
+                  - /url: /knowledge
+                  - img [ref=e107]
+            - generic [ref=e109]:
+              - link "Account" [ref=e112] [cursor=pointer]:
+                - /url: /account
+                - img [ref=e113]
+              - link "Innstillinger" [ref=e118] [cursor=pointer]:
+                - /url: /settings
+                - img [ref=e119]
+              - button "Søk" [ref=e123] [cursor=pointer]:
+                - img [ref=e124]
+          - generic [ref=e128]:
+            - generic [ref=e129]:
+              - generic [ref=e130]: Knowledge
+              - button "Collapse sidebar" [ref=e131] [cursor=pointer]:
+                - img [ref=e132]
+            - generic [ref=e134]:
+              - img [ref=e135]
+              - searchbox "Filter knowledge section" [ref=e138]
+            - generic [ref=e139]:
+              - generic:
+                - img
+              - button "Select knowledge view" [ref=e140] [cursor=pointer]:
+                - generic [ref=e141]: Knowledge Base
+              - img
+            - navigation "Knowledge navigation" [ref=e142]:
+              - generic [ref=e143]:
+                - generic [ref=e144]:
+                  - generic [ref=e145]:
+                    - heading "Collections" [level=2] [ref=e146]
+                    - button "Add collection" [ref=e147] [cursor=pointer]:
+                      - img [ref=e148]
+                  - generic [ref=e149]:
+                    - generic [ref=e150]:
+                      - button "General Knowledge 142" [pressed] [ref=e151] [cursor=pointer]:
+                        - img [ref=e152]
+                        - generic [ref=e154]: General Knowledge
+                        - generic [ref=e155]: "142"
+                      - generic [ref=e156]:
+                        - generic [ref=e159]:
+                          - button "Onboarding 15" [ref=e160] [cursor=pointer]:
+                            - img [ref=e161]
+                            - generic [ref=e163]: Onboarding
+                            - generic [ref=e164]: "15"
+                          - generic [ref=e165]:
+                            - button "Subfolder 1 5" [ref=e169] [cursor=pointer]:
+                              - img [ref=e170]
+                              - generic [ref=e172]: Subfolder 1
+                              - generic [ref=e173]: "5"
+                            - button "Subfolder 2 10" [ref=e176] [cursor=pointer]:
+                              - img [ref=e177]
+                              - generic [ref=e179]: Subfolder 2
+                              - generic [ref=e180]: "10"
+                        - button "Integrations 29" [ref=e183] [cursor=pointer]:
+                          - img [ref=e184]
+                          - generic [ref=e186]: Integrations
+                          - generic [ref=e187]: "29"
+                        - button "Documents 41" [ref=e190] [cursor=pointer]:
+                          - img [ref=e191]
+                          - generic [ref=e193]: Documents
+                          - generic [ref=e194]: "41"
+                    - generic [ref=e195]:
+                      - button "RAG Operations 32" [ref=e196] [cursor=pointer]:
+                        - img [ref=e197]
+                        - generic [ref=e200]: RAG Operations
+                        - generic [ref=e201]: "32"
+                      - generic [ref=e202]:
+                        - button "Chunk quality 18" [ref=e206] [cursor=pointer]:
+                          - img [ref=e207]
+                          - generic [ref=e209]: Chunk quality
+                          - generic [ref=e210]: "18"
+                        - button "Retrieval evals 14" [ref=e213] [cursor=pointer]:
+                          - img [ref=e214]
+                          - generic [ref=e216]: Retrieval evals
+                          - generic [ref=e217]: "14"
+                - generic [ref=e218]:
+                  - generic [ref=e219]:
+                    - heading "Pinned sources" [level=2] [ref=e220]
+                    - generic [ref=e221]: "4"
+                  - generic [ref=e222]:
+                    - button "Shipping FAQ 22 chunks · 95%" [pressed] [ref=e223] [cursor=pointer]:
+                      - img [ref=e224]
+                      - generic [ref=e226]:
+                        - generic [ref=e227]: Shipping FAQ
+                        - generic [ref=e228]: 22 chunks · 95%
+                    - button "Returns Policy v4 14 chunks · 97%" [ref=e229] [cursor=pointer]:
+                      - img [ref=e230]
+                      - generic [ref=e233]:
+                        - generic [ref=e234]: Returns Policy v4
+                        - generic [ref=e235]: 14 chunks · 97%
+                    - button "Refund SOP 17 chunks · 82%" [ref=e236] [cursor=pointer]:
+                      - img [ref=e237]
+                      - generic [ref=e240]:
+                        - generic [ref=e241]: Refund SOP
+                        - generic [ref=e242]: 17 chunks · 82%
+                    - button "Product Setup Guide 11 chunks · 71%" [ref=e243] [cursor=pointer]:
+                      - img [ref=e244]
+                      - generic [ref=e249]:
+                        - generic [ref=e250]: Product Setup Guide
+                        - generic [ref=e251]: 11 chunks · 71%
+      - main [ref=e252]:
+        - generic [ref=e255]:
+          - generic [ref=e256]:
+            - generic [ref=e257]:
+              - button "Select knowledge collection" [ref=e258] [cursor=pointer]:
+                - text: General Knowledge
+                - img [ref=e259]
+              - paragraph [ref=e261]: Overview of folders, integrations, files, and retrieval health for this knowledge space.
+            - generic [ref=e262]:
+              - generic [ref=e263]:
+                - button "Overview" [pressed] [ref=e264] [cursor=pointer]:
+                  - img [ref=e265]
+                  - text: Overview
+                - button "Graph" [ref=e267] [cursor=pointer]:
+                  - img [ref=e268]
+                  - text: Graph
+                - button "Chunks" [ref=e273] [cursor=pointer]:
+                  - img [ref=e274]
+                  - text: Chunks
+              - button "Sync" [ref=e276] [cursor=pointer]:
+                - img [ref=e277]
+                - text: Sync
+              - button "Add source" [ref=e282] [cursor=pointer]:
+                - img [ref=e283]
+                - text: Add source
+          - main [ref=e286]:
+            - generic [ref=e287]:
+              - generic [ref=e288]:
+                - generic [ref=e289]:
+                  - heading "Folders" [level=2] [ref=e290]
+                  - paragraph [ref=e291]: Browse the strongest source groups and where their files come from.
+                - button "View all" [ref=e292] [cursor=pointer]:
+                  - text: View all
+                  - img [ref=e293]
+              - generic [ref=e296]:
+                - button "Velion Knowledge Base Onboarding Guides & activation 15 Doc 1270 Notes" [ref=e297] [cursor=pointer]:
+                  - generic [ref=e301]:
+                    - text: Velion Knowledge
+                    - text: Base
+                  - generic [ref=e305]:
+                    - heading "Onboarding" [level=3] [ref=e306]
+                    - paragraph [ref=e307]: Guides & activation
+                  - generic [ref=e308]:
+                    - generic [ref=e309]:
+                      - generic [ref=e310]: "15"
+                      - generic [ref=e311]: Doc
+                    - generic [ref=e312]: 1270 Notes
+                - button "Velion Knowledge Base Integrations Sources & sync 05 Doc 840 Notes" [ref=e313] [cursor=pointer]:
+                  - generic [ref=e317]:
+                    - text: Velion Knowledge
+                    - text: Base
+                  - generic [ref=e321]:
+                    - heading "Integrations" [level=3] [ref=e322]
+                    - paragraph [ref=e323]: Sources & sync
+                  - generic [ref=e324]:
+                    - generic [ref=e325]:
+                      - generic [ref=e326]: "05"
+                      - generic [ref=e327]: Doc
+                    - generic [ref=e328]: 840 Notes
+                - button "Velion Knowledge Base Documents Files & references 10 Doc 1134 Notes" [ref=e329] [cursor=pointer]:
+                  - generic [ref=e333]:
+                    - text: Velion Knowledge
+                    - text: Base
+                  - generic [ref=e337]:
+                    - heading "Documents" [level=3] [ref=e338]
+                    - paragraph [ref=e339]: Files & references
+                  - generic [ref=e340]:
+                    - generic [ref=e341]:
+                      - generic [ref=e342]: "10"
+                      - generic [ref=e343]: Doc
+                    - generic [ref=e344]: 1134 Notes
+                - button "Velion Knowledge Base Team Interviews Voice of customer 08 Doc 462 Notes" [ref=e345] [cursor=pointer]:
+                  - generic [ref=e349]:
+                    - text: Velion Knowledge
+                    - text: Base
+                  - generic [ref=e353]:
+                    - heading "Team Interviews" [level=3] [ref=e354]
+                    - paragraph [ref=e355]: Voice of customer
+                  - generic [ref=e356]:
+                    - generic [ref=e357]:
+                      - generic [ref=e358]: "08"
+                      - generic [ref=e359]: Doc
+                    - generic [ref=e360]: 462 Notes
+            - generic [ref=e361]:
+              - generic [ref=e362]:
+                - generic [ref=e363]:
+                  - heading "Integrations" [level=2] [ref=e364]
+                  - paragraph [ref=e365]: Connected source systems feeding this knowledge space.
+                - button "View all" [ref=e366] [cursor=pointer]:
+                  - text: View all
+                  - img [ref=e367]
+              - generic [ref=e370]:
+                - article [ref=e371]:
+                  - generic [ref=e372]:
+                    - generic [ref=e373]: "N"
+                    - generic [ref=e374]: Connected
+                  - heading "Notion" [level=3] [ref=e375]
+                  - generic [ref=e376]:
+                    - generic [ref=e377]:
+                      - paragraph [ref=e378]: Documents
+                      - paragraph [ref=e379]: 28 docs
+                    - generic [ref=e380]:
+                      - paragraph [ref=e381]: Freshness
+                      - paragraph [ref=e382]: 2m ago
+                - article [ref=e383]:
+                  - generic [ref=e384]:
+                    - generic [ref=e385]: G
+                    - generic [ref=e386]: Connected
+                  - heading "Google Drive" [level=3] [ref=e387]
+                  - generic [ref=e388]:
+                    - generic [ref=e389]:
+                      - paragraph [ref=e390]: Documents
+                      - paragraph [ref=e391]: 41 docs
+                    - generic [ref=e392]:
+                      - paragraph [ref=e393]: Freshness
+                      - paragraph [ref=e394]: 6m ago
+                - article [ref=e395]:
+                  - generic [ref=e396]:
+                    - generic [ref=e397]: S
+                    - generic [ref=e398]: Syncing
+                  - heading "SharePoint" [level=3] [ref=e399]
+                  - generic [ref=e400]:
+                    - generic [ref=e401]:
+                      - paragraph [ref=e402]: Documents
+                      - paragraph [ref=e403]: 17 docs
+                    - generic [ref=e404]:
+                      - paragraph [ref=e405]: Freshness
+                      - paragraph [ref=e406]: Indexing
+                - article [ref=e407]:
+                  - generic [ref=e408]:
+                    - generic [ref=e409]: W
+                    - generic [ref=e410]: Review
+                  - heading "Website crawler" [level=3] [ref=e411]
+                  - generic [ref=e412]:
+                    - generic [ref=e413]:
+                      - paragraph [ref=e414]: Documents
+                      - paragraph [ref=e415]: 56 pages
+                    - generic [ref=e416]:
+                      - paragraph [ref=e417]: Freshness
+                      - paragraph [ref=e418]: Needs review
+            - generic [ref=e419]:
+              - generic [ref=e420]:
+                - generic [ref=e421]:
+                  - generic [ref=e422]:
+                    - heading "Files" [level=2] [ref=e423]
+                    - paragraph [ref=e424]: Latest files available to retrieval.
+                  - generic [ref=e425]:
+                    - img [ref=e426]
+                    - generic [ref=e429]: Search files…
+                - table [ref=e431]:
+                  - rowgroup [ref=e432]:
+                    - row "Name Added By Source Updated" [ref=e433]:
+                      - columnheader "Name" [ref=e434]
+                      - columnheader "Added By" [ref=e435]
+                      - columnheader "Source" [ref=e436]
+                      - columnheader "Updated" [ref=e437]
+                  - rowgroup [ref=e438]:
+                    - row "Onboarding-Guide.pdf kevin@mail.com Google Drive 48m ago" [ref=e439]:
+                      - cell "Onboarding-Guide.pdf" [ref=e440]:
+                        - generic [ref=e441]:
+                          - img [ref=e442]
+                          - text: Onboarding-Guide.pdf
+                      - cell "kevin@mail.com" [ref=e445]
+                      - cell "Google Drive" [ref=e446]
+                      - cell "48m ago" [ref=e447]
+                    - row "Product-Roadmap.docx antomwe@gmail.com Microsoft 365 1h ago" [ref=e448]:
+                      - cell "Product-Roadmap.docx" [ref=e449]:
+                        - generic [ref=e450]:
+                          - img [ref=e451]
+                          - text: Product-Roadmap.docx
+                      - cell "antomwe@gmail.com" [ref=e453]
+                      - cell "Microsoft 365" [ref=e454]
+                      - cell "1h ago" [ref=e455]
+                    - row "Shipping FAQ maria@velion.ai Notion 2h ago" [ref=e456]:
+                      - cell "Shipping FAQ" [ref=e457]:
+                        - generic [ref=e458]:
+                          - img [ref=e459]
+                          - text: Shipping FAQ
+                      - cell "maria@velion.ai" [ref=e461]
+                      - cell "Notion" [ref=e462]
+                      - cell "2h ago" [ref=e463]
+                    - row "Refund SOP.pdf jane@velion.ai Upload 3h ago" [ref=e464]:
+                      - cell "Refund SOP.pdf" [ref=e465]:
+                        - generic [ref=e466]:
+                          - img [ref=e467]
+                          - text: Refund SOP.pdf
+                      - cell "jane@velion.ai" [ref=e470]
+                      - cell "Upload" [ref=e471]
+                      - cell "3h ago" [ref=e472]
+              - complementary [ref=e473]:
+                - article [ref=e474]:
+                  - generic [ref=e476]:
+                    - heading "Indexed documents" [level=2] [ref=e477]
+                    - paragraph [ref=e478]: 94,201
+                  - paragraph [ref=e484]: +3,841
+                - article [ref=e485]:
+                  - generic [ref=e487]:
+                    - heading "Average retrieval" [level=2] [ref=e488]
+                    - paragraph [ref=e489]: 0.9s
+                  - paragraph [ref=e495]: "-0.2s"
+                - article [ref=e496]:
+                  - generic [ref=e498]:
+                    - heading "Hit rate" [level=2] [ref=e499]
+                    - paragraph [ref=e500]: 87%
+                  - paragraph [ref=e506]: "-4%"
+                - article [ref=e507]:
+                  - generic [ref=e509]:
+                    - heading "Graph coverage" [level=2] [ref=e510]
+                    - paragraph [ref=e511]: 95%
+                  - paragraph [ref=e517]: +7%
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e523] [cursor=pointer]:
+    - img [ref=e524]

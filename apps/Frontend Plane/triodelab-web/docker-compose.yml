@@ -1,0 +1,24 @@
+name: frontend-plane-triodelab-web
+
+services:
+  triodelab-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3001:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      HOSTNAME: "0.0.0.0"
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - /app/.next
+    command: ["pnpm", "exec", "next", "dev", "--webpack", "-H", "0.0.0.0"]
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

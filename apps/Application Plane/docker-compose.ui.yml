@@ -1,0 +1,39 @@
+# Optional UI tooling for the Application Plane.
+# Use together with the main compose file, for example:
+#   docker compose -f docker-compose.yml -f docker-compose.ui.yml up -d convex-dashboard
+#   docker compose --profile affine -f docker-compose.yml -f docker-compose.ui.yml up -d
+
+services:
+  convex-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: convex-dashboard
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    ports:
+      - "6791:6791"
+    environment:
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+      NODE_ENV: ${NODE_ENV:-development}
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  affine-runtime:
+    ports:
+      - "3010:3010"

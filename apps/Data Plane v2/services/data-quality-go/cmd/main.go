@@ -1,0 +1,110 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/config"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/cost"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/eval"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/gates"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/handler"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/lint"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/metrics"
+	apmotel "github.com/triodelab/dataplane/services/data-quality-go/internal/otel"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/trust"
+)
+
+func main() {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Str("service", "data-quality-go").Logger()
+
+	cfg := config.Load()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	otelShutdown, err := apmotel.Init(ctx, "data-quality-go")
+	if err != nil {
+		log.Warn().Err(err).Msg("otel init failed, continuing without tracing")
+	} else {
+		defer otelShutdown(ctx)
+	}
+
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("postgres connect failed")
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatal().Err(err).Msg("postgres ping failed")
+	}
+
+	runner := eval.NewRunner(pool)
+	scorer := trust.NewScorer(pool)
+	checker := gates.NewChecker(pool)
+	linter := lint.NewLinter(pool)
+	costQuery := cost.NewQuery(pool)
+	qualityHandler := handler.NewQualityHandler(runner, scorer, checker, linter, costQuery)
+
+	r := chi.NewRouter()
+	r.Use(chimw.RequestID)
+	r.Use(chimw.RealIP)
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.Timeout(120 * time.Second))
+	r.Use(metrics.Middleware)
+
+	r.Get("/health", handler.Health)
+	r.Get("/readyz", handler.Readyz)
+	r.Method("GET", "/metrics", metrics.Handler())
+
+	r.Route("/v1/evals", func(r chi.Router) {
+		r.Use(handler.OrgIDMiddleware)
+		r.Post("/retrieval", qualityHandler.RunEval)
+		r.Get("/retrieval/{evalID}", qualityHandler.GetEval)
+		r.Post("/compare", qualityHandler.CompareEval)
+	})
+
+	r.Route("/v1/quality", func(r chi.Router) {
+		r.Use(handler.OrgIDMiddleware)
+		r.Post("/trust", qualityHandler.ScoreTrust)
+		r.Get("/gates", qualityHandler.CheckGates)
+		r.Get("/lint", qualityHandler.Lint)
+	})
+
+	r.Route("/v1/cost", func(r chi.Router) {
+		r.Use(handler.OrgIDMiddleware)
+		r.Get("/summary", qualityHandler.CostSummary)
+	})
+
+	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
+	srv := &http.Server{Addr: addr, Handler: r}
+
+	go func() {
+		log.Info().Str("addr", addr).Msg("data-quality-go starting")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("http server error")
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Info().Msg("shutting down")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	srv.Shutdown(shutdownCtx)
+}

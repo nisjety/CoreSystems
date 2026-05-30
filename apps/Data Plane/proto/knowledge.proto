@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package dataplane.knowledge.v1;
+
+option go_package = "github.com/triodelab/dataplane/gen/go/knowledge/v1";
+
+import "google/protobuf/struct.proto";
+
+// ── Messages ──────────────────────────────────────────────────────────────
+
+message KnowledgeUnit {
+  string knowledge_id  = 1;
+  string document_id   = 2;
+  string org_id        = 3;
+  int32  chunk_index   = 4;
+  string text          = 5;
+  string embedding_status = 6;  // "pending" | "done" | "failed"
+  google.protobuf.Struct metadata = 7;
+}
+
+message GetKnowledgeUnitsRequest {
+  string document_id = 1;
+  string org_id      = 2;
+}
+
+message GetKnowledgeUnitsResponse {
+  repeated KnowledgeUnit units = 1;
+}
+
+message CheckPermissionsRequest {
+  string org_id      = 1;
+  string document_id = 2;
+  string user_id     = 3;  // optional — for user-level permission checks
+}
+
+message CheckPermissionsResponse {
+  bool   allowed = 1;
+  string reason  = 2;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────
+
+service KnowledgeService {
+  // Retrieval service uses this to check org access before returning facts
+  rpc CheckPermissions(CheckPermissionsRequest) returns (CheckPermissionsResponse);
+
+  // Retrieval service fetches full KnowledgeUnit details for returned sources
+  rpc GetKnowledgeUnits(GetKnowledgeUnitsRequest) returns (GetKnowledgeUnitsResponse);
+}

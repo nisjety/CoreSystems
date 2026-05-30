@@ -1,0 +1,262 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Agenter" [ref=e28] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e29]
+            - link "Studio" [ref=e31] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - link "Go to home" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e75]
+          - navigation "Workspace sections" [ref=e84]:
+            - generic [ref=e85]:
+              - link "Oversikt" [ref=e87] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e88]
+              - link "Chat" [ref=e91] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e92]
+              - link "Agenter" [ref=e95] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e96]
+              - link "Inbox" [ref=e100] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e101]
+              - link "Kunnskap" [ref=e105] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e106]
+          - generic [ref=e108]:
+            - button "Account menu" [ref=e111] [cursor=pointer]:
+              - img [ref=e112]
+            - link "Innstillinger" [ref=e117] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e118]
+            - button "Søk" [ref=e122] [cursor=pointer]:
+              - img [ref=e123]
+        - generic [ref=e127]:
+          - generic [ref=e128]:
+            - generic [ref=e129]:
+              - generic [ref=e130]: Agents
+              - button "Collapse sidebar" [ref=e131] [cursor=pointer]:
+                - img [ref=e132]
+            - generic [ref=e134]:
+              - generic:
+                - img
+              - combobox "Select agent type" [ref=e135]:
+                - option "All roles"
+                - option "Service"
+                - option "Sales"
+                - option "Ecommerce"
+                - option "Chatbot" [selected]
+                - option "Workflow builder"
+              - img
+            - navigation "Chatbot builder navigation" [ref=e136]:
+              - button "Playground" [pressed] [ref=e137] [cursor=pointer]:
+                - img [ref=e138]
+                - generic [ref=e141]: Playground
+              - button "Data sources" [ref=e142] [cursor=pointer]:
+                - img [ref=e143]
+                - generic [ref=e147]: Data sources
+              - button "Actions" [ref=e148] [cursor=pointer]:
+                - img [ref=e149]
+                - generic [ref=e151]: Actions
+              - button "Chat logs" [ref=e152] [cursor=pointer]:
+                - img [ref=e153]
+                - generic [ref=e156]: Chat logs
+              - button "Analytics" [ref=e157] [cursor=pointer]:
+                - img [ref=e158]
+                - generic [ref=e160]: Analytics
+              - button "Install" [ref=e161] [cursor=pointer]:
+                - img [ref=e162]
+                - generic [ref=e166]: Install
+              - button "Settings" [ref=e167] [cursor=pointer]:
+                - img [ref=e168]
+                - generic [ref=e171]: Settings
+            - generic [ref=e174]:
+              - generic [ref=e175]: 300 / 300 credits
+              - button "Upgrade" [ref=e176] [cursor=pointer]
+          - complementary "Chatbot add-on library" [ref=e182]:
+            - generic [ref=e183]:
+              - heading "Playground" [level=2] [ref=e184]
+              - generic [ref=e185]:
+                - generic [ref=e186]: Trained
+                - paragraph [ref=e188]: Last trained 3 days ago
+            - generic [ref=e189]:
+              - generic [ref=e190]: Compare AI models
+              - button "Compare" [ref=e191] [cursor=pointer]
+            - generic [ref=e192]:
+              - group [ref=e193]:
+                - generic "AI Settings" [ref=e194] [cursor=pointer]:
+                  - img [ref=e196]
+                  - generic [ref=e199]: AI Settings
+                  - img [ref=e200]
+              - group [ref=e202]:
+                - generic "Lead Collections" [ref=e203] [cursor=pointer]:
+                  - img [ref=e205]
+                  - generic [ref=e208]: Lead Collections
+                  - img [ref=e209]
+              - group [ref=e211]:
+                - generic "Messages" [ref=e212] [cursor=pointer]:
+                  - img [ref=e214]
+                  - generic [ref=e217]: Messages
+                  - img [ref=e218]
+                - generic [ref=e220]:
+                  - button "Reading instructions" [ref=e221] [cursor=pointer]:
+                    - img [ref=e222]
+                    - generic [ref=e225]: Reading instructions
+                  - button "Update subscription" [ref=e226] [cursor=pointer]:
+                    - img [ref=e227]
+                    - generic [ref=e229]: Update subscription
+                    - img [ref=e230]
+              - group [ref=e233]:
+                - generic "Chat Window" [ref=e234] [cursor=pointer]:
+                  - img [ref=e236]
+                  - generic [ref=e239]: Chat Window
+                  - img [ref=e240]
+              - group [ref=e242]:
+                - generic "Chat Bubble" [ref=e243] [cursor=pointer]:
+                  - img [ref=e245]
+                  - generic [ref=e247]: Chat Bubble
+                  - img [ref=e248]
+                - generic [ref=e250]:
+                  - button "Channel ID" [ref=e251] [cursor=pointer]:
+                    - img [ref=e252]
+                    - generic [ref=e254]: Channel ID
+                  - button "Update subscription" [ref=e255] [cursor=pointer]:
+                    - img [ref=e256]
+                    - generic [ref=e258]: Update subscription
+                    - img [ref=e259]
+              - group [ref=e262]:
+                - generic "Contexts" [ref=e263] [cursor=pointer]:
+                  - img [ref=e265]
+                  - generic [ref=e270]: Contexts
+                  - img [ref=e271]
+            - generic [ref=e273]:
+              - button "Add data source" [ref=e274] [cursor=pointer]:
+                - img [ref=e275]
+                - text: Add data source
+              - generic [ref=e279]:
+                - img [ref=e280]
+                - text: Drag add-ons onto the canvas or click to select a modal.
+    - main [ref=e283]:
+      - generic [ref=e286]:
+        - generic [ref=e287]:
+          - generic [ref=e288]:
+            - img [ref=e290]
+            - generic [ref=e293]:
+              - generic [ref=e294]:
+                - generic [ref=e295]: Velion
+                - generic [ref=e296]: /
+                - generic [ref=e297]: Chatbots
+              - generic [ref=e298]:
+                - heading "Playground" [level=1] [ref=e299]
+                - combobox "Select chatbot builder view" [ref=e300]:
+                  - option "Playground" [selected]
+                  - option "Data sources"
+                  - option "Actions"
+                  - option "Chat logs"
+                  - option "Analytics"
+                  - option "Install"
+                  - option "Settings"
+          - generic [ref=e301]:
+            - generic [ref=e302]: Unpublished edits
+            - button "Publish live" [ref=e303] [cursor=pointer]:
+              - img [ref=e304]
+              - text: Publish live
+        - main [ref=e309]:
+          - generic [ref=e312]:
+            - generic [ref=e313]:
+              - generic [ref=e314]: A
+              - text: Velion / AI Bot
+              - img [ref=e315]
+            - generic [ref=e317]:
+              - button "Add selected" [disabled] [ref=e318]:
+                - img [ref=e319]
+                - text: Add selected
+              - button "Remove selected" [ref=e320] [cursor=pointer]:
+                - img [ref=e321]
+                - text: Remove selected
+              - button "Reset" [ref=e324] [cursor=pointer]:
+                - img [ref=e325]
+                - text: Reset
+              - button "Clean" [ref=e328] [cursor=pointer]:
+                - img [ref=e329]
+                - text: Clean
+              - generic [ref=e331]:
+                - paragraph [ref=e332]: 3 add-ons on canvas
+                - paragraph [ref=e333]: Tune messages, tools, prompts, and modal add-ons around a live chatbot preview.
+          - generic [ref=e334]:
+            - generic [ref=e335]:
+              - heading "Canvas add-ons" [level=2] [ref=e336]
+              - generic [ref=e337]:
+                - button "Select Update subscription add-on" [ref=e338] [cursor=pointer]:
+                  - text: Update subscription
+                  - generic [ref=e339]: On canvas
+                - button "Select Reading instructions add-on" [ref=e340] [cursor=pointer]:
+                  - text: Reading instructions
+                  - generic [ref=e341]: On canvas
+                - button "Select Tone and policy add-on" [ref=e342] [cursor=pointer]:
+                  - text: Tone and policy
+                  - generic [ref=e343]: On canvas
+            - generic [ref=e345]:
+              - generic [ref=e346]:
+                - generic [ref=e347]:
+                  - img [ref=e349]
+                  - generic [ref=e352]:
+                    - heading "AI Bot" [level=2] [ref=e353]
+                    - paragraph [ref=e354]: Preview widget
+                - img [ref=e355]
+              - generic [ref=e357]:
+                - generic [ref=e358]: I would like to cancel my subscription.
+                - generic [ref=e359]:
+                  - generic [ref=e360]:
+                    - img [ref=e361]
+                    - text: AI Bot
+                  - text: I can help with that. I have your subscription details up. You can pause your subscription for up to 3 months with no payments, or cancel and keep access until the end of your billing period. What would you prefer?
+                - generic [ref=e364]: Actually, maybe I will just pause it then.
+                - generic [ref=e365]:
+                  - generic [ref=e366]: Velion AI preview
+                  - generic [ref=e367]:
+                    - text: Ask your question...
+                    - img [ref=e369]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e377] [cursor=pointer]:
+    - img [ref=e378]

@@ -1,0 +1,22 @@
+go 1.25.1
+
+use (
+	./gen
+	./pkg/cibuf
+	./pkg/envelope
+	./pkg/idempotency
+	./pkg/jetstream
+	./pkg/natsx
+	./pkg/publisher
+	./pkg/quarry
+	./pkg/temporalreg
+	./services/bridge-core
+	./services/browser-broker
+	./services/capability-core
+	./services/cost-core
+	./services/letta-bridge
+	./services/model-gateway
+	./services/orchestrator-core
+	./services/sandbox-manager
+	./services/task-core
+)

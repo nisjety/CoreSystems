@@ -1,0 +1,41 @@
+[package]
+name = "session-core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mp-contracts = { path = "../../crates/mp-contracts" }
+mp-events = { path = "../../crates/mp-events" }
+mp-ids = { path = "../../crates/mp-ids" }
+mp-orchestration = { path = "../../crates/mp-orchestration" }
+mp-telemetry = { path = "../../crates/mp-telemetry" }
+mp-toon = { path = "../../crates/mp-toon" }
+
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+prost-types = { workspace = true }
+async-nats = { workspace = true }
+futures = { workspace = true }
+redis = { workspace = true }
+prost = { workspace = true }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+mp-slo = { path = "../../crates/mp-slo" }

@@ -1,0 +1,723 @@
+{
+  "generated_at": "2026-05-08T10:31:26.504608+00:00",
+  "version": "0.1.0",
+  "results": [
+    {
+      "id": "article_basic",
+      "category": "static_article",
+      "pass": true,
+      "duration_ms": 7,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Quarry Evaluation Benchmark",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: first paragraph of the article",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: readability-based extraction",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Content precision",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Content recall",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Boilerplate ratio",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Automated extraction quality",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Home",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: About",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Contact",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Privacy Policy",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Terms of Service",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: All rights reserved",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 2",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:bab55b68a325896da4771abf33828c1f22beb54369b3c9a570b4bfc69c952078",
+      "markdown_bytes": 1146,
+      "link_count": 5
+    },
+    {
+      "id": "article_js_heavy",
+      "category": "js_heavy",
+      "pass": true,
+      "duration_ms": 1,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Dynamic Content Rendering",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: paragraph is in the static HTML",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Server-Rendered Section",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Modern web applications",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Dashboard",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Settings",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Profile",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: injected by JS",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: app.bundle.js",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: vendor.bundle.js",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:fa8ab364f51a9e1c69f9529a0e238d54dd7230acc9abc0fb6312c5b6f34173f0",
+      "markdown_bytes": 582,
+      "link_count": 3
+    },
+    {
+      "id": "blocked_page",
+      "category": "blocked",
+      "pass": true,
+      "duration_ms": 1,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Access Denied",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: security service",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: challenge.js",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:58f8c7ab1746798408c3ac05716a32d74ab07a9a8e294f148ebdd032e72b6d1c",
+      "markdown_bytes": 426,
+      "link_count": 1
+    },
+    {
+      "id": "minimal_content",
+      "category": "minimal",
+      "pass": true,
+      "duration_ms": 0,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Service Maintenance Window",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: API endpoints will be unavailable",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Home",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Archive",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Example Corp",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Status Page",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:4ccfefcab405388d2fc22059a45f25ebc9db19825f59e4ba072635fda65ee10e",
+      "markdown_bytes": 166,
+      "link_count": 3
+    },
+    {
+      "id": "table_heavy",
+      "category": "table_heavy",
+      "pass": true,
+      "duration_ms": 3,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Server Performance Report",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Latency by Region",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: us-east-1",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Throughput Summary",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: API Gateway",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: 99.95% SLA target",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Dashboard",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Reports",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Settings",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Metrics Platform",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Privacy",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Terms",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:354ed637b6439d99a2ff5f9bbfe35801ee3a3c20d7c7ffa8447c87e593e4c495",
+      "markdown_bytes": 953,
+      "link_count": 5
+    },
+    {
+      "id": "multi_section",
+      "category": "multi_section",
+      "pass": true,
+      "duration_ms": 3,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Developer Changelog",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: New Features",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: real-time collaboration",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Improvements",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: P95 latency",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Breaking Changes",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: v2 OAuth flow",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Bug Fixes",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: timezone offset",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Related Posts",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Privacy Policy",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Terms of Use",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: All rights reserved",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:d73a773a5be8d49ab24b3f252e6449bd8efab94dd1873a4dded19e96513ac9d3",
+      "markdown_bytes": 1421,
+      "link_count": 8
+    },
+    {
+      "id": "cache_warm",
+      "category": "cache_warm",
+      "pass": true,
+      "duration_ms": 1,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Cache Warm-Hit Determinism",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: byte-identical content",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: warm path is the most common",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: fingerprints this fixture twice",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Privacy",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Terms",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:2cccd6b81937efe00dbc1871072dc50a351d38e1cb42db4934e62059eff4993e",
+      "markdown_bytes": 625,
+      "link_count": 4
+    },
+    {
+      "id": "js_blocked",
+      "category": "js_blocked",
+      "pass": true,
+      "duration_ms": 1,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: JavaScript Required",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: JavaScript-enabled browser",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: runtime.bundle.js",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: __APP_CONFIG__",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: featureFlags",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:417662b4b3e47d15e1524b07c52746cf3a8287ab14567afc7c375a9ac7acdafe",
+      "markdown_bytes": 144,
+      "link_count": 2
+    },
+    {
+      "id": "change_precision",
+      "category": "change_precision",
+      "pass": true,
+      "duration_ms": 1,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Change Detection Precision",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: whitespace-only changes",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: paragraph reordering",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: false positives",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Privacy",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:de7fe973c2d6b4a1b410c38800d685030495b79f5c85ec0976fafdeb53364402",
+      "markdown_bytes": 607,
+      "link_count": 2
+    },
+    {
+      "id": "profile_restore",
+      "category": "profile_restore",
+      "pass": true,
+      "duration_ms": 1,
+      "checks": [
+        {
+          "name": "title",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "lang",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Welcome back",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: post-login dashboard",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: auth cookie",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: Session-dependent content",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_contain: profile-restore scenario",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Privacy",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "must_not_contain: Terms",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "min_links >= 0",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "fingerprint_stable",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "fingerprint": "blake3:d5dc99445cfc1dcc5cadd835c41e60c9edde26d30a43c0d195ff2a56cbf0ca93",
+      "markdown_bytes": 900,
+      "link_count": 5
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "passed": 10,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "total_duration_ms": 34
+  }
+}

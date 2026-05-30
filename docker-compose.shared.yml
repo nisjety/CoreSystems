@@ -1,0 +1,33 @@
+name: shared-infra
+
+services:
+  velion-nats:
+    image: nats:2.10-alpine
+    container_name: velion-nats
+    command: ["-c", "/etc/nats/nats.conf"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "6222:6222"
+    volumes:
+      - ./apps/Frontend Plane/velion/nats-shared.conf:/etc/nats/nats.conf:ro
+      - velion_nats_data:/data
+    environment:
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
+    networks:
+      - velion-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -zv localhost 4222 > /dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  velion-net:
+    name: velion-net
+    driver: bridge
+
+volumes:
+  velion_nats_data:

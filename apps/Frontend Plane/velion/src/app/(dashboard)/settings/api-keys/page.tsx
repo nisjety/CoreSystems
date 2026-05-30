@@ -15,6 +15,8 @@
 
 'use client'
 
+import { type JSX } from 'react'
+
 export default function ApiKeysPage(): JSX.Element {
   return (
     <div className="bg-[#F4EFE5] min-h-full px-8 py-10">

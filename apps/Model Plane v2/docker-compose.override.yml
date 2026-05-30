@@ -1,0 +1,3 @@
+# Local override — used automatically by docker compose.
+# All Letta and Temporal service definitions live in docker-compose.yml — no overrides needed.
+services: {}

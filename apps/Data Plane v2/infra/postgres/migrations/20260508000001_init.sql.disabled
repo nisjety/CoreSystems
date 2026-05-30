@@ -1,0 +1,4 @@
+-- This file is intentionally disabled.
+-- The baseline schema lives in infra/postgres/init.sql (loaded by Postgres on first boot).
+-- New migrations should be added as 20260508NNNNNN_description.sql in this directory.
+-- The migrator skips files ending in `.disabled`.

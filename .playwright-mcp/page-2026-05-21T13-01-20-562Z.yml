@@ -1,0 +1,50 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - link "Tilbake til forsiden" [ref=e8] [cursor=pointer]:
+            - /url: /
+            - img [ref=e9]
+            - text: Tilbake
+          - navigation "Onboarding steps" [ref=e11]:
+            - button "Go to Intro" [ref=e13]
+            - button "Go to Organization" [ref=e15]
+            - button "Go to Website" [ref=e17]
+            - button "Go to Sources" [ref=e19]
+            - button "Go to Proof" [ref=e21]
+            - button "Go to Plan" [ref=e23]
+          - generic [ref=e24]:
+            - button "Select language" [ref=e28]:
+              - img [ref=e29]
+              - img [ref=e32]
+            - 'generic "Step 1 of 6: Intro" [ref=e35]': Step 1 of 6
+        - generic [ref=e36]:
+          - generic [ref=e38]:
+            - generic [ref=e40]:
+              - generic [ref=e41]: Steg 1 av 6
+              - heading "Du Er Inne." [level=1] [ref=e42]
+              - paragraph [ref=e43]: Vi forbereder arbeidsplassen din. Det tar et øyeblikk.
+              - generic [ref=e46]: Setter opp Velion …
+            - paragraph [ref=e48]:
+              - text: Stuck?
+              - link "support@velion.com" [ref=e49] [cursor=pointer]:
+                - /url: mailto:support@velion.com
+          - generic [ref=e50]:
+            - generic [ref=e52]:
+              - generic:
+                - paragraph: Velion · for team som svarer.
+                - paragraph: 42 % raskere første svar · 18 språk · alt på din kunnskap.
+            - generic [ref=e55]:
+              - img [ref=e56]
+              - img [ref=e59]
+              - img [ref=e62]
+      - generic [ref=e71]:
+        - button "Om oss" [ref=e72]
+        - button "Personvern" [ref=e73]
+        - button "Opphavsrett" [ref=e74]
+        - button "Cookie-innstillinger" [ref=e75]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e81] [cursor=pointer]:
+    - img [ref=e82]
+  - alert [ref=e85]

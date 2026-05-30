@@ -16,7 +16,7 @@
 
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type JSX } from 'react'
 
 interface UsageSummaryRow {
   plane: string

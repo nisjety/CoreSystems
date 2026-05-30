@@ -1,0 +1,43 @@
+{
+  "config": {
+    "documents_base": "http://localhost:8001",
+    "retrieval_base": "http://localhost:8004",
+    "org_id": "benchmark-org",
+    "documents": 12,
+    "queries": 24,
+    "ingest_concurrency": 4,
+    "query_concurrency": 6,
+    "poll_interval": 1.0,
+    "max_wait_seconds": 240.0,
+    "top_k": 10,
+    "top_n": 5,
+    "cleanup": true,
+    "output_json": "benchmark-results.json"
+  },
+  "totals": {
+    "documents": 12,
+    "documents_indexed": 12,
+    "queries": 24,
+    "query_failures": 0,
+    "wall_clock_seconds": 5.06
+  },
+  "ingest": {
+    "p50_seconds": 0.0788,
+    "p95_seconds": 0.1585,
+    "p99_seconds": 0.1677,
+    "failures": []
+  },
+  "indexing": {
+    "p50_seconds": 2.017,
+    "p95_seconds": 2.0765,
+    "p99_seconds": 2.0871,
+    "timeouts": []
+  },
+  "retrieval": {
+    "p50_seconds": 0.2811,
+    "p95_seconds": 1.0121,
+    "p99_seconds": 1.5723,
+    "avg_fact_count": 5.0,
+    "failures": []
+  }
+}

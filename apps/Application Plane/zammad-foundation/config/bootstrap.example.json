@@ -1,0 +1,277 @@
+{
+  "groups": [
+    {
+      "name": "Support",
+      "followUpPossible": "yes",
+      "followUpAssignment": true,
+      "active": true,
+      "note": "Parent namespace for support queues. Do not route mailboxes here."
+    },
+    {
+      "name": "Support::Triage",
+      "followUpPossible": "yes",
+      "followUpAssignment": true,
+      "active": true,
+      "note": "Default inbound queue for support@ and help@."
+    },
+    {
+      "name": "Support::Billing",
+      "followUpPossible": "yes",
+      "followUpAssignment": true,
+      "active": true,
+      "note": "Billing queue with its own mailbox identity."
+    },
+    {
+      "name": "Support::Escalations",
+      "followUpPossible": "yes",
+      "followUpAssignment": true,
+      "active": true,
+      "note": "Manual escalation queue for cases that require senior handling."
+    }
+  ],
+  "ticketFields": [
+    {
+      "name": "request_type",
+      "object": "Ticket",
+      "display": "Request Type",
+      "active": true,
+      "position": 1550,
+      "data_type": "select",
+      "data_option": {
+        "options": {
+          "general_support": "General Support",
+          "billing": "Billing",
+          "access": "Access",
+          "bug": "Bug",
+          "feature_request": "Feature Request",
+          "sales": "Sales",
+          "spam_or_noise": "Spam / Noise",
+          "other": "Other"
+        },
+        "default": "general_support",
+        "linktemplate": ""
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "source_channel_key",
+      "object": "Ticket",
+      "display": "Source Channel Key",
+      "active": true,
+      "position": 1560,
+      "data_type": "select",
+      "data_option": {
+        "options": {
+          "email_support": "Email / Support",
+          "email_billing": "Email / Billing",
+          "web_form": "Web Form",
+          "api": "API",
+          "manual": "Manual",
+          "other": "Other"
+        },
+        "default": "email_support",
+        "linktemplate": ""
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "source_external_ref",
+      "object": "Ticket",
+      "display": "Source External Ref",
+      "active": true,
+      "position": 1570,
+      "data_type": "input",
+      "data_option": {
+        "default": "",
+        "type": "text",
+        "maxlength": 255,
+        "linktemplate": ""
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "ai_status",
+      "object": "Ticket",
+      "display": "AI Status",
+      "active": true,
+      "position": 1580,
+      "data_type": "select",
+      "data_option": {
+        "options": {
+          "pending": "Pending",
+          "skipped": "Skipped",
+          "triaged": "Triaged",
+          "approved": "Approved",
+          "rejected": "Rejected",
+          "error": "Error"
+        },
+        "default": "pending",
+        "linktemplate": ""
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "ai_confidence",
+      "object": "Ticket",
+      "display": "AI Confidence",
+      "active": true,
+      "position": 1590,
+      "data_type": "integer",
+      "data_option": {
+        "default": 0,
+        "min": 0,
+        "max": 100
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "ai_category",
+      "object": "Ticket",
+      "display": "AI Category",
+      "active": true,
+      "position": 1600,
+      "data_type": "input",
+      "data_option": {
+        "default": "",
+        "type": "text",
+        "maxlength": 255,
+        "linktemplate": ""
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "ai_recommended_team",
+      "object": "Ticket",
+      "display": "AI Recommended Team",
+      "active": true,
+      "position": 1610,
+      "data_type": "input",
+      "data_option": {
+        "default": "",
+        "type": "text",
+        "maxlength": 255,
+        "linktemplate": ""
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    },
+    {
+      "name": "ai_review_required",
+      "object": "Ticket",
+      "display": "AI Review Required",
+      "active": true,
+      "position": 1620,
+      "data_type": "boolean",
+      "data_option": {
+        "options": {
+          "true": "Yes",
+          "false": "No"
+        },
+        "default": "false"
+      },
+      "screens": {
+        "edit": {
+          "ticket.agent": {
+            "shown": true,
+            "required": false
+          }
+        }
+      }
+    }
+  ],
+  "webhooks": [
+    {
+      "name": "velion-support-events",
+      "endpoint": "http://integration-core:3026/api/v1/webhooks/zammad",
+      "sslVerify": false,
+      "active": true,
+      "note": "Velion support event bus — routes ticket events to integration-core NATS bridge. Override endpoint with ZAMMAD_WEBHOOK_ENDPOINT env var."
+    }
+  ],
+  "triggers": [
+    {
+      "name": "50-velion-ticket-created",
+      "webhookName": "velion-support-events",
+      "active": true,
+      "condition": {
+        "ticket.action": {
+          "operator": "is",
+          "value": ["create"]
+        }
+      },
+      "note": "Fire velion-support-events webhook on ticket create"
+    },
+    {
+      "name": "51-velion-ticket-updated",
+      "webhookName": "velion-support-events",
+      "active": true,
+      "condition": {
+        "ticket.action": {
+          "operator": "is",
+          "value": ["update"]
+        }
+      },
+      "note": "Fire velion-support-events webhook on ticket update"
+    },
+    {
+      "name": "52-velion-article-created",
+      "webhookName": "velion-support-events",
+      "active": true,
+      "condition": {
+        "article.action": {
+          "operator": "is",
+          "value": ["create"]
+        }
+      },
+      "note": "Fire velion-support-events webhook on new article (customer reply)"
+    }
+  ]
+}

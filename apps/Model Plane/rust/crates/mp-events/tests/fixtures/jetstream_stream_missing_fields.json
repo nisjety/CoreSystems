@@ -1,0 +1,9 @@
+{
+  "name": "",
+  "subjects": [],
+  "retention": "limits",
+  "storage": "file",
+  "max_age_secs": 0,
+  "replicas": 0,
+  "discard": "old"
+}

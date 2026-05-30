@@ -1,0 +1,1365 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/struct.proto";
+
+// ModelGateway — public boundary for HTTP/gRPC/SSE/WebSocket.
+// Owns: auth verification, request normalization, rate limiting, usage envelopes.
+// Does NOT own: session state, tool execution, or model routing decisions.
+service ModelGateway {
+  // Unary invoke — synchronous request/response.
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+
+  // Server-streaming invoke — returns chunks as they arrive from the model.
+  rpc InvokeStream(InvokeRequest) returns (stream InvokeChunk);
+
+  // Fetch — full-fat web fetch through Quarry (JS rendering, TLS
+  // fingerprint emulation, charset detection, soft-404, JSON-LD).
+  // Replaces the dead Python web_fetch tool.
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+
+  // ExtractStructured — fetch a URL via Quarry, then coerce the
+  // page content into a caller-supplied JSON schema. The gateway
+  // performs the fetch and forwards the (content, schema) tuple to
+  // inference-core's existing structured_output_schema path. Replaces
+  // the dead Python extract_structured tool. Firecrawl-equivalent.
+  rpc ExtractStructured(ExtractStructuredRequest) returns (ExtractStructuredResponse);
+
+  // ===== Wave 10a — trivial tool RPCs (replace v2 builtins) =====
+
+  // WebSearch — proxy to Quarry's /v1/search. Replaces v2 web_search.
+  // The edge handles SmartSearchRouter (Google/Bing/Tavily/local) and
+  // returns ranked results; the gateway is just a typed pass-through
+  // so callers don't need a Quarry client of their own.
+  rpc WebSearch(WebSearchRequest) returns (WebSearchResponse);
+
+  // Sleep — explicit pause inside an agent loop. Useful for poll-
+  // backoff and waiting on async external state. Server-side enforced
+  // so callers can't trivially exceed budget.
+  rpc Sleep(SleepRequest) returns (SleepResponse);
+
+  // RemoteTrigger — generic outbound HTTP webhook with SSRF guards.
+  // Used by automations to ping internal services or third-party
+  // webhooks. Routes through the same security envelope as Fetch.
+  rpc RemoteTrigger(RemoteTriggerRequest) returns (RemoteTriggerResponse);
+
+  // SendMessage — publish a typed message envelope onto NATS. Replaces
+  // the v2 send_message tool. Subject namespaces are enforced server-
+  // side so agents can't publish to arbitrary subjects.
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // SyntheticOutput — test/debug tool that echoes a fixed payload back
+  // to the caller. Used by integration tests + smoke probes; production
+  // builds may want to gate behind a feature flag.
+  rpc SyntheticOutput(SyntheticOutputRequest) returns (SyntheticOutputResponse);
+
+  // ===== Wave 10b — plan mode + team coordination =====
+
+  // EnterPlanMode — switch a run into plan-collect mode. While in plan
+  // mode, write-class tools (file_edit, file_write, bash, remote_trigger,
+  // send_message) are gated by the approval queue; read-class tools
+  // (fetch, web_search, extract_structured) flow normally.
+  rpc EnterPlanMode(EnterPlanModeRequest) returns (EnterPlanModeResponse);
+
+  // ExitPlanMode — leave plan mode. Pending actions in the plan are
+  // discarded unless the caller explicitly approved them separately.
+  rpc ExitPlanMode(ExitPlanModeRequest) returns (ExitPlanModeResponse);
+
+  // IsPlanMode — read-only check used by tool dispatch middleware.
+  rpc IsPlanMode(IsPlanModeRequest) returns (IsPlanModeResponse);
+
+  // TeamCreate — assign a new worker task to the coordinator team.
+  // Returns the worker id. Used in multi-agent runs to track parallel
+  // sub-work.
+  rpc TeamCreate(TeamCreateRequest) returns (TeamCreateResponse);
+
+  // TeamDelete — mark a worker task as completed or failed. Required
+  // so the coordinator knows the sub-work converged.
+  rpc TeamDelete(TeamDeleteRequest) returns (TeamDeleteResponse);
+
+  // TeamList — enumerate worker tasks for an org, optionally filtered
+  // by state. Used by UIs + the coordinator agent's status checks.
+  rpc TeamList(TeamListRequest) returns (TeamListResponse);
+
+  // ===== Wave 10c — LSP (language server protocol) =====
+
+  // LspQuery — proxy LSP requests (diagnostics, hover, definition,
+  // completion) to a configured LSP bridge. Returns Unimplemented when
+  // `LSP_BRIDGE_URL` is unset. The bridge owns server lifecycle and
+  // multi-language routing; the gateway is a typed pass-through so
+  // agents don't need to know about the bridge's HTTP shape.
+  rpc LspQuery(LspQueryRequest) returns (LspQueryResponse);
+
+  // ===== Wave 10e — approval gate =====
+
+  // RequestApproval — register a pending approval for a risky action.
+  // Returns immediately; resolution happens out-of-band via
+  // ApproveApproval / DenyApproval. Used by the run-loop before
+  // calling destructive tools.
+  rpc RequestApproval(RequestApprovalRequest) returns (RequestApprovalResponse);
+
+  // ApproveApproval — resolve a pending approval as approved.
+  rpc ApproveApproval(ApproveApprovalRequest) returns (ApproveApprovalResponse);
+
+  // DenyApproval — resolve a pending approval as denied.
+  rpc DenyApproval(DenyApprovalRequest) returns (DenyApprovalResponse);
+
+  // ListPendingApprovals — read pending approvals for a run. Used by
+  // UIs surfacing the queue and by the run-loop polling for resolution.
+  rpc ListPendingApprovals(ListPendingApprovalsRequest)
+      returns (ListPendingApprovalsResponse);
+
+  // ===== Wave 10f — trajectory recording + Atropos export =====
+
+  // RecordTrajectory — append a single run trajectory (goal + actions
+  // + outcome) to the recorder. Fire-and-forget from the run-loop's
+  // hot path. Records are kept in-memory (size-bounded) and published
+  // to NATS so external pipelines can stream them.
+  rpc RecordTrajectory(RecordTrajectoryRequest) returns (RecordTrajectoryResponse);
+
+  // ListTrajectories — read recent trajectories for an org. Filtered
+  // by outcome / pattern / time range. Capped at 500 per call.
+  rpc ListTrajectories(ListTrajectoriesRequest) returns (ListTrajectoriesResponse);
+
+  // ExportTrajectories — return trajectories as a JSONL-encoded blob
+  // suitable for the Atropos RL training format. Returns inline bytes
+  // when small; promote to MinIO upload in a future iteration.
+  rpc ExportTrajectories(ExportTrajectoriesRequest) returns (ExportTrajectoriesResponse);
+
+  // ===== Wave 10d — skills loader =====
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+  rpc GetSkill(GetSkillRequest) returns (GetSkillResponse);
+  rpc MatchSkills(MatchSkillsRequest) returns (MatchSkillsResponse);
+
+  // ===== Wave 10g — MCP server hosting =====
+  rpc RegisterMcpServer(RegisterMcpServerRequest) returns (RegisterMcpServerResponse);
+  rpc ListMcpServers(ListMcpServersRequest) returns (ListMcpServersResponse);
+  rpc ProxyMcpTool(ProxyMcpToolRequest) returns (ProxyMcpToolResponse);
+
+  // ===== Wave 10h — plugins =====
+  rpc RegisterPlugin(RegisterPluginRequest) returns (RegisterPluginResponse);
+  rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse);
+  rpc SetPluginEnabled(SetPluginEnabledRequest) returns (SetPluginEnabledResponse);
+
+  // ===== Wave 10i — commands + hooks + permissions + policy =====
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  rpc ExecuteCommand(ExecuteCommandRequest) returns (ExecuteCommandResponse);
+  rpc RegisterHook(RegisterHookRequest) returns (RegisterHookResponse);
+  rpc ListHooks(ListHooksRequest) returns (ListHooksResponse);
+  rpc CheckPermission(CheckPermissionRequest) returns (CheckPermissionResponse);
+  rpc SetPermission(SetPermissionRequest) returns (SetPermissionResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
+
+  // ===== Wave 10j — messages + analytics + voice + tasks =====
+  rpc AppendThreadMessage(AppendThreadMessageRequest) returns (AppendThreadMessageResponse);
+  rpc ListThreadMessages(ListThreadMessagesRequest) returns (ListThreadMessagesResponse);
+  rpc GetAnalytics(GetAnalyticsRequest) returns (GetAnalyticsResponse);
+  rpc TextToSpeech(TextToSpeechRequest) returns (TextToSpeechResponse);
+  rpc SpeechToText(SpeechToTextRequest) returns (SpeechToTextResponse);
+  rpc CreateTask(CreateTaskRequest) returns (CreateTaskResponse);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+
+  // Health check for load balancer probes.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// InvokeRequest — normalized inference request entering the gateway.
+message InvokeRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier (extracted from auth token).
+  string org_id = 2;
+
+  // Session key for routing continuity.
+  string session_key = 3;
+
+  // Thread to append this interaction to (optional — gateway creates if empty).
+  string thread_id = 4;
+
+  // The user prompt content.
+  string content = 5;
+
+  // Model hint (optional — routing may override).
+  string model = 6;
+
+  // Provider hint (optional).
+  string provider = 7;
+
+  // Maximum tokens to generate.
+  int32 max_tokens = 8;
+
+  // Sampling temperature.
+  float temperature = 9;
+
+  // Whether to stream the response.
+  bool stream = 10;
+
+  // Arbitrary metadata passed through to downstream services.
+  google.protobuf.Struct metadata = 11;
+
+  // Optional JSON Schema for structured output conformance.
+  // Forwarded to inference-core as-is; the model provider enforces conformance.
+  string structured_output_schema = 12;
+
+  // Zero Data Retention mode. When true, no durable artifacts or events are stored.
+  bool zdr = 13;
+
+  // Maximum cost in USD for this request. Gateway checks against cost-core before forwarding.
+  double max_cost_usd = 14;
+
+  // Maximum total tokens (input + output) budget for this request.
+  int32 max_tokens_budget = 15;
+}
+
+// SourceTrace records the provenance of a piece of generated content.
+message SourceTrace {
+  // Identifier for the source document or artifact.
+  string source_id = 1;
+
+  // Human-readable title or label.
+  string title = 2;
+
+  // URI or path to the original source.
+  string uri = 3;
+
+  // Relevance score (0.0–1.0) indicating how strongly this source contributed.
+  float relevance = 4;
+
+  // The specific excerpt used from the source.
+  string excerpt = 5;
+}
+
+// InvokeResponse — complete response from a unary invoke.
+message InvokeResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Generated content.
+  string content = 2;
+
+  // Model that actually served the request.
+  string model_used = 3;
+
+  // Why generation stopped.
+  string stop_reason = 4;
+
+  // Token counts for usage tracking.
+  int32 input_tokens = 5;
+  int32 output_tokens = 6;
+
+  // Source provenance traces for the generated content.
+  repeated SourceTrace sources = 7;
+}
+
+// InvokeChunk — a single chunk in a streaming response.
+message InvokeChunk {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Incremental content delta.
+  string delta = 2;
+
+  // True when this is the final chunk.
+  bool done = 3;
+
+  // Model that served the request (populated on final chunk).
+  string model_used = 4;
+
+  // Token counts (populated on final chunk).
+  int32 input_tokens = 5;
+  int32 output_tokens = 6;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  // "ok" when the service is healthy.
+  string status = 1;
+}
+
+// RenderHints — browser-driver options forwarded to Quarry's
+// ScrapeRequest.render. Ignored by static / TLS-profile fetches.
+message RenderHints {
+  // CSS selector to block on after navigation. The browser driver
+  // calls wait_for(selector, timeout_ms) between goto and content.
+  string wait_for_selector = 1;
+
+  // Timeout for wait_for_selector in milliseconds. 0 → driver default
+  // (currently 5000 ms in quarry-runtime).
+  int32 wait_for_timeout_ms = 2;
+}
+
+// FetchRequest — pure web fetch through Quarry. The gateway does not
+// touch the LLM path for this RPC.
+message FetchRequest {
+  // Tracing identifier — echoed in the response.
+  string request_id = 1;
+
+  // Tenant identifier (extracted from auth token). Forwarded to
+  // Quarry as X-Quarry-Org for sticky proxy-pool routing.
+  string org_id = 2;
+
+  // URL to fetch. Must start with http:// or https://. Validated by
+  // Quarry's SSRF + scheme guards before any network call.
+  string url = 3;
+
+  // Optional render hints (browser driver only).
+  RenderHints render = 4;
+
+  // Opt in to HTTP/3 transport at Quarry. Forward-compatible — when
+  // the edge is built without --features http3 the flag is ignored.
+  bool prefer_http3 = 5;
+}
+
+// FetchResponse — projected ScrapeResult from Quarry.
+message FetchResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Originally-requested URL.
+  string url = 2;
+
+  // URL after redirect chain (Quarry follows up to 5 hops).
+  string final_url = 3;
+
+  // HTTP status from the upstream.
+  int32 status = 4;
+
+  // Content-Type header (best-effort).
+  string content_type = 5;
+
+  // <title> when parseable.
+  string title = 6;
+
+  // Markdown projection of the page body. Empty for binary content.
+  string markdown = 7;
+
+  // Plain-text projection. May equal markdown for some content
+  // types — both fields are populated so callers can pick.
+  string text = 8;
+
+  // Stable content fingerprint (blake3:xxxx) for change detection.
+  string fingerprint = 9;
+
+  // Detected page language (ISO-639-1). May be empty.
+  string language = 10;
+}
+
+// ExtractStructuredRequest — fetch + LLM-coerced typed output.
+message ExtractStructuredRequest {
+  // Tracing identifier — echoed in the response.
+  string request_id = 1;
+
+  // Tenant identifier. Honoured for both Quarry fetch and inference
+  // calls (separate auth contexts but same tenant boundary).
+  string org_id = 2;
+
+  // URL to extract from. Same validation as FetchRequest.url.
+  string url = 3;
+
+  // JSON Schema describing the target shape as a string. The gateway
+  // forwards it verbatim as InferRequest.structured_output_schema so
+  // the model provider (OpenAI / Anthropic / etc.) does the actual
+  // coercion.
+  string schema_json = 4;
+
+  // Optional natural-language guidance prepended to the LLM prompt
+  // ("prefer the price in NOK", "extract only the primary author").
+  string instructions = 5;
+
+  // Optional render hints for the fetch step.
+  RenderHints render = 6;
+
+  // Model + provider hints forwarded to inference-core. Empty → use
+  // service defaults.
+  string model = 7;
+  string provider = 8;
+
+  // Zero Data Retention — no durable artifact or event on either the
+  // fetch path (Quarry zdr) or the inference path.
+  bool zdr = 9;
+}
+
+// ExtractStructuredResponse — LLM output coerced to the requested schema.
+message ExtractStructuredResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Originally-requested URL.
+  string url = 2;
+
+  // URL after redirect chain.
+  string final_url = 3;
+
+  // Page title (carried through from the fetch step).
+  string title = 4;
+
+  // Content fingerprint (carried through). Use this to invalidate
+  // downstream caches when the source page changes.
+  string source_fingerprint = 5;
+
+  // The structured output as a JSON string. Always a JSON object
+  // matching `schema_json`. Empty when the model failed to produce
+  // valid output — see `error_message`.
+  string extracted_json = 6;
+
+  // Model that served the inference request.
+  string model_used = 7;
+
+  // Token counts for usage tracking.
+  int32 input_tokens = 8;
+  int32 output_tokens = 9;
+
+  // Non-empty when extraction failed at the LLM step (fetch succeeded
+  // but the model could not satisfy the schema). Gateway returns
+  // gRPC OK in this case so callers see a structured failure rather
+  // than a generic Internal error.
+  string error_message = 10;
+}
+
+// =============================================================
+// Wave 10a — trivial tool RPCs
+// =============================================================
+
+// WebSearchRequest — proxy to Quarry's /v1/search SmartSearchRouter.
+message WebSearchRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string query = 3;
+  // Maximum results to return. Capped at 50 server-side.
+  int32 limit = 4;
+  // Optional intent classifier hint: "factual" | "research" |
+  // "navigational". Empty → auto-classify via rule-based router.
+  string intent = 5;
+}
+
+// WebSearchResult — single result row.
+message WebSearchResult {
+  string url = 1;
+  string title = 2;
+  string snippet = 3;
+  // Provider that served this result (e.g. "tavily", "tantivy_local").
+  string source = 4;
+  // Relevance score 0.0–1.0 (provider-specific).
+  float score = 5;
+}
+
+message WebSearchResponse {
+  string request_id = 1;
+  repeated WebSearchResult results = 2;
+  // Total result count before pagination (some providers report this).
+  int32 total = 3;
+}
+
+// SleepRequest — pause execution for `duration_ms` milliseconds.
+// Capped at 60 s server-side to prevent loops abusing it.
+message SleepRequest {
+  string request_id = 1;
+  string org_id = 2;
+  int32 duration_ms = 3;
+  // Optional reason for tracing/observability.
+  string reason = 4;
+}
+
+message SleepResponse {
+  string request_id = 1;
+  int32 actual_ms = 2;
+}
+
+// RemoteTriggerRequest — outbound HTTP webhook fired with SSRF guard
+// via the Quarry edge. Body bytes are passed verbatim; Content-Type
+// must be set explicitly.
+message RemoteTriggerRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string url = 3;
+  // GET / POST / PUT / DELETE. Default POST.
+  string method = 4;
+  // application/json | application/x-www-form-urlencoded | text/plain.
+  string content_type = 5;
+  // Body bytes (may be empty for GET / DELETE).
+  bytes body = 6;
+  // Per-call timeout in ms. Capped at 30 s.
+  int32 timeout_ms = 7;
+}
+
+message RemoteTriggerResponse {
+  string request_id = 1;
+  int32 status_code = 2;
+  bytes body = 3;
+  // Best-effort Content-Type from the upstream response.
+  string content_type = 4;
+  // Echo of the final URL after redirects.
+  string final_url = 5;
+}
+
+// SendMessageRequest — publish a JSON-encoded payload to a NATS
+// subject. Subject prefixes are enforced server-side: only
+// `agents.>`, `org.>`, and `notify.>` are allowed for now.
+message SendMessageRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string subject = 3;
+  // JSON-encoded payload. Empty string → no payload.
+  string payload_json = 4;
+  // Idempotency key — repeat publishes with the same key within
+  // 5 minutes are dropped.
+  string idempotency_key = 5;
+}
+
+message SendMessageResponse {
+  string request_id = 1;
+  // Set to false if the publish was dropped because the idempotency
+  // key was already seen; true otherwise.
+  bool published = 2;
+}
+
+// SyntheticOutputRequest — echo a fixed payload back. Test/dev only.
+message SyntheticOutputRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Caller-supplied payload to echo back verbatim.
+  string payload = 3;
+  // Optional simulated delay in ms before responding.
+  int32 delay_ms = 4;
+}
+
+message SyntheticOutputResponse {
+  string request_id = 1;
+  string echoed_payload = 2;
+}
+
+// =============================================================
+// Wave 10b — plan mode + team coordination
+// =============================================================
+
+// EnterPlanModeRequest — flag a run as "in plan mode" so write-class
+// tools route through the approval queue instead of executing
+// directly. The flag is keyed on (run_id, session_id) so two runs
+// inside the same session can be in different modes.
+message EnterPlanModeRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  // Human-readable rationale. Surfaced in approval UI and in events.
+  string rationale = 5;
+  // Optional TTL in seconds. 0 → 3600 (1 hour) default. Plan mode
+  // auto-clears after the TTL so an abandoned run doesn't gate every
+  // future call from the same session forever.
+  int32 ttl_seconds = 6;
+}
+
+message EnterPlanModeResponse {
+  string request_id = 1;
+  // Unix epoch seconds when the plan mode flag will auto-expire.
+  int64 expires_at_unix = 2;
+}
+
+message ExitPlanModeRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+}
+
+message ExitPlanModeResponse {
+  string request_id = 1;
+  // True when there was an active plan-mode flag that we cleared;
+  // false when no flag was set (idempotent — not an error).
+  bool was_active = 2;
+}
+
+message IsPlanModeRequest {
+  string request_id = 1;
+  string run_id = 2;
+}
+
+message IsPlanModeResponse {
+  string request_id = 1;
+  bool in_plan_mode = 2;
+  string rationale = 3;
+  int64 expires_at_unix = 4;
+}
+
+// TeamCreateRequest — coordinator-mode worker task creation. The
+// resulting worker_id is opaque (ULID); pass it to TeamDelete /
+// TeamList to manage the worker's lifecycle.
+message TeamCreateRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // What the worker should accomplish. Required.
+  string objective = 3;
+  // Caller-supplied context (assumptions, prior decisions). Optional.
+  string context = 4;
+  // How to determine success. Optional but recommended.
+  string success_criteria = 5;
+}
+
+// TeamWorker — current state of a single worker task. Returned by
+// TeamCreate, TeamDelete, and TeamList so callers don't need a
+// separate "get" RPC.
+message TeamWorker {
+  string worker_id = 1;
+  string org_id = 2;
+  string objective = 3;
+  string context = 4;
+  string success_criteria = 5;
+  // "pending" | "running" | "completed" | "failed".
+  string state = 6;
+  // Set when state transitions to completed/failed.
+  string summary = 7;
+  // Error message when state == "failed".
+  string error = 8;
+  // Unix epoch seconds.
+  int64 created_at_unix = 9;
+  int64 updated_at_unix = 10;
+}
+
+message TeamCreateResponse {
+  string request_id = 1;
+  TeamWorker worker = 2;
+}
+
+message TeamDeleteRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string worker_id = 3;
+  // "completed" | "failed".
+  string outcome = 4;
+  // Summary or error message.
+  string summary = 5;
+}
+
+message TeamDeleteResponse {
+  string request_id = 1;
+  TeamWorker worker = 2;
+}
+
+message TeamListRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Optional state filter ("pending" | "running" | "completed" | "failed").
+  // Empty → return all states for the org.
+  string state_filter = 3;
+  // Max results. 0 → 100 default, capped at 500.
+  int32 limit = 4;
+}
+
+message TeamListResponse {
+  string request_id = 1;
+  repeated TeamWorker workers = 2;
+  // Total count for the org (pre-limit). UIs use this for pagination.
+  int32 total = 3;
+}
+
+// =============================================================
+// Wave 10c — LSP
+// =============================================================
+
+// LspQueryRequest — single LSP query against a bridge. The four
+// operations match v2's tool surface 1:1.
+message LspQueryRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // "diagnostics" | "hover" | "definition" | "completion".
+  string operation = 3;
+  // Absolute path on the bridge's filesystem (the bridge resolves
+  // relative paths against its workspace root if needed).
+  string file_path = 4;
+  // 0-based line/column. Ignored for `diagnostics`.
+  int32 line = 5;
+  int32 column = 6;
+}
+
+// LspDiagnostic — one error/warning entry from the language server.
+message LspDiagnostic {
+  // "error" | "warning" | "info" | "hint".
+  string severity = 1;
+  int32 line = 2;
+  int32 column = 3;
+  int32 end_line = 4;
+  int32 end_column = 5;
+  string message = 6;
+  // LSP source code (e.g. "ts(2304)", "E0382").
+  string code = 7;
+}
+
+// LspLocation — for go-to-definition results.
+message LspLocation {
+  string file_path = 1;
+  int32 line = 2;
+  int32 column = 3;
+}
+
+// LspCompletion — single completion candidate.
+message LspCompletion {
+  string label = 1;
+  string detail = 2;
+  // 1=Text, 2=Method, 3=Function, ... (LSP CompletionItemKind).
+  int32 kind = 3;
+}
+
+message LspQueryResponse {
+  string request_id = 1;
+  // Populated when operation == "diagnostics".
+  repeated LspDiagnostic diagnostics = 2;
+  // Populated when operation == "hover". May be empty.
+  string hover_text = 3;
+  // Populated when operation == "definition".
+  repeated LspLocation locations = 4;
+  // Populated when operation == "completion". Capped at 20 by the
+  // bridge to keep responses sane.
+  repeated LspCompletion completions = 5;
+  // Non-empty when the bridge returned a structured error (file not
+  // found, language not supported, etc.). Gateway returns gRPC OK so
+  // callers can branch.
+  string error_message = 6;
+}
+
+// =============================================================
+// Wave 10e — approvals
+// =============================================================
+
+// GatewayApproval — single approval record. Returned by RequestApproval,
+// ApproveApproval, DenyApproval, ListPendingApprovals so callers
+// don't need a separate "get" RPC. Distinct from the orchestration-
+// level `Approval` (orchestration.proto) which models durable plan-
+// step approvals; this one is a lighter in-memory tool-gate record.
+message GatewayApproval {
+  string approval_id = 1;
+  string org_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  // Identifier of the agent action that needs approval.
+  string action_id = 5;
+  // Human-readable action name (e.g. "bash", "file_write").
+  string action_name = 6;
+  // "tool_execution" | "plan_execution" | "destructive_action" | "custom".
+  string kind = 7;
+  // Why approval is needed (LLM rationale).
+  string reason = 8;
+  // "pending" | "approved" | "denied" | "expired".
+  string status = 9;
+  // Set when status leaves pending. Identifier of the human/system
+  // that resolved the approval.
+  string decided_by = 10;
+  // Optional resolver comment.
+  string comment = 11;
+  int64 created_at_unix = 12;
+  int64 resolved_at_unix = 13;
+}
+
+message RequestApprovalRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  string action_id = 5;
+  string action_name = 6;
+  string kind = 7;
+  string reason = 8;
+}
+
+message RequestApprovalResponse {
+  string request_id = 1;
+  GatewayApproval approval = 2;
+}
+
+message ApproveApprovalRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string approval_id = 3;
+  string decided_by = 4;
+  string comment = 5;
+}
+
+message ApproveApprovalResponse {
+  string request_id = 1;
+  GatewayApproval approval = 2;
+}
+
+message DenyApprovalRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string approval_id = 3;
+  string decided_by = 4;
+  string comment = 5;
+}
+
+message DenyApprovalResponse {
+  string request_id = 1;
+  GatewayApproval approval = 2;
+}
+
+message ListPendingApprovalsRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Optional — when set, only approvals for this run are returned.
+  // Empty → all pending approvals for the org.
+  string run_id = 3;
+}
+
+message ListPendingApprovalsResponse {
+  string request_id = 1;
+  repeated GatewayApproval approvals = 2;
+}
+
+// =============================================================
+// Wave 10f — trajectory recording
+// =============================================================
+
+// TrajectoryAction — one entry in the executed-actions sequence.
+message TrajectoryAction {
+  // Tool / function name that was invoked.
+  string name = 1;
+  // "completed" | "failed" | "skipped".
+  string status = 2;
+  // Optional JSON-encoded inputs (caller-supplied, may be truncated).
+  string input_json = 3;
+  // Optional JSON-encoded outputs (provider-returned, may be truncated).
+  string output_json = 4;
+  int32 duration_ms = 5;
+}
+
+// Trajectory — full record of a single run for RL training + analytics.
+message Trajectory {
+  string trajectory_id = 1;
+  string org_id = 2;
+  string run_id = 3;
+  // Normalised task pattern (v2 derived this from the goal via
+  // `patterns.normalize_goal`). Optional — empty is acceptable.
+  string task_pattern = 4;
+  string goal = 5;
+  repeated TrajectoryAction planned_actions = 6;
+  repeated TrajectoryAction executed_actions = 7;
+  // "success" | "partial" | "failure".
+  string outcome = 8;
+  float duration_sec = 9;
+  repeated string skills_used = 10;
+  // USD cost rolled up from cost-core. 0 when not provided.
+  double cost_usd = 11;
+  // Model that served the bulk of the run, if any.
+  string model = 12;
+  int64 created_at_unix = 13;
+}
+
+message RecordTrajectoryRequest {
+  string request_id = 1;
+  Trajectory trajectory = 2;
+}
+
+message RecordTrajectoryResponse {
+  string request_id = 1;
+  // Assigned ULID — useful for cross-referencing in exports.
+  string trajectory_id = 2;
+  // True when also published to NATS (best-effort; non-fatal failures
+  // are reported as false but the in-memory record is still stored).
+  bool published = 3;
+}
+
+message ListTrajectoriesRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Optional outcome filter: "success" | "partial" | "failure". Empty
+  // → all outcomes.
+  string outcome_filter = 3;
+  // Optional pattern filter (exact match). Empty → all patterns.
+  string pattern_filter = 4;
+  // Only trajectories created at or after this unix second. 0 → all.
+  int64 since_unix = 5;
+  // Max results. 0 → 100, capped at 500.
+  int32 limit = 6;
+}
+
+message ListTrajectoriesResponse {
+  string request_id = 1;
+  repeated Trajectory trajectories = 2;
+  int32 total = 3;
+}
+
+message ExportTrajectoriesRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Lower bound (inclusive). 0 → no lower bound.
+  int64 since_unix = 3;
+  // Upper bound (exclusive). 0 → now.
+  int64 until_unix = 4;
+}
+
+message ExportTrajectoriesResponse {
+  string request_id = 1;
+  // JSONL bytes, one trajectory per line. Decoded UTF-8 (not gzip).
+  // Compress at the caller if the response is large; the gateway
+  // refuses to serialise more than 10 MB inline.
+  bytes jsonl = 2;
+  int32 count = 3;
+}
+
+// =============================================================
+// Wave 10d — skills loader
+// =============================================================
+
+// Skill — one entry loaded from the skills directory. v2's auto-loader
+// scanned `SKILL.md` and `<name>.skill.md` files; v1 keeps the same
+// shape so callers ported from v2 see no behavioural change.
+message Skill {
+  string id = 1;
+  string name = 2;
+  // Markdown body shown to the agent as system context when the skill
+  // is selected.
+  string body = 3;
+  // Tags / keywords used by MatchSkills for relevance scoring.
+  repeated string tags = 4;
+  // Source path on the bridge's filesystem. Empty for bundled skills.
+  string source_path = 5;
+  // Relevance threshold (0.0-1.0) for auto-injection.
+  float min_score = 6;
+}
+
+message ListSkillsRequest {
+  string request_id = 1;
+  string org_id = 2;
+}
+
+message ListSkillsResponse {
+  string request_id = 1;
+  repeated Skill skills = 2;
+}
+
+message GetSkillRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string skill_id = 3;
+}
+
+message GetSkillResponse {
+  string request_id = 1;
+  Skill skill = 2;
+}
+
+// MatchSkillsRequest — find skills relevant to a query. v2 used a
+// keyword + threshold match; v1 keeps the same simple scoring.
+message MatchSkillsRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string query = 3;
+  // Max results. 0 → 5, capped at 20.
+  int32 limit = 4;
+  // Minimum score to include. 0 → use each skill's min_score.
+  float min_score = 5;
+}
+
+message SkillMatch {
+  Skill skill = 1;
+  float score = 2;
+}
+
+message MatchSkillsResponse {
+  string request_id = 1;
+  repeated SkillMatch matches = 2;
+}
+
+// =============================================================
+// Wave 10g — MCP server hosting
+// =============================================================
+
+// McpServer — registered external MCP server endpoint. Once
+// registered, its tools become callable via `ProxyMcpTool`.
+message McpServer {
+  string server_id = 1;
+  string name = 2;
+  // Transport URL — `http://...` for streamable HTTP, `stdio:///...`
+  // for a local subprocess (path to executable + args).
+  string url = 3;
+  string transport = 4; // "http" | "stdio" | "sse"
+  // Bearer / OAuth token when the server requires auth.
+  string token = 5;
+  // Optional list of tool name prefixes the server is allowed to
+  // expose. Empty → all tools allowed.
+  repeated string tool_allowlist = 6;
+  bool enabled = 7;
+}
+
+message RegisterMcpServerRequest {
+  string request_id = 1;
+  string org_id = 2;
+  McpServer server = 3;
+}
+
+message RegisterMcpServerResponse {
+  string request_id = 1;
+  McpServer server = 2;
+}
+
+message ListMcpServersRequest {
+  string request_id = 1;
+  string org_id = 2;
+}
+
+message ListMcpServersResponse {
+  string request_id = 1;
+  repeated McpServer servers = 2;
+}
+
+// ProxyMcpToolRequest — invoke a tool exposed by a registered MCP
+// server. The gateway forwards the call and returns the result.
+message ProxyMcpToolRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string server_id = 3;
+  string tool_name = 4;
+  // JSON-encoded tool input.
+  string input_json = 5;
+}
+
+message ProxyMcpToolResponse {
+  string request_id = 1;
+  // JSON-encoded tool output (provider-shaped).
+  string output_json = 2;
+  // Non-empty when the proxy or remote server returned an error.
+  string error_message = 3;
+}
+
+// =============================================================
+// Wave 10h — plugins
+// =============================================================
+
+// Plugin — third-party extension registered against an org. Each
+// plugin can expose tools, skills, or hook handlers depending on its
+// manifest.
+message Plugin {
+  string plugin_id = 1;
+  string name = 2;
+  string version = 3;
+  // "tool" | "skill" | "hook" | "mcp_server" — informational only.
+  string kind = 4;
+  // Plugin manifest URL (JSON manifest the bridge fetches once).
+  string manifest_url = 5;
+  bool enabled = 6;
+  // Last-known status string ("active", "stale", "missing").
+  string status = 7;
+  int64 installed_at_unix = 8;
+}
+
+message RegisterPluginRequest {
+  string request_id = 1;
+  string org_id = 2;
+  Plugin plugin = 3;
+}
+
+message RegisterPluginResponse {
+  string request_id = 1;
+  Plugin plugin = 2;
+}
+
+message ListPluginsRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Optional kind filter ("tool" | "skill" | "hook" | "mcp_server").
+  string kind_filter = 3;
+}
+
+message ListPluginsResponse {
+  string request_id = 1;
+  repeated Plugin plugins = 2;
+}
+
+message SetPluginEnabledRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string plugin_id = 3;
+  bool enabled = 4;
+}
+
+message SetPluginEnabledResponse {
+  string request_id = 1;
+  Plugin plugin = 2;
+}
+
+// =============================================================
+// Wave 10i — commands + hooks + permissions + policy
+// =============================================================
+
+// Command — slash-command surface. Each command resolves to either a
+// builtin tool name (`tool_name` set) or a remote URL (`remote_url`
+// set; rare). The bridge handles dispatch.
+message Command {
+  string command_id = 1;
+  // "/<name>" form, e.g. "/plan" or "/init".
+  string name = 2;
+  string description = 3;
+  // Either-or: tool_name OR remote_url.
+  string tool_name = 4;
+  string remote_url = 5;
+  // Default JSON-encoded payload merged into the tool input.
+  string default_payload_json = 6;
+}
+
+message ListCommandsRequest {
+  string request_id = 1;
+  string org_id = 2;
+}
+
+message ListCommandsResponse {
+  string request_id = 1;
+  repeated Command commands = 2;
+}
+
+message ExecuteCommandRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string command_name = 3;
+  // JSON-encoded arg payload merged with the command's default_payload.
+  string args_json = 4;
+}
+
+message ExecuteCommandResponse {
+  string request_id = 1;
+  string output_json = 2;
+  string error_message = 3;
+}
+
+// Hook — pre/post lifecycle handler for tool calls. Hooks are run by
+// execution-core's middleware; the gateway holds the registry.
+message Hook {
+  string hook_id = 1;
+  // "pre_tool" | "post_tool" | "on_error" | "on_complete".
+  string event = 2;
+  // Tool name to scope to, or empty for all tools.
+  string tool_scope = 3;
+  // URL the bridge POSTs to with the hook payload.
+  string callback_url = 4;
+  bool enabled = 5;
+}
+
+message RegisterHookRequest {
+  string request_id = 1;
+  string org_id = 2;
+  Hook hook = 3;
+}
+
+message RegisterHookResponse {
+  string request_id = 1;
+  Hook hook = 2;
+}
+
+message ListHooksRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Optional event filter.
+  string event_filter = 3;
+}
+
+message ListHooksResponse {
+  string request_id = 1;
+  repeated Hook hooks = 2;
+}
+
+// Permissions — per-org tool ACL. By default all tools are allowed;
+// explicit deny entries take precedence.
+message CheckPermissionRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string tool_name = 3;
+}
+
+message CheckPermissionResponse {
+  string request_id = 1;
+  bool allowed = 2;
+  // Non-empty when allowed=false; explains the policy decision.
+  string reason = 3;
+}
+
+message SetPermissionRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string tool_name = 3;
+  // "allow" | "deny".
+  string verdict = 4;
+  string reason = 5;
+}
+
+message SetPermissionResponse {
+  string request_id = 1;
+}
+
+// Policy — per-org runtime guardrails. Operators tune via SetPolicy;
+// the run-loop fetches via GetPolicy at session start.
+message OrgPolicy {
+  string org_id = 1;
+  // Hard cap on USD spend per run.
+  double max_cost_per_run_usd = 2;
+  // Hard cap on total tokens per run.
+  int32 max_tokens_per_run = 3;
+  // Comma-separated list of allowed models. Empty → all.
+  string allowed_models = 4;
+  // Comma-separated list of denied tool names. Empty → none denied.
+  string denied_tools = 5;
+  // Requests-per-minute cap for the org.
+  int32 rate_limit_rpm = 6;
+}
+
+message GetPolicyRequest {
+  string request_id = 1;
+  string org_id = 2;
+}
+
+message GetPolicyResponse {
+  string request_id = 1;
+  OrgPolicy policy = 2;
+}
+
+message SetPolicyRequest {
+  string request_id = 1;
+  OrgPolicy policy = 2;
+}
+
+message SetPolicyResponse {
+  string request_id = 1;
+  OrgPolicy policy = 2;
+}
+
+// =============================================================
+// Wave 10j — messages + analytics + voice + tasks
+// =============================================================
+
+// ThreadMessage — single entry in a thread. Persistence is by the
+// existing session-core memory tables; the gateway routes here.
+message ThreadMessage {
+  string message_id = 1;
+  string thread_id = 2;
+  string role = 3; // "user" | "assistant" | "system" | "tool"
+  string content = 4;
+  int64 created_at_unix = 5;
+}
+
+message AppendThreadMessageRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string thread_id = 3;
+  string role = 4;
+  string content = 5;
+}
+
+message AppendThreadMessageResponse {
+  string request_id = 1;
+  ThreadMessage message = 2;
+}
+
+message ListThreadMessagesRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string thread_id = 3;
+  int32 limit = 4; // 0 → 50, capped at 500
+}
+
+message ListThreadMessagesResponse {
+  string request_id = 1;
+  repeated ThreadMessage messages = 2;
+}
+
+// Analytics — rollups over the gateway's in-memory counters. v2's
+// app/analytics had per-org/per-tool counters; v1 keeps the same
+// shape so dashboards port cleanly.
+message GetAnalyticsRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Time window in seconds back from now. 0 → 86400 (24 h).
+  int32 window_secs = 3;
+}
+
+message ToolCallCount {
+  string tool_name = 1;
+  int32 count = 2;
+}
+
+message GetAnalyticsResponse {
+  string request_id = 1;
+  int32 total_runs = 2;
+  int32 total_invocations = 3;
+  double total_cost_usd = 4;
+  int64 total_input_tokens = 5;
+  int64 total_output_tokens = 6;
+  repeated ToolCallCount tool_calls = 7;
+}
+
+// Voice — text-to-speech / speech-to-text passthroughs. Proxy to the
+// inference-core speech provider.
+message TextToSpeechRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string text = 3;
+  // Provider voice id (e.g. "alloy", "echo"). Empty → provider default.
+  string voice = 4;
+  // Output audio format ("mp3" | "wav" | "opus"). Empty → "mp3".
+  string format = 5;
+}
+
+message TextToSpeechResponse {
+  string request_id = 1;
+  bytes audio = 2;
+  string format = 3;
+  string error_message = 4;
+}
+
+message SpeechToTextRequest {
+  string request_id = 1;
+  string org_id = 2;
+  bytes audio = 3;
+  string format = 4; // input audio format
+  // Optional language hint (ISO-639-1). Empty → auto-detect.
+  string language = 5;
+}
+
+message SpeechToTextResponse {
+  string request_id = 1;
+  string text = 2;
+  string detected_language = 3;
+  string error_message = 4;
+}
+
+// Tasks — proxy to task-core. Gateway-level convenience so callers
+// don't need a separate task-core client.
+message CreateTaskRequest {
+  string request_id = 1;
+  string org_id = 2;
+  string description = 3;
+  // Optional parent run id.
+  string parent_run_id = 4;
+  // Optional cron expression — when set, task-core schedules it.
+  string cron = 5;
+}
+
+message TaskRecord {
+  string task_id = 1;
+  string org_id = 2;
+  string description = 3;
+  string status = 4;
+  string parent_run_id = 5;
+  string cron = 6;
+  int64 created_at_unix = 7;
+}
+
+message CreateTaskResponse {
+  string request_id = 1;
+  TaskRecord task = 2;
+}
+
+message ListTasksRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // Optional status filter.
+  string status_filter = 3;
+  int32 limit = 4;
+}
+
+message ListTasksResponse {
+  string request_id = 1;
+  repeated TaskRecord tasks = 2;
+}

@@ -1,0 +1,33 @@
+{
+  "name": "convex-core",
+  "version": "1.0.0",
+  "description": "Convex Core - Real-time UI state synchronization layer for CoreSystem (Application Plane)",
+  "main": "index.js",
+  "scripts": {
+    "dev": "convex dev",
+    "deploy": "convex deploy --prod",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint convex/",
+    "generate": "convex codegen"
+  },
+  "dependencies": {
+    "convex": "^1.18.0",
+    "nats": "^2.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "eslint": "^8.50.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0"
+  },
+  "keywords": [
+    "convex",
+    "realtime",
+    "gateway",
+    "websocket",
+    "chat"
+  ],
+  "author": "CoreSystem",
+  "license": "MIT"
+}

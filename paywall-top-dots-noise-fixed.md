@@ -1,0 +1,100 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - main [ref=e12]:
+      - generic [ref=e13]:
+        - button "Tilbake" [ref=e14]:
+          - img [ref=e15]
+          - text: Tilbake
+        - navigation "Onboarding steps" [ref=e17]:
+          - button "Go to Intro" [ref=e18]
+          - button "Go to Organization" [ref=e19]
+          - button "Go to Website" [ref=e20]
+          - button "Go to Sources" [ref=e21]
+          - button "Go to Proof" [ref=e22]
+          - button "Go to Plan" [ref=e23]
+        - generic [ref=e24]: Step 6 of 6
+      - generic [ref=e25]:
+        - generic [ref=e26]:
+          - heading "Do more with Velion" [level=1] [ref=e27]
+          - paragraph [ref=e28]: Select a plan based on your needs
+        - generic [ref=e29]:
+          - button "Monthly" [ref=e30]
+          - switch [ref=e31]
+          - button "Yearly" [ref=e33]
+          - generic [ref=e34]: 2 months free
+      - generic [ref=e35]:
+        - article [ref=e38] [cursor=pointer]:
+          - generic [ref=e39]:
+            - heading "Free" [level=2] [ref=e40]
+            - generic [ref=e41]
+          - generic [ref=e46]:
+            - generic [ref=e47]: $0
+            - generic [ref=e48]: /month
+          - paragraph [ref=e49]: 14-day trial with Velion and the AI agent included.
+          - list [ref=e50]:
+            - listitem [ref=e51]
+            - listitem [ref=e55]
+            - listitem [ref=e59]
+          - button "Selected" [ref=e63]
+        - article [ref=e65] [cursor=pointer]:
+          - heading "Essential" [level=2] [ref=e67]
+          - generic [ref=e68]:
+            - generic [ref=e69]: $25
+            - generic [ref=e70]: /month
+          - paragraph [ref=e71]: For individuals, startups, and small support teams.
+          - list [ref=e72]:
+            - listitem [ref=e73]
+            - listitem [ref=e77]
+            - listitem [ref=e81]
+          - button "Select plan" [ref=e85]
+        - article [ref=e87] [cursor=pointer]:
+          - heading "Advanced" [level=2] [ref=e89]
+          - generic [ref=e90]:
+            - generic [ref=e91]: $99
+            - generic [ref=e92]: /month
+          - paragraph [ref=e93]: For growing teams that need automation and AI workflows.
+          - list [ref=e94]:
+            - listitem [ref=e95]
+            - listitem [ref=e99]
+            - listitem [ref=e103]
+            - listitem [ref=e107]
+          - button "Select plan" [ref=e111]
+        - article [ref=e113] [cursor=pointer]:
+          - heading "Expert" [level=2] [ref=e115]
+          - generic [ref=e116]:
+            - generic [ref=e117]: $149
+            - generic [ref=e118]: /month
+          - paragraph [ref=e119]: For larger support teams with security and reporting needs.
+          - list [ref=e120]:
+            - listitem [ref=e121]
+            - listitem [ref=e125]
+            - listitem [ref=e129]
+            - listitem [ref=e133]
+          - button "Select plan" [ref=e137]
+        - article [ref=e139] [cursor=pointer]:
+          - heading "Custom" [level=2] [ref=e141]
+          - generic [ref=e143]: Custom
+          - paragraph [ref=e144]: Contact sales for commitments, onboarding, and governance.
+          - list [ref=e145]:
+            - listitem [ref=e146]
+            - listitem [ref=e150]
+            - listitem [ref=e154]
+            - listitem [ref=e158]
+          - button "Select plan" [ref=e162]
+      - generic [ref=e163]:
+        - paragraph [ref=e164]: Free is recommended
+        - paragraph [ref=e165]: Free lar deg teste uten kort. Betalte planer bruker setepris pluss $0.99 per AI-løsning.
+        - generic [ref=e167]:
+          - generic [ref=e168]: 100 ansatte
+          - generic [ref=e169]: Nettsted
+          - generic [ref=e170]: 3 kilder
+      - generic [ref=e171]:
+        - paragraph [ref=e172]: Pay as you go for AI resolutions on every paid plan
+        - paragraph [ref=e173]: Paid plans include AI usage-based billing at $0.99 per resolved conversation.
+      - generic [ref=e174]:
+        - button "Skip to setup" [ref=e175]
+        - button "Continue to setup" [ref=e176]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e182] [cursor=pointer]:
+    - img [ref=e183]
+  - alert [ref=e186]

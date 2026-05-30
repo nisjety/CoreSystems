@@ -1,0 +1,861 @@
+name: ingestion-plane
+
+services:
+  # ==================== QUARRY v2 (Web Crawler) ====================
+  quarry-edge:
+    build:
+      context: ./Quarry-v2
+      dockerfile: deploy/compose/Dockerfile.edge
+    container_name: quarry-edge
+    restart: unless-stopped
+    init: true
+    environment:
+      QUARRY_EDGE__PORT: "8082"
+      QUARRY_EDGE__USER_AGENT: "Quarry/2.0 (+https://triodelab.com/quarry)"
+      QUARRY_EDGE__BROWSER_PROVIDER: ${QUARRY_EDGE_BROWSER_PROVIDER:-static}
+      QUARRY_EDGE__BROWSERLESS_BASE_URL: ${BROWSERLESS_URL:-}
+      QUARRY_EDGE__BROWSERLESS_TOKEN: ${BROWSERLESS_TOKEN:-}
+      QUARRY_EDGE__CONTROL_BASE_URL: http://quarry-control:8081
+      QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
+      # Accept any non-empty Bearer in dev so the orchestrator's calls
+      # to /v1/internal/run_page succeed without a real auth-core JWT.
+      # The Rust binary refuses to start when this is `1` AND
+      # ENVIRONMENT={prod,production} — see edge main.rs. Production
+      # operators must either unset this OR set ENVIRONMENT=dev (the
+      # latter is wrong; do the former).
+      QUARRY_EDGE_AUTH_DEV_BYPASS: "${QUARRY_EDGE_AUTH_DEV_BYPASS:-1}"
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}@ingestion-redis:6379/6
+      QUARRY_EDGE__ARTIFACT_BACKEND: ${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
+      QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
+      QUARRY_EDGE__MODEL_PLANE_BASE_URL: ${MODEL_PLANE_URL:-http://ai-core:8001}
+      QUARRY_EDGE__MODEL_PLANE_BEARER_TOKEN: ${MODEL_PLANE_TOKEN:-}
+      QUARRY_EDGE__MODEL_PLANE_MODEL: ${MODEL_PLANE_MODEL:-}
+      QUARRY_EDGE__DATA_PLANE_DOCUMENTS_BASE_URL: ${DATA_PLANE_URL:-http://dpv2-documents-api:8010}
+      QUARRY_EDGE__DATA_PLANE_RETRIEVAL_BASE_URL: ${DATA_PLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:8004}
+      QUARRY_EDGE__DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
+      QUARRY_EDGE__CANARY_PCT: ${QUARRY_CANARY_PCT:-100}
+      QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
+      QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}
+      QUARRY_EDGE__FETCH_TIMEOUT_S: ${QUARRY_FETCH_TIMEOUT_S:-30}
+      # Wave 7 — wire the optional HTTP/3 driver. Default `1` because
+      # the edge image is now built with `--features http3` so the
+      # cost of having the driver available is paid at build time;
+      # leaving the runtime knob off would only deny clients a
+      # capability they already paid for. Per-request opt-in still
+      # required via `ScrapeRequest.prefer_http3: true`.
+      QUARRY_EDGE__HTTP3_ENABLED: "${QUARRY_EDGE_HTTP3_ENABLED:-1}"
+      # Optional `;`-separated proxy URI list (socks5, http, https).
+      # Empty by default → direct egress. See proxy_pool.rs for the
+      # (org_id, host) sticky-affinity hashing.
+      QUARRY_PROXY_POOL: "${QUARRY_PROXY_POOL:-}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      quarry-control:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:8082/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  quarry-control:
+    build:
+      context: ./Quarry-v2
+      dockerfile: deploy/compose/Dockerfile.control
+    container_name: quarry-control
+    restart: unless-stopped
+    init: true
+    environment:
+      QUARRY_CONTROL_ADDR: ":8081"
+      QUARRY_CONTROL_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_v2?sslmode=disable
+      QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      # G33: dispatch newly-created jobs onto the orchestrator's task queue.
+      TEMPORAL_ADDR: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: quarry-orchestrator
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    ports:
+      - "8081:8081"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:8081/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  quarry-orchestrator:
+    build:
+      context: ./Quarry-v2
+      dockerfile: deploy/compose/Dockerfile.orchestrator
+    container_name: quarry-orchestrator
+    restart: unless-stopped
+    init: true
+    environment:
+      TEMPORAL_ADDR: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      RUNTIME_BASE_URL: http://quarry-edge:8082
+      CONTROL_BASE_URL: http://quarry-control:8081
+      RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
+      CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+    depends_on:
+      temporal:
+        condition: service_healthy
+      quarry-edge:
+        condition: service_healthy
+      quarry-control:
+        condition: service_healthy
+    # Same shape as imports-api / integration-api / finspo-api. Without
+    # this an orchestrator stuck in a tight workflow-replay loop (e.g.
+    # a determinism violation that retries forever) can starve other
+    # services on the same host.
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+        reservations:
+          memory: 96M
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================== IMPORTS-CORE (File Import) ====================
+  imports-api:
+    build:
+      context: ./imports-core
+      dockerfile: Dockerfile
+    container_name: imports-api
+    restart: unless-stopped
+    env_file:
+      - ./imports-core/.env
+    environment:
+      # Bruk ingestion_user siden det er den som finnes i Postgres her
+      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/imports
+
+      NATS_URL: nats://nats:4222
+      NATS_TOKEN:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    ports:
+      - "3025:3025"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3025/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ==================== INTEGRATION-CORE (M365 OAuth + Discovery) ====================
+  integration-api:
+    build:
+      context: ./integration-core
+      dockerfile: Dockerfile
+    container_name: integration-api
+    restart: unless-stopped
+    env_file:
+      - ./integration-core/.env
+    environment:
+      # Database for first-party connection mappings and webhook journal entries
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      # integration-api is on inter-plane-bus so velion-nats resolves correctly.
+      VELION_NATS_URL: nats://velion-nats:4222
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
+      CONNECTOR_RUNTIME_PUBLIC_BASE_URL: ${CONNECTOR_RUNTIME_PUBLIC_BASE_URL:-http://localhost:3003}
+      DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      connector-runtime-engine:
+        condition: service_healthy
+    ports:
+      - "3026:3026"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3026/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ==================== FINSPO-CORE (SharePoint Manager) ====================
+  finspo-api:
+    build:
+      context: ./finspo-core
+      dockerfile: Dockerfile
+    container_name: finspo-api
+    restart: unless-stopped
+    environment:
+      PORT: "3130"
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      SERVICE_NAME: finspo-core
+      FINSPO_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
+      INTEGRATION_CORE_URL: http://integration-api:3026
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      # Phase 1 — Postgres + NATS + Data Plane wiring.
+      FINSPO_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/finspo?sslmode=disable
+      NATS_URL: ${FINSPO_NATS_URL:-nats://nats:4222}
+      NATS_SUBJECT_PREFIX: ${FINSPO_NATS_SUBJECT_PREFIX:-finspo}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      DATA_PLANE_DOCUMENTS_BASE_URL: ${DATA_PLANE_URL:-http://dpv2-documents-api:8010}
+      DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
+      # Phase 3 — background scheduler + ACL capture.
+      FINSPO_SYNC_INTERVAL: ${FINSPO_SYNC_INTERVAL:-5m}
+      FINSPO_CAPTURE_PERMISSIONS: ${FINSPO_CAPTURE_PERMISSIONS:-true}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    ports:
+      - "3130:3130"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3130/health || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  integration-worker:
+    profiles: ["legacy"]
+    build:
+      context: ./legacy/integration-core-py
+      dockerfile: Dockerfile
+    container_name: integration-worker
+    command: ["python", "-m", "app.worker_main"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      INTEGRATION_SERVICE_NAME: integration-worker
+      INTEGRATION_SERVICE_PORT: "3027"
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
+      FRONTEND_REDIRECT_URI: ${FRONTEND_REDIRECT_URI:-http://localhost:3000/onboarding/connect/callback}
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
+      MICROSOFT_FIRST_PARTY_AUTH_ENABLED: ${MICROSOFT_FIRST_PARTY_AUTH_ENABLED:-true}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-}
+      INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
+      INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      CONNECTOR_RUNTIME_BASE_URL: ${CONNECTOR_RUNTIME_BASE_URL:-http://connector-runtime-engine:3003}
+      CONNECTOR_RUNTIME_SECRET: ${CONNECTOR_RUNTIME_SECRET:?CONNECTOR_RUNTIME_SECRET is required}
+      CONNECTOR_RUNTIME_WEBHOOK_SECRET: ${CONNECTOR_RUNTIME_WEBHOOK_SECRET:?CONNECTOR_RUNTIME_WEBHOOK_SECRET is required}
+      CONNECTOR_SYNC_TRIGGERS_ENABLED: ${CONNECTOR_SYNC_TRIGGERS_ENABLED:-false}
+      MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
+      GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
+      SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
+      MICROSOFT_SHAREPOINT_SYNC_KEY: ${MICROSOFT_SHAREPOINT_SYNC_KEY:-sharepoint-documents}
+      MICROSOFT_ONEDRIVE_SYNC_KEY: ${MICROSOFT_ONEDRIVE_SYNC_KEY:-onedrive-files}
+      MICROSOFT_TEAMS_SYNC_KEY: ${MICROSOFT_TEAMS_SYNC_KEY:-teams-messages}
+      MICROSOFT_OUTLOOK_SYNC_KEY: ${MICROSOFT_OUTLOOK_SYNC_KEY:-outlook-mail}
+      GOOGLE_CALENDAR_SYNC_KEY: ${GOOGLE_CALENDAR_SYNC_KEY:-google-calendar-events}
+      GOOGLE_GMAIL_SYNC_KEY: ${GOOGLE_GMAIL_SYNC_KEY:-gmail-messages}
+      SLACK_MESSAGES_SYNC_KEY: ${SLACK_MESSAGES_SYNC_KEY:-slack-messages}
+      NATS_URL: nats://nats:4222
+      NATS_TOKEN:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================== VELION INTEGRATION ENGINE (Go replacement path) ====================
+  integration-engine-go-api:
+    profiles: ["legacy"]
+    build:
+      context: ./legacy/integration-engine-go
+      dockerfile: Dockerfile
+    container_name: integration-engine-go-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "3126"
+      SERVICE_NAME: integration-engine-go-api
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      NATS_URL: nats://nats:4222
+      NATS_TOKEN:
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_ENGINE_GO_PUBLIC_BASE_URL:-http://localhost:3126}
+      MICROSOFT_FIRST_PARTY_AUTH_ENABLED: ${MICROSOFT_FIRST_PARTY_AUTH_ENABLED:-true}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
+      GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
+      SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-}
+      INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
+      INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
+      CONNECTOR_RUNTIME_ENABLED: ${CONNECTOR_RUNTIME_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    ports:
+      - "3126:3126"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3126/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  integration-engine-go-worker:
+    profiles: ["legacy"]
+    build:
+      context: ./legacy/integration-engine-go
+      dockerfile: Dockerfile
+    container_name: integration-engine-go-worker
+    command: ["./integration-engine-worker"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "3127"
+      SERVICE_NAME: integration-engine-go-worker
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      NATS_URL: nats://nats:4222
+      NATS_TOKEN:
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_ENGINE_GO_PUBLIC_BASE_URL:-http://localhost:3126}
+      MICROSOFT_FIRST_PARTY_AUTH_ENABLED: ${MICROSOFT_FIRST_PARTY_AUTH_ENABLED:-true}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
+      GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
+      SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-}
+      INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
+      INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
+      CONNECTOR_RUNTIME_ENABLED: ${CONNECTOR_RUNTIME_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================== CONNECTOR RUNTIME ENGINE ====================
+  connector-runtime-db:
+    image: postgres:16.0-alpine
+    container_name: connector-runtime-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CONNECTOR_RUNTIME_DB_USER:-connector_runtime}
+      POSTGRES_PASSWORD: ${CONNECTOR_RUNTIME_DB_PASSWORD:-connector_runtime}
+      POSTGRES_DB: ${CONNECTOR_RUNTIME_DB_NAME:-connector_runtime}
+    volumes:
+      - connector-runtime-db-data:/var/lib/postgresql/data
+    networks:
+      - ingestion-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CONNECTOR_RUNTIME_DB_USER:-connector_runtime} -d ${CONNECTOR_RUNTIME_DB_NAME:-connector_runtime}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  connector-runtime-redis:
+    image: redis:7.2.4
+    container_name: connector-runtime-redis
+    restart: unless-stopped
+    networks:
+      - ingestion-net
+
+  connector-runtime-engine:
+    image: nangohq/nango-server:hosted
+    container_name: connector-runtime-engine
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      # Development-only fallback. Override in real environments with `openssl rand -base64 32`.
+      NANGO_ENCRYPTION_KEY: ${CONNECTOR_RUNTIME_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      NANGO_DB_USER: ${CONNECTOR_RUNTIME_DB_USER:-connector_runtime}
+      NANGO_DB_PASSWORD: ${CONNECTOR_RUNTIME_DB_PASSWORD:-connector_runtime}
+      NANGO_DB_HOST: ${CONNECTOR_RUNTIME_DB_HOST:-connector-runtime-db}
+      NANGO_DB_NAME: ${CONNECTOR_RUNTIME_DB_NAME:-connector_runtime}
+      NANGO_DB_SSL: ${CONNECTOR_RUNTIME_DB_SSL:-false}
+      RECORDS_DATABASE_URL: ${CONNECTOR_RUNTIME_RECORDS_DATABASE_URL:-postgresql://connector_runtime:connector_runtime@connector-runtime-db:5432/connector_runtime}
+      SERVER_PORT: ${CONNECTOR_RUNTIME_PORT:-3003}
+      # Browser-facing URL. Keep integration-core's internal runtime URL in
+      # CONNECTOR_RUNTIME_BASE_URL; the Nango dashboard/Connect UI must emit a
+      # host URL the browser can resolve.
+      NANGO_SERVER_URL: ${CONNECTOR_RUNTIME_PUBLIC_SERVER_URL:-http://localhost:3003}
+      NANGO_PUBLIC_SERVER_URL: ${CONNECTOR_RUNTIME_PUBLIC_SERVER_URL:-http://localhost:3003}
+      NANGO_REDIS_URL: ${CONNECTOR_RUNTIME_REDIS_URL:-redis://connector-runtime-redis:6379}
+      # Self-hosted Nango validates backend API calls against environment-scoped
+      # secret keys. integration-core uses CONNECTOR_RUNTIME_SECRET as its
+      # Nango bearer token, so expose the same value as the DEV API key here.
+      NANGO_SECRET_KEY_DEV: ${CONNECTOR_RUNTIME_SECRET:?CONNECTOR_RUNTIME_SECRET is required}
+      NANGO_PUBLIC_CONNECT_URL: ${CONNECTOR_RUNTIME_PUBLIC_CONNECT_URL:-http://localhost:3009}
+      NANGO_CONNECT_UI_PORT: ${CONNECTOR_RUNTIME_CONNECT_UI_PORT:-3009}
+      # Nango's hosted webapp initializes Stripe even when billing is disabled.
+      # A non-secret publishable placeholder avoids a local dashboard crash.
+      PUBLIC_STRIPE_KEY: ${CONNECTOR_RUNTIME_PUBLIC_STRIPE_KEY:-pk_test_self_hosted_disabled}
+      FLAG_SERVE_CONNECT_UI: "true"
+      FLAG_AUTH_ENABLED: ${CONNECTOR_RUNTIME_AUTH_ENABLED:-false}
+      LOG_LEVEL: ${CONNECTOR_RUNTIME_LOG_LEVEL:-info}
+    depends_on:
+      connector-runtime-db:
+        condition: service_healthy
+      connector-runtime-redis:
+        condition: service_started
+    ports:
+      - "3003:3003"
+      - "3009:3009"
+    networks:
+      - ingestion-net
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3003/ready').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # One-shot seed: registers OAuth provider integrations in self-hosted Nango.
+  # Idempotent (PUT/upsert). Runs once then exits; no auto-restart.
+  nango-seed:
+    build:
+      context: ./integration-core
+      dockerfile: Dockerfile
+    container_name: nango-seed
+    restart: "no"
+    command: ["node", "dist/scripts/seed-nango-providers.js"]
+    env_file:
+      - ./integration-core/.env
+    depends_on:
+      connector-runtime-engine:
+        condition: service_healthy
+    networks:
+      - ingestion-net
+
+  # ==================== INFRA (kun ingestion-net) ====================
+  postgres:
+    image: postgres:16-alpine
+    container_name: ingestion-postgres
+    restart: unless-stopped
+    networks:
+      - ingestion-net
+    environment:
+      POSTGRES_USER: ingestion_user
+      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}
+      POSTGRES_DB: ingestion_plane_db
+    ports:
+      # Bind loopback only. Compose-network peers (quarry-control,
+      # imports-api, etc.) reach Postgres via DNS as `ingestion-postgres`
+      # and don't need a host port. Loopback binding still lets local
+      # tools (`psql -h localhost`, `pgcli`) connect from the host.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ingestion-postgres-data:/var/lib/postgresql/data
+      # Viktig: må være en FIL, ikke mappe (ellers får du "Is a directory")
+      - ./init-databases.sql:/docker-entrypoint-initdb.d/001-init-databases.sql:ro
+    shm_size: "64mb"
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=64MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "effective_cache_size=128MB"
+      - "-c"
+      - "maintenance_work_mem=32MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "log_min_messages=warning"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ingestion_user -d ingestion_plane_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2.4-alpine
+    container_name: ingestion-redis
+    restart: unless-stopped
+    networks:
+      - ingestion-net
+    # No host port mapping — Redis is reached only via the compose
+    # network as `ingestion-redis:6379`. Avoids clashing with any local
+    # Redis the operator may run, and removes a Redis instance from the
+    # public host-network attack surface.
+    expose:
+      - "6379"
+    volumes:
+      - ingestion-redis-data:/data
+    command: >
+      redis-server
+      --requirepass ${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}
+      --appendonly yes
+      --maxmemory 96mb
+      --maxmemory-policy allkeys-lru
+      --tcp-backlog 128
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # G50 (velion-gap.md §8.33): dedicated Postgres for Temporal — split out
+  # from the shared `ingestion-postgres` instance which was running with
+  # only 64MB shared_buffers and hosting 6 databases (quarry, quarry_v2,
+  # ingestion_plane_db, imports, integration, temporal, temporal_visibility).
+  # The shared instance caused intermittent `GetTransferTasks` failures
+  # with `context deadline exceeded` whenever Temporal's history-shard
+  # scanner read multiple queue tables concurrently and blew the cache.
+  # Dedicated instance gives Temporal 256MB shared_buffers + 768MB
+  # effective_cache_size — enough headroom for the working set of
+  # transfer_tasks, timer_tasks, executions, history_node across all
+  # shards without thrashing.
+  temporal-postgres:
+    image: postgres:16-alpine
+    container_name: ingestion-temporal-postgres
+    restart: unless-stopped
+    networks:
+      - ingestion-net
+    environment:
+      POSTGRES_USER: ingestion_user
+      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}
+      POSTGRES_DB: temporal
+    volumes:
+      - ingestion-temporal-postgres-data:/var/lib/postgresql/data
+    shm_size: "256mb"
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "effective_cache_size=768MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "log_min_messages=warning"
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: "1.0"
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ingestion_user -d temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    container_name: ingestion-temporal
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      # G50: was `ingestion-postgres` (shared 256MB instance). Now points
+      # at the dedicated `temporal-postgres` service above.
+      POSTGRES_SEEDS: temporal-postgres
+      POSTGRES_USER: ingestion_user
+      POSTGRES_PWD: ${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}
+      DB_PORT: 5432
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      LOG_LEVEL: warn
+    deploy:
+      resources:
+        limits:
+          memory: 768M       # G50: was 384M
+          cpus: "1.0"        # G50: was 0.5
+        reservations:
+          memory: 256M       # G50: was 128M
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    ports:
+      # Temporal frontend exposes admin gRPC with no built-in auth.
+      # Loopback only — orchestrator reaches it via compose DNS.
+      - "127.0.0.1:7233:7233"
+    networks:
+      - ingestion-net
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: ingestion-nats
+    restart: unless-stopped
+    command:
+      - --jetstream
+      - --store_dir=/data
+      - -m
+      - "8222"
+    volumes:
+      - ingestion-nats-data:/data
+    ports:
+      - "4224:4222"
+    networks:
+      - ingestion-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 32M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    container_name: ingestion-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-change-me}
+      QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER: 2
+      QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
+    volumes:
+      - ingestion-qdrant-data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    networks:
+      - ingestion-net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo '' > /dev/tcp/127.0.0.1/6333"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ==================== SUPPORT-WORKER (AI Triage + SLA) ====================
+  support-worker:
+    build:
+      context: ./services/support-worker
+      dockerfile: Dockerfile
+    container_name: support-worker
+    restart: unless-stopped
+    init: true
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      VELION_NATS_URL: nats://velion-nats:4222
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
+      ZAMMAD_API_URL: http://zammad-railsserver:3000
+      ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN:-}
+      AI_CORE_URL: http://ai-core:8001
+      NOTIFICATION_CORE_URL: http://notification-core:3140
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-notif-internal-key-change-me}
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    depends_on:
+      temporal:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ingestion-postgres-data:
+    driver: local
+  # G50 (velion-gap.md §8.33): dedicated volume for the Temporal-only
+  # Postgres instance. Separating data files from `ingestion-postgres-data`
+  # makes backup / restore / blow-away operations on Temporal independent
+  # of the rest of the Ingestion Plane state.
+  ingestion-temporal-postgres-data:
+    driver: local
+  ingestion-redis-data:
+    driver: local
+  ingestion-nats-data:
+    driver: local
+  ingestion-qdrant-data:
+    driver: local
+  connector-runtime-db-data:
+    driver: local
+
+networks:
+  # Privat nettverk for ingestion plane
+  ingestion-net:
+    name: ingestion-net
+    driver: bridge
+
+  # Felles nettverk for intern kommunikasjon på tvers av planes
+  inter-plane-bus:
+    driver: bridge
+    name: inter-plane-bus
+    external: true
+    labels:
+      com.docker.compose.network: "inter-plane-bus"
+      com.docker.compose.project: "triodelab"

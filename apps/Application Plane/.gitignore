@@ -1,0 +1,8 @@
+.env
+.env.zammad
+.env.local
+.env.*.local
+zammad-foundation/bootstrap/.env
+**/.env.local
+**/node_modules/
+.DS_Store

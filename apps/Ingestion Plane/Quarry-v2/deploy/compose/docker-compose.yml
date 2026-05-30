@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: quarry
+      POSTGRES_PASSWORD: quarry
+      POSTGRES_DB: quarry
+    ports: ["5432:5432"]
+    volumes:
+      - quarry_pg:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    # No host port binding — quarry-control reaches it via the compose
+    # network as `redis:6379`. Keeps the stack from clashing with any
+    # redis you already run on the host (e.g. for another project).
+    expose: ["6379"]
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=quarry
+      - POSTGRES_PWD=quarry
+      - POSTGRES_SEEDS=postgres
+    depends_on: [postgres]
+    ports: ["7233:7233"]
+
+  quarry-edge:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.edge
+    environment:
+      QUARRY_EDGE__PORT: "8080"
+      QUARRY_EDGE__CONTROL_BASE_URL: "http://quarry-control:8081"
+      # Dev-mode: accept any non-empty Authorization: Bearer. Production
+      # MUST leave this unset so JWTs are verified against the
+      # auth-core JWKS. Required here so the orchestrator's
+      # /v1/internal/run_page calls succeed without an auth-core
+      # round-trip during onboarding-style flows.
+      QUARRY_EDGE_AUTH_DEV_BYPASS: "1"
+    ports: ["8080:8080"]
+    depends_on: [quarry-control]
+
+  quarry-control:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.control
+    environment:
+      QUARRY_CONTROL_ADDR: ":8081"
+      # Dev token shared with the orchestrator's CONTROL_AUTH_TOKEN so
+      # POST /v1/runs/{id}/events (bearer-protected) accepts the events
+      # the workflow emits.
+      QUARRY_CONTROL_API_KEY: "devsecret"
+    ports: ["8081:8081"]
+    depends_on: [postgres, redis]
+
+  quarry-orchestrator:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.orchestrator
+    environment:
+      TEMPORAL_ADDR: "temporal:7233"
+      RUNTIME_BASE_URL: "http://quarry-edge:8080"
+      CONTROL_BASE_URL: "http://quarry-control:8081"
+      # Must match QUARRY_CONTROL_API_KEY on quarry-control. The
+      # orchestrator sends this as the Authorization: Bearer header
+      # on every event/checkpoint POST to control.
+      CONTROL_AUTH_TOKEN: "devsecret"
+      # Sent as Bearer on /v1/internal/run_page calls to edge. Any
+      # non-empty value is accepted when QUARRY_EDGE_AUTH_DEV_BYPASS is
+      # on (dev compose default).
+      RUNTIME_AUTH_TOKEN: "devsecret"
+    depends_on: [temporal, quarry-control]
+
+volumes:
+  quarry_pg:

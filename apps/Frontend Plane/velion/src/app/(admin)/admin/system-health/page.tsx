@@ -13,7 +13,7 @@
 
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type JSX } from 'react'
 
 type ProbeStatus = 'healthy' | 'degraded' | 'down' | 'unknown'
 

@@ -1,0 +1,73 @@
+# Bridges overlay — opt-in. Layer on top of docker-compose.yml when
+# operators want the MCP / LSP RPCs live.
+#
+# Usage:
+#   cd apps/Model\ Plane
+#   MODEL_PLANE_BRIDGES=1 ./scripts/compose.sh \
+#       up -d model-gateway mcp-bridge lsp-bridge
+#
+# After both bridges are healthy the gateway will pick up:
+#   - LSP_BRIDGE_URL=http://lsp-bridge:9202  → LspQuery RPC active
+#   - The MCP bridge is registered per-org via ModelGateway.RegisterMcpServer
+#     with url=http://mcp-bridge:9201?server_id=<id>.
+services:
+  mcp-bridge:
+    build:
+      context: ../bridges/mcp-bridge
+      dockerfile: Dockerfile
+    container_name: mp-mcp-bridge
+    restart: unless-stopped
+    environment:
+      PORT: "9201"
+      # Mount the operator's bridge.json into /app/bridge.json to
+      # override the example config baked into the image.
+      MCP_BRIDGE_CONFIG: /app/bridge.json
+    ports:
+      # Host-side 9301; container-internal stays 9201 so the gateway's
+      # registration URL (http://mcp-bridge:9201?server_id=...) is
+      # unaffected. 9201 on the host is taken by dpv2-index-engine.
+      - "9301:9201"
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9201/health"]
+      interval: 15s
+      retries: 3
+      start_period: 5s
+
+  lsp-bridge:
+    build:
+      context: ../bridges/lsp-bridge
+      dockerfile: Dockerfile
+    container_name: mp-lsp-bridge
+    restart: unless-stopped
+    environment:
+      PORT: "9202"
+      LSP_WORKSPACE_ROOT: /workspace
+    # No default workspace mount — operators add a volume:
+    #   volumes:
+    #     - /path/on/host:/workspace:ro
+    ports:
+      # Host-side 9302; container-internal stays 9202. 9202 is taken
+      # on the host by dpv2-embedding-engine.
+      - "9302:9202"
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:9202/health').read()\""]
+      interval: 15s
+      retries: 3
+      start_period: 10s
+
+  # When the bridges are in the stack, advertise their URLs to the
+  # gateway so LspQuery resolves out of the box. MCP servers stay
+  # opt-in per-org (via RegisterMcpServer) so they don't pollute every
+  # tenant's tool catalog.
+  model-gateway:
+    environment:
+      LSP_BRIDGE_URL: "http://lsp-bridge:9202"
+    depends_on:
+      mcp-bridge:
+        condition: service_healthy
+      lsp-bridge:
+        condition: service_healthy

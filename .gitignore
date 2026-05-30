@@ -64,21 +64,22 @@ Thumbs.db
 **/.env
 **/.env.*
 **/*.env
-# Track explicitly named template/example/docker variants only.
+# Track explicitly named template/example variants only.
+# NOTE: .env.docker is intentionally NOT tracked — in this tree those files
+# carry REAL DB/Twilio/Resend/Google/Microsoft/Okta secrets. Rotate any that
+# were ever committed and keep real values in a secret manager.
 !**/.env.example
 !**/.env.template
-!**/.env.docker
 !**/.env.sso.template
 !**/.env.zammad.example
 !**/*.env.example
 !**/*.env.template
-!**/*.env.docker
 # Specific known-secret files (defence-in-depth in case the pattern
 # above ever loosens by accident).
 **/lago.env
 **/.env.external-services
-!**/.env.docker
-!**/.env.template
+**/.env.docker
+**/*.env.docker
 
 # ──────────────────────────────────────────────────────────────────────
 # Logs and runtime state

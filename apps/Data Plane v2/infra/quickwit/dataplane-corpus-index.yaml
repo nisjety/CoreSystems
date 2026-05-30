@@ -1,0 +1,119 @@
+version: 0.7
+index_id: dataplane-corpus
+index_uri: s3://quickwit/indexes/dataplane-corpus
+doc_mapping:
+  mode: lenient
+  field_mappings:
+    - name: timestamp
+      type: datetime
+      input_formats:
+        - rfc3339
+      fast_precision: seconds
+      fast: true
+    - name: entity_type
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: org_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: document_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: knowledge_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: source_object_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: chunk_index
+      type: i64
+      fast: true
+    - name: source
+      type: text
+      tokenizer: default
+      record: position
+    - name: title
+      type: text
+      tokenizer: default
+      record: position
+      fieldnorms: true
+    - name: body
+      type: text
+      tokenizer: default
+      record: position
+      fieldnorms: true
+    - name: site_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: drive_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: item_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: path
+      type: text
+      tokenizer: default
+      record: position
+    - name: mime_type
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: modified_at
+      type: datetime
+      input_formats:
+        - rfc3339
+      fast_precision: seconds
+      fast: true
+    - name: quickxor_hash
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: sha1_hash
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: content_hash
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
+    - name: acl_tags
+      type: array<text>
+      tokenizer: raw
+    - name: metadata
+      type: json
+      tokenizer: default
+  tag_fields:
+    - org_id
+    - entity_type
+    - mime_type
+  timestamp_field: timestamp
+  index_field_presence: true
+indexing_settings:
+  commit_timeout_secs: 30
+search_settings:
+  default_search_fields:
+    - title
+    - body
+    - source
+    - path

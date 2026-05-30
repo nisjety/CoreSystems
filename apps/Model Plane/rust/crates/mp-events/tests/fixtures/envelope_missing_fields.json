@@ -1,0 +1,14 @@
+{
+  "event_id": "",
+  "event_type": "RUN_STARTED",
+  "schema_version": 1,
+  "ts": "2026-01-15T12:00:00Z",
+  "producer": "model-gateway",
+  "correlation_id": "",
+  "causation_id": "",
+  "idempotency_key": "",
+  "org_id": "org1",
+  "user_id": "",
+  "resource_ref": "",
+  "payload": {}
+}

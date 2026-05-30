@@ -1,0 +1,85 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]:
+          - generic [ref=e7]:
+            - link "← TILBAKE" [ref=e8] [cursor=pointer]:
+              - /url: /
+            - button "Select language" [ref=e10] [cursor=pointer]:
+              - img [ref=e11]
+              - img [ref=e14]
+          - tablist "Autentisering" [ref=e17]:
+            - generic [ref=e18]:
+              - tab "Logg Inn" [selected] [ref=e19] [cursor=pointer]:
+                - img [ref=e20]
+                - text: Logg Inn
+              - tab "Registrer" [ref=e23] [cursor=pointer]:
+                - img [ref=e24]
+                - text: Registrer
+          - generic [ref=e27]:
+            - heading "Logg Inn" [level=1] [ref=e28]
+            - paragraph [ref=e29]: Velkommen tilbake! Logg inn på kontoen din.
+          - generic [ref=e31]:
+            - generic [ref=e32]:
+              - generic [ref=e33]:
+                - generic [ref=e34]: E-postadresse *
+                - generic [ref=e35]:
+                  - img [ref=e36]
+                  - textbox "E-postadresse *" [ref=e39]:
+                    - /placeholder: navn@eksempel.no
+              - generic [ref=e40]:
+                - generic [ref=e41]: Passord *
+                - generic [ref=e42]:
+                  - img [ref=e43]
+                  - textbox "Passord *" [ref=e46]:
+                    - /placeholder: ••••••••
+                  - button "Vis passord" [ref=e48] [cursor=pointer]:
+                    - img [ref=e49]
+              - button "Logg inn" [ref=e52] [cursor=pointer]
+            - generic [ref=e53]:
+              - generic [ref=e56]: eller med
+              - generic [ref=e58]:
+                - button "Logg inn med Microsoft" [ref=e59] [cursor=pointer]:
+                  - img [ref=e60]
+                - button "Logg inn med Google" [ref=e65] [cursor=pointer]:
+                  - img [ref=e66]
+                - button "SSO" [ref=e71] [cursor=pointer]:
+                  - img [ref=e72]
+                - button "Mer" [ref=e75] [cursor=pointer]:
+                  - generic [ref=e76]: ⌣
+            - button "Bruk passkey" [ref=e77] [cursor=pointer]:
+              - img [ref=e78]
+              - text: Bruk passkey
+            - paragraph [ref=e82]:
+              - text: Ved å fortsette aksepterer du våre
+              - button "brukervilkår" [ref=e83] [cursor=pointer]
+              - text: og
+              - button "personvernregler" [ref=e84] [cursor=pointer]
+              - text: .
+          - paragraph [ref=e86]:
+            - text: Trenger du hjelp?
+            - link "Kontakt Support" [ref=e87] [cursor=pointer]:
+              - /url: mailto:support@velion.com
+        - complementary [ref=e88]:
+          - generic [ref=e91]:
+            - img [ref=e92]
+            - img [ref=e95]
+            - img [ref=e98]
+          - generic [ref=e109]:
+            - img [ref=e111]
+            - paragraph [ref=e113]: Ved å klikke «Godta», godtar du lagring av informasjonskapsler på enheten din.
+            - generic [ref=e114]:
+              - button "Cookie-innstillinger" [ref=e115] [cursor=pointer]:
+                - img [ref=e116]
+              - button "Avvis" [ref=e118] [cursor=pointer]
+              - button "Godta" [ref=e119] [cursor=pointer]
+      - generic [ref=e120]:
+        - button "Om oss" [ref=e121] [cursor=pointer]
+        - button "Personvern" [ref=e122] [cursor=pointer]
+        - button "Opphavsrett" [ref=e123] [cursor=pointer]
+        - button "Cookie-innstillinger" [ref=e124] [cursor=pointer]
+      - button "Velion" [ref=e125] [cursor=pointer]: "N"
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e131] [cursor=pointer]:
+    - img [ref=e132]

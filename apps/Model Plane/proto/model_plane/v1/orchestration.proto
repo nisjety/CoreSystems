@@ -1,0 +1,631 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// OrchestrationCore — authoritative state for plans, approvals, todos,
+// and subagent lineage. Mirrors the Rust mp-orchestration crate records and
+// their snake_case wire encodings. Single writer for plan/approval/todo
+// transitions and lineage edges.
+service OrchestrationCoreService {
+  // List plans for a run. Plans are ordered by creation time ascending.
+  rpc ListPlans(ListPlansRequest) returns (ListPlansResponse);
+
+  // Fetch a single plan by id.
+  rpc GetPlan(GetPlanRequest) returns (GetPlanResponse);
+
+  // Transition a plan to a new state. Rejects illegal transitions.
+  rpc TransitionPlan(TransitionPlanRequest) returns (TransitionPlanResponse);
+
+  // List todos for a thread (and optionally scoped to a run).
+  rpc ListTodos(ListTodosRequest) returns (ListTodosResponse);
+
+  // Fetch a single todo by id.
+  rpc GetTodo(GetTodoRequest) returns (GetTodoResponse);
+
+  // Transition a todo to a new state. Rejects illegal transitions.
+  rpc TransitionTodo(TransitionTodoRequest) returns (TransitionTodoResponse);
+
+  // Create an approval request and pause the run for it. Inserts the durable
+  // approval record and broadcasts APPROVAL state-change + RUN_PAUSED_FOR_APPROVAL
+  // so operator surfaces show the pause. Called by execution-core when a step's
+  // permission posture is "ask" and the tool is risky (HITL gate).
+  rpc CreateApproval(CreateApprovalRequest) returns (CreateApprovalResponse);
+
+  // List approvals for a run (and optionally scoped to a step).
+  rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
+
+  // Fetch a single approval by id.
+  rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
+
+  // Record a decision (granted, denied, or timed_out) on an approval.
+  rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
+
+  // Fetch the subagent lineage for a thread.
+  rpc GetSubagentLineage(GetSubagentLineageRequest) returns (GetSubagentLineageResponse);
+
+  // Attach a subagent lineage edge (parent_run_id -> child_run_id).
+  rpc AttachSubagent(AttachSubagentRequest) returns (AttachSubagentResponse);
+
+  // Stream orchestration events for a run. Server-streaming over gRPC;
+  // SSE-compatible at the gateway (/v1/runs/{id}/events).
+  rpc StreamRunEvents(StreamRunEventsRequest) returns (stream OrchestrationEvent);
+}
+
+// --- Enums ---
+
+// Lifecycle state of a plan.
+enum PlanState {
+  // Unknown or unspecified state.
+  PLAN_STATE_UNSPECIFIED = 0;
+  // Plan is being drafted and not yet proposed.
+  PLAN_STATE_DRAFT = 1;
+  // Plan has been proposed for review.
+  PLAN_STATE_PROPOSED = 2;
+  // Plan has been approved and may execute.
+  PLAN_STATE_APPROVED = 3;
+  // Plan was rejected and will not execute.
+  PLAN_STATE_REJECTED = 4;
+  // Plan is currently executing.
+  PLAN_STATE_EXECUTING = 5;
+  // Plan completed successfully.
+  PLAN_STATE_COMPLETED = 6;
+  // Plan failed during execution.
+  PLAN_STATE_FAILED = 7;
+  // Plan was superseded by another plan.
+  PLAN_STATE_SUPERSEDED = 8;
+  // Plan has been archived.
+  PLAN_STATE_ARCHIVED = 9;
+}
+
+// Lifecycle state of an individual plan step.
+enum PlanStepState {
+  // Unknown or unspecified state.
+  PLAN_STEP_STATE_UNSPECIFIED = 0;
+  // Step is waiting to execute.
+  PLAN_STEP_STATE_PENDING = 1;
+  // Step is currently running.
+  PLAN_STEP_STATE_RUNNING = 2;
+  // Step completed successfully.
+  PLAN_STEP_STATE_DONE = 3;
+  // Step was skipped.
+  PLAN_STEP_STATE_SKIPPED = 4;
+  // Step failed during execution.
+  PLAN_STEP_STATE_FAILED = 5;
+}
+
+// Category of approval request.
+enum ApprovalKind {
+  // Unknown or unspecified approval kind.
+  APPROVAL_KIND_UNSPECIFIED = 0;
+  // Approval for a plan.
+  APPROVAL_KIND_PLAN = 1;
+  // Approval for a tool call.
+  APPROVAL_KIND_TOOL_CALL = 2;
+  // Approval for a permission grant.
+  APPROVAL_KIND_PERMISSION = 3;
+  // Approval for a destructive operation.
+  APPROVAL_KIND_DESTRUCTIVE = 4;
+  // Approval for a high-cost operation.
+  APPROVAL_KIND_COST = 5;
+}
+
+// Lifecycle state of an approval request.
+enum ApprovalState {
+  // Unknown or unspecified state.
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  // Approval has been requested and is awaiting decision.
+  APPROVAL_STATE_REQUESTED = 1;
+  // Approval has been granted.
+  APPROVAL_STATE_GRANTED = 2;
+  // Approval has been denied.
+  APPROVAL_STATE_DENIED = 3;
+  // Approval request timed out without a decision.
+  APPROVAL_STATE_TIMED_OUT = 4;
+}
+
+// Lifecycle state of a todo.
+enum TodoState {
+  // Unknown or unspecified state.
+  TODO_STATE_UNSPECIFIED = 0;
+  // Todo is waiting to start.
+  TODO_STATE_PENDING = 1;
+  // Todo is currently being worked on.
+  TODO_STATE_IN_PROGRESS = 2;
+  // Todo is blocked and cannot proceed.
+  TODO_STATE_BLOCKED = 3;
+  // Todo has been completed.
+  TODO_STATE_COMPLETED = 4;
+  // Todo has been cancelled.
+  TODO_STATE_CANCELLED = 5;
+}
+
+// Priority tier for a todo.
+enum TodoPriority {
+  // Unknown or unspecified priority.
+  TODO_PRIORITY_UNSPECIFIED = 0;
+  // Low priority.
+  TODO_PRIORITY_LOW = 1;
+  // Normal priority (default).
+  TODO_PRIORITY_NORMAL = 2;
+  // High priority.
+  TODO_PRIORITY_HIGH = 3;
+  // Urgent priority.
+  TODO_PRIORITY_URGENT = 4;
+}
+
+// Role classification for a subagent lineage edge.
+enum SubagentRole {
+  // Unknown or unspecified role.
+  SUBAGENT_ROLE_UNSPECIFIED = 0;
+  // Subagent is a code generator/implementer.
+  SUBAGENT_ROLE_CODER = 1;
+  // Subagent is a code reviewer.
+  SUBAGENT_ROLE_REVIEWER = 2;
+  // Subagent is a researcher/analyst.
+  SUBAGENT_ROLE_RESEARCHER = 3;
+  // Subagent is an explorer/investigator.
+  SUBAGENT_ROLE_EXPLORER = 4;
+  // Subagent is a generic multi-purpose agent.
+  SUBAGENT_ROLE_GENERIC = 5;
+}
+
+// --- Records ---
+
+// An individual step inside a plan.
+message PlanStep {
+  // Step identifier (ULID, prefix `step_`).
+  string id = 1;
+
+  // Human-readable title.
+  string title = 2;
+
+  // Optional operation slug tying this step to an execution op.
+  string operation = 3;
+
+  // Current state of the step.
+  PlanStepState state = 4;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 5;
+
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// A durable plan record.
+message Plan {
+  // Plan identifier (ULID, prefix `plan_`).
+  string id = 1;
+
+  // Owning run identifier.
+  string run_id = 2;
+
+  // Owning thread identifier.
+  string thread_id = 3;
+
+  // Author (user or agent) who created the plan.
+  string author = 4;
+
+  // Current lifecycle state.
+  PlanState state = 5;
+
+  // Plan summary / intent.
+  string summary = 6;
+
+  // Ordered plan steps.
+  repeated PlanStep steps = 7;
+
+  // Optional id of the plan this one supersedes. Empty when not applicable.
+  string supersedes = 8;
+
+  // Arbitrary metadata blob.
+  google.protobuf.Struct metadata = 9;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 10;
+
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// A durable approval record.
+message Approval {
+  // Approval identifier (ULID, prefix `appr_`).
+  string id = 1;
+
+  // Owning run identifier.
+  string run_id = 2;
+
+  // Owning plan step id. Empty for run-level approvals.
+  string step_id = 3;
+
+  // Category of approval.
+  ApprovalKind kind = 4;
+
+  // Current lifecycle state.
+  ApprovalState state = 5;
+
+  // Principal whose approval is required.
+  string requested_of = 6;
+
+  // Principal who recorded the decision. Empty until decided.
+  string decided_by = 7;
+
+  // Free-form reason provided with the decision.
+  string decision_reason = 8;
+
+  // Arbitrary context attached to the request.
+  google.protobuf.Struct context = 9;
+
+  // When the approval was requested.
+  google.protobuf.Timestamp requested_at = 10;
+
+  // When the approval was decided. Unset while pending.
+  google.protobuf.Timestamp decided_at = 11;
+
+  // Hard deadline for the approval.
+  google.protobuf.Timestamp expires_at = 12;
+}
+
+// A durable todo record.
+message Todo {
+  // Todo identifier (ULID, prefix `todo_`).
+  string id = 1;
+
+  // Owning thread identifier.
+  string thread_id = 2;
+
+  // Optional owning run identifier. Empty when not tied to a run.
+  string run_id = 3;
+
+  // Principal assigned to the todo.
+  string assignee = 4;
+
+  // Short title.
+  string title = 5;
+
+  // Extended description. Empty when not provided.
+  string description = 6;
+
+  // Current lifecycle state.
+  TodoState state = 7;
+
+  // Priority tier.
+  TodoPriority priority = 8;
+
+  // Ids of todos that block this one.
+  repeated string blocked_by = 9;
+
+  // Arbitrary metadata blob.
+  google.protobuf.Struct metadata = 10;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 11;
+
+  // Last update timestamp.
+  google.protobuf.Timestamp updated_at = 12;
+
+  // Completion timestamp. Unset until terminal.
+  google.protobuf.Timestamp completed_at = 13;
+}
+
+// A single parent->child subagent lineage edge.
+message LineageEdge {
+  // Parent run identifier.
+  string parent_run_id = 1;
+
+  // Child run identifier.
+  string child_run_id = 2;
+
+  // Role of the child subagent.
+  SubagentRole role = 3;
+
+  // When the edge was recorded.
+  google.protobuf.Timestamp spawned_at = 4;
+}
+
+// Aggregated subagent lineage for a thread.
+message SubagentLineage {
+  // Owning thread identifier.
+  string thread_id = 1;
+
+  // Maximum depth observed across the lineage.
+  uint32 max_depth = 2;
+
+  // All lineage edges recorded for the thread.
+  repeated LineageEdge edges = 3;
+}
+
+// --- ListPlans ---
+
+message ListPlansRequest {
+  // Run whose plans are being listed.
+  string run_id = 1;
+}
+
+message ListPlansResponse {
+  // Plans ordered by creation time ascending.
+  repeated Plan plans = 1;
+}
+
+// --- GetPlan ---
+
+message GetPlanRequest {
+  // Plan identifier.
+  string plan_id = 1;
+}
+
+message GetPlanResponse {
+  // Plan record. Unset when not found.
+  Plan plan = 1;
+}
+
+// --- TransitionPlan ---
+
+message TransitionPlanRequest {
+  // Plan identifier.
+  string plan_id = 1;
+
+  // Target state. Must be reachable from the current state.
+  PlanState target_state = 2;
+
+  // Principal performing the transition.
+  string actor = 3;
+
+  // Optional reason for the transition.
+  string reason = 4;
+}
+
+message TransitionPlanResponse {
+  // Updated plan record.
+  Plan plan = 1;
+}
+
+// --- ListTodos ---
+
+message ListTodosRequest {
+  // Thread whose todos are being listed.
+  string thread_id = 1;
+
+  // Optional run filter. Empty means all runs in the thread.
+  string run_id = 2;
+}
+
+message ListTodosResponse {
+  // Todos ordered by creation time ascending.
+  repeated Todo todos = 1;
+}
+
+// --- GetTodo ---
+
+message GetTodoRequest {
+  // Todo identifier.
+  string todo_id = 1;
+}
+
+message GetTodoResponse {
+  // Todo record. Unset when not found.
+  Todo todo = 1;
+}
+
+// --- TransitionTodo ---
+
+message TransitionTodoRequest {
+  // Todo identifier.
+  string todo_id = 1;
+
+  // Target state. Must be reachable from the current state.
+  TodoState target_state = 2;
+
+  // Principal performing the transition.
+  string actor = 3;
+
+  // Optional reason for the transition.
+  string reason = 4;
+}
+
+message TransitionTodoResponse {
+  // Updated todo record.
+  Todo todo = 1;
+}
+
+// --- CreateApproval ---
+
+message CreateApprovalRequest {
+  // Run the approval gates.
+  string run_id = 1;
+
+  // Owning plan step id. Empty for run-level approvals.
+  string step_id = 2;
+
+  // Category of approval (typically TOOL_CALL or DESTRUCTIVE).
+  ApprovalKind kind = 3;
+
+  // Principal whose approval is required.
+  string requested_of = 4;
+
+  // Tenant + actor for the durable record.
+  string org_id = 5;
+  string user_id = 6;
+
+  // Free-form reason stored in the approval's context metadata.
+  string reason = 7;
+
+  // Optional TTL; the server computes expires_at = now + this. 0 = no deadline.
+  uint32 expires_in_seconds = 8;
+}
+
+message CreateApprovalResponse {
+  // The created approval (state = REQUESTED).
+  Approval approval = 1;
+}
+
+// --- ListApprovals ---
+
+message ListApprovalsRequest {
+  // Run whose approvals are being listed.
+  string run_id = 1;
+
+  // Optional step filter. Empty means run-level and all steps.
+  string step_id = 2;
+}
+
+message ListApprovalsResponse {
+  // Approvals ordered by request time ascending.
+  repeated Approval approvals = 1;
+}
+
+// --- GetApproval ---
+
+message GetApprovalRequest {
+  // Approval identifier.
+  string approval_id = 1;
+}
+
+message GetApprovalResponse {
+  // Approval record. Unset when not found.
+  Approval approval = 1;
+}
+
+// --- DecideApproval ---
+
+message DecideApprovalRequest {
+  // Approval identifier.
+  string approval_id = 1;
+
+  // Decision state. Must be granted, denied, or timed_out.
+  ApprovalState decision = 2;
+
+  // Principal recording the decision.
+  string decided_by = 3;
+
+  // Optional free-form reason for the decision.
+  string decision_reason = 4;
+}
+
+message DecideApprovalResponse {
+  // Updated approval record.
+  Approval approval = 1;
+}
+
+// --- GetSubagentLineage ---
+
+message GetSubagentLineageRequest {
+  // Thread whose lineage is being fetched.
+  string thread_id = 1;
+}
+
+message GetSubagentLineageResponse {
+  // Aggregated lineage. Unset when the thread has no edges.
+  SubagentLineage lineage = 1;
+}
+
+// --- AttachSubagent ---
+
+message AttachSubagentRequest {
+  // Owning thread identifier.
+  string thread_id = 1;
+
+  // Parent run identifier.
+  string parent_run_id = 2;
+
+  // Child run identifier.
+  string child_run_id = 3;
+
+  // Role of the child subagent.
+  SubagentRole role = 4;
+}
+
+message AttachSubagentResponse {
+  // The edge that was recorded.
+  LineageEdge edge = 1;
+
+  // Updated aggregate lineage for the thread.
+  SubagentLineage lineage = 2;
+}
+
+// --- Run event streaming (additive) ---
+
+// Request to stream orchestration events for a single run.
+message StreamRunEventsRequest {
+  // Run identifier (server-streaming key).
+  string run_id = 1;
+
+  // Resume cursor. When set, the server first replays buffered events whose
+  // event_id sorts strictly after this value (ULID lexical order), then tails
+  // the live stream. Maps to the SSE `Last-Event-Id` header at the gateway.
+  // Empty = start from the live tail. If the requested cursor is older than
+  // the server's bounded replay buffer, the client should fall back to a
+  // fresh snapshot (ListPlans/ListTodos/ListApprovals).
+  string after_event_id = 2;
+}
+
+// A single orchestration event emitted for a run.
+// Mirrors the Rust `RunEvent` enum in mp-orchestration::run_event.
+message OrchestrationEvent {
+  // Event timestamp (server-assigned).
+  google.protobuf.Timestamp at = 1;
+
+  // Server-assigned monotonic event identifier (ULID). Used as the SSE `id:`
+  // line and as the `after_event_id` resume cursor. Sorts in emission order.
+  string event_id = 2;
+
+  // Event payload. Tags 10-16 align with the 7-variant Rust enum order.
+  oneof event {
+    PlanTransitioned plan_transitioned = 10;
+    TodoTransitioned todo_transitioned = 11;
+    ApprovalStateChanged approval_state_changed = 12;
+    SubagentAttached subagent_attached = 13;
+    SubagentStopped subagent_stopped = 14;
+    RunPausedForApproval run_paused_for_approval = 15;
+    RunResumedAfterApproval run_resumed_after_approval = 16;
+  }
+
+  message PlanTransitioned {
+    string plan_id = 1;
+    string run_id = 2;
+    PlanState from = 3;
+    PlanState to = 4;
+  }
+
+  message TodoTransitioned {
+    string todo_id = 1;
+    string thread_id = 2;
+    TodoState from = 3;
+    TodoState to = 4;
+  }
+
+  message ApprovalStateChanged {
+    string approval_id = 1;
+    string run_id = 2;
+    ApprovalKind approval_kind = 3;
+    ApprovalState to = 4;
+    string decided_by = 5;
+  }
+
+  message SubagentAttached {
+    string parent_run_id = 1;
+    string child_run_id = 2;
+    SubagentRole role = 3;
+  }
+
+  message SubagentStopped {
+    string child_run_id = 1;
+    string status = 2;
+  }
+
+  message RunPausedForApproval {
+    string run_id = 1;
+    string approval_id = 2;
+  }
+
+  message RunResumedAfterApproval {
+    string run_id = 1;
+    string approval_id = 2;
+  }
+}

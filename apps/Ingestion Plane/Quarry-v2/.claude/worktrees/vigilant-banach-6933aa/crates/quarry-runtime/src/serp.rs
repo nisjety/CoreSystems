@@ -1,0 +1,787 @@
+//! SERP-backed search (QRY-12).
+//!
+//! Provider-agnostic search trait + concrete adapters for Brave Search,
+//! Serper.dev, and SearXNG. Quarry uses this to seed crawls when a request
+//! supplies a query rather than URLs ("scrape pages about Q1 2026 financial
+//! results"). Results are ranked and de-duplicated, then handed to the
+//! [`crate::CrawlFrontier`] for normal scrape execution.
+//!
+//! Auth model: providers use API keys passed in a Bearer header (Brave,
+//! Serper) or a server URL with no auth (SearXNG). Keys live in the edge
+//! config; the runtime never logs them.
+
+use async_trait::async_trait;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub url: String,
+    pub title: Option<String>,
+    pub snippet: Option<String>,
+    /// Provider-supplied rank (1-based). Lower = higher in SERP.
+    pub rank: u32,
+    /// Provider name ("brave", "serper", "searxng") for telemetry.
+    pub provider: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    pub limit: u32,
+    pub country: Option<String>,
+    pub language: Option<String>,
+    pub safe_search: bool,
+    /// Tenant scope. When set, providers that index private corpora (e.g.
+    /// `TantivyLocalIndex`) MUST restrict results to documents whose
+    /// `org_id` matches. Remote SERP providers (Brave/Serper/SearXNG/
+    /// Stract) ignore this field — they search the public web and have
+    /// no per-tenant concept.
+    pub org_id: Option<String>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            limit: 10,
+            country: None,
+            language: None,
+            safe_search: true,
+            org_id: None,
+        }
+    }
+}
+
+#[async_trait]
+pub trait SearchProvider: Send + Sync {
+    async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>>;
+    fn name(&self) -> &str;
+}
+
+/// FallbackSearchProvider tries each underlying provider in order, returning
+/// results from the first one that succeeds. On retryable errors
+/// (`RateLimited`, `Timeout`, `UpstreamBlocked`, `DriverFailed`) it advances
+/// to the next provider; on non-retryable errors (`BadRequest`, `Forbidden`)
+/// it surfaces the error immediately.
+///
+/// Use case: production SERP wiring is typically Brave → Serper → SearXNG
+/// where Brave is the primary, Serper is a paid backup, and SearXNG is a
+/// local self-hosted last-resort. When Brave 429s during a burst, the
+/// chain transparently falls through.
+pub struct FallbackSearchProvider {
+    providers: Vec<std::sync::Arc<dyn SearchProvider>>,
+}
+
+impl FallbackSearchProvider {
+    pub fn new(providers: Vec<std::sync::Arc<dyn SearchProvider>>) -> QuarryResult<Self> {
+        if providers.is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "FallbackSearchProvider requires at least one provider",
+            ));
+        }
+        Ok(Self { providers })
+    }
+}
+
+#[async_trait]
+impl SearchProvider for FallbackSearchProvider {
+    async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let mut last_err: Option<QuarryError> = None;
+        for provider in &self.providers {
+            match provider.search(query, opts).await {
+                Ok(results) => return Ok(results),
+                Err(e) if e.code.retryable() => {
+                    tracing::warn!(
+                        provider = provider.name(),
+                        error = %e,
+                        "search provider failed; trying next in chain"
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e), // non-retryable: surface immediately
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            QuarryError::new(ErrorCode::DriverFailed, "all search providers failed")
+        }))
+    }
+
+    fn name(&self) -> &str {
+        "fallback"
+    }
+}
+
+/// Brave Search adapter. Docs: https://search.brave.com/help/api
+pub struct BraveSearch {
+    http: Client,
+    api_key: String,
+    endpoint: String,
+}
+
+impl BraveSearch {
+    pub fn new(api_key: impl Into<String>) -> QuarryResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("brave: {e}")))?;
+        Ok(Self {
+            http,
+            api_key: api_key.into(),
+            endpoint: "https://api.search.brave.com/res/v1/web/search".into(),
+        })
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
+    }
+}
+
+#[async_trait]
+impl SearchProvider for BraveSearch {
+    async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let mut req = self
+            .http
+            .get(&self.endpoint)
+            .header("x-subscription-token", &self.api_key)
+            .header("accept", "application/json")
+            .query(&[("q", query)])
+            .query(&[("count", &opts.limit.to_string())]);
+        if let Some(c) = &opts.country {
+            req = req.query(&[("country", c.as_str())]);
+        }
+        if let Some(l) = &opts.language {
+            req = req.query(&[("search_lang", l.as_str())]);
+        }
+        if opts.safe_search {
+            req = req.query(&[("safesearch", "moderate")]);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("brave: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status.as_u16(), "brave"));
+        }
+        let body: BraveResponse = resp
+            .json()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("brave decode: {e}")))?;
+        let mut results = Vec::new();
+        for (i, r) in body.web.results.into_iter().enumerate() {
+            results.push(SearchResult {
+                url: r.url,
+                title: r.title,
+                snippet: r.description,
+                rank: (i as u32) + 1,
+                provider: "brave".into(),
+            });
+        }
+        Ok(results)
+    }
+
+    fn name(&self) -> &str {
+        "brave"
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveResponse {
+    web: BraveWeb,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveWeb {
+    #[serde(default)]
+    results: Vec<BraveResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveResult {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Serper.dev adapter (Google SERP proxy).
+pub struct SerperSearch {
+    http: Client,
+    api_key: String,
+    endpoint: String,
+}
+
+impl SerperSearch {
+    pub fn new(api_key: impl Into<String>) -> QuarryResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("serper: {e}")))?;
+        Ok(Self {
+            http,
+            api_key: api_key.into(),
+            endpoint: "https://google.serper.dev/search".into(),
+        })
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
+    }
+}
+
+#[async_trait]
+impl SearchProvider for SerperSearch {
+    async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let body = serde_json::json!({
+            "q": query,
+            "num": opts.limit,
+            "gl": opts.country.clone().unwrap_or_default(),
+            "hl": opts.language.clone().unwrap_or_default(),
+        });
+        let resp = self
+            .http
+            .post(&self.endpoint)
+            .header("x-api-key", &self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("serper: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status.as_u16(), "serper"));
+        }
+
+        let response: SerperResponse = resp
+            .json()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("serper decode: {e}")))?;
+
+        let mut results = Vec::new();
+        for (i, r) in response.organic.into_iter().enumerate() {
+            results.push(SearchResult {
+                url: r.link,
+                title: r.title,
+                snippet: r.snippet,
+                rank: (i as u32) + 1,
+                provider: "serper".into(),
+            });
+        }
+        Ok(results)
+    }
+
+    fn name(&self) -> &str {
+        "serper"
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SerperResponse {
+    #[serde(default)]
+    organic: Vec<SerperOrganic>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SerperOrganic {
+    link: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    snippet: Option<String>,
+}
+
+/// SearXNG adapter (self-hosted meta-search). No auth; cheap to run.
+pub struct SearXNGSearch {
+    http: Client,
+    base_url: String,
+}
+
+impl SearXNGSearch {
+    pub fn new(base_url: impl Into<String>) -> QuarryResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("searxng: {e}")))?;
+        Ok(Self {
+            http,
+            base_url: base_url.into(),
+        })
+    }
+}
+
+#[async_trait]
+impl SearchProvider for SearXNGSearch {
+    async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let url = format!("{}/search", self.base_url.trim_end_matches('/'));
+        let mut req = self
+            .http
+            .get(&url)
+            .query(&[("q", query)])
+            .query(&[("format", "json")])
+            .query(&[("count", &opts.limit.to_string())]);
+        if let Some(c) = &opts.country {
+            req = req.query(&[("language", c.as_str())]);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("searxng: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status.as_u16(), "searxng"));
+        }
+        let body: SearXNGResponse = resp.json().await.map_err(|e| {
+            QuarryError::new(ErrorCode::DriverFailed, format!("searxng decode: {e}"))
+        })?;
+        let mut results = Vec::new();
+        for (i, r) in body.results.into_iter().enumerate() {
+            results.push(SearchResult {
+                url: r.url,
+                title: r.title,
+                snippet: r.content,
+                rank: (i as u32) + 1,
+                provider: "searxng".into(),
+            });
+        }
+        Ok(results)
+    }
+
+    fn name(&self) -> &str {
+        "searxng"
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SearXNGResponse {
+    #[serde(default)]
+    results: Vec<SearXNGResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearXNGResult {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// Stract adapter — self-hosted independent search engine (Rust).
+///
+/// Unlike SearXNG (which aggregates Google/Bing/DDG behind a proxy),
+/// Stract operates its own crawler + index + ranker. Default endpoint is
+/// `http://stract:3000/beta/api/search`. No auth required.
+///
+/// Cycle 19 / gap-quarry cluster #17 — slots into `FallbackSearchProvider`
+/// between Tantivy (own corpus) and SearXNG (long-tail aggregator).
+pub struct StractSearch {
+    http: Client,
+    endpoint: String,
+}
+
+impl StractSearch {
+    pub fn new(base_url: impl Into<String>) -> QuarryResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("stract: {e}")))?;
+        let base = base_url.into();
+        let endpoint = format!(
+            "{}/beta/api/search",
+            base.trim_end_matches('/')
+        );
+        Ok(Self { http, endpoint })
+    }
+
+    /// Override the full endpoint (used by tests against mock servers).
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
+    }
+}
+
+#[async_trait]
+impl SearchProvider for StractSearch {
+    async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let body = serde_json::json!({
+            "query": query,
+            "numResults": opts.limit,
+            "safeSearch": opts.safe_search,
+            // Stract supports a `selectedRegion` field for country bias.
+            // Treat our `country` option as best-effort.
+            "selectedRegion": opts.country.clone().unwrap_or_default(),
+        });
+        let resp = self
+            .http
+            .post(&self.endpoint)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("stract: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status.as_u16(), "stract"));
+        }
+
+        let body: StractResponse = resp
+            .json()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("stract decode: {e}")))?;
+
+        let mut results = Vec::with_capacity(body.webpages.len());
+        for (i, w) in body.webpages.into_iter().enumerate() {
+            results.push(SearchResult {
+                url: w.url,
+                title: w.title,
+                snippet: w.snippet,
+                rank: (i as u32) + 1,
+                provider: "stract".into(),
+            });
+        }
+        Ok(results)
+    }
+
+    fn name(&self) -> &str {
+        "stract"
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StractResponse {
+    #[serde(default)]
+    webpages: Vec<StractWebpage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StractWebpage {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
+    /// Stract exposes the snippet under `body` in the public API. Some
+    /// older builds use `snippet`; accept both via flatten + alias.
+    #[serde(default, alias = "body")]
+    snippet: Option<String>,
+}
+
+fn map_status(status: u16, provider: &str) -> QuarryError {
+    let code = match status {
+        429 => ErrorCode::RateLimited,
+        401 | 403 => ErrorCode::Forbidden,
+        404 => ErrorCode::NotFound,
+        500..=599 => ErrorCode::DriverFailed,
+        _ => ErrorCode::BadRequest,
+    };
+    QuarryError::new(code, format!("{provider} returned {status}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path as wpath, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn brave_returns_ranked_results() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wpath("/v1/web/search"))
+            .and(query_param("q", "rust async"))
+            .and(header("x-subscription-token", "key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "web": {
+                    "results": [
+                        {"url": "https://x.com/a", "title": "A", "description": "first"},
+                        {"url": "https://x.com/b", "title": "B"},
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = BraveSearch::new("key")
+            .unwrap()
+            .with_endpoint(format!("{}/v1/web/search", server.uri()));
+        let results = provider
+            .search("rust async", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].rank, 1);
+        assert_eq!(results[0].url, "https://x.com/a");
+        assert_eq!(results[1].rank, 2);
+        assert_eq!(provider.name(), "brave");
+    }
+
+    #[tokio::test]
+    async fn serper_returns_organic_results() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/search"))
+            .and(header("x-api-key", "k"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "organic": [
+                    {"link": "https://r.com/a", "title": "A", "snippet": "snip"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = SerperSearch::new("k")
+            .unwrap()
+            .with_endpoint(format!("{}/search", server.uri()));
+        let results = provider
+            .search("query", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://r.com/a");
+        assert_eq!(results[0].provider, "serper");
+    }
+
+    #[tokio::test]
+    async fn searxng_no_auth_works() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wpath("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {"url": "https://s.com/a", "title": "A", "content": "snip"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = SearXNGSearch::new(server.uri()).unwrap();
+        let results = provider
+            .search("query", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].provider, "searxng");
+    }
+
+    #[tokio::test]
+    async fn rate_limited_maps_to_typed_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wpath("/search"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let provider = SearXNGSearch::new(server.uri()).unwrap();
+        let err = provider
+            .search("q", &SearchOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::RateLimited);
+    }
+
+    #[test]
+    fn options_default_is_safe_and_paginated() {
+        let opts = SearchOptions::default();
+        assert_eq!(opts.limit, 10);
+        assert!(opts.safe_search);
+    }
+
+    #[tokio::test]
+    async fn fallback_returns_first_success() {
+        use std::sync::Arc;
+
+        struct Failing;
+        #[async_trait]
+        impl SearchProvider for Failing {
+            async fn search(
+                &self,
+                _q: &str,
+                _o: &SearchOptions,
+            ) -> QuarryResult<Vec<SearchResult>> {
+                Err(QuarryError::new(ErrorCode::RateLimited, "throttled"))
+            }
+            fn name(&self) -> &str {
+                "failing"
+            }
+        }
+        struct Working;
+        #[async_trait]
+        impl SearchProvider for Working {
+            async fn search(
+                &self,
+                _q: &str,
+                _o: &SearchOptions,
+            ) -> QuarryResult<Vec<SearchResult>> {
+                Ok(vec![SearchResult {
+                    url: "https://x".into(),
+                    title: Some("X".into()),
+                    snippet: None,
+                    rank: 1,
+                    provider: "working".into(),
+                }])
+            }
+            fn name(&self) -> &str {
+                "working"
+            }
+        }
+
+        let chain = FallbackSearchProvider::new(vec![Arc::new(Failing), Arc::new(Working)]).unwrap();
+        let res = chain.search("q", &SearchOptions::default()).await.unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].provider, "working");
+    }
+
+    #[tokio::test]
+    async fn fallback_surfaces_non_retryable_error_immediately() {
+        use std::sync::Arc;
+
+        struct ForbiddenProvider;
+        #[async_trait]
+        impl SearchProvider for ForbiddenProvider {
+            async fn search(
+                &self,
+                _q: &str,
+                _o: &SearchOptions,
+            ) -> QuarryResult<Vec<SearchResult>> {
+                Err(QuarryError::new(ErrorCode::Forbidden, "no key"))
+            }
+            fn name(&self) -> &str {
+                "forbidden"
+            }
+        }
+        struct ShouldNotBeCalled;
+        #[async_trait]
+        impl SearchProvider for ShouldNotBeCalled {
+            async fn search(
+                &self,
+                _q: &str,
+                _o: &SearchOptions,
+            ) -> QuarryResult<Vec<SearchResult>> {
+                panic!("non-retryable error should not advance to next provider");
+            }
+            fn name(&self) -> &str {
+                "panic"
+            }
+        }
+
+        let chain = FallbackSearchProvider::new(vec![
+            Arc::new(ForbiddenProvider),
+            Arc::new(ShouldNotBeCalled),
+        ])
+        .unwrap();
+        let err = chain.search("q", &SearchOptions::default()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn fallback_returns_last_error_when_all_retry_fail() {
+        use std::sync::Arc;
+
+        struct RateLimited(usize);
+        #[async_trait]
+        impl SearchProvider for RateLimited {
+            async fn search(
+                &self,
+                _q: &str,
+                _o: &SearchOptions,
+            ) -> QuarryResult<Vec<SearchResult>> {
+                Err(QuarryError::new(
+                    ErrorCode::RateLimited,
+                    format!("provider-{}-rate-limited", self.0),
+                ))
+            }
+            fn name(&self) -> &str {
+                "rate"
+            }
+        }
+
+        let chain = FallbackSearchProvider::new(vec![
+            Arc::new(RateLimited(1)),
+            Arc::new(RateLimited(2)),
+            Arc::new(RateLimited(3)),
+        ])
+        .unwrap();
+        let err = chain.search("q", &SearchOptions::default()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::RateLimited);
+        assert!(err.message.contains("provider-3"));
+    }
+
+    #[test]
+    fn fallback_rejects_empty_chain() {
+        match FallbackSearchProvider::new(vec![]) {
+            Ok(_) => panic!("expected error for empty provider chain"),
+            Err(e) => assert_eq!(e.code, ErrorCode::BadRequest),
+        }
+    }
+
+    #[tokio::test]
+    async fn stract_returns_webpages() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/beta/api/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "webpages": [
+                    {"url": "https://x.com/a", "title": "A", "snippet": "first"},
+                    {"url": "https://x.com/b", "title": "B", "body": "second"},
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = StractSearch::new(server.uri()).unwrap();
+        let results = provider
+            .search("rust async", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].provider, "stract");
+        assert_eq!(results[0].url, "https://x.com/a");
+        assert_eq!(results[0].snippet.as_deref(), Some("first"));
+        // Verify `body` field-alias for `snippet` works on second item.
+        assert_eq!(results[1].snippet.as_deref(), Some("second"));
+        assert_eq!(provider.name(), "stract");
+    }
+
+    #[tokio::test]
+    async fn stract_rate_limited_maps_to_typed_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/beta/api/search"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let provider = StractSearch::new(server.uri()).unwrap();
+        let err = provider
+            .search("q", &SearchOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn stract_empty_webpages_returns_empty_vec() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/beta/api/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"webpages": []})))
+            .mount(&server)
+            .await;
+
+        let provider = StractSearch::new(server.uri()).unwrap();
+        let results = provider
+            .search("nothing", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+    }
+}

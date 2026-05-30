@@ -1,0 +1,354 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - generic [ref=e7]:
+            - button "Go back" [ref=e9] [cursor=pointer]:
+              - img [ref=e10]
+            - button "Go forward" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+          - generic [ref=e16]:
+            - img [ref=e17]
+            - link "aquatiq-as Free" [ref=e19] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e20]: aquatiq-as
+              - generic [ref=e21]: Free
+            - img [ref=e22]
+            - link "Agenter" [ref=e24] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e25]
+            - link "Studio" [ref=e27] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e29] [cursor=pointer]:
+          - img [ref=e30]
+          - generic [ref=e33]: Search across the whole system
+          - generic [ref=e34]: /
+          - generic [ref=e35]: CMD+K
+        - generic [ref=e37]:
+          - button "Toggle dark mode" [ref=e40] [cursor=pointer]:
+            - img [ref=e42]
+          - button "Open AI assistant" [ref=e46] [cursor=pointer]:
+            - img [ref=e47]
+          - button "Quick messages" [ref=e51] [cursor=pointer]:
+            - img [ref=e52]
+          - button "Notifications" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Calendar" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Open profile menu" [ref=e63] [cursor=pointer]:
+            - generic [ref=e64]: I
+    - complementary "Primary navigation" [ref=e65]:
+      - generic [ref=e66]:
+        - generic [ref=e67]:
+          - generic [ref=e68]:
+            - link "Go to home" [ref=e70] [cursor=pointer]:
+              - /url: /dashboard
+              - img [ref=e71]
+            - button "Collapse sidebar" [ref=e81] [cursor=pointer]:
+              - img [ref=e82]
+          - navigation "Workspace sections" [ref=e85]:
+            - generic [ref=e86]:
+              - link "Oversikt" [ref=e88] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e89]
+              - link "Chat" [ref=e92] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e93]
+              - link "Agenter" [ref=e96] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e97]
+              - link "Inbox" [ref=e101] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e102]
+              - link "Kunnskap" [ref=e106] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e107]
+          - generic [ref=e109]:
+            - link "Account" [ref=e112] [cursor=pointer]:
+              - /url: /account
+              - img [ref=e113]
+            - link "Innstillinger" [ref=e118] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e119]
+            - button "Søk" [ref=e123] [cursor=pointer]:
+              - img [ref=e124]
+        - generic [ref=e128]:
+          - generic [ref=e129]:
+            - generic [ref=e130]: Agents
+            - button "Collapse sidebar" [ref=e131] [cursor=pointer]:
+              - img [ref=e132]
+          - generic [ref=e134]:
+            - generic:
+              - img
+            - button "Select agent type" [ref=e135] [cursor=pointer]:
+              - generic [ref=e136]: Service
+            - img
+          - navigation "Agent feature tabs" [ref=e137]:
+            - button "Resolution queue Autonomous answers, actions, verified QA, and handoff states." [pressed] [ref=e138] [cursor=pointer]:
+              - img [ref=e139]
+              - generic [ref=e142]:
+                - generic [ref=e143]: Resolution queue
+                - generic [ref=e144]: Autonomous answers, actions, verified QA, and handoff states.
+            - button "Knowledge Trusted sources, Fin-style guidance, attributes, and answer coverage." [ref=e145] [cursor=pointer]:
+              - img [ref=e146]
+              - generic [ref=e148]:
+                - generic [ref=e149]: Knowledge
+                - generic [ref=e150]: Trusted sources, Fin-style guidance, attributes, and answer coverage.
+            - button "Service actions Ada-style Actions, procedures, ticketing, lookup, and routing tools." [ref=e151] [cursor=pointer]:
+              - img [ref=e152]
+              - generic [ref=e154]:
+                - generic [ref=e155]: Service actions
+                - generic [ref=e156]: Ada-style Actions, procedures, ticketing, lookup, and routing tools.
+            - button "Channels Chat, email, voice, social, third-party, and inbox rollout." [ref=e157] [cursor=pointer]:
+              - img [ref=e158]
+              - generic [ref=e163]:
+                - generic [ref=e164]: Channels
+                - generic [ref=e165]: Chat, email, voice, social, third-party, and inbox rollout.
+            - button "Quality supervisor Source fit, policy match, verified resolution, and review queues." [ref=e166] [cursor=pointer]:
+              - img [ref=e167]
+              - generic [ref=e170]:
+                - generic [ref=e171]: Quality supervisor
+                - generic [ref=e172]: Source fit, policy match, verified resolution, and review queues.
+            - button "Insights Suggestions, content recommendations, trends, and escalations." [ref=e173] [cursor=pointer]:
+              - img [ref=e174]
+              - generic [ref=e176]:
+                - generic [ref=e177]: Insights
+                - generic [ref=e178]: Suggestions, content recommendations, trends, and escalations.
+    - main [ref=e179]:
+      - generic [ref=e183]:
+        - generic [ref=e184]:
+          - generic [ref=e185]:
+            - generic [ref=e186]:
+              - img [ref=e187]
+              - text: Service
+            - heading "Service agent resolution workspace" [level=1] [ref=e190]
+            - paragraph [ref=e191]: Run a Fin, Zendesk, and Ada-inspired service desk where every conversation moves through answer, action, verified review, and handoff states.
+            - generic [ref=e192]:
+              - generic [ref=e193]: Velion CX Reasoner
+              - generic [ref=e194]: Confidence policy required
+              - generic [ref=e195]: Live automation rate appears after launch
+          - generic [ref=e196]:
+            - generic [ref=e197]:
+              - generic [ref=e198]:
+                - paragraph [ref=e199]: Activation
+                - paragraph [ref=e200]: Blueprint ready for assisted launch
+              - img [ref=e202]
+            - paragraph [ref=e205]: Defines the support sources, ticket actions, and guarded human handoff required before activation.
+            - generic [ref=e206]:
+              - button "Activate service agent" [ref=e207] [cursor=pointer]:
+                - img [ref=e208]
+                - text: Activate service agent
+              - button "Run Service readiness test" [ref=e213] [cursor=pointer]:
+                - img [ref=e214]
+            - generic "Service feature areas" [ref=e216]:
+              - button "Open Resolution queue workspace" [pressed] [ref=e217] [cursor=pointer]: Resolution queue
+              - button "Open Knowledge workspace" [ref=e218] [cursor=pointer]: Knowledge
+              - button "Open Service actions workspace" [ref=e219] [cursor=pointer]: Service actions
+              - button "Open Channels workspace" [ref=e220] [cursor=pointer]: Channels
+              - button "Open Quality supervisor workspace" [ref=e221] [cursor=pointer]: Quality supervisor
+              - button "Open Insights workspace" [ref=e222] [cursor=pointer]: Insights
+        - generic [ref=e223]:
+          - generic [ref=e224]:
+            - generic "Agent readiness metrics" [ref=e225]:
+              - generic [ref=e226]:
+                - paragraph [ref=e227]: Sources
+                - paragraph [ref=e228]: Scope
+                - paragraph [ref=e229]: Help center, policy PDFs, resolved tickets
+              - generic [ref=e230]:
+                - paragraph [ref=e231]: Actions
+                - paragraph [ref=e232]: Guarded
+                - paragraph [ref=e233]: Ticket, refund status, order lookup, routing
+              - generic [ref=e234]:
+                - paragraph [ref=e235]: Guardrails
+                - paragraph [ref=e236]: Policy
+                - paragraph [ref=e237]: Refund limits, PII, source citations, handoff rules
+            - region "Service resolution workspace" [ref=e238]:
+              - generic [ref=e239]:
+                - generic [ref=e240]:
+                  - generic [ref=e241]:
+                    - paragraph [ref=e242]: Zendesk / Ada style
+                    - heading "Resolution queue" [level=2] [ref=e243]
+                    - paragraph [ref=e244]: Route every support issue through answer, action, QA, and human handoff states.
+                  - img [ref=e246]
+                - generic [ref=e249]:
+                  - generic [ref=e250]:
+                    - heading "Answer policy" [level=3] [ref=e252]
+                    - paragraph [ref=e254]: Configure sources
+                    - paragraph [ref=e255]: Reply only after an approved source or tool result supports it
+                  - generic [ref=e256]:
+                    - heading "Action boundary" [level=3] [ref=e258]
+                    - paragraph [ref=e260]: Scope tools
+                    - paragraph [ref=e261]: Ticket, lookup, and routing permissions must be explicit
+                  - generic [ref=e262]:
+                    - heading "Human handoff" [level=3] [ref=e264]
+                    - paragraph [ref=e266]: Map escalation
+                    - paragraph [ref=e267]: Sensitive or low-confidence cases route with a summary
+                - generic [ref=e269]:
+                  - generic [ref=e270]:
+                    - paragraph [ref=e271]: Zendesk-style verification
+                    - paragraph [ref=e272]: Only counted when the issue is actually resolved
+                  - generic [ref=e273]: QA sampled
+                - generic [ref=e274]:
+                  - generic [ref=e275]:
+                    - img [ref=e277]
+                    - generic [ref=e281]:
+                      - generic [ref=e282]:
+                        - heading "Help center" [level=3] [ref=e283]
+                        - generic [ref=e284]: Map
+                      - paragraph [ref=e285]: Approved answers, troubleshooting guides, and product docs.
+                  - generic [ref=e286]:
+                    - img [ref=e288]
+                    - generic [ref=e291]:
+                      - generic [ref=e292]:
+                        - heading "Create support ticket" [level=3] [ref=e293]
+                        - generic [ref=e294]: Scoped
+                      - paragraph [ref=e295]: Creates a ticket with transcript, intent, priority, and customer context.
+              - generic [ref=e296]:
+                - generic [ref=e297]:
+                  - generic [ref=e298]:
+                    - paragraph [ref=e299]: Forethought style
+                    - heading "Quality supervisor" [level=2] [ref=e300]
+                    - paragraph [ref=e301]: Every reply is scored for source coverage, policy fit, and escalation risk.
+                  - img [ref=e303]
+                - generic [ref=e306]:
+                  - generic [ref=e309]: Verified resolution
+                  - generic [ref=e310]: Required
+                - generic [ref=e311]:
+                  - generic [ref=e314]: Procedure followed
+                  - generic [ref=e315]: Mapped
+                - generic [ref=e316]:
+                  - generic [ref=e319]: Human handoff quality
+                  - generic [ref=e320]: Review
+                - generic [ref=e321]:
+                  - generic [ref=e322]:
+                    - img [ref=e324]
+                    - generic [ref=e327]:
+                      - generic [ref=e328]:
+                        - heading "Confidence handoff" [level=3] [ref=e329]
+                        - generic [ref=e330]: Required
+                      - paragraph [ref=e331]: Escalates below threshold instead of guessing.
+                  - generic [ref=e332]:
+                    - img [ref=e334]
+                    - generic [ref=e337]:
+                      - generic [ref=e338]:
+                        - heading "Refund boundary" [level=3] [ref=e339]
+                        - generic [ref=e340]: Required
+                      - paragraph [ref=e341]: Can explain rules, but needs approval above the configured cap.
+                  - generic [ref=e342]:
+                    - img [ref=e344]
+                    - generic [ref=e347]:
+                      - generic [ref=e348]:
+                        - heading "Source required" [level=3] [ref=e349]
+                        - generic [ref=e350]: Required
+                      - paragraph [ref=e351]: Answers service policies only when a source or tool result supports them.
+              - generic [ref=e352]:
+                - generic [ref=e353]:
+                  - generic [ref=e354]:
+                    - paragraph [ref=e355]: Intercom Fin style
+                    - heading "Omnichannel rollout" [level=2] [ref=e356]
+                    - paragraph [ref=e357]: Launch in the channels with the right confidence and escalation settings.
+                  - img [ref=e359]
+                - generic [ref=e364]:
+                  - generic [ref=e365]:
+                    - img [ref=e367]
+                    - generic [ref=e369]:
+                      - generic [ref=e370]:
+                        - heading "Web messenger" [level=3] [ref=e371]
+                        - generic [ref=e372]: Plan
+                      - paragraph [ref=e373]: Answers authenticated and anonymous visitors from the Velion widget.
+                  - generic [ref=e374]:
+                    - img [ref=e376]
+                    - generic [ref=e379]:
+                      - generic [ref=e380]:
+                        - heading "Email queue" [level=3] [ref=e381]
+                        - generic [ref=e382]: Review
+                      - paragraph [ref=e383]: Drafts policy-aware replies and escalates low-confidence threads.
+                  - generic [ref=e384]:
+                    - img [ref=e386]
+                    - generic [ref=e391]:
+                      - generic [ref=e392]:
+                        - heading "Social messaging" [level=3] [ref=e393]
+                        - generic [ref=e394]: Mapped
+                      - paragraph [ref=e395]: Keeps WhatsApp and Instagram replies consistent with support policy.
+            - generic "Service resolution queue system" [ref=e396]:
+              - generic [ref=e397]:
+                - img [ref=e399]
+                - heading "Intake queue" [level=2] [ref=e402]
+                - paragraph [ref=e403]: Classify support demand before answering.
+                - generic [ref=e404]:
+                  - generic [ref=e407]: Billing
+                  - generic [ref=e410]: Shipping
+                  - generic [ref=e413]: Security
+              - generic [ref=e414]:
+                - img [ref=e416]
+                - heading "Action state" [level=2] [ref=e419]
+                - paragraph [ref=e420]: Only approved procedures and tools can run.
+                - generic [ref=e421]:
+                  - generic [ref=e424]: Create ticket
+                  - generic [ref=e427]: Lookup order
+                  - generic [ref=e430]: Route owner
+                  - generic [ref=e433]: Verify outcome
+              - generic [ref=e434]:
+                - img [ref=e436]
+                - heading "Handoff" [level=2] [ref=e441]
+                - paragraph [ref=e442]: Give teammates a clean summary.
+                - generic [ref=e443]:
+                  - generic [ref=e446]: Intent
+                  - generic [ref=e449]: Customer context
+                  - generic [ref=e452]: Attempted actions
+          - complementary [ref=e453]:
+            - generic [ref=e454]:
+              - generic [ref=e455]:
+                - generic [ref=e456]:
+                  - paragraph [ref=e457]: Preview
+                  - heading "Customer support preview" [level=2] [ref=e458]
+                - img [ref=e460]
+              - generic [ref=e463]:
+                - generic [ref=e466]:
+                  - generic [ref=e468]:
+                    - img [ref=e470]
+                    - generic [ref=e473]: Velion Service
+                  - generic [ref=e475]: Can you help with my order?
+                  - generic [ref=e476]: I found the order and can create a support case if needed.
+                - img [ref=e478]
+              - generic [ref=e480]:
+                - generic [ref=e481]: My order is late and I need it before Friday.
+                - generic [ref=e482]: I found the shipment and the carrier scan is delayed. I can create a priority ticket with the tracking details or show the current delivery window.
+                - generic [ref=e483]: Uses order lookup, cites shipping policy, and escalates if delivery promise risk is high.
+                - generic [ref=e484]:
+                  - button "Create priority ticket" [ref=e485] [cursor=pointer]
+                  - button "Show delivery window" [ref=e486] [cursor=pointer]
+                  - button "Hand off to support" [ref=e487] [cursor=pointer]
+              - paragraph [ref=e488]: The preview shows how Velion answers with context, cites policy, and escalates when the promise is risky.
+            - generic [ref=e489]:
+              - generic [ref=e490]:
+                - generic [ref=e491]:
+                  - paragraph [ref=e492]: Operational checklist
+                  - heading "Service readiness" [level=2] [ref=e493]
+                - button "Review queue" [ref=e494] [cursor=pointer]:
+                  - img [ref=e495]
+                  - text: Review queue
+              - generic [ref=e497]:
+                - generic [ref=e498]:
+                  - img [ref=e499]
+                  - generic [ref=e502]: Priority queue mapped
+                - generic [ref=e503]:
+                  - img [ref=e504]
+                  - generic [ref=e507]: Verified resolution QA required
+                - generic [ref=e508]:
+                  - img [ref=e509]
+                  - generic [ref=e512]: Human handoff rules required
+                - generic [ref=e513]:
+                  - img [ref=e514]
+                  - generic [ref=e517]: Ticket summary scoped
+                - generic [ref=e518]:
+                  - img [ref=e519]
+                  - generic [ref=e522]: Escalation reasons mapped
+              - button "Open routing rules" [ref=e523] [cursor=pointer]:
+                - img [ref=e524]
+                - text: Open routing rules
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e531] [cursor=pointer]:
+    - img [ref=e532]
+  - alert [ref=e535]

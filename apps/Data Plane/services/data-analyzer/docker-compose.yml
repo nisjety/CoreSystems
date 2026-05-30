@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  data-analyzer:
+    build: .
+    container_name: data-analyzer
+    restart: unless-stopped
+    ports:
+      - "9103:9103"
+    env_file:
+      - .env
+    networks:
+      - data-net
+      - velion-net
+
+networks:
+  data-net:
+    driver: bridge
+    internal: true
+  velion-net:
+    external: true

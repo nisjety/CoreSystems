@@ -1,0 +1,31 @@
+[package]
+name = "quarry-transform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core = { path = "../quarry-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+scraper = { workspace = true }
+html2md = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+regex = "1"
+lol_html = "1"
+encoding_rs = { workspace = true }
+chardetng = { workspace = true }
+whatlang = { workspace = true }
+# Low-level PDF parser. We use it to walk content streams so we can
+# track Tf (set font + size) state alongside Tj/TJ (show text) and
+# infer headings from font-size ranking. Higher-level libs like
+# `pdf_extract` give us a flat text dump but throw away the size
+# information we need.
+lopdf = { version = "0.32", default-features = false, features = ["pom_parser"] }
+
+[dev-dependencies]
+tempfile = "3"

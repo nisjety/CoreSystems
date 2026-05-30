@@ -1,0 +1,42 @@
+# Binaries
+tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+aquatiq-user-service*
+
+# Test coverage
+*.out
+coverage.html
+
+# Go
+*.test
+*.prof
+vendor/
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Generated files
+*_gen.go
+
+# Air
+.air.toml
+tmp/

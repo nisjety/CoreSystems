@@ -1,0 +1,59 @@
+# Dev profile overrides — debug logging, compat adapter, relaxed limits.
+
+services:
+  model-gateway:
+    environment:
+      RUST_LOG: debug
+      RATE_LIMIT_RPM: "1000"
+      ALLOWED_MODELS: ""
+      # Wave 7 — dev profile enables fine-tuning routes; production keeps off.
+      FINETUNE_ENABLED: "1"
+      FINETUNE_ORG_BUDGET_USD: "50"
+      FINETUNE_PER_JOB_BUDGET_USD: "20"
+
+  session-core:
+    environment:
+      RUST_LOG: debug
+      COMPACTION_THRESHOLD: "200000"
+
+  inference-core:
+    environment:
+      RUST_LOG: debug
+      INFERENCE_CACHE_TTL_SECS: "60"
+
+  execution-core:
+    environment:
+      RUST_LOG: debug
+
+  orchestrator-core:
+    environment:
+      LOG_LEVEL: debug
+      ENABLE_COMPAT_ADAPTER: "true"
+
+  capability-core:
+    environment:
+      LOG_LEVEL: debug
+
+  sandbox-manager:
+    environment:
+      LOG_LEVEL: debug
+
+  browser-broker:
+    environment:
+      LOG_LEVEL: debug
+
+  letta-bridge:
+    environment:
+      LOG_LEVEL: debug
+
+  cost-core:
+    environment:
+      LOG_LEVEL: debug
+
+  task-core:
+    environment:
+      LOG_LEVEL: debug
+
+  bridge-core:
+    environment:
+      LOG_LEVEL: debug

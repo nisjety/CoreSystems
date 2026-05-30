@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "model_plane/v1/runs.proto";
+
+// ExecutionCore — runtime loop ownership for agent execution.
+// Owns: tool planning/selection, permission checkpoints, tool execution,
+//       artifacts, subagents, step transitions, compaction triggers.
+service ExecutionCore {
+  // Execute a single step within a run.
+  rpc ExecuteStep(ExecuteStepRequest) returns (ExecuteStepResponse);
+
+  // Resume a paused or checkpointed run.
+  rpc ResumeRun(ResumeRunRequest) returns (ResumeRunResponse);
+
+  // Cancel an active run.
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+}
+
+// ExecuteStepRequest — request to execute one step in the agent loop.
+message ExecuteStepRequest {
+  // Run this step belongs to.
+  string run_id = 1;
+
+  // Step identifier (ULID).
+  string step_id = 2;
+
+  // Tool to invoke (empty for reasoning-only steps).
+  string tool_name = 3;
+
+  // Tool input as JSON string.
+  string tool_input = 4;
+
+  // Permission mode: "auto", "ask", "deny".
+  string permission_mode = 5;
+
+  // Hook context as JSON string (hooks evaluated before execution).
+  string hook_context = 6;
+
+  // Tenant identifier.
+  string org_id = 7;
+}
+
+// ExecuteStepResponse — result of a single step execution.
+message ExecuteStepResponse {
+  // Step identifier echoed back.
+  string step_id = 1;
+
+  // Step status: "completed", "failed", "permission_denied", "awaiting_approval".
+  string status = 2;
+
+  // Tool output (populated on success).
+  string output = 3;
+
+  // Error message (populated on failure).
+  string error = 4;
+
+  // Whether this step triggered a compaction.
+  bool compaction_triggered = 5;
+}
+
+// ResumeRunRequest — resume a paused or checkpointed run.
+message ResumeRunRequest {
+  // Run to resume.
+  string run_id = 1;
+
+  // Optional checkpoint to resume from (empty = latest).
+  string checkpoint_id = 2;
+
+  // Tenant identifier.
+  string org_id = 3;
+}
+
+// ResumeRunResponse — acknowledgement that the run has been resumed.
+message ResumeRunResponse {
+  // True if the run was successfully resumed.
+  bool resumed = 1;
+
+  // Current step index after resume.
+  uint32 step_index = 2;
+}
+

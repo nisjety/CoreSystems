@@ -1,0 +1,152 @@
+use std::collections::HashMap;
+
+use qdrant_client::qdrant::{
+    value::Kind as QdrantKind, Condition, CreateCollectionBuilder, DeletePointsBuilder, Distance,
+    FieldCondition, Filter, Match, PointStruct, UpsertPointsBuilder, Value as QdrantValue,
+    VectorParamsBuilder,
+};
+use qdrant_client::Qdrant;
+
+pub async fn ensure_collection(qdrant: &Qdrant, collection: &str, dim: u64) -> anyhow::Result<()> {
+    let exists = qdrant.collection_exists(collection).await?;
+    if !exists {
+        qdrant
+            .create_collection(
+                CreateCollectionBuilder::new(collection)
+                    .vectors_config(VectorParamsBuilder::new(dim, Distance::Cosine)),
+            )
+            .await?;
+        tracing::info!(collection, "qdrant collection created");
+    }
+    Ok(())
+}
+
+pub struct EmbeddingPoint {
+    pub knowledge_id: String,
+    pub document_id: String,
+    pub org_id: String,
+    pub chunk_index: i32,
+    pub text: String,
+    pub vector: Vec<f32>,
+    pub metadata: HashMap<String, String>,
+}
+
+pub async fn upsert_vectors(
+    qdrant: &Qdrant,
+    collection: &str,
+    points: Vec<EmbeddingPoint>,
+) -> anyhow::Result<()> {
+    if points.is_empty() {
+        return Ok(());
+    }
+
+    let qdrant_points: Vec<PointStruct> = points
+        .into_iter()
+        .map(|p| {
+            let mut payload: HashMap<String, QdrantValue> = HashMap::new();
+            payload.insert(
+                "knowledge_id".into(),
+                QdrantValue {
+                    kind: Some(QdrantKind::StringValue(p.knowledge_id.clone())),
+                },
+            );
+            payload.insert(
+                "document_id".into(),
+                QdrantValue {
+                    kind: Some(QdrantKind::StringValue(p.document_id.clone())),
+                },
+            );
+            payload.insert(
+                "org_id".into(),
+                QdrantValue {
+                    kind: Some(QdrantKind::StringValue(p.org_id.clone())),
+                },
+            );
+            payload.insert(
+                "chunk_index".into(),
+                QdrantValue {
+                    kind: Some(QdrantKind::IntegerValue(p.chunk_index as i64)),
+                },
+            );
+            payload.insert(
+                "text".into(),
+                QdrantValue {
+                    kind: Some(QdrantKind::StringValue(p.text)),
+                },
+            );
+            for (k, v) in p.metadata {
+                payload.insert(
+                    k,
+                    QdrantValue {
+                        kind: Some(QdrantKind::StringValue(v)),
+                    },
+                );
+            }
+
+            PointStruct::new(p.knowledge_id, p.vector, payload)
+        })
+        .collect();
+
+    qdrant
+        .upsert_points(UpsertPointsBuilder::new(collection, qdrant_points).wait(true))
+        .await?;
+
+    Ok(())
+}
+
+pub async fn delete_vectors_by_document(
+    qdrant: &Qdrant,
+    collection: &str,
+    document_id: &str,
+) -> anyhow::Result<()> {
+    let filter = Filter {
+        must: vec![Condition::from(FieldCondition {
+            key: "document_id".to_string(),
+            r#match: Some(Match {
+                match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
+                    document_id.to_string(),
+                )),
+            }),
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+
+    qdrant
+        .delete_points(
+            DeletePointsBuilder::new(collection)
+                .points(filter)
+                .wait(true),
+        )
+        .await?;
+
+    tracing::info!(document_id, "qdrant vectors deleted");
+    Ok(())
+}
+
+/// Deletes specific points by knowledge_id. Used to purge chunks orphaned by a
+/// content re-chunk (the new chunks have different IDs and are upserted
+/// separately, so these IDs are disjoint and safe to delete at any time).
+pub async fn delete_vectors_by_ids(
+    qdrant: &Qdrant,
+    collection: &str,
+    knowledge_ids: &[String],
+) -> anyhow::Result<()> {
+    if knowledge_ids.is_empty() {
+        return Ok(());
+    }
+
+    let point_ids: Vec<qdrant_client::qdrant::PointId> =
+        knowledge_ids.iter().map(|id| id.clone().into()).collect();
+
+    qdrant
+        .delete_points(
+            DeletePointsBuilder::new(collection)
+                .points(qdrant_client::qdrant::PointsIdsList { ids: point_ids })
+                .wait(true),
+        )
+        .await?;
+
+    tracing::info!(count = knowledge_ids.len(), "qdrant vectors deleted by id");
+    Ok(())
+}

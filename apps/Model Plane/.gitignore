@@ -1,0 +1,38 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Go
+**/bin/
+*.test
+*.out
+go.work.sum.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs / env
+*.log
+.env
+.env.local

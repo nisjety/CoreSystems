@@ -1,0 +1,297 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - generic [ref=e7]:
+            - button "Go back" [ref=e9] [cursor=pointer]:
+              - img [ref=e10]
+            - button "Go forward" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+          - generic [ref=e16]:
+            - img [ref=e17]
+            - link "aquatiq-as Free" [ref=e19] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e20]: aquatiq-as
+              - generic [ref=e21]: Free
+            - img [ref=e22]
+            - link "Agenter" [ref=e24] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e25]
+            - link "Studio" [ref=e27] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e29] [cursor=pointer]:
+          - img [ref=e30]
+          - generic [ref=e33]: Search across the whole system
+          - generic [ref=e34]: /
+          - generic [ref=e35]: CMD+K
+        - generic [ref=e37]:
+          - button "Toggle dark mode" [ref=e40] [cursor=pointer]:
+            - img [ref=e42]
+          - button "Open AI assistant" [ref=e46] [cursor=pointer]:
+            - img [ref=e47]
+          - button "Quick messages" [ref=e51] [cursor=pointer]:
+            - img [ref=e52]
+          - button "Notifications" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Calendar" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Open profile menu" [ref=e63] [cursor=pointer]:
+            - generic [ref=e64]: I
+    - complementary "Primary navigation" [ref=e65]:
+      - generic [ref=e66]:
+        - generic [ref=e67]:
+          - generic [ref=e68]:
+            - link "Go to home" [ref=e70] [cursor=pointer]:
+              - /url: /dashboard
+              - img [ref=e71]
+            - button "Collapse sidebar" [ref=e81] [cursor=pointer]:
+              - img [ref=e82]
+          - navigation "Workspace sections" [ref=e85]:
+            - generic [ref=e86]:
+              - link "Oversikt" [ref=e88] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e89]
+              - link "Chat" [ref=e92] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e93]
+              - link "Agenter" [ref=e96] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e97]
+              - link "Inbox" [ref=e101] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e102]
+              - link "Kunnskap" [ref=e106] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e107]
+          - generic [ref=e109]:
+            - link "Account" [ref=e112] [cursor=pointer]:
+              - /url: /account
+              - img [ref=e113]
+            - link "Innstillinger" [ref=e118] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e119]
+            - button "Søk" [ref=e123] [cursor=pointer]:
+              - img [ref=e124]
+        - generic [ref=e128]:
+          - generic [ref=e129]:
+            - generic [ref=e130]: Agents
+            - button "Collapse sidebar" [ref=e131] [cursor=pointer]:
+              - img [ref=e132]
+          - generic [ref=e134]:
+            - generic:
+              - img
+            - button "Select agent type" [ref=e135] [cursor=pointer]:
+              - generic [ref=e136]: Ecommerce
+            - img
+          - navigation "Agent feature tabs" [ref=e137]:
+            - button "Shopping assistant Product questions, quick replies, upsells, and recommendations." [ref=e138] [cursor=pointer]:
+              - img [ref=e139]
+              - generic [ref=e142]:
+                - generic [ref=e143]: Shopping assistant
+                - generic [ref=e144]: Product questions, quick replies, upsells, and recommendations.
+            - button "Support & orders Tracking, returns, exchanges, and subscriptions." [ref=e145] [cursor=pointer]:
+              - img [ref=e146]
+              - generic [ref=e149]:
+                - generic [ref=e150]: Support & orders
+                - generic [ref=e151]: Tracking, returns, exchanges, and subscriptions.
+            - button "Product finder Guided Search, discovery, and comparison." [pressed] [ref=e152] [cursor=pointer]:
+              - img [ref=e153]
+              - generic [ref=e156]:
+                - generic [ref=e157]: Product finder
+                - generic [ref=e158]: Guided Search, discovery, and comparison.
+            - button "Cart recovery Checkout concerns and conversion nudges." [ref=e159] [cursor=pointer]:
+              - img [ref=e160]
+              - generic [ref=e165]:
+                - generic [ref=e166]: Cart recovery
+                - generic [ref=e167]: Checkout concerns and conversion nudges.
+            - button "Brand voice AI Personas, social replies, tone, and autonomous CX." [ref=e168] [cursor=pointer]:
+              - img [ref=e169]
+              - generic [ref=e172]:
+                - generic [ref=e173]: Brand voice
+                - generic [ref=e174]: AI Personas, social replies, tone, and autonomous CX.
+            - button "Store actions Sidekick-style guidance, content, apps, tasks, and approvals." [ref=e175] [cursor=pointer]:
+              - img [ref=e176]
+              - generic [ref=e179]:
+                - generic [ref=e180]: Store actions
+                - generic [ref=e181]: Sidekick-style guidance, content, apps, tasks, and approvals.
+            - button "Shopper insights Intent, friction, and revenue opportunities." [ref=e182] [cursor=pointer]:
+              - img [ref=e183]
+              - generic [ref=e185]:
+                - generic [ref=e186]: Shopper insights
+                - generic [ref=e187]: Intent, friction, and revenue opportunities.
+    - main [ref=e188]:
+      - generic [ref=e192]:
+        - generic [ref=e193]:
+          - generic [ref=e194]:
+            - generic [ref=e195]:
+              - img [ref=e196]
+              - text: Ecommerce
+            - heading "Guide shoppers through product discovery" [level=1] [ref=e199]
+            - paragraph [ref=e200]: Use Rep AI-style Guided Search, product cards, and shopper intelligence to move from open-ended intent to fit.
+            - generic [ref=e201]:
+              - generic [ref=e202]: Velion Commerce Reasoner
+              - generic [ref=e203]: Product confidence policy required
+              - generic [ref=e204]: Live assisted revenue appears after launch
+          - generic [ref=e205]:
+            - generic [ref=e206]:
+              - generic [ref=e207]:
+                - paragraph [ref=e208]: Activation
+                - paragraph [ref=e209]: Blueprint ready for store journeys
+              - img [ref=e211]
+            - paragraph [ref=e214]: Defines catalog grounding, product guidance, order help, and cart recovery controls before activation.
+            - generic [ref=e215]:
+              - button "Activate ecommerce agent" [ref=e216] [cursor=pointer]:
+                - img [ref=e217]
+                - text: Activate ecommerce agent
+              - button "Run Ecommerce readiness test" [ref=e222] [cursor=pointer]:
+                - img [ref=e223]
+            - generic "Ecommerce feature areas" [ref=e225]:
+              - button "Open Shopping assistant workspace" [ref=e226] [cursor=pointer]: Shopping assistant
+              - button "Open Support & orders workspace" [ref=e227] [cursor=pointer]: Support & orders
+              - button "Open Product finder workspace" [pressed] [ref=e228] [cursor=pointer]: Product finder
+              - button "Open Cart recovery workspace" [ref=e229] [cursor=pointer]: Cart recovery
+              - button "Open Brand voice workspace" [ref=e230] [cursor=pointer]: Brand voice
+              - button "Open Store actions workspace" [ref=e231] [cursor=pointer]: Store actions
+              - button "Open Shopper insights workspace" [ref=e232] [cursor=pointer]: Shopper insights
+        - generic [ref=e233]:
+          - generic [ref=e234]:
+            - generic "Agent readiness metrics" [ref=e235]:
+              - generic [ref=e236]:
+                - paragraph [ref=e237]: Catalog fields
+                - paragraph [ref=e238]: Scope
+                - paragraph [ref=e239]: Variants, inventory, fit, materials, collections
+              - generic [ref=e240]:
+                - paragraph [ref=e241]: Store actions
+                - paragraph [ref=e242]: Guarded
+                - paragraph [ref=e243]: Recommend, compare, order lookup, return start
+              - generic [ref=e244]:
+                - paragraph [ref=e245]: Intent stages
+                - paragraph [ref=e246]: Plan
+                - paragraph [ref=e247]: Discovery, interested, ready to buy
+            - region "Ecommerce product finder workspace" [ref=e248]:
+              - generic [ref=e249]:
+                - generic [ref=e250]:
+                  - generic [ref=e251]:
+                    - paragraph [ref=e252]: Rep AI Guided Search style
+                    - heading "Guided product finder" [level=2] [ref=e253]
+                    - paragraph [ref=e254]: Ask one useful question, filter with catalog attributes, and explain the best matches.
+                  - img [ref=e256]
+                - generic [ref=e259]:
+                  - paragraph [ref=e260]: What matters most for winter runs?
+                  - generic [ref=e261]:
+                    - generic [ref=e262]: Use case
+                    - generic [ref=e263]: Fit
+                    - generic [ref=e264]: Budget range
+                    - generic [ref=e265]: Availability
+                - generic [ref=e266]:
+                  - generic [ref=e267]:
+                    - heading "Catalog match" [level=3] [ref=e270]
+                    - paragraph [ref=e271]: Mapped attributes
+                    - paragraph [ref=e272]: Catalog price
+                  - generic [ref=e273]:
+                    - heading "Inventory option" [level=3] [ref=e276]
+                    - paragraph [ref=e277]: Stock checked
+                    - paragraph [ref=e278]: Catalog rule
+                  - generic [ref=e279]:
+                    - heading "Policy-safe pick" [level=3] [ref=e282]
+                    - paragraph [ref=e283]: Return terms
+                    - paragraph [ref=e284]: Source required
+              - generic [ref=e285]:
+                - generic [ref=e286]:
+                  - generic [ref=e287]:
+                    - paragraph [ref=e288]: Shopper intelligence
+                    - heading "Intent profile" [level=2] [ref=e289]
+                    - paragraph [ref=e290]: Use browsing behavior, budget, and cart context to keep recommendations relevant.
+                  - img [ref=e292]
+                - generic [ref=e294]:
+                  - img [ref=e296]
+                  - generic [ref=e299]:
+                    - generic [ref=e300]:
+                      - heading "Shopper context" [level=3] [ref=e301]
+                      - generic [ref=e302]: Map
+                    - paragraph [ref=e303]: Viewed products, cart contents, purchase history, and current page.
+                - generic [ref=e305]:
+                  - img [ref=e307]
+                  - generic [ref=e311]:
+                    - generic [ref=e312]:
+                      - heading "Live inventory required" [level=3] [ref=e313]
+                      - generic [ref=e314]: Required
+                    - paragraph [ref=e315]: Checks product data before promising availability or variants.
+            - generic "Ecommerce product finder system" [ref=e316]:
+              - generic [ref=e317]:
+                - img [ref=e319]
+                - heading "Ask" [level=2] [ref=e321]
+                - paragraph [ref=e322]: Collect shopper preference.
+                - generic [ref=e323]:
+                  - generic [ref=e326]: Need
+                  - generic [ref=e329]: Budget
+                  - generic [ref=e332]: Constraint
+              - generic [ref=e333]:
+                - img [ref=e335]
+                - heading "Filter" [level=2] [ref=e338]
+                - paragraph [ref=e339]: Use catalog attributes.
+                - generic [ref=e340]:
+                  - generic [ref=e343]: Fit
+                  - generic [ref=e346]: Stock
+                  - generic [ref=e349]: Material
+              - generic [ref=e350]:
+                - img [ref=e352]
+                - heading "Compare" [level=2] [ref=e357]
+                - paragraph [ref=e358]: Explain differences clearly.
+                - generic [ref=e359]:
+                  - generic [ref=e362]: Pros
+                  - generic [ref=e365]: Tradeoffs
+                  - generic [ref=e368]: Return terms
+          - complementary [ref=e369]:
+            - generic [ref=e370]:
+              - generic [ref=e371]:
+                - generic [ref=e372]:
+                  - paragraph [ref=e373]: Preview
+                  - heading "Product finder preview" [level=2] [ref=e374]
+                - img [ref=e376]
+              - generic [ref=e379]:
+                - generic [ref=e380]:
+                  - generic [ref=e381]: Looking for running shoes?
+                  - generic [ref=e382]:
+                    - generic [ref=e388]: Data
+                    - generic [ref=e394]: Rule
+                    - generic [ref=e400]: Rule
+                - img [ref=e402]
+              - generic [ref=e405]:
+                - generic [ref=e406]: I need shoes for winter runs and want to compare reliable options.
+                - generic [ref=e407]: I can ask one fit question, check the live catalog, then compare matching options with stock and return terms before checkout.
+                - generic [ref=e408]: Combines shopper intent, catalog attributes, inventory, and return policy in one flow.
+                - generic [ref=e409]:
+                  - button "Compare options" [ref=e410] [cursor=pointer]
+                  - button "Show in-stock sizes" [ref=e411] [cursor=pointer]
+                  - button "Explain returns" [ref=e412] [cursor=pointer]
+              - paragraph [ref=e413]: The assistant asks one focused question, filters the catalog, and explains why each product fits.
+            - generic [ref=e414]:
+              - generic [ref=e415]:
+                - generic [ref=e416]:
+                  - paragraph [ref=e417]: Operational checklist
+                  - heading "Ecommerce readiness" [level=2] [ref=e418]
+                - button "Edit finder" [ref=e419] [cursor=pointer]:
+                  - img [ref=e420]
+                  - text: Edit finder
+              - generic [ref=e422]:
+                - generic [ref=e423]:
+                  - img [ref=e424]
+                  - generic [ref=e427]: Finder questions approved
+                - generic [ref=e428]:
+                  - img [ref=e429]
+                  - generic [ref=e432]: Variant filters mapped
+                - generic [ref=e433]:
+                  - img [ref=e434]
+                  - generic [ref=e437]: Comparison cards ready
+                - generic [ref=e438]:
+                  - img [ref=e439]
+                  - generic [ref=e442]: Shopper profile live
+              - button "Open shopper signals" [ref=e443] [cursor=pointer]:
+                - img [ref=e444]
+                - text: Open shopper signals
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e451] [cursor=pointer]:
+    - img [ref=e452]
+  - alert [ref=e455]

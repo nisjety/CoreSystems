@@ -1,0 +1,10 @@
+[package]
+name = "mp-toon"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }

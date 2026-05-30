@@ -1,0 +1,1573 @@
+openapi: 3.1.0
+info:
+  title: Model Plane API
+  version: 0.1.0
+  description: |
+    Public HTTP API for the Model Plane runtime, served by model-gateway on :8080.
+    All /v1/* endpoints require a Bearer JWT issued by auth-core.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.modelplane.example.com
+    description: Production
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+    description: Liveness and readiness probes (no auth)
+  - name: invoke
+    description: Core request/response and streaming inference
+  - name: orchestration
+    description: Plans, todos, approvals, lineage, and run control
+  - name: ai
+    description: AI modality endpoints (chat, images, speech, translate, documents, realtime)
+  - name: capabilities
+    description: Capability registry
+  - name: tasks
+    description: Task management (proxied to capability-core)
+  - name: cron
+    description: Scheduled jobs (proxied to capability-core)
+  - name: memory
+    description: Memory store (proxied to capability-core)
+  - name: skills
+    description: Skill registry (proxied to capability-core)
+  - name: events
+    description: Server-Sent Event streams
+
+paths:
+  # ===========================================================================
+  # Health
+  # ===========================================================================
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [health]
+      summary: Readiness probe
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [health]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  # ===========================================================================
+  # Invoke
+  # ===========================================================================
+  /v1/invoke:
+    post:
+      operationId: invoke
+      tags: [invoke]
+      summary: Synchronous inference request
+      description: |
+        Sends content to the configured model via inference-core and returns the
+        full response. Budget is checked pre-flight against cost-core. A session
+        run is created in session-core for context tracking.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvokeRequest"
+      responses:
+        "200":
+          description: Inference completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvokeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: Budget exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Upstream service error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/invoke/stream:
+    post:
+      operationId: invokeStream
+      tags: [invoke]
+      summary: Streaming inference via SSE
+      description: |
+        Same as /v1/invoke but returns Server-Sent Events. Each event carries a
+        delta chunk. The final event has `done: true`. Event type `done` signals
+        end of stream.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvokeRequest"
+      responses:
+        "200":
+          description: SSE stream of inference chunks
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/SseChunk"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ===========================================================================
+  # Orchestration — reads
+  # ===========================================================================
+  /v1/orchestration/runs/{run_id}/plans:
+    get:
+      operationId: listPlans
+      tags: [orchestration]
+      summary: List plans for a run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Plans list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plans:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Plan"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/orchestration/plans/{plan_id}:
+    get:
+      operationId: getPlan
+      tags: [orchestration]
+      summary: Get a plan by ID
+      parameters:
+        - $ref: "#/components/parameters/PlanId"
+      responses:
+        "200":
+          description: Plan details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan:
+                    $ref: "#/components/schemas/Plan"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/threads/{thread_id}/todos:
+    get:
+      operationId: listTodos
+      tags: [orchestration]
+      summary: List todos for a thread
+      parameters:
+        - $ref: "#/components/parameters/ThreadId"
+        - name: run_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Todos list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  todos:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Todo"
+
+  /v1/orchestration/todos/{todo_id}:
+    get:
+      operationId: getTodo
+      tags: [orchestration]
+      summary: Get a todo by ID
+      parameters:
+        - name: todo_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Todo details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  todo:
+                    $ref: "#/components/schemas/Todo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/runs/{run_id}/approvals:
+    get:
+      operationId: listApprovals
+      tags: [orchestration]
+      summary: List approvals for a run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: step_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approvals list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvals:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Approval"
+
+  /v1/orchestration/approvals/{approval_id}:
+    get:
+      operationId: getApproval
+      tags: [orchestration]
+      summary: Get an approval by ID
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approval:
+                    $ref: "#/components/schemas/Approval"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/threads/{thread_id}/lineage:
+    get:
+      operationId: getSubagentLineage
+      tags: [orchestration]
+      summary: Get subagent lineage for a thread
+      parameters:
+        - $ref: "#/components/parameters/ThreadId"
+      responses:
+        "200":
+          description: Lineage graph
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lineage:
+                    $ref: "#/components/schemas/SubagentLineage"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ===========================================================================
+  # Orchestration — mutations
+  # ===========================================================================
+  /v1/orchestration/plans/{plan_id}/approve:
+    post:
+      operationId: approvePlan
+      tags: [orchestration]
+      summary: Approve a plan
+      parameters:
+        - $ref: "#/components/parameters/PlanId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransitionPlanBody"
+      responses:
+        "200":
+          description: Plan approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan:
+                    $ref: "#/components/schemas/Plan"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/plans/{plan_id}/reject:
+    post:
+      operationId: rejectPlan
+      tags: [orchestration]
+      summary: Reject a plan
+      parameters:
+        - $ref: "#/components/parameters/PlanId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransitionPlanBody"
+      responses:
+        "200":
+          description: Plan rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan:
+                    $ref: "#/components/schemas/Plan"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/todos/{todo_id}/status:
+    post:
+      operationId: updateTodoStatus
+      tags: [orchestration]
+      summary: Transition a todo to a new status
+      parameters:
+        - name: todo_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransitionTodoBody"
+      responses:
+        "200":
+          description: Todo updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  todo:
+                    $ref: "#/components/schemas/Todo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/approvals/{approval_id}/decide:
+    post:
+      operationId: decideApproval
+      tags: [orchestration]
+      summary: Approve or reject an approval request
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecideApprovalBody"
+      responses:
+        "200":
+          description: Approval decided
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approval:
+                    $ref: "#/components/schemas/Approval"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      tags: [orchestration]
+      summary: Request cancellation of a run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id:
+                    type: string
+                  status:
+                    type: string
+                    example: cancel_requested
+
+  /v1/orchestration/runs/{run_id}/resume:
+    post:
+      operationId: resumeRun
+      tags: [orchestration]
+      summary: Request resumption of a cancelled/paused run
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Resumption requested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id:
+                    type: string
+                  status:
+                    type: string
+                    example: resume_requested
+
+  # ===========================================================================
+  # Run event SSE
+  # ===========================================================================
+  /v1/runs/{run_id}/events:
+    get:
+      operationId: streamRunEvents
+      tags: [events]
+      summary: Stream orchestration events for a run via SSE
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: SSE stream of orchestration events
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/OrchestrationEvent"
+
+  # ===========================================================================
+  # AI modalities
+  # ===========================================================================
+  /v1/ai/chat:
+    post:
+      operationId: aiChat
+      tags: [ai]
+      summary: Chat completion via inference-core
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiChatRequest"
+      responses:
+        "200":
+          description: Chat response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiChatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/ai/embeddings:
+    post:
+      operationId: aiEmbeddings
+      tags: [ai]
+      summary: Embedding generation via inference-core
+      description: Generates vectors only. Data Plane remains responsible for vector storage, indexing, and retrieval.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiEmbeddingRequest"
+      responses:
+        "200":
+          description: Embedding response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiEmbeddingResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v1/ai/models:
+    get:
+      operationId: aiModels
+      tags: [ai]
+      summary: Active inference model catalogue
+      parameters:
+        - name: modality
+          in: query
+          required: false
+          schema:
+            type: string
+            example: embedding
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+            example: azure-openai
+      responses:
+        "200":
+          description: Active model catalogue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiModelsResponse"
+
+  /v1/ai/images:
+    post:
+      operationId: aiImages
+      tags: [ai]
+      summary: Image generation (queued)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt:
+                  type: string
+                model:
+                  type: string
+                size:
+                  type: string
+                  example: "1024x1024"
+      responses:
+        "200":
+          description: Generation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedResponse"
+
+  /v1/ai/speech:
+    post:
+      operationId: aiSpeech
+      tags: [ai]
+      summary: Text-to-speech synthesis (queued)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [input]
+              properties:
+                input:
+                  type: string
+                voice:
+                  type: string
+                model:
+                  type: string
+      responses:
+        "200":
+          description: Synthesis queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedResponse"
+
+  /v1/ai/translate:
+    post:
+      operationId: aiTranslate
+      tags: [ai]
+      summary: Text translation (queued)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                source_language:
+                  type: string
+                target_language:
+                  type: string
+      responses:
+        "200":
+          description: Translation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedResponse"
+
+  /v1/ai/documents:
+    post:
+      operationId: aiDocuments
+      tags: [ai]
+      summary: Document processing (queued)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+      responses:
+        "200":
+          description: Processing queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedResponse"
+
+  /v1/ai/realtime:
+    post:
+      operationId: aiRealtime
+      tags: [ai]
+      summary: Realtime session placeholder
+      description: |
+        Realtime sessions require WebSocket upgrade. Use /v1/invoke/stream for
+        SSE streaming instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  type: string
+      responses:
+        "200":
+          description: Not implemented — use SSE streaming
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedResponse"
+
+  # ===========================================================================
+  # Capabilities
+  # ===========================================================================
+  /v1/capabilities:
+    get:
+      operationId: listCapabilities
+      tags: [capabilities]
+      summary: List registered capabilities
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Full-text search query
+          schema:
+            type: string
+        - name: after_id
+          in: query
+          description: Cursor for pagination
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        "200":
+          description: Capabilities list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  capabilities:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Capability"
+                  has_more:
+                    type: boolean
+
+  /v1/capabilities/{id}:
+    get:
+      operationId: getCapability
+      tags: [capabilities]
+      summary: Get a capability by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Capability details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capability"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ===========================================================================
+  # Tasks
+  # ===========================================================================
+  /v1/tasks:
+    get:
+      operationId: listTasks
+      tags: [tasks]
+      summary: List tasks
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createTask
+      tags: [tasks]
+      summary: Create a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskInput"
+      responses:
+        "200":
+          description: Task created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /v1/tasks/{id}:
+    get:
+      operationId: getTask
+      tags: [tasks]
+      summary: Get a task by ID
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Task details
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: patchTask
+      tags: [tasks]
+      summary: Update a task
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Task updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /v1/tasks/{id}/cancel:
+    post:
+      operationId: cancelTask
+      tags: [tasks]
+      summary: Cancel a task
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Task cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ===========================================================================
+  # Cron
+  # ===========================================================================
+  /v1/cron:
+    get:
+      operationId: listCron
+      tags: [cron]
+      summary: List cron jobs
+      responses:
+        "200":
+          description: Cron list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createCron
+      tags: [cron]
+      summary: Create a cron job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Cron created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /v1/cron/{id}:
+    get:
+      operationId: getCron
+      tags: [cron]
+      summary: Get a cron job by ID
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Cron details
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: patchCron
+      tags: [cron]
+      summary: Update a cron job
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Cron updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      operationId: deleteCron
+      tags: [cron]
+      summary: Delete a cron job
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Cron deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ===========================================================================
+  # Memory
+  # ===========================================================================
+  /v1/memory:
+    get:
+      operationId: listMemory
+      tags: [memory]
+      summary: List memory entries
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Memory list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createMemory
+      tags: [memory]
+      summary: Create a memory entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Memory created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /v1/memory/{id}:
+    get:
+      operationId: getMemory
+      tags: [memory]
+      summary: Get a memory entry by ID
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Memory details
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: patchMemory
+      tags: [memory]
+      summary: Update a memory entry
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Memory updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      operationId: deleteMemory
+      tags: [memory]
+      summary: Delete a memory entry
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Memory deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ===========================================================================
+  # Skills
+  # ===========================================================================
+  /v1/skills:
+    get:
+      operationId: listSkills
+      tags: [skills]
+      summary: List skills
+      responses:
+        "200":
+          description: Skills list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createSkill
+      tags: [skills]
+      summary: Create a skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Skill created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /v1/skills/{id}:
+    get:
+      operationId: getSkill
+      tags: [skills]
+      summary: Get a skill by ID
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Skill details
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: patchSkill
+      tags: [skills]
+      summary: Update a skill
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Skill updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      operationId: deleteSkill
+      tags: [skills]
+      summary: Delete a skill
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: Skill deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+# =============================================================================
+# Components
+# =============================================================================
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT issued by auth-core. Contains org_id, user_id, scopes.
+
+  parameters:
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+    PlanId:
+      name: plan_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ThreadId:
+      name: thread_id
+      in: path
+      required: true
+      schema:
+        type: string
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    InvokeRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: User message content (max 100 KB)
+          maxLength: 102400
+        model:
+          type: string
+          description: Model identifier. Falls back to DEFAULT_MODEL env.
+        session_key:
+          type: string
+          description: Optional session key for context continuity.
+        thread_id:
+          type: string
+          description: Optional thread ID for conversation threading.
+        structured_output_schema:
+          type: string
+          description: JSON Schema string for structured output.
+        zdr:
+          type: boolean
+          default: false
+          description: Zero data retention — if true, no data is persisted.
+        max_cost_usd:
+          type: number
+          format: double
+          description: Maximum cost in USD for this request.
+          exclusiveMinimum: 0
+        max_tokens:
+          type: integer
+          format: int32
+          description: Maximum output tokens.
+          exclusiveMinimum: 0
+
+    InvokeResponse:
+      type: object
+      properties:
+        request_id:
+          type: string
+        content:
+          type: string
+        model_used:
+          type: string
+
+    SseChunk:
+      type: object
+      description: A single chunk in the invoke/stream SSE response.
+      properties:
+        request_id:
+          type: string
+        delta:
+          type: string
+        done:
+          type: boolean
+        model_used:
+          type: string
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+
+    AiChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        model:
+          type: string
+        stream:
+          type: boolean
+          default: false
+        structured_output_schema:
+          type: string
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant]
+        content:
+          type: string
+
+    AiChatResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        content:
+          type: string
+        model_used:
+          type: string
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+
+    AiEmbeddingRequest:
+      type: object
+      required: [input, model]
+      properties:
+        input:
+          type: string
+        model:
+          type: string
+          example: text-embedding-3-large
+        provider:
+          type: string
+          example: azure-openai
+
+    AiEmbeddingResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: embedding
+        model_used:
+          type: string
+        provider_used:
+          type: string
+        embedding:
+          type: array
+          items:
+            type: number
+            format: float
+
+    AiModelsResponse:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              provider:
+                type: string
+              modality:
+                type: string
+              streaming:
+                type: boolean
+
+    QueuedResponse:
+      type: object
+      description: Acknowledgement for async/queued AI modality requests.
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, not_implemented]
+        note:
+          type: string
+
+    Plan:
+      type: object
+      properties:
+        id:
+          type: string
+        run_id:
+          type: string
+        thread_id:
+          type: string
+        author:
+          type: string
+        state:
+          $ref: "#/components/schemas/PlanState"
+        summary:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlanStep"
+        supersedes:
+          type: string
+          nullable: true
+
+    PlanStep:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        operation:
+          type: string
+          nullable: true
+        state:
+          type: string
+          enum:
+            - UNSPECIFIED
+            - PENDING
+            - IN_PROGRESS
+            - COMPLETED
+            - FAILED
+            - SKIPPED
+
+    PlanState:
+      type: string
+      enum:
+        - UNSPECIFIED
+        - DRAFT
+        - PROPOSED
+        - APPROVED
+        - EXECUTING
+        - COMPLETED
+        - FAILED
+        - REJECTED
+        - SUPERSEDED
+        - ARCHIVED
+
+    Todo:
+      type: object
+      properties:
+        id:
+          type: string
+        thread_id:
+          type: string
+        run_id:
+          type: string
+          nullable: true
+        assignee:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        state:
+          $ref: "#/components/schemas/TodoState"
+        priority:
+          type: string
+          enum: [UNSPECIFIED, LOW, MEDIUM, HIGH, CRITICAL]
+        blocked_by:
+          type: array
+          items:
+            type: string
+
+    TodoState:
+      type: string
+      enum: [UNSPECIFIED, PENDING, IN_PROGRESS, BLOCKED, COMPLETED, CANCELLED]
+
+    Approval:
+      type: object
+      properties:
+        id:
+          type: string
+        run_id:
+          type: string
+        step_id:
+          type: string
+          nullable: true
+        kind:
+          type: string
+          enum: [UNSPECIFIED, HUMAN_APPROVAL, AUTO_APPROVAL, ESCALATION]
+        state:
+          type: string
+          enum: [UNSPECIFIED, PENDING, GRANTED, DENIED, EXPIRED, WITHDRAWN]
+        requested_of:
+          type: string
+        decided_by:
+          type: string
+          nullable: true
+        decision_reason:
+          type: string
+          nullable: true
+
+    SubagentLineage:
+      type: object
+      properties:
+        thread_id:
+          type: string
+        max_depth:
+          type: integer
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              parent_run_id:
+                type: string
+              child_run_id:
+                type: string
+              role:
+                type: string
+                enum: [UNSPECIFIED, PLANNER, EXECUTOR, REVIEWER, CRITIC, SPECIALIST]
+
+    OrchestrationEvent:
+      type: object
+      description: SSE event from /v1/runs/{run_id}/events
+      properties:
+        event_type:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+
+    TransitionPlanBody:
+      type: object
+      required: [target_state]
+      properties:
+        target_state:
+          $ref: "#/components/schemas/PlanState"
+        reason:
+          type: string
+          default: ""
+
+    TransitionTodoBody:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/TodoState"
+        reason:
+          type: string
+          default: ""
+
+    DecideApprovalBody:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approve, reject]
+        reason:
+          type: string
+          default: ""
+
+    Capability:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        version:
+          type: string
+        description:
+          type: string
+        risk_level:
+          type: string
+        lazy_load:
+          type: boolean
+        scope:
+          type: string
+
+    TaskInput:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          type: string
+        schedule:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true

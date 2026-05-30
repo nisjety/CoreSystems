@@ -1,0 +1,1024 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// InferenceCore — provider routing execution for LLMs.
+// Owns: model routing, structured output, retries, fallback, token streaming, caching.
+// Stateless except in-memory prompt cache.
+// Does NOT own: tool loop, session authority.
+service InferenceCore {
+  // Unary inference — returns the complete response.
+  rpc Infer(InferRequest) returns (InferResponse);
+
+  // Streaming inference — returns token-by-token chunks.
+  rpc InferStream(InferRequest) returns (stream InferChunk);
+
+  // Embedding generation — provider-facing only. Vector storage and retrieval
+  // remain Data Plane responsibilities.
+  rpc CreateEmbedding(CreateEmbeddingRequest) returns (CreateEmbeddingResponse);
+
+  // Model catalogue for routing, capability discovery, and compatibility checks.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+
+  // Text-to-speech synthesis through the provider routing layer.
+  rpc SynthesizeSpeech(SynthesizeSpeechRequest) returns (SynthesizeSpeechResponse);
+
+  // Speech-to-text transcription through the provider routing layer.
+  rpc TranscribeSpeech(TranscribeSpeechRequest) returns (TranscribeSpeechResponse);
+
+  // Provider voice catalogue for TTS UI/client discovery.
+  rpc ListSpeechVoices(ListSpeechVoicesRequest) returns (ListSpeechVoicesResponse);
+
+  // Text translation through provider-backed translation services.
+  rpc TranslateText(TranslateTextRequest) returns (TranslateTextResponse);
+
+  // Batch text translation through provider-backed translation services.
+  rpc BatchTranslateText(BatchTranslateTextRequest) returns (BatchTranslateTextResponse);
+
+  // Detect the language of a text string.
+  rpc DetectTextLanguage(DetectTextLanguageRequest) returns (DetectTextLanguageResponse);
+
+  // Supported languages for provider-backed translation.
+  rpc ListTranslationLanguages(ListTranslationLanguagesRequest) returns (ListTranslationLanguagesResponse);
+
+  // Generate images through provider-backed image models.
+  rpc GenerateImage(GenerateImageRequest) returns (GenerateImageResponse);
+
+  // Analyze an image with a multimodal vision model.
+  rpc AnalyzeImage(AnalyzeImageRequest) returns (AnalyzeImageResponse);
+
+  // Extract text from an image with a vision/OCR provider.
+  rpc ExtractImageText(ExtractImageTextRequest) returns (ExtractImageTextResponse);
+
+  // Analyze a document with a provider-backed document intelligence model.
+  rpc AnalyzeDocument(AnalyzeDocumentRequest) returns (AnalyzeDocumentResponse);
+
+  // Analyze text with provider-backed language analytics.
+  rpc AnalyzeLanguage(AnalyzeLanguageRequest) returns (AnalyzeLanguageResponse);
+
+  // Create a provider-backed realtime session client secret.
+  rpc CreateRealtimeSession(CreateRealtimeSessionRequest) returns (CreateRealtimeSessionResponse);
+
+  // Create a provider-backed video generation job.
+  rpc CreateVideoGenerationJob(CreateVideoGenerationJobRequest) returns (CreateVideoGenerationJobResponse);
+
+  // Get provider-backed video generation job status.
+  rpc GetVideoGenerationJob(GetVideoGenerationJobRequest) returns (GetVideoGenerationJobResponse);
+
+  // Stream generated video content through the provider credential boundary.
+  rpc StreamVideoGenerationContent(StreamVideoGenerationContentRequest) returns (stream StreamVideoGenerationContentResponse);
+}
+
+// InferRequest — a single inference request to be routed to a provider.
+message InferRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Requested model (e.g. "claude-sonnet-4-20250514", "gpt-4o").
+  string model = 3;
+
+  // Optional provider hint: "anthropic", "openai", etc.
+  string provider_hint = 4;
+
+  // Conversation messages for the inference call.
+  repeated ChatMessage messages = 5;
+
+  // Sampling temperature (0.0 - 1.0).
+  float temperature = 6;
+
+  // Maximum tokens to generate.
+  int32 max_tokens = 7;
+
+  // Optional JSON Schema for structured output conformance.
+  string structured_output_schema = 8;
+
+  // Zero Data Retention mode. When true, inference results are not cached or logged durably.
+  bool zdr = 9;
+}
+
+// ChatMessage — a single message in the conversation.
+message ChatMessage {
+  // Role: "user", "assistant", "system".
+  string role = 1;
+
+  // Text content.
+  string content = 2;
+
+  // Optional participant name.
+  string name = 3;
+}
+
+// InferResponse — complete inference result.
+message InferResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Generated content.
+  string content = 2;
+
+  // Model that actually served the request.
+  string model_used = 3;
+
+  // Why generation stopped: "end_turn", "max_tokens", "stop_sequence".
+  string stop_reason = 4;
+
+  // Token counts for usage tracking.
+  int32 input_tokens = 5;
+  // Number of generated tokens.
+  int32 output_tokens = 6;
+}
+
+// InferChunk — a single chunk in a streaming inference response.
+message InferChunk {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Incremental content delta.
+  string delta = 2;
+
+  // True when this is the final chunk.
+  bool done = 3;
+
+  // Model that served the request (populated on final chunk).
+  string model_used = 4;
+
+  // Token counts (populated on final chunk).
+  int32 input_tokens = 5;
+  // Number of generated tokens on the final chunk.
+  int32 output_tokens = 6;
+}
+
+// CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
+message CreateEmbeddingRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Text to embed.
+  string text = 3;
+
+  // Requested model/deployment (e.g. "text-embedding-3-large").
+  string model = 4;
+
+  // Optional provider hint: "openai", "azure-openai", etc.
+  string provider_hint = 5;
+}
+
+// CreateEmbeddingResponse — generated vector and serving metadata.
+message CreateEmbeddingResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Embedding vector.
+  repeated float vector = 2;
+
+  // Model/deployment that served the request.
+  string model_used = 3;
+
+  // Provider that served the request.
+  string provider_used = 4;
+}
+
+// ListModelsRequest — model catalogue filter.
+message ListModelsRequest {
+  // Optional modality: "chat", "embedding", "speech", "image", etc.
+  string modality = 1;
+
+  // Optional provider filter.
+  string provider = 2;
+}
+
+// ModelInfo — provider model/deployment metadata.
+message ModelInfo {
+  // Model or deployment identifier.
+  string id = 1;
+
+  // Provider identifier.
+  string provider = 2;
+
+  // Modality served by the model.
+  string modality = 3;
+
+  // Whether the model supports streaming responses.
+  bool streaming = 4;
+}
+
+// ListModelsResponse — available models in the active provider chain.
+message ListModelsResponse {
+  // Matching models.
+  repeated ModelInfo models = 1;
+}
+
+// SynthesizeSpeechRequest — text-to-speech request routed to a speech provider.
+message SynthesizeSpeechRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Text to synthesize.
+  string text = 3;
+
+  // Provider voice id. Empty means provider default.
+  string voice = 4;
+
+  // Output audio format: "mp3", "wav", "ogg", or "pcm".
+  string format = 5;
+
+  // Optional speech model/deployment.
+  string model = 6;
+
+  // Optional provider hint: "openai", "azure-openai", "azure-speech", etc.
+  string provider_hint = 7;
+
+  // Optional language hint, e.g. "en-US" or "nb-NO".
+  string language = 8;
+}
+
+// SynthesizeSpeechResponse — generated audio and serving metadata.
+message SynthesizeSpeechResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Inline audio bytes for short clips.
+  bytes audio = 2;
+
+  // Output audio format.
+  string format = 3;
+
+  // Model/deployment or voice that served the request.
+  string model_used = 4;
+
+  // Provider that served the request.
+  string provider_used = 5;
+
+  // Duration when the provider returns it. Zero means unknown.
+  uint64 duration_ms = 6;
+}
+
+// TranscribeSpeechRequest — speech-to-text request routed to a speech provider.
+message TranscribeSpeechRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Inline audio bytes.
+  bytes audio = 3;
+
+  // Input audio format: "mp3", "wav", "ogg", "m4a", or "webm".
+  string format = 4;
+
+  // Optional STT model/deployment.
+  string model = 5;
+
+  // Optional provider hint: "openai", "azure-openai", "azure-speech", etc.
+  string provider_hint = 6;
+
+  // Optional language hint. Empty means auto-detect when supported.
+  string language = 7;
+}
+
+// TranscribeSpeechResponse — recognized text and serving metadata.
+message TranscribeSpeechResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Recognized text.
+  string text = 2;
+
+  // Detected or requested language.
+  string detected_language = 3;
+
+  // Confidence in the transcription when available.
+  float confidence = 4;
+
+  // Model/deployment that served the request.
+  string model_used = 5;
+
+  // Provider that served the request.
+  string provider_used = 6;
+}
+
+// ListSpeechVoicesRequest — voice catalogue filter.
+message ListSpeechVoicesRequest {
+  // Optional provider filter.
+  string provider = 1;
+
+  // Optional language prefix, e.g. "en" or "nb-NO".
+  string language = 2;
+}
+
+// SpeechVoiceInfo — static or provider-discovered TTS voice metadata.
+message SpeechVoiceInfo {
+  // Provider voice identifier.
+  string id = 1;
+
+  // Human-readable voice name.
+  string name = 2;
+
+  // Language or "*" for provider-wide voices.
+  string language = 3;
+
+  // Provider-reported gender label, when available.
+  string gender = 4;
+
+  // Provider identifier.
+  string provider = 5;
+}
+
+// ListSpeechVoicesResponse — matching TTS voices.
+message ListSpeechVoicesResponse {
+  // Matching voices.
+  repeated SpeechVoiceInfo voices = 1;
+}
+
+// TranslateTextRequest — text translation request routed to a translation provider.
+message TranslateTextRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Text to translate.
+  string text = 3;
+
+  // Optional source language. Empty means auto-detect.
+  string source_language = 4;
+
+  // Required target language, e.g. "en", "nb", or "fr".
+  string target_language = 5;
+
+  // Optional provider hint: "azure-translator", "azure-openai", "openai".
+  string provider_hint = 6;
+
+  // Optional model/deployment for LLM fallback providers.
+  string model = 7;
+}
+
+// TranslateTextResponse — translated text and serving metadata.
+message TranslateTextResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Translated text.
+  string translated_text = 2;
+
+  // Detected or requested source language.
+  string detected_language = 3;
+
+  // Provider confidence when available.
+  float confidence = 4;
+
+  // Model/deployment that served the request.
+  string model_used = 5;
+
+  // Provider that served the request.
+  string provider_used = 6;
+}
+
+// TranslationInput — one item in a batch translation request.
+message TranslationInput {
+  // Optional caller item id.
+  string id = 1;
+
+  // Text to translate.
+  string text = 2;
+}
+
+// BatchTranslateTextRequest — batch translation request.
+message BatchTranslateTextRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Items to translate.
+  repeated TranslationInput items = 3;
+
+  // Optional source language. Empty means auto-detect.
+  string source_language = 4;
+
+  // Required target language.
+  string target_language = 5;
+
+  // Optional provider hint.
+  string provider_hint = 6;
+
+  // Optional model/deployment for LLM fallback providers.
+  string model = 7;
+}
+
+// TranslationResult — one translated batch item.
+message TranslationResult {
+  // Caller item id.
+  string id = 1;
+
+  // Original text.
+  string original_text = 2;
+
+  // Translated text.
+  string translated_text = 3;
+
+  // Detected or requested source language.
+  string detected_language = 4;
+
+  // Provider confidence when available.
+  float confidence = 5;
+}
+
+// BatchTranslateTextResponse — translated batch items and serving metadata.
+message BatchTranslateTextResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Translated items.
+  repeated TranslationResult translations = 2;
+
+  // Model/deployment that served the request.
+  string model_used = 3;
+
+  // Provider that served the request.
+  string provider_used = 4;
+}
+
+// DetectTextLanguageRequest — text language detection request.
+message DetectTextLanguageRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Text to classify.
+  string text = 3;
+
+  // Optional provider hint.
+  string provider_hint = 4;
+
+  // Optional model/deployment for LLM fallback providers.
+  string model = 5;
+}
+
+// TranslationDetection — one language detection candidate.
+message TranslationDetection {
+  // Language code.
+  string language = 1;
+
+  // Provider confidence.
+  float confidence = 2;
+
+  // True when the provider can translate this language.
+  bool is_translation_supported = 3;
+}
+
+// DetectTextLanguageResponse — language detection result.
+message DetectTextLanguageResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Ranked detection candidates.
+  repeated TranslationDetection detections = 2;
+
+  // Model/deployment that served the request.
+  string model_used = 3;
+
+  // Provider that served the request.
+  string provider_used = 4;
+}
+
+// ListTranslationLanguagesRequest — supported translation language filter.
+message ListTranslationLanguagesRequest {
+  // Optional provider hint.
+  string provider = 1;
+}
+
+// TranslationLanguageInfo — provider language metadata.
+message TranslationLanguageInfo {
+  // Language code.
+  string code = 1;
+
+  // English display name.
+  string name = 2;
+
+  // Native display name when available.
+  string native_name = 3;
+
+  // Text direction: "ltr" or "rtl".
+  string direction = 4;
+}
+
+// ListTranslationLanguagesResponse — supported translation languages.
+message ListTranslationLanguagesResponse {
+  // Matching languages.
+  repeated TranslationLanguageInfo languages = 1;
+}
+
+// GenerateImageRequest — text-to-image generation request.
+message GenerateImageRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Prompt for image generation.
+  string prompt = 3;
+
+  // Optional image model/deployment, e.g. "dall-e-3".
+  string model = 4;
+
+  // Optional provider hint: "openai" or "azure-openai".
+  string provider_hint = 5;
+
+  // Output size, e.g. "1024x1024".
+  string size = 6;
+
+  // Provider quality hint, e.g. "standard" or "hd".
+  string quality = 7;
+
+  // Number of images requested.
+  uint32 n = 8;
+}
+
+// GeneratedImage — one generated image artifact.
+message GeneratedImage {
+  // Provider-hosted image URL, when returned.
+  string url = 1;
+
+  // Base64 image payload, when returned inline.
+  string b64_json = 2;
+
+  // Provider revised prompt, when available.
+  string revised_prompt = 3;
+}
+
+// GenerateImageResponse — generated images and serving metadata.
+message GenerateImageResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Generated images.
+  repeated GeneratedImage images = 2;
+
+  // Model/deployment that served the request.
+  string model_used = 3;
+
+  // Provider that served the request.
+  string provider_used = 4;
+}
+
+// AnalyzeImageRequest — multimodal image analysis request.
+message AnalyzeImageRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Public image URL. Mutually exclusive with image_data.
+  string image_url = 3;
+
+  // Inline image bytes.
+  bytes image_data = 4;
+
+  // MIME type for inline image_data, e.g. "image/png".
+  string mime_type = 5;
+
+  // Question or instruction for the vision model.
+  string prompt = 6;
+
+  // Optional vision model/deployment.
+  string model = 7;
+
+  // Optional provider hint.
+  string provider_hint = 8;
+
+  // Maximum output tokens.
+  int32 max_tokens = 9;
+}
+
+// AnalyzeImageResponse — image analysis result.
+message AnalyzeImageResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Vision model answer or description.
+  string description = 2;
+
+  // Model/deployment that served the request.
+  string model_used = 3;
+
+  // Provider that served the request.
+  string provider_used = 4;
+
+  // Prompt/input tokens when available.
+  int32 input_tokens = 5;
+
+  // Output tokens when available.
+  int32 output_tokens = 6;
+}
+
+// ExtractImageTextRequest — OCR request for image-like inputs.
+message ExtractImageTextRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Public image URL. Mutually exclusive with image_data.
+  string image_url = 3;
+
+  // Inline image bytes.
+  bytes image_data = 4;
+
+  // MIME type for inline image_data, e.g. "image/png".
+  string mime_type = 5;
+
+  // Optional vision/OCR model/deployment.
+  string model = 6;
+
+  // Optional provider hint.
+  string provider_hint = 7;
+}
+
+// ExtractImageTextResponse — extracted text from an image.
+message ExtractImageTextResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Extracted text.
+  string text = 2;
+
+  // Page count when provided by OCR backend. Zero means unknown/not applicable.
+  uint32 page_count = 3;
+
+  // Model/deployment that served the request.
+  string model_used = 4;
+
+  // Provider that served the request.
+  string provider_used = 5;
+}
+
+// AnalyzeDocumentRequest — document intelligence extraction request.
+message AnalyzeDocumentRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Public document URL. Mutually exclusive with document_data.
+  string document_url = 3;
+
+  // Inline document bytes.
+  bytes document_data = 4;
+
+  // MIME/content type for inline document_data.
+  string content_type = 5;
+
+  // Provider model id, e.g. "prebuilt-layout" or "prebuilt-invoice".
+  string model = 6;
+
+  // Optional provider hint.
+  string provider_hint = 7;
+
+  // Optional pages filter, e.g. "1-3,5".
+  string pages = 8;
+
+  // Optional locale hint, e.g. "en-US".
+  string locale = 9;
+}
+
+// AnalyzeDocumentResponse — structured document intelligence output.
+message AnalyzeDocumentResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Provider status, normally "succeeded".
+  string status = 2;
+
+  // Top-level extracted content text.
+  string content = 3;
+
+  // Extracted document fields as JSON.
+  string fields_json = 4;
+
+  // Extracted tables as JSON.
+  string tables_json = 5;
+
+  // Extracted paragraph content.
+  repeated string paragraphs = 6;
+
+  // Raw provider result JSON.
+  string raw_json = 7;
+
+  // Pages processed when known.
+  uint32 pages_processed = 8;
+
+  // Provider confidence when known.
+  float confidence = 9;
+
+  // Model/deployment that served the request.
+  string model_used = 10;
+
+  // Provider that served the request.
+  string provider_used = 11;
+}
+
+// AnalyzeLanguageRequest — text analytics request.
+message AnalyzeLanguageRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Operation: "sentiment", "entities", "key_phrases", "pii", "detect", or "summary".
+  string operation = 3;
+
+  // Input texts. Use one item for single-text calls.
+  repeated string texts = 4;
+
+  // Optional input language code. Empty means auto-detect where supported.
+  string language = 5;
+
+  // Optional provider hint: "azure-language", "azure", "azure-openai", or "openai".
+  string provider_hint = 6;
+
+  // Optional model/deployment for LLM fallback providers.
+  string model = 7;
+
+  // Summary sentence count for summary operations.
+  uint32 sentence_count = 8;
+
+  // Summary kind: "AbstractiveSummarization" or "ExtractiveSummarization".
+  string summary_kind = 9;
+}
+
+// LanguageAnalysisResult — one text analytics result.
+message LanguageAnalysisResult {
+  // Caller/document item id.
+  string id = 1;
+
+  // Sentiment label for sentiment operations.
+  string sentiment = 2;
+
+  // Provider confidence scores as JSON.
+  string confidence_scores_json = 3;
+
+  // Sentence-level results as JSON.
+  string sentences_json = 4;
+
+  // Entity/PII results as JSON.
+  string entities_json = 5;
+
+  // Extracted key phrases.
+  repeated string key_phrases = 6;
+
+  // Redacted text for PII operations.
+  string redacted_text = 7;
+
+  // Detected language display name.
+  string detected_language_name = 8;
+
+  // Detected language ISO code.
+  string detected_language_code = 9;
+
+  // Provider confidence for detection/summary when available.
+  float confidence = 10;
+
+  // Summary text for summary operations.
+  string summary = 11;
+
+  // Raw provider result JSON for audit/debug.
+  string raw_json = 12;
+}
+
+// AnalyzeLanguageResponse — language analytics results and serving metadata.
+message AnalyzeLanguageResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Operation that was executed.
+  string operation = 2;
+
+  // Results in input order where the provider preserves it.
+  repeated LanguageAnalysisResult results = 3;
+
+  // Model/deployment that served the request.
+  string model_used = 4;
+
+  // Provider that served the request.
+  string provider_used = 5;
+}
+
+// CreateRealtimeSessionRequest — realtime token broker request.
+message CreateRealtimeSessionRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Realtime model/deployment. Empty means provider default.
+  string model = 3;
+
+  // Optional provider hint: "openai", "realtime", etc.
+  string provider_hint = 4;
+
+  // Realtime output voice.
+  string voice = 5;
+
+  // Optional system/session instructions.
+  string instructions = 6;
+
+  // Input audio format, e.g. "pcm16".
+  string input_audio_format = 7;
+
+  // Output audio format, e.g. "pcm16".
+  string output_audio_format = 8;
+
+  // Turn detection type, e.g. "server_vad" or "none".
+  string turn_detection_type = 9;
+}
+
+// CreateRealtimeSessionResponse — ephemeral realtime client secret.
+message CreateRealtimeSessionResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Provider session identifier when returned.
+  string session_id = 2;
+
+  // Short-lived client secret for browser/mobile WebSocket/WebRTC connection.
+  string client_secret = 3;
+
+  // Provider websocket URL for direct client connection.
+  string websocket_url = 4;
+
+  // Secret expiry as Unix seconds. Zero means unknown.
+  int64 expires_at = 5;
+
+  // Model/deployment that served the request.
+  string model_used = 6;
+
+  // Provider that served the request.
+  string provider_used = 7;
+
+  // Voice selected by the provider/session.
+  string voice = 8;
+}
+
+// CreateVideoGenerationJobRequest — async video generation submission.
+message CreateVideoGenerationJobRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Prompt used to generate the video.
+  string prompt = 3;
+
+  // Video width in pixels.
+  uint32 width = 4;
+
+  // Video height in pixels.
+  uint32 height = 5;
+
+  // Requested duration in seconds.
+  uint32 duration_seconds = 6;
+
+  // Number of variants to request. Zero means provider default.
+  uint32 n_variants = 7;
+
+  // Video model/deployment. Empty means provider default.
+  string model = 8;
+
+  // Optional provider hint, e.g. "azure-openai" or "azure".
+  string provider_hint = 9;
+}
+
+// CreateVideoGenerationJobResponse — submitted video generation job.
+message CreateVideoGenerationJobResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Provider job identifier.
+  string job_id = 2;
+
+  // Provider status, e.g. "queued".
+  string status = 3;
+
+  // Model/deployment that served the request.
+  string model_used = 4;
+
+  // Provider that served the request.
+  string provider_used = 5;
+
+  // Raw provider result JSON for audit/debug.
+  string raw_json = 6;
+}
+
+// GetVideoGenerationJobRequest — video generation status request.
+message GetVideoGenerationJobRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Provider job identifier.
+  string job_id = 3;
+
+  // Optional provider hint, e.g. "azure-openai" or "azure".
+  string provider_hint = 4;
+
+  // Video model/deployment. Empty means provider default.
+  string model = 5;
+}
+
+// GetVideoGenerationJobResponse — video generation status and output locator.
+message GetVideoGenerationJobResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Provider job identifier.
+  string job_id = 2;
+
+  // Provider status, e.g. "queued", "running", "succeeded", "failed", or "cancelled".
+  string status = 3;
+
+  // First generation identifier when available.
+  string generation_id = 4;
+
+  // Provider content URL for generated video retrieval.
+  string video_url = 5;
+
+  // Failure reason or provider error message.
+  string error = 6;
+
+  // Model/deployment that served the request.
+  string model_used = 7;
+
+  // Provider that served the request.
+  string provider_used = 8;
+
+  // Raw provider result JSON for audit/debug.
+  string raw_json = 9;
+}
+
+// StreamVideoGenerationContentRequest — generated video content fetch request.
+message StreamVideoGenerationContentRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // Provider generation identifier.
+  string generation_id = 3;
+
+  // Optional provider hint, e.g. "azure-openai" or "azure".
+  string provider_hint = 4;
+
+  // Video model/deployment. Empty means provider default.
+  string model = 5;
+}
+
+// StreamVideoGenerationContentResponse — generated video byte stream chunk.
+message StreamVideoGenerationContentResponse {
+  // Echoed request identifier.
+  string request_id = 1;
+
+  // Provider generation identifier.
+  string generation_id = 2;
+
+  // Raw video bytes.
+  bytes data = 3;
+
+  // True when this is the final chunk.
+  bool done = 4;
+
+  // Content type from provider when known.
+  string content_type = 5;
+
+  // Total content length from provider when known. Zero means unknown.
+  uint64 content_length = 6;
+
+  // Provider that served the request.
+  string provider_used = 7;
+}

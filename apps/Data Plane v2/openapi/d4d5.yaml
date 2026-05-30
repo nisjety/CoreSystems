@@ -1,0 +1,626 @@
+openapi: 3.1.0
+info:
+  title: Data Plane v2 — D4/D5 Knowledge Surface
+  version: 2.3.0
+  description: |
+    Knowledge surface served by the Data Plane v2 stack. Routes are split
+    across four upstreams; the table below tracks which service owns each
+    path. Velion and other consumers should bind against this OpenAPI rather
+    than the underlying protobuf — the protos are the wire contract for the
+    Model Plane (gRPC); this YAML is the contract for HTTP clients.
+
+    Service map (container DNS on `aquatiq-local`):
+      - retrieval-engine: http://retrieval-engine:8004
+      - documents-api:    http://documents-api:8010
+      - wiki-store:       http://wiki-store:8011
+      - data-orchestrator:http://data-orchestrator:8012
+      - data-quality:     http://data-quality:8013
+      - graph-index:      http://graph-index:9203   (admin)
+  contact:
+    name: Data Plane v2 owners
+servers:
+  - url: http://retrieval-engine:8004
+    description: Retrieval engine (Rust)
+  - url: http://documents-api:8010
+    description: Documents API (Go)
+  - url: http://wiki-store:8011
+    description: Wiki store (Go)
+  - url: http://data-orchestrator:8012
+    description: Data orchestrator (Go)
+  - url: http://data-quality:8013
+    description: Data quality (Go)
+  - url: http://graph-index:9203
+    description: Graph index (Rust)
+
+# ─── Security ──────────────────────────────────────────────────────────────
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: |
+        Shared `INTERNAL_API_KEY` for service-to-service calls. Used by
+        Model Plane and Quarry. Will be deprecated in favour of BearerAuth
+        once Wave 3 (Control Plane wiring) ships.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RS256 JWT issued by `auth-service` (Better Auth). Claims must
+        include `org_id` matching the `X-Org-ID` header. Wave 3 will fail
+        the request if they do not match.
+
+  parameters:
+    OrgIdHeader:
+      name: X-Org-ID
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9_\-]+$' }
+      description: |
+        Org scope for the request. Wave 3 will reject any request where
+        this header does not match the `org_id` claim in the JWT.
+    TraceId:
+      name: trace_id
+      in: path
+      required: true
+      schema: { type: string }
+
+  schemas:
+    # ─── Common ─────────────────────────────────────────────────────────
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    # ─── Retrieval ──────────────────────────────────────────────────────
+    RetrievalFilters:
+      type: object
+      properties:
+        document_types:  { type: array, items: { type: string } }
+        departments:     { type: array, items: { type: string } }
+        languages:       { type: array, items: { type: string } }
+        document_ids:    { type: array, items: { type: string }, maxItems: 1000 }
+        sources:         { type: array, items: { type: string } }
+        region:          { type: string, nullable: true }
+        workspaces:      { type: array, items: { type: string } }
+        collections:     { type: array, items: { type: string } }
+        acl_tags:        { type: array, items: { type: string } }
+
+    ModeMixWeights:
+      type: object
+      description: |
+        Per-query blend weights (D4+D5 spec §7). Unset weights inherit
+        config defaults; the resolver renormalizes the sum to 1.0 before
+        scoring. Recorded in `retrieval_runs.mode_mix`.
+      properties:
+        w_dense: { type: number, format: float, minimum: 0, maximum: 1 }
+        w_bm25:  { type: number, format: float, minimum: 0, maximum: 1 }
+        w_graph: { type: number, format: float, minimum: 0, maximum: 1 }
+        w_wiki:  { type: number, format: float, minimum: 0, maximum: 1 }
+        rerank:  { type: boolean }
+
+    RetrievalRequest:
+      type: object
+      required: [org_id, query]
+      properties:
+        org_id:                 { type: string, maxLength: 128 }
+        query:                  { type: string, maxLength: 8192 }
+        top_k:                  { type: integer, minimum: 1, maximum: 1000 }
+        top_n:                  { type: integer, minimum: 1, maximum: 100 }
+        filters:                { $ref: '#/components/schemas/RetrievalFilters' }
+        user_id:                { type: string, nullable: true }
+        query_expansion:        { type: string, nullable: true }
+        reranker_model:         { type: string, nullable: true }
+        zdr_mode:               { type: string, enum: [disabled, reject, ephemeral] }
+        context_budget_tokens:  { type: integer, minimum: 1 }
+        context_format:         { type: string, enum: [json, markdown, text] }
+        mode_mix:               { $ref: '#/components/schemas/ModeMixWeights' }
+
+    ScoredCandidate:
+      type: object
+      required: [knowledge_id, document_id, text, final_score]
+      properties:
+        knowledge_id: { type: string }
+        document_id:  { type: string }
+        text:         { type: string }
+        dense_score:  { type: number, format: float }
+        sparse_score: { type: number, format: float }
+        rerank_score: { type: number, format: float }
+        final_score:  { type: number, format: float }
+        chunk_index:  { type: integer }
+
+    SourceRef:
+      type: object
+      required: [document_id, title]
+      properties:
+        document_id: { type: string }
+        title:       { type: string }
+        source:      { type: string }
+        type:        { type: string }
+
+    ContextFact:
+      type: object
+      properties:
+        knowledge_id:     { type: string }
+        document_id:      { type: string }
+        text:             { type: string }
+        score:            { type: number, format: float }
+        source_title:     { type: string }
+        source_type:      { type: string }
+        estimated_tokens: { type: integer }
+
+    ContextPack:
+      type: object
+      properties:
+        facts:         { type: array, items: { $ref: '#/components/schemas/ContextFact' } }
+        total_tokens:  { type: integer }
+        budget_tokens: { type: integer }
+        format:        { type: string }
+
+    RetrievalResponse:
+      type: object
+      required: [candidates, sources, query, org_id, trace_id, zdr_mode]
+      properties:
+        candidates:           { type: array, items: { $ref: '#/components/schemas/ScoredCandidate' } }
+        sources:              { type: array, items: { $ref: '#/components/schemas/SourceRef' } }
+        query:                { type: string }
+        org_id:               { type: string }
+        trace_id:             { type: string }
+        index_version:        { type: string }
+        zdr_mode:             { type: string }
+        low_confidence:       { type: boolean }
+        context_pack:         { $ref: '#/components/schemas/ContextPack' }
+        suggested_next_tools: { type: array, items: { type: string } }
+
+    # ─── Documents ──────────────────────────────────────────────────────
+    Document:
+      type: object
+      required: [document_id, org_id, source, type, title, content, status]
+      properties:
+        document_id:        { type: string }
+        org_id:             { type: string }
+        source:             { type: string }
+        type:               { type: string }
+        title:              { type: string }
+        content:            { type: string }
+        status:             { type: string, enum: [pending, indexed, failed] }
+        metadata:           { type: object, additionalProperties: true }
+        zdr_classification: { type: string, enum: [internal, public, sensitive, restricted, ''] }
+        idempotency_key:    { type: string, nullable: true }
+        created_at:         { type: string, format: date-time }
+        updated_at:         { type: string, format: date-time }
+        deleted_at:         { type: string, format: date-time, nullable: true }
+
+    CreateDocumentRequest:
+      type: object
+      required: [source, type, title, content]
+      properties:
+        source:             { type: string, maxLength: 256 }
+        type:               { type: string, maxLength: 64 }
+        title:              { type: string, maxLength: 1024 }
+        content:            { type: string, maxLength: 5242880 }    # 5 MiB
+        metadata:           { type: object, additionalProperties: true }
+        zdr_classification: { type: string, enum: [internal, public, sensitive, restricted, ''] }
+        idempotency_key:    { type: string, maxLength: 256 }
+
+    BulkIngestRequest:
+      type: object
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          maxItems: 500
+          items: { $ref: '#/components/schemas/CreateDocumentRequest' }
+
+    BulkIngestResponse:
+      type: object
+      properties:
+        accepted:          { type: integer }
+        rejected:          { type: integer }
+        reused:            { type: integer }
+        document_ids:      { type: array, items: { type: string } }
+        rejection_reasons: { type: array, items: { type: string } }
+
+    # ─── Wiki ───────────────────────────────────────────────────────────
+    WikiPage:
+      type: object
+      properties:
+        page_id:            { type: string }
+        org_id:             { type: string }
+        workspace_id:       { type: string, nullable: true }
+        title:              { type: string }
+        path:               { type: string }
+        current_version_id: { type: string, nullable: true }
+        page_status:        { type: string, enum: [draft, published, deprecated] }
+        backlinks:          { type: array, items: { type: object } }
+        created_at:         { type: string, format: date-time }
+        updated_at:         { type: string, format: date-time }
+
+    WikiPageVersion:
+      type: object
+      properties:
+        version_id:        { type: string }
+        page_id:           { type: string }
+        content:           { type: string, nullable: true }
+        source_refs:       { type: array, items: { type: object } }
+        proposed_by_agent: { type: string, nullable: true }
+        proposed_by_user:  { type: string, nullable: true }
+        approved_by:       { type: string, nullable: true }
+        edit_reason:       { type: string, nullable: true }
+
+    WikiDiff:
+      type: object
+      properties:
+        page_id:         { type: string }
+        from_version_id: { type: string }
+        to_version_id:   { type: string }
+        hunks:
+          type: array
+          items:
+            type: object
+            properties:
+              op:    { type: string, enum: [add, remove, equal] }
+              lines: { type: array, items: { type: string } }
+        added_lines:     { type: integer }
+        removed_lines:   { type: integer }
+        unchanged_lines: { type: integer }
+
+    MaintenanceSweepRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 1000
+          items:
+            type: object
+            required: [kind]
+            properties:
+              page_id: { type: string }
+              kind:    { type: string, enum: [orphan_wiki, stale_wiki, weak_citation, contradiction, stale, orphan] }
+              actor:   { type: string }
+              details: { type: object, additionalProperties: true }
+
+    # ─── Graph (D4+D5 spec §3.1) ────────────────────────────────────────
+    GraphSnapshot:
+      type: object
+      description: |
+        Spec §3.1: `GET /v1/graphs/{org_id}` returns the full graph subset
+        for an org as flat node + edge arrays. Implemented as a thin
+        aggregator over `/v1/graph/entities` + `/v1/graph/relationships`.
+      properties:
+        org_id: { type: string }
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              entity_id:   { type: string }
+              entity_type: { type: string }
+              entity_text: { type: string }
+              confidence:  { type: number, format: float }
+              community_id: { type: string, nullable: true }
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              rel_id:          { type: string }
+              entity_a_id:     { type: string }
+              entity_b_id:     { type: string }
+              relation_type:   { type: string }
+              confidence:      { type: number, format: float }
+              provenance:      { type: string, enum: [extracted, inferred, ambiguous] }
+        node_count: { type: integer }
+        edge_count: { type: integer }
+
+# ─── Paths ─────────────────────────────────────────────────────────────────
+paths:
+  # ── Retrieval ─────────────────────────────────────────────────────────
+  /v1/retrieve:
+    post:
+      summary: Hybrid retrieve (D5 headline)
+      tags: [retrieval]
+      parameters: [{ $ref: '#/components/parameters/OrgIdHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetrievalRequest' }
+      responses:
+        '200':
+          description: Retrieval result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RetrievalResponse' }
+        '400': { description: bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: unauthorized }
+
+  /v1/retrieve/hybrid:
+    post:
+      summary: Alias for /v1/retrieve
+      tags: [retrieval]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RetrievalRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RetrievalResponse' } } } }
+
+  /v1/retrieve/graph:
+    post:
+      summary: Graph expansion retrieve (D5-3)
+      tags: [retrieval]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org_id, query]
+              properties:
+                org_id:              { type: string }
+                query:               { type: string }
+                max_entities:        { type: integer, default: 10 }
+                include_communities: { type: boolean, default: false }
+      responses: { '200': { description: OK } }
+
+  /v1/retrieve/wiki:
+    post:
+      summary: Wiki retrieve (D5-4)
+      tags: [retrieval]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org_id, query]
+              properties:
+                org_id: { type: string }
+                query:  { type: string }
+                limit:  { type: integer, default: 10 }
+      responses: { '200': { description: OK } }
+
+  /v1/retrieve/contradictions:
+    post:
+      summary: Contradiction retrieve (D5-6)
+      tags: [retrieval]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org_id]
+              properties:
+                org_id: { type: string }
+                query:  { type: string, nullable: true }
+                limit:  { type: integer, default: 20 }
+      responses: { '200': { description: OK } }
+
+  /v1/retrieve/pack:
+    post:
+      summary: Standalone context packing (D7)
+      tags: [retrieval]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: object } } } } }
+
+  /v1/retrieve/sources: { post: { summary: Source lookup, tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/retrieve/freshness: { post: { summary: Freshness scoring, tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/retrieve/timeline: { post: { summary: Temporal retrieval / replay, tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/retrieve/chunks: { post: { summary: Exact chunk lookup, tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/retrieve/compare: { post: { summary: Compare entities or documents, tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/retrieval/{trace_id}:
+    get:
+      summary: Retrieval audit trace
+      tags: [retrieval]
+      parameters: [{ $ref: '#/components/parameters/TraceId' }]
+      responses: { '200': { description: OK } }
+
+  /v1/knowledge/search:
+    post:
+      summary: App Shell global search wrapper (D5-7)
+      tags: [retrieval]
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RetrievalResponse' } } } } }
+  /v1/knowledge/graph:   { post: { summary: graph (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/knowledge/wiki:    { post: { summary: wiki (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/knowledge/sources: { post: { summary: sources (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
+  /v1/knowledge/freshness: { post: { summary: freshness (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
+
+  /v1/index/versions:
+    get:
+      summary: List index versions
+      tags: [retrieval]
+      responses: { '200': { description: OK } }
+
+  /v1/admin/cleanup/orphans:
+    post:
+      summary: Orphan Qdrant vector cleanup
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [org_id]
+              properties:
+                org_id:  { type: string }
+                dry_run: { type: boolean, default: false }
+      responses: { '200': { description: OK } }
+
+  # ── Documents (Go service :8010) ──────────────────────────────────────
+  /v1/documents:
+    get:
+      summary: List documents
+      tags: [documents]
+      parameters:
+        - { $ref: '#/components/parameters/OrgIdHeader' }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: type, in: query, schema: { type: string } }
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create document (idempotent on `idempotency_key`)
+      tags: [documents]
+      parameters: [{ $ref: '#/components/parameters/OrgIdHeader' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateDocumentRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Document' } } } }
+        '200': { description: Reused (idempotency hit), content: { application/json: { schema: { $ref: '#/components/schemas/Document' } } } }
+
+  /v1/documents/bulk:
+    post:
+      summary: Bulk ingest (≤500 docs)
+      tags: [documents]
+      parameters: [{ $ref: '#/components/parameters/OrgIdHeader' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BulkIngestRequest' } } }
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BulkIngestResponse' } } } } }
+
+  /v1/documents/{documentID}:
+    get:
+      summary: Get document
+      tags: [documents]
+      parameters:
+        - { $ref: '#/components/parameters/OrgIdHeader' }
+        - { name: documentID, in: path, required: true, schema: { type: string } }
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Document' } } } } }
+    delete:
+      summary: Soft delete document
+      tags: [documents]
+      parameters:
+        - { $ref: '#/components/parameters/OrgIdHeader' }
+        - { name: documentID, in: path, required: true, schema: { type: string } }
+      responses: { '200': { description: Deleted } }
+
+  # ── Wiki (Go service :8011) ───────────────────────────────────────────
+  /v1/wiki/pages:
+    post:
+      summary: Create wiki page
+      tags: [wiki]
+      parameters: [{ $ref: '#/components/parameters/OrgIdHeader' }]
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/WikiPage' } } } } }
+
+  /v1/wiki/pages/{pageID}:
+    get:
+      summary: Get wiki page + current version
+      tags: [wiki]
+      parameters:
+        - { $ref: '#/components/parameters/OrgIdHeader' }
+        - { name: pageID, in: path, required: true, schema: { type: string } }
+      responses: { '200': { description: OK } }
+
+  /v1/wiki/pages/{pageID}/versions:
+    get:
+      summary: List versions
+      tags: [wiki]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create new version
+      tags: [wiki]
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/WikiPageVersion' } } } } }
+
+  /v1/wiki/pages/{pageID}/diff:
+    get:
+      summary: Diff two versions (LCS line-diff)
+      tags: [wiki]
+      parameters:
+        - { name: pageID, in: path, required: true, schema: { type: string } }
+        - { name: from_version_id, in: query, required: true, schema: { type: string } }
+        - { name: to_version_id, in: query, required: true, schema: { type: string } }
+      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/WikiDiff' } } } } }
+
+  /v1/wiki/pages/{pageID}/backlinks:
+    get: { summary: Get backlinks, tags: [wiki], responses: { '200': { description: OK } } }
+  /v1/wiki/pages/{pageID}/proposals:
+    post: { summary: Submit proposal, tags: [wiki], responses: { '201': { description: Created } } }
+  /v1/wiki/proposals/review:
+    post: { summary: Review/accept proposal, tags: [wiki], responses: { '200': { description: OK } } }
+  /v1/wiki/pages/{pageID}/source-logs:
+    post: { summary: Create source log, tags: [wiki], responses: { '201': { description: Created } } }
+    get:  { summary: List source logs, tags: [wiki], responses: { '200': { description: OK } } }
+  /v1/wiki/pages/{pageID}/maintenance-logs:
+    post: { summary: Create maintenance log, tags: [wiki], responses: { '201': { description: Created } } }
+    get:  { summary: List maintenance logs, tags: [wiki], responses: { '200': { description: OK } } }
+
+  /v1/wiki/maintenance/sweep:
+    post:
+      summary: Batch ingest of lint findings (D5-6 + spec §3.4)
+      tags: [wiki]
+      parameters: [{ $ref: '#/components/parameters/OrgIdHeader' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MaintenanceSweepRequest' } } }
+      responses: { '200': { description: OK } }
+
+  # ── Graph (Rust service :9203 admin port) ─────────────────────────────
+  /v1/graphs/{org_id}:
+    get:
+      summary: Spec §3.1 — aggregate graph snapshot
+      description: |
+        Returns a flat `{nodes:[], edges:[]}` snapshot for one org. Thin
+        aggregator over `/v1/graph/entities` + `/v1/graph/relationships`.
+        For most clients this is the simplest entry into the graph; for
+        anything beyond ~5k nodes use the paginated `/v1/graph/*` endpoints.
+      tags: [graph]
+      parameters:
+        - { name: org_id, in: path, required: true, schema: { type: string } }
+        - { name: limit_nodes, in: query, schema: { type: integer, default: 5000 } }
+        - { name: limit_edges, in: query, schema: { type: integer, default: 20000 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphSnapshot' }
+        '413': { description: Snapshot would exceed limits; use paginated endpoints }
+
+  /v1/graph/entities:
+    get: { summary: List entities, tags: [graph], responses: { '200': { description: OK } } }
+  /v1/graph/entities/{entity_id}:
+    get: { summary: Get entity, tags: [graph], responses: { '200': { description: OK } } }
+  /v1/graph/relationships/{entity_id}:
+    get: { summary: Get relationships for entity, tags: [graph], responses: { '200': { description: OK } } }
+  /v1/graph/claims:
+    get: { summary: List claims, tags: [graph], responses: { '200': { description: OK } } }
+  /v1/graph/contradictions:
+    get: { summary: Detect contradictions, tags: [graph], responses: { '200': { description: OK } } }
+  /v1/graph/expand:
+    post: { summary: Expand subgraph around query, tags: [graph], responses: { '200': { description: OK } } }
+
+  # ── Orchestrator / Quality ────────────────────────────────────────────
+  /v1/jobs:
+    post:
+      summary: Create job (reindex / graph_build / wiki_refresh)
+      tags: [orchestrator]
+      responses: { '200': { description: OK } }
+
+  /v1/evals/retrieval: { post: { summary: Run retrieval eval, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/evals/retrieval/{evalID}: { get: { summary: Get eval result, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/evals/compare: { post: { summary: A/B compare two strategies, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/quality/trust: { post: { summary: Score trust, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/quality/gates: { get: { summary: Release gates check, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/quality/lint:  { get: { summary: Knowledge lint (orphan/stale/weak-citation), tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/cost/summary:  { get: { summary: Cost ledger summary, tags: [quality], responses: { '200': { description: OK } } } }
+
+tags:
+  - { name: retrieval, description: Retrieval endpoints (Rust, port 8004) }
+  - { name: documents, description: Document CRUD (Go, port 8010) }
+  - { name: wiki, description: Wiki pages + maintenance (Go, port 8011) }
+  - { name: graph, description: Knowledge graph (Rust, port 9203) }
+  - { name: orchestrator, description: Job control (Go, port 8012) }
+  - { name: quality, description: Evals + gates + lint + cost (Go, port 8013) }
+  - { name: admin, description: Operator-only — orphan cleanup, etc. }

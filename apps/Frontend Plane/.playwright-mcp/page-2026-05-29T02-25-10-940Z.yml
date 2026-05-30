@@ -1,0 +1,102 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - banner [ref=e4]:
+        - generic [ref=e5]:
+          - generic [ref=e6]:
+            - link "Go to home" [ref=e8] [cursor=pointer]:
+              - /url: /dashboard
+              - img [ref=e9]
+            - generic [ref=e18]:
+              - button "Go back" [ref=e20] [cursor=pointer]:
+                - img [ref=e21]
+              - button "Go forward" [ref=e24] [cursor=pointer]:
+                - img [ref=e25]
+            - generic [ref=e27]:
+              - img [ref=e28]
+              - link "aquatiq-as Free" [ref=e30] [cursor=pointer]:
+                - /url: /dashboard
+                - generic [ref=e31]: aquatiq-as
+                - generic [ref=e32]: Free
+              - img [ref=e33]
+              - link "Chat" [ref=e35] [cursor=pointer]:
+                - /url: /chat
+              - img [ref=e36]
+              - link "Oppgaver" [ref=e38] [cursor=pointer]:
+                - /url: /chat
+          - button "Open global search" [ref=e40] [cursor=pointer]:
+            - img [ref=e41]
+            - generic [ref=e44]: Search across the whole system
+            - generic [ref=e45]: /
+            - generic [ref=e46]: CMD+K
+          - generic [ref=e48]:
+            - button "Toggle dark mode" [ref=e51] [cursor=pointer]:
+              - img [ref=e53]
+            - button "Open AI assistant" [ref=e57] [cursor=pointer]:
+              - img [ref=e58]
+            - button "Quick messages" [ref=e62] [cursor=pointer]:
+              - img [ref=e63]
+            - button "Notifications" [ref=e66] [cursor=pointer]:
+              - img [ref=e67]
+            - button "Calendar" [ref=e70] [cursor=pointer]:
+              - img [ref=e71]
+            - button "Open profile menu" [ref=e74] [cursor=pointer]:
+              - generic [ref=e75]: I
+      - complementary "Primary navigation" [ref=e76]:
+        - generic [ref=e78]:
+          - button "Expand sidebar" [ref=e81] [cursor=pointer]:
+            - img [ref=e82]
+          - navigation "Workspace sections" [ref=e85]:
+            - generic [ref=e86]:
+              - link "Oversikt" [ref=e88] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e89]
+              - link "Chat" [ref=e92] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e93]
+              - link "Agenter" [ref=e96] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e97]
+              - link "Inbox" [ref=e101] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e102]
+              - link "Kunnskap" [ref=e106] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e107]
+          - generic [ref=e109]:
+            - link "Account" [ref=e112] [cursor=pointer]:
+              - /url: /account
+              - img [ref=e113]
+            - link "Innstillinger" [ref=e118] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e119]
+            - button "Søk" [ref=e123] [cursor=pointer]:
+              - img [ref=e124]
+      - main [ref=e127]:
+        - region "Velion chat workspace" [ref=e130]:
+          - generic [ref=e132]:
+            - generic [ref=e133]:
+              - img [ref=e134]
+              - heading "Hva kan jeg hjelpe med?" [level=1] [ref=e137]
+            - generic [ref=e138]:
+              - 'button "Use quick prompt: Create slides" [ref=e139] [cursor=pointer]':
+                - img [ref=e140]
+                - generic [ref=e143]: Create slides
+              - 'button "Use quick prompt: Build website" [ref=e144] [cursor=pointer]':
+                - img [ref=e145]
+                - generic [ref=e149]: Build website
+              - 'button "Use quick prompt: Develop desktop apps" [ref=e150] [cursor=pointer]':
+                - img [ref=e151]
+                - generic [ref=e153]: Develop desktop apps
+              - 'button "Use quick prompt: Design" [ref=e154] [cursor=pointer]':
+                - img [ref=e155]
+                - generic [ref=e161]: Design
+              - 'button "Use quick prompt: Write" [ref=e162] [cursor=pointer]':
+                - img [ref=e163]
+                - generic [ref=e165]: Write
+              - button "Show more quick prompts" [ref=e167] [cursor=pointer]:
+                - img [ref=e168]
+                - generic [ref=e172]: More
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e178] [cursor=pointer]:
+    - img [ref=e179]

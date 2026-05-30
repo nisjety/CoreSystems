@@ -1,0 +1,26 @@
+- generic:
+  - generic [active]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - navigation [ref=e6]
+          - img
+        - generic [ref=e15]:
+          - link "Next.js 16.1.6 (stale) Webpack" [ref=e16] [cursor=pointer]:
+            - /url: https://nextjs.org/docs/messages/version-staleness
+          - img
+      - dialog "Build Error" [ref=e22]:
+        - generic [ref=e25]:
+          - generic [ref=e26]
+          - generic [ref=e49]
+        - generic [ref=e64]: "1"
+        - generic [ref=e65]: "2"
+    - generic [ref=e70] [cursor=pointer]:
+      - button "Open Next.js Dev Tools" [ref=e71]:
+        - img [ref=e72]
+      - button "Open issues overlay" [ref=e76]:
+        - generic [ref=e77]:
+          - generic [ref=e78]: "0"
+          - generic [ref=e79]: "1"
+        - generic [ref=e80]: Issue
+  - alert [ref=e81]

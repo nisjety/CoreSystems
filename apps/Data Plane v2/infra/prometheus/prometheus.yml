@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: dataplane-v2
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - retrieval-engine:8014
+        labels:
+          service: retrieval-engine-rs
+          plane: data
+
+  - job_name: dataplane-v2-go
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - documents-api:8010
+          - wiki-store:8011
+          - data-orchestrator:8012
+          - data-quality:8013
+        labels:
+          plane: data

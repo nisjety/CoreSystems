@@ -1,0 +1,43 @@
+version: v2
+managed:
+  enabled: true
+plugins:
+  # Rust — tonic + prost
+  - remote: buf.build/community/neoeinstein-prost
+    out: ../rust/crates/mp-contracts/src/gen
+    opt:
+      - compile_well_known_types=false
+  - remote: buf.build/community/neoeinstein-tonic
+    out: ../rust/crates/mp-contracts/src/gen
+    opt:
+      - compile_well_known_types=false
+
+  # Go — protoc-gen-go + grpc
+  - remote: buf.build/protocolbuffers/go
+    out: ../go/gen
+    opt:
+      - paths=source_relative
+  - remote: buf.build/grpc/go
+    out: ../go/gen
+    opt:
+      - paths=source_relative
+
+  # Python — protoc-gen-python
+  - remote: buf.build/protocolbuffers/python
+    out: ../python/mp-events-py/src/mp_events/_gen
+
+  # TypeScript — protoc-gen-es (message types only; transport-agnostic).
+  # Output lands in velion's lib/model-plane/gen/ so the frontend can
+  # construct typed requests + decode typed responses without a separate
+  # gRPC client. velion uses Connect-RPC over HTTP for the actual wire
+  # call (see lib/model-plane/reasoning.ts for the existing pattern).
+  - remote: buf.build/bufbuild/es
+    out: ../../Frontend Plane/velion/src/lib/model-plane/gen
+    opt:
+      - target=ts
+      - import_extension=js
+  - remote: buf.build/bufbuild/connect-es
+    out: ../../Frontend Plane/velion/src/lib/model-plane/gen
+    opt:
+      - target=ts
+      - import_extension=js

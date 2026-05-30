@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS set_source_objects_updated_at ON source_objects;
+DROP INDEX IF EXISTS idx_source_objects_acl_tags_gin;
+DROP INDEX IF EXISTS idx_source_objects_metadata_gin;
+DROP INDEX IF EXISTS idx_source_objects_modified_at;
+DROP INDEX IF EXISTS idx_source_objects_sha1_hash;
+DROP INDEX IF EXISTS idx_source_objects_quickxor_hash;
+DROP INDEX IF EXISTS idx_source_objects_content_hash;
+DROP INDEX IF EXISTS idx_source_objects_drive_item;
+DROP INDEX IF EXISTS idx_source_objects_org_source;
+DROP TABLE IF EXISTS source_objects;

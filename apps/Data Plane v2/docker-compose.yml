@@ -1,0 +1,581 @@
+name: data-plane-v2
+
+services:
+  # ─────────────────────────────────────────────────────────────
+  # INFRA
+  # ─────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dpv2-postgres
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dataplane}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dataplane}
+      POSTGRES_DB: ${POSTGRES_DB:-dataplane}
+    ports:
+      - "5442:5432"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    volumes:
+      - dpv2_postgres:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    shm_size: "128mb"
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "effective_cache_size=256MB"
+      - "-c"
+      - "max_connections=100"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dataplane}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: dpv2-redis
+    restart: unless-stopped
+    init: true
+    ports:
+      - "6389:6379"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    volumes:
+      - dpv2_redis:/data
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    container_name: dpv2-qdrant
+    restart: unless-stopped
+    init: true
+    ports:
+      - "6345:6333"
+      - "6346:6334"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    volumes:
+      - dpv2_qdrant:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+
+  nats:
+    image: nats:2-alpine
+    container_name: dpv2-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4232:4222"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    volumes:
+      - dpv2_nats:/data
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: dpv2-minio
+    restart: unless-stopped
+    init: true
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-dataplane}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dataplane-dev-password}
+    networks:
+      - dpv2-net
+    volumes:
+      - dpv2_minio:/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: dpv2-minio-init
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set dpv2 http://minio:9000 "${MINIO_ROOT_USER:-dataplane}" "${MINIO_ROOT_PASSWORD:-dataplane-dev-password}" &&
+        mc mb --ignore-existing "dpv2/quickwit"
+    networks:
+      - dpv2-net
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  quickwit:
+    image: quickwit/quickwit:0.8.1
+    container_name: dpv2-quickwit
+    restart: unless-stopped
+    init: true
+    command: ["run", "--config=/quickwit/config/quickwit.yaml"]
+    ports:
+      - "7280:7280"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-dataplane}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-dataplane-dev-password}
+      QW_LISTEN_ADDRESS: 0.0.0.0
+      RUST_LOG: quickwit=info
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    volumes:
+      - ./infra/quickwit/quickwit.yaml:/quickwit/config/quickwit.yaml:ro
+      - ./infra/quickwit/dataplane-corpus-index.yaml:/quickwit/config/dataplane-corpus-index.yaml:ro
+      - dpv2_quickwit_cache:/quickwit/qwdata
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:7280/api/v1/cluster?format=json >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+
+  # ─────────────────────────────────────────────────────────────
+  # RUST SERVICES
+  # ─────────────────────────────────────────────────────────────
+
+  retrieval-engine:
+    build:
+      context: .
+      dockerfile: services/retrieval-engine-rs/Dockerfile
+    container_name: dpv2-retrieval-engine
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8014:8004"
+      - "50062:50052"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      QDRANT_URL: http://qdrant:6334
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      HTTP_PORT: "8004"
+      GRPC_PORT: "50052"
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
+      MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
+      MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
+      MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-3072}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      HYBRID_ENABLED: "true"
+      SPARSE_SEARCH_BACKEND: ${SPARSE_SEARCH_BACKEND:-postgres}
+      QUICKWIT_URL: ${QUICKWIT_URL:-http://quickwit:7280}
+      QUICKWIT_INDEX_ID: ${QUICKWIT_INDEX_ID:-dataplane-corpus}
+      QUICKWIT_SEARCH_TIMEOUT_MS: ${QUICKWIT_SEARCH_TIMEOUT_MS:-1500}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      # Tower middleware tuning (v2.1)
+      GRPC_TIMEOUT_SECS: ${GRPC_TIMEOUT_SECS:-30}
+      GRPC_MAX_CONCURRENT: ${GRPC_MAX_CONCURRENT:-256}
+      # Postgres pool tuning (v2.2)
+      PG_MAX_CONNECTIONS: ${PG_MAX_CONNECTIONS:-20}
+      PG_MIN_CONNECTIONS: ${PG_MIN_CONNECTIONS:-2}
+      PG_ACQUIRE_TIMEOUT_SECS: ${PG_ACQUIRE_TIMEOUT_SECS:-5}
+      # Optional OTel collector
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: "retrieval_engine_rs=info,tower_http=info"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      quickwit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8004/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+  index-engine:
+    build:
+      context: .
+      dockerfile: services/index-engine-rs/Dockerfile
+    container_name: dpv2-index-engine
+    restart: unless-stopped
+    init: true
+    ports:
+      - "9201:9201"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      NATS_URL: nats://nats:4222
+      ADMIN_PORT: "9201"
+      CHUNK_SIZE: "512"
+      CHUNK_OVERLAP: "64"
+      BATCH_SIZE: "10"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: "index_engine_rs=info"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9201/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  embedding-engine:
+    build:
+      context: .
+      dockerfile: services/embedding-engine-rs/Dockerfile
+    container_name: dpv2-embedding-engine
+    restart: unless-stopped
+    init: true
+    ports:
+      - "9202:9202"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      QDRANT_URL: http://qdrant:6334
+      NATS_URL: nats://nats:4222
+      ADMIN_PORT: "9202"
+      BATCH_SIZE: "32"
+      QDRANT_COLLECTION: "dataplane_knowledge"
+      EMBEDDING_DIMENSION: "3072"
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
+      MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
+      MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
+      MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: "embedding_engine_rs=info"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9202/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  graph-index:
+    build:
+      context: .
+      dockerfile: services/graph-index-rs/Dockerfile
+    container_name: dpv2-graph-index
+    restart: unless-stopped
+    init: true
+    ports:
+      - "9203:9203"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      NATS_URL: nats://nats:4222
+      ADMIN_PORT: "9203"
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_EXTRACTION_DEPLOYMENT: ${AZURE_OPENAI_EXTRACTION_DEPLOYMENT:-gpt-4o}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: "graph_index_rs=info"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9203/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  quickwit-adapter:
+    build:
+      context: .
+      dockerfile: services/quickwit-adapter-rs/Dockerfile
+    container_name: dpv2-quickwit-adapter
+    restart: unless-stopped
+    init: true
+    ports:
+      - "9204:9204"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      NATS_URL: nats://nats:4222
+      QUICKWIT_URL: ${QUICKWIT_URL:-http://quickwit:7280}
+      QUICKWIT_INDEX_ID: ${QUICKWIT_INDEX_ID:-dataplane-corpus}
+      QUICKWIT_INDEX_CONFIG_PATH: /app/infra/quickwit/dataplane-corpus-index.yaml
+      ADMIN_PORT: ${QUICKWIT_ADAPTER_ADMIN_PORT:-9204}
+      BATCH_SIZE: ${QUICKWIT_ADAPTER_BATCH_SIZE:-500}
+      REBUILD_ON_START: ${QUICKWIT_ADAPTER_REBUILD_ON_START:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: "quickwit_adapter_rs=info"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      quickwit:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9204/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────
+  # GO SERVICES
+  # ─────────────────────────────────────────────────────────────
+
+  documents-api:
+    build:
+      context: services/documents-api-go
+      dockerfile: Dockerfile
+    container_name: dpv2-documents-api
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8010:8010"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      NATS_URL: nats://nats:4222
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      HTTP_PORT: "8010"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8010/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wiki-store:
+    build:
+      context: services/wiki-store-go
+      dockerfile: Dockerfile
+    container_name: dpv2-wiki-store
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8011:8011"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      HTTP_PORT: "8011"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8011/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  data-orchestrator:
+    build:
+      context: services/data-orchestrator-go
+      dockerfile: Dockerfile
+    container_name: dpv2-data-orchestrator
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8012:8012"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      NATS_URL: nats://nats:4222
+      HTTP_PORT: "8012"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8012/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  data-quality:
+    build:
+      context: services/data-quality-go
+      dockerfile: Dockerfile
+    container_name: dpv2-data-quality
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8013:8013"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
+      HTTP_PORT: "8013"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8013/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────
+  # OBSERVABILITY (optional — only starts if profile "obs" is selected)
+  # ─────────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: dpv2-prometheus
+    profiles: ["obs"]
+    restart: unless-stopped
+    init: true
+    ports:
+      - "9090:9090"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - dpv2_prometheus:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: dpv2-grafana
+    profiles: ["obs"]
+    restart: unless-stopped
+    init: true
+    ports:
+      - "3001:3000"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - dpv2_grafana:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  dpv2-net:
+    name: dpv2-net
+    driver: bridge
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
+
+volumes:
+  dpv2_postgres:
+  dpv2_redis:
+  dpv2_qdrant:
+  dpv2_nats:
+  dpv2_minio:
+  dpv2_quickwit_cache:
+  dpv2_prometheus:
+  dpv2_grafana:

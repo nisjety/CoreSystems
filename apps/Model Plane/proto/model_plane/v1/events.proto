@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+// Canonical event envelope for all Model Plane events.
+// Every event published to NATS or stored in the events table uses this shape.
+message Event {
+  // Globally unique event identifier (ULID).
+  string event_id = 1;
+
+  // Discriminator for the event payload type.
+  EventType event_type = 2;
+
+  // Monotonically increasing schema version for this event type.
+  // Consumers MUST handle unknown versions gracefully.
+  uint32 schema_version = 3;
+
+  // Wall-clock time when the event was produced.
+  google.protobuf.Timestamp ts = 4;
+
+  // Service name that produced this event.
+  string producer = 5;
+
+  // Trace correlation — propagated from the originating request.
+  string correlation_id = 6;
+
+  // ID of the event that directly caused this event.
+  string causation_id = 7;
+
+  // Client-supplied deduplication key. Combined with producer + event_type + resource_ref
+  // to form the idempotency hash: blake3(producer|event_type|resource_ref|idempotency_key).
+  string idempotency_key = 8;
+
+  // Tenant identifier.
+  string org_id = 9;
+
+  // Acting user identifier.
+  string user_id = 10;
+
+  // Canonical reference to the affected resource (e.g. "thread/{thread_id}" or "run/{run_id}").
+  string resource_ref = 11;
+
+  // Type-specific payload. Encoded as google.protobuf.Any so envelope shape is stable.
+  google.protobuf.Any payload = 12;
+
+  // Zero Data Retention mode. When true, this event must not be persisted durably.
+  bool zdr = 13;
+
+  // Reserved for future envelope fields.
+  reserved 14 to 20;
+}
+
+// Lifecycle event types from the plan Phase A taxonomy.
+enum EventType {
+  // Unknown or unspecified event type.
+  EVENT_TYPE_UNSPECIFIED = 0;
+
+  // Session lifecycle events.
+  // User session started.
+  EVENT_TYPE_SESSION_START = 1;
+  // User session ended.
+  EVENT_TYPE_SESSION_END = 2;
+
+  // Instruction and prompt events.
+  // Instructions loaded from external source.
+  EVENT_TYPE_INSTRUCTIONS_LOADED = 10;
+  // User submitted a prompt.
+  EVENT_TYPE_USER_PROMPT_SUBMIT = 11;
+
+  // Hook lifecycle events.
+  // Pre-tool-use hook executed.
+  EVENT_TYPE_PRE_TOOL_USE = 20;
+  // Post-tool-use hook executed.
+  EVENT_TYPE_POST_TOOL_USE = 21;
+  // Post-tool-use hook failed.
+  EVENT_TYPE_POST_TOOL_USE_FAILURE = 22;
+
+  // Permission events.
+  // Permission request issued.
+  EVENT_TYPE_PERMISSION_REQUEST = 30;
+
+  // Subagent lifecycle events.
+  // Subagent started.
+  EVENT_TYPE_SUBAGENT_START = 40;
+  // Subagent stopped.
+  EVENT_TYPE_SUBAGENT_STOP = 41;
+
+  // Task lifecycle events.
+  // Task created.
+  EVENT_TYPE_TASK_CREATED = 50;
+  // Task completed.
+  EVENT_TYPE_TASK_COMPLETED = 51;
+
+  // Compaction events.
+  // Pre-compaction event.
+  EVENT_TYPE_PRE_COMPACT = 60;
+  // Post-compaction event.
+  EVENT_TYPE_POST_COMPACT = 61;
+
+  // Terminal events.
+  // Stop/termination requested.
+  EVENT_TYPE_STOP = 70;
+  // Stop/termination failed.
+  EVENT_TYPE_STOP_FAILURE = 71;
+
+  // Ingress (model-gateway) events.
+  // Ingress request accepted.
+  EVENT_TYPE_INGRESS_ACCEPTED = 80;
+  // Ingress request rejected.
+  EVENT_TYPE_INGRESS_REJECTED = 81;
+
+  // Run lifecycle events.
+  // Run started execution.
+  EVENT_TYPE_RUN_STARTED = 90;
+  // Run completed successfully.
+  EVENT_TYPE_RUN_COMPLETED = 91;
+  // Run failed.
+  EVENT_TYPE_RUN_FAILED = 92;
+
+  // Action lifecycle events.
+  // Action started execution.
+  EVENT_TYPE_ACTION_STARTED = 100;
+  // Action completed.
+  EVENT_TYPE_ACTION_COMPLETED = 101;
+
+  // Checkpoint events.
+  // Checkpoint saved.
+  EVENT_TYPE_CHECKPOINT_SAVED = 110;
+  // Checkpoint restored.
+  EVENT_TYPE_CHECKPOINT_RESTORED = 111;
+
+  // Plan and approval events (Phase 1).
+  // Plan created.
+  EVENT_TYPE_PLAN_CREATED = 120;
+  // Approval requested.
+  EVENT_TYPE_APPROVAL_REQUESTED = 121;
+  // Plan transitioned to new state.
+  EVENT_TYPE_PLAN_TRANSITIONED = 122;
+  // Approval decision made.
+  EVENT_TYPE_APPROVAL_DECIDED = 123;
+
+  // Todo lifecycle events (Phase 1).
+  // Todo created.
+  EVENT_TYPE_TODO_CREATED = 124;
+  // Todo transitioned to new state.
+  EVENT_TYPE_TODO_TRANSITIONED = 125;
+
+  // Subagent lifecycle events (Phase 1).
+  // Subagent attached to lineage.
+  EVENT_TYPE_SUBAGENT_ATTACHED = 126;
+  // Subagent stopped in lineage.
+  EVENT_TYPE_SUBAGENT_STOPPED = 127;
+
+  // Run pause/resume for approval events (Phase 1).
+  // Run paused awaiting approval.
+  EVENT_TYPE_RUN_PAUSED_FOR_APPROVAL = 128;
+  // Run resumed after approval granted.
+  EVENT_TYPE_RUN_RESUMED_AFTER_APPROVAL = 129;
+
+  // Recovery events (Phase 1).
+  // Recovery attempt made.
+  EVENT_TYPE_RECOVERY_ATTEMPTED = 130;
+
+  // Reserved for future event types.
+  reserved 200 to 255;
+}

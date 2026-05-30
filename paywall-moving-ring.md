@@ -1,0 +1,88 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - main [ref=e12]:
+      - generic [ref=e13]:
+        - generic [ref=e14]:
+          - heading "Do more with Velion" [level=1] [ref=e15]
+          - paragraph [ref=e16]: Select a plan based on your needs
+        - generic [ref=e17]:
+          - button "Monthly" [ref=e18]
+          - switch [checked] [active] [ref=e19]
+          - button "Yearly" [ref=e21]
+          - generic [ref=e22]: 2 months free
+      - generic [ref=e23]:
+        - article [ref=e25] [cursor=pointer]:
+          - generic [ref=e26]:
+            - heading "Free" [level=2] [ref=e27]
+            - generic [ref=e28]
+          - generic [ref=e33]:
+            - generic [ref=e34]: $0
+            - generic [ref=e35]: /month
+          - paragraph [ref=e36]: 14-day trial with Velion and the AI agent included.
+          - list [ref=e37]:
+            - listitem [ref=e38]
+            - listitem [ref=e42]
+            - listitem [ref=e46]
+          - button "Select plan" [ref=e50]
+        - article [ref=e52] [cursor=pointer]:
+          - heading "Essential" [level=2] [ref=e54]
+          - generic [ref=e55]:
+            - generic [ref=e56]: $20
+            - generic [ref=e57]: /month
+          - paragraph [ref=e58]: For individuals, startups, and small support teams.
+          - list [ref=e59]:
+            - listitem [ref=e60]
+            - listitem [ref=e64]
+            - listitem [ref=e68]
+          - button "Select plan" [ref=e72]
+        - article [ref=e74] [cursor=pointer]:
+          - heading "Advanced" [level=2] [ref=e76]
+          - generic [ref=e77]:
+            - generic [ref=e78]: $85
+            - generic [ref=e79]: /month
+          - paragraph [ref=e80]: For growing teams that need automation and AI workflows.
+          - list [ref=e81]:
+            - listitem [ref=e82]
+            - listitem [ref=e86]
+            - listitem [ref=e90]
+            - listitem [ref=e94]
+          - button "Select plan" [ref=e98]
+        - article [ref=e100] [cursor=pointer]:
+          - heading "Expert" [level=2] [ref=e102]
+          - generic [ref=e103]:
+            - generic [ref=e104]: $110
+            - generic [ref=e105]: /month
+          - paragraph [ref=e106]: For larger support teams with security and reporting needs.
+          - list [ref=e107]:
+            - listitem [ref=e108]
+            - listitem [ref=e112]
+            - listitem [ref=e116]
+            - listitem [ref=e120]
+          - button "Select plan" [ref=e124]
+        - article [ref=e127] [cursor=pointer]:
+          - heading "Custom" [level=2] [ref=e129]
+          - generic [ref=e131]: Custom
+          - paragraph [ref=e132]: Contact sales for commitments, onboarding, and governance.
+          - list [ref=e133]:
+            - listitem [ref=e134]
+            - listitem [ref=e138]
+            - listitem [ref=e142]
+            - listitem [ref=e146]
+          - button "Selected" [ref=e150]
+      - generic [ref=e151]:
+        - paragraph [ref=e152]: Free is recommended
+        - paragraph [ref=e153]: Free lar deg teste uten kort. Betalte planer bruker setepris pluss $0.99 per AI-løsning.
+        - generic [ref=e155]:
+          - generic [ref=e156]: 100 ansatte
+          - generic [ref=e157]: Nettsted
+          - generic [ref=e158]: 3 kilder
+      - generic [ref=e159]:
+        - paragraph [ref=e160]: Pay as you go for AI resolutions on every paid plan
+        - paragraph [ref=e161]: Paid plans include AI usage-based billing at $0.99 per resolved conversation.
+      - generic [ref=e162]:
+        - button "Skip" [ref=e163]
+        - button "Explore all plans" [ref=e164]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e177] [cursor=pointer]:
+    - img [ref=e178]
+  - alert [ref=e181]

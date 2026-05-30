@@ -1,0 +1,23 @@
+# Physical Service Split - CI/CD Configuration
+name: Buf Proto CI
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Model Plane/proto/**'
+      - '.github/workflows/buf.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Model Plane/proto/**'
+      - '.github/workflows/buf.yml'
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-setup-action@v1
+      - name: buf lint
+        run: buf lint apps/Model Plane/proto
+      - name: buf breaking
+        run: buf breaking apps/Model Plane/proto --against apps/Model Plane/proto/baseline.binpb

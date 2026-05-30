@@ -1,0 +1,156 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]:
+          - button "Go back" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - button "Go forward" [ref=e10] [cursor=pointer]:
+            - img [ref=e11]
+        - generic [ref=e13]:
+          - button "Open search" [ref=e14] [cursor=pointer]:
+            - img [ref=e15]
+          - button "Toggle dark mode" [ref=e19] [cursor=pointer]:
+            - img [ref=e20]
+          - button "AI assistant" [ref=e22] [cursor=pointer]:
+            - img [ref=e23]
+          - button "Notifications" [ref=e26] [cursor=pointer]:
+            - img [ref=e27]
+          - button "Calendar" [ref=e30] [cursor=pointer]:
+            - img [ref=e31]
+          - button "Open profile menu" [ref=e34] [cursor=pointer]:
+            - generic [ref=e35]: IF
+    - main [ref=e38]:
+      - generic [ref=e41]:
+        - generic [ref=e42]:
+          - generic [ref=e43]:
+            - generic [ref=e44]:
+              - generic [ref=e45]:
+                - paragraph [ref=e46]: Velion heart
+                - heading "Control cockpit" [level=1] [ref=e47]
+                - paragraph [ref=e48]: "Same dashboard rhythm as v1: Linear-style shell, fast operator scan, live agent state, and one composer for every task."
+              - button "Open report" [ref=e49] [cursor=pointer]:
+                - text: Open report
+                - img [ref=e50]
+            - generic [ref=e53]:
+              - generic [ref=e54]:
+                - paragraph [ref=e55]: First response
+                - generic [ref=e56]:
+                  - generic [ref=e57]: 38s
+                  - generic [ref=e58]: "-42%"
+              - generic [ref=e59]:
+                - paragraph [ref=e60]: AI deflection
+                - generic [ref=e61]:
+                  - generic [ref=e62]: 71%
+                  - generic [ref=e63]: +18%
+              - generic [ref=e64]:
+                - paragraph [ref=e65]: SLA risk
+                - generic [ref=e66]:
+                  - generic [ref=e67]: "4"
+                  - generic [ref=e68]: 2 high
+              - generic [ref=e69]:
+                - paragraph [ref=e70]: Knowledge freshness
+                - generic [ref=e71]:
+                  - generic [ref=e72]: 96%
+                  - generic [ref=e73]: live
+            - generic [ref=e75]:
+              - generic [ref=e76]: Message Velion
+              - textbox "Message Velion" [ref=e77]:
+                - /placeholder: Ask Velion to triage, draft, search, or automate...
+              - generic [ref=e78]:
+                - generic [ref=e79]:
+                  - button "Add attachment" [ref=e80] [cursor=pointer]:
+                    - img [ref=e81]
+                  - button "Attach file" [ref=e82] [cursor=pointer]:
+                    - img [ref=e83]
+                  - button "Tools" [ref=e85] [cursor=pointer]:
+                    - img [ref=e86]
+                    - text: Tools
+                - generic [ref=e88]:
+                  - button "Voice input" [ref=e89] [cursor=pointer]:
+                    - img [ref=e90]
+                  - button "Send message" [disabled] [ref=e93]:
+                    - img [ref=e94]
+          - generic [ref=e96]:
+            - generic [ref=e97]:
+              - generic [ref=e98]:
+                - paragraph [ref=e99]: Agent stream
+                - heading "Running now" [level=2] [ref=e100]
+              - img [ref=e102]
+            - generic [ref=e105]:
+              - generic [ref=e106]:
+                - img [ref=e108]
+                - generic [ref=e111]:
+                  - paragraph [ref=e112]: Retrieved renewal policy
+                  - paragraph [ref=e113]: Completed
+              - generic [ref=e114]:
+                - img [ref=e116]
+                - generic [ref=e119]:
+                  - paragraph [ref=e120]: Matched enterprise SLA clause
+                  - paragraph [ref=e121]: Completed
+              - generic [ref=e122]:
+                - img [ref=e124]
+                - generic [ref=e127]:
+                  - paragraph [ref=e128]: Prepared macro draft
+                  - paragraph [ref=e129]: Completed
+              - generic [ref=e130]:
+                - img [ref=e132]
+                - generic [ref=e134]:
+                  - paragraph [ref=e135]: Waiting for human approval
+                  - paragraph [ref=e136]: Human-in-loop gate
+        - generic [ref=e137]:
+          - generic [ref=e138]:
+            - generic [ref=e139]:
+              - generic [ref=e140]:
+                - img [ref=e142]
+                - generic [ref=e145]:
+                  - heading "Priority inbox" [level=2] [ref=e146]
+                  - paragraph [ref=e147]: Virtualized table shell and retry-ready rows.
+              - button "View inbox" [ref=e148] [cursor=pointer]
+            - generic [ref=e149]:
+              - generic [ref=e150]:
+                - generic [ref=e151]:
+                  - paragraph [ref=e152]: Maya Chen
+                  - paragraph [ref=e153]: Northwind Care
+                - paragraph [ref=e154]: Enterprise renewal wording
+                - generic [ref=e155]: High
+                - generic [ref=e156]: 4m
+                - generic [ref=e157]: 88%
+              - generic [ref=e158]:
+                - generic [ref=e159]:
+                  - paragraph [ref=e160]: Jonas Vik
+                  - paragraph [ref=e161]: Aquatiq
+                - paragraph [ref=e162]: SharePoint import missing files
+                - generic [ref=e163]: Medium
+                - generic [ref=e164]: 11m
+                - generic [ref=e165]: 74%
+              - generic [ref=e166]:
+                - generic [ref=e167]:
+                  - paragraph [ref=e168]: Amara Okafor
+                  - paragraph [ref=e169]: Nova Logistics
+                - paragraph [ref=e170]: Return macro approval
+                - generic [ref=e171]: Low
+                - generic [ref=e172]: 23m
+                - generic [ref=e173]: 92%
+          - generic [ref=e174]:
+            - generic [ref=e175]:
+              - img [ref=e177]
+              - generic [ref=e182]:
+                - heading "Knowledge health" [level=2] [ref=e183]
+                - paragraph [ref=e184]: Quarry, SharePoint, Zendesk
+            - generic [ref=e185]:
+              - generic [ref=e187]:
+                - generic [ref=e188]: Website
+                - generic [ref=e189]: 96%
+              - generic [ref=e193]:
+                - generic [ref=e194]: SharePoint
+                - generic [ref=e195]: 88%
+              - generic [ref=e199]:
+                - generic [ref=e200]: Zendesk
+                - generic [ref=e201]: 91%
+            - generic [ref=e204]:
+              - paragraph [ref=e205]: Next best action
+              - paragraph [ref=e206]: Re-crawl pricing pages and refresh the refund macro before the SLA handoff.
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e212] [cursor=pointer]:
+    - img [ref=e213]

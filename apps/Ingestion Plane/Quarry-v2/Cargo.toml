@@ -1,0 +1,130 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/quarry-core",
+    "crates/quarry-security",
+    "crates/quarry-transform",
+    "crates/quarry-browser",
+    "crates/quarry-tls",
+    "crates/quarry-runtime",
+    "crates/quarry-edge",
+    "lab/evals",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Triodelab <eng@triodelab.com>"]
+repository = "https://github.com/triodelab/quarry-v2"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+futures-util = "0.3"
+
+# HTTP server
+axum = { version = "0.7", features = ["macros", "http2"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "limit"] }
+hyper = { version = "1", features = ["full"] }
+
+# HTTP client (static fetch)
+# `deflate` and `zstd` aligned with the wreq feature set below — without
+# them, sites advertising `Accept-Encoding: br,zstd,deflate` get a
+# wreq-shaped body but a garbled reqwest-shaped one. `hickory-dns` wires
+# the cached resolver from the `hickory-resolver` crate below.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "zstd", "stream", "json", "cookies", "hickory-dns", "socks"] }
+# HTTP client (TLS/JA3/JA4 impersonation; rquest upstream package name).
+# Exact-pin until wreq leaves RC; wreq currently declares rust-version 1.85.
+wreq = { version = "=6.0.0-rc.28", default-features = false, features = ["webpki-roots", "gzip", "brotli", "deflate", "zstd", "cookies"] }
+
+# Charset detection — `chardetng` sniffs body bytes when the
+# Content-Type header lies about the charset (common on CMS-driven sites
+# that declare UTF-8 but serve windows-1252 or ISO-8859-1). `encoding_rs`
+# does the re-decode using the sniffed encoding label.
+encoding_rs = "0.8"
+chardetng = "0.1"
+
+# Body-content language detection. Used when html[lang] is absent or
+# wrong — downstream ranking + extraction needs to know which language
+# a chunk is in. ~3 MB stat data baked into the binary; cheap.
+whatlang = "0.16"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+
+# IDs / hash
+ulid = { version = "1.1", features = ["serde"] }
+blake3 = "1.5"
+
+# JWT + JWKS verification (auth middleware)
+jsonwebtoken = "9"
+
+# Base64 (cursor encoding for pagination — cluster #4 / cycle 22)
+base64 = "0.22"
+
+# HMAC + SHA-256 (D2 / cluster #14 internal HMAC auth)
+hmac = "0.12"
+sha2 = "0.10"
+
+# GraphQL (cluster #11 / cycle 31)
+# We use async-graphql directly + a hand-rolled axum handler because
+# `async-graphql-axum` ties tightly to one axum minor version (6.x →
+# axum 0.6, 7.x → axum 0.8). Our workspace is on axum 0.7. The
+# hand-rolled handler is ~20 LOC and decouples the axum version
+# upgrade from the GraphQL upgrade.
+async-graphql = { version = "7", default-features = false, features = ["chrono"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# Errors / logs / tracing
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.29"
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.29", features = ["tonic", "grpc-tonic"] }
+tracing-opentelemetry = "0.30"
+
+# Config / env
+config = "0.14"
+dotenvy = "0.15"
+
+# Storage
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+redis = { version = "0.27", default-features = false, features = ["tokio-rustls-comp", "connection-manager"] }
+
+# HTML / markdown
+scraper = "0.20"
+html2md = "0.2"
+url = { version = "2.5", features = ["serde"] }
+
+# Chrono
+chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# NATS / JetStream (cross-plane event bus)
+async-nats = "0.37"
+bytes = "1.7"
+
+# Local BM25 index (cycle 19: own-corpus search)
+# Tantivy is the Lucene-equivalent embedded library. We pin a recent stable
+# release; the API is stable across 0.22.x patches.
+tantivy = "0.22"
+
+# gRPC (cross-plane RPC: Model Plane browser-broker, Data Plane documents-api)
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost", "tls", "tls-roots"] }
+prost = "0.13"
+prost-types = "0.13"
+tonic-build = "0.12"

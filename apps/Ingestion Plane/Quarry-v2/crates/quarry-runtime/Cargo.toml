@@ -1,0 +1,77 @@
+[package]
+name = "quarry-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core = { path = "../quarry-core" }
+quarry-security = { path = "../quarry-security" }
+quarry-transform = { path = "../quarry-transform" }
+quarry-browser = { path = "../quarry-browser" }
+quarry-tls = { path = "../quarry-tls" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+# Wave 7 — real HTTP/3.
+#
+# Aliased dep so the http3-capable reqwest sits alongside the workspace
+# 0.12 reqwest without forcing a workspace-wide bump (axum + several
+# AWS SDK crates still pin 0.12-compatible hyper). Optional + feature-
+# gated so the default build stays QUIC-free; opt in with the `http3`
+# Cargo feature.
+#
+# IMPORTANT — `--cfg reqwest_unstable`:
+#   reqwest gates its http3 API behind `--cfg reqwest_unstable` at
+#   compile time. The crate-level `.cargo/config.toml` sets this flag
+#   for the `http3` feature so consumers don't have to thread RUSTFLAGS
+#   through their build. The flag only affects this crate.
+reqwest_http3 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "gzip", "brotli", "deflate", "stream", "cookies", "http3"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+blake3 = { workspace = true }
+tempfile = "3"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+dashmap = "6"
+async-nats = { workspace = true }
+bytes = { workspace = true }
+tokio-stream = "0.1"
+ulid = { workspace = true }
+tantivy = { workspace = true }
+redis = { workspace = true }
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+# Cycle 20 / cluster #1 — Postgres durable queue. Gated so default
+# builds don't pull sqlx + libpq toolchain.
+sqlx = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[features]
+default = ["test-site"]
+grpc = ["dep:tonic", "dep:prost", "dep:prost-types"]
+test-site = ["dep:axum"]
+postgres-queue = ["dep:sqlx", "dep:uuid"]
+# Wave 7 — gate the real-QUIC driver. Off by default to keep the build
+# fast; opt in with `--features http3`. See `Http3Driver` docs and
+# `.cargo/config.toml` (`reqwest_unstable` cfg) for the build-time
+# story.
+http3 = ["dep:reqwest_http3"]
+
+[build-dependencies]
+tonic-build = { workspace = true, optional = false }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
+wiremock = "0.6"
+bytes = "1"

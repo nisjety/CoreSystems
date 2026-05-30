@@ -1,0 +1,49 @@
+{
+  "webhook": {
+    "name": "support-triage-events",
+    "targetUrl": "${ZAMMAD_TRIAGE_RECEIVER_URL}",
+    "method": "POST",
+    "headers": {
+      "X-Zammad-Webhook-Secret": "${ZAMMAD_WEBHOOK_SHARED_SECRET}",
+      "X-Zammad-Instance": "${ZAMMAD_FQDN}",
+      "Content-Type": "application/json"
+    },
+    "note": "Create this in Manage > Webhooks once the receiver exists."
+  },
+  "triggerPlan": [
+    {
+      "name": "50-webhook-post-ingest-created",
+      "enabled": false,
+      "activator": "action / selective",
+      "condition": {
+        "group": ["Support::Triage", "Support::Billing"],
+        "ticket state type": ["new", "open"],
+        "article type": ["email", "web"],
+        "article internal": false
+      },
+      "action": "fire webhook support-triage-events"
+    },
+    {
+      "name": "51-webhook-post-ingest-updated",
+      "enabled": false,
+      "activator": "action / selective",
+      "condition": {
+        "group": ["Support::Triage", "Support::Billing"],
+        "article type": ["email", "web"],
+        "article sender": ["Customer"],
+        "article internal": false
+      },
+      "action": "fire webhook support-triage-events"
+    }
+  ],
+  "receiverContract": {
+    "expectedBehavior": [
+      "Validate webhook signature.",
+      "Extract ticket, latest article, group, customer, organization, and tags.",
+      "Run AI triage after Zammad ingestion, never before.",
+      "Publish normalized event to NATS if needed.",
+      "Write results back to Zammad via REST API.",
+      "Create notifications through Novu if humans need to act."
+    ]
+  }
+}

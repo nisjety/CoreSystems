@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Cache-Friendly Page: Warm Path Verification</title>
+    <meta name="description" content="Stable content used to verify cache warm-hit determinism.">
+    <link rel="canonical" href="https://example.com/cache-warm">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/">Home</a>
+            <a href="/docs">Docs</a>
+        </nav>
+    </header>
+    <main>
+        <article>
+            <h1>Cache Warm-Hit Determinism</h1>
+            <p>This article exists to verify that the warm-cache code path returns byte-identical content across two requests, where the second request reuses the cached blake3 fingerprint to short-circuit the transform pipeline.</p>
+            <p>The warm path is the most common production path; cold scrapes are a tiny fraction of overall traffic. Performance regressions in this path show up as latency cliffs at the edge.</p>
+            <h2>What we verify</h2>
+            <p>The eval harness fingerprints this fixture twice in succession. Both fingerprints must match byte-for-byte. Any divergence indicates a non-deterministic transform.</p>
+        </article>
+    </main>
+    <footer>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+    </footer>
+</body>
+</html>

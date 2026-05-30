@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package dataplane.retrieval.v2;
+
+option go_package = "github.com/triodelab/dataplane/gen/go/retrieval/v2";
+option java_package = "com.triodelab.dataplane.retrieval.v2";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ────────────────────────────────────────────────────────────────────────────
+// CORE MESSAGES
+// ────────────────────────────────────────────────────────────────────────────
+
+message RetrieveRequest {
+  string org_id  = 1;
+  string query   = 2;
+  Filters filters = 3;
+  int32   top_k  = 4;  // default 10; 0 = use service default
+
+  optional string user_id = 5;  // ACL-filter results to user's allowed documents
+  optional string role    = 6;  // reserved for role-based filtering
+  
+  // V2: optional query rewrite from Model Plane decomposition
+  optional string query_expansion = 7;
+  
+  // V2: reranking config
+  optional string reranker_model = 8;  // "cohere_rerank_v3" | "local_cross_encoder" | empty=default
+  optional int32  top_k_before_rerank = 9;  // retrieve this many before reranking; 0=no rerank
+  
+  // V2: ZDR mode enforcement
+  optional string zdr_mode = 10;  // "disabled" | "ephemeral_only" | empty=use org default
+}
+
+message Filters {
+  repeated string document_types = 1;
+  repeated string departments    = 2;
+  repeated string languages      = 3;
+  repeated string document_ids   = 4;  // restrict to specific documents
+  string          region         = 5;
+  repeated string sources        = 6;  // restrict to specific source types
+}
+
+message Candidate {
+  string knowledge_id  = 1;
+  string document_id   = 2;
+  string text          = 3;
+  float  dense_score   = 4;  // from Qdrant ANN
+  float  sparse_score  = 5;  // from BM25 (optional, 0 if not used)
+  float  rerank_score  = 6;  // from reranker (optional, 0 if not reranked)
+  float  final_score   = 7;  // normalized final score after fusion
+  google.protobuf.Struct metadata = 8;
+}
+
+message Source {
+  string document_id = 1;
+  string title       = 2;
+  string source      = 3;     // "sharepoint" | "web" | "pdf" | etc.
+  string type        = 4;     // "policy" | "invoice" | etc.
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message RetrieveResponse {
+  repeated Candidate candidates = 1;
+  repeated Source sources = 2;
+  string query = 3;
+  string org_id = 4;
+  
+  // V2: retrieval trace for audit trail
+  string trace_id = 5;
+  string index_version = 6;
+  
+  // V2: metadata
+  google.protobuf.Struct retrieval_metadata = 7;  // e.g., {dense_count: 150, sparse_count: 80, rerank_time_ms: 234}
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// TRACE MESSAGES
+// ────────────────────────────────────────────────────────────────────────────
+
+message RetrievalTrace {
+  string trace_id = 1;
+  string org_id = 2;
+  string query = 3;
+  string query_embedding_model = 4;
+  string index_version = 5;
+  google.protobuf.Struct filters_applied = 6;
+  
+  repeated RetrievalCandidate candidates = 7;
+  
+  string reranker_name = 8;  // "cohere_rerank_v3" | "local_cross_encoder" | empty
+  string zdr_mode = 9;  // "disabled" | "ephemeral_only"
+  
+  google.protobuf.Timestamp created_at = 10;
+  
+  // Metadata
+  int32 dense_retrieval_time_ms = 11;
+  int32 sparse_retrieval_time_ms = 12;
+  int32 rerank_time_ms = 13;
+  int32 total_time_ms = 14;
+}
+
+message RetrievalCandidate {
+  int32 rank = 1;
+  string knowledge_id = 2;
+  string document_id = 3;
+  float dense_score = 4;
+  float sparse_score = 5;
+  float rerank_score = 6;
+  string source_chunk_ref = 7;
+}
+
+message GetTraceRequest {
+  string trace_id = 1;
+  string org_id = 2;  // for auth
+}
+
+message GetTraceResponse {
+  RetrievalTrace trace = 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SERVICES
+// ────────────────────────────────────────────────────────────────────────────
+
+service RetrievalService {
+  // Main retrieval interface (backward-compatible with v1)
+  rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+  
+  // V2: audit trail retrieval
+  rpc GetTrace(GetTraceRequest) returns (GetTraceResponse);
+}

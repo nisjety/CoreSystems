@@ -1,0 +1,22 @@
+[package]
+name = "quarry-transform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core = { path = "../quarry-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+scraper = { workspace = true }
+html2md = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+regex = "1"
+lol_html = "1"
+
+[dev-dependencies]
+tempfile = "3"

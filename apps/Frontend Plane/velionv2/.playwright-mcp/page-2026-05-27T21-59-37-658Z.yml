@@ -1,0 +1,264 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Agenter" [ref=e28] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e29]
+            - link "Studio" [ref=e31] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - link "Go to home" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e75]
+          - navigation "Workspace sections" [ref=e84]:
+            - generic [ref=e85]:
+              - link "Oversikt" [ref=e87] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e88]
+              - link "Chat" [ref=e91] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e92]
+              - link "Agenter" [ref=e95] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e96]
+              - link "Inbox" [ref=e100] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e101]
+              - link "Kunnskap" [ref=e105] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e106]
+          - generic [ref=e108]:
+            - button "Account menu" [ref=e111] [cursor=pointer]:
+              - img [ref=e112]
+            - link "Innstillinger" [ref=e117] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e118]
+            - button "Søk" [ref=e122] [cursor=pointer]:
+              - img [ref=e123]
+        - complementary "Workflow tools" [ref=e128]:
+          - generic [ref=e129]:
+            - heading "Tools" [level=2] [ref=e136]
+            - generic [ref=e137]:
+              - button "More workflow tools options" [ref=e138] [cursor=pointer]:
+                - img [ref=e139]
+              - button "Collapse workflow tools" [ref=e143] [cursor=pointer]:
+                - img [ref=e144]
+          - generic [ref=e148]:
+            - img
+            - searchbox "Workflow tool search" [ref=e149]
+          - generic [ref=e150]:
+            - button "All" [ref=e151] [cursor=pointer]:
+              - generic [ref=e152]: All
+            - button "Controls" [ref=e153] [cursor=pointer]:
+              - generic [ref=e154]: Controls
+            - button "AI & Apps" [ref=e155] [cursor=pointer]:
+              - generic [ref=e156]: AI & Apps
+            - button "Custom" [ref=e157] [cursor=pointer]:
+              - generic [ref=e158]: Custom
+          - generic [ref=e160]:
+            - button "Select ChatGPT tool" [ref=e161] [cursor=pointer]:
+              - img [ref=e164]
+              - generic [ref=e167]: ChatGPT
+            - button "Select Gemini tool" [ref=e168] [cursor=pointer]:
+              - generic [ref=e170]: "*"
+              - generic [ref=e171]: Gemini
+            - button "Select Grok tool" [ref=e172] [cursor=pointer]:
+              - generic [ref=e174]: G
+              - generic [ref=e175]: Grok
+            - button "Select Perplexity tool" [ref=e176] [cursor=pointer]:
+              - generic [ref=e178]: P
+              - generic [ref=e179]: Perplexity
+            - button "Select Google Drive tool" [ref=e180] [cursor=pointer]:
+              - generic [ref=e182]: D
+              - generic [ref=e183]: Google Drive
+            - button "Select Google Sheets tool" [ref=e184] [cursor=pointer]:
+              - img [ref=e187]
+              - generic [ref=e190]: Google Sheets
+            - button "Select Google Slides tool" [ref=e191] [cursor=pointer]:
+              - generic [ref=e193]: S
+              - generic [ref=e194]: Google Slides
+            - button "Select Google Docs tool" [ref=e195] [cursor=pointer]:
+              - generic [ref=e197]: D
+              - generic [ref=e198]: Google Docs
+            - button "Select Slack tool" [ref=e199] [cursor=pointer]:
+              - generic [ref=e201]: "#"
+              - generic [ref=e202]: Slack
+            - button "Select Notion tool" [ref=e203] [cursor=pointer]:
+              - generic [ref=e205]: "N"
+              - generic [ref=e206]: Notion
+            - button "Select LinkedIn tool" [ref=e207] [cursor=pointer]:
+              - generic [ref=e209]: in
+              - generic [ref=e210]: LinkedIn
+            - button "Select Instagram tool" [ref=e211] [cursor=pointer]:
+              - generic [ref=e213]: ig
+              - generic [ref=e214]: Instagram
+            - button "Select Facebook tool" [ref=e215] [cursor=pointer]:
+              - generic [ref=e217]: f
+              - generic [ref=e218]: Facebook
+    - main [ref=e219]:
+      - generic [ref=e222]:
+        - generic [ref=e226]:
+          - generic [ref=e227]:
+            - img [ref=e229]
+            - generic [ref=e232]:
+              - heading "Generate Social Media Post" [level=1] [ref=e233]
+              - paragraph [ref=e234]:
+                - img [ref=e235]
+                - text: Team project
+          - generic [ref=e238]:
+            - button "Test Run" [ref=e239] [cursor=pointer]:
+              - img [ref=e240]
+              - generic [ref=e242]: Test Run
+            - button "Publish" [ref=e243] [cursor=pointer]
+        - region "Workflow canvas" [ref=e244]:
+          - generic [ref=e246]:
+            - img [ref=e247]
+            - button "Select Schedule Daily Post workflow node" [ref=e252] [cursor=pointer]:
+              - img [ref=e254]
+              - generic [ref=e258]: Schedule Daily Post
+            - button "Select Generate Image workflow node" [ref=e259] [cursor=pointer]:
+              - img [ref=e262]
+              - generic [ref=e265]: Generate Image
+            - button "Select Generate Caption workflow node" [ref=e266] [cursor=pointer]:
+              - img [ref=e269]
+              - generic [ref=e272]: Generate Caption
+            - button "Select Post on Facebook workflow node" [ref=e273] [cursor=pointer]:
+              - generic [ref=e275]: f
+              - generic [ref=e276]: Post on Facebook
+            - button "Select Post on Instagram workflow node" [ref=e277] [cursor=pointer]:
+              - generic [ref=e279]: ig
+              - generic [ref=e280]: Post on Instagram
+            - button "Select Post on LinkedIn workflow node" [ref=e281] [cursor=pointer]:
+              - generic [ref=e283]: in
+              - generic [ref=e284]: Post on LinkedIn
+            - button "Select Merge workflow node" [ref=e285] [cursor=pointer]:
+              - img [ref=e287]
+              - generic [ref=e292]: Merge
+            - button "Select Update Status to DONE workflow node" [ref=e293] [cursor=pointer]:
+              - img [ref=e296]
+              - generic [ref=e299]: Update Status to DONE
+          - generic [ref=e300]:
+            - generic [ref=e301]:
+              - img [ref=e302]
+              - text: Searching nodes
+            - generic [ref=e304]:
+              - img [ref=e305]
+              - text: Adding nodes
+            - generic [ref=e307]:
+              - img [ref=e308]
+              - text: Validating workflow
+          - generic [ref=e310]:
+            - textbox "Workflow prompt" [ref=e311]:
+              - /placeholder: Describe your workflow to Aira
+            - button "Expand composer" [ref=e312] [cursor=pointer]:
+              - img [ref=e313]
+            - button "Dictate workflow prompt" [ref=e318] [cursor=pointer]:
+              - img [ref=e319]
+            - button "Generate workflow" [ref=e322] [cursor=pointer]:
+              - img [ref=e323]
+        - complementary [ref=e326]:
+          - generic [ref=e327]:
+            - img [ref=e329]
+            - heading "Generate Caption" [level=2] [ref=e333]
+            - button "More tool options" [ref=e334] [cursor=pointer]:
+              - img [ref=e335]
+            - button "Close tool settings" [ref=e339] [cursor=pointer]:
+              - img [ref=e340]
+          - generic [ref=e343]:
+            - generic [ref=e344]: Setup
+            - img [ref=e345]
+            - generic [ref=e347]: Configure
+            - img [ref=e348]
+            - generic [ref=e350]: Test
+          - generic [ref=e352]:
+            - generic [ref=e353]:
+              - generic [ref=e354]:
+                - text: Provider
+                - img [ref=e355]
+              - generic [ref=e357]:
+                - generic [ref=e358]: Open AI
+                - img [ref=e359]
+            - generic [ref=e361]:
+              - generic [ref=e362]:
+                - text: Authentication
+                - img [ref=e363]
+              - generic [ref=e365]:
+                - generic [ref=e366]: Open AI
+                - img [ref=e367]
+            - generic [ref=e369]:
+              - generic [ref=e370]:
+                - text: Model
+                - img [ref=e371]
+              - generic [ref=e373]:
+                - generic [ref=e374]: Open AI
+                - img [ref=e375]
+            - generic [ref=e377]:
+              - generic [ref=e378]:
+                - text: Prompt
+                - img [ref=e379]
+              - generic [ref=e381]:
+                - paragraph [ref=e382]: "Create an engaging Instagram post caption that includes:"
+                - paragraph [ref=e383]: "- A compelling hook to grab attention"
+                - paragraph [ref=e384]: "- Relevant hashtags (5-10 popular ones)"
+                - paragraph [ref=e385]: "- A call-to-action that encourages engagement"
+                - paragraph [ref=e386]: "- A compelling hook to grab attention"
+                - paragraph [ref=e387]: "- Relevant hashtags (5-10 popular ones)"
+            - button "Improve prompt" [ref=e388] [cursor=pointer]:
+              - img [ref=e389]
+              - text: Improve prompt
+            - generic [ref=e392]:
+              - generic [ref=e393]:
+                - text: Output
+                - img [ref=e394]
+              - generic [ref=e396]:
+                - generic [ref=e397]:
+                  - img [ref=e398]
+                  - generic [ref=e405]: Caption
+                  - img [ref=e406]
+                - generic [ref=e409]:
+                  - img [ref=e410]
+                  - generic [ref=e417]: Hashtags
+                  - img [ref=e418]
+              - button "Add output" [ref=e421] [cursor=pointer]:
+                - img [ref=e422]
+                - text: Add output
+          - button "Next" [ref=e424] [cursor=pointer]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e430] [cursor=pointer]:
+    - img [ref=e431]

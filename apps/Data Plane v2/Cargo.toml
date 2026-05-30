@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "services/retrieval-engine-rs",
+    "services/index-engine-rs",
+    "services/embedding-engine-rs",
+    "services/graph-index-rs",
+    "services/quickwit-adapter-rs",
+]
+exclude = [
+    "gen/rust",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = { version = "0.8", features = ["macros"] }
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
+qdrant-client = "1"
+reqwest = { version = "0.12", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+blake3 = "1"
+tower = { version = "0.5", features = ["timeout", "limit", "load-shed"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "limit"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
+opentelemetry = "0.29"
+opentelemetry_sdk = { version = "0.29", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.29"
+tracing-opentelemetry = "0.30"
+tonic-build = "0.12"
+futures = "0.3"
+jsonwebtoken = "9"
+regex = "1"
+once_cell = "1"
+async-trait = "0.1"
+moka = { version = "0.12", features = ["future"] }
+tiktoken-rs = "0.6"
+governor = "0.7"
+ammonia = "4"

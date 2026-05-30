@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// RunService — query and manage run lifecycle.
+// Ownership: session-core owns run metadata; execution-core owns run state transitions.
+service RunService {
+  // Get a run by ID.
+  rpc GetRun(GetRunRequest) returns (RunDetail);
+
+  // List runs for a thread.
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+
+  // Cancel a running or queued run.
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+}
+
+message GetRunRequest {
+  // Run identifier (ULID).
+  string run_id = 1;
+}
+
+message ListRunsRequest {
+  // Thread to list runs for.
+  string thread_id = 1;
+
+  // Filter by status (empty = all).
+  string status_filter = 2;
+
+  // Pagination cursor (ULID of last seen run).
+  string after_run_id = 3;
+
+  // Maximum results.
+  uint32 limit = 4;
+}
+
+message ListRunsResponse {
+  // Runs matching the query.
+  repeated RunDetail runs = 1;
+
+  // True if more results exist.
+  bool has_more = 2;
+}
+
+message CancelRunRequest {
+  // Run to cancel.
+  string run_id = 1;
+
+  // Reason for cancellation.
+  string reason = 2;
+}
+
+message CancelRunResponse {
+  // True if the run was successfully cancelled.
+  bool cancelled = 1;
+}
+
+// RunDetail — full run metadata.
+message RunDetail {
+  // Run identifier (ULID).
+  string run_id = 1;
+
+  // Thread this run belongs to.
+  string thread_id = 2;
+
+  // Parent run for subagent runs (empty for top-level).
+  string parent_run_id = 3;
+
+  // Agent definition used.
+  string agent_id = 4;
+
+  // Run status: "queued", "running", "completed", "failed", "cancelled", "awaiting_approval".
+  string status = 5;
+
+  // Run mode: "execute", "plan", "reactive".
+  string mode = 6;
+
+  // The user's goal.
+  string goal = 7;
+
+  // Final output (populated on completion).
+  string final_output = 8;
+
+  // Error message (populated on failure).
+  string error = 9;
+
+  // Checkpoint index for resumability.
+  uint32 checkpoint_index = 10;
+
+  // Step count completed.
+  uint32 steps_completed = 11;
+
+  // Token usage.
+  uint32 input_tokens = 12;
+  uint32 output_tokens = 13;
+
+  // Timestamps.
+  google.protobuf.Timestamp created_at = 14;
+  google.protobuf.Timestamp updated_at = 15;
+
+  // Arbitrary metadata.
+  google.protobuf.Struct metadata = 16;
+}

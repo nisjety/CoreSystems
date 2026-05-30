@@ -1,0 +1,91 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e6]:
+          - button "Go back" [ref=e8] [cursor=pointer]:
+            - img [ref=e9]
+          - button "Go forward" [ref=e12] [cursor=pointer]:
+            - img [ref=e13]
+        - generic [ref=e15]:
+          - button "Open global search" [ref=e17] [cursor=pointer]:
+            - img [ref=e18]
+          - generic [ref=e21]:
+            - button "Toggle dark mode" [ref=e24] [cursor=pointer]:
+              - img [ref=e26]
+            - button "Open AI assistant" [ref=e30] [cursor=pointer]:
+              - img [ref=e31]
+            - button "Quick messages" [ref=e35] [cursor=pointer]:
+              - img [ref=e36]
+            - button "Notifications" [ref=e39] [cursor=pointer]:
+              - img [ref=e40]
+            - button "Calendar" [ref=e43] [cursor=pointer]:
+              - img [ref=e44]
+            - button "Open profile menu" [ref=e47] [cursor=pointer]:
+              - generic [ref=e48]: I
+    - main [ref=e49]:
+      - generic [ref=e52]:
+        - generic [ref=e53]:
+          - generic [ref=e54]:
+            - img [ref=e56]
+            - generic [ref=e59]:
+              - generic [ref=e60]:
+                - generic [ref=e61]: Velion
+                - generic [ref=e62]: /
+                - generic [ref=e63]: Chatbots
+              - generic [ref=e64]:
+                - heading "Playground" [level=1] [ref=e65]
+                - combobox "Select chatbot builder view" [ref=e66]:
+                  - option "Playground" [selected]
+                  - option "Data sources"
+                  - option "Actions"
+                  - option "Chat logs"
+                  - option "Analytics"
+                  - option "Install"
+                  - option "Settings"
+          - button "Publish live" [ref=e68] [cursor=pointer]:
+            - img [ref=e69]
+            - text: Publish live
+        - main [ref=e74]:
+          - generic [ref=e77]:
+            - generic [ref=e78]:
+              - generic [ref=e79]: A
+              - text: Velion / AI Bot
+              - img [ref=e80]
+            - generic [ref=e82]:
+              - button "Add selected" [disabled] [ref=e83]:
+                - img [ref=e84]
+                - text: Add selected
+              - button "Remove selected" [ref=e85] [cursor=pointer]:
+                - img [ref=e86]
+                - text: Remove selected
+              - button "Reset" [ref=e89] [cursor=pointer]:
+                - img [ref=e90]
+                - text: Reset
+              - button "Clean" [ref=e93] [cursor=pointer]:
+                - img [ref=e94]
+                - text: Clean
+          - generic [ref=e98]:
+            - generic [ref=e99]:
+              - generic [ref=e100]:
+                - img [ref=e102]
+                - generic [ref=e105]:
+                  - heading "AI Bot" [level=2] [ref=e106]
+                  - paragraph [ref=e107]: Preview widget
+              - img [ref=e108]
+            - generic [ref=e110]:
+              - generic [ref=e111]: I would like to cancel my subscription.
+              - generic [ref=e112]:
+                - generic [ref=e113]:
+                  - img [ref=e114]
+                  - text: AI Bot
+                - text: I can help with that. I have your subscription details up. You can pause your subscription for up to 3 months with no payments, or cancel and keep access until the end of your billing period. What would you prefer?
+              - generic [ref=e117]: Actually, maybe I will just pause it then.
+              - generic [ref=e118]:
+                - generic [ref=e119]: Velion AI preview
+                - generic [ref=e120]:
+                  - text: Ask your question...
+                  - img [ref=e122]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e130] [cursor=pointer]:
+    - img [ref=e131]

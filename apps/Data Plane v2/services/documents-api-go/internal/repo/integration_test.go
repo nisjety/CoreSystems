@@ -1,0 +1,258 @@
+//go:build integration
+
+package repo_test
+
+// Integration tests for DocumentRepo using testcontainers-postgres.
+// Run with: go test -tags integration -race ./...
+//
+// Requires Docker available locally. Skipped on CI runs without Docker.
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	tc "github.com/testcontainers/testcontainers-go"
+	pgmod "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
+)
+
+// schemaSQL is a slim subset of init.sql sufficient to test the document path.
+const schemaSQL = `
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS documents (
+    document_id  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+    org_id       TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT '',
+    type         TEXT NOT NULL DEFAULT '',
+    title        TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    metadata     JSONB NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    zdr_classification TEXT NOT NULL DEFAULT 'internal',
+    zdr_reason   TEXT,
+    extraction_trace JSONB,
+    created_by   TEXT,
+    deleted_by   TEXT,
+    idempotency_key TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at   TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_idempotency
+    ON documents (org_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL AND deleted_at IS NULL;
+`
+
+func setupPostgres(t *testing.T) (*pgxpool.Pool, func()) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	container, err := pgmod.Run(ctx,
+		"postgres:16-alpine",
+		pgmod.WithDatabase("dataplane_test"),
+		pgmod.WithUsername("test"),
+		pgmod.WithPassword("test"),
+		tc.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(30*time.Second),
+		),
+	)
+	if err != nil {
+		t.Skipf("docker not available, skipping testcontainers: %v", err)
+	}
+
+	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+
+	// Apply schema using database/sql for one-shot DDL (avoids pgx pool warmup).
+	db, err := sql.Open("pgx", connStr)
+	if err == nil {
+		// pgx stdlib not registered without import; fall back to pgxpool directly.
+		_ = db.Close()
+	}
+
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		t.Fatalf("pgx pool: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+
+	cleanup := func() {
+		pool.Close()
+		_ = container.Terminate(context.Background())
+	}
+	return pool, cleanup
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+func TestCreateAndGet(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	result, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID:   "org-test",
+		Source:  "src",
+		Type:    "article",
+		Title:   "Hello",
+		Content: "World",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if result.Reused {
+		t.Errorf("first create should not be reused")
+	}
+	if result.Document.DocumentID == "" {
+		t.Errorf("expected document_id")
+	}
+
+	got, err := r.Get(ctx, "org-test", result.Document.DocumentID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Title != "Hello" {
+		t.Errorf("expected Hello, got %q", got.Title)
+	}
+}
+
+func TestIdempotency(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	input := model.CreateDocumentInput{
+		OrgID:          "org-idem",
+		Source:         "s",
+		Type:           "t",
+		Title:          "First",
+		Content:        "C1",
+		IdempotencyKey: "key-123",
+	}
+
+	first, err := r.Create(ctx, input)
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if first.Reused {
+		t.Errorf("first create should not be reused")
+	}
+
+	// Same key again — must return existing doc, not create new one
+	input.Title = "Second"
+	input.Content = "C2"
+	second, err := r.Create(ctx, input)
+	if err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if !second.Reused {
+		t.Errorf("second create should be reused")
+	}
+	if second.Document.DocumentID != first.Document.DocumentID {
+		t.Errorf("idempotent create returned different doc_id")
+	}
+	if second.Document.Title != "First" {
+		t.Errorf("expected original title, got %q", second.Document.Title)
+	}
+
+	// Different org, same key — must create separately
+	input.OrgID = "org-other"
+	other, err := r.Create(ctx, input)
+	if err != nil {
+		t.Fatalf("cross-org create: %v", err)
+	}
+	if other.Reused {
+		t.Errorf("cross-org should not collide on idempotency key")
+	}
+	if other.Document.DocumentID == first.Document.DocumentID {
+		t.Errorf("cross-org returned same doc_id — TENANT LEAK")
+	}
+}
+
+func TestSoftDeleteOrgScope(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	doc, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID: "org-A", Source: "s", Type: "t", Title: "A", Content: "x",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Org B tries to delete org A's doc — must fail
+	err = r.SoftDelete(ctx, "org-B", doc.Document.DocumentID, "")
+	if err == nil {
+		t.Errorf("cross-org delete must fail")
+	}
+
+	// Doc must still be retrievable from org A
+	got, err := r.Get(ctx, "org-A", doc.Document.DocumentID)
+	if err != nil {
+		t.Fatalf("doc disappeared: %v", err)
+	}
+	if got.DocumentID == "" {
+		t.Errorf("doc unexpectedly deleted")
+	}
+}
+
+func TestListOrgScoped(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	for _, org := range []string{"a", "b", "c"} {
+		for i := 0; i < 3; i++ {
+			meta, _ := json.Marshal(map[string]int{"i": i})
+			if _, err := r.Create(ctx, model.CreateDocumentInput{
+				OrgID:    "org-" + org,
+				Source:   "s",
+				Type:     "t",
+				Title:    fmt.Sprintf("%s-%d", org, i),
+				Content:  "x",
+				Metadata: meta,
+			}); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+		}
+	}
+
+	res, err := r.List(ctx, model.ListDocumentsInput{OrgID: "org-b", Limit: 100})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if res.Total != 3 {
+		t.Errorf("expected 3 docs for org-b, got %d", res.Total)
+	}
+	for _, d := range res.Documents {
+		if d.OrgID != "org-b" {
+			t.Errorf("got doc from %q in org-b list", d.OrgID)
+		}
+	}
+}

@@ -1,0 +1,32 @@
+[package]
+name = "graph-index-rs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "graph-index"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sqlx.workspace = true
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+envy = "0.4"
+async-nats = "0.38"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+chrono.workspace = true
+# gRPC server (graph_v1.proto)
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

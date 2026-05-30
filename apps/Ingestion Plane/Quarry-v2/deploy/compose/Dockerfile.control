@@ -1,0 +1,42 @@
+# quarry-control-go (Go durable plane: jobs/schedules/profiles/webhooks/Postgres)
+#
+# Three local module deps live in pkg/:
+#   - pkg/quarrycontracts (cross-plane Go contracts)
+#   - pkg/quarryotel      (shared OTLP/W3C TraceContext bootstrap, cycle 14)
+#   - pkg/quarryassets    (where present)
+# The build copies them all so `go mod tidy` resolves the `replace` directives
+# in services/quarry-control/go.mod.
+
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+
+# Copy local module dependencies first (pkg/) so cache survives service-only edits.
+COPY pkg ./pkg
+
+# Now copy the service tree.
+COPY services/quarry-control ./services/quarry-control
+
+WORKDIR /src/services/quarry-control
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags="-s -w -extldflags=-static" \
+        -o /out/control ./cmd/control
+
+# ---- Runtime image -----------------------------------------------------------
+# bookworm-slim with wget for Docker healthchecks; adds ~25 MB over distroless.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin quarry
+
+COPY --from=build --chown=quarry:quarry /out/control /app/control
+
+USER quarry
+WORKDIR /app
+EXPOSE 8081
+# /health is GET-only; use -O /dev/null instead of --spider (which sends HEAD).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD wget --quiet --tries=1 -O /dev/null http://localhost:8081/health || exit 1
+ENTRYPOINT ["/app/control"]

@@ -1,0 +1,26 @@
+[package]
+name = "autocomplete-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Triodelab <eng@triodelab.com>"]
+
+[dependencies]
+async-nats = "0.37"
+axum = { version = "0.7", features = ["macros", "http2"] }
+blake3 = "1.5"
+futures-util = "0.3"
+rusqlite = { version = "0.36", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sonic-channel = { version = "1.1", features = ["ingest", "search"] }
+thiserror = "2"
+tokio = { version = "1.41", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2.5"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

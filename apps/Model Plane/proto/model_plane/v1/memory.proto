@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// MemoryService — memory index and retrieval for session context.
+// Letta-bridge owns block synchronization; session-core owns the memory index metadata.
+// This service defines the retrieval interface used by context assembly.
+service MemoryService {
+  // Search memory entries relevant to a query.
+  rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
+
+  // Index a new memory entry.
+  rpc IndexMemory(IndexMemoryRequest) returns (IndexMemoryResponse);
+
+  // Health check.
+  rpc Health(MemoryHealthRequest) returns (MemoryHealthResponse);
+}
+
+message SearchMemoryRequest {
+  // Thread context for scoping.
+  string thread_id = 1;
+
+  // Natural language query.
+  string query = 2;
+
+  // Memory topic filter: "POLICY", "WORKSPACE", "AGENT", "USER", "MEMORY".
+  repeated string topic_filter = 3;
+
+  // Maximum results.
+  uint32 limit = 4;
+
+  // Tenant context.
+  string org_id = 5;
+
+  // Optional lower bound for updated_at.
+  google.protobuf.Timestamp updated_after = 6;
+}
+
+message SearchMemoryResponse {
+  // Matching memory entries ordered by relevance.
+  repeated MemoryEntry entries = 1;
+}
+
+message MemoryEntry {
+  // Memory entry identifier.
+  string memory_id = 1;
+
+  // Thread that owns this entry.
+  string thread_id = 2;
+
+  // Topic: "POLICY", "WORKSPACE", "AGENT", "USER", "MEMORY".
+  string topic = 3;
+
+  // Content of the memory entry.
+  string content = 4;
+
+  // Relevance score (0.0 - 1.0).
+  float score = 5;
+
+  // When this entry was last updated.
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message IndexMemoryRequest {
+  // Thread this memory belongs to.
+  string thread_id = 1;
+
+  // Topic classification.
+  string topic = 2;
+
+  // Content to index.
+  string content = 3;
+
+  // Tenant context.
+  string org_id = 4;
+}
+
+message IndexMemoryResponse {
+  // Assigned memory entry identifier.
+  string memory_id = 1;
+}
+
+message MemoryHealthRequest {}
+
+message MemoryHealthResponse {
+  // "ok" when service is healthy.
+  string status = 1;
+}

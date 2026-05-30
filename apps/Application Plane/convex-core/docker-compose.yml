@@ -1,0 +1,409 @@
+name: application-plane
+
+services:
+  # ============================================================================
+  # 1) Convex Backend - runtime + sqlite storage
+  # ============================================================================
+
+  convex-backend:
+    image: ghcr.io/get-convex/convex-backend:latest
+    container_name: convex-backend
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 20s
+    ports:
+      - "3210:3210"  # Backend API
+      - "3211:3211"  # HTTP Actions
+    volumes:
+      - convex-data:/data
+      - ./convex:/app/convex:ro
+    environment:
+      # Instance configuration
+      CONVEX_INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
+      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
+
+      # Database configuration
+      CONVEX_STORAGE_TYPE: sqlite
+      CONVEX_SQLITE_PATH: /data/convex.db
+
+      # Service URLs (cross-plane via inter-plane-bus).
+      # `org-core` + `auth-core` are the canonical Control Plane service
+      # names (see velion-gap.md G7). The legacy `org-core-service` /
+      # `auth-service` aliases still resolve in docker-compose but are
+      # being phased out — do not introduce new references to them.
+      AI_CORE_URL: ${AI_CORE_URL:-http://ai-core:8000}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-core:3011}
+
+      # Auth configuration
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
+
+      # Logging
+      RUST_LOG: ${RUST_LOG:-info}
+      CONVEX_LOG_FORMAT: json
+      CONVEX_DISABLE_BEACON: "true"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3210/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ============================================================================
+  # 2) Convex Dashboard - UI
+  # ============================================================================
+
+  convex-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: convex-dashboard
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    ports:
+      - "6791:6791"
+    environment:
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+      NODE_ENV: ${NODE_ENV:-development}
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  # ============================================================================
+  # 3) Convex Gateway - dev gateway / schema push
+  # ============================================================================
+
+  convex-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: convex-gateway
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    env_file:
+      - ./.env.local
+    environment:
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+    # G49 (velion-gap.md §8.33): mount the host `./convex/` directory so
+    # the dev server (running `npx convex dev` per startup.sh) picks up
+    # function changes without requiring an image rebuild. Without this
+    # mount the baked-in snapshot at image-build time is what gets
+    # pushed, and any subsequent additions (Wave 7 G35 controlSessions,
+    # Wave 10 G43 byUser query) never reach the running backend — the
+    # exact failure mode that produced
+    # `Could not find public function for 'controlSessions:byUser'`.
+    volumes:
+      - ./convex:/app/convex
+    ports:
+      - "3000:3000"
+    networks:
+      - app-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'npx convex dev' || pgrep -f 'node' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  # ============================================================================
+  # 4) Convex Subscriber - sync fra Control Plane NATS
+  # ============================================================================
+
+  convex-subscriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: convex-subscriber
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    command: ["node", "nats-subscriber.js"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'nats-subscriber' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    env_file:
+      - ./.env.local
+    environment:
+      # controlplane-nats is now on inter-plane-bus — no more host.docker.internal hack
+      NATS_URL: nats://controlplane-nats:4222
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  # ============================================================================
+  # 5) Planner Sync Core - first-party collaborative transport
+  # ============================================================================
+
+  planner-sync-core:
+    build:
+      context: ../planner-sync-core
+      dockerfile: Dockerfile
+    container_name: planner-sync-core
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    ports:
+      - "1234:1234"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 1234
+      AUTH_SERVICE_URL: http://auth-core:3011
+      USER_SERVICE_URL: http://user-core:3012
+      AFFINE_CORE_URL: http://affine-core:3180
+      CONVEX_URL: http://convex-backend:3210
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      VELION_NATS_URL: ${VELION_NATS_URL}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================================
+  # 6) AFFiNE Backend - app + postgres + redis
+  # ============================================================================
+
+  affine:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine-server
+    profiles: ["affine"]
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 20s
+    depends_on:
+      affine-postgres:
+        condition: service_healthy
+      affine-redis:
+        condition: service_healthy
+      affine-migration:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_SERVER_HTTPS: "false"
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@affine-postgres:5432/affine
+      REDIS_SERVER_HOST: affine-redis
+      AFFINE_INDEXER_ENABLED: "false"
+    volumes:
+      - affine-uploads:/root/.affine/storage
+      - affine-config:/root/.affine/config
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3010/info').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  affine-migration:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine-migration-job
+    profiles: ["affine"]
+    depends_on:
+      affine-postgres:
+        condition: service_healthy
+      affine-redis:
+        condition: service_healthy
+    command: ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_SERVER_HTTPS: "false"
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@affine-postgres:5432/affine
+      REDIS_SERVER_HOST: affine-redis
+      AFFINE_INDEXER_ENABLED: "false"
+    volumes:
+      - affine-uploads:/root/.affine/storage
+      - affine-config:/root/.affine/config
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  affine-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: affine-postgres
+    profiles: ["affine"]
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    environment:
+      POSTGRES_DB: affine
+      POSTGRES_USER: affine
+      POSTGRES_PASSWORD: ${AFFINE_POSTGRES_PASSWORD:-affine_secret}
+    volumes:
+      - affine-postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U affine -d affine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  affine-redis:
+    image: redis:7-alpine
+    container_name: affine-redis
+    profiles: ["affine"]
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  convex-data:
+    driver: local
+  affine-uploads:
+    driver: local
+  affine-config:
+    driver: local
+  affine-postgres-data:
+    driver: local
+
+networks:
+  # Privat nettverk for Application plane
+  app-net:
+    name: app-net
+    driver: bridge
+
+  # Shared nettverk for cross-plane app-til-app kommunikasjon
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
+    labels:
+      com.docker.compose.network: "inter-plane-bus"
+      com.docker.compose.project: "coresystem"

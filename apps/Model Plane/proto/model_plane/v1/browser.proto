@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// BrowserBroker — trusted browser grant lifecycle.
+// Owns: grant issuance, local/cloud mode switching, per-session revocation, action audit.
+service BrowserBroker {
+  // Request a browser grant for a session.
+  rpc AcquireGrant(AcquireGrantRequest) returns (AcquireGrantResponse);
+
+  // Revoke a browser grant.
+  rpc RevokeGrant(RevokeGrantRequest) returns (RevokeGrantResponse);
+
+  // Validate a browser grant is active and not revoked/expired.
+  rpc ValidateGrant(ValidateGrantRequest) returns (ValidateGrantResponse);
+
+  // Health check.
+  rpc Health(BrowserHealthRequest) returns (BrowserHealthResponse);
+}
+
+message AcquireGrantRequest {
+  // Session requesting browser access.
+  string session_key = 1;
+
+  // Preferred mode: "local" or "cloud".
+  string mode = 2;
+
+  // Tenant identifier.
+  string org_id = 3;
+}
+
+message AcquireGrantResponse {
+  // Grant identifier (ULID).
+  string grant_id = 1;
+
+  // Browser endpoint (CDP URL or local ws).
+  string endpoint = 2;
+
+  // Grant expiry time.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message RevokeGrantRequest {
+  // Grant to revoke.
+  string grant_id = 1;
+
+  // Reason for revocation.
+  string reason = 2;
+}
+
+message RevokeGrantResponse {
+  // True if revoked successfully.
+  bool revoked = 1;
+}
+
+message BrowserHealthRequest {}
+
+message BrowserHealthResponse {
+  // "ok" when service is healthy.
+  string status = 1;
+}
+
+message ValidateGrantRequest {
+  // Grant to validate.
+  string grant_id = 1;
+}
+
+message ValidateGrantResponse {
+  // Grant identifier echoed back.
+  string grant_id = 1;
+
+  // True if grant is active and unexpired.
+  bool active = 2;
+
+  // Grant expiry time.
+  google.protobuf.Timestamp expires_at = 3;
+}

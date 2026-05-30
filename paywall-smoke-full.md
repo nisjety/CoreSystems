@@ -1,0 +1,85 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - main [ref=e12]:
+      - generic [ref=e13]:
+        - generic [ref=e14]:
+          - heading "Do more with Velion" [level=1] [ref=e15]
+          - paragraph [ref=e16]: Select a plan based on your needs
+        - generic [ref=e17]:
+          - button "Monthly" [ref=e18]
+          - switch [ref=e19]
+          - button "Yearly" [ref=e21]
+          - generic [ref=e22]: 2 months free
+      - generic [ref=e23]:
+        - generic [ref=e177]:
+          - generic [ref=e178]:
+            - img [ref=e179]
+            - text: Most Popular
+          - article [ref=e181] [cursor=pointer]:
+            - generic [ref=e182]
+            - generic [ref=e185]
+            - paragraph [ref=e188]: For testing Velion with one workspace before rollout.
+            - list [ref=e189]
+            - button "Selected" [ref=e202]
+        - article [ref=e46] [cursor=pointer]:
+          - heading "Starter" [level=2] [ref=e48]
+          - generic [ref=e49]:
+            - generic [ref=e50]: $5
+            - generic [ref=e51]: /month
+          - paragraph [ref=e52]: For small teams creating their first AI support flows.
+          - list [ref=e53]:
+            - listitem [ref=e54]
+            - listitem [ref=e58]
+            - listitem [ref=e62]
+          - button "Select plan" [ref=e66]
+        - article [ref=e203] [cursor=pointer]:
+          - generic [ref=e204]:
+            - heading "Creator" [level=2] [ref=e205]
+            - generic [ref=e206]: First month 50% off
+          - generic [ref=e207]:
+            - generic [ref=e208]: $22
+            - generic [ref=e209]: $11
+            - generic [ref=e210]: /month
+          - paragraph [ref=e211]: For teams making premium support content for customers.
+          - list [ref=e212]:
+            - listitem [ref=e213]
+            - listitem [ref=e217]
+            - listitem [ref=e221]
+            - listitem [ref=e225]
+          - button "Select plan" [ref=e229]
+        - article [ref=e99] [cursor=pointer]:
+          - heading "Pro" [level=2] [ref=e101]
+          - generic [ref=e102]:
+            - generic [ref=e103]: $99
+            - generic [ref=e104]: /month
+          - paragraph [ref=e105]: For teams ramping up their content and automation.
+          - list [ref=e106]:
+            - listitem [ref=e107]
+            - listitem [ref=e111]
+            - listitem [ref=e115]
+            - listitem [ref=e119]
+          - button "Select plan" [ref=e123]
+        - article [ref=e124] [cursor=pointer]:
+          - heading "Enterprise" [level=2] [ref=e126]
+          - generic [ref=e128]: Custom
+          - paragraph [ref=e129]: For larger organizations with governance requirements.
+          - list [ref=e130]:
+            - listitem [ref=e131]
+            - listitem [ref=e135]
+            - listitem [ref=e139]
+            - listitem [ref=e143]
+          - button "Select plan" [ref=e147]
+      - generic [ref=e148]:
+        - paragraph [ref=e149]: Free is recommended
+        - paragraph [ref=e150]: Start gratis nå. Legg til nettsted og kilder for en mer presis plan.
+        - generic [ref=e152]:
+          - generic [ref=e153]: 100 ansatte
+          - generic [ref=e154]: Nettsted
+          - generic [ref=e155]: 3 kilder
+      - generic [ref=e156]:
+        - button "Skip" [ref=e157]
+        - button "Explore all plans" [ref=e158]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e171] [cursor=pointer]:
+    - img [ref=e172]
+  - alert [ref=e175]

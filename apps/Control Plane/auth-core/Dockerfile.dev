@@ -1,0 +1,21 @@
+# Dockerfile.dev for Auth Service
+FROM node:20-alpine
+
+# Jobbmappe inne i containeren
+WORKDIR /app
+
+# Aktiver corepack for pnpm og enable pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+# Kopier kun manifest først for cache av node_modules-laget
+COPY package.json pnpm-lock.yaml* ./
+
+# Install dependencies (allow updating lockfile in dev)
+RUN pnpm install
+
+# Standard dev-port
+ENV PORT=3011
+EXPOSE 3011
+
+# Default kommando – overrides i docker-compose
+CMD ["pnpm", "run", "start:dev"]

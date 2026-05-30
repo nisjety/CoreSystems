@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package dataplane.documents.v2;
+
+option go_package = "github.com/triodelab/dataplane/gen/go/documents/v2";
+option java_package = "com.triodelab.dataplane.documents.v2";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ────────────────────────────────────────────────────────────────────────────
+// CORE MESSAGES (extended from v1)
+// ────────────────────────────────────────────────────────────────────────────
+
+message Document {
+  string document_id = 1;
+  string org_id      = 2;
+  string source      = 3;    // "sharepoint" | "web" | "pdf" | etc.
+  string type        = 4;    // "policy" | "invoice" | "report" | etc.
+  string title       = 5;
+  string content     = 6;
+  string status      = 7;    // "active" | "archived" | "deleted"
+  google.protobuf.Struct metadata = 8;
+  
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp deleted_at = 11;
+  
+  // V2: ZDR classification
+  string zdr_classification = 12;  // "public" | "internal" | "confidential" | "restricted"
+  optional string zdr_reason = 13;  // "user_marked" | "policy_inferred" | "automated_scan"
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// INDEX STATUS MESSAGES
+// ────────────────────────────────────────────────────────────────────────────
+
+message DocumentIndexStatus {
+  string document_id = 1;
+  string org_id = 2;
+  
+  // Chunking status
+  int32  chunk_count = 3;
+  string chunk_status = 4;  // "pending" | "processing" | "complete" | "failed"
+  
+  // Embedding status
+  string embed_status = 5;  // "pending" | "processing" | "complete" | "failed"
+  int32  embeddings_synced = 6;  // how many chunks have embeddings
+  
+  // Vector store status
+  string vector_status = 7;  // "pending" | "synced" | "sync_partial" | "failed"
+  
+  google.protobuf.Timestamp last_indexed_at = 8;
+  optional string error_message = 9;
+}
+
+message GetDocumentIndexStatusRequest {
+  string document_id = 1;
+  string org_id = 2;
+}
+
+message GetDocumentIndexStatusResponse {
+  DocumentIndexStatus status = 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// INGEST STATUS MESSAGES
+// ────────────────────────────────────────────────────────────────────────────
+
+message IngestPolicy {
+  string zdr_mode = 1;  // "disabled" | "ephemeral_only"
+  string index_schedule = 2;  // "immediate" | "batch_hourly" | "batch_daily"
+  bool   ephemeral_only = 3;  // if true, documents never written to permanent storage
+}
+
+message IngestStatusRequest {
+  string org_id = 1;
+}
+
+message IngestStatusResponse {
+  IngestPolicy policy = 1;
+  bool is_active = 2;
+  google.protobuf.Timestamp next_batch_window = 3;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// STANDARD OPERATIONS
+// ────────────────────────────────────────────────────────────────────────────
+
+message GetDocumentRequest {
+  string document_id = 1;
+  string org_id = 2;
+}
+
+message GetDocumentResponse {
+  Document document = 1;
+}
+
+message ListDocumentsRequest {
+  string org_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  string type = 4;  // filter by type
+}
+
+message ListDocumentsResponse {
+  repeated Document documents = 1;
+  int32 total = 2;
+}
+
+message DeleteDocumentRequest {
+  string document_id = 1;
+  string org_id = 2;
+}
+
+message DeleteDocumentResponse {
+  bool success = 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SERVICES
+// ────────────────────────────────────────────────────────────────────────────
+
+service DocumentService {
+  // Standard CRUD (backward-compatible with v1)
+  rpc GetDocument(GetDocumentRequest) returns (GetDocumentResponse);
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+  
+  // V2: index status tracking
+  rpc GetDocumentIndexStatus(GetDocumentIndexStatusRequest) returns (GetDocumentIndexStatusResponse);
+  
+  // V2: ingest policy introspection
+  rpc GetIngestStatus(IngestStatusRequest) returns (IngestStatusResponse);
+}

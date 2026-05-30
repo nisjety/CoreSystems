@@ -1,0 +1,36 @@
+{
+  "name": "basic",
+  "seed": 42,
+  "input": {
+    "url": "https://example.com/a",
+    "title": "Hello World",
+    "body": "one two three"
+  },
+  "expected": [
+    {
+      "key": "audience",
+      "value": "executive",
+      "score": 0.88
+    },
+    {
+      "key": "language",
+      "value": "es",
+      "score": 0.68
+    },
+    {
+      "key": "length",
+      "value": "medium",
+      "score": 0.62
+    },
+    {
+      "key": "sentiment",
+      "value": "neutral",
+      "score": 0.9
+    },
+    {
+      "key": "topic",
+      "value": "product",
+      "score": 0.36
+    }
+  ]
+}

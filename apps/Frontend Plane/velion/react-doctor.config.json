@@ -1,0 +1,11 @@
+{
+  "ignore": {
+    "rules": [
+      "react-doctor/require-reduced-motion"
+    ],
+    "files": [
+      ".next/**",
+      ".next*/**"
+    ]
+  }
+}

@@ -1,0 +1,504 @@
+syntax = "proto3";
+
+package user.v1;
+
+option go_package = "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/proto/user/v1;userv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// UserService provides comprehensive user management operations
+service UserService {
+  // User CRUD operations
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc GetUserByEmail(GetUserByEmailRequest) returns (GetUserByEmailResponse);
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  
+  // User status management
+  rpc ActivateUser(ActivateUserRequest) returns (ActivateUserResponse);
+  rpc DeactivateUser(DeactivateUserRequest) returns (DeactivateUserResponse);
+  rpc BlockUser(BlockUserRequest) returns (BlockUserResponse);
+  rpc UnblockUser(UnblockUserRequest) returns (UnblockUserResponse);
+  rpc SuspendUser(SuspendUserRequest) returns (SuspendUserResponse);
+  rpc UnsuspendUser(UnsuspendUserRequest) returns (UnsuspendUserResponse);
+  
+  // Profile management
+  rpc GetUserProfile(GetUserProfileRequest) returns (GetUserProfileResponse);
+  rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UpdateUserProfileResponse);
+  
+  // Session management
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc InvalidateSession(InvalidateSessionRequest) returns (InvalidateSessionResponse);
+  rpc InvalidateAllSessions(InvalidateAllSessionsRequest) returns (InvalidateAllSessionsResponse);
+  
+  // Activity logging
+  rpc LogActivity(LogActivityRequest) returns (LogActivityResponse);
+  rpc ListActivities(ListActivitiesRequest) returns (ListActivitiesResponse);
+  
+  // Role management
+  rpc AssignRole(AssignRoleRequest) returns (AssignRoleResponse);
+  rpc ListUserRoles(ListUserRolesRequest) returns (ListUserRolesResponse);
+  rpc RemoveRole(RemoveRoleRequest) returns (RemoveRoleResponse);
+  
+  // Device management
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  rpc UpdateDevice(UpdateDeviceRequest) returns (UpdateDeviceResponse);
+  rpc DeactivateDevice(DeactivateDeviceRequest) returns (DeactivateDeviceResponse);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// User represents a user in the system
+message User {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string avatar = 4;
+  UserStatus status = 5;
+  bool email_verified = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+  google.protobuf.Timestamp last_login_at = 9;
+}
+
+// UserProfile represents extended user profile information
+message UserProfile {
+  string user_id = 1;
+  string bio = 2;
+  string phone = 3;
+  string location = 4;
+  string timezone = 5;
+  string language = 6;
+  google.protobuf.Struct metadata = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// UserStatus represents the status of a user
+enum UserStatus {
+  USER_STATUS_UNSPECIFIED = 0;
+  USER_STATUS_ACTIVE = 1;
+  USER_STATUS_INACTIVE = 2;
+  USER_STATUS_BLOCKED = 3;
+  USER_STATUS_SUSPENDED = 4;
+}
+
+// Session represents a user session
+message Session {
+  string id = 1;
+  string user_id = 2;
+  string token = 3;
+  string device_info = 4;
+  string ip_address = 5;
+  string user_agent = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  google.protobuf.Timestamp last_accessed_at = 9;
+}
+
+// Activity represents a user activity log entry
+message Activity {
+  string id = 1;
+  string user_id = 2;
+  string action = 3;
+  string resource = 4;
+  google.protobuf.Struct details = 5;
+  string ip_address = 6;
+  string user_agent = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// Role represents a user role
+message Role {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string permissions = 4;
+}
+
+// Device represents a user device
+message Device {
+  string id = 1;
+  string user_id = 2;
+  string device_name = 3;
+  string device_type = 4;
+  string device_os = 5;
+  string device_browser = 6;
+  bool is_active = 7;
+  google.protobuf.Timestamp last_used_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+// Pagination for list requests
+message Pagination {
+  int32 page = 1;
+  int32 limit = 2;
+}
+
+// User CRUD messages
+
+message CreateUserRequest {
+  string email = 1;
+  string name = 2;
+  string password = 3;
+  string avatar = 4;
+  // Canonical auth-service user ID. When set, CreateUser behaves as an
+  // idempotent sync into user-core instead of minting a separate local ID.
+  string id = 5;
+}
+
+message CreateUserResponse {
+  User user = 1;
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message GetUserByEmailRequest {
+  string email = 1;
+}
+
+message GetUserByEmailResponse {
+  User user = 1;
+}
+
+message UpdateUserRequest {
+  string id = 1;
+  optional string name = 2;
+  optional string avatar = 3;
+  optional string email = 4;
+}
+
+message UpdateUserResponse {
+  User user = 1;
+}
+
+message DeleteUserRequest {
+  string id = 1;
+}
+
+message DeleteUserResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListUsersRequest {
+  Pagination pagination = 1;
+  optional UserStatus status = 2;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 limit = 4;
+}
+
+// User status management messages
+
+message ActivateUserRequest {
+  string user_id = 1;
+}
+
+message ActivateUserResponse {
+  User user = 1;
+}
+
+message DeactivateUserRequest {
+  string user_id = 1;
+}
+
+message DeactivateUserResponse {
+  User user = 1;
+}
+
+message BlockUserRequest {
+  string user_id = 1;
+  string reason = 2;
+}
+
+message BlockUserResponse {
+  User user = 1;
+}
+
+message UnblockUserRequest {
+  string user_id = 1;
+}
+
+message UnblockUserResponse {
+  User user = 1;
+}
+
+message SuspendUserRequest {
+  string user_id = 1;
+  string reason = 2;
+  optional google.protobuf.Timestamp until = 3;
+}
+
+message SuspendUserResponse {
+  User user = 1;
+}
+
+message UnsuspendUserRequest {
+  string user_id = 1;
+}
+
+message UnsuspendUserResponse {
+  User user = 1;
+}
+
+// Profile management messages
+
+message GetUserProfileRequest {
+  string user_id = 1;
+}
+
+message GetUserProfileResponse {
+  UserProfile profile = 1;
+}
+
+message UpdateUserProfileRequest {
+  string user_id = 1;
+  optional string bio = 2;
+  optional string phone = 3;
+  optional string location = 4;
+  optional string timezone = 5;
+  optional string language = 6;
+  optional google.protobuf.Struct metadata = 7;
+}
+
+message UpdateUserProfileResponse {
+  UserProfile profile = 1;
+}
+
+// Session management messages
+
+message CreateSessionRequest {
+  string user_id = 1;
+  string device_info = 2;
+  string ip_address = 3;
+  string user_agent = 4;
+  int32 expires_in_seconds = 5;
+}
+
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+message ListSessionsRequest {
+  string user_id = 1;
+  bool active_only = 2;
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+message InvalidateSessionRequest {
+  string session_id = 1;
+}
+
+message InvalidateSessionResponse {
+  bool success = 1;
+}
+
+message InvalidateAllSessionsRequest {
+  string user_id = 1;
+}
+
+message InvalidateAllSessionsResponse {
+  int32 invalidated_count = 1;
+}
+
+// Activity logging messages
+
+message LogActivityRequest {
+  string user_id = 1;
+  string action = 2;
+  string resource = 3;
+  google.protobuf.Struct details = 4;
+  string ip_address = 5;
+  string user_agent = 6;
+}
+
+message LogActivityResponse {
+  Activity activity = 1;
+}
+
+message ListActivitiesRequest {
+  string user_id = 1;
+  Pagination pagination = 2;
+}
+
+message ListActivitiesResponse {
+  repeated Activity activities = 1;
+  int32 total = 2;
+}
+
+// Role management messages
+
+message AssignRoleRequest {
+  string user_id = 1;
+  string role_id = 2;
+}
+
+message AssignRoleResponse {
+  bool success = 1;
+}
+
+message ListUserRolesRequest {
+  string user_id = 1;
+}
+
+message ListUserRolesResponse {
+  repeated Role roles = 1;
+}
+
+message RemoveRoleRequest {
+  string user_id = 1;
+  string role_id = 2;
+}
+
+message RemoveRoleResponse {
+  bool success = 1;
+}
+
+// Device management messages
+
+message RegisterDeviceRequest {
+  string user_id = 1;
+  string device_name = 2;
+  string device_type = 3;
+  string device_os = 4;
+  string device_browser = 5;
+}
+
+message RegisterDeviceResponse {
+  Device device = 1;
+}
+
+message ListDevicesRequest {
+  string user_id = 1;
+  bool active_only = 2;
+}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
+}
+
+message UpdateDeviceRequest {
+  string device_id = 1;
+  optional string device_name = 2;
+  optional bool is_active = 3;
+}
+
+message UpdateDeviceResponse {
+  Device device = 1;
+}
+
+message DeactivateDeviceRequest {
+  string device_id = 1;
+}
+
+message DeactivateDeviceResponse {
+  bool success = 1;
+}
+
+// Health check messages
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+  }
+  ServingStatus status = 1;
+  string message = 2;
+}
+
+// Document ACL service — grants, revokes, and checks per-user document access.
+
+service DocumentAccessService {
+  rpc GrantDocumentAccess(GrantDocumentAccessRequest)   returns (GrantDocumentAccessResponse);
+  rpc RevokeDocumentAccess(RevokeDocumentAccessRequest) returns (RevokeDocumentAccessResponse);
+  rpc GetDocumentAccess(GetDocumentAccessRequest)       returns (GetDocumentAccessResponse);
+  rpc ListDocumentAccess(ListDocumentAccessRequest)     returns (ListDocumentAccessResponse);
+  rpc CheckDocumentAccess(CheckDocumentAccessRequest)   returns (CheckDocumentAccessResponse);
+}
+
+message DocumentAclEntry {
+  string acl_id            = 1;
+  string org_id            = 2;
+  string document_id       = 3;
+  string user_id           = 4;
+  string permission_level  = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message GrantDocumentAccessRequest {
+  string org_id            = 1;
+  string document_id       = 2;
+  string user_id           = 3;
+  string permission_level  = 4;
+}
+
+message GrantDocumentAccessResponse {
+  DocumentAclEntry acl = 1;
+}
+
+message RevokeDocumentAccessRequest {
+  string org_id      = 1;
+  string document_id = 2;
+  string user_id     = 3;
+}
+
+message RevokeDocumentAccessResponse {
+  bool revoked = 1;
+}
+
+message GetDocumentAccessRequest {
+  string org_id      = 1;
+  string document_id = 2;
+  string user_id     = 3;
+}
+
+message GetDocumentAccessResponse {
+  DocumentAclEntry acl = 1;
+}
+
+message ListDocumentAccessRequest {
+  string org_id      = 1;
+  string document_id = 2;
+  Pagination pagination = 3;
+}
+
+message ListDocumentAccessResponse {
+  repeated DocumentAclEntry acls = 1;
+  int32 total                    = 2;
+}
+
+message CheckDocumentAccessRequest {
+  string org_id            = 1;
+  string document_id       = 2;
+  string user_id           = 3;
+  string permission_level  = 4;
+}
+
+message CheckDocumentAccessResponse {
+  bool allowed = 1;
+}

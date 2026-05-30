@@ -1,0 +1,57 @@
+name: frontend-plane-velionv2
+
+# Frontend Plane: velion v2.
+# Mirrors the velion v1 dev compose minus the unused planner / Affine env vars.
+# The host source tree is bind-mounted so Next.js's file watcher picks up edits.
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: velionv2-frontend
+    ports:
+      - "3001:3000"   # host 3001 → container 3000; v1 keeps host 3000.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: development
+      HOSTNAME: "0.0.0.0"
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+    command:
+      [
+        "sh",
+        "-lc",
+        "if [ ! -x node_modules/.bin/next ]; then mkdir -p node_modules && cp -R /opt/velionv2-deps/node_modules/. node_modules/ 2>/dev/null || true; fi; if [ ! -x node_modules/.bin/next ]; then pnpm install --frozen-lockfile || pnpm install; fi; pnpm dev --hostname 0.0.0.0",
+      ]
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+      - ./package.json:/app/package.json:ro
+      - ./pnpm-lock.yaml:/app/pnpm-lock.yaml:ro
+      - ./next.config.ts:/app/next.config.ts:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./next-env.d.ts:/app/next-env.d.ts
+      - ./postcss.config.mjs:/app/postcss.config.mjs:ro
+      - ./eslint.config.mjs:/app/eslint.config.mjs:ro
+      - velionv2_node_modules:/app/node_modules
+    networks:
+      - inter-plane-bus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --timeout=5 --tries=1 -O /dev/null http://127.0.0.1:3000 || exit 1"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 120s
+
+networks:
+  inter-plane-bus:
+    name: inter-plane-bus
+    external: true
+
+volumes:
+  velionv2_node_modules:

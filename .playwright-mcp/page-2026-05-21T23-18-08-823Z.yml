@@ -1,0 +1,90 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Tilbake til Website" [ref=e8]:
+            - img [ref=e9]
+            - text: Tilbake
+          - navigation "Onboarding steps" [ref=e11]:
+            - button "Go to Intro" [ref=e13]
+            - button "Go to Organization" [ref=e15]
+            - button "Go to Website" [ref=e17]
+            - button "Go to Sources" [ref=e19]
+            - button "Go to Proof" [ref=e21]
+            - button "Go to Plan" [ref=e23]
+          - generic [ref=e24]:
+            - button "Select language" [ref=e28]:
+              - img [ref=e29]
+              - img [ref=e32]
+            - 'generic "Step 4 of 6: Sources" [ref=e35]': Step 4 of 6
+        - generic [ref=e36]:
+          - generic [ref=e38]:
+            - generic [ref=e40]:
+              - generic [ref=e41]: Step 4 of 6 · Sources
+              - heading "Connect Your Knowledge." [level=1] [ref=e42]
+              - paragraph [ref=e43]: Pick the systems Velion should learn from. Each one becomes a cluster of nodes in the graph on the right.
+              - generic [ref=e44]:
+                - generic [ref=e45]:
+                  - paragraph [ref=e46]: Chat
+                  - list [ref=e47]:
+                    - listitem [ref=e48]:
+                      - button "Slack Channels + threads Add" [ref=e49]:
+                        - generic [ref=e50]:
+                          - generic [ref=e51]: Slack
+                          - generic [ref=e52]: Channels + threads
+                        - generic [ref=e53]: Add
+                    - listitem [ref=e54]:
+                      - button "Microsoft 365 Teams, Outlook, SharePoint, OneDrive Connected" [pressed] [ref=e55]:
+                        - generic [ref=e56]:
+                          - generic [ref=e57]: Microsoft 365
+                          - generic [ref=e58]: Teams, Outlook, SharePoint, OneDrive
+                        - generic [ref=e59]: Connected
+                - generic [ref=e60]:
+                  - paragraph [ref=e61]: Documents
+                  - list [ref=e62]:
+                    - listitem [ref=e63]:
+                      - button "Notion Pages + databases Add" [ref=e64]:
+                        - generic [ref=e65]:
+                          - generic [ref=e66]: Notion
+                          - generic [ref=e67]: Pages + databases
+                        - generic [ref=e68]: Add
+                    - listitem [ref=e69]:
+                      - button "Google Drive Docs + Sheets Add" [ref=e70]:
+                        - generic [ref=e71]:
+                          - generic [ref=e72]: Google Drive
+                          - generic [ref=e73]: Docs + Sheets
+                        - generic [ref=e74]: Add
+                - generic [ref=e75]:
+                  - paragraph [ref=e76]: Tools
+                  - list [ref=e77]:
+                    - listitem [ref=e78]:
+                      - button "GitHub README + issues Add" [ref=e79]:
+                        - generic [ref=e80]:
+                          - generic [ref=e81]: GitHub
+                          - generic [ref=e82]: README + issues
+                        - generic [ref=e83]: Add
+              - generic [ref=e84]:
+                - generic [ref=e85]:
+                  - button "Continue" [ref=e86]
+                  - button "Skip" [ref=e87]
+                - paragraph [ref=e88]: 2 sources · 2 nodes · 1 edges
+            - paragraph [ref=e90]:
+              - text: Stuck?
+              - link "support@velion.com" [ref=e91] [cursor=pointer]:
+                - /url: mailto:support@velion.com
+          - generic [ref=e95]:
+            - img [ref=e96]:
+              - generic [ref=e100]: org_1779
+              - generic [ref=e103]: Aquatiq.com
+            - generic:
+              - paragraph: sources 2 · nodes 2 · edges 1
+      - generic [ref=e104]:
+        - button "Om oss" [ref=e105]
+        - button "Personvern" [ref=e106]
+        - button "Opphavsrett" [ref=e107]
+        - button "Cookie-innstillinger" [ref=e108]
+    - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e114] [cursor=pointer]:
+    - img [ref=e115]
+  - alert [ref=e118]

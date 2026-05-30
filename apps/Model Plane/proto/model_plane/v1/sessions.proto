@@ -1,0 +1,233 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "model_plane/v1/events.proto";
+
+// SessionCore — authoritative state for thread timeline, run metadata,
+// checkpoints, instruction loading, compaction summaries, and auto-memory index.
+// Single writer for threads, messages, runs, and checkpoints.
+service SessionCore {
+  // Create a new conversation thread within a session.
+  rpc CreateThread(CreateThreadRequest) returns (CreateThreadResponse);
+
+  // Append a message (user, assistant, or system) to a thread.
+  rpc AppendMessage(AppendMessageRequest) returns (AppendMessageResponse);
+
+  // Start a new run within a thread.
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
+
+  // Record completion of a single step within a run.
+  rpc CompleteStep(CompleteStepRequest) returns (CompleteStepResponse);
+
+  // Persist a checkpoint snapshot for a run.
+  rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
+
+  // Replay the thread event log as a stream of Events.
+  // Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
+  rpc ReplayThread(ReplayThreadRequest) returns (stream Event);
+
+  // Assemble the full context window for a model call.
+  // Order: policy -> workspace -> agent -> user -> thread recent -> episodic
+  //        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+  rpc GetContextAssembly(GetContextAssemblyRequest) returns (GetContextAssemblyResponse);
+
+  // Trigger on-demand checkpoint compaction for all runs with pending events.
+  rpc CompactNow(CompactNowRequest) returns (CompactNowResponse);
+}
+
+// --- CreateThread ---
+
+message CreateThreadRequest {
+  // Session this thread belongs to.
+  string session_key = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+
+  // User who initiated the thread.
+  string user_id = 3;
+
+  // Optional metadata.
+  google.protobuf.Struct metadata = 4;
+}
+
+message CreateThreadResponse {
+  // Newly created thread identifier (ULID).
+  string thread_id = 1;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 2;
+}
+
+// --- AppendMessage ---
+
+message AppendMessageRequest {
+  // Thread to append to.
+  string thread_id = 1;
+
+  // Message role: "user", "assistant", "system", "tool".
+  string role = 2;
+
+  // Message content.
+  string content = 3;
+
+  // Optional metadata (tool call results, citations, etc.).
+  google.protobuf.Struct metadata = 4;
+}
+
+message AppendMessageResponse {
+  // Assigned message sequence number within the thread.
+  uint64 sequence = 1;
+}
+
+// --- StartRun ---
+
+message StartRunRequest {
+  // Thread this run executes within.
+  string thread_id = 1;
+
+  // Parent run (empty for top-level runs).
+  string parent_run_id = 2;
+
+  // Agent definition to use.
+  string agent_id = 3;
+
+  // The user's goal for this run.
+  string goal = 4;
+
+  // Run mode: "execute", "plan", "reactive".
+  string mode = 5;
+
+  // Tenant and user context.
+  string org_id = 6;
+  string user_id = 7;
+}
+
+message StartRunResponse {
+  // Newly created run identifier (ULID).
+  string run_id = 1;
+
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 2;
+}
+
+// --- CompleteStep ---
+
+message CompleteStepRequest {
+  // Run this step belongs to.
+  string run_id = 1;
+
+  // Step identifier.
+  string step_id = 2;
+
+  // Step status: "completed", "failed", "skipped".
+  string status = 3;
+
+  // Step output (may be empty for failed steps).
+  string output = 4;
+
+  // Error message if status is "failed".
+  string error = 5;
+}
+
+message CompleteStepResponse {
+  // Acknowledged step sequence within the run.
+  uint32 step_index = 1;
+}
+
+// --- SaveCheckpoint ---
+
+message SaveCheckpointRequest {
+  // Run this checkpoint belongs to.
+  string run_id = 1;
+
+  // Checkpoint identifier (ULID).
+  string checkpoint_id = 2;
+
+  // Serialized checkpoint state (JSON bytes).
+  bytes state = 3;
+}
+
+message SaveCheckpointResponse {
+  // Acknowledged checkpoint index within the run.
+  uint32 checkpoint_index = 1;
+
+  // Persistence timestamp.
+  google.protobuf.Timestamp saved_at = 2;
+}
+
+// --- ReplayThread ---
+
+message ReplayThreadRequest {
+  // Thread to replay.
+  string thread_id = 1;
+
+  // Optional: replay from this event_id (exclusive). Empty = from beginning.
+  string after_event_id = 2;
+
+  // Optional: maximum number of events to return. 0 = unlimited.
+  uint32 limit = 3;
+}
+
+// --- GetContextAssembly ---
+
+message GetContextAssemblyRequest {
+  // Thread to assemble context for.
+  string thread_id = 1;
+
+  // Run requesting context (for checkpoint and policy resolution).
+  string run_id = 2;
+
+  // Maximum context window size in tokens.
+  uint32 max_tokens = 3;
+
+  // Policy identifier; empty skips policy segment.
+  string policy_id = 4;
+
+  // Workspace identifier; empty skips workspace segment.
+  string workspace_id = 5;
+
+  // Agent identifier override; empty falls back to runs.agent_id lookup via run_id.
+  string agent_id = 6;
+}
+
+message GetContextAssemblyResponse {
+  // Ordered context segments ready for model submission.
+  repeated ContextSegment segments = 1;
+
+  // Estimated total token count of the assembled context.
+  uint32 estimated_tokens = 2;
+}
+
+// A single segment of the assembled context window.
+message ContextSegment {
+  // Segment kind: "policy", "workspace", "agent", "user", "thread",
+  // "episodic", "skill_index", "skill_expansion", "retrieval", "prompt".
+  string kind = 1;
+
+  // Segment content.
+  string content = 2;
+
+  // Token estimate for this segment.
+  uint32 estimated_tokens = 3;
+}
+
+// --- CompactNow ---
+
+message CompactNowRequest {
+  // If true, return a terse single-line summary instead of full details.
+  bool toon = 1;
+}
+
+message CompactNowResponse {
+  // Number of checkpoint rows inserted during this compaction cycle.
+  int64 compacted_count = 1;
+
+  // Human-readable summary of the compaction result.
+  string summary = 2;
+}

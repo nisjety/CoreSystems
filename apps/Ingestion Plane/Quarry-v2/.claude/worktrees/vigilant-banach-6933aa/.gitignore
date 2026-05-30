@@ -1,0 +1,55 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Go
+bin/
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Docker
+docker-compose.override.yml
+
+# Generated SDKs (regenerate via sdks/generate.sh)
+sdks/python/quarry_client/
+sdks/python/docs/
+sdks/python/test/
+sdks/python/.openapi-generator/
+sdks/python/.venv/
+sdks/python/*.egg-info/
+sdks/python/setup.py
+sdks/python/setup.cfg
+sdks/python/pyproject.toml
+sdks/python/requirements.txt
+sdks/python/test-requirements.txt
+sdks/python/tox.ini
+sdks/python/git_push.sh
+sdks/python/.gitignore
+sdks/python/.openapi-generator-ignore
+sdks/python/.travis.yml
+sdks/python/README.md
+sdks/python/.github/
+sdks/typescript/src/
+sdks/typescript/dist/
+sdks/typescript/.openapi-generator/
+sdks/typescript/node_modules/
+sdks/typescript/*.json
+sdks/typescript/.gitignore
+sdks/typescript/.npmignore
+sdks/typescript/.openapi-generator-ignore
+sdks/typescript/README.md

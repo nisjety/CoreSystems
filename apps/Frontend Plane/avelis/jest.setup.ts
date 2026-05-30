@@ -1,0 +1,1 @@
+process.env.AUTH_SERVICE_URL = 'http://auth-core:3011';

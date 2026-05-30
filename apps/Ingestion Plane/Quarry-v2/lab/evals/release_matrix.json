@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-05-08T10:31:28.130766+00:00",
+  "gates": [
+    {
+      "name": "fixture_scoreboard",
+      "pass": true,
+      "detail": "10/10 passed (100%)"
+    },
+    {
+      "name": "bakeoff_diff",
+      "pass": true,
+      "detail": "quarry vs firecrawl: 0 wins / 0 losses / 0 ties / 10 solo (net +0)"
+    },
+    {
+      "name": "provider_matrix",
+      "pass": true,
+      "detail": "no provider matrix at lab/evals/provider_matrix.report.json (informational)"
+    }
+  ],
+  "overall_pass": true
+}

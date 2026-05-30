@@ -1,0 +1,271 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - button "Collapse sidebar" [ref=e7] [cursor=pointer]:
+            - img [ref=e8]
+          - generic [ref=e11]:
+            - button "Go back" [ref=e13] [cursor=pointer]:
+              - img [ref=e14]
+            - button "Go forward" [ref=e17] [cursor=pointer]:
+              - img [ref=e18]
+          - generic [ref=e20]:
+            - img [ref=e21]
+            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+              - /url: /dashboard
+              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e25]: Free
+            - img [ref=e26]
+            - link "Agenter" [ref=e28] [cursor=pointer]:
+              - /url: /agents
+            - img [ref=e29]
+            - link "Studio" [ref=e31] [cursor=pointer]:
+              - /url: /agents
+        - button "Open global search" [ref=e33] [cursor=pointer]:
+          - img [ref=e34]
+          - generic [ref=e37]: Search across the whole system
+          - generic [ref=e38]: /
+          - generic [ref=e39]: CMD+K
+        - generic [ref=e41]:
+          - button "Toggle dark mode" [ref=e44] [cursor=pointer]:
+            - img [ref=e46]
+          - button "Open AI assistant" [ref=e50] [cursor=pointer]:
+            - img [ref=e51]
+          - button "Quick messages" [ref=e55] [cursor=pointer]:
+            - img [ref=e56]
+          - button "Notifications" [ref=e59] [cursor=pointer]:
+            - img [ref=e60]
+          - button "Calendar" [ref=e63] [cursor=pointer]:
+            - img [ref=e64]
+          - button "Open profile menu" [ref=e67] [cursor=pointer]:
+            - generic [ref=e68]: I
+    - complementary "Primary navigation" [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e71]:
+          - link "Go to home" [ref=e74] [cursor=pointer]:
+            - /url: /dashboard
+            - img [ref=e75]
+          - navigation "Workspace sections" [ref=e84]:
+            - generic [ref=e85]:
+              - link "Oversikt" [ref=e87] [cursor=pointer]:
+                - /url: /dashboard
+                - img [ref=e88]
+              - link "Chat" [ref=e91] [cursor=pointer]:
+                - /url: /chat
+                - img [ref=e92]
+              - link "Agenter" [ref=e95] [cursor=pointer]:
+                - /url: /agents
+                - img [ref=e96]
+              - link "Inbox" [ref=e100] [cursor=pointer]:
+                - /url: /inbox
+                - img [ref=e101]
+              - link "Kunnskap" [ref=e105] [cursor=pointer]:
+                - /url: /knowledge
+                - img [ref=e106]
+          - generic [ref=e108]:
+            - button "Account menu" [ref=e111] [cursor=pointer]:
+              - img [ref=e112]
+            - link "Innstillinger" [ref=e117] [cursor=pointer]:
+              - /url: /settings
+              - img [ref=e118]
+            - button "Søk" [ref=e122] [cursor=pointer]:
+              - img [ref=e123]
+        - generic [ref=e127]:
+          - generic [ref=e128]:
+            - generic [ref=e129]: Agents
+            - button "Collapse sidebar" [ref=e130] [cursor=pointer]:
+              - img [ref=e131]
+          - generic [ref=e133]:
+            - generic:
+              - img
+            - combobox "Select agent type" [ref=e134]:
+              - option "All roles" [selected]
+              - option "Service"
+              - option "Sales"
+              - option "Ecommerce"
+              - option "Chatbot"
+              - option "Workflow builder"
+            - img
+          - navigation "Agent setup tabs" [ref=e135]:
+            - button "Train" [disabled] [ref=e136]:
+              - img [ref=e137]
+              - generic [ref=e139]: Train
+            - button "Test" [disabled] [ref=e140]:
+              - img [ref=e141]
+              - generic [ref=e143]: Test
+            - button "Deploy" [disabled] [ref=e144]:
+              - img [ref=e145]
+              - generic [ref=e150]: Deploy
+            - button "Analyze" [disabled] [ref=e151]:
+              - img [ref=e152]
+              - generic [ref=e154]: Analyze
+    - main [ref=e155]:
+      - generic [ref=e158]:
+        - generic [ref=e159]:
+          - img [ref=e161]
+          - heading "One agent system for the entire customer journey" [level=1] [ref=e164]
+          - paragraph [ref=e165]: Choose a Velion blueprint, then configure the role with knowledge, tests, channels, and insight loops.
+        - region "One agent system for the entire customer journey" [ref=e166]:
+          - generic [ref=e167]:
+            - button "Service agent" [ref=e168] [cursor=pointer]:
+              - generic [ref=e169]:
+                - generic [ref=e172]:
+                  - generic [ref=e174]:
+                    - img [ref=e176]
+                    - generic [ref=e179]: Velion Service
+                  - generic [ref=e181]: Can you help with my order?
+                  - generic [ref=e182]: I found the order and can create a support case if needed.
+                - img [ref=e184]
+              - generic [ref=e186]:
+                - generic [ref=e187]:
+                  - img [ref=e189]
+                  - generic [ref=e192]:
+                    - heading "Service agent" [level=2] [ref=e193]
+                    - paragraph [ref=e194]: Support your customers.
+                - paragraph [ref=e195]: Answer questions, resolve issues, create tickets, and hand off sensitive conversations.
+                - generic [ref=e196]:
+                  - generic [ref=e199]: Instant support
+                  - generic [ref=e202]: Complex query resolution
+                  - generic [ref=e205]: Human handoff
+                - generic [ref=e206]:
+                  - text: Set up service
+                  - img [ref=e207]
+            - button "Sales agent" [ref=e209] [cursor=pointer]:
+              - generic [ref=e210]:
+                - generic [ref=e211]:
+                  - generic [ref=e212]:
+                    - generic [ref=e213]: December 2026
+                    - generic [ref=e214]: Friday
+                  - generic [ref=e215]:
+                    - generic [ref=e216]: "1"
+                    - generic [ref=e217]: "2"
+                    - generic [ref=e218]: "3"
+                    - generic [ref=e219]: "4"
+                    - generic [ref=e220]: "5"
+                    - generic [ref=e221]: "6"
+                    - generic [ref=e222]: "7"
+                    - generic [ref=e223]: "8"
+                    - generic [ref=e224]: "9"
+                    - generic [ref=e225]: "10"
+                    - generic [ref=e226]: "11"
+                    - generic [ref=e227]: "12"
+                    - generic [ref=e228]: "13"
+                    - generic [ref=e229]: "14"
+                    - generic [ref=e230]: "15"
+                    - generic [ref=e231]: "16"
+                    - generic [ref=e232]: "17"
+                    - generic [ref=e233]: "18"
+                    - generic [ref=e234]: "19"
+                    - generic [ref=e235]: "20"
+                    - generic [ref=e236]: "21"
+                  - generic [ref=e237]:
+                    - generic [ref=e238]: 10:30
+                    - generic [ref=e239]: 12:00
+                    - generic [ref=e240]: 14:00
+                - generic [ref=e241]:
+                  - img [ref=e242]
+                  - text: Book a demo with sales
+              - generic [ref=e244]:
+                - generic [ref=e245]:
+                  - img [ref=e247]
+                  - generic [ref=e251]:
+                    - heading "Sales agent" [level=2] [ref=e252]
+                    - paragraph [ref=e253]: Acquire new customers.
+                - paragraph [ref=e254]: Engage visitors, qualify intent, answer objections, and book meetings for the team.
+                - generic [ref=e255]:
+                  - generic [ref=e258]: Lead qualification
+                  - generic [ref=e261]: Product discovery
+                  - generic [ref=e264]: Calendar booking
+                - generic [ref=e265]:
+                  - text: Set up sales
+                  - img [ref=e266]
+            - button "Ecommerce agent" [ref=e268] [cursor=pointer]:
+              - generic [ref=e269]:
+                - generic [ref=e270]:
+                  - generic [ref=e271]: Looking for running shoes?
+                  - generic [ref=e272]:
+                    - generic [ref=e278]: $89
+                    - generic [ref=e284]: $109
+                    - generic [ref=e290]: $129
+                - img [ref=e292]
+              - generic [ref=e295]:
+                - generic [ref=e296]:
+                  - img [ref=e298]
+                  - generic [ref=e301]:
+                    - heading "Ecommerce agent" [level=2] [ref=e302]
+                    - paragraph [ref=e303]: Engage your shoppers.
+                - paragraph [ref=e304]: Guide product discovery, compare items, recover carts, and handle store questions.
+                - generic [ref=e305]:
+                  - generic [ref=e308]: Catalog guidance
+                  - generic [ref=e311]: Cart recovery
+                  - generic [ref=e314]: Shopify-ready setup
+                - generic [ref=e315]:
+                  - text: Set up ecommerce
+                  - img [ref=e316]
+            - button "Build your own chatbot" [ref=e318] [cursor=pointer]:
+              - generic [ref=e319]:
+                - generic [ref=e320]:
+                  - generic [ref=e321]: Playground
+                  - generic [ref=e324]: Trained
+                  - generic [ref=e325]: Model
+                  - generic [ref=e326]: Actions
+                  - generic [ref=e327]: Instructions
+                - generic [ref=e328]:
+                  - generic [ref=e329]:
+                    - generic [ref=e330]:
+                      - img [ref=e332]
+                      - generic [ref=e335]: Velion Chatbot
+                    - img [ref=e336]
+                  - generic [ref=e346]: Hi. What can I help you with?
+                  - generic [ref=e347]:
+                    - generic [ref=e348]: Message...
+                    - img [ref=e349]
+              - generic [ref=e352]:
+                - generic [ref=e353]:
+                  - img [ref=e355]
+                  - generic [ref=e358]:
+                    - heading "Build your own chatbot" [level=2] [ref=e359]
+                    - paragraph [ref=e360]: Custom assistant.
+                - paragraph [ref=e361]: Design a branded AI chat agent with training sources, tone, actions, and deploy settings.
+                - generic [ref=e362]:
+                  - generic [ref=e365]: Custom prompt
+                  - generic [ref=e368]: Data sources
+                  - generic [ref=e371]: Web chat preview
+                - generic [ref=e372]:
+                  - text: Build chatbot
+                  - img [ref=e373]
+            - button "Workflow builder" [ref=e375] [cursor=pointer]:
+              - generic [ref=e376]:
+                - generic [ref=e377]:
+                  - generic [ref=e378]:
+                    - img [ref=e379]
+                    - text: Tools
+                  - generic [ref=e382]:
+                    - img [ref=e384]
+                    - img [ref=e388]
+                    - img [ref=e393]
+                    - img [ref=e399]
+                    - img [ref=e403]
+                    - img [ref=e409]
+                - generic [ref=e413]:
+                  - img [ref=e416]
+                  - img [ref=e424]
+                  - img [ref=e431]
+              - generic [ref=e435]:
+                - generic [ref=e436]:
+                  - img [ref=e438]
+                  - generic [ref=e442]:
+                    - heading "Workflow builder" [level=2] [ref=e443]
+                    - paragraph [ref=e444]: Automate operations.
+                - paragraph [ref=e445]: Orchestrate triggers, AI steps, branches, and handoffs on a visual workflow canvas.
+                - generic [ref=e446]:
+                  - generic [ref=e449]: Visual canvas
+                  - generic [ref=e452]: AI app blocks
+                  - generic [ref=e455]: Branch and merge logic
+                - generic [ref=e456]:
+                  - text: Open workflow builder
+                  - img [ref=e457]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=e464] [cursor=pointer]:
+    - img [ref=e465]

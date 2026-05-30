@@ -1,0 +1,4 @@
+- generic "Loading" [ref=e5]:
+  - banner [ref=e6]:
+    - button "Close" [ref=e7] [cursor=pointer]:
+      - img [ref=e8]

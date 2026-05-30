@@ -1,0 +1,18 @@
+# Sequential recovery only.
+# Do not run this override alongside a healthy primary Control Plane stack,
+# because it reuses the same published ports and named volumes.
+services:
+  controlplane-postgres:
+    container_name: controlplane-postgres-recovery
+
+  controlplane-redis:
+    container_name: controlplane-redis-recovery
+
+  controlplane-nats:
+    container_name: controlplane-nats-recovery
+
+  org-core:
+    container_name: org-core-service-recovery
+
+  billing-core:
+    container_name: billing-core-service-recovery

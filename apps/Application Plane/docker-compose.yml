@@ -1,0 +1,505 @@
+name: application-plane
+
+services:
+  # ============================================================================
+  # 1) Convex Backend - runtime + sqlite storage
+  # ============================================================================
+
+  convex-backend:
+    image: ghcr.io/get-convex/convex-backend:latest
+    container_name: convex-backend
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 20s
+    ports:
+      - "3210:3210"  # Backend API
+      - "3211:3211"  # HTTP Actions
+    volumes:
+      - convex-data:/data
+      - ./convex-core/convex:/app/convex:ro
+    environment:
+      # Instance configuration
+      CONVEX_INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
+      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
+
+      # Database configuration
+      CONVEX_STORAGE_TYPE: sqlite
+      CONVEX_SQLITE_PATH: /data/convex.db
+
+      # Service URLs (cross-plane via inter-plane-bus)
+      AI_CORE_URL: ${AI_CORE_URL:-http://ai-core:8000}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core-service:8080}
+      AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-service:3011}
+
+      # Auth configuration
+      JWT_SECRET: ${JWT_SECRET:-your-jwt-secret-here}
+      JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
+
+      # Logging
+      RUST_LOG: ${RUST_LOG:-info}
+      CONVEX_LOG_FORMAT: json
+      CONVEX_DISABLE_BEACON: "true"
+      NATS_URL: nats://nats:4222
+    networks:
+      - app-net
+      - inter-plane-bus
+    depends_on:
+      nats:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3210/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ============================================================================
+  # 2) Convex Dashboard - UI
+  # ============================================================================
+
+  convex-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: convex-dashboard
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    ports:
+      - "6791:6791"
+    environment:
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+      NODE_ENV: ${NODE_ENV:-development}
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  # ============================================================================
+  # 3) Convex Gateway - dev gateway / schema push
+  # ============================================================================
+
+  convex-gateway:
+    build:
+      context: ./convex-core
+      dockerfile: Dockerfile
+    container_name: convex-gateway
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    env_file:
+      - ./convex-core/.env.local
+    environment:
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+    ports:
+      - "3005:3000"
+    networks:
+      - app-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'npx convex dev' || pgrep -f 'node' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      convex-backend:
+        condition: service_healthy
+
+  # ============================================================================
+  # 4) Convex Subscriber - sync fra Control Plane NATS
+  # ============================================================================
+
+  convex-subscriber:
+    build:
+      context: ./convex-core
+      dockerfile: Dockerfile
+    container_name: convex-subscriber
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    command: ["node", "nats-subscriber.js"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'nats-subscriber' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    env_file:
+      - ./convex-core/.env.local
+    environment:
+      # Cross-plane NATS bus and Convex URL — NATS_URL/NATS_TOKEN come from env_file above
+      CONVEX_BACKEND_URL: http://convex-backend:3210
+      NATS_URL: nats://velion-nats:4222    # inter-plane-bus shared bus — all ingestion/org events publish here
+      # W4-2 (ui-ux-velion-gap.md §13): Model Plane orchestrator-core
+      # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
+      # (model-plane-nats-1). The subscriber dual-connects here so the
+      # agent run lifecycle mirror actually receives events in prod.
+      # `model-plane-nats-1` is reachable via the `inter-plane-bus`
+      # network as the compose-generated hostname.
+      MODEL_PLANE_NATS_URL: nats://model-plane-nats-1:4222
+      # Token defaults to NATS_TOKEN (above) when MODEL_PLANE_NATS_TOKEN
+      # is unset, which works in dev because both clusters share the
+      # same dev token. Production should set both explicitly.
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      nats:
+        condition: service_started
+      convex-backend:
+        condition: service_healthy
+
+
+  # ============================================================================
+  # 6) AFFiNE Core — First-party planner workspace boundary
+  # ============================================================================
+
+  affine-core:
+    build:
+      context: ./affine-core
+      dockerfile: Dockerfile
+    container_name: affine-core
+    profiles: ["affine"]
+    restart: unless-stopped
+    env_file:
+      - ./affine-core/.env
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+      affine-runtime:
+        condition: service_healthy
+    ports:
+      - "3180:3180"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3180/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ============================================================================
+  # 7) AFFiNE Runtime — internal vendor runtime
+  # ============================================================================
+
+  affine-runtime:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine-runtime
+    profiles: ["affine"]
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 20s
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+      application-redis:
+        condition: service_healthy
+      affine-runtime-migration:
+        condition: service_completed_successfully
+    ports:
+      - "47810:3010"
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_SERVER_HTTPS: "false"
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@application-postgres:5432/affine
+      REDIS_SERVER_HOST: application-redis
+      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}
+      AFFINE_INDEXER_ENABLED: "false"
+    volumes:
+      - affine-uploads:/root/.affine/storage
+      - affine-config:/root/.affine/config
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3010/info').then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  affine-runtime-migration:
+    image: ghcr.io/toeverything/affine:stable
+    container_name: affine-runtime-migration
+    profiles: ["affine"]
+    command: ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+      application-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_SERVER_HTTPS: "false"
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@application-postgres:5432/affine
+      REDIS_SERVER_HOST: application-redis
+      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}
+      AFFINE_INDEXER_ENABLED: "false"
+    volumes:
+      - affine-uploads:/root/.affine/storage
+      - affine-config:/root/.affine/config
+    networks:
+      - app-net
+      - inter-plane-bus
+
+  # ============================================================================
+  # 8) Notification Core — First-party notification boundary
+  # Persists request state, emits lifecycle events, and hands off to a hidden
+  # Novu-compatible runtime on app-net.
+  # ============================================================================
+
+  application-postgres:
+    image: postgres:16-alpine
+    container_name: application-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}
+      POSTGRES_PASSWORD: ${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}
+      POSTGRES_DB: ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c max_connections=200"
+    ports:
+      - "9540:5432"
+    volumes:
+      - application-postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}} -d ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  application-redis:
+    image: redis:7-alpine
+    container_name: application-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6480:6379"
+    volumes:
+      - application-redis-data:/data
+    networks:
+      - app-net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  notification-core:
+    build:
+      context: ./notification-core
+      dockerfile: Dockerfile
+    container_name: notification-core
+    restart: unless-stopped
+    env_file:
+      - ./notification-core/.env
+    environment:
+      NATS_URL: nats://nats:4222          # override env_file — local app-nats for own publisher
+      NATS_SHARED_URL: nats://nats:4222   # priority 2 in Go config chain
+      VELION_NATS_URL: nats://nats:4222   # priority 1 in Go config chain — must override env_file
+      # G14: subscribe to cross-plane events (app.session.*) on the shared
+      # velion-nats bus. Without this, the in-app subscriber falls back to the
+      # local NATS connection, which doesn't carry those subjects.
+      SHARED_NATS_URL: nats://velion-nats:4222
+      SHARED_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
+    depends_on:
+      nats:
+        condition: service_healthy
+      application-postgres:
+        condition: service_healthy
+      application-redis:
+        condition: service_healthy
+    ports:
+      - "3140:3140"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --header='X-Internal-Api-Key: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}' --no-verbose --tries=1 -O /dev/null http://localhost:3140/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # (novu delivery adapter runs inline inside notification-core)
+
+  # ─────────────────────────────────────────────────────────────
+  # NATS — plane-level message bus (required)
+  # ─────────────────────────────────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    container_name: app-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222", "-sd", "/data"]
+    networks:
+      - app-net
+    volumes:
+      - app-nats-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  convex-data:
+    driver: local
+  affine-uploads:
+    driver: local
+  affine-config:
+    driver: local
+  application-postgres-data:
+    driver: local
+  application-redis-data:
+    driver: local
+  app-nats-data:
+    driver: local
+
+networks:
+  # Privat nettverk for Application plane
+  app-net:
+    name: app-net
+    driver: bridge
+
+  # Shared nettverk for cross-plane app-til-app kommunikasjon
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
+    labels:
+      com.docker.compose.network: "inter-plane-bus"
+      com.docker.compose.project: "triodelab"

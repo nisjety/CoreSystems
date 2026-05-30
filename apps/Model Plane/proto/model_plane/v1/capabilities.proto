@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// CapabilityCore — policy and capability authority.
+// Owns: skill registry, tool metadata, connector normalization,
+//       model/tool eligibility, versioned capability definitions.
+// Does NOT own: tool execution logic.
+service CapabilityCore {
+  // List registered capabilities matching the query.
+  rpc ListCapabilities(ListCapabilitiesRequest) returns (ListCapabilitiesResponse);
+
+  // Get a single capability definition by ID.
+  rpc GetCapability(GetCapabilityRequest) returns (CapabilityDetail);
+
+  // Evaluate a policy decision for a tool invocation.
+  rpc EvaluatePolicy(EvaluatePolicyRequest) returns (EvaluatePolicyResponse);
+
+  // Validate that a skill bundle exists and is structurally promotable.
+  rpc ValidateSkillBundle(ValidateSkillBundleRequest) returns (ValidateSkillBundleResponse);
+
+  // Check whether a skill may be promoted between scopes.
+  rpc CheckSkillPromotion(CheckSkillPromotionRequest) returns (CheckSkillPromotionResponse);
+
+  // Promote a skill to a new scope.
+  rpc PromoteSkill(PromoteSkillRequest) returns (PromoteSkillResponse);
+}
+
+message ListCapabilitiesRequest {
+  // Optional filter by capability kind: "tool", "skill", "connector".
+  string kind_filter = 1;
+
+  // Optional text search query.
+  string query = 2;
+
+  // Pagination.
+  string after_id = 3;
+  uint32 limit = 4;
+}
+
+message ListCapabilitiesResponse {
+  // Matching capability definitions.
+  repeated CapabilityDetail capabilities = 1;
+
+  // True if more results exist.
+  bool has_more = 2;
+}
+
+message GetCapabilityRequest {
+  // Capability identifier.
+  string capability_id = 1;
+
+  // Optional semver constraint (e.g. "^1.2.0").
+  string version_constraint = 2;
+}
+
+// CapabilityDetail — a registered tool, skill, or connector.
+message CapabilityDetail {
+  // Unique capability identifier.
+  string capability_id = 1;
+
+  // Human-readable name.
+  string name = 2;
+
+  // Kind: "tool", "skill", "connector".
+  string kind = 3;
+
+  // Semantic version.
+  string version = 4;
+
+  // Description for agent context.
+  string description = 5;
+
+  // Risk flags: "safe", "read_only", "mutation", "dangerous".
+  string risk_level = 6;
+
+  // Whether full definition must be loaded on demand (progressive disclosure).
+  bool lazy_load = 7;
+
+  // Registry scope: "agent", "workspace", "user", "global".
+  string scope = 8;
+}
+
+// EvaluatePolicy — check whether a tool invocation is allowed.
+message EvaluatePolicyRequest {
+  // Capability being invoked.
+  string capability_id = 1;
+
+  // Run requesting invocation.
+  string run_id = 2;
+
+  // Agent making the request.
+  string agent_id = 3;
+
+  // Tenant context.
+  string org_id = 4;
+
+  // Effective scope at invocation time. Must match one of the capability's
+  // EnabledForScopes entries. Canonical values: "run", "thread", "workspace",
+  // "user", "org", "global". Empty = backwards-compatible (scope check skipped).
+  string scope = 5;
+}
+
+message EvaluatePolicyResponse {
+  // Decision: "allow", "deny", "ask", "fallback".
+  string decision = 1;
+
+  // Human-readable reason code.
+  string reason = 2;
+
+  // Budget context (remaining tokens, cost, etc.).
+  string budget_context = 3;
+}
+
+message ValidateSkillBundleRequest {
+  // Skill capability identifier.
+  string skill_id = 1;
+}
+
+message ValidateSkillBundleResponse {
+  bool valid = 1;
+  repeated string errors = 2;
+  CapabilityDetail capability = 3;
+}
+
+message CheckSkillPromotionRequest {
+  string skill_id = 1;
+  string from_scope = 2;
+  string to_scope = 3;
+}
+
+message CheckSkillPromotionResponse {
+  bool passed = 1;
+  repeated string checks = 2;
+  string reason = 3;
+}
+
+message PromoteSkillRequest {
+  string skill_id = 1;
+  string from_scope = 2;
+  string to_scope = 3;
+}
+
+message PromoteSkillResponse {
+  bool promoted = 1;
+  repeated string checks = 2;
+  string reason = 3;
+  CapabilityDetail capability = 4;
+}

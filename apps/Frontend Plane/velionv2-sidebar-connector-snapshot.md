@@ -1,0 +1,95 @@
+- generic [active] [ref=e1] [box=0,0,2048,1064]:
+  - generic [ref=e2] [box=0,0,2048,1064]:
+    - banner [ref=e3] [box=0,0,2048,57]:
+      - generic [ref=e4] [box=0,0,2048,56]:
+        - generic [ref=e5] [box=20,6,432,44]:
+          - button "Expand sidebar" [ref=e6] [cursor=pointer] [box=20,10,36,36]:
+            - img [ref=e7] [box=30,20,16,16]
+          - generic [ref=e10] [box=68,6,82,44]:
+            - button "Go back" [ref=e11] [cursor=pointer] [box=72,10,36,36]
+            - button "Go forward" [ref=e14] [cursor=pointer] [box=110,10,36,36]
+          - generic [ref=e17] [box=162,18,290,21]:
+            - img [ref=e18] [box=162,21,14,14]
+            - link "aquatiq-as Free" [ref=e20] [cursor=pointer] [box=184,18,121,21]:
+              - /url: /dashboard
+            - img [ref=e23] [box=313,21,14,14]
+            - link "Oversikt" [ref=e25] [cursor=pointer] [box=335,18,53,21]:
+              - /url: /dashboard
+            - img [ref=e26] [box=396,21,14,14]
+            - link "Hjem" [ref=e28] [cursor=pointer] [box=418,18,33,21]:
+              - /url: /dashboard
+        - button "Open global search" [ref=e30] [cursor=pointer] [box=868,8,367,40]:
+          - img [ref=e31] [box=885,20,16,16]
+          - generic [ref=e34] [box=913,18,193,20]: Search across the whole system
+          - generic [ref=e35] [box=1118,14,28,28]: /
+          - generic [ref=e36] [box=1158,14,61,28]: CMD+K
+        - generic [ref=e38] [box=1725,10,303,36]:
+          - button "Toggle dark mode" [ref=e40] [cursor=pointer] [box=1754,10,36,36]:
+            - img [ref=e41] [box=1763,19,18,18]
+          - button "Open AI assistant" [ref=e44] [cursor=pointer] [box=1815,10,36,36]:
+            - img [ref=e45] [box=1824,19,18,18]
+          - button "Quick messages" [ref=e49] [cursor=pointer] [box=1855,10,36,36]:
+            - img [ref=e50] [box=1864,19,18,18]
+          - button "Notifications" [ref=e53] [cursor=pointer] [box=1895,10,36,36]:
+            - img [ref=e54] [box=1904,19,18,18]
+          - button "Calendar" [ref=e57] [cursor=pointer] [box=1935,10,36,36]:
+            - img [ref=e58] [box=1944,19,18,18]
+          - button "Open profile menu" [ref=e61] [cursor=pointer] [box=1996,12,32,32]:
+            - generic [ref=e62] [box=1999,15,26,26]: I
+    - complementary "Primary navigation" [ref=e63] [box=0,56,60,1008]:
+      - generic [ref=e65] [box=0,56,60,1008]:
+        - generic [ref=e67] [box=8,68,44,28]:
+          - link "Go to home" [ref=e68] [cursor=pointer] [box=8,68,28,28]:
+            - /url: /dashboard
+            - img [ref=e69] [box=14,74,16,16]
+          - generic [box=50,69,48,27]: Home
+        - navigation "Workspace sections" [ref=e78] [box=0,100,60,763]:
+          - generic [ref=e79] [box=12,112,36,226]:
+            - generic [ref=e80] [box=12,112,36,36]
+            - generic [ref=e84] [box=12,150,36,36]
+            - generic [ref=e88] [box=12,188,36,36]
+            - generic [ref=e94] [box=12,226,36,36]
+            - generic [ref=e99] [box=12,264,36,36]
+            - generic [ref=e104] [box=12,302,36,36]
+        - generic [ref=e108] [box=0,863,60,201]:
+          - generic [ref=e110] [box=12,876,36,36]:
+            - button "Account menu" [ref=e111] [cursor=pointer] [box=12,876,36,36]
+            - generic [box=54,881,92,27]: Account menu
+          - generic [ref=e116] [box=12,920,36,36]:
+            - link "Innstillinger" [ref=e117] [cursor=pointer] [box=12,920,36,36]:
+              - /url: /settings
+            - generic [box=54,925,79,27]: Innstillinger
+          - generic [ref=e121] [box=12,964,36,36]:
+            - button "Søk" [ref=e122] [cursor=pointer] [box=12,964,36,36]
+            - generic [box=54,969,38,27]: Søk
+    - main [ref=e126] [box=0,0,2048,1064]:
+      - generic [ref=e128] [box=60,56,1988,1008]:
+        - generic [ref=e131] [box=870,72,369,48]:
+          - button "Chat" [pressed] [ref=e133] [cursor=pointer] [box=874,76,120,40]
+          - button "Søk" [ref=e134] [cursor=pointer] [box=994,76,120,40]
+          - button "Kunnskap" [ref=e135] [cursor=pointer] [box=1114,76,120,40]
+        - generic [ref=e137] [box=542,168,1024,181]:
+          - generic [ref=e139] [box=694,168,144,29]:
+            - text: Pro Plan
+            - generic [ref=e140] [box=764,173,3,19]: ·
+            - button "Upgrade" [ref=e141] [cursor=pointer] [box=773,173,50,19]
+          - heading "God ettermiddag, Ima" [level=1] [ref=e142] [box=694,213,720,72]
+        - generic [ref=e146] [box=644,405,820,195]:
+          - generic [ref=e147] [box=644,405,820,40]:
+            - generic [ref=e148] [box=648,405,328,40]
+            - generic [ref=e159] [box=1382,407,78,36]
+          - generic [ref=e166] [box=644,457,820,143]:
+            - generic [ref=e167] [box=659,472,1,1]: Message Velion
+            - textbox "Message Velion" [ref=e168] [box=660,473,788,64]:
+              - /placeholder: How can I help you today?
+            - generic [ref=e169] [box=660,543,788,44]
+        - generic [ref=e216] [box=464,623,1180,368]:
+          - generic [ref=e217] [box=480,623,1148,284]:
+            - generic [ref=e218] [box=480,623,372,284]
+            - generic [ref=e228] [box=868,621,372,284]
+            - generic [ref=e238] [box=1256,623,372,284]
+          - button "Vis neste kortside" [ref=e248] [cursor=pointer] [box=1030,943,48,48]
+  - region "Notifications alt+T" [box=0,1064,2048,0]
+  - button "Open Next.js Dev Tools" [ref=e257] [cursor=pointer] [box=22,1010,32,32]:
+    - img [ref=e258] [box=22,1006,40,40]
+  - alert [ref=e261] [box=-1,1063,1,1]

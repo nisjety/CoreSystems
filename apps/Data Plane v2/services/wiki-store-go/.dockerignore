@@ -1,0 +1,12 @@
+.git/
+.idea/
+.vscode/
+.DS_Store
+*.md
+Dockerfile
+.dockerignore
+.env
+.env.*
+testdata/
+*.test
+*.out
