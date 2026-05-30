@@ -3,11 +3,14 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/triodelab/model-plane/pkg/publisher"
+	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 )
 
 // ---------------------------------------------------------------------------
@@ -176,11 +179,20 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
 // MCPHandler handles CRUD for mcp_servers.
 type MCPHandler struct {
 	pool *pgxpool.Pool
+	pub  publisher.EventPublisher
 }
 
 // NewMCPHandler constructs the handler.
 func NewMCPHandler(pool *pgxpool.Pool) *MCPHandler {
 	return &MCPHandler{pool: pool}
+}
+
+// WithPublisher wires reconcile-event emission (matrix §4.3). Optional and
+// nil-safe: without it, mutations simply don't emit and the gateway falls back
+// to its cache TTL. Chainable: NewMCPHandler(pool).WithPublisher(pub).Register(mux).
+func (h *MCPHandler) WithPublisher(pub publisher.EventPublisher) *MCPHandler {
+	h.pub = pub
+	return h
 }
 
 type mcpServerRow struct {
@@ -276,6 +288,12 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		// Reconcile (matrix §4.3): notify cache holders an MCP server changed.
+		// Best-effort — never block the mutation on event emission.
+		if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindMCPServer,
+			reconcile.ActionRegistered, s.ID, s.OrgID); eerr != nil {
+			slog.Warn("reconcile emit failed", "kind", reconcile.KindMCPServer, "id", s.ID, "error", eerr)
 		}
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"id": s.ID})
