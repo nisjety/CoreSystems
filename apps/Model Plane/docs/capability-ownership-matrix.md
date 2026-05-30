@@ -141,6 +141,13 @@ Everything else the harvest proposed **already exists** — do not rebuild it.
 - ✅ **P8 correctness — CLOSED by verification.** `mp-toon` is encode-only and lossy by construction (unquoted scalars conflate `"30"`/`30`/bools), so no decoder can losslessly invert it. **But every caller was verified display-only:** session-core `grpc.rs` uses it for the on-demand compaction *summary* (source events remain in the log — GOAL.md compaction-never-replaces-source holds); gateway `/v1/toon/encode` is a prompt-utility returning a string + token estimate. **Nothing round-trips TOON back to structured data.** So TOON is already the right tool for its one job (display/prompt compaction), the roadmap's "TOON reversibility gate" is **not applicable** (it should be removed from ROADMAP P8, not built), and the inaccurate "losslessly round-trippable" module-doc claim was corrected. No `decode` should be written; if a future feature needs reversible compact transport, use JSON or add a *separate* type-tagged codec — do not retrofit TOON.
   - Residual (cheap, stack to confirm): assert the session-core compaction summary is stored *additively* (never overwriting source events) — usage is display-shaped, so low risk.
 
+### Integration verification (2026-05-30) — Docker IS available here
+Correcting an earlier wrong assumption ("no running stack"): Docker works in this environment, so the two highest-risk, previously-"runtime-bound" layers are now **integration-verified**, reproducibly:
+- ✅ **Durable layer** (`scripts/verify-durable-layer.sh`) — throwaway Postgres + all migrations + assertions: **G7 upsert provenance-guard** (background_review can't overwrite a user skill; `xmax` created-detection), **P3 SetRunMode** (+404), **G8 approval id-alignment** (DecideApproval targets the gateway-supplied id — the divergence bug **cannot** occur). All PASS against real Postgres.
+- ✅ **G1 isolation** (`scripts/verify-sandbox-isolation.sh`) — privileged Linux container + bubblewrap 0.8.0: the argv from `sandbox.rs::build_bwrap_argv` **enforces** read-only root, `--unshare-net` egress cutoff, and scoped writable binds. PASS. Constraint found: bwrap needs userns (Docker default blocks it → `--privileged`/userns-enabled host).
+
+What still genuinely needs more than infra-containers: the **running services** themselves (gateway↔session-core gRPC e2e), an **LLM endpoint** (G7 Reviewer), **Temporal** (G7 trigger), and the gateway-registries→caches refactor (§4.3 consumer). Those are the remaining verification tiers.
+
 ---
 
 ## 6. Protocol map — right tool for each job
