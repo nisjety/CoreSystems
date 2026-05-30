@@ -426,29 +426,6 @@ services:
       interval: 10s
       retries: 3
 
-  task-core:
-    build:
-      context: ../go/services/task-core
-      dockerfile: Dockerfile
-    ports:
-      - "8090:8090"   # HTTP health + REST API
-      - "9099:9099"   # gRPC
-    environment:
-      LOG_LEVEL: info
-      NATS_URL: nats://nats:4222
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-      OTEL_SERVICE_NAME: task-core
-      SESSION_CORE_ADDR: session-core:9091
-      EXECUTION_CORE_ADDR: execution-core:9093
-      ORCHESTRATOR_CORE_ADDR: orchestrator-core:8084
-    depends_on:
-      nats:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8090/healthz"]
-      interval: 10s
-      retries: 3
-
   bridge-core:
     build:
       context: ../go/services/bridge-core

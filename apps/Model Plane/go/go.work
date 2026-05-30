@@ -18,5 +18,4 @@ use (
 	./services/model-gateway
 	./services/orchestrator-core
 	./services/sandbox-manager
-	./services/task-core
 )

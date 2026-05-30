@@ -2,7 +2,7 @@
 //!
 //! Each sub-module owns one or two stores + the matching handlers.
 //! Everything here is gateway-scoped and ephemeral; durable state
-//! should subscribe to NATS or live in capability-core / task-core.
+//! should subscribe to NATS or live in capability-core / session-core.
 //!
 //! Modules:
 //!   - mcp:        MCP server registry + tool proxy (Wave 10g)
@@ -14,7 +14,9 @@
 //!   - messages:   Thread message append/list (Wave 10j)
 //!   - analytics:  Per-org counter rollups (Wave 10j)
 //!   - voice:      TTS/STT passthrough to inference-core (Wave 10j; stub)
-//!   - tasks:      Proxy to task-core (Wave 10j)
+//!   - tasks:      Gateway-scoped task ingress (Wave 10j; durable state
+//!                 belongs in session-core `tasks` tables, cron in Temporal —
+//!                 the orphaned task-core service was retired, matrix §4.2)
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
