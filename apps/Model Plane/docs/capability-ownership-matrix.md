@@ -125,7 +125,8 @@ Everything else the harvest proposed **already exists** — do not rebuild it.
 - ✅ **G3** — `execution-core/policy.rs` `MpSandboxPolicy`/`MpNetworkPolicy` (Rust vocabulary); 5 tests pass. Proto promotion deferred to G1 (when it crosses execution-core↔sandbox-manager).
 - ⏭️ **G6** — skipped (rationale above).
 - 🟡 **G1 foundation** — `execution-core/sandbox.rs` (`MpSandboxPolicy`→bubblewrap argv, Linux-gated syscalls, transparent passthrough without bwrap; 6 tests). Blocked on a **real tool executor** — `tool_bridge` is currently a deterministic stub and `sandbox-manager` is lease-only, so there is no process to isolate yet. The executor is the next prerequisite (needs stack+Linux to verify).
-- ⬜ **G2, G7, G8** — pending. G2 narrowed: gateway MCP client is **HTTP-only**; the real gap is the **stdio transport** (dominant MCP transport).
+- ✅ **G2 stdio transport** — `model-gateway/mcp_jsonrpc.rs` (pure JSON-RPC 2.0 framing + `stdio://` URL parse, 8 tests) wired into `runtime_registries.rs::handle_proxy_mcp_tool`: spawns the MCP server subprocess, does the `initialize` handshake + `tools/call` over newline-delimited JSON-RPC, 30s timeout, child always killed. Compiles clean. (HTTP transport pre-existed; sse still returns Unimplemented. Integration test vs a real MCP server needs the stack.)
+- ⬜ **G7, G8** — pending (need LLM/Temporal/stack: learning-loop producer; gateway↔backend durability wiring).
 
 ---
 

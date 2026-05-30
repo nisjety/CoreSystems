@@ -68,6 +68,100 @@ impl McpRegistry {
     }
 }
 
+/// Execute an MCP `tools/call` over the **stdio** transport (matrix §G2):
+/// spawn the server subprocess, perform the `initialize` handshake, then issue
+/// `tools/call` — all newline-delimited JSON-RPC 2.0 (framing lives in
+/// `crate::mcp_jsonrpc`, unit-tested). Bounded by a 30s timeout; the child is
+/// always killed before returning. Returns the serialized `result` JSON on
+/// success, or an error message.
+async fn stdio_tool_call(url: &str, tool_name: &str, input_json: &str) -> Result<String, String> {
+    use crate::mcp_jsonrpc::{
+        build_initialize_request, build_initialized_notification, build_tool_call_request,
+        parse_tool_call_response, McpCallOutcome,
+    };
+    use tokio::io::AsyncBufReadExt as _; // for BufReader::lines()
+
+    let (program, args) = crate::mcp_jsonrpc::parse_stdio_command(url)?;
+    let arguments: serde_json::Value =
+        serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
+
+    let mut child = tokio::process::Command::new(&program)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("mcp stdio spawn {program}: {e}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "mcp stdio: no child stdin".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "mcp stdio: no child stdout".to_owned())?;
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+
+    let interaction = async {
+        send_jsonrpc(&mut stdin, &build_initialize_request(1)).await?;
+        await_response(&mut reader, 1).await?;
+        send_jsonrpc(&mut stdin, &build_initialized_notification()).await?;
+        send_jsonrpc(&mut stdin, &build_tool_call_request(2, tool_name, arguments)).await?;
+        await_response(&mut reader, 2).await
+    };
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), interaction).await;
+    let _ = child.kill().await;
+
+    let line = match outcome {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("mcp stdio call timed out".to_owned()),
+    };
+    match parse_tool_call_response(2, &line) {
+        McpCallOutcome::Ok(out) => Ok(out),
+        McpCallOutcome::Err(e) => Err(e),
+    }
+}
+
+async fn send_jsonrpc(
+    stdin: &mut tokio::process::ChildStdin,
+    msg: &serde_json::Value,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut line = msg.to_string();
+    line.push('\n');
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("mcp stdio write: {e}"))?;
+    stdin.flush().await.map_err(|e| format!("mcp stdio flush: {e}"))
+}
+
+async fn await_response(
+    reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    id: i64,
+) -> Result<String, String> {
+    loop {
+        match reader
+            .next_line()
+            .await
+            .map_err(|e| format!("mcp stdio read: {e}"))?
+        {
+            Some(line) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    if crate::mcp_jsonrpc::is_response_for(&v, id) {
+                        return Ok(line);
+                    }
+                }
+                // else: notification / log / other id — skip and keep reading.
+            }
+            None => return Err(format!("mcp server closed stream before response id={id}")),
+        }
+    }
+}
+
 pub fn handle_register_mcp_server(
     reg: &McpRegistry,
     req: RegisterMcpServerRequest,
@@ -136,14 +230,28 @@ pub async fn handle_proxy_mcp_tool(
         });
     }
 
-    // HTTP transport only for the inline implementation. stdio + sse
-    // transports require a separate bridge process; document that
-    // they return Unimplemented here.
-    if server.transport != "http" {
-        return Err(Status::unimplemented(format!(
-            "transport {} not yet implemented (only http)",
-            server.transport
-        )));
+    // Transport dispatch. HTTP falls through to the inline implementation
+    // below; stdio is handled here (matrix §G2) by spawning the server
+    // subprocess and speaking JSON-RPC over its stdio; sse is still pending.
+    match server.transport.as_str() {
+        "http" => {}
+        "stdio" => {
+            let (output_json, error_message) =
+                match stdio_tool_call(&server.url, &req.tool_name, &req.input_json).await {
+                    Ok(out) => (out, String::new()),
+                    Err(e) => (String::new(), e),
+                };
+            return Ok(ProxyMcpToolResponse {
+                request_id: req.request_id,
+                output_json,
+                error_message,
+            });
+        }
+        other => {
+            return Err(Status::unimplemented(format!(
+                "mcp transport {other} not yet implemented (http, stdio supported)"
+            )));
+        }
     }
 
     // MCP JSON-RPC over HTTP. Bridge expects POST {url}/tools/call with
