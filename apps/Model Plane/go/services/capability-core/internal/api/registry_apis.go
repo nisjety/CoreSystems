@@ -20,11 +20,18 @@ import (
 // SkillsHandler handles CRUD for agent_skills.
 type SkillsHandler struct {
 	pool *pgxpool.Pool
+	pub  publisher.EventPublisher
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool *pgxpool.Pool) *SkillsHandler {
 	return &SkillsHandler{pool: pool}
+}
+
+// WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
+func (h *SkillsHandler) WithPublisher(pub publisher.EventPublisher) *SkillsHandler {
+	h.pub = pub
+	return h
 }
 
 // Register mounts routes.
@@ -115,6 +122,10 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindSkill,
+			reconcile.ActionRegistered, s.ID, s.OrgID); eerr != nil {
+			slog.Warn("reconcile emit failed", "kind", reconcile.KindSkill, "id", s.ID, "error", eerr)
 		}
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"id": s.ID})
@@ -354,11 +365,18 @@ func (h *MCPHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 // RoutingHandler handles CRUD for routing_policies.
 type RoutingHandler struct {
 	pool *pgxpool.Pool
+	pub  publisher.EventPublisher
 }
 
 // NewRoutingHandler constructs the handler.
 func NewRoutingHandler(pool *pgxpool.Pool) *RoutingHandler {
 	return &RoutingHandler{pool: pool}
+}
+
+// WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
+func (h *RoutingHandler) WithPublisher(pub publisher.EventPublisher) *RoutingHandler {
+	h.pub = pub
+	return h
 }
 
 // Register mounts routes.
@@ -443,6 +461,10 @@ func (h *RoutingHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindRoutingPolicy,
+			reconcile.ActionRegistered, p.ID, p.OrgID); eerr != nil {
+			slog.Warn("reconcile emit failed", "kind", reconcile.KindRoutingPolicy, "id", p.ID, "error", eerr)
+		}
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"id": p.ID})
 	default:
@@ -497,11 +519,18 @@ func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id strin
 // SafetyHandler handles CRUD for safety_policies.
 type SafetyHandler struct {
 	pool *pgxpool.Pool
+	pub  publisher.EventPublisher
 }
 
 // NewSafetyHandler constructs the handler.
 func NewSafetyHandler(pool *pgxpool.Pool) *SafetyHandler {
 	return &SafetyHandler{pool: pool}
+}
+
+// WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
+func (h *SafetyHandler) WithPublisher(pub publisher.EventPublisher) *SafetyHandler {
+	h.pub = pub
+	return h
 }
 
 // Register mounts routes.
@@ -585,6 +614,10 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindSafetyPolicy,
+			reconcile.ActionRegistered, p.ID, p.OrgID); eerr != nil {
+			slog.Warn("reconcile emit failed", "kind", reconcile.KindSafetyPolicy, "id", p.ID, "error", eerr)
 		}
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"id": p.ID})
