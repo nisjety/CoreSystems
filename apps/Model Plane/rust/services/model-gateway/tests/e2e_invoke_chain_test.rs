@@ -647,6 +647,13 @@ impl SessionCore for MockSessionCore {
     ) -> Result<Response<CompactNowResponse>, Status> {
         Err(Status::unimplemented("compact_now not needed in this test"))
     }
+
+    async fn upsert_agent_skill(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::UpsertAgentSkillRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::UpsertAgentSkillResponse>, Status> {
+        Err(Status::unimplemented("upsert_agent_skill not needed in this test"))
+    }
 }
 
 async fn spawn_mock<S: InferenceCore>(svc: S) -> InferenceCoreClient<tonic::transport::Channel> {

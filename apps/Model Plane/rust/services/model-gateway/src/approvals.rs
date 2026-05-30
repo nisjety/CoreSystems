@@ -21,10 +21,89 @@ use tonic::Status;
 use tracing::warn;
 
 use mp_contracts::model_plane::v1::{
-    ApproveApprovalRequest, ApproveApprovalResponse, DenyApprovalRequest, DenyApprovalResponse,
-    GatewayApproval, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    RequestApprovalRequest, RequestApprovalResponse,
+    orchestration_core_service_client::OrchestrationCoreServiceClient, ApprovalKind, ApprovalState,
+    ApproveApprovalRequest, ApproveApprovalResponse, CreateApprovalRequest, DecideApprovalRequest,
+    DenyApprovalRequest, DenyApprovalResponse, GatewayApproval, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, RequestApprovalRequest, RequestApprovalResponse,
 };
+use tonic::transport::Channel;
+
+// ---------------------------------------------------------------------------
+// Durable write-through (matrix §4.1).
+//
+// The in-memory ApprovalStore above is a run-loop latency cache; session-core's
+// OrchestrationCoreService is the system of record. These map the gateway's
+// approval to the durable RPCs and persist best-effort — the in-memory store
+// stays authoritative for the response, so a backend hiccup never blocks the
+// approval gate. The gateway's own approval_id is passed as
+// `client_approval_id` so the durable record shares the id and a later
+// DecideApproval can target it.
+// ---------------------------------------------------------------------------
+
+/// Map a gateway approval to the durable `CreateApprovalRequest`.
+#[must_use]
+pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest {
+    let kind = match a.kind.as_str() {
+        "tool_execution" | "tool_call" => ApprovalKind::ToolCall,
+        "plan" => ApprovalKind::Plan,
+        "permission" => ApprovalKind::Permission,
+        _ => ApprovalKind::Unspecified,
+    };
+    CreateApprovalRequest {
+        run_id: a.run_id.clone(),
+        step_id: String::new(),
+        kind: kind as i32,
+        requested_of: String::new(),
+        org_id: a.org_id.clone(),
+        user_id: String::new(),
+        reason: a.reason.clone(),
+        expires_in_seconds: 0,
+        client_approval_id: a.approval_id.clone(),
+    }
+}
+
+/// Map a resolved gateway approval to the durable `DecideApprovalRequest`.
+#[must_use]
+pub fn to_decide_approval_request(a: &GatewayApproval) -> DecideApprovalRequest {
+    let decision = match a.status.as_str() {
+        STATUS_APPROVED => ApprovalState::Granted,
+        STATUS_DENIED => ApprovalState::Denied,
+        _ => ApprovalState::Unspecified,
+    };
+    DecideApprovalRequest {
+        approval_id: a.approval_id.clone(),
+        decision: decision as i32,
+        decided_by: a.decided_by.clone(),
+        decision_reason: a.comment.clone(),
+    }
+}
+
+/// Best-effort durable persist of a newly-requested approval. Logged on
+/// failure, never blocks the caller.
+pub async fn persist_approval_request(
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    approval: &GatewayApproval,
+) {
+    if let Err(e) = client
+        .create_approval(to_create_approval_request(approval))
+        .await
+    {
+        warn!(error = %e, approval_id = %approval.approval_id, "durable approval persist failed (best-effort)");
+    }
+}
+
+/// Best-effort durable persist of an approval decision.
+pub async fn persist_approval_decision(
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    approval: &GatewayApproval,
+) {
+    if let Err(e) = client
+        .decide_approval(to_decide_approval_request(approval))
+        .await
+    {
+        warn!(error = %e, approval_id = %approval.approval_id, "durable approval decision persist failed (best-effort)");
+    }
+}
 
 const STATUS_PENDING: &str = "pending";
 const STATUS_APPROVED: &str = "approved";
@@ -428,5 +507,49 @@ mod tests {
 
         let other_org = s.list_pending("org2", "");
         assert_eq!(other_org.len(), 1);
+    }
+
+    #[test]
+    fn to_create_request_maps_kind_and_aligns_id() {
+        let a = GatewayApproval {
+            approval_id: "appr-gw-1".into(),
+            org_id: "org1".into(),
+            run_id: "r1".into(),
+            kind: "tool_execution".into(),
+            reason: "rm -rf /".into(),
+            ..Default::default()
+        };
+        let req = to_create_approval_request(&a);
+        // The gateway id is carried so the durable record shares it.
+        assert_eq!(req.client_approval_id, "appr-gw-1");
+        assert_eq!(req.run_id, "r1");
+        assert_eq!(req.org_id, "org1");
+        assert_eq!(req.kind, ApprovalKind::ToolCall as i32);
+        assert_eq!(req.reason, "rm -rf /");
+    }
+
+    #[test]
+    fn to_decide_request_maps_status_to_state() {
+        let approved = GatewayApproval {
+            approval_id: "appr-gw-2".into(),
+            status: STATUS_APPROVED.into(),
+            decided_by: "alice".into(),
+            comment: "looks safe".into(),
+            ..Default::default()
+        };
+        let req = to_decide_approval_request(&approved);
+        assert_eq!(req.approval_id, "appr-gw-2");
+        assert_eq!(req.decision, ApprovalState::Granted as i32);
+        assert_eq!(req.decided_by, "alice");
+        assert_eq!(req.decision_reason, "looks safe");
+
+        let denied = GatewayApproval {
+            status: STATUS_DENIED.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            to_decide_approval_request(&denied).decision,
+            ApprovalState::Denied as i32
+        );
     }
 }

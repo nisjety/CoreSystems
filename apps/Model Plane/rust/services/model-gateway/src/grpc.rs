@@ -639,39 +639,63 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RequestApprovalRequest>,
     ) -> Result<Response<RequestApprovalResponse>, Status> {
-        approvals::handle_request_approval(
+        let resp = approvals::handle_request_approval(
             &self.state.approvals,
             &*self.state.publisher,
             request.into_inner(),
         )
-        .await
-        .map(Response::new)
+        .await?;
+        // Durable write-through (matrix §4.1): persist to session-core's
+        // canonical store, best-effort. The in-memory store already holds the
+        // authoritative response, so a backend failure never blocks the gate.
+        if let Some(approval) = &resp.approval {
+            approvals::persist_approval_request(
+                &mut self.state.orchestration_client.clone(),
+                approval,
+            )
+            .await;
+        }
+        Ok(Response::new(resp))
     }
 
     async fn approve_approval(
         &self,
         request: Request<ApproveApprovalRequest>,
     ) -> Result<Response<ApproveApprovalResponse>, Status> {
-        approvals::handle_approve_approval(
+        let resp = approvals::handle_approve_approval(
             &self.state.approvals,
             &*self.state.publisher,
             request.into_inner(),
         )
-        .await
-        .map(Response::new)
+        .await?;
+        if let Some(approval) = &resp.approval {
+            approvals::persist_approval_decision(
+                &mut self.state.orchestration_client.clone(),
+                approval,
+            )
+            .await;
+        }
+        Ok(Response::new(resp))
     }
 
     async fn deny_approval(
         &self,
         request: Request<DenyApprovalRequest>,
     ) -> Result<Response<DenyApprovalResponse>, Status> {
-        approvals::handle_deny_approval(
+        let resp = approvals::handle_deny_approval(
             &self.state.approvals,
             &*self.state.publisher,
             request.into_inner(),
         )
-        .await
-        .map(Response::new)
+        .await?;
+        if let Some(approval) = &resp.approval {
+            approvals::persist_approval_decision(
+                &mut self.state.orchestration_client.clone(),
+                approval,
+            )
+            .await;
+        }
+        Ok(Response::new(resp))
     }
 
     async fn list_pending_approvals(
@@ -1808,6 +1832,14 @@ mod tests {
             _: Request<CompactNowRequest>,
         ) -> Result<Response<CompactNowResponse>, Status> {
             Err(Status::unimplemented("compact_now not needed in test"))
+        }
+
+        async fn upsert_agent_skill(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::UpsertAgentSkillRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UpsertAgentSkillResponse>, Status>
+        {
+            Err(Status::unimplemented("upsert_agent_skill not needed in test"))
         }
     }
 

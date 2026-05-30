@@ -458,6 +458,12 @@ message CreateApprovalRequest {
 
   // Optional TTL; the server computes expires_at = now + this. 0 = no deadline.
   uint32 expires_in_seconds = 8;
+
+  // Optional caller-supplied id. When set, the durable approval uses this id
+  // instead of minting one — lets an upstream cache (the gateway's in-memory
+  // ApprovalStore) keep its id aligned with the durable record so a later
+  // DecideApproval can target it. Empty = server mints (matrix §4.1).
+  string client_approval_id = 9;
 }
 
 message CreateApprovalResponse {

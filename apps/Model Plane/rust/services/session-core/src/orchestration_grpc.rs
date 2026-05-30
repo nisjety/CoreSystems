@@ -1024,7 +1024,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let kind = approval_kind_to_str(req.kind)
                 .ok_or_else(|| Status::invalid_argument("invalid approval kind"))?;
 
-            let id = format!("appr_{}", mp_ids::new_ulid());
+            // Honor a caller-supplied id (matrix §4.1) so an upstream cache
+            // (the gateway ApprovalStore) stays aligned with the durable
+            // record; otherwise mint one. Empty stays the default path.
+            let id = if req.client_approval_id.is_empty() {
+                format!("appr_{}", mp_ids::new_ulid())
+            } else {
+                req.client_approval_id.clone()
+            };
             let plan_id = if req.step_id.is_empty() {
                 None
             } else {
