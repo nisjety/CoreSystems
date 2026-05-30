@@ -1800,4 +1800,92 @@ mod tests {
             "expected non-empty assembly; fixture may be wrong"
         );
     }
+
+    // Handler-level integration test against a REAL Postgres. Exercises the
+    // actual gRPC handler code (validation + SQL + mapping), not just raw SQL.
+    // #[ignore]d so plain `cargo test` (no DB) skips it; run explicitly with a
+    // DB:  DATABASE_URL=… cargo test -p session-core --lib
+    //        set_run_mode_and_upsert_skill_against_real_pg -- --ignored
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn set_run_mode_and_upsert_skill_against_real_pg() {
+        use super::SessionService;
+        use mp_contracts::model_plane::v1 as pb;
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use tonic::Request;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+
+        let sfx = std::process::id();
+        let (thread_id, run_id, org) =
+            (format!("t-{sfx}"), format!("r-{sfx}"), format!("org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
+            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+        };
+
+        // P3 SetRunMode — durable run.mode + invalid-mode rejection.
+        let resp = svc
+            .set_run_mode(Request::new(pb::SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "plan".into(),
+            }))
+            .await
+            .expect("set_run_mode")
+            .into_inner();
+        assert_eq!(resp.mode, "plan");
+        assert!(svc
+            .set_run_mode(Request::new(pb::SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "bogus".into(),
+            }))
+            .await
+            .is_err());
+
+        let skill = |name: &str, content: &str, origin: &str| pb::UpsertAgentSkillRequest {
+            org_id: org.clone(),
+            name: name.into(),
+            description: "d".into(),
+            content: content.into(),
+            trigger_keywords: vec![],
+            trigger_file_patterns: vec![],
+            tool_restrictions: vec![],
+            enabled: true,
+            origin: origin.into(),
+        };
+
+        // G7 — fresh background_review insert.
+        let r = svc.upsert_agent_skill(Request::new(skill("Cache", "c1", "background_review")))
+            .await.expect("upsert").into_inner();
+        assert!(r.created && !r.skipped_protected);
+
+        // User skill then a background_review overwrite attempt → must be skipped.
+        svc.upsert_agent_skill(Request::new(skill("Runbook", "human", "user")))
+            .await.expect("user skill");
+        let blocked = svc.upsert_agent_skill(Request::new(skill("Runbook", "MACHINE", "background_review")))
+            .await.expect("guarded upsert").into_inner();
+        assert!(blocked.skipped_protected, "background_review must not overwrite a user skill");
+
+        // cleanup
+        for q in [
+            "DELETE FROM agent_skills WHERE org_id=$1",
+            "DELETE FROM approvals WHERE org_id=$1",
+            "DELETE FROM runs WHERE org_id=$1",
+            "DELETE FROM threads WHERE org_id=$1",
+        ] {
+            sqlx::query(q).bind(&org).execute(&pool).await.ok();
+        }
+    }
 }
