@@ -12,6 +12,7 @@ pub mod translation;
 pub mod video;
 pub mod vision;
 
+#[allow(unused_imports)] // ArtifactStore is part of the intended provider surface; not yet consumed
 pub use artifact_ref::{ArtifactRef, ArtifactStore};
 
 use tokio::sync::mpsc;
@@ -87,6 +88,57 @@ pub struct ModelInfo {
     pub streaming: bool,
 }
 
+/// Introspectable feature flags for a provider.
+///
+/// Added per `docs/capability-ownership-matrix.md` §G4 (shape adapted from
+/// OpenAI Codex `ProviderCapabilities`, Apache-2.0). Lets the router and
+/// capability-core policy gate modality/feature use *by querying the
+/// provider* instead of hardcoding per-provider knowledge at the call site —
+/// the prerequisite for clean multimodal routing (Phase 5) and routing
+/// policies (Phase 2).
+// Intended provider surface; constructed once routing/policy consumes it
+// (Phase 2/5) — same "not yet consumed" convention as `ArtifactStore` above.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProviderCapabilities {
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub supports_thinking: bool,
+    pub supports_streaming: bool,
+    pub supports_embeddings: bool,
+    /// Modality groups served, e.g. `["chat", "vision", "speech"]`.
+    pub modalities: Vec<String>,
+    pub max_context_tokens: u32,
+    pub max_output_tokens: u32,
+}
+
+impl Default for ProviderCapabilities {
+    /// Conservative chat-only baseline. Providers override `capabilities()`
+    /// to advertise more — defaulting low means an unconfigured provider is
+    /// never *assumed* to support a modality it cannot serve.
+    fn default() -> Self {
+        Self {
+            supports_tools: false,
+            supports_vision: false,
+            supports_thinking: false,
+            supports_streaming: true,
+            supports_embeddings: false,
+            modalities: vec!["chat".to_owned()],
+            max_context_tokens: 8_192,
+            max_output_tokens: 4_096,
+        }
+    }
+}
+
+impl ProviderCapabilities {
+    /// True if this provider advertises the named modality group.
+    #[allow(dead_code)] // intended surface; consumed by router/policy (Phase 2/5)
+    #[must_use]
+    pub fn serves_modality(&self, modality: &str) -> bool {
+        self.modalities.iter().any(|m| m == modality)
+    }
+}
+
 /// Provider routing trait for inference backends.
 #[async_trait::async_trait]
 pub trait ProviderRouter: Send + Sync {
@@ -112,6 +164,13 @@ pub trait ProviderRouter: Send + Sync {
     fn list_models(&self) -> Vec<ModelInfo> {
         Vec::new()
     }
+
+    /// Advertise this provider's feature/modality capabilities. Defaults to
+    /// the conservative chat-only baseline; multimodal providers override.
+    #[allow(dead_code)] // intended surface; consumed by router/policy (Phase 2/5)
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 }
 
 /// Errors from provider operations.
@@ -135,4 +194,33 @@ pub enum ProviderError {
     #[allow(dead_code)]
     #[error("unsupported model: {0}")]
     UnsupportedModel(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_capabilities_are_conservative_chat_only() {
+        let caps = ProviderCapabilities::default();
+        assert!(caps.serves_modality("chat"));
+        assert!(!caps.serves_modality("vision"));
+        assert!(!caps.supports_vision);
+        assert!(!caps.supports_tools);
+        // streaming is the one safe-on default (virtually all chat providers).
+        assert!(caps.supports_streaming);
+    }
+
+    #[test]
+    fn capabilities_serialize_to_json() {
+        let caps = ProviderCapabilities {
+            supports_tools: true,
+            supports_vision: true,
+            modalities: vec!["chat".to_owned(), "vision".to_owned()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&caps).expect("serialize");
+        assert!(json.contains("\"supports_vision\":true"));
+        assert!(caps.serves_modality("vision"));
+    }
 }

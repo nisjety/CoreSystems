@@ -6,6 +6,7 @@ pub mod grpc;
 pub mod hook;
 pub mod http_health;
 pub mod permission;
+pub mod policy;
 pub mod runtime_loop;
 pub mod scrub;
 pub mod state;

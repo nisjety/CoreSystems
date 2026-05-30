@@ -1,0 +1,157 @@
+# Capability Ownership & Harmonization Matrix
+
+> **Purpose.** The single source of truth for *who owns what* in the Model Plane, so we never build two systems that do the same job. Every capability has **exactly one canonical owner**; everything else either relays to it or is consolidated into it. This operationalizes the directive: *right tool for the right job, small but powerful, not over-engineered.*
+>
+> **Grounded in code, not docs** (audited 2026-05-30 via codegraph + source inspection of `apps/Model Plane/`). Where this matrix and `ARCHITECTURE.md`/`ROADMAP.md` disagree, **this matrix wins** until those are reconciled (see §1).
+>
+> **Scope rule:** canonical target is `apps/Model Plane/` (**v1**). `apps/Model Plane v2/` is **deprecated** — never extend or duplicate it (per MEMORY: "v1 is forward target; v2 deprecated").
+
+---
+
+## 1. Reality reconciliation — the docs are stale
+
+The roadmap marks most phases ❌. **The code says otherwise.** This is the root cause of duplication risk: building "missing" features that already exist.
+
+| Roadmap claim | Actual state in code | Evidence |
+|---|---|---|
+| P1 orchestration shell ❌ | **Largely DONE** | `session-core/orchestration_store.rs` (25 pub fns: plans/steps/todos/approvals/lineage), `orchestration_grpc.rs`, `orchestration_nats.rs`; gateway routes `/v1/orchestration/{plans,todos,runs/:id/cancel,resume,plans}`, `/v1/runs/:id/events`; migration `0003_orchestration_tables` |
+| P4 tasks/cron ❌ | **DONE (with overlap)** | session-core migration `0004_tasks_cron_hooks_skills_memory` (tasks, task_events/assignments/dependencies/artifacts, cron_schedules/fires); Go `task-core` service (store+cron); gateway `/v1/tasks`,`/v1/cron` |
+| P5 multimodal ❌ (chat-only) | **DONE** | inference-core `provider/{vision,video,speech,doc_intel,realtime}.rs`; gateway routes for all 8 groups: `/v1/ai/{chat,embeddings,images,documents,speech,translate,video,realtime,language,models}` |
+| P2 capability registries ❌ (all Unimplemented) | **Mostly DONE** | capability-core packages: `registry/`(models), `commands/`, `tasks/`, `schedule/`, `coordination/`, `modalities/`, `sandbox/`, `policy/`(RBAC), `artifacts/`, `failover/`, `streaming/`, `roadmap/` |
+| P7 knowledge plane ❌ | **Partial — routes live** | gateway `/v1/graph/entities`,`/v1/graph/expand`,`/v1/wiki/pages`; dataplane protos `graph_v1`,`wiki_v1`,`knowledge_v2` |
+| P8 token efficiency ❌ | **Partial** | gateway `/v1/toon/encode`; execution-core compaction hook; `session-core/compaction.rs` |
+| MCP / plugins "not started" | **Registries EXIST (in-mem)** | gateway `runtime_registries.rs`: mcp (Wave 10g), plugins (10h), commands+hooks+permissions (10i) |
+| Plan mode / approvals ❌ | **EXIST (in-mem, gateway)** | `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore) |
+
+**Conclusion:** Model Plane v1 is ~80–90% feature-complete against its own roadmap. The remaining work is **harmonization + a few genuine gaps**, not greenfield phases.
+
+---
+
+## 2. The layering principle (resolves most duplication)
+
+Three tiers. A capability appearing in more than one tier is **correct layering** *only if* the lower tiers defer durability upward. Same-tier duplication is a **defect**.
+
+```
+INGRESS (ephemeral, run-loop-scoped)   model-gateway (Rust)        — HTTP/SSE/WS, auth, rate-limit, in-mem caches that MUST defer to durable owners
+DURABLE STATE (one writer per resource) session-core (Rust+PG), capability-core (Go+PG), task-core (Go+PG)
+COORDINATION (recovery, retries)        orchestrator-core (Temporal), execution-core (step loop + enforcement)
+```
+
+**Rule:** model-gateway's `runtime_registries.rs`, `coordinator.rs`, `approvals.rs` stores are **ephemeral caches**, not systems of record. Each must (a) hydrate from its durable owner on miss, and (b) publish mutations to NATS for the owner to persist. They are allowed to exist as latency caches; they are **not** allowed to be the source of truth.
+
+---
+
+## 3. Capability Ownership Matrix
+
+Legend — **Owner** = single system of record. **Relay** = ingress/enforcement that defers to owner. **Protocol**: gRPC (internal sync), NATS (async events), HTTP (public), Temporal (durable coordination).
+
+| Capability | Canonical Owner | Storage | Relay / Enforcement | Async | Duplication verdict |
+|---|---|---|---|---|---|
+| Identity / org / billing | **Control Plane** (external) | — | model-gateway validates JWT | — | ✅ clean (read-only) |
+| Thread / message timeline | **session-core** | Postgres | gateway ingress | outbox | ✅ |
+| Run metadata + lifecycle | **session-core** | Postgres | execution-core transitions | NATS run-events | ✅ |
+| Plans / steps / todos / approvals / subagent-lineage | **session-core** (`orchestration_store.rs`) | Postgres | gateway `coordinator.rs`/`approvals.rs` are **ephemeral caches** | `orchestration_nats.rs` | ⚠️ **CONSOLIDATE**: gateway stores must defer to session-core (see §4.1) |
+| Checkpoints / context assembly / compaction | **session-core** | Postgres + MinIO | execution-core triggers | — | ✅ |
+| Memory index (`agent_memory`) | **session-core** | Postgres | — | — | ⚠️ vs letta-bridge (see §4.4) |
+| Durable tasks + cron | **task-core** (Go) ↔ **session-core** tables | Postgres | gateway `/v1/tasks`,`/v1/cron`; capability-core `tasks/`,`schedule/` = **metadata only** | NATS | ⚠️ **RESOLVE**: one durable task store (see §4.2) |
+| Tool / command / skill / model / plugin / MCP / routing / safety registries | **capability-core** | Postgres | gateway `runtime_registries.rs` = **ephemeral cache** | NATS reconcile | ⚠️ **CONSOLIDATE**: gateway registries defer to capability-core (see §4.3) |
+| Policy / permissions / RBAC | **capability-core** (`policy/engine.go`) | Postgres | gateway `permissions` ACL cache; execution-core `permission/` = **enforcement** | — | ⚠️ enforcement OK; gateway ACL must hydrate from capability-core |
+| Hook config (registry) | **capability-core** (`hook_configs`) | Postgres | execution-core `hook/` = **firing/enforcement**; gateway `hooks` = cache | — | ✅ layering OK once gateway hydrates |
+| Lifecycle hook firing | **execution-core** (`hook/mod.rs`) | — | — | — | ✅ enforcement owner |
+| Provider routing / inference / multimodal | **inference-core** (`provider/*`) | in-mem cache (Redis target) | gateway `/v1/ai/*` ingress | usage NATS | ✅ (add capabilities struct — §5) |
+| Secret scrub / redaction | **execution-core** (`scrub.rs`) | — | called at output/error/checkpoint boundary | — | ✅ single owner (extend regexes — §5) |
+| Sandbox lease lifecycle | **sandbox-manager** (Go) | in-mem + Redis target | execution-core requests lease | — | ✅ owner; **no real isolation yet (gap §5)** |
+| Real OS isolation (bwrap/Landlock/seccomp/egress) | **execution-core** (NEW) + sandbox-manager (provisioning) | — | — | — | ❌ **GENUINE GAP** — nothing exists |
+| Subagent spawn / message / coordinate | **orchestrator-core** (Temporal) | session-core lineage | execution-core `subagent/` = **exec**; gateway `coordinator.rs` TeamWorkerStore = **cache** | NATS | ⚠️ **CONSOLIDATE**: 3 locations → orchestrator owns lifecycle (see §4.1) |
+| Channels (Slack/Discord/…) / voice | **bridge-core** (Go) | session-core | gateway ingress | NATS | ✅ (`channel/`,`voice/` exist) |
+| IDE bridge / remote sessions | **bridge-core** (`session/`) | — | gateway WS | — | 🟡 partial; reuse Velion JWT |
+| Browser grants | **browser-broker** (Go) | in-mem + Redis target | — | — | ✅ |
+| Cost / usage ledger | **cost-core** (Go) | Postgres | gateway emits `usage.*` | NATS | ✅ |
+| Fine-tuning jobs | **session-core** (persist) + **model-gateway** (Azure) | Postgres | poller | NATS finetune | ✅ (Wave 7) |
+| Knowledge: graph / wiki extraction | **Data Plane** (read) + session-core context | Data Plane | gateway `/v1/graph`,`/v1/wiki` relay | NATS | 🟡 extraction service is P7 gap |
+| Compact transport (TOON) | **model-gateway** (`/v1/toon`) + shared crate | — | — | — | ✅ (benchmark/reversibility = P8 finish) |
+
+---
+
+## 4. Duplication ledger — explicit rulings
+
+### 4.1 Orchestration & coordination (plan mode, approvals, subagents) — **3-way shadow**
+- **Owner:** session-core (durability) + orchestrator-core (Temporal lifecycle/recovery).
+- **Shadows:** model-gateway `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore) — all in-memory, no backend calls (verified: no `session_core.*` calls in these files), explicitly documented as "promote to postgres later."
+- **Ruling:** Keep the gateway stores as **run-loop latency caches only**. Wire them to: (a) read-through to session-core `orchestration_grpc` on miss, (b) write-through via NATS (`orchestration_nats`) so session-core persists. execution-core `subagent/` stays as the **executor**; orchestrator-core owns spawn/lifecycle. **No new coordinator system.**
+
+### 4.2 Tasks & cron — **task-core vs session-core durable overlap** (sharpest defect)
+- Both `task-core/internal/store/store.go` and session-core migration `0004` define durable task/cron state.
+- **Ruling (verify then act):** Pick **one** durable store. Recommended: **session-core owns task/cron *persistence*** (it already has the tables, the outbox, and run linkage); **task-core owns *execution* (cron firing, dispatch) and calls session-core via gRPC for state.** If task-core currently writes its own Postgres tables → migrate it to delegate. capability-core `tasks/`+`schedule/` = **definition/metadata only** (templates, policy), not runtime state. ACTION: confirm task-core's store backend; if duplicate tables exist, consolidate to session-core.
+
+### 4.3 Capability registries — **gateway in-mem vs capability-core durable**
+- gateway `runtime_registries.rs` (mcp/plugins/commands/hooks/permissions) vs capability-core durable packages.
+- **Ruling:** capability-core is the **registry system of record**. Gateway registries become **read-through caches** that subscribe to capability-core reconcile events (`skill.registered`, `plugin.installed`, `mcp.server.enabled`, `routing.policy.updated`). **No second registry implementation.**
+
+### 4.4 Memory — **session-core `agent_memory` vs letta-bridge**
+- **Ruling:** session-core owns the **canonical memory index**. letta-bridge becomes **one adapter** behind a capability-core `memory-adapters` registry (hermes `MemoryProvider` shape). Rust calls only `Prefetch`/`SyncTurn`. **letta-bridge is not a parallel memory system.**
+
+### 4.5 Skills — registry vs promotion vs learning
+- **Ruling:** capability-core owns the **skills registry** (`agent_skills`); orchestrator-core `SkillPromotionWorkflow` **writes into it**; the hermes-style learning loop is a **producer** of skill candidates, not a store. One registry.
+
+---
+
+## 5. Genuine gaps (net-new from harvest — these are the ONLY things to build fresh)
+
+After harmonization, the truly-missing items are small and targeted:
+
+| # | Gap | Owner | Source (license) | Why it's real (not duplicate) |
+|---|---|---|---|---|
+| G1 | **OS isolation** (bwrap/Landlock/seccomp/no_new_privs) + egress allowlist | execution-core + sandbox-manager | codex `linux-sandbox`/`bwrap`/`network-proxy` (Apache) | Zero matches in codebase — sandboxes have leases but run with no kernel isolation |
+| G2 | **MCP transport client** behind the existing registry | capability-core | codex `rmcp-client` (Apache, fork) | Registry exists; the actual stdio/HTTP MCP client connection layer does not |
+| G3 | **Sandbox-policy vocabulary** (`MpSandboxPolicy`/`PermissionProfile`/network) | execution-core + `safety.proto` | codex enums (Apache) | No sandbox-policy type exists; G1 needs it |
+| G4 | **Provider capabilities struct** (`supports_vision/tools/thinking`, ctx window) | inference-core | codex `ProviderCapabilities` (Apache) | Providers exist but aren't introspectable; needed to gate routing |
+| G5 | **Secret-scrub hardening** (sk-*/AKIA*/PG-DSN/NATS-creds) | execution-core `scrub.rs` | codex `redact_secrets` (Apache) | `scrub.rs` exists — this is a **regex extension**, not new system |
+| G6 | ~~Keyring store for infra secrets~~ | — | codex `keyring-store` (Apache) | **SKIPPED — wrong tool.** OS keychain is a desktop-CLI pattern; this server plane uses env vars + secret-manager. Adding it = over-engineering. |
+| G7 | **Closed learning loop** (post-session skill review) | orchestrator-core activity → capability-core | hermes `background_review` + prompt (MIT) | Promotion workflow exists; the *review→candidate* producer does not |
+| G8 | **Real durability** for gateway ephemeral stores (§4.1/4.3 wiring) | gateway ↔ session-core/capability-core | — | Consolidation work, not new feature |
+
+Everything else the harvest proposed **already exists** — do not rebuild it.
+
+**Implementation status (2026-05-30):**
+- ✅ **G5** — `execution-core/scrub.rs` extended (connection-string passwords, inline `KEY=value`, Slack/Google keys); 7 tests pass.
+- ✅ **G4** — `inference-core/provider/mod.rs` `ProviderCapabilities` + `capabilities()` trait method; 2 tests pass. (Per-provider overrides deferred until the router consumes them.)
+- ✅ **G3** — `execution-core/policy.rs` `MpSandboxPolicy`/`MpNetworkPolicy` (Rust vocabulary); 5 tests pass. Proto promotion deferred to G1 (when it crosses execution-core↔sandbox-manager).
+- ⏭️ **G6** — skipped (rationale above).
+- ⬜ **G1, G2, G7, G8** — pending (larger; G1 Linux-gated).
+
+---
+
+## 6. Protocol map — right tool for each job
+
+| Job | Protocol | Rationale |
+|---|---|---|
+| Public client ↔ gateway | HTTP/JSON + SSE (+WS for realtime/bridge) | Browser-native, Velion proxy-friendly |
+| gateway ↔ core services | **gRPC (Tonic/Go)** | Typed, low-latency, internal trust |
+| Async fan-out (events, reconcile, usage, finetune) | **NATS JetStream** `mp.v1.*` | Decouple slow workers from request path; replay |
+| Durable multi-step coordination + retries + cron(durable) | **Temporal** (orchestrator-core) | Crash-safe, deterministic replay |
+| In-process latency cache | dashmap/in-mem (gateway) | Must defer durability upward (§2) |
+| Live UI projection | Convex (read-only) | Reactive dashboards |
+| **Not used:** GraphQL | — | REST+NATS+Convex cover it; no schema-stitch cost |
+
+---
+
+## 7. Action plan (harmonize first, then fill gaps — keeps it small)
+
+**Phase H — Harmonize (no new features, removes duplication):**
+1. [§4.2] Resolve task durable-store overlap (task-core delegates persistence to session-core).
+2. [§4.1] Wire gateway coordinator/approvals stores to read/write-through session-core.
+3. [§4.3] Wire gateway registries to capability-core reconcile events.
+4. [§4.4] Reframe letta-bridge as a memory-adapter behind capability-core.
+5. Reconcile `ARCHITECTURE.md`/`ROADMAP.md`/`gap-model.md` to actual state (mark P1/P4/P5 DONE).
+
+**Phase G — Fill genuine gaps (Apache-vendored, small):**
+6. [G5] Extend `scrub.rs` regexes (S).
+7. [G6] Keyring-store crate (S).
+8. [G3] `MpSandboxPolicy` enum + `safety.proto` (S).
+9. [G4] `ProviderCapabilities` on inference-core ProviderRouter (S).
+10. [G1] execution-core OS isolation via codex `linux-sandbox` + egress (L, Linux-gated).
+11. [G2] Fork codex `rmcp-client` behind capability-core MCP registry (M).
+12. [G7] hermes learning-loop activity feeding capability-core skills + Wave 7 (M).
+
+Each item: one owner, respects §3, ADR records source+license. **No item creates a second system for an existing job.**

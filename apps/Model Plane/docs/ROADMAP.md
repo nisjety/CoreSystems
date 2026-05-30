@@ -4,7 +4,11 @@ This roadmap tracks the path from the current Rust+Go foundation to product-surf
 
 Sequencing recommendation: see `GOAL.md` § "Recommended sequencing". Phases are numbered for traceability, not strict execution order.
 
+> External-source adoptions per phase (codex/hermes/pi/daytona/claude-code → concrete changes, with license gates) are catalogued in [external-ideas-harvest.md](external-ideas-harvest.md). Phase tags there: P2/P3 (codex traits, plan-mode), P4 (hermes cron, claude-code coordinator), P6 (channels/bridge/TUI), P7 (hermes learning loop), P8 (deferred schema).
+
 Status legend: ✅ done · 🟡 partial · ❌ missing
+
+> **⚠️ 2026-05-30 status reconciliation.** A code-grounded audit found this roadmap badly understated reality — most phases below were marked ❌ but are in fact LIVE (all 8 multimodal groups, orchestration shell, tasks/cron, TOON, graph/wiki routes, MCP/plugin registries). Building off the old ❌ flags is the root cause of duplicate systems. **The authoritative current-state + one-owner-per-capability map is [capability-ownership-matrix.md](capability-ownership-matrix.md).** Phase headers below are corrected; per-phase prose is being reconciled.
 
 ---
 
@@ -22,7 +26,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 1 — Orchestration shell parity · ❌
+## Phase 1 — Orchestration shell parity · ✅ LIVE (corrected — matrix §1)
 
 **Current state**
 
@@ -52,7 +56,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 2 — Capability platform parity · ❌ (highest-leverage gap)
+## Phase 2 — Capability platform parity · 🟡 registries LIVE; consolidation pending (matrix §4.3)
 
 **Current state**
 
@@ -82,7 +86,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 3 — Plan mode, approvals, hooks, recovery · ❌
+## Phase 3 — Plan mode, approvals, hooks, recovery · 🟡 LIVE in-memory at gateway; durable wiring pending (matrix §4.1)
 
 **Current state**
 
@@ -104,7 +108,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 4 — Tasks, cron, coordination · ❌
+## Phase 4 — Tasks, cron, coordination · 🟡 tasks/cron LIVE; task-core↔session-core store overlap (matrix §4.2)
 
 **Current state**
 
@@ -123,7 +127,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 5 — Multimodal AI breadth · ❌ (chat/completions only today)
+## Phase 5 — Multimodal AI breadth · ✅ LIVE — all 8 modality groups routed (corrected — matrix §1)
 
 **Current state**
 
@@ -167,7 +171,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 7 — Knowledge plane · ❌
+## Phase 7 — Knowledge plane · 🟡 graph/wiki routes LIVE; extraction service pending
 
 **Current state**
 
@@ -186,7 +190,7 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 ---
 
-## Phase 8 — Token efficiency and ergonomics · ❌
+## Phase 8 — Token efficiency and ergonomics · 🟡 TOON route + compaction LIVE; benchmark/deferred-schema pending
 
 **Current state**
 

@@ -123,9 +123,13 @@ The next goal is to expand the verified foundations into a full product shell th
 - `claude-code-fork`: command/tool/plugin/skill/memory/task/voice/bridge/coordinator breadth.
 - `Model Plane v2`: orchestration shell, approvals, hooks, MCP, skills, plugins, tasks, cron, broad capability API, multimodal AI breadth.
 - `openclaw`: gateway, channels, voice, live canvas, multi-agent routing.
-- `hermes-agent`: shared command model across CLI and messaging, toolsets, MCP, memory, scheduling.
-- `openai/codex`: local-first coding-agent shell, context-file model, lightweight operator UX.
+- `hermes-agent`: shared command model across CLI and messaging, toolsets, MCP, memory, scheduling, closed learning loop.
+- `openai/codex`: local-first coding-agent shell, context-file model, lightweight operator UX, Rust sandbox isolation (`linux-sandbox`/bwrap/Landlock), provider + MCP + extension traits (Apache-2.0 — vendorable).
+- `earendil-works/pi`: self-extensible coding-agent harness — no-throw provider envelope, two-phase tool hooks, differential-render TUI (MIT).
+- `daytonaio/daytona`: secure elastic sandbox runtime — desired/current-state reconcile, iptables egress rules, OCI-snapshot persistence (AGPL-3.0 — clean-room patterns only).
 - `autoresearch`: bounded autonomous research loops and program-driven experimentation.
+
+> Concrete idea→service mapping, license matrix, and a 22-item prioritized adoption plan: [external-ideas-harvest.md](external-ideas-harvest.md).
 
 ### Token-efficiency layer
 

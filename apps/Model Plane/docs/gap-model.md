@@ -400,3 +400,28 @@ Final run brought the Model Plane stack to **20/20 running** under the compose p
 ### Container roll-up (final)
 All 20 containers `Up`, with `model-gateway`, `session-core`, `inference-core`, `execution-core`, `cost-core`, `task-core`, `bridge-core`, `temporal-postgres`, `postgres`, `redis`, `nats`, `minio` reporting `healthy`. `temporal-ui`, `temporal`, `otel-collector`, `letta-bridge`, `sandbox-manager`, `browser-broker`, `capability-core`, `orchestrator-core` reporting `Up` without an explicit healthcheck.
 
+## 14. 2026-05-30 — External ideas harvest adoption backlog
+
+Mined five reference agent stacks via `opensrc` (codex/hermes-agent/pi/daytona/claude-code). Full idea→service mapping, license matrix, and code extracts: [external-ideas-harvest.md](external-ideas-harvest.md). License gate per item is binding — `codex` is Apache-2.0 (vendorable), `hermes`/`pi` are MIT (port freely), `daytona` is AGPL-3.0 (clean-room patterns only, **legal sign-off before any line**), `claude-code` is leaked proprietary (shapes only, **zero code**).
+
+### Remediation backlog — Tier 1 (quick, Apache, low-risk)
+1. [ ] `execution-core` secret-scrub: vendor codex `secrets/sanitizer.rs::redact_secrets` (sk-*/AKIA*/Bearer/`*=` regexes); extend with JWT + Postgres DSN + NATS creds; call at every NATS-publish + tool-output boundary.
+2. [ ] `execution-core` keychain: vendor codex `keyring-store` (`KeyringStore` trait) for infra-secret loading (macOS Keychain / Linux Secret Service).
+3. [ ] `execution-core/src/policy.rs` (new) + `mp-contracts` proto: adopt codex `SandboxPolicy`/`PermissionProfile`/`NetworkSandboxPolicy` enums (extended with `AllowDomains` egress allowlist). See harvest §4.
+4. [ ] `inference-core`: add codex `ProviderCapabilities { supports_tools/vision/thinking, context_window, max_output }`; gates P5 multimodal exposure.
+
+### Remediation backlog — Tier 2 (infra unblock: real sandboxing — sandbox-manager create paths)
+5. [ ] `execution-core` OS isolation: vendor codex `linux-sandbox` (bwrap namespaces + Landlock/seccomp + `no_new_privs`) + `process-hardening`; branch step executor on `SandboxPolicy`. Linux-gated.
+6. [ ] `sandbox-manager` (Go) real create paths — **AGPL clean-room from daytona patterns**: desired/current-state reconcile (Temporal reconciler), per-sandbox iptables egress package (~400 LOC reimplemented), snapshot-as-OCI → MinIO via `distribution/distribution` registry, Redis `SET NX PX` state lock. Legal sign-off required.
+7. [ ] `execution-core` backend trait: `SandboxBackend {init_session, execute, cleanup}` + `SandboxHandle {poll, kill, wait, stdout}` (hermes `BaseEnvironment` shape, MIT); ship `local` + `docker` first.
+
+### Remediation backlog — Tier 3+ (capability platform P2, behavioral P3, learning P7)
+8. [ ] `inference-core` provider trait merging pi no-throw stream envelope + codex `ModelProvider` (harvest §5).
+9. [ ] `capability-core` MCP registry: fork codex `rmcp-client` (strip ChatGPT OAuth → NATS token refresh). Apache.
+10. [ ] `capability-core` plugin host: codex `ext/extension-api` contributor traits + hermes `plugin.yaml` discovery.
+11. [ ] `capability-core` tools registry: clean-room `ToolDef` trait + **deferred schema loading** (name-only stub → `ResolveSchema` RPC; prompt-size win).
+12. [ ] P7 learning loop: hermes `background_review` → Temporal `PostSessionSkillReview` activity using `_SKILL_REVIEW_PROMPT` (MIT, verbatim); skills feed Wave 7 fine-tune dataset (harvest §7).
+13. [ ] `capability-core` memory-adapter registry: hermes `MemoryProvider` ABC → Go `MemoryAdapter` interface; letta-bridge becomes one impl; Rust calls only `Prefetch`/`SyncTurn` (harvest §6).
+
+> Sequencing: Tier 1 first (unblocks everything, all Apache/low-risk), then Tier 2 (closes the `sandbox-manager` create-path stub — our largest infra gap), then Tier 3+ tracks the existing P2/P3/P7 phases. Each adopted item gets an ADR recording source + license.
+
