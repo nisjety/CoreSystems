@@ -11,6 +11,7 @@ package reconcile
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,7 +59,7 @@ func Emit(ctx context.Context, pub publisher.EventPublisher, kind, action, id, o
 	}
 	payload, err := json.Marshal(map[string]string{"kind": kind, "action": action, "id": id})
 	if err != nil {
-		return err
+		return fmt.Errorf("reconcile emit marshal payload (%s.%s): %w", kind, action, err)
 	}
 	eid := uuid.NewString()
 	env := &envelope.Envelope{

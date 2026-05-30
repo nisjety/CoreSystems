@@ -711,27 +711,36 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result: Result<Response<pb::SetRunModeResponse>, Status> = async {
             let req = request.into_inner();
-            if req.run_id.is_empty() {
-                return Err(Status::invalid_argument("run_id is required"));
+            if req.run_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("run_id and org_id are required"));
             }
             let mode = match req.mode.as_str() {
                 "execute" | "plan" | "reactive" | "research" => req.mode.as_str(),
                 other => {
-                    return Err(Status::invalid_argument(format!("invalid run mode: {other}")));
+                    return Err(Status::invalid_argument(format!(
+                        "invalid run mode: {other}"
+                    )));
                 }
             };
-            let row: Option<(String, String)> =
-                sqlx::query_as("UPDATE runs SET mode = $2 WHERE id = $1 RETURNING id, mode")
-                    .bind(&req.run_id)
-                    .bind(mode)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(|e| {
-                        warn!(error = %e, "set_run_mode failed");
-                        Status::internal(e.to_string())
-                    })?;
-            let (run_id, mode) = row
-                .ok_or_else(|| Status::not_found(format!("run {} not found", req.run_id)))?;
+            // Org-scoped UPDATE: a run is only mutable by its owning org, so a
+            // caller can never flip the mode of another org's run (per-org
+            // isolation invariant). A missing row ⟺ wrong org OR unknown run;
+            // both surface as not_found without leaking which.
+            let row: Option<(String, String)> = sqlx::query_as(
+                "UPDATE runs SET mode = $2, updated_at = now()
+                 WHERE id = $1 AND org_id = $3 RETURNING id, mode",
+            )
+            .bind(&req.run_id)
+            .bind(mode)
+            .bind(&req.org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "set_run_mode failed");
+                Status::internal(e.to_string())
+            })?;
+            let (run_id, mode) =
+                row.ok_or_else(|| Status::not_found(format!("run {} not found", req.run_id)))?;
             Ok(Response::new(pb::SetRunModeResponse { run_id, mode }))
         }
         .await;
@@ -1804,7 +1813,7 @@ mod tests {
     // Handler-level integration test against a REAL Postgres. Exercises the
     // actual gRPC handler code (validation + SQL + mapping), not just raw SQL.
     // #[ignore]d so plain `cargo test` (no DB) skips it; run explicitly with a
-    // DB:  DATABASE_URL=… cargo test -p session-core --lib
+    // DB:  DATABASE_URL=… cargo test -p session-core --bin session-core
     //        set_run_mode_and_upsert_skill_against_real_pg -- --ignored
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
@@ -1819,15 +1828,29 @@ mod tests {
             return;
         };
         let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
 
         let sfx = std::process::id();
         let (thread_id, run_id, org) =
             (format!("t-{sfx}"), format!("r-{sfx}"), format!("org-{sfx}"));
         sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
-            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
-        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
-            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+            .bind(&thread_id)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed run");
 
         let svc = SessionService {
             pool: pool.clone(),
@@ -1841,6 +1864,7 @@ mod tests {
             .set_run_mode(Request::new(pb::SetRunModeRequest {
                 run_id: run_id.clone(),
                 mode: "plan".into(),
+                org_id: org.clone(),
             }))
             .await
             .expect("set_run_mode")
@@ -1850,9 +1874,35 @@ mod tests {
             .set_run_mode(Request::new(pb::SetRunModeRequest {
                 run_id: run_id.clone(),
                 mode: "bogus".into(),
+                org_id: org.clone(),
             }))
             .await
             .is_err());
+
+        // Per-org isolation: another org may NOT flip this run's mode. The
+        // org-scoped UPDATE matches no row, so the handler returns not_found
+        // (without revealing the run exists) and the mode stays 'plan'.
+        let cross = svc
+            .set_run_mode(Request::new(pb::SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "execute".into(),
+                org_id: format!("attacker-{sfx}"),
+            }))
+            .await;
+        assert_eq!(
+            cross.unwrap_err().code(),
+            tonic::Code::NotFound,
+            "cross-org set_run_mode must be rejected (per-org isolation)"
+        );
+        let persisted: (String,) = sqlx::query_as("SELECT mode FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read mode");
+        assert_eq!(
+            persisted.0, "plan",
+            "cross-org attempt must not mutate the run"
+        );
 
         let skill = |name: &str, content: &str, origin: &str| pb::UpsertAgentSkillRequest {
             org_id: org.clone(),
@@ -1867,16 +1917,30 @@ mod tests {
         };
 
         // G7 — fresh background_review insert.
-        let r = svc.upsert_agent_skill(Request::new(skill("Cache", "c1", "background_review")))
-            .await.expect("upsert").into_inner();
+        let r = svc
+            .upsert_agent_skill(Request::new(skill("Cache", "c1", "background_review")))
+            .await
+            .expect("upsert")
+            .into_inner();
         assert!(r.created && !r.skipped_protected);
 
         // User skill then a background_review overwrite attempt → must be skipped.
         svc.upsert_agent_skill(Request::new(skill("Runbook", "human", "user")))
-            .await.expect("user skill");
-        let blocked = svc.upsert_agent_skill(Request::new(skill("Runbook", "MACHINE", "background_review")))
-            .await.expect("guarded upsert").into_inner();
-        assert!(blocked.skipped_protected, "background_review must not overwrite a user skill");
+            .await
+            .expect("user skill");
+        let blocked = svc
+            .upsert_agent_skill(Request::new(skill(
+                "Runbook",
+                "MACHINE",
+                "background_review",
+            )))
+            .await
+            .expect("guarded upsert")
+            .into_inner();
+        assert!(
+            blocked.skipped_protected,
+            "background_review must not overwrite a user skill"
+        );
 
         // cleanup
         for q in [
@@ -1909,15 +1973,32 @@ mod tests {
             return;
         };
         let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
 
         let sfx = std::process::id();
-        let (thread_id, run_id, org) =
-            (format!("e2e-t-{sfx}"), format!("e2e-r-{sfx}"), format!("e2e-org-{sfx}"));
+        let (thread_id, run_id, org) = (
+            format!("e2e-t-{sfx}"),
+            format!("e2e-r-{sfx}"),
+            format!("e2e-org-{sfx}"),
+        );
         sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
-            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
-        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
-            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+            .bind(&thread_id)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed run");
 
         let svc = SessionService {
             pool: pool.clone(),
@@ -1953,6 +2034,7 @@ mod tests {
             .set_run_mode(pb::SetRunModeRequest {
                 run_id: run_id.clone(),
                 mode: "plan".into(),
+                org_id: org.clone(),
             })
             .await
             .expect("set_run_mode rpc over wire")
@@ -1965,9 +2047,15 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("read back run mode");
-        assert_eq!(mode, "plan", "run mode must be durable after the wire round-trip");
+        assert_eq!(
+            mode, "plan",
+            "run mode must be durable after the wire round-trip"
+        );
 
-        for q in ["DELETE FROM runs WHERE org_id=$1", "DELETE FROM threads WHERE org_id=$1"] {
+        for q in [
+            "DELETE FROM runs WHERE org_id=$1",
+            "DELETE FROM threads WHERE org_id=$1",
+        ] {
             sqlx::query(q).bind(&org).execute(&pool).await.ok();
         }
     }

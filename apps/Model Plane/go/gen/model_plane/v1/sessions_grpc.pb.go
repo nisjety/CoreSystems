@@ -28,6 +28,7 @@ const (
 	SessionCore_GetContextAssembly_FullMethodName = "/model_plane.v1.SessionCore/GetContextAssembly"
 	SessionCore_CompactNow_FullMethodName         = "/model_plane.v1.SessionCore/CompactNow"
 	SessionCore_UpsertAgentSkill_FullMethodName   = "/model_plane.v1.SessionCore/UpsertAgentSkill"
+	SessionCore_SetRunMode_FullMethodName         = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
 // SessionCoreClient is the client API for SessionCore service.
@@ -63,6 +64,11 @@ type SessionCoreClient interface {
 	// registry is the catalog over these rows. Provenance-protected: a
 	// `background_review` upsert never overwrites a `user`-authored skill.
 	UpsertAgentSkill(ctx context.Context, in *UpsertAgentSkillRequest, opts ...grpc.CallOption) (*UpsertAgentSkillResponse, error)
+	// Set a run's mode (execute | plan | reactive | research) durably on the
+	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
+	// write-throughs here so plan mode survives restart — auditability/resume
+	// (GOAL.md §7). The in-memory cache stays authoritative for the request.
+	SetRunMode(ctx context.Context, in *SetRunModeRequest, opts ...grpc.CallOption) (*SetRunModeResponse, error)
 }
 
 type sessionCoreClient struct {
@@ -172,6 +178,16 @@ func (c *sessionCoreClient) UpsertAgentSkill(ctx context.Context, in *UpsertAgen
 	return out, nil
 }
 
+func (c *sessionCoreClient) SetRunMode(ctx context.Context, in *SetRunModeRequest, opts ...grpc.CallOption) (*SetRunModeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetRunModeResponse)
+	err := c.cc.Invoke(ctx, SessionCore_SetRunMode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionCoreServer is the server API for SessionCore service.
 // All implementations must embed UnimplementedSessionCoreServer
 // for forward compatibility.
@@ -205,6 +221,11 @@ type SessionCoreServer interface {
 	// registry is the catalog over these rows. Provenance-protected: a
 	// `background_review` upsert never overwrites a `user`-authored skill.
 	UpsertAgentSkill(context.Context, *UpsertAgentSkillRequest) (*UpsertAgentSkillResponse, error)
+	// Set a run's mode (execute | plan | reactive | research) durably on the
+	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
+	// write-throughs here so plan mode survives restart — auditability/resume
+	// (GOAL.md §7). The in-memory cache stays authoritative for the request.
+	SetRunMode(context.Context, *SetRunModeRequest) (*SetRunModeResponse, error)
 	mustEmbedUnimplementedSessionCoreServer()
 }
 
@@ -241,6 +262,9 @@ func (UnimplementedSessionCoreServer) CompactNow(context.Context, *CompactNowReq
 }
 func (UnimplementedSessionCoreServer) UpsertAgentSkill(context.Context, *UpsertAgentSkillRequest) (*UpsertAgentSkillResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpsertAgentSkill not implemented")
+}
+func (UnimplementedSessionCoreServer) SetRunMode(context.Context, *SetRunModeRequest) (*SetRunModeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetRunMode not implemented")
 }
 func (UnimplementedSessionCoreServer) mustEmbedUnimplementedSessionCoreServer() {}
 func (UnimplementedSessionCoreServer) testEmbeddedByValue()                     {}
@@ -418,6 +442,24 @@ func _SessionCore_UpsertAgentSkill_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_SetRunMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetRunModeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).SetRunMode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_SetRunMode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).SetRunMode(ctx, req.(*SetRunModeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionCore_ServiceDesc is the grpc.ServiceDesc for SessionCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -456,6 +498,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpsertAgentSkill",
 			Handler:    _SessionCore_UpsertAgentSkill_Handler,
+		},
+		{
+			MethodName: "SetRunMode",
+			Handler:    _SessionCore_SetRunMode_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

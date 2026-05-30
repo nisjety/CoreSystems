@@ -563,18 +563,21 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<EnterPlanModeResponse>, Status> {
         let req = request.into_inner();
         let run_id = req.run_id.clone();
+        let org_id = req.org_id.clone();
         let resp =
             coordinator::handle_enter_plan_mode(&self.state.plan_mode, &*self.state.publisher, req)
                 .await?;
         // Durable run-mode write-through (ROADMAP P3 / matrix §4.1): persist
         // mode='plan' on the run so plan mode survives restart. Best-effort —
         // the in-memory plan_mode store is authoritative for the response.
-        if !run_id.is_empty() {
+        // org_id is forwarded so session-core can org-scope the UPDATE.
+        if !run_id.is_empty() && !org_id.is_empty() {
             let mut client = self.state.session_client.clone();
             if let Err(e) = client
                 .set_run_mode(mp_contracts::model_plane::v1::SetRunModeRequest {
                     run_id,
                     mode: "plan".to_owned(),
+                    org_id,
                 })
                 .await
             {
@@ -590,16 +593,19 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<ExitPlanModeResponse>, Status> {
         let req = request.into_inner();
         let run_id = req.run_id.clone();
+        let org_id = req.org_id.clone();
         let resp =
             coordinator::handle_exit_plan_mode(&self.state.plan_mode, &*self.state.publisher, req)
                 .await?;
         // Exiting plan mode returns the run to 'execute' durably. Best-effort.
-        if !run_id.is_empty() {
+        // org_id is forwarded so session-core can org-scope the UPDATE.
+        if !run_id.is_empty() && !org_id.is_empty() {
             let mut client = self.state.session_client.clone();
             if let Err(e) = client
                 .set_run_mode(mp_contracts::model_plane::v1::SetRunModeRequest {
                     run_id,
                     mode: "execute".to_owned(),
+                    org_id,
                 })
                 .await
             {
@@ -1865,7 +1871,9 @@ mod tests {
             _: Request<mp_contracts::model_plane::v1::UpsertAgentSkillRequest>,
         ) -> Result<Response<mp_contracts::model_plane::v1::UpsertAgentSkillResponse>, Status>
         {
-            Err(Status::unimplemented("upsert_agent_skill not needed in test"))
+            Err(Status::unimplemented(
+                "upsert_agent_skill not needed in test",
+            ))
         }
 
         async fn set_run_mode(

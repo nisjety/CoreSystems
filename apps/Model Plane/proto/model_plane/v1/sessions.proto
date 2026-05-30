@@ -276,6 +276,10 @@ message SetRunModeRequest {
   string run_id = 1;
   // One of: execute | plan | reactive | research.
   string mode = 2;
+  // Server-authoritative org scope, forwarded from the gateway's authenticated
+  // claims. The update is constrained to runs owned by this org so a caller can
+  // never flip the mode of another org's run (per-org isolation invariant).
+  string org_id = 3;
 }
 
 message SetRunModeResponse {

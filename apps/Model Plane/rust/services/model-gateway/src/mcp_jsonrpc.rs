@@ -83,9 +83,7 @@ pub fn parse_tool_call_response(expected_id: i64, line: &str) -> McpCallOutcome 
         return McpCallOutcome::Err("missing or wrong jsonrpc version".to_owned());
     }
     if !is_response_for(&value, expected_id) {
-        return McpCallOutcome::Err(format!(
-            "response id mismatch (expected {expected_id})"
-        ));
+        return McpCallOutcome::Err(format!("response id mismatch (expected {expected_id})"));
     }
     if let Some(err) = value.get("error") {
         let msg = err
@@ -107,11 +105,17 @@ pub fn parse_tool_call_response(expected_id: i64, line: &str) -> McpCallOutcome 
 /// the first token is the executable, the rest are arguments.
 ///
 /// # Errors
-/// Returns `Err` if the scheme is not `stdio://` or no executable is present.
+/// Returns `Err` if the scheme is not `stdio://`, no executable is present, or
+/// the command contains quote characters (whitespace-splitting cannot honor
+/// quoted arguments, so rather than silently mis-split them we reject — the
+/// caller must supply a quote-free `program arg arg` form).
 pub fn parse_stdio_command(url: &str) -> Result<(String, Vec<String>), String> {
     let rest = url
         .strip_prefix("stdio://")
         .ok_or_else(|| format!("not a stdio url: {url}"))?;
+    if rest.contains('"') || rest.contains('\'') {
+        return Err("stdio url: quoted arguments are not supported".to_owned());
+    }
     let mut parts = rest.split_whitespace();
     let program = parts
         .next()
@@ -154,7 +158,8 @@ mod tests {
 
     #[test]
     fn parse_error_response_extracts_message() {
-        let line = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}"#;
         assert_eq!(
             parse_tool_call_response(2, line),
             McpCallOutcome::Err("method not found".to_owned())
@@ -195,5 +200,13 @@ mod tests {
     fn parse_stdio_command_rejects_non_stdio_and_empty() {
         assert!(parse_stdio_command("http://x").is_err());
         assert!(parse_stdio_command("stdio://").is_err());
+    }
+
+    #[test]
+    fn parse_stdio_command_rejects_quoted_args() {
+        // Quotes would be mis-split by split_whitespace; reject loudly instead
+        // of silently producing broken argv tokens like `"a` / `b"`.
+        assert!(parse_stdio_command("stdio:///bin/mcp --msg \"a b\"").is_err());
+        assert!(parse_stdio_command("stdio:///bin/mcp --msg 'a b'").is_err());
     }
 }

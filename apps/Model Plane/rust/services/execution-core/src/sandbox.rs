@@ -92,6 +92,14 @@ fn assemble_argv(
     // the namespace (so the egress proxy is reachable) and relies on the
     // network-proxy layer to enforce the allowlist; `AllowAll` shares the host
     // network; `Disabled` cuts the network entirely.
+    //
+    // SECURITY (G1 executor requirement): `AllowDomains` is NOT self-enforcing
+    // here — bwrap keeps the network up and the allowlist lives at the proxy.
+    // The executor that spawns this argv MUST fail closed when no egress proxy
+    // is configured (e.g. `HTTPS_PROXY`/`ALL_PROXY` unset): otherwise the
+    // process gets unrestricted egress, silently defeating the allowlist. This
+    // pure builder stays env-free by design; the check belongs at the spawn
+    // site. Tracked in capability-ownership-matrix §G1.
     if matches!(network, MpNetworkPolicy::Disabled) {
         argv.push("--unshare-net".into());
     }

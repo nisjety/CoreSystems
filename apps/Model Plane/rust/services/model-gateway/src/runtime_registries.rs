@@ -84,8 +84,14 @@ async fn stdio_tool_call(url: &str, tool_name: &str, input_json: &str) -> Result
     use tokio::io::AsyncBufReadExt as _; // for BufReader::lines()
 
     let (program, args) = crate::mcp_jsonrpc::parse_stdio_command(url)?;
-    let arguments: serde_json::Value =
-        serde_json::from_str(input_json).unwrap_or(serde_json::Value::Null);
+    // Empty input ⟺ no arguments; anything else must be valid JSON. Silently
+    // coercing malformed input to null hid client errors behind confusing
+    // server-side failures, so reject it with a clear message instead.
+    let arguments: serde_json::Value = if input_json.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(input_json).map_err(|e| format!("invalid tool input_json: {e}"))?
+    };
 
     let mut child = tokio::process::Command::new(&program)
         .args(&args)
@@ -109,7 +115,11 @@ async fn stdio_tool_call(url: &str, tool_name: &str, input_json: &str) -> Result
         send_jsonrpc(&mut stdin, &build_initialize_request(1)).await?;
         await_response(&mut reader, 1).await?;
         send_jsonrpc(&mut stdin, &build_initialized_notification()).await?;
-        send_jsonrpc(&mut stdin, &build_tool_call_request(2, tool_name, arguments)).await?;
+        send_jsonrpc(
+            &mut stdin,
+            &build_tool_call_request(2, tool_name, arguments),
+        )
+        .await?;
         await_response(&mut reader, 2).await
     };
 
@@ -138,13 +148,21 @@ async fn send_jsonrpc(
         .write_all(line.as_bytes())
         .await
         .map_err(|e| format!("mcp stdio write: {e}"))?;
-    stdin.flush().await.map_err(|e| format!("mcp stdio flush: {e}"))
+    stdin
+        .flush()
+        .await
+        .map_err(|e| format!("mcp stdio flush: {e}"))
 }
 
 async fn await_response(
     reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
     id: i64,
 ) -> Result<String, String> {
+    // Bound how many non-matching lines we'll skip. The outer 30s timeout caps
+    // wall-clock, but a misbehaving/adversarial server could stream unbounded
+    // short notification lines within that window; this caps the work per call.
+    const MAX_SKIPPED: usize = 1024;
+    let mut skipped = 0usize;
     loop {
         match reader
             .next_line()
@@ -158,6 +176,12 @@ async fn await_response(
                     }
                 }
                 // else: notification / log / other id — skip and keep reading.
+                skipped += 1;
+                if skipped >= MAX_SKIPPED {
+                    return Err(format!(
+                        "mcp server sent >{MAX_SKIPPED} non-response lines before id={id}"
+                    ));
+                }
             }
             None => return Err(format!("mcp server closed stream before response id={id}")),
         }
