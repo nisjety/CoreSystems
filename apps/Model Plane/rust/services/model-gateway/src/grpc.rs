@@ -1910,6 +1910,16 @@ mod tests {
         ) -> Result<Response<mp_contracts::model_plane::v1::SetRunModeResponse>, Status> {
             Err(Status::unimplemented("set_run_mode not needed in test"))
         }
+
+        async fn list_agent_skills(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ListAgentSkillsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListAgentSkillsResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "list_agent_skills not needed in test",
+            ))
+        }
     }
 
     async fn spawn_inference_client<S: InferenceCore>(

@@ -28,6 +28,7 @@ const (
 	SessionCore_GetContextAssembly_FullMethodName = "/model_plane.v1.SessionCore/GetContextAssembly"
 	SessionCore_CompactNow_FullMethodName         = "/model_plane.v1.SessionCore/CompactNow"
 	SessionCore_UpsertAgentSkill_FullMethodName   = "/model_plane.v1.SessionCore/UpsertAgentSkill"
+	SessionCore_ListAgentSkills_FullMethodName    = "/model_plane.v1.SessionCore/ListAgentSkills"
 	SessionCore_SetRunMode_FullMethodName         = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
@@ -64,6 +65,11 @@ type SessionCoreClient interface {
 	// registry is the catalog over these rows. Provenance-protected: a
 	// `background_review` upsert never overwrites a `user`-authored skill.
 	UpsertAgentSkill(ctx context.Context, in *UpsertAgentSkillRequest, opts ...grpc.CallOption) (*UpsertAgentSkillResponse, error)
+	// List an org's agent skills (the read path for the gateway's MatchSkills
+	// cache, G7's "last mile"): learned skills persisted via UpsertAgentSkill are
+	// read back here so they become usable in inference, not just stored.
+	// Org-scoped — only the caller's org's skills are returned.
+	ListAgentSkills(ctx context.Context, in *ListAgentSkillsRequest, opts ...grpc.CallOption) (*ListAgentSkillsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -178,6 +184,16 @@ func (c *sessionCoreClient) UpsertAgentSkill(ctx context.Context, in *UpsertAgen
 	return out, nil
 }
 
+func (c *sessionCoreClient) ListAgentSkills(ctx context.Context, in *ListAgentSkillsRequest, opts ...grpc.CallOption) (*ListAgentSkillsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAgentSkillsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ListAgentSkills_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionCoreClient) SetRunMode(ctx context.Context, in *SetRunModeRequest, opts ...grpc.CallOption) (*SetRunModeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetRunModeResponse)
@@ -221,6 +237,11 @@ type SessionCoreServer interface {
 	// registry is the catalog over these rows. Provenance-protected: a
 	// `background_review` upsert never overwrites a `user`-authored skill.
 	UpsertAgentSkill(context.Context, *UpsertAgentSkillRequest) (*UpsertAgentSkillResponse, error)
+	// List an org's agent skills (the read path for the gateway's MatchSkills
+	// cache, G7's "last mile"): learned skills persisted via UpsertAgentSkill are
+	// read back here so they become usable in inference, not just stored.
+	// Org-scoped — only the caller's org's skills are returned.
+	ListAgentSkills(context.Context, *ListAgentSkillsRequest) (*ListAgentSkillsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -262,6 +283,9 @@ func (UnimplementedSessionCoreServer) CompactNow(context.Context, *CompactNowReq
 }
 func (UnimplementedSessionCoreServer) UpsertAgentSkill(context.Context, *UpsertAgentSkillRequest) (*UpsertAgentSkillResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpsertAgentSkill not implemented")
+}
+func (UnimplementedSessionCoreServer) ListAgentSkills(context.Context, *ListAgentSkillsRequest) (*ListAgentSkillsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgentSkills not implemented")
 }
 func (UnimplementedSessionCoreServer) SetRunMode(context.Context, *SetRunModeRequest) (*SetRunModeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetRunMode not implemented")
@@ -442,6 +466,24 @@ func _SessionCore_UpsertAgentSkill_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_ListAgentSkills_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentSkillsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ListAgentSkills(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ListAgentSkills_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ListAgentSkills(ctx, req.(*ListAgentSkillsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionCore_SetRunMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetRunModeRequest)
 	if err := dec(in); err != nil {
@@ -498,6 +540,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpsertAgentSkill",
 			Handler:    _SessionCore_UpsertAgentSkill_Handler,
+		},
+		{
+			MethodName: "ListAgentSkills",
+			Handler:    _SessionCore_ListAgentSkills_Handler,
 		},
 		{
 			MethodName: "SetRunMode",

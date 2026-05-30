@@ -748,6 +748,71 @@ impl SessionCore for SessionService {
         result
     }
 
+    // G7 read path (the loop's "last mile"): list an org's agent skills so the
+    // gateway's MatchSkills cache can surface LEARNED skills, not just disk
+    // ones. Org-scoped — only this org's rows. The jsonb array columns are
+    // NOT NULL DEFAULT '[]', so they decode cleanly into Vec<String>.
+    async fn list_agent_skills(
+        &self,
+        request: Request<pb::ListAgentSkillsRequest>,
+    ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListAgentSkillsResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.org_id.is_empty() {
+                return Err(Status::invalid_argument("org_id is required"));
+            }
+            type Row = (
+                String,
+                String,
+                String,
+                String,
+                sqlx::types::Json<Vec<String>>,
+                sqlx::types::Json<Vec<String>>,
+                sqlx::types::Json<Vec<String>>,
+                bool,
+                String,
+            );
+            let rows: Vec<Row> = sqlx::query_as(
+                "SELECT id, name, description, content, trigger_keywords,
+                        trigger_file_patterns, tool_restrictions, enabled, origin
+                 FROM agent_skills
+                 WHERE org_id = $1 AND (NOT $2 OR enabled)
+                 ORDER BY name",
+            )
+            .bind(&req.org_id)
+            .bind(req.enabled_only)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "list_agent_skills failed");
+                Status::internal(e.to_string())
+            })?;
+            let skills = rows
+                .into_iter()
+                .map(
+                    |(id, name, description, content, kw, fp, tr, enabled, origin)| {
+                        pb::AgentSkill {
+                            id,
+                            name,
+                            description,
+                            content,
+                            trigger_keywords: kw.0,
+                            trigger_file_patterns: fp.0,
+                            tool_restrictions: tr.0,
+                            enabled,
+                            origin,
+                        }
+                    },
+                )
+                .collect();
+            Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
+        }
+        .await;
+        record_metrics("list_agent_skills", started, result.is_ok());
+        result
+    }
+
     async fn get_context_assembly(
         &self,
         request: Request<pb::GetContextAssemblyRequest>,
@@ -1940,6 +2005,36 @@ mod tests {
         assert!(
             blocked.skipped_protected,
             "background_review must not overwrite a user skill"
+        );
+
+        // G7 read path: list_agent_skills returns this org's skills (Cache +
+        // Runbook), proving the learned-skill last mile is readable.
+        let listed = svc
+            .list_agent_skills(Request::new(pb::ListAgentSkillsRequest {
+                org_id: org.clone(),
+                enabled_only: true,
+            }))
+            .await
+            .expect("list_agent_skills")
+            .into_inner();
+        let names: std::collections::BTreeSet<&str> =
+            listed.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains("Cache") && names.contains("Runbook"),
+            "list must return the upserted skills, got {names:?}"
+        );
+        // Per-org isolation: another org sees none of them.
+        let other = svc
+            .list_agent_skills(Request::new(pb::ListAgentSkillsRequest {
+                org_id: format!("other-{sfx}"),
+                enabled_only: true,
+            }))
+            .await
+            .expect("list other org")
+            .into_inner();
+        assert!(
+            other.skills.is_empty(),
+            "another org must not see this org's skills"
         );
 
         // cleanup
