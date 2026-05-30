@@ -701,6 +701,44 @@ impl SessionCore for SessionService {
         result
     }
 
+    // ROADMAP P3 run modes: durably set a run's mode on the runs row. The
+    // gateway's in-memory plan-mode cache write-throughs here so plan mode
+    // survives restart (auditability/resume — GOAL.md §7).
+    async fn set_run_mode(
+        &self,
+        request: Request<pb::SetRunModeRequest>,
+    ) -> Result<Response<pb::SetRunModeResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::SetRunModeResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.run_id.is_empty() {
+                return Err(Status::invalid_argument("run_id is required"));
+            }
+            let mode = match req.mode.as_str() {
+                "execute" | "plan" | "reactive" | "research" => req.mode.as_str(),
+                other => {
+                    return Err(Status::invalid_argument(format!("invalid run mode: {other}")));
+                }
+            };
+            let row: Option<(String, String)> =
+                sqlx::query_as("UPDATE runs SET mode = $2 WHERE id = $1 RETURNING id, mode")
+                    .bind(&req.run_id)
+                    .bind(mode)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| {
+                        warn!(error = %e, "set_run_mode failed");
+                        Status::internal(e.to_string())
+                    })?;
+            let (run_id, mode) = row
+                .ok_or_else(|| Status::not_found(format!("run {} not found", req.run_id)))?;
+            Ok(Response::new(pb::SetRunModeResponse { run_id, mode }))
+        }
+        .await;
+        record_metrics("set_run_mode", started, result.is_ok());
+        result
+    }
+
     async fn get_context_assembly(
         &self,
         request: Request<pb::GetContextAssemblyRequest>,

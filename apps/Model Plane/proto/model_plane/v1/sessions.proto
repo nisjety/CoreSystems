@@ -44,6 +44,12 @@ service SessionCore {
   // registry is the catalog over these rows. Provenance-protected: a
   // `background_review` upsert never overwrites a `user`-authored skill.
   rpc UpsertAgentSkill(UpsertAgentSkillRequest) returns (UpsertAgentSkillResponse);
+
+  // Set a run's mode (execute | plan | reactive | research) durably on the
+  // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
+  // write-throughs here so plan mode survives restart — auditability/resume
+  // (GOAL.md §7). The in-memory cache stays authoritative for the request.
+  rpc SetRunMode(SetRunModeRequest) returns (SetRunModeResponse);
 }
 
 // --- CreateThread ---
@@ -262,5 +268,18 @@ message UpsertAgentSkillResponse {
   // True if the write was suppressed because the target is a protected
   // user-authored skill (no error — the loop simply yields to the human).
   bool skipped_protected = 3;
+}
+
+// --- SetRunMode (ROADMAP P3 run modes) ---
+
+message SetRunModeRequest {
+  string run_id = 1;
+  // One of: execute | plan | reactive | research.
+  string mode = 2;
+}
+
+message SetRunModeResponse {
+  string run_id = 1;
+  string mode = 2;
 }
 

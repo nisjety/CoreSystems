@@ -561,26 +561,52 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<EnterPlanModeRequest>,
     ) -> Result<Response<EnterPlanModeResponse>, Status> {
-        coordinator::handle_enter_plan_mode(
-            &self.state.plan_mode,
-            &*self.state.publisher,
-            request.into_inner(),
-        )
-        .await
-        .map(Response::new)
+        let req = request.into_inner();
+        let run_id = req.run_id.clone();
+        let resp =
+            coordinator::handle_enter_plan_mode(&self.state.plan_mode, &*self.state.publisher, req)
+                .await?;
+        // Durable run-mode write-through (ROADMAP P3 / matrix §4.1): persist
+        // mode='plan' on the run so plan mode survives restart. Best-effort —
+        // the in-memory plan_mode store is authoritative for the response.
+        if !run_id.is_empty() {
+            let mut client = self.state.session_client.clone();
+            if let Err(e) = client
+                .set_run_mode(mp_contracts::model_plane::v1::SetRunModeRequest {
+                    run_id,
+                    mode: "plan".to_owned(),
+                })
+                .await
+            {
+                tracing::warn!(error = %e, "durable run-mode persist (plan) failed (best-effort)");
+            }
+        }
+        Ok(Response::new(resp))
     }
 
     async fn exit_plan_mode(
         &self,
         request: Request<ExitPlanModeRequest>,
     ) -> Result<Response<ExitPlanModeResponse>, Status> {
-        coordinator::handle_exit_plan_mode(
-            &self.state.plan_mode,
-            &*self.state.publisher,
-            request.into_inner(),
-        )
-        .await
-        .map(Response::new)
+        let req = request.into_inner();
+        let run_id = req.run_id.clone();
+        let resp =
+            coordinator::handle_exit_plan_mode(&self.state.plan_mode, &*self.state.publisher, req)
+                .await?;
+        // Exiting plan mode returns the run to 'execute' durably. Best-effort.
+        if !run_id.is_empty() {
+            let mut client = self.state.session_client.clone();
+            if let Err(e) = client
+                .set_run_mode(mp_contracts::model_plane::v1::SetRunModeRequest {
+                    run_id,
+                    mode: "execute".to_owned(),
+                })
+                .await
+            {
+                tracing::warn!(error = %e, "durable run-mode persist (execute) failed (best-effort)");
+            }
+        }
+        Ok(Response::new(resp))
     }
 
     async fn is_plan_mode(
@@ -1840,6 +1866,13 @@ mod tests {
         ) -> Result<Response<mp_contracts::model_plane::v1::UpsertAgentSkillResponse>, Status>
         {
             Err(Status::unimplemented("upsert_agent_skill not needed in test"))
+        }
+
+        async fn set_run_mode(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::SetRunModeRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::SetRunModeResponse>, Status> {
+            Err(Status::unimplemented("set_run_mode not needed in test"))
         }
     }
 
