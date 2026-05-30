@@ -796,7 +796,35 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<MatchSkillsRequest>,
     ) -> Result<Response<MatchSkillsResponse>, Status> {
-        skills::handle_match_skills(&self.state.skills, request.into_inner()).map(Response::new)
+        let req = request.into_inner();
+        // §G7 read path (last mile): lazily pull this org's LEARNED skills from
+        // session-core into the match cache — once per org — so learned skills
+        // surface in matching, not just disk-loaded ones. Best-effort: a fetch
+        // failure leaves the disk-loaded skills intact and is retried next call
+        // (the org is only marked loaded on success).
+        if !req.org_id.is_empty() && !self.state.skills.is_org_loaded(&req.org_id) {
+            let mut client = self.state.session_client.clone();
+            match client
+                .list_agent_skills(mp_contracts::model_plane::v1::ListAgentSkillsRequest {
+                    org_id: req.org_id.clone(),
+                    enabled_only: true,
+                })
+                .await
+            {
+                Ok(resp) => {
+                    for a in resp.into_inner().skills {
+                        self.state
+                            .skills
+                            .upsert(&req.org_id, skills::agent_skill_to_skill(a));
+                    }
+                    self.state.skills.mark_org_loaded(&req.org_id);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, org_id = %req.org_id, "lazy-load learned skills failed (best-effort)");
+                }
+            }
+        }
+        skills::handle_match_skills(&self.state.skills, req).map(Response::new)
     }
 
     // ------------------------------------------------------------------
