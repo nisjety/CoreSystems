@@ -82,6 +82,17 @@ Thumbs.db
 **/*.env.docker
 
 # ──────────────────────────────────────────────────────────────────────
+# Compiled Go service binaries (build artifacts — large, non-reproducible,
+# may embed baked-in config). A stray `git add -A` committed these; they are
+# untracked via `git rm --cached` and ignored here so they don't recur.
+# Specific paths (not a glob) so a real `server/` source dir is never ignored.
+# ──────────────────────────────────────────────────────────────────────
+apps/Control Plane/org-core/org-core
+apps/Control Plane/org-core/server
+apps/Control Plane/user-core/user-core
+apps/Control Plane/user-core/server
+
+# ──────────────────────────────────────────────────────────────────────
 # Logs and runtime state
 # ──────────────────────────────────────────────────────────────────────
 *.log
