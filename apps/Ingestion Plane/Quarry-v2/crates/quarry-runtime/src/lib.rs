@@ -99,6 +99,7 @@ pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
 pub use events::EventSink;
 pub use fallback_driver::FallbackDriver;
 pub use fetch::StaticDriver;
+pub use agent_memory::{redact_sensitive, AgentScratchpad};
 pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
 pub use fingerprint_rotation::{is_block_status, FingerprintRotator};
 pub use fusion::{rrf_fuse, RRF_K};
