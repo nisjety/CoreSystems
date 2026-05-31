@@ -8,11 +8,21 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache bash git \
- && npm install -g pnpm@10
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
 
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile || pnpm install
+RUN set -e; \
+    if ! apk add --no-cache --quiet bash git docker-cli docker-cli-compose curl wget \
+      > /tmp/apk-add.log 2>&1; then \
+      cat /tmp/apk-add.log; \
+      exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log; \
+    corepack enable; \
+    corepack prepare pnpm@10.14.0 --activate
+
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prefer-offline --loglevel=error
 RUN mkdir -p /opt/velionv2-deps && cp -R node_modules /opt/velionv2-deps/node_modules
 
 COPY . .

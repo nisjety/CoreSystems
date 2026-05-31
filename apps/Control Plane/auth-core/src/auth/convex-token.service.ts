@@ -389,9 +389,13 @@ export class ConvexTokenService {
       };
     }
 
-    this.logger.warn(
-      'CONVEX_AUTH_PRIVATE_KEY_PEM / CONVEX_AUTH_PUBLIC_KEY_PEM not set; generating ephemeral RSA keypair for local development.',
-    );
+    const message =
+      'CONVEX_AUTH_PRIVATE_KEY_PEM / CONVEX_AUTH_PUBLIC_KEY_PEM not set; generating ephemeral RSA keypair for local development.';
+    if (process.env.NODE_ENV === 'production') {
+      this.logger.warn(message);
+    } else {
+      this.logger.log(message);
+    }
 
     const generated = generateKeyPairSync('rsa', {
       modulusLength: 2048,

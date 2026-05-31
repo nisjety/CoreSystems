@@ -7,7 +7,7 @@
     "dev": "convex dev",
     "deploy": "convex deploy --prod",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint convex/",
+    "lint": "eslint \"convex/**/*.ts\"",
     "generate": "convex codegen"
   },
   "dependencies": {

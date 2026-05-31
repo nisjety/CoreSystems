@@ -103,7 +103,7 @@ export const upsertControlSessionInternal = mutation({
  *   snapshot:          object   — full ControlSession JSON
  *   fetched_at?:       number   — ms-epoch, defaults to Date.now()
  */
-export const upsertControlSession = httpAction(async (ctx, request) => {
+export async function upsertControlSessionHandler(ctx: any, request: Request) {
   try {
     assertIngestKey(request);
   } catch {
@@ -137,7 +137,9 @@ export const upsertControlSession = httpAction(async (ctx, request) => {
   });
 
   return jsonOk({ id });
-});
+}
+
+export const upsertControlSession = httpAction(upsertControlSessionHandler);
 
 /**
  * byUser — velion's reactive subscription target. Returns the most recent

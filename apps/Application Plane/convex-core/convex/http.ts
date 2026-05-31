@@ -8,8 +8,8 @@
 import { httpAction } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { httpRouter } from "convex/server";
-import { createSession, postMessage } from "./ingest";
-import { upsertControlSession } from "./controlSessions";
+import { createSessionHandler, postMessageHandler } from "./ingest";
+import { upsertControlSessionHandler } from "./controlSessions";
 
 /**
  * Webhook: RAG job completed
@@ -212,13 +212,13 @@ http.route({
 http.route({
   path: "/ingest/session",
   method: "POST",
-  handler: createSession,
+  handler: httpAction(createSessionHandler),
 });
 
 http.route({
   path: "/ingest/session/message",
   method: "POST",
-  handler: postMessage,
+  handler: httpAction(postMessageHandler),
 });
 
 // G35: Control Session projection — session-core's `Refresh` mirrors the
@@ -227,7 +227,7 @@ http.route({
 http.route({
   path: "/ingest/control-session",
   method: "POST",
-  handler: upsertControlSession,
+  handler: httpAction(upsertControlSessionHandler),
 });
 
 // NATS cross-plane event dispatcher

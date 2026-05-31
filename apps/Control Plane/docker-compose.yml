@@ -166,6 +166,8 @@ services:
         condition: service_healthy
       controlplane-nats:
         condition: service_healthy
+      user-core:
+        condition: service_healthy
     stop_signal: SIGTERM
     stop_grace_period: 15s
     healthcheck:
@@ -296,6 +298,8 @@ services:
       PPROF_ENABLED: "true"
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      # G26: silence gin's debug-mode banner + enable release-mode perf paths.
+      GIN_MODE: release
     ports:
       - "3014:3014"
       - "50013:50013"

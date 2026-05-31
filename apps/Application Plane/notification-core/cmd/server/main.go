@@ -220,7 +220,6 @@ func ensureSharedConsumerStream(js nats.JetStreamContext) error {
 
 	const streamName = "VELION_SHARED_CONSUMERS"
 	requiredSubjects := []string{
-		"app.session.>",
 		"auth.user.>",
 		"org.member.>",
 	}

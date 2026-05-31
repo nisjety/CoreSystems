@@ -7,7 +7,6 @@ import {
   completeOnboarding,
   updateProfile,
   OnboardingServiceError,
-  type OnboardingPlanId,
 } from "@/features/onboarding-v2/lib/onboarding-service";
 
 function makeFetchResponse(body: unknown, status = 200): Response {

@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -76,12 +77,58 @@ func (sp *SharedPublisher) EnsureStreams(ctx context.Context) error {
 
 	for _, cfg := range streams {
 		_, err := sp.js.CreateOrUpdateStream(ctx, cfg)
+		if err != nil && cfg.Name == "APP_SESSION" && isSubjectOverlap(err) {
+			if migrated, migrateErr := sp.removeLegacyAppSessionOverlap(ctx); migrateErr != nil {
+				return migrateErr
+			} else if migrated {
+				_, err = sp.js.CreateOrUpdateStream(ctx, cfg)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("ensure stream %s: %w", cfg.Name, err)
 		}
 		log.Info().Str("stream", cfg.Name).Msg("JetStream stream ready")
 	}
 	return nil
+}
+
+func isSubjectOverlap(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "subjects overlap")
+}
+
+func (sp *SharedPublisher) removeLegacyAppSessionOverlap(ctx context.Context) (bool, error) {
+	const legacyStream = "VELION_SHARED_CONSUMERS"
+
+	stream, err := sp.js.Stream(ctx, legacyStream)
+	if err != nil {
+		return false, nil
+	}
+
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return false, fmt.Errorf("inspect legacy stream %s: %w", legacyStream, err)
+	}
+
+	hasOverlap := false
+	for _, subject := range info.Config.Subjects {
+		if subject == "app.session.>" {
+			hasOverlap = true
+			break
+		}
+	}
+	if !hasOverlap {
+		return false, nil
+	}
+
+	if err := sp.js.DeleteStream(ctx, legacyStream); err != nil {
+		return false, fmt.Errorf("remove legacy stream %s: %w", legacyStream, err)
+	}
+
+	log.Info().Str("stream", legacyStream).Msg("Removed legacy overlapping JetStream stream")
+	return true, nil
 }
 
 // PublishSessionCommand publishes a command to the correct plane based on version.

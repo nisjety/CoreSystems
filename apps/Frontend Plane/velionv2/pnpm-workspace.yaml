@@ -4,3 +4,7 @@ trustPolicy: no-downgrade
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
+
+overrides:
+  postcss: 8.5.15
+  ws: 8.20.1

@@ -54,7 +54,7 @@ function jsonErr(message: string, status: number): Response {
  *   title?:            string  — defaults to "Session <ISO timestamp>"
  *   plan_mode?:        boolean — tags the conversation when planning is active
  */
-export const createSession = httpAction(async (ctx, request) => {
+export async function createSessionHandler(ctx: any, request: Request) {
   try {
     assertIngestKey(request);
   } catch {
@@ -119,7 +119,7 @@ export const createSession = httpAction(async (ctx, request) => {
     console.error("[ingest/session] error:", err);
     return jsonErr(String(err), 500);
   }
-});
+}
 
 /**
  * POST /ingest/session/message
@@ -132,7 +132,7 @@ export const createSession = httpAction(async (ctx, request) => {
  *   role:       user|assistant|system
  *   content:    string
  */
-export const postMessage = httpAction(async (ctx, request) => {
+export async function postMessageHandler(ctx: any, request: Request) {
   try {
     assertIngestKey(request);
   } catch {
@@ -177,4 +177,7 @@ export const postMessage = httpAction(async (ctx, request) => {
     console.error("[ingest/session/message] error:", err);
     return jsonErr(String(err), 500);
   }
-});
+}
+
+export const createSession = httpAction(createSessionHandler);
+export const postMessage = httpAction(postMessageHandler);

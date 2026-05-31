@@ -226,9 +226,11 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if `NATS_URL` is set but the connection fails.
-    // Flat constructor wiring ~18 env-keyed gRPC/HTTP clients; the two publisher
-    // branches assign fields with an intentional asymmetry (lsp set only on the
-    // NATS path), so a shared populate-helper cannot preserve behavior 1:1.
+    // Flat constructor wiring ~18 env-keyed gRPC/HTTP clients across two
+    // near-identical publisher branches (NATS vs in-memory). Both branches
+    // assign the same fields — including `lsp` — so the only real difference
+    // is the publisher backing. The repeated assignments keep each branch
+    // readable but push the function past clippy's line limit.
     #[allow(clippy::too_many_lines)]
     pub async fn from_env() -> anyhow::Result<Self> {
         let inference_client = InferenceCoreClient::new(Self::lazy_channel(
@@ -398,5 +400,57 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Set or clear an env var, returning its prior value so the caller can
+    /// restore it and leave the process environment unchanged for siblings.
+    fn swap_env(key: &str, value: Option<&str>) -> Option<String> {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        prev
+    }
+
+    fn restore_env(key: &str, prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// Regression guard for the in-memory (`NATS_URL`-unset) branch of
+    /// `from_env`: it must wire the LSP bridge client exactly like the NATS
+    /// branch. A previous revision assigned `state.lsp` only on the NATS
+    /// path, so `LspQuery` was silently disabled in dev mode even when
+    /// `LSP_BRIDGE_URL` was configured. `NATS_URL` is removed to force the
+    /// in-memory branch and `REDIS_URL` is removed to keep the stream buffer
+    /// in-memory — both keep the call hermetic (no network I/O).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_env_wires_lsp_on_in_memory_branch() {
+        let prev_lsp = swap_env("LSP_BRIDGE_URL", Some("http://localhost:9099"));
+        let prev_nats = swap_env("NATS_URL", None);
+        let prev_redis = swap_env("REDIS_URL", None);
+
+        let result = AppState::from_env().await;
+
+        // Restore before asserting so an assertion failure can't leak env
+        // state into other serial tests.
+        restore_env("LSP_BRIDGE_URL", prev_lsp);
+        restore_env("NATS_URL", prev_nats);
+        restore_env("REDIS_URL", prev_redis);
+
+        let state = result.expect("from_env must succeed on the in-memory path");
+        assert!(
+            state.lsp.available(),
+            "in-memory branch must wire the LSP bridge when LSP_BRIDGE_URL is set"
+        );
     }
 }
