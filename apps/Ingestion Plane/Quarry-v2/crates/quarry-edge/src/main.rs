@@ -72,7 +72,9 @@ async fn main() -> anyhow::Result<()> {
             );
             anyhow::bail!("auth dev-bypass enabled with ENVIRONMENT={env_name}; refusing to start");
         }
-        if bypass {
+        if bypass && env_name == "dev" {
+            tracing::info!("QUARRY_EDGE_AUTH_DEV_BYPASS is ON for local development");
+        } else if bypass {
             tracing::warn!(
                 env = %env_name,
                 "QUARRY_EDGE_AUTH_DEV_BYPASS is ON — every bearer accepted without \
@@ -106,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let mut drivers = DriverRegistry::new(DriverKind::Static);
     drivers.register(Arc::new(static_driver));
 
-    match TlsProfileDriver::new(TlsProfile::Chrome, timeout, Some(&cfg.user_agent)) {
+    match TlsProfileDriver::new(TlsProfile::Chrome, timeout, None) {
         Ok(tls) => {
             tracing::info!("tls driver registered (chrome profile)");
             drivers.register(Arc::new(tls));

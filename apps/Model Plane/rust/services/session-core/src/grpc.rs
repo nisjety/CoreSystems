@@ -86,6 +86,555 @@ pub struct SessionService {
     knowledge_client: Option<KnowledgeServiceClient<Channel>>,
 }
 
+/// Insert the `THREAD_CREATED` event row for a freshly created thread, within
+/// the caller's open transaction.
+async fn insert_thread_created_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_id: &str,
+    req: &pb::CreateThreadRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), Status> {
+    let thread_resource = format!("thread:{thread_id}");
+    let thread_idem = derive_idempotency_hash(
+        "session-core",
+        "THREAD_CREATED",
+        &thread_resource,
+        &format!("{thread_id}:created"),
+    );
+    sqlx::query(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         VALUES ($1, 'THREAD_CREATED', $2, $3, $4, $5, $6, $7, '', $8, $9, $10, 'session-core', 1)",
+    )
+    .bind(new_ulid())
+    .bind(thread_id)
+    .bind(serde_json::json!({
+        "thread_id": thread_id,
+        "session_key": &req.session_key,
+    }))
+    .bind(now)
+    .bind(&req.org_id)
+    .bind(&req.user_id)
+    .bind(thread_id)
+    .bind(&thread_idem)
+    .bind(&thread_resource)
+    .bind(THREAD_CREATED_TYPE_URL)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(())
+}
+
+/// Core of `SessionCore::create_thread`, factored out to keep the trait method
+/// small. Inserts the thread row and its `THREAD_CREATED` event in one tx.
+async fn create_thread_inner(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    let thread_id = new_ulid();
+    let now = Utc::now();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&thread_id)
+    .bind(&req.session_key)
+    .bind(&req.org_id)
+    .bind(&req.user_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    insert_thread_created_event(&mut tx, &thread_id, &req, now).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    info!(thread_id = %thread_id, "thread created");
+
+    Ok(Response::new(pb::CreateThreadResponse {
+        thread_id,
+        created_at: Some(prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
+        }),
+    }))
+}
+
+/// Core of `SessionCore::append_message`, factored out to keep the trait method
+/// small. Inserts the message row and its `MESSAGE_APPENDED` event in one tx.
+async fn append_message_inner(
+    pool: &PgPool,
+    req: pb::AppendMessageRequest,
+) -> Result<Response<pb::AppendMessageResponse>, Status> {
+    let msg_id = new_ulid();
+    let now = Utc::now();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    let row: (i64,) = sqlx::query_as(
+        "INSERT INTO messages (id, thread_id, role, content, created_at)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING sequence",
+    )
+    .bind(&msg_id)
+    .bind(&req.thread_id)
+    .bind(&req.role)
+    .bind(&req.content)
+    .bind(now)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let sequence =
+        u64::try_from(row.0).map_err(|_| Status::internal("message sequence out of range"))?;
+
+    let msg_resource = format!("message:{}", &msg_id);
+    let msg_idem = derive_idempotency_hash(
+        "session-core",
+        "MESSAGE_APPENDED",
+        &msg_resource,
+        &format!("{}:{}", &req.thread_id, sequence),
+    );
+    sqlx::query(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         SELECT $1, 'MESSAGE_APPENDED', $2, $3, $4, t.org_id, t.user_id, $5, '', $6, $7, $8, 'session-core', 1
+         FROM threads t WHERE t.id = $2",
+    )
+    .bind(new_ulid())
+    .bind(&req.thread_id)
+    .bind(serde_json::json!({
+        "thread_id": &req.thread_id,
+        "message_id": &msg_id,
+        "sequence": sequence,
+        "role": &req.role,
+    }))
+    .bind(now)
+    .bind(&req.thread_id)
+    .bind(&msg_idem)
+    .bind(&msg_resource)
+    .bind(MESSAGE_APPENDED_TYPE_URL)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    Ok(Response::new(pb::AppendMessageResponse { sequence }))
+}
+
+/// Core of `SessionCore::start_run`, factored out to keep the trait method
+/// small. Inserts the run row and its `RUN_STARTED` event in one tx.
+async fn start_run_inner(
+    pool: &PgPool,
+    req: pb::StartRunRequest,
+) -> Result<Response<pb::StartRunResponse>, Status> {
+    let run_id = new_ulid();
+    let now = Utc::now();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, created_at, updated_at)
+         VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $9)",
+    )
+    .bind(&run_id)
+    .bind(&req.thread_id)
+    .bind(&req.parent_run_id)
+    .bind(&req.agent_id)
+    .bind(&req.goal)
+    .bind(&req.mode)
+    .bind(&req.org_id)
+    .bind(&req.user_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let run_started_resource = format!("run:{}", &run_id);
+    let run_started_idem = derive_idempotency_hash(
+        "session-core",
+        "RUN_STARTED",
+        &run_started_resource,
+        &format!("{}:started", &run_id),
+    );
+    sqlx::query(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         VALUES ($1, 'RUN_STARTED', $2, $3, $4, $5, $6, $7, '', $8, $9, $10, 'session-core', 1)",
+    )
+    .bind(new_ulid())
+    .bind(&run_id)
+    .bind(serde_json::json!({
+        "goal": &req.goal,
+        "mode": &req.mode,
+        "agent_id": &req.agent_id,
+    }))
+    .bind(now)
+    .bind(&req.org_id)
+    .bind(&req.user_id)
+    .bind(&run_id)
+    .bind(&run_started_idem)
+    .bind(&run_started_resource)
+    .bind(RUN_STARTED_TYPE_URL)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    info!(run_id = %run_id, "run started");
+
+    Ok(Response::new(pb::StartRunResponse {
+        run_id,
+        created_at: Some(prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
+        }),
+    }))
+}
+
+/// Record a terminal run event (`RUN_COMPLETED` / `RUN_FAILED`) and flip the
+/// run's status, within the caller's open transaction. `causation_event_id` is
+/// the `STEP_COMPLETED` event that drove the terminal transition.
+async fn record_run_terminal(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &pb::CompleteStepRequest,
+    causation_event_id: &str,
+) -> Result<(), Status> {
+    let (terminal_event_type, run_status) = if req.status == "failed" {
+        ("RUN_FAILED", "failed")
+    } else {
+        ("RUN_COMPLETED", "completed")
+    };
+
+    let terminal_resource = format!("run:{}", &req.run_id);
+    let terminal_idem = derive_idempotency_hash(
+        "session-core",
+        terminal_event_type,
+        &terminal_resource,
+        &format!("{}:terminal", &req.run_id),
+    );
+    sqlx::query(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         SELECT $1, $2, $3, $4, now(), r.org_id, r.user_id, $3, $5, $8, $6, $7, 'session-core', 1
+         FROM runs r WHERE r.id = $3",
+    )
+    .bind(new_ulid())
+    .bind(terminal_event_type)
+    .bind(&req.run_id)
+    .bind(serde_json::json!({ "error": &req.error }))
+    .bind(causation_event_id)
+    .bind(&terminal_resource)
+    .bind(RUN_TERMINAL_TYPE_URL)
+    .bind(&terminal_idem)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    sqlx::query("UPDATE runs SET status = $1, ended_at = now(), updated_at = now() WHERE id = $2")
+        .bind(run_status)
+        .bind(&req.run_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(())
+}
+
+/// Core of `SessionCore::complete_step`, factored out to keep the trait method
+/// small. Appends the `STEP_COMPLETED` event and, on a terminal status, the
+/// run-terminal event + status flip, all in one tx.
+async fn complete_step_inner(
+    pool: &PgPool,
+    req: pb::CompleteStepRequest,
+) -> Result<Response<pb::CompleteStepResponse>, Status> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    // Append step event; trigger assigns step_ordinal.
+    let event_id = new_ulid();
+    let step_resource = format!("run:{}:step:{}", &req.run_id, &req.step_id);
+    let step_idem = derive_idempotency_hash(
+        "session-core",
+        "STEP_COMPLETED",
+        &step_resource,
+        &format!("{}:{}", &req.run_id, &req.step_id),
+    );
+    let row: (i64,) = sqlx::query_as(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+          SELECT $1, 'STEP_COMPLETED', $2, $3, now(), r.org_id, r.user_id, $2, '', $4, $5, $6, 'session-core', 1
+         FROM runs r WHERE r.id = $2
+         RETURNING step_ordinal",
+    )
+    .bind(&event_id)
+    .bind(&req.run_id)
+    .bind(serde_json::json!({
+        "step_id": req.step_id,
+        "status": req.status,
+        "output": req.output,
+        "error": req.error,
+    }))
+    .bind(&step_idem)
+    .bind(&step_resource)
+    .bind(STEP_COMPLETED_TYPE_URL)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    if req.status == "completed" || req.status == "failed" {
+        record_run_terminal(&mut tx, &req, &event_id).await?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    let step_index =
+        u32::try_from(row.0).map_err(|_| Status::internal("step index out of range"))?;
+
+    Ok(Response::new(pb::CompleteStepResponse { step_index }))
+}
+
+/// One event row in the exact column order selected by `replay_thread_task`'s
+/// query (see that function's `SELECT` for the field-by-field mapping).
+type ReplayEventRow = (
+    String,
+    String,
+    serde_json::Value,
+    chrono::NaiveDateTime,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i32,
+);
+
+/// Map a replay event row to its proto `Event`.
+fn replay_event_row_to_proto(row: ReplayEventRow) -> pb::Event {
+    let (
+        event_id,
+        event_type,
+        payload,
+        ts,
+        org_id,
+        user_id,
+        correlation_id,
+        causation_id,
+        type_url,
+        idempotency_key,
+        resource_ref,
+        producer,
+        schema_version,
+    ) = row;
+    pb::Event {
+        event_id,
+        event_type: event_type_to_i32(&event_type),
+        schema_version: u32::try_from(schema_version).unwrap_or(0),
+        ts: Some(prost_types::Timestamp {
+            seconds: ts.and_utc().timestamp(),
+            nanos: nanos_to_i32(ts.and_utc().timestamp_subsec_nanos()),
+        }),
+        producer,
+        correlation_id,
+        causation_id,
+        idempotency_key,
+        org_id,
+        user_id,
+        resource_ref,
+        payload: Some(prost_types::Any {
+            type_url,
+            value: serde_json::to_vec(&payload).unwrap_or_default(),
+        }),
+        zdr: false,
+    }
+}
+
+/// Spawned worker for `SessionCore::replay_thread`: replays a thread's events
+/// (ordered by `(ts, id)` for determinism) onto the response stream.
+async fn replay_thread_task(
+    pool: PgPool,
+    req: pb::ReplayThreadRequest,
+    tx: tokio::sync::mpsc::Sender<Result<pb::Event, Status>>,
+) {
+    let rows = sqlx::query_as::<_, ReplayEventRow>(
+        "SELECT e.id, e.event_type, e.payload, e.ts, e.org_id, e.user_id, e.correlation_id, e.causation_id, e.type_url, e.idempotency_key, e.resource_ref, e.producer, e.schema_version
+         FROM events e
+         JOIN runs r ON e.run_id = r.id
+         WHERE r.thread_id = $1
+         AND ($2 = '' OR e.id > $2)
+         ORDER BY e.ts ASC, e.id ASC
+         LIMIT CASE WHEN $3 = 0 THEN 10000 ELSE $3 END",
+    )
+    .bind(&req.thread_id)
+    .bind(&req.after_event_id)
+    .bind(i64::from(req.limit))
+    .fetch_all(&pool)
+    .await;
+
+    match rows {
+        Ok(events) => {
+            for row in events {
+                if tx.send(Ok(replay_event_row_to_proto(row))).await.is_err() {
+                    break;
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+        }
+    }
+}
+
+/// Recent non-empty thread messages (oldest-first) for context assembly.
+async fn load_thread_messages(
+    pool: &PgPool,
+    thread_id: &str,
+) -> Result<Vec<(String, String)>, Status> {
+    let mut msgs = sqlx::query_as::<_, (String, String)>(
+        "SELECT role, content
+         FROM (
+             SELECT role, content, sequence
+             FROM messages
+             WHERE thread_id = $1
+             ORDER BY sequence DESC
+             LIMIT $2
+         ) recent
+         ORDER BY sequence ASC",
+    )
+    .bind(thread_id)
+    .bind(CONTEXT_MESSAGE_LIMIT)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    msgs.retain(|(_, content)| !content.is_empty());
+    Ok(msgs)
+}
+
+/// Core of `SessionCore::get_context_assembly`. Loads run metadata, recent
+/// messages, and memory buckets; fans out to retrieval/knowledge/graph; then
+/// assembles the budgeted context segments.
+async fn get_context_assembly_inner(
+    svc: &SessionService,
+    req: pb::GetContextAssemblyRequest,
+) -> Result<Response<pb::GetContextAssemblyResponse>, Status> {
+    let thread_id = req.thread_id.clone();
+    let run_id = req.run_id.clone();
+
+    let run_meta: Option<(String, String, String)> = if run_id.is_empty() {
+        None
+    } else {
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT agent_id, user_id, goal FROM runs WHERE id = $1",
+        )
+        .bind(&run_id)
+        .fetch_optional(&svc.pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+    };
+
+    let (run_agent, user_id, prompt_goal) = match run_meta {
+        Some((a, u, g)) => (Some(a), Some(u), Some(g)),
+        None => (None, None, None),
+    };
+
+    let agent_id = if req.agent_id.is_empty() {
+        run_agent
+    } else {
+        Some(req.agent_id.clone())
+    };
+
+    let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
+
+    let memory_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT topic, content
+         FROM memory_index
+         WHERE thread_id = $1
+         ORDER BY updated_at DESC
+         LIMIT $2",
+    )
+    .bind(&thread_id)
+    .bind(CONTEXT_MEMORY_LIMIT)
+    .fetch_all(&svc.pool)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let memory = bucket_memory_segments(memory_rows);
+
+    let evidence = svc
+        .fetch_retrieval_segments(
+            &thread_id,
+            &thread_messages,
+            req.max_tokens,
+            &memory.retrieval,
+        )
+        .await;
+
+    // Persist live Data Plane retrieval into memory_index so the next call's
+    // `bucket_memory_segments` path picks it up even when Data Plane is
+    // unreachable. Best-effort; never blocking.
+    if evidence.source == RetrievalSource::DataPlane {
+        svc.persist_retrieval_evidence(&thread_id, &evidence.segments)
+            .await;
+    }
+    if evidence.low_confidence {
+        info!(thread_id, "retrieval returned low_confidence");
+    }
+
+    let knowledge_segments = svc
+        .fetch_knowledge_segments(&thread_id, &evidence.document_ids)
+        .await;
+    let graph_segments = svc.fetch_graph_segments(&thread_id).await;
+
+    let inputs = AssemblyInputs {
+        policy_id: req.policy_id,
+        workspace_id: req.workspace_id,
+        agent_id,
+        user_id,
+        prompt_goal,
+        thread_messages,
+        policy_segments: memory.policy,
+        workspace_segments: memory.workspace,
+        agent_segments: memory.agent,
+        user_segments: memory.user,
+        episodic_segments: memory.episodic,
+        skill_index_segments: memory.skill_index,
+        skill_expansion_segments: memory.skill_expansion,
+        retrieval_segments: evidence.segments,
+        knowledge_segments,
+        graph_segments,
+        run_id,
+        max_tokens: req.max_tokens,
+    };
+
+    let (segments, estimated_tokens) = assemble_segments(&inputs);
+
+    Ok(Response::new(pb::GetContextAssemblyResponse {
+        segments,
+        estimated_tokens,
+    }))
+}
+
 #[tonic::async_trait]
 impl SessionCore for SessionService {
     async fn create_thread(
@@ -93,72 +642,7 @@ impl SessionCore for SessionService {
         request: Request<pb::CreateThreadRequest>,
     ) -> Result<Response<pb::CreateThreadResponse>, Status> {
         let started = Instant::now();
-        let result: Result<Response<pb::CreateThreadResponse>, Status> = async {
-            let req = request.into_inner();
-            let thread_id = new_ulid();
-            let now = Utc::now();
-
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            sqlx::query(
-                "INSERT INTO threads (id, session_key, org_id, user_id, created_at) VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(&thread_id)
-            .bind(&req.session_key)
-            .bind(&req.org_id)
-            .bind(&req.user_id)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            let thread_resource = format!("thread:{}", &thread_id);
-            let thread_idem = derive_idempotency_hash(
-                "session-core",
-                "THREAD_CREATED",
-                &thread_resource,
-                &format!("{}:created", &thread_id),
-            );
-            sqlx::query(
-                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
-                 VALUES ($1, 'THREAD_CREATED', $2, $3, $4, $5, $6, $7, '', $8, $9, $10, 'session-core', 1)",
-            )
-            .bind(new_ulid())
-            .bind(&thread_id)
-            .bind(serde_json::json!({
-                "thread_id": &thread_id,
-                "session_key": &req.session_key,
-            }))
-            .bind(now)
-            .bind(&req.org_id)
-            .bind(&req.user_id)
-            .bind(&thread_id)
-            .bind(&thread_idem)
-            .bind(&thread_resource)
-            .bind(THREAD_CREATED_TYPE_URL)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            tx.commit()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            info!(thread_id = %thread_id, "thread created");
-
-            Ok(Response::new(pb::CreateThreadResponse {
-                thread_id,
-                created_at: Some(prost_types::Timestamp {
-                    seconds: now.timestamp(),
-                    nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
-                }),
-            }))
-        }
-        .await;
+        let result = create_thread_inner(&self.pool, request.into_inner()).await;
         record_metrics("create_thread", started, result.is_ok());
         result
     }
@@ -168,70 +652,7 @@ impl SessionCore for SessionService {
         request: Request<pb::AppendMessageRequest>,
     ) -> Result<Response<pb::AppendMessageResponse>, Status> {
         let started = Instant::now();
-        let result: Result<Response<pb::AppendMessageResponse>, Status> = async {
-            let req = request.into_inner();
-            let msg_id = new_ulid();
-            let now = Utc::now();
-
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            let row: (i64,) = sqlx::query_as(
-                "INSERT INTO messages (id, thread_id, role, content, created_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 RETURNING sequence",
-            )
-            .bind(&msg_id)
-            .bind(&req.thread_id)
-            .bind(&req.role)
-            .bind(&req.content)
-            .bind(now)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            let sequence = u64::try_from(row.0)
-                .map_err(|_| Status::internal("message sequence out of range"))?;
-
-            let msg_resource = format!("message:{}", &msg_id);
-            let msg_idem = derive_idempotency_hash(
-                "session-core",
-                "MESSAGE_APPENDED",
-                &msg_resource,
-                &format!("{}:{}", &req.thread_id, sequence),
-            );
-            sqlx::query(
-                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
-                 SELECT $1, 'MESSAGE_APPENDED', $2, $3, $4, t.org_id, t.user_id, $5, '', $6, $7, $8, 'session-core', 1
-                 FROM threads t WHERE t.id = $2",
-            )
-            .bind(new_ulid())
-            .bind(&req.thread_id)
-            .bind(serde_json::json!({
-                "thread_id": &req.thread_id,
-                "message_id": &msg_id,
-                "sequence": sequence,
-                "role": &req.role,
-            }))
-            .bind(now)
-            .bind(&req.thread_id)
-            .bind(&msg_idem)
-            .bind(&msg_resource)
-            .bind(MESSAGE_APPENDED_TYPE_URL)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            tx.commit()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            Ok(Response::new(pb::AppendMessageResponse { sequence }))
-        }
-        .await;
+        let result = append_message_inner(&self.pool, request.into_inner()).await;
         record_metrics("append_message", started, result.is_ok());
         result
     }
@@ -241,78 +662,7 @@ impl SessionCore for SessionService {
         request: Request<pb::StartRunRequest>,
     ) -> Result<Response<pb::StartRunResponse>, Status> {
         let started = Instant::now();
-        let result: Result<Response<pb::StartRunResponse>, Status> = async {
-            let req = request.into_inner();
-            let run_id = new_ulid();
-            let now = Utc::now();
-
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            sqlx::query(
-                "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, created_at, updated_at)
-                 VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $9)",
-            )
-            .bind(&run_id)
-            .bind(&req.thread_id)
-            .bind(&req.parent_run_id)
-            .bind(&req.agent_id)
-            .bind(&req.goal)
-            .bind(&req.mode)
-            .bind(&req.org_id)
-            .bind(&req.user_id)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            let run_started_resource = format!("run:{}", &run_id);
-            let run_started_idem = derive_idempotency_hash(
-                "session-core",
-                "RUN_STARTED",
-                &run_started_resource,
-                &format!("{}:started", &run_id),
-            );
-            sqlx::query(
-                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
-                 VALUES ($1, 'RUN_STARTED', $2, $3, $4, $5, $6, $7, '', $8, $9, $10, 'session-core', 1)",
-            )
-            .bind(new_ulid())
-            .bind(&run_id)
-            .bind(serde_json::json!({
-                "goal": &req.goal,
-                "mode": &req.mode,
-                "agent_id": &req.agent_id,
-            }))
-            .bind(now)
-            .bind(&req.org_id)
-            .bind(&req.user_id)
-            .bind(&run_id)
-            .bind(&run_started_idem)
-            .bind(&run_started_resource)
-            .bind(RUN_STARTED_TYPE_URL)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            tx.commit()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            info!(run_id = %run_id, "run started");
-
-            Ok(Response::new(pb::StartRunResponse {
-                run_id,
-                created_at: Some(prost_types::Timestamp {
-                    seconds: now.timestamp(),
-                    nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
-                }),
-            }))
-        }
-        .await;
+        let result = start_run_inner(&self.pool, request.into_inner()).await;
         record_metrics("start_run", started, result.is_ok());
         result
     }
@@ -322,96 +672,7 @@ impl SessionCore for SessionService {
         request: Request<pb::CompleteStepRequest>,
     ) -> Result<Response<pb::CompleteStepResponse>, Status> {
         let started = Instant::now();
-        let result: Result<Response<pb::CompleteStepResponse>, Status> = async {
-            let req = request.into_inner();
-
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            // Append step event; trigger assigns step_ordinal.
-            let event_id = new_ulid();
-            let step_resource = format!("run:{}:step:{}", &req.run_id, &req.step_id);
-            let step_idem = derive_idempotency_hash(
-                "session-core",
-                "STEP_COMPLETED",
-                &step_resource,
-                &format!("{}:{}", &req.run_id, &req.step_id),
-            );
-            let row: (i64,) = sqlx::query_as(
-                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
-                  SELECT $1, 'STEP_COMPLETED', $2, $3, now(), r.org_id, r.user_id, $2, '', $4, $5, $6, 'session-core', 1
-                 FROM runs r WHERE r.id = $2
-                 RETURNING step_ordinal",
-            )
-            .bind(&event_id)
-            .bind(&req.run_id)
-            .bind(serde_json::json!({
-                "step_id": req.step_id,
-                "status": req.status,
-                "output": req.output,
-                "error": req.error,
-            }))
-            .bind(&step_idem)
-            .bind(&step_resource)
-            .bind(STEP_COMPLETED_TYPE_URL)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            if req.status == "completed" || req.status == "failed" {
-                let (terminal_event_type, run_status) = if req.status == "failed" {
-                    ("RUN_FAILED", "failed")
-                } else {
-                    ("RUN_COMPLETED", "completed")
-                };
-
-                let terminal_resource = format!("run:{}", &req.run_id);
-                let terminal_idem = derive_idempotency_hash(
-                    "session-core",
-                    terminal_event_type,
-                    &terminal_resource,
-                    &format!("{}:terminal", &req.run_id),
-                );
-                sqlx::query(
-                    "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
-                     SELECT $1, $2, $3, $4, now(), r.org_id, r.user_id, $3, $5, $8, $6, $7, 'session-core', 1
-                     FROM runs r WHERE r.id = $3",
-                )
-                .bind(new_ulid())
-                .bind(terminal_event_type)
-                .bind(&req.run_id)
-                .bind(serde_json::json!({ "error": &req.error }))
-                .bind(&event_id)
-                .bind(&terminal_resource)
-                 .bind(RUN_TERMINAL_TYPE_URL)
-                .bind(&terminal_idem)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-                sqlx::query(
-                    "UPDATE runs SET status = $1, ended_at = now(), updated_at = now() WHERE id = $2",
-                )
-                .bind(run_status)
-                .bind(&req.run_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-            }
-
-            tx.commit()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            let step_index = u32::try_from(row.0)
-                .map_err(|_| Status::internal("step index out of range"))?;
-
-            Ok(Response::new(pb::CompleteStepResponse { step_index }))
-        }
-        .await;
+        let result = complete_step_inner(&self.pool, request.into_inner()).await;
         record_metrics("complete_step", started, result.is_ok());
         result
     }
@@ -501,87 +762,7 @@ impl SessionCore for SessionService {
         let pool = self.pool.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-
-        tokio::spawn(async move {
-            // Replay from events table ordered by (ts, event_id) for determinism.
-            let rows = sqlx::query_as::<_, (
-                String,
-                String,
-                serde_json::Value,
-                chrono::NaiveDateTime,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                i32,
-            )>(
-                "SELECT e.id, e.event_type, e.payload, e.ts, e.org_id, e.user_id, e.correlation_id, e.causation_id, e.type_url, e.idempotency_key, e.resource_ref, e.producer, e.schema_version
-                 FROM events e
-                 JOIN runs r ON e.run_id = r.id
-                 WHERE r.thread_id = $1
-                 AND ($2 = '' OR e.id > $2)
-                 ORDER BY e.ts ASC, e.id ASC
-                 LIMIT CASE WHEN $3 = 0 THEN 10000 ELSE $3 END",
-            )
-            .bind(&req.thread_id)
-            .bind(&req.after_event_id)
-            .bind(i64::from(req.limit))
-            .fetch_all(&pool)
-            .await;
-
-            match rows {
-                Ok(events) => {
-                    for (
-                        event_id,
-                        event_type,
-                        payload,
-                        ts,
-                        org_id,
-                        user_id,
-                        correlation_id,
-                        causation_id,
-                        type_url,
-                        idempotency_key,
-                        resource_ref,
-                        producer,
-                        schema_version,
-                    ) in events
-                    {
-                        let proto_event = pb::Event {
-                            event_id,
-                            event_type: event_type_to_i32(&event_type),
-                            schema_version: u32::try_from(schema_version).unwrap_or(0),
-                            ts: Some(prost_types::Timestamp {
-                                seconds: ts.and_utc().timestamp(),
-                                nanos: nanos_to_i32(ts.and_utc().timestamp_subsec_nanos()),
-                            }),
-                            producer,
-                            correlation_id,
-                            causation_id,
-                            idempotency_key,
-                            org_id,
-                            user_id,
-                            resource_ref,
-                            payload: Some(prost_types::Any {
-                                type_url,
-                                value: serde_json::to_vec(&payload).unwrap_or_default(),
-                            }),
-                            zdr: false,
-                        };
-                        if tx.send(Ok(proto_event)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
-                }
-            }
-        });
+        tokio::spawn(replay_thread_task(pool, req, tx));
 
         let resp = Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
@@ -753,122 +934,7 @@ impl SessionCore for SessionService {
         request: Request<pb::GetContextAssemblyRequest>,
     ) -> Result<Response<pb::GetContextAssemblyResponse>, Status> {
         let started = Instant::now();
-        let result: Result<Response<pb::GetContextAssemblyResponse>, Status> = async {
-            let req = request.into_inner();
-            let thread_id = req.thread_id.clone();
-            let run_id = req.run_id.clone();
-
-            let run_meta: Option<(String, String, String)> = if run_id.is_empty() {
-                None
-            } else {
-                sqlx::query_as::<_, (String, String, String)>(
-                    "SELECT agent_id, user_id, goal FROM runs WHERE id = $1",
-                )
-                .bind(&run_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-            };
-
-            let (run_agent, user_id, prompt_goal) = match run_meta {
-                Some((a, u, g)) => (Some(a), Some(u), Some(g)),
-                None => (None, None, None),
-            };
-
-            let agent_id = if req.agent_id.is_empty() {
-                run_agent
-            } else {
-                Some(req.agent_id.clone())
-            };
-
-            let mut thread_messages = sqlx::query_as::<_, (String, String)>(
-                "SELECT role, content
-                 FROM (
-                     SELECT role, content, sequence
-                     FROM messages
-                     WHERE thread_id = $1
-                     ORDER BY sequence DESC
-                     LIMIT $2
-                 ) recent
-                 ORDER BY sequence ASC",
-            )
-            .bind(&thread_id)
-            .bind(CONTEXT_MESSAGE_LIMIT)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            thread_messages.retain(|(_, content)| !content.is_empty());
-
-            let memory_rows = sqlx::query_as::<_, (String, String)>(
-                "SELECT topic, content
-                 FROM memory_index
-                 WHERE thread_id = $1
-                 ORDER BY updated_at DESC
-                 LIMIT $2",
-            )
-            .bind(&thread_id)
-            .bind(CONTEXT_MEMORY_LIMIT)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-            let memory = bucket_memory_segments(memory_rows);
-
-            let evidence = self
-                .fetch_retrieval_segments(
-                    &thread_id,
-                    &thread_messages,
-                    req.max_tokens,
-                    &memory.retrieval,
-                )
-                .await;
-
-            // Persist live Data Plane retrieval into memory_index so the
-            // next call's `bucket_memory_segments` path picks it up even
-            // when Data Plane is unreachable. Best-effort; never blocking.
-            if evidence.source == RetrievalSource::DataPlane {
-                self.persist_retrieval_evidence(&thread_id, &evidence.segments)
-                    .await;
-            }
-            if evidence.low_confidence {
-                info!(thread_id, "retrieval returned low_confidence");
-            }
-
-            let knowledge_segments = self
-                .fetch_knowledge_segments(&thread_id, &evidence.document_ids)
-                .await;
-            let graph_segments = self.fetch_graph_segments(&thread_id).await;
-
-            let inputs = AssemblyInputs {
-                policy_id: req.policy_id,
-                workspace_id: req.workspace_id,
-                agent_id,
-                user_id,
-                prompt_goal,
-                thread_messages,
-                policy_segments: memory.policy,
-                workspace_segments: memory.workspace,
-                agent_segments: memory.agent,
-                user_segments: memory.user,
-                episodic_segments: memory.episodic,
-                skill_index_segments: memory.skill_index,
-                skill_expansion_segments: memory.skill_expansion,
-                retrieval_segments: evidence.segments,
-                knowledge_segments,
-                graph_segments,
-                run_id,
-                max_tokens: req.max_tokens,
-            };
-
-            let (segments, estimated_tokens) = assemble_segments(&inputs);
-
-            Ok(Response::new(pb::GetContextAssemblyResponse {
-                segments,
-                estimated_tokens,
-            }))
-        }
-        .await;
+        let result = get_context_assembly_inner(self, request.into_inner()).await;
         record_metrics("get_context_assembly", started, result.is_ok());
         result
     }
@@ -883,11 +949,11 @@ const PERSIST_RETRIEVAL_LIMIT: usize = 5;
 
 /// Outcome of a retrieval pass — text segments ready for the assembler
 /// plus the structured metadata callers need to enrich context further
-/// (knowledge units), persist the evidence (memory_index), and emit
+/// (knowledge units), persist the evidence (`memory_index`), and emit
 /// learning-loop events (`mp.v1.retrieval.{used,low_confidence}`).
 pub(crate) struct RetrievalEvidence {
     pub segments: Vec<String>,
-    /// Distinct document_ids returned by the retrieval call, ordered by
+    /// Distinct `document_ids` returned by the retrieval call, ordered by
     /// rank. Capped at top-K so downstream knowledge enrichment doesn't
     /// blow out latency.
     pub document_ids: Vec<String>,
@@ -895,7 +961,7 @@ pub(crate) struct RetrievalEvidence {
     /// signals the corpus has a gap and may want a wiki proposal.
     pub low_confidence: bool,
     /// Source of the segments. Distinguishes "live Data Plane" from
-    /// "fell back to memory_index" for telemetry and tests.
+    /// "fell back to `memory_index`" for telemetry and tests.
     pub source: RetrievalSource,
 }
 
@@ -905,8 +971,57 @@ pub(crate) enum RetrievalSource {
     DataPlane,
     /// Returned from `memory_index` rows persisted by an earlier call —
     /// happens when the Data Plane client is unconfigured, the call
-    /// failed, or the thread's org_id is missing.
+    /// failed, or the thread's `org_id` is missing.
     LocalFallback,
+}
+
+/// Map a Data Plane `RetrieveResponse` into `RetrievalEvidence`, preferring the
+/// `context_pack` facts, then raw candidate text, falling back to `local_fallback`.
+fn map_retrieve_response(
+    inner: ret_pb::RetrieveResponse,
+    local_fallback: &[String],
+) -> RetrievalEvidence {
+    let low_confidence = inner.low_confidence;
+    let mut document_ids: Vec<String> = inner
+        .candidates
+        .iter()
+        .map(|c| c.document_id.clone())
+        .filter(|d| !d.is_empty())
+        .collect();
+    document_ids.dedup();
+
+    let segments = if let Some(pack) = inner.context_pack {
+        let facts: Vec<String> = pack
+            .facts
+            .into_iter()
+            .map(|f| format!("[{}] ({}): {}", f.source_title, f.source_type, f.text))
+            .collect();
+        if facts.is_empty() {
+            local_fallback.to_vec()
+        } else {
+            facts
+        }
+    } else if inner.candidates.is_empty() {
+        local_fallback.to_vec()
+    } else {
+        inner.candidates.into_iter().map(|c| c.text).collect()
+    };
+
+    if segments.is_empty() {
+        return RetrievalEvidence {
+            segments: local_fallback.to_vec(),
+            document_ids: Vec::new(),
+            low_confidence: false,
+            source: RetrievalSource::LocalFallback,
+        };
+    }
+
+    RetrievalEvidence {
+        segments,
+        document_ids,
+        low_confidence,
+        source: RetrievalSource::DataPlane,
+    }
 }
 
 impl SessionService {
@@ -959,7 +1074,7 @@ impl SessionService {
         };
 
         let budget = if max_tokens > 0 {
-            Some((max_tokens / RETRIEVAL_BUDGET_FRACTION) as i32)
+            Some(i32::try_from(max_tokens / RETRIEVAL_BUDGET_FRACTION).unwrap_or(i32::MAX))
         } else {
             None
         };
@@ -981,45 +1096,7 @@ impl SessionService {
         };
 
         match client.retrieve(retrieve_req).await {
-            Ok(resp) => {
-                let inner = resp.into_inner();
-                let low_confidence = inner.low_confidence;
-                let mut document_ids: Vec<String> = inner
-                    .candidates
-                    .iter()
-                    .map(|c| c.document_id.clone())
-                    .filter(|d| !d.is_empty())
-                    .collect();
-                document_ids.dedup();
-
-                let segments = if let Some(pack) = inner.context_pack {
-                    let facts: Vec<String> = pack
-                        .facts
-                        .into_iter()
-                        .map(|f| format!("[{}] ({}): {}", f.source_title, f.source_type, f.text))
-                        .collect();
-                    if facts.is_empty() {
-                        local_fallback.to_vec()
-                    } else {
-                        facts
-                    }
-                } else if !inner.candidates.is_empty() {
-                    inner.candidates.into_iter().map(|c| c.text).collect()
-                } else {
-                    local_fallback.to_vec()
-                };
-
-                if segments.is_empty() {
-                    return local();
-                }
-
-                RetrievalEvidence {
-                    segments,
-                    document_ids,
-                    low_confidence,
-                    source: RetrievalSource::DataPlane,
-                }
-            }
+            Ok(resp) => map_retrieve_response(resp.into_inner(), local_fallback),
             Err(e) => {
                 warn!(error = %e, "retrieval service call failed, using local fallback");
                 local()
@@ -1027,7 +1104,7 @@ impl SessionService {
         }
     }
 
-    /// Fetch knowledge-unit context for the top-N retrieval doc_ids.
+    /// Fetch knowledge-unit context for the top-N retrieval `doc_ids`.
     /// `KnowledgeService.GetKnowledgeUnits` returns chunks adjacent to
     /// the retrieved candidates — useful when the candidate text alone
     /// is too narrow (e.g. it's the answer span but the model needs the
@@ -1094,7 +1171,7 @@ impl SessionService {
     /// `RETRIEVAL` so subsequent context-assembly calls on this thread
     /// can fall back to them when Data Plane is unreachable, and so the
     /// model "remembers" what it saw across calls instead of refetching.
-    /// Bounded by `PERSIST_RETRIEVAL_LIMIT` to keep memory_index lean.
+    /// Bounded by `PERSIST_RETRIEVAL_LIMIT` to keep `memory_index` lean.
     /// Failures are logged and ignored — persistence is best-effort.
     async fn persist_retrieval_evidence(&self, thread_id: &str, segments: &[String]) {
         if segments.is_empty() {
@@ -1232,6 +1309,26 @@ fn push_all(
     true
 }
 
+/// Push one assembly tier: prefer explicit `segments`; otherwise fall back to a
+/// single id-based segment (`{kind}:{id}`) when `fallback_id` is non-empty.
+/// Returns `false` when the budget was exhausted and assembly should stop.
+fn push_tier(
+    kind: &str,
+    segments: &[String],
+    fallback_id: Option<&str>,
+    budget: u32,
+    segs: &mut Vec<pb::ContextSegment>,
+    total: &mut u32,
+) -> bool {
+    if !segments.is_empty() {
+        return push_all(kind, segments, budget, segs, total);
+    }
+    match fallback_id {
+        Some(id) if !id.is_empty() => try_push(kind, format!("{kind}:{id}"), budget, segs, total),
+        _ => true,
+    }
+}
+
 fn try_push(
     kind: &str,
     content: String,
@@ -1258,96 +1355,45 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
     let mut total: u32 = 0;
     let budget = inputs.max_tokens;
 
-    if !inputs.policy_segments.is_empty() {
-        if !push_all(
-            "policy",
-            &inputs.policy_segments,
-            budget,
-            &mut segments,
-            &mut total,
-        ) {
-            return (segments, total);
-        }
-    } else if !inputs.policy_id.is_empty()
-        && !try_push(
-            "policy",
-            format!("policy:{}", inputs.policy_id),
-            budget,
-            &mut segments,
-            &mut total,
-        )
-    {
+    if !push_tier(
+        "policy",
+        &inputs.policy_segments,
+        Some(&inputs.policy_id),
+        budget,
+        &mut segments,
+        &mut total,
+    ) {
         return (segments, total);
     }
-
-    if !inputs.workspace_segments.is_empty() {
-        if !push_all(
-            "workspace",
-            &inputs.workspace_segments,
-            budget,
-            &mut segments,
-            &mut total,
-        ) {
-            return (segments, total);
-        }
-    } else if !inputs.workspace_id.is_empty()
-        && !try_push(
-            "workspace",
-            format!("workspace:{}", inputs.workspace_id),
-            budget,
-            &mut segments,
-            &mut total,
-        )
-    {
+    if !push_tier(
+        "workspace",
+        &inputs.workspace_segments,
+        Some(&inputs.workspace_id),
+        budget,
+        &mut segments,
+        &mut total,
+    ) {
         return (segments, total);
     }
-
-    if !inputs.agent_segments.is_empty() {
-        if !push_all(
-            "agent",
-            &inputs.agent_segments,
-            budget,
-            &mut segments,
-            &mut total,
-        ) {
-            return (segments, total);
-        }
-    } else if let Some(aid) = &inputs.agent_id {
-        if !aid.is_empty()
-            && !try_push(
-                "agent",
-                format!("agent:{aid}"),
-                budget,
-                &mut segments,
-                &mut total,
-            )
-        {
-            return (segments, total);
-        }
+    if !push_tier(
+        "agent",
+        &inputs.agent_segments,
+        inputs.agent_id.as_deref(),
+        budget,
+        &mut segments,
+        &mut total,
+    ) {
+        return (segments, total);
     }
-
-    if !inputs.user_segments.is_empty() {
-        if !push_all(
-            "user",
-            &inputs.user_segments,
-            budget,
-            &mut segments,
-            &mut total,
-        ) {
-            return (segments, total);
-        }
-    } else if let Some(uid) = &inputs.user_id {
-        if !uid.is_empty()
-            && !try_push(
-                "user",
-                format!("user:{uid}"),
-                budget,
-                &mut segments,
-                &mut total,
-            )
-        {
-            return (segments, total);
-        }
+    if !push_tier(
+        "user",
+        &inputs.user_segments,
+        inputs.user_id.as_deref(),
+        budget,
+        &mut segments,
+        &mut total,
+    ) {
+        return (segments, total);
     }
 
     for (role, content) in &inputs.thread_messages {
@@ -1362,59 +1408,18 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
         }
     }
 
-    if !push_all(
-        "episodic",
-        &inputs.episodic_segments,
-        budget,
-        &mut segments,
-        &mut total,
-    ) {
-        return (segments, total);
-    }
-    if !push_all(
-        "skill_index",
-        &inputs.skill_index_segments,
-        budget,
-        &mut segments,
-        &mut total,
-    ) {
-        return (segments, total);
-    }
-    if !push_all(
-        "skill_expansion",
-        &inputs.skill_expansion_segments,
-        budget,
-        &mut segments,
-        &mut total,
-    ) {
-        return (segments, total);
-    }
-    if !push_all(
-        "retrieval",
-        &inputs.retrieval_segments,
-        budget,
-        &mut segments,
-        &mut total,
-    ) {
-        return (segments, total);
-    }
-    if !push_all(
-        "knowledge",
-        &inputs.knowledge_segments,
-        budget,
-        &mut segments,
-        &mut total,
-    ) {
-        return (segments, total);
-    }
-    if !push_all(
-        "graph",
-        &inputs.graph_segments,
-        budget,
-        &mut segments,
-        &mut total,
-    ) {
-        return (segments, total);
+    let tail_tiers: [(&str, &[String]); 6] = [
+        ("episodic", &inputs.episodic_segments),
+        ("skill_index", &inputs.skill_index_segments),
+        ("skill_expansion", &inputs.skill_expansion_segments),
+        ("retrieval", &inputs.retrieval_segments),
+        ("knowledge", &inputs.knowledge_segments),
+        ("graph", &inputs.graph_segments),
+    ];
+    for (kind, tier) in tail_tiers {
+        if !push_all(kind, tier, budget, &mut segments, &mut total) {
+            return (segments, total);
+        }
     }
 
     let prompt = match &inputs.prompt_goal {
@@ -1810,6 +1815,105 @@ mod tests {
         );
     }
 
+    // P3 SetRunMode — durable run.mode, invalid-mode rejection, and per-org
+    // isolation (a foreign org's UPDATE matches no row → not_found, no mutation).
+    async fn assert_set_run_mode_isolation(
+        svc: &super::SessionService,
+        pool: &sqlx::PgPool,
+        run_id: &str,
+        org: &str,
+        sfx: u32,
+    ) {
+        use mp_contracts::model_plane::v1 as pb;
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use tonic::Request;
+
+        let resp = svc
+            .set_run_mode(Request::new(pb::SetRunModeRequest {
+                run_id: run_id.to_owned(),
+                mode: "plan".into(),
+                org_id: org.to_owned(),
+            }))
+            .await
+            .expect("set_run_mode")
+            .into_inner();
+        assert_eq!(resp.mode, "plan");
+        assert!(svc
+            .set_run_mode(Request::new(pb::SetRunModeRequest {
+                run_id: run_id.to_owned(),
+                mode: "bogus".into(),
+                org_id: org.to_owned(),
+            }))
+            .await
+            .is_err());
+
+        let cross = svc
+            .set_run_mode(Request::new(pb::SetRunModeRequest {
+                run_id: run_id.to_owned(),
+                mode: "execute".into(),
+                org_id: format!("attacker-{sfx}"),
+            }))
+            .await;
+        assert_eq!(
+            cross.unwrap_err().code(),
+            tonic::Code::NotFound,
+            "cross-org set_run_mode must be rejected (per-org isolation)"
+        );
+        let persisted: (String,) = sqlx::query_as("SELECT mode FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("read mode");
+        assert_eq!(
+            persisted.0, "plan",
+            "cross-org attempt must not mutate the run"
+        );
+    }
+
+    // G7 — fresh background_review insert succeeds; a background_review overwrite
+    // of an existing user skill must be skipped (protected).
+    async fn assert_upsert_skill_guards(svc: &super::SessionService, org: &str) {
+        use mp_contracts::model_plane::v1 as pb;
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use tonic::Request;
+
+        let skill = |name: &str, content: &str, origin: &str| pb::UpsertAgentSkillRequest {
+            org_id: org.to_owned(),
+            name: name.into(),
+            description: "d".into(),
+            content: content.into(),
+            trigger_keywords: vec![],
+            trigger_file_patterns: vec![],
+            tool_restrictions: vec![],
+            enabled: true,
+            origin: origin.into(),
+        };
+
+        let r = svc
+            .upsert_agent_skill(Request::new(skill("Cache", "c1", "background_review")))
+            .await
+            .expect("upsert")
+            .into_inner();
+        assert!(r.created && !r.skipped_protected);
+
+        svc.upsert_agent_skill(Request::new(skill("Runbook", "human", "user")))
+            .await
+            .expect("user skill");
+        let blocked = svc
+            .upsert_agent_skill(Request::new(skill(
+                "Runbook",
+                "MACHINE",
+                "background_review",
+            )))
+            .await
+            .expect("guarded upsert")
+            .into_inner();
+        assert!(
+            blocked.skipped_protected,
+            "background_review must not overwrite a user skill"
+        );
+    }
+
     // Handler-level integration test against a REAL Postgres. Exercises the
     // actual gRPC handler code (validation + SQL + mapping), not just raw SQL.
     // #[ignore]d so plain `cargo test` (no DB) skips it; run explicitly with a
@@ -1819,9 +1923,6 @@ mod tests {
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
     async fn set_run_mode_and_upsert_skill_against_real_pg() {
         use super::SessionService;
-        use mp_contracts::model_plane::v1 as pb;
-        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
-        use tonic::Request;
 
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping: DATABASE_URL unset");
@@ -1859,88 +1960,8 @@ mod tests {
             knowledge_client: None,
         };
 
-        // P3 SetRunMode — durable run.mode + invalid-mode rejection.
-        let resp = svc
-            .set_run_mode(Request::new(pb::SetRunModeRequest {
-                run_id: run_id.clone(),
-                mode: "plan".into(),
-                org_id: org.clone(),
-            }))
-            .await
-            .expect("set_run_mode")
-            .into_inner();
-        assert_eq!(resp.mode, "plan");
-        assert!(svc
-            .set_run_mode(Request::new(pb::SetRunModeRequest {
-                run_id: run_id.clone(),
-                mode: "bogus".into(),
-                org_id: org.clone(),
-            }))
-            .await
-            .is_err());
-
-        // Per-org isolation: another org may NOT flip this run's mode. The
-        // org-scoped UPDATE matches no row, so the handler returns not_found
-        // (without revealing the run exists) and the mode stays 'plan'.
-        let cross = svc
-            .set_run_mode(Request::new(pb::SetRunModeRequest {
-                run_id: run_id.clone(),
-                mode: "execute".into(),
-                org_id: format!("attacker-{sfx}"),
-            }))
-            .await;
-        assert_eq!(
-            cross.unwrap_err().code(),
-            tonic::Code::NotFound,
-            "cross-org set_run_mode must be rejected (per-org isolation)"
-        );
-        let persisted: (String,) = sqlx::query_as("SELECT mode FROM runs WHERE id = $1")
-            .bind(&run_id)
-            .fetch_one(&pool)
-            .await
-            .expect("read mode");
-        assert_eq!(
-            persisted.0, "plan",
-            "cross-org attempt must not mutate the run"
-        );
-
-        let skill = |name: &str, content: &str, origin: &str| pb::UpsertAgentSkillRequest {
-            org_id: org.clone(),
-            name: name.into(),
-            description: "d".into(),
-            content: content.into(),
-            trigger_keywords: vec![],
-            trigger_file_patterns: vec![],
-            tool_restrictions: vec![],
-            enabled: true,
-            origin: origin.into(),
-        };
-
-        // G7 — fresh background_review insert.
-        let r = svc
-            .upsert_agent_skill(Request::new(skill("Cache", "c1", "background_review")))
-            .await
-            .expect("upsert")
-            .into_inner();
-        assert!(r.created && !r.skipped_protected);
-
-        // User skill then a background_review overwrite attempt → must be skipped.
-        svc.upsert_agent_skill(Request::new(skill("Runbook", "human", "user")))
-            .await
-            .expect("user skill");
-        let blocked = svc
-            .upsert_agent_skill(Request::new(skill(
-                "Runbook",
-                "MACHINE",
-                "background_review",
-            )))
-            .await
-            .expect("guarded upsert")
-            .into_inner();
-        assert!(
-            blocked.skipped_protected,
-            "background_review must not overwrite a user skill"
-        );
+        assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
+        assert_upsert_skill_guards(&svc, &org).await;
 
         // cleanup
         for q in [

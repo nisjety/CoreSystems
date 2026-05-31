@@ -59,21 +59,17 @@ impl TodoState {
 /// Priority bands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TodoPriority {
     /// Low priority.
     Low,
     /// Normal priority (default).
+    #[default]
     Normal,
     /// High priority.
     High,
     /// Urgent; should be addressed immediately.
     Urgent,
-}
-
-impl Default for TodoPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Durable work-item record.
@@ -225,15 +221,11 @@ impl Todo {
         use TodoState::{Blocked, Cancelled, Completed, InProgress, Pending};
         matches!(
             (from, to),
-            (Pending, InProgress)
-                | (Pending, Blocked)
-                | (Pending, Cancelled)
-                | (InProgress, Blocked)
+            (Pending | Blocked, InProgress)
+                | (Pending | InProgress, Blocked)
+                | (Pending | InProgress | Blocked, Cancelled)
                 | (InProgress, Completed)
-                | (InProgress, Cancelled)
                 | (Blocked, Pending)
-                | (Blocked, InProgress)
-                | (Blocked, Cancelled)
         )
     }
 }

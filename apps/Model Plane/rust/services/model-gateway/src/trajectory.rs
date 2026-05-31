@@ -1,7 +1,7 @@
 //! Wave 10f — trajectory recording + Atropos-format export.
 //!
 //! In-memory ring-buffer of completed-run trajectories keyed by
-//! trajectory_id. Each `RecordTrajectory` call also publishes the
+//! `trajectory_id`. Each `RecordTrajectory` call also publishes the
 //! trajectory onto `agents.trajectory.recorded` so external pipelines
 //! (a separate Atropos exporter, an analytics aggregator) can stream
 //! them without coupling to the gateway.
@@ -149,6 +149,13 @@ impl TrajectoryStore {
     }
 }
 
+/// Records an agent trajectory in the store and best-effort publishes an event.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.trajectory` is absent or its `org_id`
+/// or `run_id` is empty. Event-publish failures are reported via the response's
+/// `published` flag, not as an `Err`.
 pub async fn handle_record_trajectory<P: EventPublisher>(
     store: &TrajectoryStore,
     publisher: &P,
@@ -184,7 +191,7 @@ pub async fn handle_record_trajectory<P: EventPublisher>(
         payload: trajectory_to_payload(&stored),
         zdr: false,
     };
-    let published = match publisher
+    let was_published = match publisher
         .publish("agents.trajectory.recorded", &envelope)
         .await
     {
@@ -198,10 +205,15 @@ pub async fn handle_record_trajectory<P: EventPublisher>(
     Ok(RecordTrajectoryResponse {
         request_id: req.request_id,
         trajectory_id,
-        published,
+        published: was_published,
     })
 }
 
+/// Lists recorded trajectories for an org with optional filters.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.org_id` is empty.
 pub async fn handle_list_trajectories(
     store: &TrajectoryStore,
     req: ListTrajectoriesRequest,
@@ -209,11 +221,12 @@ pub async fn handle_list_trajectories(
     if req.org_id.is_empty() {
         return Err(Status::invalid_argument("org_id is required"));
     }
-    let limit = if req.limit <= 0 {
+    let limit = usize::try_from(if req.limit <= 0 {
         DEFAULT_LIST_LIMIT
     } else {
         req.limit.min(MAX_LIST_LIMIT)
-    } as usize;
+    })
+    .unwrap_or(0);
 
     let (trajectories, total) = store
         .list(
@@ -232,6 +245,11 @@ pub async fn handle_list_trajectories(
     })
 }
 
+/// Exports trajectories for an org (e.g. for offline learning).
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.org_id` is empty.
 pub async fn handle_export_trajectories(
     store: &TrajectoryStore,
     req: ExportTrajectoriesRequest,

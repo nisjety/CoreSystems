@@ -1,6 +1,6 @@
-//! mp-eventlog — shared domain types for the Phase-4 EventLog service.
+//! mp-eventlog — shared domain types for the Phase-4 `EventLog` service.
 //!
-//! Owns three concerns every EventLog implementation and consumer needs:
+//! Owns three concerns every `EventLog` implementation and consumer needs:
 //!   - **Filter validation** — `EventFilter` has cross-field invariants that
 //!     must be checked the same way in the session-core RPC server, in any
 //!     future in-process consumer, and in tests.
@@ -10,7 +10,7 @@
 //!   - **Idempotency-key derivation** — the append path must derive the
 //!     canonical idempotency key from `(producer, event_type, resource_ref,
 //!     client_key)` using blake3. Same rule as `mp-events` envelope
-//!     idempotency — kept separate here so EventLog callers can compute the
+//!     idempotency — kept separate here so `EventLog` callers can compute the
 //!     key without pulling in the whole events crate.
 //!
 //! Design rules (shared with `mp-orchestration`, `mp-slo`):

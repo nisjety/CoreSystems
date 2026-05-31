@@ -1,7 +1,7 @@
 //! gRPC handler for the `FinetuneJobs` service.
 //!
 //! Wave 7 v1 — owns the fine-tuning job state-machine persistence in
-//! session-core's existing Postgres. Provider integration (Azure OpenAI Files
+//! session-core's existing Postgres. Provider integration (Azure `OpenAI` Files
 //! and Fine-tuning Jobs APIs) lives in `model-gateway::finetune_routes` so the
 //! gateway holds the Azure credentials, runs the HTTP calls, and writes the
 //! resulting `azure_file_id` / `azure_job_id` back through this service.
@@ -12,6 +12,9 @@
 //! Transitions are not enforced at the DB level — the gateway is the only
 //! caller and writes the valid set. `succeeded` requires the gateway to fill
 //! in `fine_tuned_model` + `deployment_name` before flipping status.
+
+// tonic::Status is the unavoidable large Err for gRPC; boxing breaks the service-trait contract.
+#![allow(clippy::result_large_err)]
 
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
@@ -26,7 +29,7 @@ use tracing::warn;
 const LIST_LIMIT_DEFAULT: i32 = 50;
 const LIST_LIMIT_MAX: i32 = 200;
 /// Max rows the polling worker may pull per tick. Higher than the user-facing
-/// ListJobs cap because the poller is an internal caller and we want it to
+/// `ListJobs` cap because the poller is an internal caller and we want it to
 /// drain in-flight backlog quickly when the gateway has been offline.
 const LIST_ACTIVE_LIMIT_MAX: i32 = 500;
 

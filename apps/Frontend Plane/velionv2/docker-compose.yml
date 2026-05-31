@@ -11,23 +11,46 @@ services:
       dockerfile: Dockerfile.dev
     container_name: velionv2-frontend
     ports:
-      - "3001:3000"   # host 3001 → container 3000; v1 keeps host 3000.
+      - "3107:3000"
     env_file:
       - path: .env
         required: false
     environment:
+      CORE_ROOT_OVERRIDE: "/Volumes/Lagring/Triodelab/CoreSystem"
       NODE_ENV: development
       HOSTNAME: "0.0.0.0"
+      PORT: "3000"
       WATCHPACK_POLLING: "true"
       CHOKIDAR_USEPOLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
+      VELION_SKIP_BOOTSTRAP: "${VELION_SKIP_BOOTSTRAP:-0}"
+      VELION_NATS_URL: "nats://velion-nats:4222"
+      AUTH_CORE_URL: "http://auth-core:3011"
+      CONTROL_PLANE_AUTH_URL: "http://auth-core:3011"
+      USER_CORE_URL: "http://user-core:3012"
+      USER_SERVICE_URL: "http://user-core:3012"
+      NEXT_PUBLIC_APP_URL: "http://localhost:3107"
+    depends_on:
+      nats:
+        condition: service_healthy
     command:
-      [
-        "sh",
-        "-lc",
-        "if [ ! -x node_modules/.bin/next ]; then mkdir -p node_modules && cp -R /opt/velionv2-deps/node_modules/. node_modules/ 2>/dev/null || true; fi; if [ ! -x node_modules/.bin/next ]; then pnpm install --frozen-lockfile || pnpm install; fi; pnpm dev --hostname 0.0.0.0",
-      ]
+      - sh
+      - -lc
+      - |
+          if [ "$${VELION_SKIP_BOOTSTRAP:-0}" != "1" ]; then
+            "$$CORE_ROOT_OVERRIDE/apps/Frontend Plane/velionv2/build-velion-services.sh" --compose-bootstrap
+          fi
+          if [ ! -x node_modules/.bin/next ]; then
+            mkdir -p node_modules
+            cp -R /opt/velionv2-deps/node_modules/. node_modules/ 2>/dev/null || true
+          fi
+          if [ ! -x node_modules/.bin/next ]; then
+            pnpm install --frozen-lockfile || pnpm install
+          fi
+          pnpm dev --hostname 0.0.0.0 --port 3000
     volumes:
+      - ../../..:/Volumes/Lagring/Triodelab/CoreSystem
+      - /var/run/docker.sock:/var/run/docker.sock
       - ./src:/app/src
       - ./public:/app/public
       - ./package.json:/app/package.json:ro
@@ -42,11 +65,37 @@ services:
       - inter-plane-bus
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --timeout=5 --tries=1 -O /dev/null http://127.0.0.1:3000 || exit 1"]
+      test: ["CMD-SHELL", "wget -q --timeout=5 --tries=1 -O /dev/null http://127.0.0.1:3000/api/v1/health || exit 1"]
       interval: 30s
       timeout: 8s
       retries: 5
       start_period: 120s
+
+  nats:
+    image: nats:2-alpine
+    container_name: velion-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222", "-sd", "/data"]
+    networks:
+      - inter-plane-bus
+    volumes:
+      - velion-nats-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
 networks:
   inter-plane-bus:
@@ -55,3 +104,4 @@ networks:
 
 volumes:
   velionv2_node_modules:
+  velion-nats-data:

@@ -12,13 +12,22 @@
 # Build context: project root (so the entire workspace is available).
 
 FROM rust:1-bookworm AS chef
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
         protobuf-compiler libprotobuf-dev libssl-dev pkg-config build-essential \
-    && rm -rf /var/lib/apt/lists/*
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
 # tonic-build invokes protoc, which needs to resolve `google/protobuf/*.proto`
 # imports. libprotobuf-dev installs them under /usr/include/google/protobuf/.
 ENV PROTOC_INCLUDE=/usr/include
-RUN cargo install cargo-chef --locked --version 0.1.71
+RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 # ─── Stage 1: planner ──────────────────────────────────────────────────────
@@ -38,13 +47,23 @@ FROM cooker AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY services/ services/
+COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
 RUN cargo build --release --bin retrieval-engine
 
 # ─── Stage 4: runtime ──────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
         ca-certificates curl libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
 
 # Run as non-root for defense in depth.
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2

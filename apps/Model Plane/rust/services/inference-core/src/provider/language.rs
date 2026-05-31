@@ -7,7 +7,8 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use super::{
-    openai::OpenAiProvider, ChatMessage, InferRequest, ModelInfo, ProviderError, ProviderRouter,
+    narrow_f64, openai::OpenAiProvider, ChatMessage, InferRequest, ModelInfo, ProviderError,
+    ProviderRouter,
 };
 
 const DEFAULT_AZURE_API_VERSION: &str = "2024-11-15-preview";
@@ -27,6 +28,11 @@ pub enum LanguageOperation {
 }
 
 impl LanguageOperation {
+    /// Parse a [`LanguageOperation`] from its wire string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidResponse`] if `value` is not a recognized operation.
     pub fn from_wire(value: &str) -> Result<Self, ProviderError> {
         match value.trim().to_ascii_lowercase().as_str() {
             "sentiment" => Ok(Self::Sentiment),
@@ -128,6 +134,12 @@ impl LanguageAnalyticsChain {
         self.providers.len()
     }
 
+    /// Run language analytics using the first matching provider in the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn analyze(
         &self,
         req: &LanguageAnalyticsRequest,
@@ -549,7 +561,7 @@ fn azure_doc_to_item(
                 id: doc["id"].as_str().unwrap_or("").to_owned(),
                 detected_language_name: detected["name"].as_str().unwrap_or("").to_owned(),
                 detected_language_code: detected["iso6391Name"].as_str().unwrap_or("").to_owned(),
-                confidence: detected["confidenceScore"].as_f64().unwrap_or(0.0) as f32,
+                confidence: narrow_f64(detected["confidenceScore"].as_f64().unwrap_or(0.0)),
                 raw_json: to_json_string(doc, "{}"),
                 ..LanguageAnalysisItem::default()
             }
@@ -608,29 +620,31 @@ fn parse_llm_results(
     serde_json::from_str::<serde_json::Value>(content)
         .ok()
         .and_then(|value| value.as_array().cloned())
-        .map(|items| {
-            items
-                .iter()
-                .enumerate()
-                .map(|(idx, item)| llm_item(operation, idx, item))
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            texts
-                .iter()
-                .enumerate()
-                .map(|(idx, text)| LanguageAnalysisItem {
-                    id: (idx + 1).to_string(),
-                    summary: if operation == LanguageOperation::Summary {
-                        content.to_owned()
-                    } else {
-                        String::new()
-                    },
-                    raw_json: json!({ "text": text, "content": content }).to_string(),
-                    ..LanguageAnalysisItem::default()
-                })
-                .collect()
-        })
+        .map_or_else(
+            || {
+                texts
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, text)| LanguageAnalysisItem {
+                        id: (idx + 1).to_string(),
+                        summary: if operation == LanguageOperation::Summary {
+                            content.to_owned()
+                        } else {
+                            String::new()
+                        },
+                        raw_json: json!({ "text": text, "content": content }).to_string(),
+                        ..LanguageAnalysisItem::default()
+                    })
+                    .collect()
+            },
+            |items| {
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, item)| llm_item(operation, idx, item))
+                    .collect()
+            },
+        )
 }
 
 fn llm_item(
@@ -641,8 +655,7 @@ fn llm_item(
     LanguageAnalysisItem {
         id: item["id"]
             .as_str()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| (idx + 1).to_string()),
+            .map_or_else(|| (idx + 1).to_string(), ToOwned::to_owned),
         sentiment: item["sentiment"].as_str().unwrap_or("").to_owned(),
         confidence_scores_json: to_json_string(&item["confidence_scores"], "{}"),
         sentences_json: to_json_string(&item["sentences"], "[]"),
@@ -656,7 +669,7 @@ fn llm_item(
         redacted_text: item["redacted_text"].as_str().unwrap_or("").to_owned(),
         detected_language_name: item["language_name"].as_str().unwrap_or("").to_owned(),
         detected_language_code: item["iso_code"].as_str().unwrap_or("").to_owned(),
-        confidence: item["confidence"].as_f64().unwrap_or(0.0) as f32,
+        confidence: narrow_f64(item["confidence"].as_f64().unwrap_or(0.0)),
         summary: item["summary"]
             .as_str()
             .unwrap_or(if operation == LanguageOperation::Summary {

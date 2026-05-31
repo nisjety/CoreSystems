@@ -13,7 +13,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /session-core ./cmd/se
 # ── Runtime stage ─────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates curl postgresql16-client bash
+RUN set -e; \
+    if ! apk add --no-cache --quiet ca-certificates curl postgresql16-client bash \
+        > /tmp/apk-add.log 2>&1; then \
+        cat /tmp/apk-add.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log
 
 COPY --from=builder /session-core /usr/local/bin/session-core
 COPY migrations /app/migrations

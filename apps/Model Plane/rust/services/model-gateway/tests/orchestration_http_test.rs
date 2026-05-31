@@ -30,17 +30,20 @@ use tower::ServiceExt;
 type MockEventStream =
     Pin<Box<dyn futures::Stream<Item = Result<OrchestrationEvent, Status>> + Send>>;
 
+/// Captured `(id, state_int, actor, comment)` tuple recorded by a transition/decide RPC.
+type CapturedTransition = Arc<Mutex<Option<(String, i32, String, String)>>>;
+
 #[derive(Clone, Default)]
 struct CaptureState {
     list_plans_run_id: Arc<Mutex<Option<String>>>,
     get_plan_id: Arc<Mutex<Option<String>>>,
-    transition_plan: Arc<Mutex<Option<(String, i32, String, String)>>>,
+    transition_plan: CapturedTransition,
     list_todos: Arc<Mutex<Option<(String, String)>>>,
     get_todo_id: Arc<Mutex<Option<String>>>,
-    transition_todo: Arc<Mutex<Option<(String, i32, String, String)>>>,
+    transition_todo: CapturedTransition,
     list_approvals: Arc<Mutex<Option<(String, String)>>>,
     get_approval_id: Arc<Mutex<Option<String>>>,
-    decide_approval: Arc<Mutex<Option<(String, i32, String, String)>>>,
+    decide_approval: CapturedTransition,
     lineage_thread_id: Arc<Mutex<Option<String>>>,
     stream_run_id: Arc<Mutex<Option<String>>>,
 }

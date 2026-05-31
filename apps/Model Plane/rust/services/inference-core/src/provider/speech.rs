@@ -34,7 +34,6 @@ impl AudioFormat {
     #[must_use]
     pub fn from_wire(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
-            "" | "mp3" => Self::Mp3,
             "wav" => Self::Wav,
             "ogg" | "opus" => Self::Ogg,
             "pcm" => Self::Pcm,
@@ -42,7 +41,7 @@ impl AudioFormat {
         }
     }
 
-    /// String for use as OpenAI's `response_format` field.
+    /// String for use as `OpenAI`'s `response_format` field.
     fn openai_format(self) -> &'static str {
         match self {
             Self::Wav => "wav",
@@ -386,11 +385,11 @@ impl OpenAiSpeechProvider {
     /// `base` may be either `https://api.openai.com` or
     /// `https://api.openai.com/v1`; it is normalized internally.
     #[must_use]
-    pub fn new(api_key: String, base: String, tts_model: String, stt_model: String) -> Self {
+    pub fn new(api_key: String, base: &str, tts_model: String, stt_model: String) -> Self {
         Self {
             flavor: OpenAiSpeechFlavor::OpenAi {
                 api_key,
-                base: normalize_openai_speech_base(&base),
+                base: normalize_openai_speech_base(base),
             },
             tts_model: nonempty_or(tts_model, DEFAULT_OPENAI_TTS_MODEL),
             stt_model: nonempty_or(stt_model, DEFAULT_OPENAI_STT_MODEL),
@@ -407,13 +406,13 @@ impl OpenAiSpeechProvider {
             .unwrap_or_default();
         Some(Self::new(
             key,
-            base,
+            &base,
             env_nonempty("OPENAI_TTS_MODEL").unwrap_or_default(),
             env_nonempty("OPENAI_STT_MODEL").unwrap_or_default(),
         ))
     }
 
-    /// Build an Azure OpenAI audio provider from env.
+    /// Build an Azure `OpenAI` audio provider from env.
     #[must_use]
     pub fn from_azure_env() -> Option<Self> {
         let endpoint_default = env_nonempty("AZURE_OPENAI_ENDPOINT")?;

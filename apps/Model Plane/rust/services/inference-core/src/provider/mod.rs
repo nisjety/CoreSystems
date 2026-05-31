@@ -18,6 +18,17 @@ pub use artifact_ref::{ArtifactRef, ArtifactStore};
 
 use tokio::sync::mpsc;
 
+/// Narrow an `f64` (e.g. a JSON confidence score or embedding value) to `f32`.
+///
+/// The precision loss is intentional and inherent to `f64 -> f32`; there is no
+/// lossless conversion, so the cast lint is allowed on this single helper rather
+/// than at every provider call site.
+#[allow(clippy::cast_possible_truncation)]
+#[must_use]
+pub(crate) fn narrow_f64(value: f64) -> f32 {
+    value as f32
+}
+
 /// A unified inference request used internally across providers.
 #[derive(Debug, Clone)]
 pub struct InferRequest {
@@ -92,7 +103,7 @@ pub struct ModelInfo {
 /// Introspectable feature flags for a provider.
 ///
 /// Added per `docs/capability-ownership-matrix.md` §G4 (shape adapted from
-/// OpenAI Codex `ProviderCapabilities`, Apache-2.0). Lets the router and
+/// `OpenAI` Codex `ProviderCapabilities`, Apache-2.0). Lets the router and
 /// capability-core policy gate modality/feature use *by querying the
 /// provider* instead of hardcoding per-provider knowledge at the call site —
 /// the prerequisite for clean multimodal routing (Phase 5) and routing
@@ -100,6 +111,9 @@ pub struct ModelInfo {
 // Intended provider surface; constructed once routing/policy consumes it
 // (Phase 2/5) — same "not yet consumed" convention as `ArtifactStore` above.
 #[allow(dead_code)]
+// Flags are independent capability bits mirroring the upstream Codex
+// ProviderCapabilities shape; two-variant enums would add noise without value.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProviderCapabilities {
     pub supports_tools: bool,

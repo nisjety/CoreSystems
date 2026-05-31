@@ -51,12 +51,12 @@ pub fn build_initialized_notification() -> Value {
 /// Build a `tools/call` request. `arguments` is the already-parsed JSON value
 /// of the tool input (use `Value::Null` / `{}` when there are none).
 #[must_use]
-pub fn build_tool_call_request(id: i64, tool_name: &str, arguments: Value) -> Value {
+pub fn build_tool_call_request(id: i64, tool_name: &str, arguments: &Value) -> Value {
     json!({
         "jsonrpc": JSONRPC_VERSION,
         "id": id,
         "method": "tools/call",
-        "params": { "name": tool_name, "arguments": arguments }
+        "params": { "name": tool_name, "arguments": arguments.clone() }
     })
 }
 
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn tool_call_request_carries_name_and_arguments() {
-        let r = build_tool_call_request(7, "read_file", json!({"path": "/x"}));
+        let r = build_tool_call_request(7, "read_file", &json!({"path": "/x"}));
         assert_eq!(r["method"], "tools/call");
         assert_eq!(r["id"], 7);
         assert_eq!(r["params"]["name"], "read_file");
@@ -152,7 +152,7 @@ mod tests {
         let line = r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
         match parse_tool_call_response(2, line) {
             McpCallOutcome::Ok(out) => assert!(out.contains("\"text\":\"hi\"")),
-            other => panic!("expected Ok, got {other:?}"),
+            McpCallOutcome::Err(e) => panic!("expected Ok, got Err({e:?})"),
         }
     }
 

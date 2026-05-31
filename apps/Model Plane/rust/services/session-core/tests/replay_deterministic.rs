@@ -299,7 +299,7 @@ fn replay_isolates_multiple_runs() {
     assert_eq!(state.runs.get("run-b").unwrap().status, "completed");
 }
 
-/// Deduplicates events by idempotency_key (keeps first occurrence).
+/// Deduplicates events by `idempotency_key` (keeps first occurrence).
 /// Empty keys are passthrough (no dedup).
 /// Mirrors the `mp_events_idempotency_key` uniqueness constraint in Postgres.
 fn dedup_by_idempotency(events: &[ReplayEvent], keys: &[&str]) -> Vec<ReplayEvent> {

@@ -526,7 +526,7 @@ struct MockSessionHandles {
     create_thread_count: Arc<AtomicUsize>,
     append_message_count: Arc<AtomicUsize>,
     start_run_count: Arc<AtomicUsize>,
-    /// (role, thread_id) per append_message call
+    /// (role, `thread_id`) per `append_message` call
     append_captures: Arc<Mutex<Vec<(String, String)>>>,
     start_run_thread_id: Arc<Mutex<Option<String>>>,
 }

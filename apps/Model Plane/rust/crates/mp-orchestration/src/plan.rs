@@ -138,7 +138,7 @@ impl Plan {
     const KIND: &'static str = "plan";
 
     /// Construct a new plan in `Draft` state. Returns `MissingField` if any
-    /// required id / run_id / thread_id is empty.
+    /// required id / `run_id` / `thread_id` is empty.
     ///
     /// # Errors
     /// - `MissingField("id" | "run_id" | "thread_id" | "author")`
@@ -247,16 +247,10 @@ impl Plan {
         };
         matches!(
             (from, to),
-            (Draft, Proposed)
-                | (Draft, Archived)
-                | (Proposed, Approved)
-                | (Proposed, Rejected)
-                | (Proposed, Draft)        // amend back to draft
-                | (Proposed, Superseded)
-                | (Approved, Executing)
-                | (Approved, Superseded)
-                | (Executing, Completed)
-                | (Executing, Failed)
+            (Draft, Proposed | Archived)
+                | (Proposed, Approved | Rejected | Draft | Superseded)
+                | (Approved, Executing | Superseded)
+                | (Executing, Completed | Failed)
         )
     }
 }

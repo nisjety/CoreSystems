@@ -2,7 +2,16 @@
 # Build context: Model Plane root (sibling of `rust/`, `proto/`).
 FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev \
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
 
 FROM chef AS planner
 COPY rust/ rust/
@@ -22,7 +31,16 @@ RUN cargo build --release --bin session-core
 FROM debian:trixie-slim AS runtime
 # Trixie has GLIBC >= 2.38 to match the cargo-chef builder image. curl is
 # needed by the compose healthcheck (curl -f /healthz).
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends ca-certificates curl \
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/rust/target/release/session-core /usr/local/bin/session-core
 EXPOSE 8081 9091
 ENTRYPOINT ["session-core"]

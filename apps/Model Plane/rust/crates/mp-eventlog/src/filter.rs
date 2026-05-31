@@ -1,7 +1,7 @@
 //! `EventFilter` domain type + validation.
 //!
 //! Mirrors the proto `EventFilter` shape but with Rust-native invariants:
-//!   - `org_id` is required for any QueryEvents / SubscribeEvents operation
+//!   - `org_id` is required for any `QueryEvents` / `SubscribeEvents` operation
 //!     to prevent cross-tenant leak-by-omission.
 //!   - `event_types` is a bitmask set; the zero set means "no filter".
 //!   - `run_id` without `org_id` is rejected so callers can't drift into a
@@ -18,16 +18,18 @@ use crate::error::{EventLogError, EventLogResult};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventTypeMask(BTreeSet<u32>);
 
+impl FromIterator<u32> for EventTypeMask {
+    /// Build a mask from discriminator values. Caller-side dedup is free.
+    fn from_iter<I: IntoIterator<Item = u32>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 impl EventTypeMask {
     /// Empty mask = "accept all types".
     #[must_use]
     pub fn any() -> Self {
         Self(BTreeSet::new())
-    }
-
-    /// Build a mask from discriminator values. Caller-side dedup is free.
-    pub fn from_iter<I: IntoIterator<Item = u32>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
     }
 
     /// Is this mask a wildcard (empty set)?
@@ -60,7 +62,7 @@ impl EventTypeMask {
     }
 }
 
-/// Filter applied to QueryEvents / SubscribeEvents.
+/// Filter applied to `QueryEvents` / `SubscribeEvents`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventFilter {
     /// Tenant. Always required for validation to pass.

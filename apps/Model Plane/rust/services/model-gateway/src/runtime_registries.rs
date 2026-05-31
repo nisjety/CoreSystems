@@ -15,8 +15,11 @@
 //!   - analytics:  Per-org counter rollups (Wave 10j)
 //!   - voice:      TTS/STT passthrough to inference-core (Wave 10j; stub)
 //!   - tasks:      Gateway-scoped task ingress (Wave 10j; durable state
-//!                 belongs in session-core `tasks` tables, cron in Temporal —
-//!                 the orphaned task-core service was retired, matrix §4.2)
+//!     belongs in session-core `tasks` tables, cron in Temporal —
+//!     the orphaned task-core service was retired, matrix §4.2)
+
+// tonic::Status is the unavoidable large Err for gRPC handlers; boxing breaks the service-trait contract.
+#![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -69,7 +72,7 @@ impl McpRegistry {
         }
     }
 
-    /// Drop a cached server by (org, server_id). Returns true if an entry was
+    /// Drop a cached server by (org, `server_id`). Returns true if an entry was
     /// removed. Used by the §4.3 reconcile consumer to keep the cache coherent
     /// when capability-core (the system-of-record) reports a server removed —
     /// so the gateway stops proxying to a decommissioned/revoked server.
@@ -79,7 +82,7 @@ impl McpRegistry {
             .is_some()
     }
 
-    /// Whether a server is cached for (org, server_id). Test/observability helper.
+    /// Whether a server is cached for (org, `server_id`). Test/observability helper.
     #[must_use]
     pub fn contains(&self, org_id: &str, server_id: &str) -> bool {
         self.inner
@@ -134,7 +137,7 @@ async fn stdio_tool_call(url: &str, tool_name: &str, input_json: &str) -> Result
         send_jsonrpc(&mut stdin, &build_initialized_notification()).await?;
         send_jsonrpc(
             &mut stdin,
-            &build_tool_call_request(2, tool_name, arguments),
+            &build_tool_call_request(2, tool_name, &arguments),
         )
         .await?;
         await_response(&mut reader, 2).await
@@ -205,6 +208,11 @@ async fn await_response(
     }
 }
 
+/// Registers (or upserts) an MCP server in the gateway-scoped registry.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.server` is absent or its `name` is empty.
 pub fn handle_register_mcp_server(
     reg: &McpRegistry,
     req: RegisterMcpServerRequest,
@@ -316,6 +324,11 @@ mod mcp_writethrough_tests {
     }
 }
 
+/// Lists all MCP servers registered for `req.org_id`.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_list_mcp_servers(
     reg: &McpRegistry,
     req: ListMcpServersRequest,
@@ -332,6 +345,13 @@ pub fn handle_list_mcp_servers(
     })
 }
 
+/// Proxies a tool call to a registered MCP server over its transport.
+///
+/// # Errors
+///
+/// Returns `Status::not_found` if the server is unknown, or `Status::unimplemented`
+/// for an unsupported transport. Per-call dispatch failures are reported in the
+/// response's `error_message` rather than as an `Err`.
 pub async fn handle_proxy_mcp_tool(
     reg: &McpRegistry,
     req: ProxyMcpToolRequest,
@@ -443,6 +463,11 @@ impl PluginRegistry {
     }
 }
 
+/// Registers (or upserts) a plugin in the gateway-scoped registry.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.plugin` is absent or its `name` is empty.
 pub fn handle_register_plugin(
     reg: &PluginRegistry,
     req: RegisterPluginRequest,
@@ -470,6 +495,11 @@ pub fn handle_register_plugin(
     })
 }
 
+/// Lists plugins for `req.org_id`, optionally filtered by `kind_filter`.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_list_plugins(
     reg: &PluginRegistry,
     req: ListPluginsRequest,
@@ -487,6 +517,11 @@ pub fn handle_list_plugins(
     })
 }
 
+/// Toggles the `enabled` flag of a registered plugin.
+///
+/// # Errors
+///
+/// Returns `Status::not_found` if no plugin matches `(org_id, plugin_id)`.
 pub fn handle_set_plugin_enabled(
     reg: &PluginRegistry,
     req: SetPluginEnabledRequest,
@@ -523,6 +558,11 @@ impl CommandRegistry {
     }
 }
 
+/// Lists slash-commands registered for `req.org_id`.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_list_commands(
     reg: &CommandRegistry,
     req: ListCommandsRequest,
@@ -539,6 +579,11 @@ pub fn handle_list_commands(
     })
 }
 
+/// Resolves a slash-command to its target (tool or remote URL) and acknowledges it.
+///
+/// # Errors
+///
+/// Returns `Status::not_found` if no command matches `(org_id, command_name)`.
 pub fn handle_execute_command(
     reg: &CommandRegistry,
     req: ExecuteCommandRequest,
@@ -554,7 +599,7 @@ pub fn handle_execute_command(
         request_id: req.request_id,
         output_json: serde_json::json!({
             "command": cmd.name,
-            "resolves_to": if !cmd.tool_name.is_empty() { cmd.tool_name } else { cmd.remote_url },
+            "resolves_to": if cmd.tool_name.is_empty() { cmd.remote_url } else { cmd.tool_name },
             "default_payload": cmd.default_payload_json,
             "args": serde_json::from_str::<serde_json::Value>(&req.args_json)
                 .unwrap_or(serde_json::Value::Null),
@@ -575,6 +620,12 @@ impl HookRegistry {
     }
 }
 
+/// Registers (or upserts) a lifecycle hook in the gateway-scoped registry.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.hook` is absent or its `event`
+/// is not one of `pre_tool`, `post_tool`, `on_error`, `on_complete`.
 pub fn handle_register_hook(
     reg: &HookRegistry,
     req: RegisterHookRequest,
@@ -601,6 +652,11 @@ pub fn handle_register_hook(
     })
 }
 
+/// Lists hooks for `req.org_id`, optionally filtered by `event_filter`.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_list_hooks(
     reg: &HookRegistry,
     req: ListHooksRequest,
@@ -636,6 +692,11 @@ impl PermissionRegistry {
     }
 }
 
+/// Resolves the tool-ACL verdict for `(org_id, tool_name)` (default-open).
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_check_permission(
     reg: &PermissionRegistry,
     req: CheckPermissionRequest,
@@ -655,6 +716,11 @@ pub fn handle_check_permission(
     })
 }
 
+/// Sets the tool-ACL verdict for `(org_id, tool_name)`.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.verdict` is not `allow` or `deny`.
 pub fn handle_set_permission(
     reg: &PermissionRegistry,
     req: SetPermissionRequest,
@@ -687,6 +753,11 @@ impl PolicyStore {
     }
 }
 
+/// Returns the runtime policy for `req.org_id`, or a default when unset.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_get_policy(
     store: &PolicyStore,
     req: GetPolicyRequest,
@@ -705,6 +776,11 @@ pub fn handle_get_policy(
     })
 }
 
+/// Stores the runtime policy for an org.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.policy` is absent or its `org_id` is empty.
 pub fn handle_set_policy(
     store: &PolicyStore,
     req: SetPolicyRequest,
@@ -737,6 +813,11 @@ impl MessageStore {
     }
 }
 
+/// Appends a message to a thread and returns the stored record.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.thread_id` is empty.
 pub fn handle_append_thread_message(
     store: &MessageStore,
     req: AppendThreadMessageRequest,
@@ -759,15 +840,21 @@ pub fn handle_append_thread_message(
     })
 }
 
+/// Lists the most recent messages of a thread (oldest-first within the limit).
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_list_thread_messages(
     store: &MessageStore,
     req: ListThreadMessagesRequest,
 ) -> Result<ListThreadMessagesResponse, Status> {
-    let limit = if req.limit <= 0 {
+    let limit = usize::try_from(if req.limit <= 0 {
         50
     } else {
         req.limit.min(500)
-    } as usize;
+    })
+    .unwrap_or(50);
     let messages = store
         .inner
         .get(&req.thread_id)
@@ -829,6 +916,11 @@ impl AnalyticsStore {
     }
 }
 
+/// Returns the lifetime counter rollup for `req.org_id`.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_get_analytics(
     store: &AnalyticsStore,
     req: GetAnalyticsRequest,
@@ -861,12 +953,22 @@ pub fn handle_get_analytics(
 // specific InferRequest variant. Kept as RPCs so the API surface
 // matches v2.
 
+/// Text-to-speech passthrough (stub).
+///
+/// # Errors
+///
+/// Always returns `Status::unimplemented` until the inference-core speech provider is wired.
 pub fn handle_text_to_speech(_req: TextToSpeechRequest) -> Result<TextToSpeechResponse, Status> {
     Err(Status::unimplemented(
         "TTS requires inference-core speech provider wiring; coming in a follow-up.",
     ))
 }
 
+/// Speech-to-text passthrough (stub).
+///
+/// # Errors
+///
+/// Always returns `Status::unimplemented` until the inference-core speech provider is wired.
 pub fn handle_speech_to_text(_req: SpeechToTextRequest) -> Result<SpeechToTextResponse, Status> {
     Err(Status::unimplemented(
         "STT requires inference-core speech provider wiring; coming in a follow-up.",
@@ -884,6 +986,11 @@ impl TaskStore {
     }
 }
 
+/// Creates a gateway-scoped task record.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.description` is empty.
 pub fn handle_create_task(
     store: &TaskStore,
     req: CreateTaskRequest,
@@ -907,15 +1014,21 @@ pub fn handle_create_task(
     })
 }
 
+/// Lists tasks for `req.org_id`, optionally filtered by `status_filter`.
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub fn handle_list_tasks(
     store: &TaskStore,
     req: ListTasksRequest,
 ) -> Result<ListTasksResponse, Status> {
-    let limit = if req.limit <= 0 {
+    let limit = usize::try_from(if req.limit <= 0 {
         100
     } else {
         req.limit.min(500)
-    } as usize;
+    })
+    .unwrap_or(100);
     let mut tasks: Vec<TaskRecord> = store
         .inner
         .iter()
@@ -1052,7 +1165,7 @@ mod tests {
         .unwrap();
         let p = r.policy.unwrap();
         assert_eq!(p.org_id, "o");
-        assert_eq!(p.max_cost_per_run_usd, 0.0);
+        assert!(p.max_cost_per_run_usd.abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1118,8 +1231,8 @@ mod tests {
                 request_id: "t".into(),
                 org_id: "o".into(),
                 description: "first".into(),
-                parent_run_id: "".into(),
-                cron: "".into(),
+                parent_run_id: String::new(),
+                cron: String::new(),
             },
         )
         .unwrap();
@@ -1128,7 +1241,7 @@ mod tests {
             ListTasksRequest {
                 request_id: "t".into(),
                 org_id: "o".into(),
-                status_filter: "".into(),
+                status_filter: String::new(),
                 limit: 0,
             },
         )

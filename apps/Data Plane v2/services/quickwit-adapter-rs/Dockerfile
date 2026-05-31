@@ -2,10 +2,19 @@
 # Build context: Data Plane v2 root.
 
 FROM rust:1-bookworm AS chef
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
         protobuf-compiler libprotobuf-dev libssl-dev pkg-config build-essential \
-    && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked --version 0.1.71
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 FROM chef AS planner
@@ -26,9 +35,18 @@ COPY infra/quickwit/ infra/quickwit/
 RUN cargo build --release --bin quickwit-adapter
 
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG DEBIAN_FRONTEND=noninteractive
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
         ca-certificates curl libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
 WORKDIR /app
 COPY --from=builder /build/target/release/quickwit-adapter /usr/local/bin/quickwit-adapter

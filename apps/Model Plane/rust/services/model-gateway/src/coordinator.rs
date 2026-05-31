@@ -4,13 +4,13 @@
 //! access:
 //!
 //! 1. `PlanModeStore` — per-run flags with a TTL. When a run is in
-//!    plan mode, write-class tools (file_edit, bash, remote_trigger,
-//!    send_message) are expected to gate via `is_plan_mode` before
-//!    executing; read-class tools (Fetch, WebSearch, ExtractStructured)
+//!    plan mode, write-class tools (`file_edit`, bash, `remote_trigger`,
+//!    `send_message`) are expected to gate via `is_plan_mode` before
+//!    executing; read-class tools (Fetch, `WebSearch`, `ExtractStructured`)
 //!    flow normally.
 //!
 //! 2. `TeamWorkerStore` — coordinator-mode sub-task tracker. A worker
-//!    is a (objective, context, success_criteria) triple with a state
+//!    is a (objective, context, `success_criteria`) triple with a state
 //!    machine: pending → running → completed | failed. Used by the
 //!    coordinator agent to fan out parallel sub-work.
 //!
@@ -23,6 +23,9 @@
 //!    the run from its Temporal checkpoint, which re-creates them.
 //!
 //! Promote to postgres if either invariant ever stops holding.
+
+// tonic::Status is the unavoidable large Err for gRPC handlers; boxing breaks the service-trait contract.
+#![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,7 +51,7 @@ const DEFAULT_PLAN_TTL_SECS: i64 = 3600;
 /// certainly a bug.
 const MAX_PLAN_TTL_SECS: i64 = 86_400;
 
-/// Max workers returned per TeamList call.
+/// Max workers returned per `TeamList` call.
 const MAX_TEAM_LIST_LIMIT: i32 = 500;
 const DEFAULT_TEAM_LIST_LIMIT: i32 = 100;
 
@@ -111,6 +114,12 @@ impl PlanModeStore {
     }
 }
 
+/// Enters plan mode for a run and emits a best-effort lifecycle event.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.run_id` is empty. Event-publish
+/// failures are logged and non-fatal, not surfaced as an `Err`.
 pub async fn handle_enter_plan_mode<P: EventPublisher>(
     store: &PlanModeStore,
     publisher: &P,
@@ -162,6 +171,12 @@ pub async fn handle_enter_plan_mode<P: EventPublisher>(
     })
 }
 
+/// Exits plan mode for a run and emits a best-effort lifecycle event.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.run_id` is empty. Event-publish
+/// failures are logged and non-fatal, not surfaced as an `Err`.
 pub async fn handle_exit_plan_mode<P: EventPublisher>(
     store: &PlanModeStore,
     publisher: &P,
@@ -203,6 +218,11 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
     })
 }
 
+/// Reports whether a run is currently in plan mode (and its TTL).
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.run_id` is empty.
 pub fn handle_is_plan_mode(
     store: &PlanModeStore,
     req: IsPlanModeRequest,
@@ -264,7 +284,7 @@ impl TeamWorkerStore {
     }
 
     /// Mark a worker as completed or failed. Returns the updated
-    /// worker, or `Err(NotFound)` when the worker_id is unknown or
+    /// worker, or `Err(NotFound)` when the `worker_id` is unknown or
     /// belongs to a different org.
     fn finish(
         &self,
@@ -281,12 +301,12 @@ impl TeamWorkerStore {
         }
         match outcome {
             "completed" => {
-                entry.state = STATE_COMPLETED.to_owned();
+                STATE_COMPLETED.clone_into(&mut entry.state);
                 entry.summary = summary;
                 entry.error = String::new();
             }
             "failed" => {
-                entry.state = STATE_FAILED.to_owned();
+                STATE_FAILED.clone_into(&mut entry.state);
                 entry.error = if summary.is_empty() {
                     "worker failed".to_owned()
                 } else {
@@ -328,7 +348,12 @@ enum FinishError {
     BadOutcome(String),
 }
 
-pub async fn handle_team_create(
+/// Creates a team worker for coordinator-mode sub-task tracking.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.objective` is empty or whitespace.
+pub fn handle_team_create(
     store: &TeamWorkerStore,
     req: TeamCreateRequest,
 ) -> Result<TeamCreateResponse, Status> {
@@ -349,7 +374,13 @@ pub async fn handle_team_create(
     })
 }
 
-pub async fn handle_team_delete(
+/// Finishes (completes or fails) a team worker.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `worker_id` is empty or the outcome is
+/// invalid, or `Status::not_found` if the worker is unknown or owned by another org.
+pub fn handle_team_delete(
     store: &TeamWorkerStore,
     req: TeamDeleteRequest,
 ) -> Result<TeamDeleteResponse, Status> {
@@ -377,7 +408,13 @@ pub async fn handle_team_delete(
     })
 }
 
-pub async fn handle_team_list(
+/// Lists team workers for an org, optionally filtered by state.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `org_id` is empty or `state_filter`
+/// is not one of "", `pending`, `running`, `completed`, `failed`.
+pub fn handle_team_list(
     store: &TeamWorkerStore,
     req: TeamListRequest,
 ) -> Result<TeamListResponse, Status> {
@@ -393,11 +430,12 @@ pub async fn handle_team_list(
             req.state_filter
         )));
     }
-    let limit = if req.limit <= 0 {
+    let limit = usize::try_from(if req.limit <= 0 {
         DEFAULT_TEAM_LIST_LIMIT
     } else {
         req.limit.min(MAX_TEAM_LIST_LIMIT)
-    } as usize;
+    })
+    .unwrap_or(0);
     let (workers, total) = store.list(&req.org_id, &req.state_filter, limit);
     Ok(TeamListResponse {
         request_id: req.request_id,
@@ -478,7 +516,7 @@ mod tests {
     #[test]
     fn team_finish_completed_sets_summary() {
         let s = TeamWorkerStore::new();
-        let w = s.create("org1".into(), "do X".into(), "".into(), "".into());
+        let w = s.create("org1".into(), "do X".into(), String::new(), String::new());
         let updated = s
             .finish(&w.worker_id, "org1", "completed", "all good".into())
             .unwrap();
@@ -490,7 +528,7 @@ mod tests {
     #[test]
     fn team_finish_failed_sets_error() {
         let s = TeamWorkerStore::new();
-        let w = s.create("org1".into(), "do X".into(), "".into(), "".into());
+        let w = s.create("org1".into(), "do X".into(), String::new(), String::new());
         let updated = s
             .finish(&w.worker_id, "org1", "failed", "boom".into())
             .unwrap();
@@ -501,7 +539,7 @@ mod tests {
     #[test]
     fn team_finish_other_org_returns_not_found() {
         let s = TeamWorkerStore::new();
-        let w = s.create("org1".into(), "do X".into(), "".into(), "".into());
+        let w = s.create("org1".into(), "do X".into(), String::new(), String::new());
         let err = s
             .finish(&w.worker_id, "org2", "completed", String::new())
             .expect_err("cross-org must error");
@@ -511,7 +549,7 @@ mod tests {
     #[test]
     fn team_finish_bad_outcome_rejects() {
         let s = TeamWorkerStore::new();
-        let w = s.create("org1".into(), "do X".into(), "".into(), "".into());
+        let w = s.create("org1".into(), "do X".into(), String::new(), String::new());
         let err = s
             .finish(&w.worker_id, "org1", "weird", String::new())
             .expect_err("bad outcome must error");
@@ -521,9 +559,9 @@ mod tests {
     #[test]
     fn team_list_filters_by_org_and_state() {
         let s = TeamWorkerStore::new();
-        s.create("org1".into(), "A".into(), "".into(), "".into());
-        let w2 = s.create("org1".into(), "B".into(), "".into(), "".into());
-        s.create("org2".into(), "C".into(), "".into(), "".into());
+        s.create("org1".into(), "A".into(), String::new(), String::new());
+        let w2 = s.create("org1".into(), "B".into(), String::new(), String::new());
+        s.create("org2".into(), "C".into(), String::new(), String::new());
         s.finish(&w2.worker_id, "org1", "completed", "ok".into())
             .unwrap();
 

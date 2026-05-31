@@ -182,8 +182,8 @@ pub async fn invoke_stream_sse(
                     seq += 1;
                 }
                 Ok(chunk) => {
-                    let input_tokens = chunk.input_tokens as u32;
-                    let output_tokens = chunk.output_tokens as u32;
+                    let input_tokens = u32::try_from(chunk.input_tokens).unwrap_or(0);
+                    let output_tokens = u32::try_from(chunk.output_tokens).unwrap_or(0);
                     let model_used = if chunk.model_used.is_empty() {
                         model_clone.clone()
                     } else {
@@ -270,12 +270,17 @@ pub async fn invoke_stream_sse(
     Sse::new(ReceiverStream::new(rx))
 }
 
-/// Resume a chat stream after a reconnect/reload (HARNESS_PHASE1 §3b).
+/// Resume a chat stream after a reconnect/reload (`HARNESS_PHASE1` §3b).
 ///
 /// Replays buffered deltas with `seq > Last-Event-Id` and, when the original
 /// stream has finished, the terminal `done` event. Returns 404 when the
 /// `request_id` is unknown (evicted past TTL or never existed) so the client
 /// restarts the request instead of silently hanging.
+///
+/// # Errors
+///
+/// Returns a 404 `HttpJsonError` when `request_id` is unknown (evicted past TTL or
+/// never existed).
 pub async fn invoke_resume_sse(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
@@ -340,6 +345,12 @@ pub async fn invoke_resume_sse(
     Ok(Sse::new(ReceiverStream::new(rx)))
 }
 
+/// Streams orchestration run events as Server-Sent Events.
+///
+/// # Errors
+///
+/// Returns an `HttpJsonError` if opening the upstream `stream_run_events` gRPC
+/// stream fails.
 pub async fn run_events_sse(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -363,7 +374,7 @@ pub async fn run_events_sse(
             after_event_id,
         })
         .await
-        .map_err(grpc_status_to_http)?;
+        .map_err(|e| grpc_status_to_http(&e))?;
 
     let mut grpc_stream = response.into_inner();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -375,7 +386,7 @@ pub async fn run_events_sse(
                     // Carry the server-assigned event_id onto the SSE `id:` line
                     // so the next reconnect resumes from exactly here.
                     let event_id = event.event_id.clone();
-                    if let Some(sse_event) = orchestration_event_to_sse(event) {
+                    if let Some(sse_event) = orchestration_event_to_sse(&event) {
                         let sse_event = if event_id.is_empty() {
                             sse_event
                         } else {
@@ -453,7 +464,7 @@ fn build_usage_envelope(
     }
 }
 
-fn grpc_status_to_http(error: tonic::Status) -> HttpJsonError {
+fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
     let status = match error.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::NotFound => StatusCode::NOT_FOUND,
@@ -468,8 +479,8 @@ fn grpc_status_to_http(error: tonic::Status) -> HttpJsonError {
     (status, Json(json!({ "error": error.message() })))
 }
 
-fn orchestration_event_to_sse(event: OrchestrationEvent) -> Option<Event> {
-    let payload = event_payload_value(&event)?;
+fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
+    let payload = event_payload_value(event)?;
     let event_name = match event.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(_) => "plan_transitioned",
         orchestration_event::Event::TodoTransitioned(_) => "todo_transitioned",

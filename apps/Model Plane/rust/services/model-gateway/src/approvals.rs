@@ -10,6 +10,9 @@
 //! `orchestration.proto`). This gateway-scoped store is intentionally
 //! lighter weight: ephemeral, run-loop-blocking, no plan-step linkage.
 
+// tonic::Status is the unavoidable large Err for gRPC handlers; boxing breaks the service-trait contract.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -192,6 +195,11 @@ enum ResolveError {
     AlreadyResolved(String),
 }
 
+/// Creates a pending approval for a gated action and emits a lifecycle event.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.run_id` or `req.action_id` is empty.
 pub async fn handle_request_approval<P: EventPublisher>(
     store: &ApprovalStore,
     publisher: &P,
@@ -240,6 +248,12 @@ pub async fn handle_request_approval<P: EventPublisher>(
     })
 }
 
+/// Approves a pending approval and emits a lifecycle event.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.approval_id` is empty, `Status::not_found`
+/// if it is unknown, or `Status::failed_precondition` if it was already resolved.
 pub async fn handle_approve_approval<P: EventPublisher>(
     store: &ApprovalStore,
     publisher: &P,
@@ -271,6 +285,12 @@ pub async fn handle_approve_approval<P: EventPublisher>(
     })
 }
 
+/// Denies a pending approval and emits a lifecycle event.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.approval_id` is empty, `Status::not_found`
+/// if it is unknown, or `Status::failed_precondition` if it was already resolved.
 pub async fn handle_deny_approval<P: EventPublisher>(
     store: &ApprovalStore,
     publisher: &P,
@@ -302,7 +322,12 @@ pub async fn handle_deny_approval<P: EventPublisher>(
     })
 }
 
-pub async fn handle_list_pending_approvals(
+/// Lists pending approvals for an org, optionally scoped to a run.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.org_id` is empty.
+pub fn handle_list_pending_approvals(
     store: &ApprovalStore,
     req: ListPendingApprovalsRequest,
 ) -> Result<ListPendingApprovalsResponse, Status> {
@@ -495,7 +520,7 @@ mod tests {
             ..Default::default()
         });
         // Resolve one so it's no longer pending.
-        s.resolve(&a2.approval_id, "org1", true, "".into(), "".into())
+        s.resolve(&a2.approval_id, "org1", true, String::new(), String::new())
             .unwrap();
 
         let all = s.list_pending("org1", "");

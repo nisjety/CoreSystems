@@ -12,7 +12,11 @@ pub fn init_telemetry() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().json();
 
-    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .is_some()
+    {
         match try_init_otel() {
             Ok(provider) => {
                 let tracer = provider.tracer("quarry-edge");

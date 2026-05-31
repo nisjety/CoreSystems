@@ -1,9 +1,9 @@
 //! Runtime lifecycle verification (Phase F Runtime gate).
 //!
 //! Mirrors the emission contracts in `src/grpc.rs`:
-//!   - `start_run`       -> RUN_STARTED
-//!   - `complete_step`   -> STEP_COMPLETED (+ RUN_COMPLETED | RUN_FAILED on terminal)
-//!   - `save_checkpoint` -> CHECKPOINT_SAVED
+//!   - `start_run`       -> `RUN_STARTED`
+//!   - `complete_step`   -> `STEP_COMPLETED` (+ `RUN_COMPLETED` | `RUN_FAILED` on terminal)
+//!   - `save_checkpoint` -> `CHECKPOINT_SAVED`
 //!
 //! Each test feeds a recorded emission sequence into an in-memory replay
 //! fold identical in shape to `replay_deterministic.rs`, then asserts the
@@ -47,7 +47,7 @@ fn replay(mut events: Vec<RuntimeEvent>) -> ThreadState {
         match event.event_type.as_str() {
             "RUN_STARTED" => {
                 "running".clone_into(&mut run.status);
-                run.parent_run_id = event.parent_run_id.clone();
+                run.parent_run_id.clone_from(&event.parent_run_id);
             }
             "STEP_COMPLETED" => run.steps_completed += 1,
             "CHECKPOINT_SAVED" => run.checkpoint_count += 1,
@@ -176,7 +176,7 @@ fn all_taxonomy_event_types_are_exercised() {
     }
 }
 
-/// Item 3: Failure paths emit RUN_FAILED with error context in payload.
+/// Item 3: Failure paths emit `RUN_FAILED` with error context in payload.
 #[test]
 fn failure_path_emits_run_failed_with_error_context() {
     let events = vec![

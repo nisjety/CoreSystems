@@ -26,7 +26,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 FROM alpine:3.22
 
 # Merge all apk installs into one layer
-RUN apk add --no-cache ca-certificates postgresql-client && \
+RUN set -e; \
+    if ! apk add --no-cache --quiet ca-certificates postgresql-client \
+        > /tmp/apk-add.log 2>&1; then \
+        cat /tmp/apk-add.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log; \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app

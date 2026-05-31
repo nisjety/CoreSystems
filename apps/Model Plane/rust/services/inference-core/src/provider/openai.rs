@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::{
-    EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError,
-    ProviderRouter,
+    narrow_f64, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
+    ProviderError, ProviderRouter,
 };
 
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
@@ -66,10 +66,14 @@ impl OpenAiProvider {
         })
     }
 
-    /// Create an Azure OpenAI provider.
+    /// Create an Azure `OpenAI` provider.
     ///
     /// Azure uses deployment names in the URL and the `api-key` header
-    /// instead of OpenAI's `/v1/chat/completions` + bearer token shape.
+    /// instead of `OpenAI`'s `/v1/chat/completions` + bearer token shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unavailable`] if `api_key` or `endpoint` is empty.
     pub fn new_azure(
         api_key: impl Into<String>,
         endpoint: impl Into<String>,
@@ -478,7 +482,7 @@ impl ProviderRouter for OpenAiProvider {
         let vector = values
             .iter()
             .map(|value| {
-                value.as_f64().map(|number| number as f32).ok_or_else(|| {
+                value.as_f64().map(narrow_f64).ok_or_else(|| {
                     ProviderError::InvalidResponse(
                         "embedding vector contains non-number".to_owned(),
                     )

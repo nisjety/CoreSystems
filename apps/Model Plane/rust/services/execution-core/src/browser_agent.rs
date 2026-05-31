@@ -2,7 +2,7 @@
 //!
 //! Implements the planner side of the browser-agent protocol defined in
 //! `browser_agent.proto`. The loop:
-//!   1. Initializes an `AgentPlan` with constraints (max_steps, max_runtime_s, allowed_domains).
+//!   1. Initializes an `AgentPlan` with constraints (`max_steps`, `max_runtime_s`, `allowed_domains`).
 //!   2. Calls the planner to produce the next `BrowserAction`.
 //!   3. Waits for a `BrowserObservation` from Quarry.
 //!   4. Evaluates stop criteria and budget/step limits.
@@ -138,7 +138,7 @@ impl AgentPlan {
             return Some("max_steps exceeded");
         }
         if self.config.max_runtime_s > 0 {
-            let elapsed = self.started_at.elapsed().as_secs() as i32;
+            let elapsed = i32::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i32::MAX);
             if elapsed >= self.config.max_runtime_s {
                 return Some("max_runtime_s exceeded");
             }
@@ -191,7 +191,7 @@ fn extract_host(url: &str) -> Option<String> {
     };
     // Host ends at the first `/`, `?`, `#`, or `:` (port separator).
     let host_end = after_userinfo
-        .find(|c: char| matches!(c, '/' | '?' | '#' | ':'))
+        .find(['/', '?', '#', ':'])
         .unwrap_or(after_userinfo.len());
     let host = &after_userinfo[..host_end];
     if host.is_empty() {
@@ -295,39 +295,43 @@ pub fn run_browser_agent_loop(config: PlanConfig) -> (PlanStatus, Vec<BrowserObs
 
     info!(plan_id = %plan.config.plan_id, "browser-agent loop started");
 
-    let summary = loop {
-        let last_obs = plan.observations.last().cloned();
-        let result = plan_next_action(&mut plan, last_obs.as_ref());
+    // NOTE: until Quarry is wired (Phase 7) this dispatches a single step and
+    // returns — there is no second iteration yet, so this is intentionally
+    // straight-line rather than a `loop` (a `loop` here would never actually
+    // loop and trips the deny-by-default `clippy::never_loop`). When the Quarry
+    // action/observation round-trip lands, restore a loop that re-evaluates
+    // `plan_next_action` after each observation until a terminal state.
+    let last_obs = plan.observations.last().cloned();
+    let result = plan_next_action(&mut plan, last_obs.as_ref());
 
-        match result {
-            PlanStepResult::Action(action) => {
-                info!(
-                    plan_id = %plan.config.plan_id,
-                    step = plan.current_step,
-                    action_type = action.action_type.as_str(),
-                    "dispatching browser action"
-                );
-                // In production this would send the action to Quarry via gRPC/NATS
-                // and wait for the observation response. For now we simulate a timeout
-                // after dispatching since Quarry is not wired yet.
-                plan.status = PlanStatus::Completed;
-                break format!(
-                    "browser-agent plan {} dispatched {} steps; awaiting Quarry wiring",
-                    plan.config.plan_id, plan.current_step
-                );
-            }
-            PlanStepResult::Completed(reason) => {
-                info!(plan_id = %plan.config.plan_id, reason = %reason, "browser-agent loop completed");
-                break reason;
-            }
-            PlanStepResult::WaitingApproval => {
-                info!(plan_id = %plan.config.plan_id, "browser-agent paused for approval");
-                break "paused for approval".to_owned();
-            }
-            PlanStepResult::Failed(error) => {
-                warn!(plan_id = %plan.config.plan_id, error = %error, "browser-agent loop failed");
-                break error;
-            }
+    let summary = match result {
+        PlanStepResult::Action(action) => {
+            info!(
+                plan_id = %plan.config.plan_id,
+                step = plan.current_step,
+                action_type = action.action_type.as_str(),
+                "dispatching browser action"
+            );
+            // In production this would send the action to Quarry via gRPC/NATS
+            // and wait for the observation response. For now we simulate a timeout
+            // after dispatching since Quarry is not wired yet.
+            plan.status = PlanStatus::Completed;
+            format!(
+                "browser-agent plan {} dispatched {} steps; awaiting Quarry wiring",
+                plan.config.plan_id, plan.current_step
+            )
+        }
+        PlanStepResult::Completed(reason) => {
+            info!(plan_id = %plan.config.plan_id, reason = %reason, "browser-agent loop completed");
+            reason
+        }
+        PlanStepResult::WaitingApproval => {
+            info!(plan_id = %plan.config.plan_id, "browser-agent paused for approval");
+            "paused for approval".to_owned()
+        }
+        PlanStepResult::Failed(error) => {
+            warn!(plan_id = %plan.config.plan_id, error = %error, "browser-agent loop failed");
+            error
         }
     };
 
@@ -348,23 +352,26 @@ impl PlanStore {
 
     pub fn create(&self, config: PlanConfig) -> AgentPlan {
         let plan = AgentPlan::new(config);
-        let mut lock = self.plans.lock().expect("mutex not poisoned");
+        let mut lock = self
+            .plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.insert(plan.config.plan_id.clone(), plan.clone());
         plan
     }
 
     pub fn get(&self, plan_id: &str) -> Option<AgentPlan> {
-        let lock = self.plans.lock().expect("mutex not poisoned");
+        let lock = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.get(plan_id).cloned()
     }
 
     pub fn update(&self, plan: AgentPlan) {
-        let mut lock = self.plans.lock().expect("mutex not poisoned");
+        let mut lock = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.insert(plan.config.plan_id.clone(), plan);
     }
 
     pub fn abort(&self, plan_id: &str) -> bool {
-        let mut lock = self.plans.lock().expect("mutex not poisoned");
+        let mut lock = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(plan) = lock.get_mut(plan_id) {
             if !plan.status.is_terminal() {
                 plan.status = PlanStatus::Aborted;

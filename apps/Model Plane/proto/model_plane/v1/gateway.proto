@@ -114,10 +114,10 @@ service ModelGateway {
 
   // ===== Wave 10f — trajectory recording + Atropos export =====
 
-  // RecordTrajectory — append a single run trajectory (goal + actions
-  // + outcome) to the recorder. Fire-and-forget from the run-loop's
-  // hot path. Records are kept in-memory (size-bounded) and published
-  // to NATS so external pipelines can stream them.
+  // RecordTrajectory — append a single run trajectory
+  // (goal + actions + outcome) to the recorder. Fire-and-forget from the
+  // run-loop's hot path. Records are kept in-memory (size-bounded) and
+  // published to NATS so external pipelines can stream them.
   rpc RecordTrajectory(RecordTrajectoryRequest) returns (RecordTrajectoryResponse);
 
   // ListTrajectories — read recent trajectories for an org. Filtered

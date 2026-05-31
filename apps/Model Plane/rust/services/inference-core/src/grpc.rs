@@ -1,4 +1,6 @@
 //! gRPC server implementing the `InferenceCore` service on :9092.
+// tonic::Status is the unavoidable large Err for gRPC; boxing breaks the service-trait contract.
+#![allow(clippy::result_large_err)]
 
 use mp_contracts::model_plane::v1::{
     self as pb,
@@ -847,23 +849,37 @@ fn to_internal_request(req: &pb::InferRequest) -> provider::InferRequest {
     }
 }
 
+/// Bundle of every provider chain required to construct an [`InferenceService`].
+pub struct ProviderChains {
+    pub chain: FallbackChain,
+    pub speech: SpeechChain,
+    pub translation: TranslationChain,
+    pub vision: VisionChain,
+    pub doc_intel: DocIntelChain,
+    pub language: LanguageAnalyticsChain,
+    pub realtime: RealtimeChain,
+    pub video: VideoChain,
+}
+
 /// Start the gRPC server with explicit provider chains.
 ///
 /// # Errors
 ///
 /// Returns an error if the server fails to bind.
-pub async fn serve_with_providers(
-    chain: FallbackChain,
-    speech: SpeechChain,
-    translation: TranslationChain,
-    vision: VisionChain,
-    doc_intel: DocIntelChain,
-    language: LanguageAnalyticsChain,
-    realtime: RealtimeChain,
-    video: VideoChain,
-) -> anyhow::Result<()> {
+pub async fn serve_with_providers(chains: ProviderChains) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9092".parse()?;
     info!("gRPC listening on :9092");
+
+    let ProviderChains {
+        chain,
+        speech,
+        translation,
+        vision,
+        doc_intel,
+        language,
+        realtime,
+        video,
+    } = chains;
 
     tonic::transport::Server::builder()
         .add_service(InferenceCoreServer::new(InferenceService {
@@ -1006,10 +1022,10 @@ fn validate_video_generation(req: &pb::CreateVideoGenerationJobRequest) -> Resul
             "n_variants exceeds {MAX_VIDEO_VARIANTS}-variant cap"
         )));
     }
-    if req.width > 0 && req.width % 8 != 0 {
+    if req.width > 0 && !req.width.is_multiple_of(8) {
         return Err(Status::invalid_argument("width must be divisible by 8"));
     }
-    if req.height > 0 && req.height % 8 != 0 {
+    if req.height > 0 && !req.height.is_multiple_of(8) {
         return Err(Status::invalid_argument("height must be divisible by 8"));
     }
     Ok(())
@@ -1019,13 +1035,14 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
     match error {
         provider::ProviderError::InvalidResponse(message) => Status::invalid_argument(message),
         provider::ProviderError::UnsupportedModel(message) => Status::unimplemented(message),
-        provider::ProviderError::Unavailable(message) => Status::unavailable(message),
+        provider::ProviderError::Unavailable(message) | provider::ProviderError::Http(message) => {
+            Status::unavailable(message)
+        }
         provider::ProviderError::AllExhausted { attempts } => {
             Status::unavailable(format!("all providers exhausted after {attempts} attempts"))
         }
         provider::ProviderError::RateLimited { retry_after_ms } => {
             Status::resource_exhausted(format!("rate limited: retry after {retry_after_ms}ms"))
         }
-        provider::ProviderError::Http(message) => Status::unavailable(message),
     }
 }

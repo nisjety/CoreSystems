@@ -1,6 +1,6 @@
 //! TOON — Token-Oriented Object Notation.
 //!
-//! Compact, indentation-driven encoding for serde_json::Value payloads
+//! Compact, indentation-driven encoding for `serde_json::Value` payloads
 //! intended for LLM prompts and tool I/O. Objectives:
 //!
 //! * Drop the structural noise of JSON (quotes, braces, commas).

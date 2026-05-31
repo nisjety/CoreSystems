@@ -4,8 +4,8 @@
 //!   - **Plans** — structured proposed-action records, owner `session-core`
 //!   - **Todos** — durable work-item records, owner `session-core`
 //!   - **Approvals** — risky-action gate records, owner `session-core`
-//!   - **SubagentLineage** — parent/child run graph, owner `session-core`
-//!   - **RunEvent** — envelope wrapper with typed orchestration payloads
+//!   - **`SubagentLineage`** — parent/child run graph, owner `session-core`
+//!   - **`RunEvent`** — envelope wrapper with typed orchestration payloads
 //!
 //! Design rules:
 //!   - Every record has a state enum with explicit allowed transitions.
@@ -16,9 +16,9 @@
 //!   - Serde JSON round-trips are part of the contract and covered by tests.
 //!
 //! Services that will consume this crate:
-//!   - `session-core` — stores plans/todos/approvals; emits RunEvents
+//!   - `session-core` — stores plans/todos/approvals; emits `RunEvents`
 //!   - `execution-core` — transitions approvals + updates run state
-//!   - `orchestrator-core` — watches RunEvents for recovery + coordination
+//!   - `orchestrator-core` — watches `RunEvents` for recovery + coordination
 //!   - `model-gateway` — serializes REST responses over these types
 
 #![deny(missing_docs)]

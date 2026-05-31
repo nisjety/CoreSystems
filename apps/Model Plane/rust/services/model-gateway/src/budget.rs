@@ -34,6 +34,11 @@ struct BudgetCheckResponse {
 /// Check whether the request is within budget.
 ///
 /// Returns `Ok(())` if allowed, or an error response if budget is exceeded.
+///
+/// # Errors
+///
+/// Returns a `402 PAYMENT_REQUIRED` JSON error when cost-core reports the org is
+/// over budget. Fails open (`Ok`) if cost-core is unreachable or returns non-success.
 pub async fn check_budget(
     http_client: &reqwest::Client,
     org_id: &str,

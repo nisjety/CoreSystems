@@ -10,31 +10,56 @@ set -Eeuo pipefail
 #                                              volumes, and networks. Use before a
 #                                              clean rebuild. Idempotent.
 #   ./build-velion-services.sh --status       Per-plane health roll-up. Read-only.
+#   ./build-velion-services.sh --compose-bootstrap
+#                                             Called by velionv2 docker-compose.
+#                                             Builds core planes only when they
+#                                             are not already running.
 #
 # Environment knobs:
 #   WAIT_TIMEOUT_SECONDS=900   Max seconds to wait for one-shot services.
 #   WAIT_INTERVAL_SECONDS=3    Poll interval while waiting for one-shot services.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+CORE_ROOT="${CORE_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 cd "$CORE_ROOT"
 
 MODE="build"
 DRY_RUN=false
-case "${1:-}" in
-  --dry-run) DRY_RUN=true; shift ;;
-  --prune)   MODE="prune"; shift ;;
-  --status)  MODE="status"; shift ;;
-  --help|-h)
-    sed -n '3,16p' "$0"
-    exit 0
-    ;;
-esac
 
-if (( $# > 0 )); then
-  printf 'Usage: %s [--dry-run|--prune|--status]\n' "$0" >&2
-  exit 2
-fi
+set_mode() {
+  local next_mode="$1"
+  if [[ "$MODE" != "build" ]]; then
+    printf 'Only one mode flag may be used per run.\n' >&2
+    exit 2
+  fi
+  MODE="$next_mode"
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    --prune)
+      set_mode "prune"
+      ;;
+    --status)
+      set_mode "status"
+      ;;
+    --compose-bootstrap)
+      set_mode "compose-bootstrap"
+      ;;
+    --help|-h)
+      sed -n '3,19p' "$0"
+      exit 0
+      ;;
+    *)
+      printf 'Usage: %s [--dry-run] [--prune|--status|--compose-bootstrap]\n' "$0" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 # These are intentionally ordered by dependency flow:
 # Data and Ingestion first, then Model, Control, Application (Convex + Novu +
@@ -60,7 +85,7 @@ STACK_NAMES=(
 # One-shot services are removed after they exit successfully so `docker ps -a`
 # stays focused on long-running servers.
 BOOTSTRAP_SERVICES=(
-  ""
+  "minio-init"
   "nango-seed"
   ""
   "lago-migrate"
@@ -105,6 +130,7 @@ POST_BUILD_HOOKS=(
 
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-900}"
 WAIT_INTERVAL_SECONDS="${WAIT_INTERVAL_SECONDS:-3}"
+FRONTEND_STACK_INDEX=5
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -138,6 +164,99 @@ ensure_velion_network() {
 validate_compose() {
   local compose_file="$1"
   docker compose -f "$compose_file" config --quiet
+}
+
+compose_services() {
+  local compose_file="$1"
+  docker compose -f "$compose_file" config --services
+}
+
+runtime_services() {
+  local compose_file="$1"
+  local excluded_services="$2"
+  local service
+  local excluded
+
+  while IFS= read -r service; do
+    [[ -z "$service" ]] && continue
+    for excluded in $excluded_services; do
+      if [[ "$service" == "$excluded" ]]; then
+        continue 2
+      fi
+    done
+    printf '%s\n' "$service"
+  done < <(compose_services "$compose_file")
+}
+
+service_ready() {
+  local compose_file="$1"
+  local service="$2"
+  local container_id
+  local status
+  local health
+
+  container_id="$(docker compose -f "$compose_file" ps -q "$service" 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    return 1
+  fi
+
+  status="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+  if [[ "$status" != "running" ]]; then
+    return 1
+  fi
+
+  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || true)"
+  [[ "$health" == "healthy" || "$health" == "none" ]]
+}
+
+stack_runtime_ready() {
+  local index="$1"
+  local compose_file="${COMPOSE_FILES[$index]}"
+  local excluded_services="${BOOTSTRAP_SERVICES[$index]}"
+  local service
+  local saw_service=false
+
+  while IFS= read -r service; do
+    [[ -z "$service" ]] && continue
+    saw_service=true
+    if ! service_ready "$compose_file" "$service"; then
+      return 1
+    fi
+  done < <(runtime_services "$compose_file" "$excluded_services")
+
+  [[ "$saw_service" == "true" ]]
+}
+
+ensure_frontend_bus() {
+  local compose_file="${COMPOSE_FILES[$FRONTEND_STACK_INDEX]}"
+
+  validate_compose "$compose_file"
+  log "Ensuring Frontend Plane NATS bus is running"
+  run docker compose -f "$compose_file" up -d nats
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    return 0
+  fi
+
+  local attempts=0
+  while ! service_ready "$compose_file" nats; do
+    attempts=$((attempts + 1))
+    if (( attempts * WAIT_INTERVAL_SECONDS >= WAIT_TIMEOUT_SECONDS )); then
+      docker compose -f "$compose_file" logs --tail=120 nats || true
+      printf 'Timed out waiting for Frontend Plane NATS bus\n' >&2
+      return 1
+    fi
+    sleep "$WAIT_INTERVAL_SECONDS"
+  done
+}
+
+core_stacks_ready() {
+  local index
+  for index in 0 1 2 3 4; do
+    if ! stack_runtime_ready "$index"; then
+      return 1
+    fi
+  done
 }
 
 validate_ingestion_plane_targets_quarry_v2() {
@@ -220,12 +339,24 @@ remove_one_shot_containers() {
     return 0
   fi
 
+  local existing_services
+  existing_services="$(compose_services "$compose_file")"
+  local active_services=()
   for service in $services; do
+    if ! grep -Fxq "$service" <<<"$existing_services"; then
+      log "Skipping missing one-shot service: $service"
+      continue
+    fi
     wait_for_one_shot "$compose_file" "$service"
+    active_services+=("$service")
   done
 
-  log "Removing completed one-shot services: $services"
-  run docker compose -f "$compose_file" rm -f -s -v $services >/dev/null
+  if (( ${#active_services[@]} == 0 )); then
+    return 0
+  fi
+
+  log "Removing completed one-shot services: ${active_services[*]}"
+  run docker compose -f "$compose_file" rm -f -s -v "${active_services[@]}" >/dev/null
 }
 
 build_stack() {
@@ -245,7 +376,11 @@ build_stack() {
   stop_old_project "$compose_file" "$old_project"
 
   log "Building and starting $name"
-  run docker compose -f "$compose_file" up -d --build --remove-orphans
+  if (( index == FRONTEND_STACK_INDEX )); then
+    run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --build --remove-orphans frontend nats
+  else
+    run docker compose -f "$compose_file" up -d --build --remove-orphans
+  fi
 
   if [[ "$DRY_RUN" == "false" ]]; then
     remove_one_shot_containers "$compose_file" "$bootstrap_services"
@@ -287,6 +422,7 @@ build_stack() {
 deploy_convex_functions() {
   local convex_dir="$CORE_ROOT/apps/Application Plane/convex-core"
   local backend_url="${CONVEX_SELF_HOSTED_URL:-http://localhost:3210}"
+  local env_file="$convex_dir/.env.local"
 
   if [[ ! -d "$convex_dir/convex" ]]; then
     printf '[convex-deploy] Skipping — %s/convex not found\n' "$convex_dir" >&2
@@ -294,13 +430,19 @@ deploy_convex_functions() {
   fi
 
   local admin_key="${CONVEX_ADMIN_KEY:-${CONVEX_SELF_HOSTED_ADMIN_KEY:-}}"
-  if [[ -z "$admin_key" ]] && [[ -f "$convex_dir/.env.local" ]]; then
-    admin_key="$(grep -E '^CONVEX_ADMIN_KEY=' "$convex_dir/.env.local" | head -n1 | cut -d'=' -f2- | tr -d '"'"'"'')"
+  if [[ -z "$admin_key" ]] && [[ -f "$env_file" ]]; then
+    admin_key="$(read_env_value "$env_file" CONVEX_ADMIN_KEY)"
   fi
   if [[ -z "$admin_key" ]]; then
     printf '[convex-deploy] WARN: no CONVEX_ADMIN_KEY available; skipping deploy\n' >&2
     return 0
   fi
+
+  local convex_auth_issuer="${CONVEX_AUTH_ISSUER:-$(read_env_value "$env_file" CONVEX_AUTH_ISSUER)}"
+  local convex_auth_jwks_url="${CONVEX_AUTH_JWKS_URL:-$(read_env_value "$env_file" CONVEX_AUTH_JWKS_URL)}"
+  local convex_auth_audience="${CONVEX_AUTH_AUDIENCE:-$(read_env_value "$env_file" CONVEX_AUTH_AUDIENCE)}"
+  local convex_tmpdir="$convex_dir/.convex-tmp"
+  mkdir -p "$convex_tmpdir"
 
   # Wait for the backend to become reachable. 60 attempts × 2s = 2 min cap,
   # well inside the convex-backend healthcheck start_period window.
@@ -319,11 +461,36 @@ deploy_convex_functions() {
     cd "$convex_dir"
     CONVEX_SELF_HOSTED_URL="$backend_url" \
     CONVEX_SELF_HOSTED_ADMIN_KEY="$admin_key" \
+    CONVEX_AUTH_ISSUER="$convex_auth_issuer" \
+    CONVEX_AUTH_JWKS_URL="$convex_auth_jwks_url" \
+    CONVEX_AUTH_AUDIENCE="$convex_auth_audience" \
+    CONVEX_TMPDIR="$convex_tmpdir" \
     npx convex deploy --yes
   ) || {
     printf '[convex-deploy] WARN: deploy returned non-zero; verify convex-gateway logs for the auto-deploy fallback\n' >&2
     return 0
   }
+}
+
+read_env_value() {
+  local file="$1"
+  local name="$2"
+
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+
+  local line
+  line="$(grep -E "^${name}=" "$file" | head -n1 || true)"
+  [[ -z "$line" ]] && return 0
+
+  local value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
 }
 
 # ensure_finspo_database — idempotently CREATE DATABASE finspo on the
@@ -431,30 +598,59 @@ status_all() {
   for index in "${!COMPOSE_FILES[@]}"; do
     local compose_file="${COMPOSE_FILES[$index]}"
     local stack_name="${STACK_NAMES[$index]}"
+    local excluded_services="${BOOTSTRAP_SERVICES[$index]}"
 
     if [[ ! -f "$compose_file" ]]; then
       printf '%-22s %-12s missing\n' "$stack_name" "MISSING"
       continue
     fi
 
-    local total
-    total="$(docker compose -f "$compose_file" ps --format json 2>/dev/null | wc -l | tr -d ' ')"
-    local healthy
-    healthy="$(docker compose -f "$compose_file" ps --filter 'status=running' --format json 2>/dev/null | wc -l | tr -d ' ')"
-    if [[ "$total" == "0" ]]; then
-      printf '%-22s %-12s 0 containers (stack is down)\n' "$stack_name" "DOWN"
-      continue
-    fi
+    local total=0
+    local ready=0
+    local service
+    while IFS= read -r service; do
+      [[ -z "$service" ]] && continue
+      total=$((total + 1))
+      if service_ready "$compose_file" "$service"; then
+        ready=$((ready + 1))
+      fi
+    done < <(runtime_services "$compose_file" "$excluded_services")
 
-    local label="UP"
-    if [[ "$healthy" != "$total" ]]; then
-      label="DEGRADED"
+    local label="DEGRADED"
+    if (( ready == 0 )); then
+      label="DOWN"
+    elif (( ready == total )); then
+      label="UP"
     fi
-    printf '%-22s %-12s %s of %s containers running\n' "$stack_name" "$label" "$healthy" "$total"
+    printf '%-22s %-12s %s of %s runtime services ready\n' "$stack_name" "$label" "$ready" "$total"
   done
   printf '\n'
   log "Detailed container roster:"
   docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+}
+
+compose_bootstrap() {
+  local index
+
+  ensure_velion_network
+  ensure_frontend_bus
+
+  for index in "${!COMPOSE_FILES[@]}"; do
+    validate_compose "${COMPOSE_FILES[$index]}"
+  done
+  validate_ingestion_plane_targets_quarry_v2 "apps/Ingestion Plane/docker-compose.yml"
+
+  stop_old_project "${COMPOSE_FILES[$FRONTEND_STACK_INDEX]}" "${OLD_PROJECTS[$FRONTEND_STACK_INDEX]}"
+
+  if core_stacks_ready; then
+    log "Core planes already running; compose bootstrap skips full rebuild."
+    return 0
+  fi
+
+  log "Core planes are not fully ready; compose bootstrap builds core stacks."
+  for index in 0 1 2 3 4; do
+    build_stack "$index"
+  done
 }
 
 main() {
@@ -467,9 +663,14 @@ main() {
       status_all
       return 0
       ;;
+    compose-bootstrap)
+      compose_bootstrap
+      return 0
+      ;;
   esac
 
   ensure_velion_network
+  ensure_frontend_bus
 
   for index in "${!COMPOSE_FILES[@]}"; do
     build_stack "$index"

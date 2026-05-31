@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/channels"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/consumers"
@@ -152,6 +154,11 @@ func main() {
 			log.Printf("connected to shared nats at %s", cfg.SharedNATSURL)
 		}
 	}
+	if sharedNATSClient != nil {
+		if err := ensureSharedConsumerStream(sharedNATSClient.JS); err != nil {
+			log.Printf("shared nats stream setup skipped: %v", err)
+		}
+	}
 
 	var controlSessionSub *consumers.ControlSessionSubscriber
 	if sharedNATSClient != nil {
@@ -204,4 +211,54 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+func ensureSharedConsumerStream(js nats.JetStreamContext) error {
+	if js == nil {
+		return nil
+	}
+
+	const streamName = "VELION_SHARED_CONSUMERS"
+	requiredSubjects := []string{
+		"app.session.>",
+		"auth.user.>",
+		"org.member.>",
+	}
+
+	info, err := js.StreamInfo(streamName)
+	if err != nil {
+		_, err = js.AddStream(&nats.StreamConfig{
+			Name:      streamName,
+			Subjects:  requiredSubjects,
+			Retention: nats.LimitsPolicy,
+			MaxAge:    14 * 24 * time.Hour,
+			MaxMsgs:   100_000,
+			Storage:   nats.FileStorage,
+		})
+		return err
+	}
+
+	subjects := append([]string{}, info.Config.Subjects...)
+	changed := false
+	for _, required := range requiredSubjects {
+		found := false
+		for _, existing := range subjects {
+			if existing == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			subjects = append(subjects, required)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	cfg := info.Config
+	cfg.Subjects = subjects
+	_, err = js.UpdateStream(&cfg)
+	return err
 }

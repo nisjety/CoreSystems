@@ -1,6 +1,10 @@
 minimumReleaseAge: 10080
 trustPolicy: no-downgrade
 
+overrides:
+  postcss: 8.5.15
+  ws: 8.20.1
+
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver

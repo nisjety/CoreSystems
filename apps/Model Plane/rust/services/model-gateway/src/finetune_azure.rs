@@ -1,6 +1,6 @@
-//! Azure OpenAI fine-tuning HTTP client (Wave 7 slice 2a).
+//! Azure `OpenAI` fine-tuning HTTP client (Wave 7 slice 2a).
 //!
-//! Five operations against the Azure OpenAI data-plane REST API:
+//! Five operations against the Azure `OpenAI` data-plane REST API:
 //!
 //!   1. `upload_training_file` — POST `/openai/files?purpose=fine-tune` (multipart).
 //!   2. `create_finetune_job`  — POST `/openai/fine_tuning/jobs`.
@@ -55,8 +55,8 @@ pub struct AzureJobError {
 }
 
 /// Hyperparameter shape Azure accepts. Every field is optional — when omitted
-/// Azure falls back to its defaults. We mirror the OpenAI surface (n_epochs /
-/// batch_size / learning_rate_multiplier) rather than inventing our own.
+/// Azure falls back to its defaults. We mirror the `OpenAI` surface (`n_epochs` /
+/// `batch_size` / `learning_rate_multiplier`) rather than inventing our own.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AzureHyperparameters {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,12 +123,23 @@ impl AzureFinetuneClient {
         )
     }
 
-    /// Upload a JSONL training file. Returns the Azure file_id (e.g. `file-abc123`).
+    /// Upload a JSONL training file. Returns the Azure `file_id` (e.g. `file-abc123`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AzureError`] if the multipart form cannot be built, the request
+    /// fails, Azure returns a non-success status, or the response cannot be decoded.
     pub async fn upload_training_file(
         &self,
         bytes: Vec<u8>,
         filename: &str,
     ) -> Result<String, AzureError> {
+        // Response shape: { "id": "file-abc", ... }
+        #[derive(Deserialize)]
+        struct FileResp {
+            id: String,
+        }
+
         let part = multipart::Part::bytes(bytes)
             .file_name(filename.to_owned())
             .mime_str("application/jsonl")
@@ -154,11 +165,6 @@ impl AzureFinetuneClient {
                 body,
             });
         }
-        // Response shape: { "id": "file-abc", ... }
-        #[derive(Deserialize)]
-        struct FileResp {
-            id: String,
-        }
         let parsed: FileResp = serde_json::from_str(&body)
             .map_err(|e| AzureError::Decode(format!("upload response: {e}")))?;
         Ok(parsed.id)
@@ -166,6 +172,11 @@ impl AzureFinetuneClient {
 
     /// Kick off a fine-tuning job against a previously-uploaded training file.
     /// Returns the Azure job id (e.g. `ftjob-xyz`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AzureError`] if the hyperparameters cannot be encoded, the request
+    /// fails, Azure returns a non-success status, or the response cannot be decoded.
     pub async fn create_finetune_job(
         &self,
         base_model: &str,
@@ -173,6 +184,11 @@ impl AzureFinetuneClient {
         hyperparameters: Option<AzureHyperparameters>,
         suffix: Option<&str>,
     ) -> Result<String, AzureError> {
+        #[derive(Deserialize)]
+        struct JobResp {
+            id: String,
+        }
+
         let mut body = serde_json::json!({
             "model": base_model,
             "training_file": training_file_id,
@@ -200,10 +216,6 @@ impl AzureFinetuneClient {
                 body: body_text,
             });
         }
-        #[derive(Deserialize)]
-        struct JobResp {
-            id: String,
-        }
         let parsed: JobResp = serde_json::from_str(&body_text)
             .map_err(|e| AzureError::Decode(format!("create job response: {e}")))?;
         Ok(parsed.id)
@@ -211,6 +223,11 @@ impl AzureFinetuneClient {
 
     /// Refresh a job's current state from Azure. Used by the polling worker
     /// (slice 2b) and by `GET /v1/finetune/jobs/:id` when `status='running'`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AzureError`] if the request fails, Azure returns a non-success
+    /// status, or the response cannot be decoded.
     pub async fn get_finetune_job(&self, job_id: &str) -> Result<AzureJobStatus, AzureError> {
         let path = format!("/openai/fine_tuning/jobs/{job_id}");
         let resp = self
@@ -233,6 +250,10 @@ impl AzureFinetuneClient {
 
     /// Cancel an in-flight job. Azure returns the post-cancel job document;
     /// we only care that the call succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AzureError`] if the request fails or Azure returns a non-success status.
     pub async fn cancel_finetune_job(&self, job_id: &str) -> Result<(), AzureError> {
         let path = format!("/openai/fine_tuning/jobs/{job_id}/cancel");
         let resp = self
@@ -254,6 +275,10 @@ impl AzureFinetuneClient {
 
     /// Provision a deployment for a fine-tuned model so the gateway can route
     /// traffic to it. Idempotent — repeated calls with the same name return 200.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AzureError`] if the request fails or Azure returns a non-success status.
     pub async fn create_deployment(
         &self,
         deployment_name: &str,

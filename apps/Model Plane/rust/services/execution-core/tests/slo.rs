@@ -28,7 +28,7 @@ use execution_core::scrub;
 type BoxedErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// Minimal permission mode + hook context combo that steers the runtime loop
-/// through its Allow → tool_bridge path without external dependencies.
+/// through its Allow → `tool_bridge` path without external dependencies.
 fn bench_step() -> runtime_loop::StepOutcome {
     runtime_loop::execute_step(
         "noop", // unrecognized tool name → tool_bridge returns a default stub output

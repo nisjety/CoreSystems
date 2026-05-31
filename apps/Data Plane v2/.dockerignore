@@ -12,14 +12,15 @@ tests/load/
 
 # Tooling that doesn't belong in the Rust workspace build
 tools/
-gen/
+gen/*
+!gen/go/
+!gen/go/**
 bin/
 backups/
 
 # Go service source — each Go service has its own build context, but we
 # don't want them pulled into Rust builds (project-root context).
 services/documents-api-go/
-services/wiki-store-go/
 services/data-orchestrator-go/
 services/data-quality-go/
 

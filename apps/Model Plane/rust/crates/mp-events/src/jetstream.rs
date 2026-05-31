@@ -1,13 +1,13 @@
-//! JetStream stream-as-code and consumer-as-code specifications.
+//! `JetStream` stream-as-code and consumer-as-code specifications.
 //!
 //! These types provide a declarative, language-agnostic description of the
-//! NATS JetStream streams and consumers that back the Model Plane event bus.
+//! NATS `JetStream` streams and consumers that back the Model Plane event bus.
 //! The same JSON fixtures are consumed by the Go parity tests to keep the
 //! Rust and Go implementations aligned byte-for-byte.
 
 use serde::{Deserialize, Serialize};
 
-/// Retention policy for a JetStream stream.
+/// Retention policy for a `JetStream` stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RetentionPolicy {
@@ -19,7 +19,7 @@ pub enum RetentionPolicy {
     WorkQueue,
 }
 
-/// Storage backend for a JetStream stream.
+/// Storage backend for a `JetStream` stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageType {
@@ -39,7 +39,7 @@ pub enum DiscardPolicy {
     New,
 }
 
-/// Acknowledgement policy for a JetStream consumer.
+/// Acknowledgement policy for a `JetStream` consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AckPolicy {
@@ -51,10 +51,10 @@ pub enum AckPolicy {
     None,
 }
 
-/// Declarative specification of a JetStream stream.
+/// Declarative specification of a `JetStream` stream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamSpec {
-    /// Stream name (must be unique within the JetStream account).
+    /// Stream name (must be unique within the `JetStream` account).
     pub name: String,
     /// Subjects captured by this stream.
     pub subjects: Vec<String>,
@@ -114,7 +114,7 @@ impl StreamSpec {
     }
 }
 
-/// Declarative specification of a JetStream consumer.
+/// Declarative specification of a `JetStream` consumer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConsumerSpec {
     /// Durable consumer name.
@@ -170,7 +170,7 @@ impl ConsumerSpec {
     }
 }
 
-/// Errors from JetStream spec operations.
+/// Errors from `JetStream` spec operations.
 #[derive(Debug, thiserror::Error)]
 pub enum JetStreamSpecError {
     #[error("missing required field: {0}")]

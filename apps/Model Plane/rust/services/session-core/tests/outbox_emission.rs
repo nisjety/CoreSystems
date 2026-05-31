@@ -1,7 +1,7 @@
 //! Contract tests for the transactional outbox emission used by session-core.
 //!
 //! These tests verify the idempotency-key contract that `create_thread` and
-//! `append_message` rely on when inserting THREAD_CREATED / MESSAGE_APPENDED
+//! `append_message` rely on when inserting `THREAD_CREATED` / `MESSAGE_APPENDED`
 //! envelopes alongside their domain rows in the same transaction.
 //!
 //! Real-DB verification of the outbox INSERTs is deferred to a future
@@ -19,8 +19,8 @@ fn thread_created_hash(thread_id: &str) -> String {
     derive_idempotency_hash(
         PRODUCER,
         THREAD_CREATED,
-        &format!("thread:{}", thread_id),
-        &format!("{}:created", thread_id),
+        &format!("thread:{thread_id}"),
+        &format!("{thread_id}:created"),
     )
 }
 
@@ -28,8 +28,8 @@ fn message_appended_hash(thread_id: &str, message_id: &str, sequence: u64) -> St
     derive_idempotency_hash(
         PRODUCER,
         MESSAGE_APPENDED,
-        &format!("message:{}", message_id),
-        &format!("{}:{}", thread_id, sequence),
+        &format!("message:{message_id}"),
+        &format!("{thread_id}:{sequence}"),
     )
 }
 
@@ -98,8 +98,8 @@ fn resource_ref_format_contract() {
     let thread_id = new_ulid();
     let msg_id = new_ulid();
 
-    let thread_resource = format!("thread:{}", thread_id);
-    let message_resource = format!("message:{}", msg_id);
+    let thread_resource = format!("thread:{thread_id}");
+    let message_resource = format!("message:{msg_id}");
 
     assert!(thread_resource.starts_with("thread:"));
     assert!(message_resource.starts_with("message:"));

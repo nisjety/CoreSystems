@@ -1,11 +1,11 @@
-//! ArtifactRef — opaque pointer to multimodal output stored outside the
+//! `ArtifactRef` — opaque pointer to multimodal output stored outside the
 //! request/response envelope.
 //!
 //! Multimodal providers (speech, vision, doc-intel) can produce binary or
 //! large-text outputs that are too costly to stream inline through the
 //! gateway. The provider trait surfaces them as `ArtifactRef` instead:
 //! a URI plus content-type, size, and a content hash. The artifact bytes
-//! live in an object store (S3, MinIO, blob, or in-memory for tests) the
+//! live in an object store (S3, `MinIO`, blob, or in-memory for tests) the
 //! caller is expected to know how to dereference.
 //!
 //! Under ZDR (`InferRequest.zdr = true`) providers must avoid producing
@@ -54,7 +54,14 @@ impl ArtifactRef {
         }
     }
 
-    /// Validating constructor. Rejects:
+    /// Validating constructor.
+    ///
+    /// `size_bytes == 0` is permitted — empty artifacts are a valid
+    /// outcome (e.g. a zero-page extraction).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidResponse`] for:
     ///
     ///   * empty `uri` or `content_type`,
     ///   * `uri` without a `<scheme>://` prefix (so consumers always
@@ -62,9 +69,6 @@ impl ArtifactRef {
     ///   * embedded ASCII control characters in `uri` or `content_type`
     ///     (defends against header-injection-style smuggling when the
     ///     ref is later interpolated into URLs or HTTP headers).
-    ///
-    /// `size_bytes == 0` is permitted — empty artifacts are a valid
-    /// outcome (e.g. a zero-page extraction).
     pub fn try_new(
         uri: impl Into<String>,
         content_type: impl Into<String>,

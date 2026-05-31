@@ -17,26 +17,26 @@ pub struct InferenceConfig {
     /// `OpenAI` API key (from `OPENAI_API_KEY`).
     pub openai_api_key: Option<String>,
 
-    /// Azure OpenAI endpoint (from `AZURE_OPENAI_ENDPOINT`).
+    /// Azure `OpenAI` endpoint (from `AZURE_OPENAI_ENDPOINT`).
     pub azure_openai_endpoint: Option<String>,
 
-    /// Azure OpenAI API key (from `AZURE_OPENAI_API_KEY`).
+    /// Azure `OpenAI` API key (from `AZURE_OPENAI_API_KEY`).
     pub azure_openai_api_key: Option<String>,
 
-    /// Azure OpenAI API version (from `AZURE_OPENAI_API_VERSION`).
+    /// Azure `OpenAI` API version (from `AZURE_OPENAI_API_VERSION`).
     pub azure_openai_api_version: String,
 
-    /// OpenAI chat model catalog (from `OPENAI_CHAT_MODELS`).
+    /// `OpenAI` chat model catalog (from `OPENAI_CHAT_MODELS`).
     pub openai_chat_models: Vec<String>,
 
-    /// OpenAI embedding model catalog (from `OPENAI_EMBEDDING_MODELS`).
+    /// `OpenAI` embedding model catalog (from `OPENAI_EMBEDDING_MODELS`).
     pub openai_embedding_models: Vec<String>,
 
-    /// Azure OpenAI chat deployment catalog (from `AZURE_OPENAI_CHAT_DEPLOYMENTS`
+    /// Azure `OpenAI` chat deployment catalog (from `AZURE_OPENAI_CHAT_DEPLOYMENTS`
     /// or legacy `AZURE_OPENAI_DEPLOYMENT`).
     pub azure_openai_chat_deployments: Vec<String>,
 
-    /// Azure OpenAI embedding deployment catalog (from
+    /// Azure `OpenAI` embedding deployment catalog (from
     /// `AZURE_OPENAI_EMBEDDING_DEPLOYMENTS` or legacy
     /// `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`).
     pub azure_openai_embedding_deployments: Vec<String>,

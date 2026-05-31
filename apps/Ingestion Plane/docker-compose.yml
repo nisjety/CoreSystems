@@ -18,6 +18,9 @@ services:
       QUARRY_EDGE__CONTROL_BASE_URL: http://quarry-control:8081
       QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
+      QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
+      QUARRY_EDGE__NATS_URL: nats://nats:4222
+      QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
       # Accept any non-empty Bearer in dev so the orchestrator's calls
       # to /v1/internal/run_page succeed without a real auth-core JWT.
       # The Rust binary refuses to start when this is `1` AND
@@ -57,6 +60,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      nats:
+        condition: service_healthy
     ports:
       - "8082:8082"
     networks:
@@ -85,12 +90,22 @@ services:
       QUARRY_CONTROL_ADDR: ":8081"
       QUARRY_CONTROL_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_v2?sslmode=disable
       QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
+      QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
       # G33: dispatch newly-created jobs onto the orchestrator's task queue.
       TEMPORAL_ADDR: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: quarry-orchestrator
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        until pg_isready -q -h ingestion-postgres -p 5432 -U ingestion_user -d quarry_v2; do
+          sleep 1
+        done
+        exec /app/control
     depends_on:
       postgres:
         condition: service_healthy

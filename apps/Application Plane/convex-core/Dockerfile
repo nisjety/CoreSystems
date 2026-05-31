@@ -3,14 +3,23 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+ENV NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
 # Install required tools
-RUN apk add --no-cache wget curl bash
+RUN set -e; \
+    if ! apk add --no-cache --quiet wget curl bash > /tmp/apk-add.log 2>&1; then \
+      cat /tmp/apk-add.log; \
+      exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log
 
 # Copy package files
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm ci --omit=dev --no-audit --no-fund --loglevel=error
 
 # Copy convex schema and functions
 COPY convex/ ./convex/

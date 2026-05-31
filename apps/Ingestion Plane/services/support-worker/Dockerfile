@@ -4,16 +4,19 @@
 FROM node:20-slim AS builder
 
 WORKDIR /app
+ENV NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --silent
 
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
 # Prune to production deps only after the build is done.
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --silent
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM node:20-slim AS runtime

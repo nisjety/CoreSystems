@@ -1,4 +1,4 @@
-//! Golden fixture contract tests for JetStream stream/consumer specs.
+//! Golden fixture contract tests for `JetStream` stream/consumer specs.
 //!
 //! Validates:
 //! - decode -> encode round-trip preserves all fields
@@ -75,7 +75,7 @@ fn stream_missing_subjects_fails_validation() {
 #[test]
 fn stream_empty_subject_fails_validation() {
     let mut spec = load_valid_stream();
-    spec.subjects = vec!["".to_string()];
+    spec.subjects = vec![String::new()];
     let err = spec.validate().unwrap_err().to_string();
     assert!(
         err.contains("subjects"),

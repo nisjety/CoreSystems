@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
         "video provider chain configured"
     );
 
-    let grpc_handle = tokio::spawn(grpc::serve_with_providers(
-        chain.clone(),
+    let grpc_handle = tokio::spawn(grpc::serve_with_providers(grpc::ProviderChains {
+        chain: chain.clone(),
         speech,
         translation,
         vision,
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         language,
         realtime,
         video,
-    ));
+    }));
     let http_handle = tokio::spawn(http_health::serve());
 
     let shutdown = async {

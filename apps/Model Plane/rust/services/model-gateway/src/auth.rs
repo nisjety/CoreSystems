@@ -686,8 +686,6 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn require_scope_returns_403_without_scope_and_200_with_scope() {
-        clear_env();
-
         async fn ok_handler() -> &'static str {
             "ok"
         }
@@ -700,6 +698,8 @@ mod tests {
                 .layer(middleware::from_fn(require_scope("admin")))
                 .layer(axum::Extension(claims))
         }
+
+        clear_env();
 
         // No scope → 403.
         let mut without_scope = base_claims();

@@ -22,12 +22,20 @@ WORKDIR /src
 #                                            time. Without these the build
 #                                            panics at boring-sys2/build/main.rs:571
 #                                            with "No such file or directory".
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
         pkg-config libssl-dev ca-certificates \
         protobuf-compiler \
         cmake perl clang build-essential \
         git golang-go \
-    && rm -rf /var/lib/apt/lists/*
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests first so cargo can resolve deps in a cached layer.
 # We then copy source last for maximum cache hit rate on incremental rebuilds.
@@ -63,11 +71,20 @@ RUN cargo build --release -p quarry-edge --bin quarry-edge-rs --features grpc,ht
 # Use bookworm-slim (not distroless) so healthcheck has wget available and
 # operators can shell in for triage. Adds ~25 MB over distroless; worth it.
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
         ca-certificates \
         wget \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin quarry
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    rm -rf /var/lib/apt/lists/*; \
+    echo 'quarry:x:65532:' >> /etc/group; \
+    echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
 
 COPY --from=build --chown=quarry:quarry \
     /src/target/release/quarry-edge-rs /usr/local/bin/quarry-edge-rs

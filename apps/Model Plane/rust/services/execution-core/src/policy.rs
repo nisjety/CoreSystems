@@ -3,7 +3,7 @@
 //! and that sandbox-manager consumes when provisioning isolation.
 //!
 //! Added per `docs/capability-ownership-matrix.md` §G3. The enum shape is
-//! adapted from OpenAI Codex's `SandboxPolicy` / `PermissionProfile`
+//! adapted from `OpenAI` Codex's `SandboxPolicy` / `PermissionProfile`
 //! (Apache-2.0), independently reimplemented; the [`MpNetworkPolicy::AllowDomains`]
 //! egress-allowlist variant is our extension.
 //!

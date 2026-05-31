@@ -197,6 +197,8 @@ services:
     build:
       context: .
       dockerfile: services/retrieval-engine-rs/Dockerfile
+      additional_contexts:
+        model-plane-proto: "../Model Plane/proto"
     container_name: dpv2-retrieval-engine
     restart: unless-stopped
     init: true
@@ -292,6 +294,8 @@ services:
     build:
       context: .
       dockerfile: services/embedding-engine-rs/Dockerfile
+      additional_contexts:
+        model-plane-proto: "../Model Plane/proto"
     container_name: dpv2-embedding-engine
     restart: unless-stopped
     init: true
@@ -436,8 +440,8 @@ services:
 
   wiki-store:
     build:
-      context: services/wiki-store-go
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/wiki-store-go/Dockerfile
     container_name: dpv2-wiki-store
     restart: unless-stopped
     init: true

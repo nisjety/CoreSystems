@@ -1,7 +1,7 @@
 //! HTTP routes for fine-tuning lifecycle (Wave 7 v1).
 //!
 //! These routes proxy to session-core's `FinetuneJobs` gRPC service for state
-//! and persistence. Azure OpenAI HTTP integration (file upload, job creation,
+//! and persistence. Azure `OpenAI` HTTP integration (file upload, job creation,
 //! polling, deployment) is deferred to the next implementation slice — for v1
 //! the gateway persists the job row with `status='queued'` and empty Azure
 //! fields, and a follow-up session adds:
@@ -80,7 +80,7 @@ pub(crate) fn map_azure_status_to_local(azure_status: &str) -> &str {
 }
 
 /// Returns `Some(true)` if Azure says the job is in a terminal state, so the
-/// gateway should stamp `completed_at` on the UpdateJobStatus call.
+/// gateway should stamp `completed_at` on the `UpdateJobStatus` call.
 pub(crate) fn azure_status_is_terminal(local_status: &str) -> bool {
     matches!(local_status, "succeeded" | "failed" | "cancelled")
 }
@@ -222,7 +222,7 @@ pub(crate) async fn publish_finetune_event(
     }
 }
 
-fn grpc_err(e: tonic::Status) -> HttpJsonError {
+fn grpc_err(e: &tonic::Status) -> HttpJsonError {
     let code = match e.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::NotFound => StatusCode::NOT_FOUND,
@@ -314,13 +314,13 @@ fn hyperparameters_for_azure(raw: Option<&Value>) -> Option<AzureHyperparameters
     Some(AzureHyperparameters {
         n_epochs: obj
             .get("n_epochs")
-            .and_then(|x| x.as_i64())
-            .map(|n| n as i32),
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok()),
         batch_size: obj
             .get("batch_size")
-            .and_then(|x| x.as_i64())
-            .map(|n| n as i32),
-        learning_rate_multiplier: obj.get("learning_rate_multiplier").and_then(|x| x.as_f64()),
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok()),
+        learning_rate_multiplier: obj.get("learning_rate_multiplier").and_then(serde_json::Value::as_f64),
     })
 }
 
@@ -336,7 +336,7 @@ async fn provision_azure_job(
     let file_id = azure
         .upload_training_file(training_jsonl.as_bytes().to_vec(), "training.jsonl")
         .await
-        .map_err(azure_err)?;
+        .map_err(|e| azure_err(&e))?;
     let job_id = azure
         .create_finetune_job(
             base_model,
@@ -345,13 +345,13 @@ async fn provision_azure_job(
             suffix,
         )
         .await
-        .map_err(azure_err)?;
+        .map_err(|e| azure_err(&e))?;
     Ok((file_id, job_id))
 }
 
-fn azure_err(e: crate::finetune_azure::AzureError) -> HttpJsonError {
+fn azure_err(e: &crate::finetune_azure::AzureError) -> HttpJsonError {
     use crate::finetune_azure::AzureError;
-    let (code, msg) = match &e {
+    let (code, msg) = match e {
         AzureError::Http(_) => (
             StatusCode::BAD_GATEWAY,
             "azure transport failure".to_owned(),
@@ -380,18 +380,111 @@ fn azure_err(e: crate::finetune_azure::AzureError) -> HttpJsonError {
     (code, Json(json!({ "error": msg })))
 }
 
+/// Enforce the per-job and per-org monthly budget caps for a JSON create request.
+///
+/// # Errors
+///
+/// Returns a `429 TOO_MANY_REQUESTS` JSON error if the effective estimate exceeds
+/// the per-job cap or would push the org over its monthly cap, or maps an upstream
+/// gRPC failure (spend lookup) to an `HttpJsonError`.
+async fn enforce_budget(
+    state: &AppState,
+    org_id: &str,
+    body: &CreateJobBody,
+) -> Result<(), HttpJsonError> {
+    enforce_budget_estimate(
+        state,
+        org_id,
+        body.estimated_cost_usd,
+        body.training_example_count,
+        &body.base_model,
+    )
+    .await
+}
+
+/// Shared budget guard for both the JSON and multipart create paths.
+///
+/// Reads the per-job and per-org caps from env, queries session-core for the org's
+/// month-to-date spend, and combines the caller estimate with a server-derived floor
+/// (HIGH-3 defence) so a client cannot bypass the caps by claiming a cost of zero.
+///
+/// # Errors
+///
+/// Returns a `429 TOO_MANY_REQUESTS` JSON error if the per-job or org-monthly cap
+/// would be exceeded, or maps an upstream gRPC failure (spend lookup) to an `HttpJsonError`.
+async fn enforce_budget_estimate(
+    state: &AppState,
+    org_id: &str,
+    caller_estimate_usd: f64,
+    example_count: i32,
+    base_model: &str,
+) -> Result<(), HttpJsonError> {
+    // Caps of 0 disable the corresponding check — operators opt into
+    // throttling by setting positive values.
+    let per_job_cap = read_budget_cap("FINETUNE_PER_JOB_BUDGET_USD", 20.0);
+    let org_cap = read_budget_cap("FINETUNE_ORG_BUDGET_USD", 50.0);
+    let spend = state
+        .finetune_jobs_client
+        .clone()
+        .get_org_monthly_spend(pb::GetOrgMonthlySpendRequest {
+            org_id: org_id.to_owned(),
+        })
+        .await
+        .map_err(|e| grpc_err(&e))?
+        .into_inner();
+    let effective_estimate =
+        effective_budget_estimate(caller_estimate_usd, example_count, base_model);
+    match budget_verdict(effective_estimate, spend.total_usd, per_job_cap, org_cap) {
+        BudgetVerdict::Allowed => Ok(()),
+        BudgetVerdict::PerJobExceeded {
+            cap_usd,
+            estimate_usd,
+        } => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": format!(
+                    "estimated cost ${estimate_usd:.2} exceeds per-job cap ${cap_usd:.2}"
+                ),
+                "per_job_cap_usd": cap_usd,
+                "estimate_usd": estimate_usd,
+            })),
+        )),
+        BudgetVerdict::OrgMonthlyExceeded {
+            cap_usd,
+            current_usd,
+            estimate_usd,
+        } => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": format!(
+                    "org monthly cap ${cap_usd:.2} would be exceeded (current ${current_usd:.2} + new ${estimate_usd:.2})"
+                ),
+                "org_cap_usd": cap_usd,
+                "current_usd": current_usd,
+                "estimate_usd": estimate_usd,
+            })),
+        )),
+    }
+}
+
 /// `POST /v1/finetune/jobs`
 ///
 /// v1 path (no Azure HTTP yet):
 ///   1. Admin-scope + feature-flag check.
-///   2. Validate body (agent_id, base_model present).
-///   3. Generate a job_id (ULID, server-side so callers can't collide).
+///   2. Validate body (`agent_id`, `base_model` present).
+///   3. Generate a `job_id` (ULID, server-side so callers can't collide).
 ///   4. Persist row in session-core's `finetune_jobs` table with
 ///      `status='queued'`, `azure_*` empty.
 ///   5. Return `{ job_id, status: 'queued' }` to the caller.
 ///
 /// Follow-up (next session) inserts steps 2.5/3.5: upload the JSONL to Azure
 /// Files, kick off the Fine-tuning Job, populate `azure_file_id` + `azure_job_id`.
+///
+/// # Errors
+///
+/// Returns a `400` if `agent_id`/`base_model` are missing, a `429` if budget caps
+/// are exceeded, a `403`/feature error from the admin/flag guards, or maps upstream
+/// Azure/gRPC failures to an `HttpJsonError`.
 pub async fn create_job(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -413,70 +506,13 @@ pub async fn create_job(
         ));
     }
 
-    // Budget guard (slice 2d). Reads the per-job and per-org caps from env,
-    // then queries session-core for the org's spend this calendar month.
-    // Caps of 0 disable the corresponding check — operators opt into
-    // throttling by setting positive values.
-    let per_job_cap = read_budget_cap("FINETUNE_PER_JOB_BUDGET_USD", 20.0);
-    let org_cap = read_budget_cap("FINETUNE_ORG_BUDGET_USD", 50.0);
-    let spend = state
-        .finetune_jobs_client
-        .clone()
-        .get_org_monthly_spend(pb::GetOrgMonthlySpendRequest {
-            org_id: claims.org_id.clone(),
-        })
-        .await
-        .map_err(grpc_err)?
-        .into_inner();
-    // HIGH-3 defence: combine the caller-supplied estimate with a server
-    // floor derived from training_example_count + base_model so a client
-    // cannot bypass the caps by claiming a cost of zero.
-    let effective_estimate = effective_budget_estimate(
-        body.estimated_cost_usd,
-        body.training_example_count,
-        &body.base_model,
-    );
-    match budget_verdict(effective_estimate, spend.total_usd, per_job_cap, org_cap) {
-        BudgetVerdict::Allowed => {}
-        BudgetVerdict::PerJobExceeded {
-            cap_usd,
-            estimate_usd,
-        } => {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": format!(
-                        "estimated cost ${estimate_usd:.2} exceeds per-job cap ${cap_usd:.2}"
-                    ),
-                    "per_job_cap_usd": cap_usd,
-                    "estimate_usd": estimate_usd,
-                })),
-            ));
-        }
-        BudgetVerdict::OrgMonthlyExceeded {
-            cap_usd,
-            current_usd,
-            estimate_usd,
-        } => {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": format!(
-                        "org monthly cap ${cap_usd:.2} would be exceeded (current ${current_usd:.2} + new ${estimate_usd:.2})"
-                    ),
-                    "org_cap_usd": cap_usd,
-                    "current_usd": current_usd,
-                    "estimate_usd": estimate_usd,
-                })),
-            ));
-        }
-    }
+    enforce_budget(&state, &claims.org_id, &body).await?;
 
     let job_id = new_ulid();
     let hyperparameters_json = body
         .hyperparameters
         .as_ref()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .unwrap_or_default();
 
     // If Azure is configured AND the caller supplied training JSONL, drive
@@ -517,29 +553,44 @@ pub async fn create_job(
             created_by: claims.user_id.clone(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
 
-    // Slice 2d — emit a created event so the App-Plane projector wakes
-    // immediately without polling. Best-effort: emission failure logs and
-    // does not block the response.
+    announce_created(&state, &claims, &resp, &json!({})).await;
+
+    Ok(Json(job_value(&resp)))
+}
+
+/// Emit the `finetune.created` lifecycle event so the App-Plane projector wakes
+/// without polling. Best-effort — emission failure logs and never blocks the response.
+/// `extra` is merged into the event payload (e.g. example/rejected counts).
+async fn announce_created(
+    state: &AppState,
+    claims: &Claims,
+    resp: &pb::FinetuneJob,
+    extra: &Value,
+) {
+    let mut payload = json!({
+        "job_id": resp.job_id,
+        "agent_id": resp.agent_id,
+        "base_model": resp.base_model,
+        "status": resp.status,
+        "azure_job_id": resp.azure_job_id,
+    });
+    if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
     publish_finetune_event(
         &state.publisher,
         &claims.org_id,
         &claims.user_id,
         &resp.job_id,
         mp_events::subjects::FINETUNE_EVENT_CREATED,
-        json!({
-            "job_id": resp.job_id,
-            "agent_id": resp.agent_id,
-            "base_model": resp.base_model,
-            "status": resp.status,
-            "azure_job_id": resp.azure_job_id,
-        }),
+        payload,
     )
     .await;
-
-    Ok(Json(job_value(&resp)))
 }
 
 #[derive(Deserialize, Default)]
@@ -555,6 +606,11 @@ pub struct ListJobsQuery {
 /// Scoped to caller's org. Listing is open to any auth'd user in the org (no
 /// admin scope required) — operators need to see job history without elevated
 /// rights. Mutations stay admin-only.
+///
+/// # Errors
+///
+/// Returns a feature-disabled error from the flag guard, or maps an upstream gRPC
+/// failure to an `HttpJsonError`.
 pub async fn list_jobs(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -573,7 +629,7 @@ pub async fn list_jobs(
             offset: q.offset.unwrap_or(0),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -589,6 +645,12 @@ pub async fn list_jobs(
 /// before returning. Refresh failures degrade gracefully — they log a warning
 /// and return the cached row rather than failing the read. The polling worker
 /// (slice 2c) covers the eventual-consistency gap.
+///
+/// # Errors
+///
+/// Returns a feature-disabled error from the flag guard, or maps an upstream gRPC
+/// failure (job lookup) to an `HttpJsonError`. Azure refresh failures are logged
+/// and fall back to the cached row, not surfaced as an `Err`.
 pub async fn get_job(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -604,7 +666,7 @@ pub async fn get_job(
             org_id: claims.org_id.clone(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
 
     let needs_refresh =
@@ -648,9 +710,14 @@ pub async fn get_job(
 /// `DELETE /v1/finetune/jobs/:job_id`
 ///
 /// v1: marks the row `cancelled` (and stamps `completed_at`) in session-core.
-/// The Azure cancel call (POST /openai/fine_tuning/jobs/{id}/cancel) is wired
+/// The Azure cancel call (POST /`openai/fine_tuning/jobs/{id}/cancel`) is wired
 /// in the next slice once Azure HTTP is in. If a job has progressed to
 /// `succeeded` it cannot be cancelled — return 409.
+///
+/// # Errors
+///
+/// Returns a feature-disabled/admin error from the guards, a `409 CONFLICT` if the
+/// job is already terminal, or maps an upstream gRPC failure to an `HttpJsonError`.
 pub async fn cancel_job(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -669,7 +736,7 @@ pub async fn cancel_job(
             org_id: claims.org_id.clone(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
 
     match current.status.as_str() {
@@ -725,7 +792,7 @@ pub async fn cancel_job(
                 })),
             ));
         }
-        Err(status) => return Err(grpc_err(status)),
+        Err(status) => return Err(grpc_err(&status)),
     };
 
     publish_finetune_event(
@@ -780,18 +847,14 @@ pub(crate) fn validate_jsonl(body: &str) -> Result<JsonlSummary, String> {
             rejected.push(line_no);
             continue;
         };
-        let obj = match value.as_object() {
-            Some(o) => o,
-            None => {
-                rejected.push(line_no);
-                continue;
-            }
+        let Some(obj) = value.as_object() else {
+            rejected.push(line_no);
+            continue;
         };
         let has_messages = obj
             .get("messages")
             .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
+            .is_some_and(|a| !a.is_empty());
         let has_prompt_completion = obj.get("prompt").is_some() && obj.get("completion").is_some();
         if has_messages || has_prompt_completion {
             valid += 1;
@@ -852,14 +915,144 @@ struct MultipartFields {
 /// Rejects: missing `file` or `agent_id` or `base_model` (400);
 /// file larger than `FINETUNE_MAX_JSONL_BYTES` (413); JSONL with zero valid
 /// examples (400 with a clear count of rejected lines).
+///
+/// # Errors
+///
+/// Returns a feature-disabled/admin error from the guards, a `400`/`413` from
+/// multipart parsing or validation, a `429` if budget caps are exceeded, or maps
+/// upstream Azure/gRPC failures to an `HttpJsonError`.
 pub async fn create_job_multipart(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<Value>, HttpJsonError> {
     require_feature_enabled()?;
     require_admin(&claims)?;
 
+    let fields = parse_multipart_fields(multipart).await?;
+
+    if fields.agent_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id required" })),
+        ));
+    }
+    if fields.base_model.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "base_model required" })),
+        ));
+    }
+    if fields.file_bytes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "file required (multipart field name: file)" })),
+        ));
+    }
+
+    // Validate JSONL before any Azure or budget calls — fail fast on garbage
+    // input so we don't burn a budget aggregation query on a bad upload.
+    let jsonl_text = std::str::from_utf8(&fields.file_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("file is not valid UTF-8: {e}") })),
+        )
+    })?;
+    let summary = validate_jsonl(jsonl_text)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
+
+    // HIGH-3 defence (multipart path): use the JSONL-derived valid_examples
+    // count (server-trusted) and the caller's base_model to floor the estimate.
+    enforce_budget_estimate(
+        &state,
+        &claims.org_id,
+        fields.estimated_cost_usd,
+        summary.valid_examples,
+        &fields.base_model,
+    )
+    .await?;
+
+    let job_id = new_ulid();
+    let hyperparameters_value: Option<Value> = fields
+        .hyperparameters
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let hyperparameters_json = fields.hyperparameters.clone().unwrap_or_default();
+
+    // Drive Azure with the actual uploaded bytes (preserves the original
+    // filename for Azure-side auditability).
+    let (azure_file_id, azure_job_id) = if let Some(client) = state.azure_finetune.as_ref() {
+        let file_id = client
+            .upload_training_file(fields.file_bytes.clone(), &fields.file_name)
+            .await
+            .map_err(|e| azure_err(&e))?;
+        let job_id_az = client
+            .create_finetune_job(
+                &fields.base_model,
+                &file_id,
+                hyperparameters_for_azure(hyperparameters_value.as_ref()),
+                fields.suffix.as_deref(),
+            )
+            .await
+            .map_err(|e| azure_err(&e))?;
+        (file_id, job_id_az)
+    } else {
+        (String::new(), String::new())
+    };
+
+    let resp = state
+        .finetune_jobs_client
+        .clone()
+        .create_job(pb::CreateFinetuneJobRequest {
+            job_id: job_id.clone(),
+            org_id: claims.org_id.clone(),
+            agent_id: fields.agent_id,
+            base_model: fields.base_model,
+            azure_file_id,
+            azure_job_id,
+            hyperparameters_json,
+            training_example_count: summary.valid_examples,
+            estimated_cost_usd: fields.estimated_cost_usd,
+            created_by: claims.user_id.clone(),
+        })
+        .await
+        .map_err(|e| grpc_err(&e))?
+        .into_inner();
+
+    announce_created(
+        &state,
+        &claims,
+        &resp,
+        &json!({
+            "training_example_count": summary.valid_examples,
+            "rejected_line_count": summary.rejected_lines.len(),
+        }),
+    )
+    .await;
+
+    Ok(Json(json!({
+        "job": job_value(&resp),
+        "training_example_count": summary.valid_examples,
+        "rejected_lines": summary.rejected_lines,
+    })))
+}
+
+async fn read_text(field: axum::extract::multipart::Field<'_>) -> Result<String, HttpJsonError> {
+    field.text().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("multipart text field error: {e}") })),
+        )
+    })
+}
+
+/// Drain a multipart body into [`MultipartFields`], enforcing the per-file size cap.
+///
+/// # Errors
+///
+/// Returns a `400 BAD_REQUEST` on a multipart parse/read error, or `413 PAYLOAD_TOO_LARGE`
+/// if the `file` part exceeds `FINETUNE_MAX_JSONL_BYTES`.
+async fn parse_multipart_fields(mut multipart: Multipart) -> Result<MultipartFields, HttpJsonError> {
     let max_bytes = max_jsonl_bytes();
     let mut fields = MultipartFields::default();
 
@@ -920,168 +1113,7 @@ pub async fn create_job_multipart(
             }
         }
     }
-
-    if fields.agent_id.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "agent_id required" })),
-        ));
-    }
-    if fields.base_model.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "base_model required" })),
-        ));
-    }
-    if fields.file_bytes.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "file required (multipart field name: file)" })),
-        ));
-    }
-
-    // Validate JSONL before any Azure or budget calls — fail fast on garbage
-    // input so we don't burn a budget aggregation query on a bad upload.
-    let jsonl_text = std::str::from_utf8(&fields.file_bytes).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("file is not valid UTF-8: {e}") })),
-        )
-    })?;
-    let summary = validate_jsonl(jsonl_text)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
-
-    // Budget guard mirrors create_job — see that handler for rationale.
-    let per_job_cap = read_budget_cap("FINETUNE_PER_JOB_BUDGET_USD", 20.0);
-    let org_cap = read_budget_cap("FINETUNE_ORG_BUDGET_USD", 50.0);
-    let spend = state
-        .finetune_jobs_client
-        .clone()
-        .get_org_monthly_spend(pb::GetOrgMonthlySpendRequest {
-            org_id: claims.org_id.clone(),
-        })
-        .await
-        .map_err(grpc_err)?
-        .into_inner();
-    // HIGH-3 defence (multipart path): use the JSONL-derived
-    // valid_examples count (server-trusted) and the caller's base_model to
-    // floor the budget estimate.
-    let effective_estimate = effective_budget_estimate(
-        fields.estimated_cost_usd,
-        summary.valid_examples,
-        &fields.base_model,
-    );
-    match budget_verdict(effective_estimate, spend.total_usd, per_job_cap, org_cap) {
-        BudgetVerdict::Allowed => {}
-        BudgetVerdict::PerJobExceeded {
-            cap_usd,
-            estimate_usd,
-        } => {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": format!("estimated cost ${estimate_usd:.2} exceeds per-job cap ${cap_usd:.2}"),
-                    "per_job_cap_usd": cap_usd,
-                    "estimate_usd": estimate_usd,
-                })),
-            ));
-        }
-        BudgetVerdict::OrgMonthlyExceeded {
-            cap_usd,
-            current_usd,
-            estimate_usd,
-        } => {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": format!("org monthly cap ${cap_usd:.2} would be exceeded"),
-                    "org_cap_usd": cap_usd,
-                    "current_usd": current_usd,
-                    "estimate_usd": estimate_usd,
-                })),
-            ));
-        }
-    }
-
-    let job_id = new_ulid();
-    let hyperparameters_value: Option<Value> = fields
-        .hyperparameters
-        .as_ref()
-        .and_then(|s| serde_json::from_str(s).ok());
-    let hyperparameters_json = fields.hyperparameters.clone().unwrap_or_default();
-
-    // Drive Azure with the actual uploaded bytes (preserves the original
-    // filename for Azure-side auditability).
-    let (azure_file_id, azure_job_id) = if let Some(client) = state.azure_finetune.as_ref() {
-        let file_id = client
-            .upload_training_file(fields.file_bytes.clone(), &fields.file_name)
-            .await
-            .map_err(azure_err)?;
-        let job_id_az = client
-            .create_finetune_job(
-                &fields.base_model,
-                &file_id,
-                hyperparameters_for_azure(hyperparameters_value.as_ref()),
-                fields.suffix.as_deref(),
-            )
-            .await
-            .map_err(azure_err)?;
-        (file_id, job_id_az)
-    } else {
-        (String::new(), String::new())
-    };
-
-    let resp = state
-        .finetune_jobs_client
-        .clone()
-        .create_job(pb::CreateFinetuneJobRequest {
-            job_id: job_id.clone(),
-            org_id: claims.org_id.clone(),
-            agent_id: fields.agent_id,
-            base_model: fields.base_model,
-            azure_file_id,
-            azure_job_id,
-            hyperparameters_json,
-            training_example_count: summary.valid_examples,
-            estimated_cost_usd: fields.estimated_cost_usd,
-            created_by: claims.user_id.clone(),
-        })
-        .await
-        .map_err(grpc_err)?
-        .into_inner();
-
-    publish_finetune_event(
-        &state.publisher,
-        &claims.org_id,
-        &claims.user_id,
-        &resp.job_id,
-        mp_events::subjects::FINETUNE_EVENT_CREATED,
-        json!({
-            "job_id": resp.job_id,
-            "agent_id": resp.agent_id,
-            "base_model": resp.base_model,
-            "status": resp.status,
-            "azure_job_id": resp.azure_job_id,
-            "training_example_count": summary.valid_examples,
-            "rejected_line_count": summary.rejected_lines.len(),
-        }),
-    )
-    .await;
-
-    Ok(Json(json!({
-        "job": job_value(&resp),
-        "training_example_count": summary.valid_examples,
-        "rejected_lines": summary.rejected_lines,
-    })))
-}
-
-async fn read_text(field: axum::extract::multipart::Field<'_>) -> Result<String, HttpJsonError> {
-    field.text().await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": format!("multipart text field error: {e}") })),
-        )
-    })
+    Ok(fields)
 }
 
 #[cfg(test)]
@@ -1260,7 +1292,7 @@ mod tests {
     fn read_budget_cap_falls_back_to_default_when_unset() {
         // We can't toggle env in tests (unsafe forbidden), but we can check
         // the parse path with a known-unset name.
-        assert_eq!(read_budget_cap("MP_FT_TEST_UNSET_VAR_NAME_XYZ", 7.5), 7.5);
+        assert!((read_budget_cap("MP_FT_TEST_UNSET_VAR_NAME_XYZ", 7.5) - 7.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1270,7 +1302,7 @@ mod tests {
         // 100 examples at $0.0005/example = $0.05 for gpt-3.5 class.
         assert!((server_estimate_cost_usd(100, "gpt-3.5-turbo") - 0.05).abs() < 1e-9);
         // Negative counts clamp to zero.
-        assert_eq!(server_estimate_cost_usd(-5, "gpt-4o-mini"), 0.0);
+        assert!(server_estimate_cost_usd(-5, "gpt-4o-mini").abs() < 1e-9);
     }
 
     #[test]

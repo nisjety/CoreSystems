@@ -1,5 +1,5 @@
-//! CRUD store for orchestration tables (plans, plan_steps, todos, approvals,
-//! subagent_edges) introduced in migration `0003_orchestration_tables.sql`.
+//! CRUD store for orchestration tables (plans, `plan_steps`, todos, approvals,
+//! `subagent_edges`) introduced in migration `0003_orchestration_tables.sql`.
 //!
 //! All IDs are caller-supplied ULID-prefixed text (`plan_`, `step_`, `todo_`,
 //! `appr_`, `run_`). Ordinals on `plan_steps` and `todos` are auto-assigned by

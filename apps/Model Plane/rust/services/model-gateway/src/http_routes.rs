@@ -76,7 +76,51 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route("/v1/invoke", post(invoke))
         .route("/v1/invoke/stream", post(sse::invoke_stream_sse))
         .route("/v1/invoke/resume/:request_id", get(sse::invoke_resume_sse))
-        // Orchestration — read
+        // Orchestration read + mutations
+        .merge(orchestration_routes())
+        // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
+        .route("/v1/feedback", post(ingest_feedback))
+        // Run event SSE
+        .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
+        // AI modality routes  /v1/ai/*
+        .merge(ai_routes())
+        // App-Plane proxies (capabilities/tasks/cron/memory/skills)
+        .merge(proxy_routes())
+        // --- Data Plane v2 ---
+        .merge(dataplane_routes())
+        // TOON compact-context encoding
+        .route("/v1/toon/encode", post(toon_encode))
+        // Wave 7 — fine-tuning lifecycle (gap-model.md §14.9 PAR-30/31/32 v1).
+        // POST is admin-gated; GETs are open within the org.
+        .route(
+            "/v1/finetune/jobs",
+            post(crate::finetune_routes::create_job).get(crate::finetune_routes::list_jobs),
+        )
+        // Wave 7 slice 2e — multipart upload variant of create_job for files
+        // larger than what fits comfortably in a JSON body.
+        .route(
+            "/v1/finetune/jobs/upload",
+            post(crate::finetune_routes::create_job_multipart),
+        )
+        .route(
+            "/v1/finetune/jobs/:job_id",
+            get(crate::finetune_routes::get_job).delete(crate::finetune_routes::cancel_job),
+        )
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn(auth::require_auth))
+        .layer(axum::Extension(rate_limiter));
+
+    Router::new()
+        .merge(public)
+        .merge(authed)
+        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
+        .with_state(state)
+}
+
+/// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
+fn orchestration_routes() -> Router<AppState> {
+    Router::new()
+        // read
         .route("/v1/orchestration/runs/:run_id/plans", get(list_plans))
         .route("/v1/orchestration/plans/:plan_id", get(get_plan))
         .route(
@@ -96,7 +140,7 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
             "/v1/orchestration/threads/:thread_id/lineage",
             get(get_subagent_lineage),
         )
-        // Orchestration — mutations
+        // mutations
         .route(
             "/v1/orchestration/plans/:plan_id/approve",
             post(approve_plan),
@@ -112,11 +156,55 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         )
         .route("/v1/orchestration/runs/:run_id/cancel", post(cancel_run))
         .route("/v1/orchestration/runs/:run_id/resume", post(resume_run))
-        // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
-        .route("/v1/feedback", post(ingest_feedback))
-        // Run event SSE
-        .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
-        // AI modality routes  /v1/ai/*
+}
+
+/// App-Plane proxy routes (`/v1/capabilities`, `/v1/tasks`, `/v1/cron`,
+/// `/v1/memory`, `/v1/skills`). Merged into the auth-gated router.
+fn proxy_routes() -> Router<AppState> {
+    Router::new()
+        // Capabilities
+        .route("/v1/capabilities", get(list_capabilities_proxy))
+        .route("/v1/capabilities/:id", get(get_capability_proxy))
+        // Tasks
+        .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
+        .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
+        .route("/v1/tasks/:id/cancel", post(cancel_task_proxy))
+        // Cron
+        .route("/v1/cron", get(list_cron_proxy).post(create_cron_proxy))
+        .route(
+            "/v1/cron/:id",
+            get(get_cron_proxy)
+                .patch(patch_cron_proxy)
+                .delete(delete_cron_proxy),
+        )
+        // Memory
+        .route(
+            "/v1/memory",
+            get(list_memory_proxy).post(create_memory_proxy),
+        )
+        .route(
+            "/v1/memory/:id",
+            get(get_memory_proxy)
+                .patch(patch_memory_proxy)
+                .delete(delete_memory_proxy),
+        )
+        // Skills
+        .route(
+            "/v1/skills",
+            get(list_skills_proxy).post(create_skill_proxy),
+        )
+        .route(
+            "/v1/skills/:id",
+            get(get_skill_proxy)
+                .patch(patch_skill_proxy)
+                .delete(delete_skill_proxy),
+        )
+}
+
+/// `/v1/ai/*` modality routes (chat, embeddings, images, speech, translate,
+/// documents, language, realtime, video). Merged into the auth-gated router.
+fn ai_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/ai/chat", post(ai_chat))
         .route("/v1/ai/embeddings", post(ai_embeddings))
         .route("/v1/ai/models", get(ai_models))
@@ -154,44 +242,12 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
             get(ai_video_content),
         )
         .route("/v1/ai/video/models", get(ai_video_models))
-        // Capabilities  /v1/capabilities/*
-        .route("/v1/capabilities", get(list_capabilities_proxy))
-        .route("/v1/capabilities/:id", get(get_capability_proxy))
-        // Tasks  /v1/tasks/*
-        .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
-        .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
-        .route("/v1/tasks/:id/cancel", post(cancel_task_proxy))
-        // Cron  /v1/cron/*
-        .route("/v1/cron", get(list_cron_proxy).post(create_cron_proxy))
-        .route(
-            "/v1/cron/:id",
-            get(get_cron_proxy)
-                .patch(patch_cron_proxy)
-                .delete(delete_cron_proxy),
-        )
-        // Memory  /v1/memory/*
-        .route(
-            "/v1/memory",
-            get(list_memory_proxy).post(create_memory_proxy),
-        )
-        .route(
-            "/v1/memory/:id",
-            get(get_memory_proxy)
-                .patch(patch_memory_proxy)
-                .delete(delete_memory_proxy),
-        )
-        // Skills  /v1/skills/*
-        .route(
-            "/v1/skills",
-            get(list_skills_proxy).post(create_skill_proxy),
-        )
-        .route(
-            "/v1/skills/:id",
-            get(get_skill_proxy)
-                .patch(patch_skill_proxy)
-                .delete(delete_skill_proxy),
-        )
-        // --- Data Plane v2 ---
+}
+
+/// Data Plane v2 routes (documents, retrieval, knowledge, graph, wiki). Merged
+/// into the auth-gated router.
+fn dataplane_routes() -> Router<AppState> {
+    Router::new()
         // Documents
         .route(
             "/v1/documents",
@@ -277,33 +333,6 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
             "/v1/wiki/proposals/:proposal_id/review",
             post(crate::dataplane::review_wiki_proposal),
         )
-        // TOON compact-context encoding
-        .route("/v1/toon/encode", post(toon_encode))
-        // Wave 7 — fine-tuning lifecycle (gap-model.md §14.9 PAR-30/31/32 v1).
-        // POST is admin-gated; GETs are open within the org.
-        .route(
-            "/v1/finetune/jobs",
-            post(crate::finetune_routes::create_job).get(crate::finetune_routes::list_jobs),
-        )
-        // Wave 7 slice 2e — multipart upload variant of create_job for files
-        // larger than what fits comfortably in a JSON body.
-        .route(
-            "/v1/finetune/jobs/upload",
-            post(crate::finetune_routes::create_job_multipart),
-        )
-        .route(
-            "/v1/finetune/jobs/:job_id",
-            get(crate::finetune_routes::get_job).delete(crate::finetune_routes::cancel_job),
-        )
-        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(middleware::from_fn(auth::require_auth))
-        .layer(axum::Extension(rate_limiter));
-
-    Router::new()
-        .merge(public)
-        .merge(authed)
-        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
-        .with_state(state)
 }
 
 async fn healthz() -> &'static str {
@@ -339,7 +368,7 @@ async fn list_plans(
         .clone()
         .list_plans(ListPlansRequest { run_id })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -356,7 +385,7 @@ async fn get_plan(
         .clone()
         .get_plan(GetPlanRequest { plan_id })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let plan = response.plan.ok_or_else(|| not_found("plan not found"))?;
@@ -376,7 +405,7 @@ async fn list_todos(
             run_id: query.run_id.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -393,7 +422,7 @@ async fn get_todo(
         .clone()
         .get_todo(GetTodoRequest { todo_id })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let todo = response.todo.ok_or_else(|| not_found("todo not found"))?;
@@ -413,7 +442,7 @@ async fn list_approvals(
             step_id: query.step_id.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -430,7 +459,7 @@ async fn get_approval(
         .clone()
         .get_approval(GetApprovalRequest { approval_id })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let approval = response
@@ -448,7 +477,7 @@ async fn get_subagent_lineage(
         .clone()
         .get_subagent_lineage(GetSubagentLineageRequest { thread_id })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let lineage = response
@@ -485,7 +514,7 @@ async fn approve_plan(
             reason: body.reason,
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     let plan = resp.plan.ok_or_else(|| not_found("plan not found"))?;
     Ok(Json(json!({ "plan": plan_value(&plan) })))
@@ -507,7 +536,7 @@ async fn reject_plan(
             reason: body.reason,
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     let plan = resp.plan.ok_or_else(|| not_found("plan not found"))?;
     Ok(Json(json!({ "plan": plan_value(&plan) })))
@@ -537,7 +566,7 @@ async fn update_todo_status(
             reason: body.reason,
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     let todo = resp.todo.ok_or_else(|| not_found("todo not found"))?;
     Ok(Json(json!({ "todo": todo_value(&todo) })))
@@ -576,7 +605,7 @@ async fn decide_approval(
             decision_reason: body.reason,
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     let approval = resp
         .approval
@@ -862,7 +891,7 @@ async fn ai_chat(
             zdr: false,
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     Ok(Json(json!({
         "id": request_id,
@@ -891,7 +920,7 @@ async fn ai_embeddings(
             provider_hint: req.provider.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -916,7 +945,7 @@ async fn ai_models(
             provider: query.provider.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let models: Vec<Value> = resp
@@ -1014,7 +1043,7 @@ async fn generate_image(
             n: req.n.unwrap_or(1),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let images: Vec<Value> = resp
@@ -1066,7 +1095,7 @@ async fn analyze_image(
             max_tokens: req.max_tokens.unwrap_or(1024),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1102,7 +1131,7 @@ async fn extract_image_text(
             provider_hint: req.provider.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1190,7 +1219,7 @@ async fn ai_speech(
                 language: req.language.unwrap_or_default(),
             })
             .await
-            .map_err(grpc_status_to_http)?
+            .map_err(|e| grpc_status_to_http(&e))?
             .into_inner();
 
         return Ok(Json(json!({
@@ -1235,7 +1264,7 @@ async fn ai_speech(
             language: req.language.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1262,7 +1291,7 @@ async fn ai_speech_voices(
             language: query.language.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let voices: Vec<Value> = resp
@@ -1280,6 +1309,68 @@ async fn ai_speech_voices(
         .collect();
 
     Ok(Json(json!({ "voices": voices })))
+}
+
+/// Batch-translate branch of [`ai_translate`].
+///
+/// # Errors
+///
+/// Returns a `400` if `items` is absent, or maps an upstream gRPC failure to an `HttpJsonError`.
+async fn batch_translate(
+    state: &AppState,
+    org_id: String,
+    req: AiTranslateRequest,
+    request_id: &str,
+) -> Result<Json<Value>, HttpJsonError> {
+    let Some(items) = req.items else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "items are required for batch translation" })),
+        ));
+    };
+    let resp = state
+        .inference_client
+        .clone()
+        .batch_translate_text(BatchTranslateTextRequest {
+            request_id: request_id.to_owned(),
+            org_id,
+            items: items
+                .into_iter()
+                .map(|item| TranslationInput {
+                    id: item.id.unwrap_or_default(),
+                    text: item.text,
+                })
+                .collect(),
+            source_language: req.source_language.unwrap_or_default(),
+            target_language: req.target_language.unwrap_or_default(),
+            provider_hint: req.provider.unwrap_or_default(),
+            model: req.model.unwrap_or_default(),
+        })
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    let translations: Vec<Value> = resp
+        .translations
+        .into_iter()
+        .map(|item| {
+            json!({
+                "id": item.id,
+                "original_text": item.original_text,
+                "translated_text": item.translated_text,
+                "detected_language": item.detected_language,
+                "confidence": item.confidence,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "id": request_id,
+        "object": "translation.batch",
+        "translations": translations,
+        "model_used": resp.model_used,
+        "provider_used": resp.provider_used,
+    })))
 }
 
 /// Translation via inference-core translation providers.
@@ -1315,55 +1406,7 @@ async fn ai_translate(
 
     let request_id = new_ulid();
     if matches!(operation.as_str(), "batch" | "batch_translate") {
-        let Some(items) = req.items else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "items are required for batch translation" })),
-            ));
-        };
-        let resp = state
-            .inference_client
-            .clone()
-            .batch_translate_text(BatchTranslateTextRequest {
-                request_id: request_id.clone(),
-                org_id: claims.org_id,
-                items: items
-                    .into_iter()
-                    .map(|item| TranslationInput {
-                        id: item.id.unwrap_or_default(),
-                        text: item.text,
-                    })
-                    .collect(),
-                source_language: req.source_language.unwrap_or_default(),
-                target_language: req.target_language.unwrap_or_default(),
-                provider_hint: req.provider.unwrap_or_default(),
-                model: req.model.unwrap_or_default(),
-            })
-            .await
-            .map_err(grpc_status_to_http)?
-            .into_inner();
-
-        let translations: Vec<Value> = resp
-            .translations
-            .into_iter()
-            .map(|item| {
-                json!({
-                    "id": item.id,
-                    "original_text": item.original_text,
-                    "translated_text": item.translated_text,
-                    "detected_language": item.detected_language,
-                    "confidence": item.confidence,
-                })
-            })
-            .collect();
-
-        return Ok(Json(json!({
-            "id": request_id,
-            "object": "translation.batch",
-            "translations": translations,
-            "model_used": resp.model_used,
-            "provider_used": resp.provider_used,
-        })));
+        return batch_translate(&state, claims.org_id, req, &request_id).await;
     }
 
     if !matches!(operation.as_str(), "translate" | "text") {
@@ -1386,7 +1429,7 @@ async fn ai_translate(
             model: req.model.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1443,7 +1486,7 @@ async fn detect_text_language(
             model,
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let detections: Vec<Value> = resp
@@ -1476,7 +1519,7 @@ async fn list_translation_languages(
         .clone()
         .list_translation_languages(ListTranslationLanguagesRequest { provider })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let languages: Vec<Value> = resp
@@ -1563,7 +1606,7 @@ async fn analyze_document_with_model(
             locale: req.locale.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1702,14 +1745,10 @@ async fn analyze_language_with_operation(
                 .unwrap_or_else(|| "AbstractiveSummarization".to_owned()),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
-    let results: Vec<Value> = resp
-        .results
-        .into_iter()
-        .map(language_result_value)
-        .collect();
+    let results: Vec<Value> = resp.results.iter().map(language_result_value).collect();
 
     Ok(Json(json!({
         "id": request_id,
@@ -1734,7 +1773,7 @@ fn language_texts(
     Ok(texts)
 }
 
-fn language_result_value(result: mp_contracts::model_plane::v1::LanguageAnalysisResult) -> Value {
+fn language_result_value(result: &mp_contracts::model_plane::v1::LanguageAnalysisResult) -> Value {
     json!({
         "id": result.id,
         "sentiment": result.sentiment,
@@ -1753,7 +1792,7 @@ fn language_result_value(result: mp_contracts::model_plane::v1::LanguageAnalysis
     })
 }
 
-/// Ingest a document via Data Plane v2 DocumentService.
+/// Ingest a document via Data Plane v2 `DocumentService`.
 async fn ai_documents(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1812,7 +1851,7 @@ async fn ai_realtime(
                 .unwrap_or_else(|| "server_vad".to_owned()),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1837,7 +1876,7 @@ async fn ai_realtime_models(State(state): State<AppState>) -> Result<Json<Value>
             provider: String::new(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let models: Vec<Value> = resp
@@ -1877,7 +1916,7 @@ async fn ai_video_generate(
             provider_hint: req.provider.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1909,7 +1948,7 @@ async fn ai_video_job(
             model: query.model.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     Ok(Json(json!({
@@ -1944,7 +1983,7 @@ async fn ai_video_content(
             model: query.model.unwrap_or_default(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let body_stream = futures::stream::unfold(stream, |mut stream| async move {
@@ -1953,8 +1992,7 @@ async fn ai_video_content(
             Ok(Some(chunk)) => Some((Ok::<Bytes, std::io::Error>(Bytes::from(chunk.data)), stream)),
             Ok(None) => None,
             Err(status) => Some((
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                Err(std::io::Error::other(
                     status.to_string(),
                 )),
                 stream,
@@ -1978,7 +2016,7 @@ async fn ai_video_models(State(state): State<AppState>) -> Result<Json<Value>, H
             provider: String::new(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
     let models: Vec<Value> = resp
@@ -2017,7 +2055,7 @@ async fn list_capabilities_proxy(
             limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     Ok(Json(json!({
         "capabilities": resp.capabilities.iter().map(|c| json!({
@@ -2048,7 +2086,7 @@ async fn get_capability_proxy(
             version_constraint: String::new(),
         })
         .await
-        .map_err(grpc_status_to_http)?
+        .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     Ok(Json(json!({
         "id": c.capability_id,
@@ -2262,7 +2300,7 @@ async fn delete_skill_proxy(
     proxy_to_capability_core(&s, &format!("skills/{id}"), "DELETE", None).await
 }
 
-fn grpc_status_to_http(error: tonic::Status) -> HttpJsonError {
+fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
     let status = match error.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::NotFound => StatusCode::NOT_FOUND,
@@ -2406,7 +2444,7 @@ impl EnumName for SubagentRole {
 }
 
 /// Operator feedback published as `mp.v1.feedback.rated`, consumed by
-/// orchestrator-core's FeedbackPromotionWorkflow (HARNESS_PHASE1 §6).
+/// orchestrator-core's `FeedbackPromotionWorkflow` (`HARNESS_PHASE1` §6).
 #[derive(Debug, Deserialize)]
 struct FeedbackBody {
     run_id: String,
@@ -2482,8 +2520,8 @@ pub struct InvokeRequest {
     pub max_cost_usd: Option<f64>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Harness profile ("chat" | "deployed_agent"). Drives the approval
-    /// posture (HARNESS_PHASE1 §1). Absent → "chat" (auto, non-gating).
+    /// Harness profile ("chat" | "`deployed_agent`"). Drives the approval
+    /// posture (`HARNESS_PHASE1` §1). Absent → "chat" (auto, non-gating).
     #[serde(default)]
     pub profile: Option<String>,
 }

@@ -1,4 +1,4 @@
-//! Delta buffer for resumable chat streams (HARNESS_PHASE1 §3b).
+//! Delta buffer for resumable chat streams (`HARNESS_PHASE1` §3b).
 //!
 //! As `invoke_stream_sse` produces deltas it appends them here keyed by
 //! `request_id`, tagged with the same monotonic seq used as the SSE `id:`
@@ -164,19 +164,19 @@ impl RedisStreamBuffer {
 
     async fn append(&self, request_id: &str, seq: u64, delta: &str) {
         let key = Self::list_key(request_id);
-        let entry = match serde_json::to_string(&BufferedDelta {
+        let Ok(entry) = serde_json::to_string(&BufferedDelta {
             seq,
             delta: delta.to_owned(),
-        }) {
-            Ok(s) => s,
-            Err(_) => return,
+        }) else {
+            return;
         };
         let mut conn = self.conn.clone();
+        let cap = isize::try_from(MAX_DELTAS_PER_STREAM).unwrap_or(isize::MAX);
         // RPUSH + LTRIM to cap + EXPIRE in a pipeline; ignore transient errors.
         let result: redis::RedisResult<()> = redis::pipe()
             .rpush(&key, entry)
             .ignore()
-            .ltrim(&key, -(MAX_DELTAS_PER_STREAM as isize), -1)
+            .ltrim(&key, -cap, -1)
             .ignore()
             .expire(&key, STREAM_TTL_SECS)
             .ignore()
@@ -189,9 +189,8 @@ impl RedisStreamBuffer {
 
     async fn finish(&self, request_id: &str, done: StreamDone) {
         let key = Self::done_key(request_id);
-        let value = match serde_json::to_string(&done) {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok(value) = serde_json::to_string(&done) else {
+            return;
         };
         let mut conn = self.conn.clone();
         let result: redis::RedisResult<()> = conn.set_ex(&key, value, STREAM_TTL_SECS as u64).await;
@@ -247,7 +246,7 @@ impl RedisStreamBuffer {
 #[derive(Clone)]
 pub enum StreamBufferStore {
     Memory(InMemoryStreamBuffer),
-    Redis(RedisStreamBuffer),
+    Redis(Box<RedisStreamBuffer>),
 }
 
 impl StreamBufferStore {
@@ -268,7 +267,7 @@ impl StreamBufferStore {
             Ok(client) => match redis::aio::ConnectionManager::new(client).await {
                 Ok(conn) => {
                     tracing::info!("stream buffer: Redis backend active");
-                    Self::Redis(RedisStreamBuffer { conn })
+                    Self::Redis(Box::new(RedisStreamBuffer { conn }))
                 }
                 Err(e) => {
                     warn!(error = %e, "REDIS_URL set but connect failed; using in-memory stream buffer");

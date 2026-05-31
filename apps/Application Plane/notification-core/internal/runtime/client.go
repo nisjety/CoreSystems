@@ -57,7 +57,7 @@ type NovuAdapter struct {
 // warning is logged and Dispatch returns synthetic IDs without calling Novu.
 func NewNovuAdapter(cfg Config) *NovuAdapter {
 	if strings.TrimSpace(cfg.SecretKey) == "" {
-		log.Println("[notification-core/runtime] WARNING: NOVU_SECRET_KEY is not set — stub mode active, no real notifications will be delivered")
+		log.Println("[notification-core/runtime] NOVU_SECRET_KEY is not set; using local stub delivery mode")
 		return &NovuAdapter{generateID: defaultIDGenerator}
 	}
 

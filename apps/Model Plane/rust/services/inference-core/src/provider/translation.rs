@@ -143,8 +143,8 @@ pub trait TranslationProvider: Send + Sync {
                     model: req.model.clone(),
                 })
                 .await?;
-            model_used = result.model_used.clone();
-            provider_used = result.provider_used.clone();
+            model_used.clone_from(&result.model_used);
+            provider_used.clone_from(&result.provider_used);
             translations.push(TranslationItemResult {
                 id: item.id.clone(),
                 original_text: item.text.clone(),
@@ -509,8 +509,7 @@ impl AzureTranslatorProvider {
                     translated_text: result
                         .translations
                         .first()
-                        .map(|translation| translation.text.clone())
-                        .unwrap_or_else(|| item.text.clone()),
+                        .map_or_else(|| item.text.clone(), |translation| translation.text.clone()),
                     detected_language: if detected.language.is_empty() {
                         source_language.to_owned()
                     } else {
@@ -691,7 +690,7 @@ pub struct LlmTranslationProvider {
 }
 
 impl LlmTranslationProvider {
-    /// Build Azure OpenAI translation fallback from env.
+    /// Build Azure `OpenAI` translation fallback from env.
     #[must_use]
     pub fn from_azure_env() -> Option<Self> {
         let endpoint = env_nonempty("AZURE_OPENAI_ENDPOINT")?;
@@ -710,7 +709,7 @@ impl LlmTranslationProvider {
         })
     }
 
-    /// Build OpenAI translation fallback from env.
+    /// Build `OpenAI` translation fallback from env.
     #[must_use]
     pub fn from_openai_env() -> Option<Self> {
         let key = env_nonempty("OPENAI_API_KEY")?;

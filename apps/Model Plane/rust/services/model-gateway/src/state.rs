@@ -73,7 +73,7 @@ pub struct AppState {
     pub browser_client: BrowserBrokerClient<Channel>,
     pub memory_client: MemoryServiceClient<Channel>,
     pub capability_client: CapabilityCoreClient<Channel>,
-    /// Base URL of the capability-core HTTP API (e.g. "http://capability-core:8085").
+    /// Base URL of the capability-core HTTP API (e.g. "<http://capability-core:8085>").
     pub capability_core_base_url: String,
     /// Shared reqwest client for HTTP proxy calls to capability-core.
     pub http_client: reqwest::Client,
@@ -82,10 +82,10 @@ pub struct AppState {
     pub document_client: DocumentServiceClient<Channel>,
     pub knowledge_client: KnowledgeServiceClient<Channel>,
     pub graph_client: GraphServiceClient<Channel>,
-    /// FinetuneJobs runs inside session-core's gRPC server (same address as
+    /// `FinetuneJobs` runs inside session-core's gRPC server (same address as
     /// `session_client`). Shares the channel.
     pub finetune_jobs_client: FinetuneJobsClient<Channel>,
-    /// Azure OpenAI HTTP client for the fine-tuning surface. `None` when
+    /// Azure `OpenAI` HTTP client for the fine-tuning surface. `None` when
     /// `AZURE_OPENAI_ENDPOINT` / `AZURE_OPENAI_API_KEY` are unset; routes
     /// degrade to "persist row only" mode in that case.
     pub azure_finetune: Option<AzureFinetuneClient>,
@@ -111,7 +111,7 @@ pub struct AppState {
     /// entries evicted FIFO. Durable retention should subscribe to
     /// the `agents.trajectory.recorded` NATS subject.
     pub trajectories: crate::trajectory::TrajectoryStore,
-    /// Resumable chat-stream delta buffer (HARNESS_PHASE1 §3b). Process-local;
+    /// Resumable chat-stream delta buffer (`HARNESS_PHASE1` §3b). Process-local;
     /// powers `/v1/invoke/{request_id}/resume`. Swap for Redis in multi-replica.
     pub stream_buffers: crate::stream_buffer::StreamBufferStore,
     /// Wave 10d — skill catalogue (per-org markdown skills).
@@ -226,6 +226,10 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if `NATS_URL` is set but the connection fails.
+    // Flat constructor wiring ~18 env-keyed gRPC/HTTP clients; the two publisher
+    // branches assign fields with an intentional asymmetry (lsp set only on the
+    // NATS path), so a shared populate-helper cannot preserve behavior 1:1.
+    #[allow(clippy::too_many_lines)]
     pub async fn from_env() -> anyhow::Result<Self> {
         let inference_client = InferenceCoreClient::new(Self::lazy_channel(
             "INFERENCE_CORE_URL",
@@ -382,6 +386,9 @@ impl AppState {
             state.finetune_jobs_client = finetune_jobs_client;
             state.azure_finetune = azure_finetune;
             state.quarry = quarry_client;
+            // Mirror the NATS branch: without this, LspQuery is silently
+            // disabled in dev mode even when LSP_BRIDGE_URL is configured.
+            state.lsp = lsp_client;
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
             Ok(state)
         }

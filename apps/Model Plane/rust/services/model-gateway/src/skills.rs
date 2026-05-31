@@ -1,10 +1,13 @@
 //! Wave 10d — skills loader.
 //!
-//! v2 read .md skill files from disk (auto_registry + bundled). v1
+//! v2 read .md skill files from disk (`auto_registry` + bundled). v1
 //! keeps the same shape but the source-of-truth is an in-memory
 //! registry — operators preload it at startup from disk or push
 //! updates via gRPC. Skill bodies are markdown text shown to the
-//! agent as system context when MatchSkills surfaces a relevant skill.
+//! agent as system context when `MatchSkills` surfaces a relevant skill.
+
+// tonic::Status is the unavoidable large Err for gRPC handlers; boxing breaks the service-trait contract.
+#![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
 
@@ -61,6 +64,11 @@ impl SkillStore {
     }
 }
 
+/// Lists all skills registered for `req.org_id`.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.org_id` is empty.
 pub fn handle_list_skills(
     store: &SkillStore,
     req: ListSkillsRequest,
@@ -74,6 +82,11 @@ pub fn handle_list_skills(
     })
 }
 
+/// Fetches a single skill by id.
+///
+/// # Errors
+///
+/// Returns `Status::not_found` if no skill matches `(org_id, skill_id)`.
 pub fn handle_get_skill(
     store: &SkillStore,
     req: GetSkillRequest,
@@ -100,9 +113,17 @@ fn score(query_terms: &[String], s: &Skill) -> f32 {
         .iter()
         .filter(|t| haystack.contains(t.as_str()))
         .count();
-    hits as f32 / query_terms.len() as f32
+    // reason: keyword-overlap ratio; small counts (< 100 terms) lose no meaningful precision in f32.
+    #[allow(clippy::cast_precision_loss)]
+    let ratio = hits as f32 / query_terms.len() as f32;
+    ratio
 }
 
+/// Ranks an org's skills by keyword overlap with the query.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `req.org_id` is empty.
 pub fn handle_match_skills(
     store: &SkillStore,
     req: MatchSkillsRequest,
@@ -118,27 +139,28 @@ pub fn handle_match_skills(
         .map(str::to_string)
         .collect();
 
-    let limit = if req.limit <= 0 {
+    let limit = usize::try_from(if req.limit <= 0 {
         DEFAULT_MATCH_LIMIT
     } else {
         req.limit.min(MAX_MATCH_LIMIT)
-    } as usize;
+    })
+    .unwrap_or(0);
 
     let mut scored: Vec<SkillMatch> = store
         .list(&req.org_id)
         .into_iter()
         .map(|s| {
-            let score = score(&query_terms, &s);
+            let match_score = score(&query_terms, &s);
             SkillMatch {
                 skill: Some(s),
-                score,
+                score: match_score,
             }
         })
         .filter(|m| {
             let threshold = if req.min_score > 0.0 {
                 req.min_score
             } else {
-                m.skill.as_ref().map(|s| s.min_score).unwrap_or(0.0)
+                m.skill.as_ref().map_or(0.0, |s| s.min_score)
             };
             m.score > 0.0 && m.score >= threshold
         })
@@ -165,7 +187,7 @@ mod tests {
             id: String::new(),
             name: name.into(),
             body: body.into(),
-            tags: tags.iter().map(|t| t.to_string()).collect(),
+            tags: tags.iter().map(std::string::ToString::to_string).collect(),
             source_path: String::new(),
             min_score: 0.0,
         }

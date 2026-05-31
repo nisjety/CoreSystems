@@ -16,6 +16,7 @@ import type * as controlSessions from "../controlSessions.js";
 import type * as conversations from "../conversations.js";
 import type * as http from "../http.js";
 import type * as ingest from "../ingest.js";
+import type * as knowledgeQnA from "../knowledgeQnA.js";
 import type * as messages from "../messages.js";
 import type * as nats from "../nats.js";
 import type * as organizations from "../organizations.js";
@@ -38,6 +39,7 @@ declare const fullApi: ApiFromModules<{
   conversations: typeof conversations;
   http: typeof http;
   ingest: typeof ingest;
+  knowledgeQnA: typeof knowledgeQnA;
   messages: typeof messages;
   nats: typeof nats;
   organizations: typeof organizations;

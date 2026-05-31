@@ -6,7 +6,7 @@
 //!   * `wiki_lint` — run cheap heuristics over a candidate page to surface
 //!     contradiction / stale / orphan signals as proposal seeds.
 //!
-//! The actual durable write (SubmitProposal RPC) lives at the model-gateway
+//! The actual durable write (`SubmitProposal` RPC) lives at the model-gateway
 //! `/v1/wiki/proposals` route. This module produces deterministic envelopes
 //! so the agent loop and tests can reason about wiki maintenance without
 //! coupling tool execution to an async gRPC channel.
@@ -67,6 +67,9 @@ pub struct LintReport {
     pub content_truncated: bool,
 }
 
+// serde's `skip_serializing_if` requires a `fn(&T) -> bool`, so the reference
+// is mandated by the framework, not a style choice.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -81,6 +84,10 @@ pub const MAX_LINT_CONTENT_BYTES: usize = 64 * 1024;
 const CONTRADICTION_MARKERS: &[&str] =
     &["however", "contradicts", "but in fact", "on the contrary"];
 
+/// Build a wiki-edit [`ProposalEnvelope`] from `input`.
+///
+/// # Errors
+/// Returns `Err` with a human-readable reason if `page_id` or `patch` is empty.
 pub fn propose_edit(input: ProposeEditInput) -> Result<ProposalEnvelope, String> {
     if input.page_id.is_empty() {
         return Err("page_id required".to_owned());

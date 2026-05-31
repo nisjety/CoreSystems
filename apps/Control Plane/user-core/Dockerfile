@@ -6,18 +6,42 @@
 # ── Builder ──────────────────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git make protobuf protobuf-dev
+RUN set -e; \
+    if ! apk add --no-cache --quiet git make protobuf protobuf-dev \
+        > /tmp/apk-add.log 2>&1; then \
+        cat /tmp/apk-add.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log
 
 WORKDIR /build
 
 # Dep layer — only invalidated when go.mod/go.sum changes
 COPY go.mod go.sum ./
-RUN go mod download
+ENV GOPROXY=https://proxy.golang.org,https://goproxy.io,direct
+ENV GOSUMDB=sum.golang.org
+RUN set -e; \
+    for i in 1 2 3 4 5; do \
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 
 # Install protoc plugins in a separate cached layer
-# Runs only when go.mod changes (tools are tracked there)
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+# Keep codegen deterministic and retry transient module proxy failures.
+RUN set -e; \
+    for i in 1 2 3 4 5; do \
+        if go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 && \
+           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0; then \
+            exit 0; \
+        fi; \
+        echo "go tool install retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 
 # Copy source
 COPY . .
@@ -39,7 +63,13 @@ FROM alpine:3.22
 
 # Pinned from alpine:latest — deterministic builds
 # Merge apk layers and create non-root user
-RUN apk add --no-cache ca-certificates postgresql-client && \
+RUN set -e; \
+    if ! apk add --no-cache --quiet ca-certificates postgresql-client \
+        > /tmp/apk-add.log 2>&1; then \
+        cat /tmp/apk-add.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log; \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app

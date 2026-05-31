@@ -61,7 +61,7 @@ impl RenderHints {
     }
 }
 
-/// Projected SearchResult. Returned by [`Client::search`]; the full
+/// Projected `SearchResult`. Returned by [`Client::search`]; the full
 /// Quarry envelope is kept under `raw` so callers can read additional
 /// fields (rank features, provider-specific scores) without a new
 /// projection round trip.
@@ -71,7 +71,7 @@ pub struct SearchResult {
     pub title: String,
     pub snippet: String,
     /// Provider that served this hit. Examples emitted by Quarry's
-    /// SmartSearchRouter: `tantivy_local`, `tavily`, `bing`, `google`.
+    /// `SmartSearchRouter`: `tantivy_local`, `tavily`, `bing`, `google`.
     pub source: String,
     /// Relevance score 0.0–1.0. Provider-specific normalisation —
     /// only meaningful within a single search response.
@@ -79,7 +79,7 @@ pub struct SearchResult {
     pub raw: Value,
 }
 
-/// Projected ScrapeResult. Full envelope is kept under `raw` for
+/// Projected `ScrapeResult`. Full envelope is kept under `raw` for
 /// callers that need branding, JSON-LD, links, etc.
 #[derive(Debug, Clone)]
 pub struct ScrapeResult {
@@ -102,7 +102,7 @@ pub struct Config {
     /// Empty / unset → [`Client`] returns [`QuarryError::Unavailable`]
     /// on every call.
     pub base_url: String,
-    /// Bearer token. Empty in dev (the edge's AUTH_DEV_BYPASS accepts
+    /// Bearer token. Empty in dev (the edge's `AUTH_DEV_BYPASS` accepts
     /// any non-empty value in non-prod). Production MUST set this.
     pub token: String,
     /// End-to-end timeout per Scrape call. Default 30s — generous so
@@ -156,8 +156,12 @@ impl Client {
         !self.base_url.is_empty()
     }
 
-    /// POST `/v1/scrape` and project the response. See
-    /// [`QuarryError`] for the failure modes.
+    /// POST `/v1/scrape` and project the response.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] if the edge is unavailable, the URL is empty,
+    /// the upstream returns a non-2xx status, or the response cannot be decoded.
     pub async fn scrape(
         &self,
         url: &str,
@@ -165,6 +169,20 @@ impl Client {
         render: Option<&RenderHints>,
         prefer_http3: bool,
     ) -> Result<ScrapeResult, QuarryError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            url: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            render: Option<&'a RenderHints>,
+            #[serde(skip_serializing_if = "is_false", rename = "prefer_http3")]
+            prefer_http3: bool,
+        }
+        // serde requires fn(&T)->bool for skip_serializing_if
+        #[allow(clippy::trivially_copy_pass_by_ref)]
+        fn is_false(b: &bool) -> bool {
+            !*b
+        }
+
         if !self.available() {
             return Err(QuarryError::Unavailable);
         }
@@ -174,18 +192,6 @@ impl Client {
                 message: "url is required".to_string(),
                 status: 400,
             });
-        }
-
-        #[derive(Serialize)]
-        struct Body<'a> {
-            url: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            render: Option<&'a RenderHints>,
-            #[serde(skip_serializing_if = "is_false", rename = "prefer_http3")]
-            prefer_http3: bool,
-        }
-        fn is_false(b: &bool) -> bool {
-            !*b
         }
 
         let body = Body {
@@ -222,8 +228,7 @@ impl Client {
             let parsed: Option<EnvErr> = serde_json::from_str(&raw).ok();
             let (code, message) = parsed
                 .and_then(|p| p.error)
-                .map(|e| (e.code, e.message))
-                .unwrap_or((None, None));
+                .map_or((None, None), |e| (e.code, e.message));
             return Err(QuarryError::Typed {
                 code: code.unwrap_or_else(|| format!("HTTP_{status}")),
                 message: message.unwrap_or_else(|| truncate(&raw, 200)),
@@ -237,15 +242,20 @@ impl Client {
             .and_then(Value::as_object)
             .ok_or(QuarryError::EmptyEnvelope)?;
 
-        Ok(project(url, Value::Object(data.clone())))
+        Ok(project(url, &Value::Object(data.clone())))
     }
 
     /// Call `/v1/search` and return the projected results. The edge's
-    /// SmartSearchRouter picks the provider (local Tantivy, Tavily,
+    /// `SmartSearchRouter` picks the provider (local Tantivy, Tavily,
     /// Bing, Google) based on the `intent` hint and operator config.
     ///
     /// Limit is capped at 50 to keep responses sane; callers needing
     /// more should paginate via the underlying provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] if the edge is unavailable, the query is empty,
+    /// the upstream returns a non-2xx status, or the response cannot be decoded.
     pub async fn search(
         &self,
         query: &str,
@@ -253,6 +263,14 @@ impl Client {
         intent: &str,
         org_id: &str,
     ) -> Result<Vec<SearchResult>, QuarryError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            query: &'a str,
+            limit: i32,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            intent: &'a str,
+        }
+
         if !self.available() {
             return Err(QuarryError::Unavailable);
         }
@@ -266,13 +284,6 @@ impl Client {
         // Server-side cap; an i32 limit comes in over the wire.
         let effective_limit = limit.clamp(1, 50);
 
-        #[derive(Serialize)]
-        struct Body<'a> {
-            query: &'a str,
-            limit: i32,
-            #[serde(skip_serializing_if = "str::is_empty")]
-            intent: &'a str,
-        }
         let body = Body {
             query,
             limit: effective_limit,
@@ -308,11 +319,13 @@ impl Client {
             .cloned()
             .unwrap_or_default();
 
-        Ok(results.into_iter().map(project_search_result).collect())
+        Ok(results.iter().map(project_search_result).collect())
     }
 }
 
-fn project_search_result(v: Value) -> SearchResult {
+// reason: provider scores are small; i64/f64→f32 loses no meaningful precision
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn project_search_result(v: &Value) -> SearchResult {
     let obj = v.as_object().cloned().unwrap_or_default();
     SearchResult {
         url: string_field(&obj, "url"),
@@ -323,19 +336,17 @@ fn project_search_result(v: Value) -> SearchResult {
         score: obj
             .get("score")
             .and_then(|s| s.as_f64().or_else(|| s.as_i64().map(|n| n as f64)))
-            .map(|f| f as f32)
-            .unwrap_or(0.0),
+            .map_or(0.0, |f| f as f32),
         raw: Value::Object(obj),
     }
 }
 
-fn project(requested: &str, data: Value) -> ScrapeResult {
+fn project(requested: &str, data: &Value) -> ScrapeResult {
     let obj = data.as_object().cloned().unwrap_or_default();
     let status = obj
         .get("status")
         .and_then(Value::as_u64)
-        .map(|n| n as u16)
-        .unwrap_or(0);
+        .map_or(0, |n| u16::try_from(n).unwrap_or(0));
 
     let content_type = string_field(&obj, "content_type");
     let fingerprint = string_field(&obj, "fingerprint");
@@ -463,7 +474,7 @@ mod tests {
     #[test]
     fn project_handles_missing_fields() {
         let data = serde_json::json!({"status": 200});
-        let r = project("https://example.com", data);
+        let r = project("https://example.com", &data);
         assert_eq!(r.status, 200);
         assert_eq!(r.final_url, "https://example.com"); // falls back to requested
         assert!(r.markdown.is_empty());
@@ -476,7 +487,7 @@ mod tests {
             "status": 200,
             "formats": {"markdown": "# hello"}
         });
-        let r = project("https://example.com", data);
+        let r = project("https://example.com", &data);
         assert_eq!(r.text, "# hello"); // text falls back to markdown
     }
 }

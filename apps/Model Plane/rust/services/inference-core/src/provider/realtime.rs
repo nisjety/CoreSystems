@@ -76,6 +76,12 @@ impl RealtimeChain {
         self.providers.len()
     }
 
+    /// Create a realtime session using the first matching provider in the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn create_session(
         &self,
         req: &RealtimeSessionRequest,

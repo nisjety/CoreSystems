@@ -1,11 +1,11 @@
 //! Data Plane v2 integration handlers.
 //!
 //! Proxies Model Plane HTTP requests to Data Plane gRPC services:
-//! - Document ingest via DocumentService
-//! - Retrieval via RetrievalService
-//! - Knowledge unit lookup via KnowledgeService
-//! - Graph expansion via GraphService
-//! - Wiki pages via WikiService
+//! - Document ingest via `DocumentService`
+//! - Retrieval via `RetrievalService`
+//! - Knowledge unit lookup via `KnowledgeService`
+//! - Graph expansion via `GraphService`
+//! - Wiki pages via `WikiService`
 
 use axum::{
     extract::{Path, Query, State},
@@ -27,7 +27,7 @@ use crate::state::AppState;
 
 type HttpJsonError = (StatusCode, Json<Value>);
 
-fn grpc_err(e: tonic::Status) -> HttpJsonError {
+fn grpc_err(e: &tonic::Status) -> HttpJsonError {
     let code = match e.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::NotFound => StatusCode::NOT_FOUND,
@@ -39,9 +39,9 @@ fn grpc_err(e: tonic::Status) -> HttpJsonError {
     (code, Json(json!({ "error": e.message() })))
 }
 
-fn ts_to_str(ts: &Option<prost_types::Timestamp>) -> Value {
-    ts.as_ref().map_or(Value::Null, |t| {
-        match chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32) {
+fn ts_to_str(ts: Option<&prost_types::Timestamp>) -> Value {
+    ts.map_or(Value::Null, |t| {
+        match chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).unwrap_or(0)) {
             Some(dt) => Value::String(dt.to_rfc3339()),
             None => Value::Number(t.seconds.into()),
         }
@@ -52,21 +52,20 @@ fn ts_to_str(ts: &Option<prost_types::Timestamp>) -> Value {
 fn prost_value_to_json(v: &prost_types::Value) -> Value {
     use prost_types::value::Kind;
     match &v.kind {
-        Some(Kind::NullValue(_)) => Value::Null,
         Some(Kind::NumberValue(n)) => json!(*n),
         Some(Kind::StringValue(s)) => Value::String(s.clone()),
         Some(Kind::BoolValue(b)) => Value::Bool(*b),
-        Some(Kind::StructValue(st)) => struct_to_json(&Some(st.clone())),
+        Some(Kind::StructValue(st)) => struct_to_json(Some(st)),
         Some(Kind::ListValue(l)) => {
             Value::Array(l.values.iter().map(prost_value_to_json).collect())
         }
-        None => Value::Null,
+        Some(Kind::NullValue(_)) | None => Value::Null,
     }
 }
 
 #[allow(dead_code)]
-fn struct_to_json(s: &Option<prost_types::Struct>) -> Value {
-    s.as_ref().map_or(Value::Null, |st| {
+fn struct_to_json(s: Option<&prost_types::Struct>) -> Value {
+    s.map_or(Value::Null, |st| {
         let map: serde_json::Map<String, Value> = st
             .fields
             .iter()
@@ -90,8 +89,8 @@ pub fn document_value(d: &Document) -> Value {
         "content": d.content,
         "status": d.status,
         "zdr_classification": d.zdr_classification,
-        "created_at": ts_to_str(&d.created_at),
-        "updated_at": ts_to_str(&d.updated_at),
+        "created_at": ts_to_str(d.created_at.as_ref()),
+        "updated_at": ts_to_str(d.updated_at.as_ref()),
     })
 }
 
@@ -115,7 +114,7 @@ fn source_value(s: &ret_pb::Source) -> Value {
         "title": s.title,
         "source": s.source,
         "type": s.r#type,
-        "created_at": ts_to_str(&s.created_at),
+        "created_at": ts_to_str(s.created_at.as_ref()),
     })
 }
 
@@ -170,8 +169,8 @@ fn knowledge_unit_value(u: &KnowledgeUnit) -> Value {
         "embedding_status": u.embedding_status,
         "content_hash": u.content_hash,
         "chunk_version": u.chunk_version,
-        "created_at": ts_to_str(&u.created_at),
-        "updated_at": ts_to_str(&u.updated_at),
+        "created_at": ts_to_str(u.created_at.as_ref()),
+        "updated_at": ts_to_str(u.updated_at.as_ref()),
     })
 }
 
@@ -184,7 +183,7 @@ fn entity_value(e: &GraphEntity) -> Value {
         "confidence": e.confidence,
         "provenance": e.provenance,
         "source_refs": e.source_refs,
-        "created_at": ts_to_str(&e.created_at),
+        "created_at": ts_to_str(e.created_at.as_ref()),
     })
 }
 
@@ -198,7 +197,7 @@ fn relationship_value(r: &GraphRelationship) -> Value {
         "confidence": r.confidence,
         "provenance": r.provenance,
         "source_refs": r.source_refs,
-        "created_at": ts_to_str(&r.created_at),
+        "created_at": ts_to_str(r.created_at.as_ref()),
     })
 }
 
@@ -213,7 +212,7 @@ fn claim_value(c: &GraphClaim) -> Value {
         "source_refs": c.source_refs,
         "contradicted_by_claim_ids": c.contradicted_by_claim_ids,
         "status": c.status,
-        "created_at": ts_to_str(&c.created_at),
+        "created_at": ts_to_str(c.created_at.as_ref()),
     })
 }
 
@@ -227,8 +226,8 @@ fn wiki_page_value(p: &WikiPage) -> Value {
         "current_version_id": p.current_version_id,
         "status": p.status,
         "backlinks": p.backlinks,
-        "created_at": ts_to_str(&p.created_at),
-        "updated_at": ts_to_str(&p.updated_at),
+        "created_at": ts_to_str(p.created_at.as_ref()),
+        "updated_at": ts_to_str(p.updated_at.as_ref()),
     })
 }
 
@@ -240,8 +239,8 @@ fn wiki_version_value(v: &WikiPageVersion) -> Value {
         "source_refs": v.source_refs,
         "edit_reason": v.edit_reason,
         "status": v.status,
-        "created_at": ts_to_str(&v.created_at),
-        "published_at": ts_to_str(&v.published_at),
+        "created_at": ts_to_str(v.created_at.as_ref()),
+        "published_at": ts_to_str(v.published_at.as_ref()),
     })
 }
 
@@ -255,7 +254,7 @@ fn wiki_proposal_value(p: &WikiProposal) -> Value {
         "proposed_by_agent": p.proposed_by_agent,
         "source_refs": p.source_refs,
         "status": p.status,
-        "created_at": ts_to_str(&p.created_at),
+        "created_at": ts_to_str(p.created_at.as_ref()),
     })
 }
 
@@ -266,7 +265,7 @@ fn wiki_source_log_value(l: &WikiSourceLog) -> Value {
         "original_chunks": l.original_chunks,
         "processing_model": l.processing_model,
         "synthesis_prompt_hash": l.synthesis_prompt_hash,
-        "created_at": ts_to_str(&l.created_at),
+        "created_at": ts_to_str(l.created_at.as_ref()),
     })
 }
 
@@ -288,6 +287,11 @@ fn default_limit() -> i32 {
     50
 }
 
+/// Lists documents for the caller's org via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn list_documents(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -303,7 +307,7 @@ pub async fn list_documents(
             r#type: q.doc_type,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "documents": resp.documents.iter().map(document_value).collect::<Vec<_>>(),
@@ -311,6 +315,11 @@ pub async fn list_documents(
     })))
 }
 
+/// Fetches a single document by id via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -324,7 +333,7 @@ pub async fn get_document(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let doc = resp.document.map(|d| document_value(&d));
     Ok(Json(json!({ "document": doc })))
@@ -341,6 +350,11 @@ pub struct CreateDocumentBody {
     pub zdr_classification: String,
 }
 
+/// Creates a document via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn create_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -360,12 +374,17 @@ pub async fn create_document(
             ingest_policy: None,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let doc = resp.document.map(|d| document_value(&d));
     Ok(Json(json!({ "document": doc })))
 }
 
+/// Deletes a document by id via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn delete_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -379,11 +398,16 @@ pub async fn delete_document(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({ "success": resp.success })))
 }
 
+/// Bulk-ingests documents via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn bulk_ingest(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -412,7 +436,7 @@ pub async fn bulk_ingest(
             ingest_policy: None,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "accepted": resp.accepted,
@@ -421,6 +445,11 @@ pub async fn bulk_ingest(
     })))
 }
 
+/// Returns the indexing status of a document via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_document_index_status(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -434,7 +463,7 @@ pub async fn get_document_index_status(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let status = resp.status.map(|s| {
         json!({
@@ -444,7 +473,7 @@ pub async fn get_document_index_status(
             "embed_status": s.embed_status,
             "embeddings_synced": s.embeddings_synced,
             "vector_status": s.vector_status,
-            "last_indexed_at": ts_to_str(&s.last_indexed_at),
+            "last_indexed_at": ts_to_str(s.last_indexed_at.as_ref()),
         })
     });
     Ok(Json(json!({ "status": status })))
@@ -489,6 +518,11 @@ pub struct RetrieveFilters {
     pub sources: Vec<String>,
 }
 
+/// Runs retrieval against the Data Plane and returns ranked candidates.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn retrieve(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -530,7 +564,7 @@ pub async fn retrieve(
             agent_id: None,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "candidates": resp.candidates.iter().map(candidate_value).collect::<Vec<_>>(),
@@ -546,7 +580,7 @@ pub async fn retrieve(
 }
 
 /// Pre-flight check: query DocumentService.GetDocumentIndexStatus for each requested
-/// document_id and return the ones whose chunk_status, embed_status, or vector_status
+/// `document_id` and return the ones whose `chunk_status`, `embed_status`, or `vector_status`
 /// is not "ready". The model can use this to wait, fall back, or warn the user.
 ///
 /// Calls are dispatched concurrently via `futures::future::join_all` so the
@@ -591,6 +625,11 @@ async fn check_pending_documents(
     pending
 }
 
+/// Fetches a retrieval trace by id via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_retrieval_trace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -604,12 +643,17 @@ pub async fn get_retrieval_trace(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let trace = resp.trace.map(|t| trace_value(&t));
     Ok(Json(json!({ "trace": trace })))
 }
 
+/// Lists retrieval sources via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_sources(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -631,13 +675,18 @@ pub async fn get_sources(
             document_ids,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "sources": resp.sources.iter().map(source_value).collect::<Vec<_>>(),
     })))
 }
 
+/// Lists chunks for a source via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_chunks(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -661,7 +710,7 @@ pub async fn get_chunks(
             document_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "chunks": resp.chunks.iter().map(candidate_value).collect::<Vec<_>>(),
@@ -684,6 +733,11 @@ fn default_format() -> String {
     "json".to_owned()
 }
 
+/// Builds a context pack via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn pack_context(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -699,7 +753,7 @@ pub async fn pack_context(
             format: body.format,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let pack = resp.pack.map(|p| context_pack_value(&p));
     Ok(Json(json!({ "pack": pack })))
@@ -709,6 +763,11 @@ pub async fn pack_context(
 // Knowledge endpoints — /v1/knowledge/*
 // ============================================================================
 
+/// Lists knowledge units for a document via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_knowledge_units(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -722,13 +781,18 @@ pub async fn get_knowledge_units(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "units": resp.units.iter().map(knowledge_unit_value).collect::<Vec<_>>(),
     })))
 }
 
+/// Checks document access permissions via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn check_permissions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -743,7 +807,7 @@ pub async fn check_permissions(
             user_id: claims.user_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(
         json!({ "allowed": resp.allowed, "reason": resp.reason }),
@@ -754,6 +818,11 @@ pub async fn check_permissions(
 // Graph endpoints — /v1/graph/*
 // ============================================================================
 
+/// Fetches a graph entity by id via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_entity(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -767,7 +836,7 @@ pub async fn get_entity(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let entity = resp.entity.map(|e| entity_value(&e));
     Ok(Json(json!({ "entity": entity })))
@@ -783,6 +852,11 @@ pub struct ListEntitiesQuery {
     pub offset: i32,
 }
 
+/// Lists graph entities via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn list_entities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -798,7 +872,7 @@ pub async fn list_entities(
             offset: q.offset,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "entities": resp.entities.iter().map(entity_value).collect::<Vec<_>>(),
@@ -806,6 +880,13 @@ pub async fn list_entities(
     })))
 }
 
+/// Lists relationships for a graph entity via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn get_relationships(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -821,13 +902,20 @@ pub async fn get_relationships(
             relation_type: q.get("type").cloned().unwrap_or_default(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "relationships": resp.relationships.iter().map(relationship_value).collect::<Vec<_>>(),
     })))
 }
 
+/// Lists claims for a graph entity via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn get_claims(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -843,7 +931,7 @@ pub async fn get_claims(
             status: q.get("status").cloned().unwrap_or_default(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "claims": resp.claims.iter().map(claim_value).collect::<Vec<_>>(),
@@ -866,6 +954,11 @@ fn default_max_entities() -> i32 {
     50
 }
 
+/// Expands the knowledge graph from seed entities via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn expand_graph(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -881,7 +974,7 @@ pub async fn expand_graph(
             max_entities: body.max_entities,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     let graph = resp.graph.map(|g| {
         json!({
@@ -904,6 +997,13 @@ pub async fn expand_graph(
     })))
 }
 
+/// Lists contradictions in the knowledge graph via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn get_contradictions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -919,7 +1019,7 @@ pub async fn get_contradictions(
             offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "contradictions": resp.contradictions.iter().map(claim_value).collect::<Vec<_>>(),
@@ -931,6 +1031,13 @@ pub async fn get_contradictions(
 // Wiki endpoints — /v1/wiki/*
 // ============================================================================
 
+/// Fetches a wiki page by id via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn get_wiki_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -946,7 +1053,7 @@ pub async fn get_wiki_page(
             version_id: q.get("version_id").cloned(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "page": resp.page.map(|p| wiki_page_value(&p)),
@@ -954,6 +1061,13 @@ pub async fn get_wiki_page(
     })))
 }
 
+/// Fetches a wiki page by its path via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn get_wiki_page_by_path(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -969,7 +1083,7 @@ pub async fn get_wiki_page_by_path(
             version_id: q.get("version_id").cloned(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "page": resp.page.map(|p| wiki_page_value(&p)),
@@ -977,6 +1091,13 @@ pub async fn get_wiki_page_by_path(
     })))
 }
 
+/// Lists historical versions of a wiki page via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn list_wiki_page_versions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -993,7 +1114,7 @@ pub async fn list_wiki_page_versions(
             offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "versions": resp.versions.iter().map(wiki_version_value).collect::<Vec<_>>(),
@@ -1001,6 +1122,13 @@ pub async fn list_wiki_page_versions(
     })))
 }
 
+/// Lists source logs for a wiki page via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn get_wiki_page_sources(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1016,13 +1144,20 @@ pub async fn get_wiki_page_sources(
             version_id: q.get("version_id").cloned(),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "source_log": resp.source_log.map(|l| wiki_source_log_value(&l)),
     })))
 }
 
+/// Lists wiki maintenance issues via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
+// axum requires a concrete `Query<HashMap>` extractor; the handler cannot be generic over the hasher.
+#[allow(clippy::implicit_hasher)]
 pub async fn list_wiki_maintenance_issues(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1039,7 +1174,7 @@ pub async fn list_wiki_maintenance_issues(
             offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "issues": resp.issues.iter().map(|i| json!({
@@ -1047,13 +1182,18 @@ pub async fn list_wiki_maintenance_issues(
             "page_id": i.page_id,
             "issue_type": i.issue_type,
             "status": i.status,
-            "created_at": ts_to_str(&i.created_at),
-            "resolved_at": ts_to_str(&i.resolved_at),
+            "created_at": ts_to_str(i.created_at.as_ref()),
+            "resolved_at": ts_to_str(i.resolved_at.as_ref()),
         })).collect::<Vec<_>>(),
         "total": resp.total,
     })))
 }
 
+/// Lists backlinks to a wiki page via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn get_wiki_backlinks(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1067,7 +1207,7 @@ pub async fn get_wiki_backlinks(
             org_id: claims.org_id,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "pages": resp.pages.iter().map(wiki_page_value).collect::<Vec<_>>(),
@@ -1082,6 +1222,11 @@ pub struct CreateWikiPageBody {
     pub initial_content: String,
 }
 
+/// Creates a wiki page via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn create_wiki_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1098,7 +1243,7 @@ pub async fn create_wiki_page(
             initial_content: body.initial_content,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "page": resp.page.map(|p| wiki_page_value(&p)),
@@ -1112,6 +1257,11 @@ pub struct UpdateWikiPageBody {
     pub edit_reason: String,
 }
 
+/// Updates a wiki page via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn update_wiki_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1129,7 +1279,7 @@ pub async fn update_wiki_page(
             proposed_by_user: Some(claims.user_id),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "new_version": resp.new_version.map(|v| wiki_version_value(&v)),
@@ -1147,6 +1297,11 @@ pub struct SubmitProposalBody {
     pub source_refs: Vec<String>,
 }
 
+/// Submits a wiki edit proposal via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn submit_wiki_proposal(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1164,7 +1319,7 @@ pub async fn submit_wiki_proposal(
             source_refs: body.source_refs,
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "proposal": resp.proposal.map(|p| wiki_proposal_value(&p)),
@@ -1176,6 +1331,11 @@ pub struct ReviewProposalBody {
     pub decision: String,
 }
 
+/// Reviews (approves or rejects) a wiki proposal via the Data Plane.
+///
+/// # Errors
+///
+/// Returns an error if the upstream Data Plane gRPC call fails.
 pub async fn review_wiki_proposal(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1192,7 +1352,7 @@ pub async fn review_wiki_proposal(
             reviewed_by: Some(claims.user_id),
         })
         .await
-        .map_err(grpc_err)?
+        .map_err(|e| grpc_err(&e))?
         .into_inner();
     Ok(Json(json!({
         "proposal": resp.proposal.map(|p| wiki_proposal_value(&p)),

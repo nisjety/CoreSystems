@@ -24,6 +24,9 @@ services:
     ports:
       - "4228:4222"
       - "8228:8222"
+    networks:
+      default:
+      inter-plane-bus:
     healthcheck:
       test: ["CMD", "nats-server", "--help"]
       interval: 5s
@@ -67,6 +70,12 @@ services:
     depends_on:
       temporal-postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 | grep -q SERVING"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
 
   temporal-postgres:
     image: postgres:16-alpine
@@ -88,7 +97,8 @@ services:
     ports:
       - "8233:8080"
     depends_on:
-      - temporal
+      temporal:
+        condition: service_healthy
 
   # OTEL collector for distributed tracing
   otel-collector:
@@ -338,10 +348,6 @@ services:
       dockerfile: services/orchestrator-core/Dockerfile
     ports:
       - "8084:8084"
-    # temporal's auto-setup image takes ~30-60s after the container reports
-    # "Up" before its Frontend service is reachable. orchestrator-core fails
-    # fast on first connect ("Frontend is not healthy yet"); `restart:
-    # unless-stopped` makes Docker re-spawn it until Temporal is ready.
     restart: unless-stopped
     environment:
       TEMPORAL_ADDRESS: temporal:7233
@@ -352,8 +358,10 @@ services:
       CAPABILITY_CORE_ADDR: capability-core:9097
       ENABLE_COMPAT_ADAPTER: "false"
     depends_on:
-      - temporal
-      - nats
+      temporal:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
 
   capability-core:
     build:

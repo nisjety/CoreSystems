@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@nangohq/node": "^0.69.47",
+    "@nangohq/node": "^0.70.5",
     "fastify": "^5.6.1",
     "nats": "^2.29.3",
     "pg": "^8.16.3",
@@ -24,5 +24,8 @@
     "tsx": "^4.20.6",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "axios": "1.16.1"
   }
 }

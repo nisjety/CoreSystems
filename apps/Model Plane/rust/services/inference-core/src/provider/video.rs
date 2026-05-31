@@ -128,6 +128,12 @@ impl VideoChain {
         self.providers.len()
     }
 
+    /// Create a video generation job using the first matching provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn create_job(
         &self,
         req: &VideoGenerationRequest,
@@ -149,6 +155,12 @@ impl VideoChain {
         Err(ProviderError::AllExhausted { attempts })
     }
 
+    /// Fetch the status of a video generation job via the first matching provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn get_job_status(
         &self,
         req: &VideoJobStatusRequest,
@@ -170,6 +182,12 @@ impl VideoChain {
         Err(ProviderError::AllExhausted { attempts })
     }
 
+    /// Stream generated video content via the first matching provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn stream_generation_content(
         &self,
         req: &VideoContentRequest,
@@ -296,13 +314,13 @@ impl VideoProvider for AzureOpenAiVideoProvider {
             .await
             .map_err(|error| ProviderError::Http(error.to_string()))?;
         let value = parse_response(response).await?;
-        parse_status_response(
+        Ok(parse_status_response(
             &req.request_id,
             &req.job_id,
             &value,
             &model,
             |generation_id| self.video_content_url(generation_id),
-        )
+        ))
     }
 
     async fn stream_generation_content(
@@ -384,7 +402,7 @@ fn parse_status_response(
     value: &Value,
     fallback_model: &str,
     content_url: impl FnOnce(&str) -> String,
-) -> Result<VideoJobStatus, ProviderError> {
+) -> VideoJobStatus {
     let job_id = value
         .pointer("/id")
         .and_then(Value::as_str)
@@ -397,7 +415,7 @@ fn parse_status_response(
     } else {
         content_url(&generation_id)
     };
-    Ok(VideoJobStatus {
+    VideoJobStatus {
         request_id: request_id.to_owned(),
         job_id,
         status: provider_status(value),
@@ -411,7 +429,7 @@ fn parse_status_response(
             .to_owned(),
         provider_used: "azure-openai".to_owned(),
         raw_json: value.to_string(),
-    })
+    }
 }
 
 async fn parse_response(response: reqwest::Response) -> Result<Value, ProviderError> {
@@ -658,10 +676,15 @@ mod tests {
             "generations": [{ "id": "gen_456" }],
             "model": "sora",
         });
-        let parsed = parse_status_response("req-1", "job_123", &value, "fallback", |generation_id| {
-            format!("https://example.test/openai/v1/video/generations/{generation_id}/content/video?api-version=preview")
-        })
-        .unwrap();
+        let parsed = parse_status_response(
+            "req-1",
+            "job_123",
+            &value,
+            "fallback",
+            |generation_id| {
+                format!("https://example.test/openai/v1/video/generations/{generation_id}/content/video?api-version=preview")
+            },
+        );
 
         assert_eq!(parsed.status, "succeeded");
         assert_eq!(parsed.generation_id, "gen_456");

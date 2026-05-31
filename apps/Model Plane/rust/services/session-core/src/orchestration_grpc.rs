@@ -107,7 +107,11 @@ impl RedisReplay {
         let result: redis::RedisResult<()> = redis::pipe()
             .rpush(&key, entry)
             .ignore()
-            .ltrim(&key, -(REPLAY_BUFFER_PER_RUN as isize), -1)
+            .ltrim(
+                &key,
+                -isize::try_from(REPLAY_BUFFER_PER_RUN).unwrap_or(isize::MAX),
+                -1,
+            )
             .ignore()
             .expire(&key, RUNEVENTS_TTL_SECS)
             .ignore()
@@ -153,7 +157,7 @@ impl RedisReplay {
 #[derive(Clone)]
 enum ReplayBuffer {
     Memory(InMemoryReplay),
-    Redis(RedisReplay),
+    Redis(Box<RedisReplay>),
 }
 
 impl ReplayBuffer {
@@ -171,7 +175,7 @@ impl ReplayBuffer {
             Ok(client) => match redis::aio::ConnectionManager::new(client).await {
                 Ok(conn) => {
                     tracing::info!("run-event replay buffer: Redis backend active");
-                    Self::Redis(RedisReplay { conn })
+                    Self::Redis(Box::new(RedisReplay { conn }))
                 }
                 Err(e) => {
                     warn!(error = %e, "REDIS_URL set but connect failed; using in-memory replay buffer");
@@ -423,14 +427,14 @@ pub(crate) fn subagent_role_to_str(code: i32) -> &'static str {
 // Timestamp + JSON helpers
 // ---------------------------------------------------------------------------
 
-fn ts(dt: DateTime<Utc>) -> Option<prost_types::Timestamp> {
-    Some(prost_types::Timestamp {
+fn ts(dt: DateTime<Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp {
         seconds: dt.timestamp(),
         nanos: i32::try_from(dt.timestamp_subsec_nanos()).unwrap_or(i32::MAX),
-    })
+    }
 }
 
-fn now_ts() -> Option<prost_types::Timestamp> {
+fn now_ts() -> prost_types::Timestamp {
     ts(Utc::now())
 }
 
@@ -504,8 +508,8 @@ fn plan_step_from_row(row: &store::PlanStepRow) -> proto::PlanStep {
         title,
         operation: row.kind.clone(),
         state: plan_step_state_from_str(&row.status),
-        created_at: ts(row.created_at),
-        updated_at: ts(row.updated_at),
+        created_at: Some(ts(row.created_at)),
+        updated_at: Some(ts(row.updated_at)),
     }
 }
 
@@ -521,8 +525,8 @@ fn plan_from_row(row: &store::PlanRow, steps: Vec<proto::PlanStep>) -> proto::Pl
         steps,
         supersedes,
         metadata: json_to_struct(&row.metadata),
-        created_at: ts(row.created_at),
-        updated_at: ts(row.updated_at),
+        created_at: Some(ts(row.created_at)),
+        updated_at: Some(ts(row.updated_at)),
     }
 }
 
@@ -538,9 +542,9 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         decided_by: row.decided_by.clone(),
         decision_reason: row.decision_reason.clone(),
         context: json_to_struct(&row.metadata),
-        requested_at: ts(row.requested_at),
-        decided_at: row.decided_at.and_then(ts),
-        expires_at: row.expires_at.and_then(ts),
+        requested_at: Some(ts(row.requested_at)),
+        decided_at: row.decided_at.map(ts),
+        expires_at: row.expires_at.map(ts),
     }
 }
 
@@ -550,7 +554,7 @@ fn todo_from_row(row: &store::TodoRow) -> proto::Todo {
     let blocked_by = metadata_string_array(&row.metadata, "blocked_by");
     let run_id = metadata_str_field(&row.metadata, "run_id");
     let completed_at = if row.status == "completed" {
-        ts(row.updated_at)
+        Some(ts(row.updated_at))
     } else {
         None
     };
@@ -565,8 +569,8 @@ fn todo_from_row(row: &store::TodoRow) -> proto::Todo {
         priority: todo_priority_from_str(&row.priority),
         blocked_by,
         metadata: json_to_struct(&row.metadata),
-        created_at: ts(row.created_at),
-        updated_at: ts(row.updated_at),
+        created_at: Some(ts(row.created_at)),
+        updated_at: Some(ts(row.updated_at)),
         completed_at,
     }
 }
@@ -577,12 +581,31 @@ fn lineage_edge_from_row(row: &store::SubagentEdgeRow) -> proto::LineageEdge {
         parent_run_id: row.parent_run_id.clone(),
         child_run_id: row.child_run_id.clone(),
         role: subagent_role_from_str(&row.role),
-        spawned_at: ts(row.attached_at),
+        spawned_at: Some(ts(row.attached_at)),
     }
 }
 
 fn compute_max_depth(edges: &[proto::LineageEdge]) -> u32 {
     use std::collections::{HashMap, HashSet};
+    fn dfs<'a>(
+        node: &'a str,
+        children: &HashMap<&'a str, Vec<&'a str>>,
+        seen: &mut HashSet<&'a str>,
+    ) -> u32 {
+        if !seen.insert(node) {
+            return 0;
+        }
+        let mut deepest = 0u32;
+        if let Some(kids) = children.get(node) {
+            for k in kids {
+                let d = dfs(k, children, seen);
+                if d > deepest {
+                    deepest = d;
+                }
+            }
+        }
+        deepest + 1
+    }
     if edges.is_empty() {
         return 0;
     }
@@ -603,26 +626,6 @@ fn compute_max_depth(edges: &[proto::LineageEdge]) -> u32 {
         .copied()
         .filter(|n| !has_parent.contains(n))
         .collect();
-
-    fn dfs<'a>(
-        node: &'a str,
-        children: &HashMap<&'a str, Vec<&'a str>>,
-        seen: &mut HashSet<&'a str>,
-    ) -> u32 {
-        if !seen.insert(node) {
-            return 0;
-        }
-        let mut deepest = 0u32;
-        if let Some(kids) = children.get(node) {
-            for k in kids {
-                let d = dfs(k, children, seen);
-                if d > deepest {
-                    deepest = d;
-                }
-            }
-        }
-        deepest + 1
-    }
 
     let mut max_depth = 0u32;
     for root in roots {
@@ -673,7 +676,7 @@ async fn fetch_lineage_for_thread(
             parent_run_id: r.get::<String, _>("parent_run_id"),
             child_run_id: r.get::<String, _>("child_run_id"),
             role: subagent_role_from_str(r.get::<&str, _>("role")),
-            spawned_at: ts(r.get::<DateTime<Utc>, _>("attached_at")),
+            spawned_at: Some(ts(r.get::<DateTime<Utc>, _>("attached_at"))),
         })
         .collect();
 
@@ -720,10 +723,10 @@ fn broadcast_event(
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
     match ev.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(p) => Some(&p.run_id),
-        orchestration_event::Event::TodoTransitioned(_) => None,
+        orchestration_event::Event::TodoTransitioned(_)
+        | orchestration_event::Event::SubagentStopped(_) => None,
         orchestration_event::Event::ApprovalStateChanged(p) => Some(&p.run_id),
         orchestration_event::Event::SubagentAttached(p) => Some(&p.parent_run_id),
-        orchestration_event::Event::SubagentStopped(_) => None,
         orchestration_event::Event::RunPausedForApproval(p) => Some(&p.run_id),
         orchestration_event::Event::RunResumedAfterApproval(p) => Some(&p.run_id),
     }
@@ -829,7 +832,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::PlanTransitioned(
                         orchestration_event::PlanTransitioned {
                             plan_id: after.id.clone(),
@@ -937,7 +940,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::TodoTransitioned(
                         orchestration_event::TodoTransitioned {
                             todo_id: after.id.clone(),
@@ -1080,7 +1083,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::ApprovalStateChanged(
                         orchestration_event::ApprovalStateChanged {
                             approval_id: row.id.clone(),
@@ -1097,7 +1100,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::RunPausedForApproval(
                         orchestration_event::RunPausedForApproval {
                             run_id: row.run_id.clone(),
@@ -1155,7 +1158,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::ApprovalStateChanged(
                         orchestration_event::ApprovalStateChanged {
                             approval_id: after.id.clone(),
@@ -1235,7 +1238,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 parent_run_id: req.parent_run_id.clone(),
                 child_run_id: req.child_run_id.clone(),
                 role: req.role,
-                spawned_at: now_ts(),
+                spawned_at: Some(now_ts()),
             };
             let lineage = fetch_lineage_for_thread(&self.pool, &req.thread_id)
                 .await
@@ -1246,7 +1249,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::SubagentAttached(
                         orchestration_event::SubagentAttached {
                             parent_run_id: req.parent_run_id.clone(),
@@ -1301,7 +1304,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             async move {
                 match item {
                     Ok(ev) => {
-                        if !event_run_id(&ev).is_some_and(|id| id == target) {
+                        if event_run_id(&ev).is_none_or(|id| id != target) {
                             return None;
                         }
                         if let Some(ref last_id) = last_replayed {
@@ -1492,11 +1495,11 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_event_with_no_subscribers_is_no_op() {
-        let (tx, _rx_drop) = broadcast::channel::<proto::OrchestrationEvent>(8);
-        drop(_rx_drop);
+        let (tx, rx_drop) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        drop(rx_drop);
         let ev = proto::OrchestrationEvent {
             event_id: String::new(),
-            at: now_ts(),
+            at: Some(now_ts()),
             event: Some(orchestration_event::Event::SubagentStopped(
                 orchestration_event::SubagentStopped {
                     child_run_id: "run_x".into(),
@@ -1515,7 +1518,7 @@ mod tests {
         // Run-scoped event: gets an id and lands in the run's buffer.
         let run_ev = proto::OrchestrationEvent {
             event_id: String::new(),
-            at: now_ts(),
+            at: Some(now_ts()),
             event: Some(orchestration_event::Event::RunPausedForApproval(
                 orchestration_event::RunPausedForApproval {
                     run_id: "run_1".into(),
@@ -1528,7 +1531,7 @@ mod tests {
         // Thread-only event (no run_id): assigned an id but not buffered per run.
         let todo_ev = proto::OrchestrationEvent {
             event_id: String::new(),
-            at: now_ts(),
+            at: Some(now_ts()),
             event: Some(orchestration_event::Event::TodoTransitioned(
                 orchestration_event::TodoTransitioned {
                     todo_id: "todo_1".into(),
@@ -1564,7 +1567,7 @@ mod tests {
                 &replay,
                 proto::OrchestrationEvent {
                     event_id: String::new(),
-                    at: now_ts(),
+                    at: Some(now_ts()),
                     event: Some(orchestration_event::Event::RunPausedForApproval(
                         orchestration_event::RunPausedForApproval {
                             run_id: "run_cap".into(),

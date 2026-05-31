@@ -92,7 +92,7 @@ fn execute_browser_agent(tool_input: &str) -> ToolExecution {
     match config {
         Ok(input) => {
             let plan_config = browser_agent::PlanConfig {
-                plan_id: input.plan_id.unwrap_or_else(|| mp_ids::new_ulid()),
+                plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
                 grant_id: input.grant_id,
                 run_id: input.run_id.unwrap_or_default(),
                 org_id: input.org_id.unwrap_or_default(),

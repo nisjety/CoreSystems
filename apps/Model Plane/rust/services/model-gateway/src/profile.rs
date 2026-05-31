@@ -1,14 +1,14 @@
-//! Agent harness profile + its approval posture (HARNESS_PHASE1 §1).
+//! Agent harness profile + its approval posture (`HARNESS_PHASE1` §1).
 //!
 //! The profile is decided by the operator on the agent definition (Convex) and
 //! sent to the gateway on each invoke. It is the single source of truth for
 //! whether the harness gates risky actions behind a human approval:
 //!
 //!   - `chat`           → `auto` posture: no approval gates, clean single-user
-//!                        experience. The harness stays invisible.
+//!     experience. The harness stays invisible.
 //!   - `deployed_agent` → `ask` posture: risky/destructive tool calls produce
-//!                        an Approval + `RUN_PAUSED_FOR_APPROVAL`, surfaced to
-//!                        the operator (run-event feed) until decided.
+//!     an Approval + `RUN_PAUSED_FOR_APPROVAL`, surfaced to
+//!     the operator (run-event feed) until decided.
 //!
 //! Enforcement of the `ask` posture lives in the run loop (orchestrator-core +
 //! the Approval primitives in mp-orchestration / session-core). This module is
@@ -62,7 +62,7 @@ impl AgentProfile {
 }
 
 impl ApprovalPosture {
-    /// Wire/permission_mode string consumed by the run loop's permission gate
+    /// `Wire/permission_mode` string consumed by the run loop's permission gate
     /// (`ExecuteStep.permission_mode`: "auto" | "ask" | "deny").
     #[must_use]
     pub fn as_permission_mode(self) -> &'static str {

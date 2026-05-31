@@ -414,7 +414,7 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-controlplane}:${POSTGRES_PASSWORD:-controlplane}@controlplane-postgres:5432/${POSTGRES_DB:-controlplane}
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
       NATS_URL: nats://velion-nats:4222
       NATS_TOKEN: ${VELION_NATS_TOKEN:-}
       HTTP_PORT: "8187"
@@ -504,6 +504,7 @@ services:
 
   lago-pdf:
     image: getlago/lago-gotenberg:7.8.2
+    platform: linux/amd64
     container_name: lago-pdf
     restart: unless-stopped
     networks:

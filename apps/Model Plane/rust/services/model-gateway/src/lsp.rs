@@ -7,7 +7,7 @@
 //!   - LSP JSON-RPC wire protocol
 //!
 //! The gateway is intentionally just a typed pass-through. Why an
-//! external bridge instead of porting v2's LSPManager:
+//! external bridge instead of porting v2's `LSPManager`:
 //!   - LSP servers (tsserver, gopls, rust-analyzer) are stateful and
 //!     long-lived. They need workspace-rooted setup, file-system
 //!     watch, restart logic — all stuff already solved by tooling like
@@ -147,6 +147,13 @@ struct BridgeCompletion {
     kind: i32,
 }
 
+/// Proxies an LSP query to the bridge and projects the response.
+///
+/// # Errors
+///
+/// Returns `Status::unimplemented` if the LSP bridge is not configured,
+/// `Status::invalid_argument` for an unsupported operation or empty `file_path`,
+/// or maps an upstream bridge failure to a `Status`.
 pub async fn handle_lsp_query(
     client: &BridgeClient,
     req: LspQueryRequest,
@@ -276,7 +283,7 @@ mod tests {
             &c,
             LspQueryRequest {
                 request_id: "t".into(),
-                org_id: "".into(),
+                org_id: String::new(),
                 operation: "hover".into(),
                 file_path: "/x".into(),
                 line: 0,
@@ -295,7 +302,7 @@ mod tests {
             &c,
             LspQueryRequest {
                 request_id: "t".into(),
-                org_id: "".into(),
+                org_id: String::new(),
                 operation: "rename".into(),
                 file_path: "/x".into(),
                 line: 0,
@@ -314,7 +321,7 @@ mod tests {
             &c,
             LspQueryRequest {
                 request_id: "t".into(),
-                org_id: "".into(),
+                org_id: String::new(),
                 operation: "diagnostics".into(),
                 file_path: "   ".into(),
                 line: 0,

@@ -11,9 +11,16 @@ fn deny_mode_blocks_execution() {
 }
 
 #[test]
-fn ask_mode_requires_approval_for_tools() {
-    let outcome = runtime_loop::execute_step("echo", "payload", "ask", "");
-    assert_eq!(outcome.status, "awaiting_approval");
+fn ask_mode_requires_approval_for_risky_tools() {
+    // `ask` posture gates risky/destructive tools behind human approval
+    // (see permission::evaluate / is_risky_tool).
+    let risky = runtime_loop::execute_step("delete_record", "payload", "ask", "");
+    assert_eq!(risky.status, "awaiting_approval");
+
+    // ...while benign tools are NOT gated under `ask` — they run to completion,
+    // so the agent isn't pausing on every read.
+    let benign = runtime_loop::execute_step("echo", "payload", "ask", "");
+    assert_eq!(benign.status, "completed");
 }
 
 #[test]

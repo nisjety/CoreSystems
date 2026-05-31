@@ -87,7 +87,7 @@ pub trait VisionProvider: Send + Sync {
         req: &AnalyzeImageRequest,
     ) -> Result<ExtractImageTextResponse, ProviderError> {
         let mut ocr_req = req.clone();
-        ocr_req.prompt = OCR_PROMPT.to_owned();
+        OCR_PROMPT.clone_into(&mut ocr_req.prompt);
         let analysis = self.analyze_image(&ocr_req).await?;
         Ok(ExtractImageTextResponse {
             text: analysis.description,
@@ -133,6 +133,12 @@ impl VisionChain {
         self.providers.len()
     }
 
+    /// Generate an image using the first matching provider in the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn generate_image(
         &self,
         req: &GenerateImageRequest,
@@ -154,6 +160,12 @@ impl VisionChain {
         Err(ProviderError::AllExhausted { attempts })
     }
 
+    /// Analyze an image using the first matching provider in the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn analyze_image(
         &self,
         req: &AnalyzeImageRequest,
@@ -175,6 +187,12 @@ impl VisionChain {
         Err(ProviderError::AllExhausted { attempts })
     }
 
+    /// Extract text (OCR) from an image using the first matching provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn extract_text(
         &self,
         req: &AnalyzeImageRequest,

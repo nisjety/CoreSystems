@@ -1,4 +1,4 @@
-//! Idempotency-key derivation for EventLog append operations.
+//! Idempotency-key derivation for `EventLog` append operations.
 
 /// Derive a canonical idempotency key from the four fields that uniquely
 /// identify an append attempt: `(producer, event_type, resource_ref, client_key)`.

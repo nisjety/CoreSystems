@@ -57,12 +57,13 @@ pub enum ShimError {
 fn ts_from(dt: DateTime<Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: dt.timestamp(),
-        nanos: dt.timestamp_subsec_nanos() as i32,
+        nanos: i32::try_from(dt.timestamp_subsec_nanos()).unwrap_or(0),
     }
 }
 
 fn ts_to(ts: prost_types::Timestamp) -> Result<DateTime<Utc>, ShimError> {
-    DateTime::from_timestamp(ts.seconds, ts.nanos as u32).ok_or(ShimError::InvalidTimestamp)
+    let nanos = u32::try_from(ts.nanos).map_err(|_| ShimError::InvalidTimestamp)?;
+    DateTime::from_timestamp(ts.seconds, nanos).ok_or(ShimError::InvalidTimestamp)
 }
 
 // ---------- enum encode ----------
@@ -188,6 +189,16 @@ fn subagent_role_from_proto(code: i32) -> Result<SubagentRole, ShimError> {
 
 // ---------- envelope encode ----------
 
+/// Wrap an encoded event variant in the proto envelope. `event_id` is left
+/// empty — session-core assigns it at broadcast time.
+fn envelope(at: DateTime<Utc>, event: ProtoEvent) -> ProtoOrchestrationEvent {
+    ProtoOrchestrationEvent {
+        event_id: String::new(),
+        at: Some(ts_from(at)),
+        event: Some(event),
+    }
+}
+
 impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
     fn from(ev: OrchestrationEvent) -> Self {
         match ev {
@@ -197,34 +208,30 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                 from,
                 to,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::PlanTransitioned(PbPlanTransitioned {
+            } => envelope(
+                at,
+                ProtoEvent::PlanTransitioned(PbPlanTransitioned {
                     plan_id,
                     run_id,
                     from: plan_state_to_proto(from),
                     to: plan_state_to_proto(to),
-                })),
-            },
+                }),
+            ),
             OrchestrationEvent::TodoTransitioned {
                 todo_id,
                 thread_id,
                 from,
                 to,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::TodoTransitioned(PbTodoTransitioned {
+            } => envelope(
+                at,
+                ProtoEvent::TodoTransitioned(PbTodoTransitioned {
                     todo_id,
                     thread_id,
                     from: todo_state_to_proto(from),
                     to: todo_state_to_proto(to),
-                })),
-            },
+                }),
+            ),
             OrchestrationEvent::ApprovalStateChanged {
                 approval_id,
                 run_id,
@@ -232,74 +239,62 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                 to,
                 decided_by,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::ApprovalStateChanged(PbApprovalStateChanged {
+            } => envelope(
+                at,
+                ProtoEvent::ApprovalStateChanged(PbApprovalStateChanged {
                     approval_id,
                     run_id,
                     approval_kind: approval_kind_to_proto(approval_kind),
                     to: approval_state_to_proto(to),
                     decided_by,
-                })),
-            },
+                }),
+            ),
             OrchestrationEvent::SubagentAttached {
                 parent_run_id,
                 child_run_id,
                 role,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::SubagentAttached(PbSubagentAttached {
+            } => envelope(
+                at,
+                ProtoEvent::SubagentAttached(PbSubagentAttached {
                     parent_run_id,
                     child_run_id,
                     role: subagent_role_to_proto(role),
-                })),
-            },
+                }),
+            ),
             OrchestrationEvent::SubagentStopped {
                 child_run_id,
                 status,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::SubagentStopped(PbSubagentStopped {
+            } => envelope(
+                at,
+                ProtoEvent::SubagentStopped(PbSubagentStopped {
                     child_run_id,
                     status,
-                })),
-            },
+                }),
+            ),
             OrchestrationEvent::RunPausedForApproval {
                 run_id,
                 approval_id,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::RunPausedForApproval(PbRunPausedForApproval {
+            } => envelope(
+                at,
+                ProtoEvent::RunPausedForApproval(PbRunPausedForApproval {
                     run_id,
                     approval_id,
-                })),
-            },
+                }),
+            ),
             OrchestrationEvent::RunResumedAfterApproval {
                 run_id,
                 approval_id,
                 at,
-            } => ProtoOrchestrationEvent {
-                // event_id is assigned by session-core at broadcast time.
-                event_id: String::new(),
-                at: Some(ts_from(at)),
-                event: Some(ProtoEvent::RunResumedAfterApproval(
-                    PbRunResumedAfterApproval {
-                        run_id,
-                        approval_id,
-                    },
-                )),
-            },
+            } => envelope(
+                at,
+                ProtoEvent::RunResumedAfterApproval(PbRunResumedAfterApproval {
+                    run_id,
+                    approval_id,
+                }),
+            ),
         }
     }
 }
@@ -368,15 +363,15 @@ mod tests {
         DateTime::from_timestamp(1_700_000_000, 0).expect("valid epoch")
     }
 
-    fn round_trip(ev: OrchestrationEvent) {
+    fn round_trip(ev: &OrchestrationEvent) {
         let pb: ProtoOrchestrationEvent = ev.clone().into();
         let back: OrchestrationEvent = pb.try_into().expect("decode");
-        assert_eq!(ev, back);
+        assert_eq!(*ev, back);
     }
 
     #[test]
     fn round_trip_plan_transitioned() {
-        round_trip(OrchestrationEvent::PlanTransitioned {
+        round_trip(&OrchestrationEvent::PlanTransitioned {
             plan_id: "plan-1".into(),
             run_id: "run-1".into(),
             from: PlanState::Draft,
@@ -387,7 +382,7 @@ mod tests {
 
     #[test]
     fn round_trip_todo_transitioned() {
-        round_trip(OrchestrationEvent::TodoTransitioned {
+        round_trip(&OrchestrationEvent::TodoTransitioned {
             todo_id: "todo-1".into(),
             thread_id: "thread-1".into(),
             from: TodoState::Pending,
@@ -398,7 +393,7 @@ mod tests {
 
     #[test]
     fn round_trip_approval_state_changed() {
-        round_trip(OrchestrationEvent::ApprovalStateChanged {
+        round_trip(&OrchestrationEvent::ApprovalStateChanged {
             approval_id: "appr-1".into(),
             run_id: "run-1".into(),
             approval_kind: ApprovalKind::ToolCall,
@@ -410,7 +405,7 @@ mod tests {
 
     #[test]
     fn round_trip_subagent_attached() {
-        round_trip(OrchestrationEvent::SubagentAttached {
+        round_trip(&OrchestrationEvent::SubagentAttached {
             parent_run_id: "run-parent".into(),
             child_run_id: "run-child".into(),
             role: SubagentRole::Reviewer,
@@ -420,7 +415,7 @@ mod tests {
 
     #[test]
     fn round_trip_subagent_stopped() {
-        round_trip(OrchestrationEvent::SubagentStopped {
+        round_trip(&OrchestrationEvent::SubagentStopped {
             child_run_id: "run-child".into(),
             status: "completed".into(),
             at: fixture_at(),
@@ -429,7 +424,7 @@ mod tests {
 
     #[test]
     fn round_trip_run_paused_for_approval() {
-        round_trip(OrchestrationEvent::RunPausedForApproval {
+        round_trip(&OrchestrationEvent::RunPausedForApproval {
             run_id: "run-1".into(),
             approval_id: "appr-1".into(),
             at: fixture_at(),
@@ -438,7 +433,7 @@ mod tests {
 
     #[test]
     fn round_trip_run_resumed_after_approval() {
-        round_trip(OrchestrationEvent::RunResumedAfterApproval {
+        round_trip(&OrchestrationEvent::RunResumedAfterApproval {
             run_id: "run-1".into(),
             approval_id: "appr-1".into(),
             at: fixture_at(),

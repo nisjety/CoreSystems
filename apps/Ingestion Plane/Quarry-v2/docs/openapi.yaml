@@ -200,8 +200,231 @@ paths:
               schema:
                 $ref: "#/components/schemas/Envelope_Error"
 
+  /v1/search:
+    post:
+      operationId: search
+      summary: SERP + own-corpus search (hybrid when Data Plane wired)
+      description: |
+        Provider-agnostic search across the local Tantivy corpus, SERP
+        backends, and — when a Data Plane is configured — semantic vectors
+        fused via RRF. Tavily-style params: topic, time_range/days,
+        exact_match, chunks_per_source, include_answer, format=context,
+        highlight, facets.
+      tags: [search]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Ranked results (plus optional answer/context/facets)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "429":
+          description: Rate limited (structured retry envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitError"
+        "501":
+          description: No search backend configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/map:
+    post:
+      operationId: map
+      summary: Whole-site URL discovery
+      description: |
+        Fast site map from sitemap.xml + robots + on-page links, optionally
+        relevance-ranked by `search`. Read-only, org-scoped, SSRF-guarded.
+      tags: [map]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MapRequest"
+      responses:
+        "200":
+          description: Discovered URLs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapResponse"
+        "502":
+          description: Origin returned no sitemap or links
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
+  /v1/extract:
+    post:
+      operationId: extract
+      summary: Multi-URL structured extraction
+      description: |
+        Fetch a bounded set of URLs and return structured data per source
+        (JSON-Schema-guided via Model Plane) or cleaned markdown. Per-source
+        isolation — one failure never sinks the batch.
+      tags: [extract]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractRequest"
+      responses:
+        "200":
+          description: Per-source extraction results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractResponse"
+        "400":
+          description: No valid URLs in request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+        "501":
+          description: Structured extraction requires a Model Plane
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBody"
+
 components:
   schemas:
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        limit: { type: integer, format: int32, nullable: true }
+        country: { type: string, nullable: true }
+        language: { type: string, nullable: true }
+        safe_search: { type: boolean, default: true }
+        topic: { type: string, nullable: true, description: "general | news | finance" }
+        time_range: { type: string, nullable: true, description: "day | week | month | year" }
+        days: { type: integer, format: int32, nullable: true }
+        exact_match: { type: boolean, default: false }
+        chunks_per_source: { type: integer, format: int32, nullable: true }
+        include_answer: { type: boolean, default: false }
+        format: { type: string, nullable: true, description: "results | context" }
+        highlight: { type: boolean, default: false }
+        facets: { type: boolean, default: false }
+    SearchResultItem:
+      type: object
+      required: [url, rank, provider]
+      properties:
+        url: { type: string }
+        title: { type: string, nullable: true }
+        snippet: { type: string, nullable: true }
+        rank: { type: integer, format: int32 }
+        provider: { type: string }
+    FacetCount:
+      type: object
+      required: [value, count]
+      properties:
+        value: { type: string }
+        count: { type: integer }
+    SearchResponse:
+      type: object
+      required: [query, provider, results, count]
+      properties:
+        query: { type: string }
+        provider: { type: string }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/SearchResultItem" }
+        count: { type: integer }
+        answer: { type: string, nullable: true }
+        citations:
+          type: array
+          nullable: true
+          items: { type: object }
+        context: { type: string, nullable: true }
+        facets:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/FacetCount" }
+    MapRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+        search: { type: string, nullable: true }
+        limit: { type: integer, format: int32, nullable: true }
+        include_subdomains: { type: boolean, default: false }
+    MapLink:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+        title: { type: string, nullable: true }
+        score: { type: number, format: float, nullable: true }
+    MapResponse:
+      type: object
+      required: [url, links, count, ranked]
+      properties:
+        url: { type: string }
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/MapLink" }
+        count: { type: integer }
+        ranked: { type: boolean }
+    ExtractRequest:
+      type: object
+      required: [urls]
+      properties:
+        urls:
+          type: array
+          items: { type: string }
+        schema: { type: object, nullable: true, description: "JSON Schema for structured output" }
+        prompt: { type: string, nullable: true }
+        max_urls: { type: integer, format: int32, nullable: true }
+    ExtractItem:
+      type: object
+      required: [url, status]
+      properties:
+        url: { type: string }
+        status: { type: string, description: "ok | fetched | error" }
+        data: { type: object, nullable: true }
+        markdown: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+    ExtractResponse:
+      type: object
+      required: [results, count, requested]
+      properties:
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/ExtractItem" }
+        count: { type: integer }
+        requested: { type: integer }
+    ErrorBody:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string }
+        code: { type: string }
+        hint: { type: string, nullable: true }
+    RateLimitError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorBody"
+        - type: object
+          properties:
+            window: { type: string, nullable: true }
+            retry_after_seconds: { type: integer, nullable: true }
+            next_actions:
+              type: array
+              items: { type: string }
     ScrapeRequest:
       type: object
       required: [url]

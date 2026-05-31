@@ -41,7 +41,7 @@ impl Cursor {
     ///
     /// Returns an error if the input is not valid base64 or the payload is malformed.
     pub fn decode(encoded: &str) -> EventLogResult<Self> {
-        let bytes = base64_decode(encoded).map_err(|e| EventLogError::CursorDecode(e))?;
+        let bytes = base64_decode(encoded).map_err(EventLogError::CursorDecode)?;
         let payload: CursorPayload = serde_json::from_slice(&bytes)
             .map_err(|e| EventLogError::CursorDecode(e.to_string()))?;
         Ok(Self { payload })
@@ -56,8 +56,8 @@ impl Cursor {
 
 fn base64_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    let mut out = String::with_capacity((bytes.len() * 4 / 3) + 4);
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() * 4 / 3) + 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 {
@@ -104,7 +104,7 @@ fn base64_decode(encoded: &str) -> Result<Vec<u8>, String> {
             .iter()
             .enumerate()
         {
-            t[c as usize] = i as u8;
+            t[c as usize] = u8::try_from(i).unwrap_or(255);
         }
         t
     };

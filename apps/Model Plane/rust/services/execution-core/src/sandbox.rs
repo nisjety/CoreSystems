@@ -60,7 +60,7 @@ fn assemble_argv(
     writable_roots: &[PathBuf],
     network: &MpNetworkPolicy,
     program: &str,
-    args: &[String],
+    cmd_args: &[String],
 ) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "--die-with-parent".into(),
@@ -106,7 +106,7 @@ fn assemble_argv(
 
     argv.push("--".into());
     argv.push(program.to_owned());
-    argv.extend(args.iter().cloned());
+    argv.extend(cmd_args.iter().cloned());
     argv
 }
 

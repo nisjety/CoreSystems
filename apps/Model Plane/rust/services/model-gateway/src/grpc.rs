@@ -17,7 +17,7 @@ use mp_contracts::model_plane::v1::{
     ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest,
     FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse,
     GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InferChunk, InferRequest,
-    InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse,
+    InferResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse,
     ListCommandsRequest, ListCommandsResponse, ListHooksRequest, ListHooksResponse,
     ListMcpServersRequest, ListMcpServersResponse, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest,
@@ -51,7 +51,7 @@ use crate::{
 };
 
 /// Maximum page content (markdown chars) forwarded to inference-core
-/// for ExtractStructured. Tuned to stay well below the 128k context
+/// for `ExtractStructured`. Tuned to stay well below the 128k context
 /// floor every in-use model shares, leaving headroom for the schema +
 /// system prompt + caller instructions.
 const MAX_EXTRACT_CONTENT_CHARS: usize = 80_000;
@@ -194,11 +194,88 @@ async fn publish_ingress_accepted(
     }
 }
 
+/// Semantic-cache lookup (best-effort). On a hit, records the assistant turn so
+/// thread history stays consistent and returns a zero-token `InvokeResponse`.
+/// Returns `Ok(None)` on a miss so the caller proceeds to inference-core.
+async fn try_serve_from_cache(
+    state: &AppState,
+    thread_id: &str,
+    request_id: &str,
+    org_id: &str,
+    model: &str,
+    content: &str,
+) -> Result<Option<InvokeResponse>, Status> {
+    let Some(cache) = crate::langcache::global() else {
+        return Ok(None);
+    };
+    let Some(cached) = cache.lookup(content, org_id, model).await else {
+        return Ok(None);
+    };
+    session_flow::append_assistant_message(state, thread_id, &cached)
+        .await
+        .map_err(|error| {
+            Status::internal(format!("session-core append assistant failed: {error}"))
+        })?;
+    info!(request_id = %request_id, "gateway invoke served from langcache");
+    Ok(Some(InvokeResponse {
+        request_id: request_id.to_owned(),
+        content: cached,
+        model_used: model.to_owned(),
+        stop_reason: "end_turn".to_owned(),
+        input_tokens: 0,
+        output_tokens: 0,
+        sources: Vec::new(),
+    }))
+}
+
+/// Publish the per-request usage envelope (best-effort; publish failures are logged).
+async fn publish_usage_envelope(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    infer: &InferResponse,
+    latency_ms: u64,
+) {
+    let usage_envelope = Envelope {
+        event_id: new_ulid(),
+        event_type: "USAGE_ENVELOPE".to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
+        org_id: org_id.to_owned(),
+        user_id: "grpc_user".to_owned(),
+        resource_ref: format!("request/{request_id}"),
+        payload: serde_json::json!({
+            "request_id": request_id,
+            "org_id": org_id,
+            "user_id": "grpc_user",
+            "model": infer.model_used.clone(),
+            "input_tokens": infer.input_tokens,
+            "output_tokens": infer.output_tokens,
+            "latency_ms": latency_ms,
+            "transport": "grpc",
+        }),
+        zdr: false,
+    };
+
+    if let Err(error) = state
+        .publisher
+        .publish(&subjects::usage_subject(org_id), &usage_envelope)
+        .await
+    {
+        warn!(%error, "failed to publish grpc USAGE_ENVELOPE");
+    }
+}
+
 #[tonic::async_trait]
+// invoke/invoke_stream are sequential request pipelines (session preamble + cache +
+// inference/streaming relay); per-method #[allow] doesn't survive the async_trait
+// macro expansion, so the allow lives on the impl block. Both read clearer inline.
+#[allow(clippy::too_many_lines)]
 impl ModelGateway for GatewayService {
-    // Long orchestration handler (session preamble + cache + inference + usage);
-    // the steps are sequential and clearer inline than split across helpers.
-    #[allow(clippy::too_many_lines)]
     async fn invoke(
         &self,
         request: Request<InvokeRequest>,
@@ -232,31 +309,17 @@ impl ModelGateway for GatewayService {
         let infer_req =
             build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
 
-        // Semantic-cache lookup (best-effort). On a hit we skip inference-core
-        // entirely but still record the assistant turn so thread history stays
-        // consistent. Cache hits report zero tokens to usage accounting.
-        if let Some(cache) = crate::langcache::global() {
-            if let Some(cached) = cache.lookup(&content, &org_id, &model).await {
-                session_flow::append_assistant_message(
-                    &self.state,
-                    &session_run.thread_id,
-                    &cached,
-                )
-                .await
-                .map_err(|error| {
-                    Status::internal(format!("session-core append assistant failed: {error}"))
-                })?;
-                info!(request_id = %request_id, "gateway invoke served from langcache");
-                return Ok(Response::new(InvokeResponse {
-                    request_id,
-                    content: cached,
-                    model_used: model,
-                    stop_reason: "end_turn".to_owned(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    sources: Vec::new(),
-                }));
-            }
+        if let Some(hit) = try_serve_from_cache(
+            &self.state,
+            &session_run.thread_id,
+            &request_id,
+            &org_id,
+            &model,
+            &content,
+        )
+        .await?
+        {
+            return Ok(Response::new(hit));
         }
 
         let mut client = self.state.inference_client.clone();
@@ -279,42 +342,7 @@ impl ModelGateway for GatewayService {
         }
 
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let usage_envelope = Envelope {
-            event_id: new_ulid(),
-            event_type: "USAGE_ENVELOPE".to_owned(),
-            schema_version: 1,
-            ts: Utc::now(),
-            producer: "model-gateway".to_owned(),
-            correlation_id: request_id.clone(),
-            causation_id: String::new(),
-            idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
-            org_id: org_id.clone(),
-            user_id: "grpc_user".to_owned(),
-            resource_ref: format!("request/{request_id}"),
-            payload: serde_json::json!({
-                "request_id": request_id.clone(),
-                "org_id": org_id.clone(),
-                "user_id": "grpc_user",
-                "model": infer.model_used.clone(),
-                "input_tokens": infer.input_tokens,
-                "output_tokens": infer.output_tokens,
-                "latency_ms": latency_ms,
-                "transport": "grpc",
-            }),
-            zdr: false,
-        };
-
-        if let Err(error) = self
-            .state
-            .publisher
-            .publish(
-                &subjects::usage_subject(&usage_envelope.org_id),
-                &usage_envelope,
-            )
-            .await
-        {
-            warn!(%error, "failed to publish grpc USAGE_ENVELOPE");
-        }
+        publish_usage_envelope(&self.state, &request_id, &org_id, &infer, latency_ms).await;
 
         info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "gateway invoke completed");
 
@@ -339,8 +367,6 @@ impl ModelGateway for GatewayService {
 
     type InvokeStreamStream = tokio_stream::wrappers::ReceiverStream<Result<InvokeChunk, Status>>;
 
-    // Long orchestration handler (session preamble + cache + streaming relay).
-    #[allow(clippy::too_many_lines)]
     async fn invoke_stream(
         &self,
         request: Request<InvokeRequest>,
@@ -628,7 +654,6 @@ impl ModelGateway for GatewayService {
         request: Request<TeamCreateRequest>,
     ) -> Result<Response<TeamCreateResponse>, Status> {
         coordinator::handle_team_create(&self.state.team_workers, request.into_inner())
-            .await
             .map(Response::new)
     }
 
@@ -637,7 +662,6 @@ impl ModelGateway for GatewayService {
         request: Request<TeamDeleteRequest>,
     ) -> Result<Response<TeamDeleteResponse>, Status> {
         coordinator::handle_team_delete(&self.state.team_workers, request.into_inner())
-            .await
             .map(Response::new)
     }
 
@@ -646,7 +670,6 @@ impl ModelGateway for GatewayService {
         request: Request<TeamListRequest>,
     ) -> Result<Response<TeamListResponse>, Status> {
         coordinator::handle_team_list(&self.state.team_workers, request.into_inner())
-            .await
             .map(Response::new)
     }
 
@@ -735,7 +758,6 @@ impl ModelGateway for GatewayService {
         request: Request<ListPendingApprovalsRequest>,
     ) -> Result<Response<ListPendingApprovalsResponse>, Status> {
         approvals::handle_list_pending_approvals(&self.state.approvals, request.into_inner())
-            .await
             .map(Response::new)
     }
 
@@ -1251,8 +1273,8 @@ fn render_hints_from_proto(p: Option<&ProtoRenderHints>) -> Option<RenderHints> 
 }
 
 /// Map Quarry typed errors onto gRPC status codes so callers can branch
-/// on the canonical kind (PermissionDenied vs Unavailable vs
-/// InvalidArgument) instead of parsing strings.
+/// on the canonical kind (`PermissionDenied` vs Unavailable vs
+/// `InvalidArgument`) instead of parsing strings.
 fn quarry_err_to_status(err: QuarryError) -> Status {
     match err {
         QuarryError::Unavailable => Status::unimplemented("quarry edge not configured"),

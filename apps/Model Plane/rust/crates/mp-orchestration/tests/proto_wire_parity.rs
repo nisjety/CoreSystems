@@ -46,14 +46,14 @@ fn decode_from_hex(h: &str) -> OrchestrationEvent {
     OrchestrationEvent::try_from(proto).expect("shim accepts golden")
 }
 
-fn assert_roundtrip(ev: OrchestrationEvent, golden: &str) {
+fn assert_roundtrip(ev: &OrchestrationEvent, golden: &str) {
     let actual = encode_hex(ev.clone());
     assert_eq!(
         actual, golden,
         "wire bytes drifted; this is a cross-language breaking change"
     );
     let decoded = decode_from_hex(golden);
-    assert_eq!(decoded, ev, "round-trip lost data");
+    assert_eq!(decoded, *ev, "round-trip lost data");
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn plan_transitioned_wire_parity() {
         to: PlanState::Proposed,
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_PLAN_TRANSITIONED);
+    assert_roundtrip(&ev, GOLDEN_PLAN_TRANSITIONED);
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn todo_transitioned_wire_parity() {
         to: TodoState::InProgress,
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_TODO_TRANSITIONED);
+    assert_roundtrip(&ev, GOLDEN_TODO_TRANSITIONED);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn approval_state_changed_wire_parity() {
         decided_by: "user@example.com".into(),
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_APPROVAL_STATE_CHANGED);
+    assert_roundtrip(&ev, GOLDEN_APPROVAL_STATE_CHANGED);
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn subagent_attached_wire_parity() {
         role: SubagentRole::Reviewer,
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_SUBAGENT_ATTACHED);
+    assert_roundtrip(&ev, GOLDEN_SUBAGENT_ATTACHED);
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn subagent_stopped_wire_parity() {
         status: "completed".into(),
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_SUBAGENT_STOPPED);
+    assert_roundtrip(&ev, GOLDEN_SUBAGENT_STOPPED);
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn run_paused_for_approval_wire_parity() {
         approval_id: "appr-1".into(),
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_RUN_PAUSED_FOR_APPROVAL);
+    assert_roundtrip(&ev, GOLDEN_RUN_PAUSED_FOR_APPROVAL);
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn run_resumed_after_approval_wire_parity() {
         approval_id: "appr-1".into(),
         at: at(),
     };
-    assert_roundtrip(ev, GOLDEN_RUN_RESUMED_AFTER_APPROVAL);
+    assert_roundtrip(&ev, GOLDEN_RUN_RESUMED_AFTER_APPROVAL);
 }
 
 #[test]

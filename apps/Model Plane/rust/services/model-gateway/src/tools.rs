@@ -1,10 +1,10 @@
 //! Wave 10a — handlers for the 5 trivial tool RPCs.
 //!
-//! - WebSearch:       quarry::Client::search proxy
-//! - Sleep:           tokio::time::sleep with server-side cap
-//! - RemoteTrigger:   outbound HTTP webhook + SSRF guard
-//! - SendMessage:     NATS publish via the shared publisher
-//! - SyntheticOutput: deterministic echo (test/dev only)
+//! - `WebSearch`:       `quarry::Client::search` proxy
+//! - Sleep:           `tokio::time::sleep` with server-side cap
+//! - `RemoteTrigger`:   outbound HTTP webhook + SSRF guard
+//! - `SendMessage`:     NATS publish via the shared publisher
+//! - `SyntheticOutput`: deterministic echo (test/dev only)
 //!
 //! Each handler is intentionally < 60 LOC. The corresponding v2 Python
 //! files totalled ~650 LOC; the bulk of that was Pydantic validation
@@ -32,21 +32,27 @@ use crate::state::AppState;
 /// for more than this even if they ask.
 const MAX_SLEEP_MS: i32 = 60_000;
 
-/// Hard cap on RemoteTrigger timeout.
+/// Hard cap on `RemoteTrigger` timeout.
 const MAX_REMOTE_TIMEOUT_MS: i32 = 30_000;
 
-/// Maximum response body we'll return through RemoteTrigger. Beyond
+/// Maximum response body we'll return through `RemoteTrigger`. Beyond
 /// this we truncate. Keeps a misbehaving webhook from blowing the gRPC
 /// 4 MB message limit.
 const MAX_REMOTE_BODY_BYTES: usize = 2 * 1024 * 1024;
 
-/// Allowed NATS subject prefixes for SendMessage. Anything outside
+/// Allowed NATS subject prefixes for `SendMessage`. Anything outside
 /// these namespaces is rejected so a runaway agent can't publish to
 /// system subjects (e.g. `_INBOX.>`, `js.>`).
 const ALLOWED_SUBJECT_PREFIXES: &[&str] = &["agents.", "org.", "notify."];
 
 // ---------------- WebSearch ----------------
 
+/// Runs a web search via the Quarry edge.
+///
+/// # Errors
+///
+/// Returns `Status::unimplemented` if Quarry is not configured, or maps a
+/// Quarry search failure to a `Status`.
 pub async fn handle_web_search(
     state: &AppState,
     req: WebSearchRequest,
@@ -79,6 +85,11 @@ pub async fn handle_web_search(
 
 // ---------------- Sleep ----------------
 
+/// Sleeps for the requested duration (capped at `MAX_SLEEP_MS`).
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub async fn handle_sleep(req: SleepRequest) -> Result<SleepResponse, Status> {
     let requested = req.duration_ms.max(0);
     let actual = requested.min(MAX_SLEEP_MS);
@@ -89,7 +100,7 @@ pub async fn handle_sleep(req: SleepRequest) -> Result<SleepResponse, Status> {
             "Sleep duration capped"
         );
     }
-    tokio::time::sleep(Duration::from_millis(actual as u64)).await;
+    tokio::time::sleep(Duration::from_millis(u64::try_from(actual).unwrap_or(0))).await;
     Ok(SleepResponse {
         request_id: req.request_id,
         actual_ms: actual,
@@ -98,6 +109,13 @@ pub async fn handle_sleep(req: SleepRequest) -> Result<SleepResponse, Status> {
 
 // ---------------- RemoteTrigger ----------------
 
+/// Issues an outbound HTTP request to a remote endpoint (dev-mode helper, SSRF-guarded).
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` for a missing/invalid URL or disallowed scheme,
+/// `Status::permission_denied` for an SSRF-unsafe host, or `Status::internal` if the
+/// HTTP client cannot be built.
 pub async fn handle_remote_trigger(
     req: RemoteTriggerRequest,
 ) -> Result<RemoteTriggerResponse, Status> {
@@ -136,7 +154,7 @@ pub async fn handle_remote_trigger(
         }
     }
 
-    let timeout_ms = req.timeout_ms.clamp(100, MAX_REMOTE_TIMEOUT_MS) as u64;
+    let timeout_ms = u64::try_from(req.timeout_ms.clamp(100, MAX_REMOTE_TIMEOUT_MS)).unwrap_or(100);
     let method = if req.method.is_empty() {
         "POST".to_string()
     } else {
@@ -165,7 +183,7 @@ pub async fn handle_remote_trigger(
         .send()
         .await
         .map_err(|e| Status::unavailable(format!("remote: {e}")))?;
-    let status_code = resp.status().as_u16() as i32;
+    let status_code = i32::from(resp.status().as_u16());
     let final_url = resp.url().to_string();
     let content_type = resp
         .headers()
@@ -252,6 +270,13 @@ fn is_egress_safe(addr: IpAddr) -> bool {
 
 // ---------------- SendMessage ----------------
 
+/// Publishes an agent message envelope to a NATS subject.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` if `subject` is empty, or `Status::permission_denied`
+/// if it is not in the allowed-prefix list. Publish failures are reported in the
+/// response's `published` flag, not as an `Err`.
 pub async fn handle_send_message(
     state: &AppState,
     req: SendMessageRequest,
@@ -265,8 +290,7 @@ pub async fn handle_send_message(
         .any(|p| subject.starts_with(p))
     {
         return Err(Status::permission_denied(format!(
-            "subject must start with one of {:?}",
-            ALLOWED_SUBJECT_PREFIXES
+            "subject must start with one of {ALLOWED_SUBJECT_PREFIXES:?}"
         )));
     }
 
@@ -312,10 +336,15 @@ pub async fn handle_send_message(
 
 // ---------------- SyntheticOutput ----------------
 
+/// Echoes a payload back after an optional delay (test/synthetic helper).
+///
+/// # Errors
+///
+/// Infallible in practice; returns `Result` to match the gRPC handler contract.
 pub async fn handle_synthetic_output(
     req: SyntheticOutputRequest,
 ) -> Result<SyntheticOutputResponse, Status> {
-    let delay_ms = req.delay_ms.clamp(0, MAX_SLEEP_MS) as u64;
+    let delay_ms = u64::try_from(req.delay_ms.clamp(0, MAX_SLEEP_MS)).unwrap_or(0);
     if delay_ms > 0 {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
@@ -404,9 +433,9 @@ mod tests {
     async fn sleep_caps_at_max() {
         let r = handle_sleep(SleepRequest {
             request_id: "t".into(),
-            org_id: "".into(),
+            org_id: String::new(),
             duration_ms: 10_000_000,
-            reason: "".into(),
+            reason: String::new(),
         })
         .await
         .unwrap();
@@ -417,7 +446,7 @@ mod tests {
     async fn synthetic_output_echoes() {
         let r = handle_synthetic_output(SyntheticOutputRequest {
             request_id: "t".into(),
-            org_id: "".into(),
+            org_id: String::new(),
             payload: "hello".into(),
             delay_ms: 0,
         })

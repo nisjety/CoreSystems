@@ -12,7 +12,7 @@
 //! `CompleteStep`) to satisfy Security gate #1 in `docs/VERIFICATION.md`.
 //!
 //! Pattern set extended 2026-05-30 per `docs/capability-ownership-matrix.md`
-//! §G5, adapting the regex coverage of OpenAI Codex's `secrets` crate
+//! §G5, adapting the regex coverage of `OpenAI` Codex's `secrets` crate
 //! (`redact_secrets`, Apache-2.0) — independently reimplemented here. The
 //! additions close the gaps our existing patterns missed: credentials
 //! embedded in DSN/URI userinfo, `KEY=value` assignments inside shell command

@@ -9,7 +9,7 @@ use serde_json::json;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use super::{ModelInfo, ProviderError};
+use super::{narrow_f64, ModelInfo, ProviderError};
 
 const DEFAULT_AZURE_API_VERSION: &str = "2024-11-30";
 const DEFAULT_MODEL: &str = "prebuilt-document";
@@ -73,6 +73,12 @@ impl DocIntelChain {
         self.providers.len()
     }
 
+    /// Analyze a document using the first matching provider in the chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn analyze_document(
         &self,
         req: &AnalyzeDocumentRequest,
@@ -291,13 +297,14 @@ fn analyze_result_to_response(
         .as_array()
         .and_then(|pages| u32::try_from(pages.len()).ok())
         .unwrap_or(0);
-    let confidence = analysis["documents"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|doc| doc["confidence"].as_f64())
-        .next()
-        .unwrap_or(0.0) as f32;
+    let confidence = narrow_f64(
+        analysis["documents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|doc| doc["confidence"].as_f64())
+            .unwrap_or(0.0),
+    );
 
     AnalyzeDocumentResponse {
         status: "succeeded".to_owned(),

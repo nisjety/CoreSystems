@@ -38,7 +38,7 @@ const FEATURE_ENV: &str = "FINETUNE_ENABLED";
 const INTERVAL_ENV: &str = "FINETUNE_POLLER_INTERVAL_SECS";
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 const DEPLOYMENT_NAME_PREFIX: &str = "ft-";
-/// Length of the job_id suffix included in the deployment name. ULIDs are 26
+/// Length of the `job_id` suffix included in the deployment name. ULIDs are 26
 /// chars; we take 12 so the full name fits Azure's 64-char deployment-name
 /// limit even with any future prefix expansion.
 const DEPLOYMENT_NAME_SUFFIX_LEN: usize = 12;
@@ -52,7 +52,7 @@ pub(crate) enum PollerAction {
     /// matches that state. Nothing to write.
     NoOp,
 
-    /// Update status + error_message + (optionally) fine_tuned_model. The
+    /// Update status + `error_message` + (optionally) `fine_tuned_model`. The
     /// `terminal` flag tells `UpdateJobStatus` to stamp `completed_at`.
     UpdateStatus {
         new_status: String,
@@ -62,7 +62,7 @@ pub(crate) enum PollerAction {
     },
 
     /// Job just transitioned to `succeeded` — provision an Azure deployment
-    /// for the new fine-tuned model, then write the deployment_name back
+    /// for the new fine-tuned model, then write the `deployment_name` back
     /// alongside the status flip. `deployment_name` is the value the
     /// worker will use when calling Azure.
     DeployThenUpdate {
@@ -110,13 +110,13 @@ pub(crate) fn decide_action(current: &pb::FinetuneJob, azure: &AzureJobStatus) -
     }
 }
 
-/// Build a deployment name for a fine-tuned model. Stable per job_id so the
+/// Build a deployment name for a fine-tuned model. Stable per `job_id` so the
 /// poller is idempotent — re-running the same job's deploy step produces the
 /// same name (Azure returns 200 on PUT for an existing deployment).
 pub(crate) fn generate_deployment_name(job_id: &str) -> String {
     let suffix: String = job_id
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(DEPLOYMENT_NAME_SUFFIX_LEN)
         .collect::<String>()
         .to_lowercase();
@@ -136,123 +136,164 @@ async fn apply_action(
 ) {
     match action {
         PollerAction::NoOp => {}
-
         PollerAction::UpdateStatus {
             new_status,
             error_message,
             fine_tuned_model,
             terminal,
         } => {
-            let event_type = match new_status.as_str() {
-                "failed" => mp_events::subjects::FINETUNE_EVENT_FAILED,
-                "cancelled" => mp_events::subjects::FINETUNE_EVENT_CANCELLED,
-                _ => mp_events::subjects::FINETUNE_EVENT_TRANSITIONED,
-            };
-            if let Err(e) = client
-                .update_job_status(pb::UpdateFinetuneJobStatusRequest {
-                    job_id: row.job_id.clone(),
-                    org_id: row.org_id.clone(),
-                    status: new_status.clone(),
-                    error_message: error_message.clone(),
-                    fine_tuned_model: fine_tuned_model.clone(),
-                    deployment_name: String::new(),
-                    actual_cost_usd: 0.0,
-                    set_completed: terminal,
-                })
-                .await
-            {
-                warn!(error = %e, job_id = %row.job_id, "poller update_job_status failed");
-                return;
-            }
-            if let Some(p) = publisher {
-                publish_finetune_event(
-                    p,
-                    &row.org_id,
-                    "system",
-                    &row.job_id,
-                    event_type,
-                    json!({
-                        "job_id": row.job_id,
-                        "status": new_status,
-                        "error_message": error_message,
-                        "fine_tuned_model": fine_tuned_model,
-                        "terminal": terminal,
-                    }),
-                )
-                .await;
-            }
+            apply_update_status(
+                client,
+                publisher,
+                row,
+                &new_status,
+                &error_message,
+                &fine_tuned_model,
+                terminal,
+            )
+            .await;
         }
-
         PollerAction::DeployThenUpdate {
             deployment_name,
             fine_tuned_model,
         } => {
-            // Provision deployment first — if it fails the status flip
-            // doesn't happen and the next tick retries. Operators can
-            // inspect via Azure portal or the gateway log.
-            if let Err(e) = azure
-                .create_deployment(&deployment_name, &fine_tuned_model)
-                .await
-            {
-                warn!(
-                    error = %e,
-                    job_id = %row.job_id,
-                    deployment_name = %deployment_name,
-                    "poller create_deployment failed; will retry next tick"
-                );
-                return;
-            }
-
-            if let Err(e) = client
-                .update_job_status(pb::UpdateFinetuneJobStatusRequest {
-                    job_id: row.job_id.clone(),
-                    org_id: row.org_id.clone(),
-                    status: "succeeded".to_owned(),
-                    error_message: String::new(),
-                    fine_tuned_model: fine_tuned_model.clone(),
-                    deployment_name: deployment_name.clone(),
-                    actual_cost_usd: 0.0,
-                    set_completed: true,
-                })
-                .await
-            {
-                warn!(error = %e, job_id = %row.job_id, "poller update_job_status (succeeded) failed");
-                return;
-            }
-            if let Some(p) = publisher {
-                // Two events on succeed: `deployed` (deployment_name set) +
-                // `succeeded` (terminal status). Subscribers interested in
-                // one or the other can filter; the loose coupling is the
-                // point.
-                publish_finetune_event(
-                    p,
-                    &row.org_id,
-                    "system",
-                    &row.job_id,
-                    mp_events::subjects::FINETUNE_EVENT_DEPLOYED,
-                    json!({
-                        "job_id": row.job_id,
-                        "deployment_name": deployment_name,
-                        "fine_tuned_model": fine_tuned_model,
-                    }),
-                )
-                .await;
-                publish_finetune_event(
-                    p,
-                    &row.org_id,
-                    "system",
-                    &row.job_id,
-                    mp_events::subjects::FINETUNE_EVENT_SUCCEEDED,
-                    json!({
-                        "job_id": row.job_id,
-                        "status": "succeeded",
-                        "deployment_name": deployment_name,
-                        "fine_tuned_model": fine_tuned_model,
-                    }),
-                )
-                .await;
-            }
+            apply_deploy_then_update(
+                azure,
+                client,
+                publisher,
+                row,
+                &deployment_name,
+                &fine_tuned_model,
+            )
+            .await;
         }
+    }
+}
+
+/// Persist a non-deploy status transition and emit the matching lifecycle event.
+async fn apply_update_status(
+    client: &mut FinetuneJobsClient<Channel>,
+    publisher: Option<&DynPublisher>,
+    row: &pb::FinetuneJob,
+    new_status: &str,
+    error_message: &str,
+    fine_tuned_model: &str,
+    terminal: bool,
+) {
+    let event_type = match new_status {
+        "failed" => mp_events::subjects::FINETUNE_EVENT_FAILED,
+        "cancelled" => mp_events::subjects::FINETUNE_EVENT_CANCELLED,
+        _ => mp_events::subjects::FINETUNE_EVENT_TRANSITIONED,
+    };
+    if let Err(e) = client
+        .update_job_status(pb::UpdateFinetuneJobStatusRequest {
+            job_id: row.job_id.clone(),
+            org_id: row.org_id.clone(),
+            status: new_status.to_owned(),
+            error_message: error_message.to_owned(),
+            fine_tuned_model: fine_tuned_model.to_owned(),
+            deployment_name: String::new(),
+            actual_cost_usd: 0.0,
+            set_completed: terminal,
+        })
+        .await
+    {
+        warn!(error = %e, job_id = %row.job_id, "poller update_job_status failed");
+        return;
+    }
+    if let Some(p) = publisher {
+        publish_finetune_event(
+            p,
+            &row.org_id,
+            "system",
+            &row.job_id,
+            event_type,
+            json!({
+                "job_id": row.job_id,
+                "status": new_status,
+                "error_message": error_message,
+                "fine_tuned_model": fine_tuned_model,
+                "terminal": terminal,
+            }),
+        )
+        .await;
+    }
+}
+
+/// Provision the deployment first, then flip the job to `succeeded`, emitting
+/// the `deployed` and `succeeded` lifecycle events on success.
+async fn apply_deploy_then_update(
+    azure: &AzureFinetuneClient,
+    client: &mut FinetuneJobsClient<Channel>,
+    publisher: Option<&DynPublisher>,
+    row: &pb::FinetuneJob,
+    deployment_name: &str,
+    fine_tuned_model: &str,
+) {
+    // Provision deployment first — if it fails the status flip
+    // doesn't happen and the next tick retries. Operators can
+    // inspect via Azure portal or the gateway log.
+    if let Err(e) = azure
+        .create_deployment(deployment_name, fine_tuned_model)
+        .await
+    {
+        warn!(
+            error = %e,
+            job_id = %row.job_id,
+            deployment_name = %deployment_name,
+            "poller create_deployment failed; will retry next tick"
+        );
+        return;
+    }
+
+    if let Err(e) = client
+        .update_job_status(pb::UpdateFinetuneJobStatusRequest {
+            job_id: row.job_id.clone(),
+            org_id: row.org_id.clone(),
+            status: "succeeded".to_owned(),
+            error_message: String::new(),
+            fine_tuned_model: fine_tuned_model.to_owned(),
+            deployment_name: deployment_name.to_owned(),
+            actual_cost_usd: 0.0,
+            set_completed: true,
+        })
+        .await
+    {
+        warn!(error = %e, job_id = %row.job_id, "poller update_job_status (succeeded) failed");
+        return;
+    }
+    if let Some(p) = publisher {
+        // Two events on succeed: `deployed` (deployment_name set) +
+        // `succeeded` (terminal status). Subscribers interested in
+        // one or the other can filter; the loose coupling is the
+        // point.
+        publish_finetune_event(
+            p,
+            &row.org_id,
+            "system",
+            &row.job_id,
+            mp_events::subjects::FINETUNE_EVENT_DEPLOYED,
+            json!({
+                "job_id": row.job_id,
+                "deployment_name": deployment_name,
+                "fine_tuned_model": fine_tuned_model,
+            }),
+        )
+        .await;
+        publish_finetune_event(
+            p,
+            &row.org_id,
+            "system",
+            &row.job_id,
+            mp_events::subjects::FINETUNE_EVENT_SUCCEEDED,
+            json!({
+                "job_id": row.job_id,
+                "status": "succeeded",
+                "deployment_name": deployment_name,
+                "fine_tuned_model": fine_tuned_model,
+            }),
+        )
+        .await;
     }
 }
 
@@ -293,6 +334,11 @@ pub(crate) async fn tick(
 /// `publisher` is `Arc<DynPublisher>` so the poller shares the same NATS
 /// connection the routes use — no duplicate connections, no separate
 /// configuration surface.
+///
+/// # Errors
+///
+/// Returns an error only on an unrecoverable failure of the tonic channel itself;
+/// transient per-tick failures are absorbed inside [`tick`].
 pub async fn run(
     azure: AzureFinetuneClient,
     mut client: FinetuneJobsClient<Channel>,
@@ -345,7 +391,7 @@ pub async fn run(
                 if n > 0 {
                     info!(
                         jobs_polled = n,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         "finetune poller tick"
                     );
                 }

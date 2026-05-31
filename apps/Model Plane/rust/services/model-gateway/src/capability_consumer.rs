@@ -89,10 +89,11 @@ pub fn apply(action: &CacheAction, mcp: &McpRegistry) {
 ///
 /// Best-effort and self-contained: if `NATS_URL` is unset or the bus is
 /// unreachable it logs and returns, never breaking the gateway. Spawn once at
-/// startup. capability-core publishes via core NATS (not JetStream), so a core
+/// startup. capability-core publishes via core NATS (not `JetStream`), so a core
 /// subscription with at-most-once delivery is the right fit — a missed removal
 /// is corrected by the next event or a cache TTL, and never causes a write.
 pub async fn run(mcp: McpRegistry) {
+    use futures::StreamExt as _;
     let Ok(url) = std::env::var("NATS_URL") else {
         info!("NATS_URL unset; capability reconcile consumer disabled");
         return;
@@ -115,12 +116,11 @@ pub async fn run(mcp: McpRegistry) {
         subject = CAPABILITY_SUBJECT_FILTER,
         "capability reconcile consumer started"
     );
-    use futures::StreamExt as _;
     while let Some(msg) = sub.next().await {
         match serde_json::from_slice::<Envelope>(&msg.payload) {
             Ok(env) => apply(&reconcile_action(&env), &mcp),
             Err(e) => {
-                warn!(error = %e, subject = %msg.subject, "capability consumer: undecodable envelope")
+                warn!(error = %e, subject = %msg.subject, "capability consumer: undecodable envelope");
             }
         }
     }

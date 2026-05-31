@@ -30,7 +30,7 @@ impl ExecutionService {
         SessionCoreClient::new(self.session_channel.clone())
     }
 
-    /// OrchestrationCoreService is hosted on session-core's gRPC server, so it
+    /// `OrchestrationCoreService` is hosted on session-core's gRPC server, so it
     /// shares the same channel.
     fn orchestration_client(&self) -> OrchestrationCoreServiceClient<tonic::transport::Channel> {
         OrchestrationCoreServiceClient::new(self.session_channel.clone())

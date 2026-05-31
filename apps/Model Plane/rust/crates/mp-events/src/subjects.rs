@@ -37,7 +37,7 @@ impl CompatMode {
             "dual_write" => Self::DualWrite,
             "dual_read" => Self::DualRead,
             "legacy_only" => Self::LegacyOnly,
-            "v1_only" | "" => Self::V1Only,
+            // "v1_only", "", and any unrecognized value all map to V1Only.
             _ => Self::V1Only,
         }
     }
@@ -338,6 +338,10 @@ pub fn translate_new_to_legacy(v1_subject: &str) -> Option<String> {
 ///
 /// Non-canonical subjects (outside `mp.v1.*`) are returned unchanged for all
 /// modes so service-local subjects keep working during cutover.
+///
+/// # Errors
+/// Returns [`SubjectSelectionError::NoLegacyMapping`] when `mode` is
+/// [`CompatMode::LegacyOnly`] but `canonical_subject` has no legacy mirror.
 pub fn subscriber_subjects(
     canonical_subject: &str,
     mode: CompatMode,
