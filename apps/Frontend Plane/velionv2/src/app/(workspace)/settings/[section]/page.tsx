@@ -3,9 +3,9 @@ import { notFound } from "next/navigation";
 import {
   getWorkspaceSettingsSection,
   isWorkspaceSettingsSection,
-  VelionWorkspaceSettingsPage,
   workspaceSettingsSectionIds,
-} from "@/features/settings-v2/components/VelionWorkspaceSettingsPage";
+} from "@/features/settings-v2/lib/settings-sections";
+import { VelionWorkspaceSettingsPage } from "@/features/settings-v2/components/VelionWorkspaceSettingsPage";
 import { VelionProductShell } from "@/features/shell-v2/components/VelionProductShell";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 

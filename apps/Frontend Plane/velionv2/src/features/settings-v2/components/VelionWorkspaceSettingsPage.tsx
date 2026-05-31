@@ -1,5 +1,7 @@
+"use client";
+
 import { Check, ChevronDown, MoreHorizontal } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   VelionButton,
   VelionIconButton,
@@ -8,99 +10,33 @@ import {
   VelionSwitch,
 } from "@/components/ui/velion-ui";
 import { cn } from "@/lib/utils";
+import {
+  useEntitlements,
+  useOrgId,
+} from "@/features/shell-v2/lib/control-plane-provider";
+import type { ControlPlaneEntitlements } from "@/lib/control-plane/context-types";
+import {
+  workspaceSettingsSectionIds,
+  workspaceSettingsSections,
+  getWorkspaceSettingsSection,
+  isWorkspaceSettingsSection,
+  type WorkspaceSettingsSectionId,
+  type SectionDetail,
+} from "@/features/settings-v2/lib/settings-sections";
 
-export const workspaceSettingsSectionIds = [
-  "workspace",
-  "members",
-  "billing",
-  "sso",
-  "org-security",
-  "integrations",
-] as const;
-
-export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number];
-
-type SectionDetail = {
-  id: WorkspaceSettingsSectionId;
-  label: string;
-  title: string;
-  description: string;
-  saveLabel: string;
-};
-
-export const workspaceSettingsSections: SectionDetail[] = [
-  // Scope notes:
-  // Must have: workspace name, URL, primary domain, data region, default locale, business hours, admin owner, audit contact.
-  // Nice to have: brand avatar, customer-facing assets, formatting defaults, DNS guidance, region migration readiness checks.
-  {
-    id: "workspace",
-    label: "Workspace",
-    title: "Workspace settings",
-    description: "Manage shared identity, domains, regional defaults, and operational ownership.",
-    saveLabel: "Save workspace",
-  },
-  // Scope notes:
-  // Must have: invite members, role table, seat status, pending invites, remove access, ownership transfer.
-  // Nice to have: role templates, temporary access expiry, bulk invite/import, SSO team mapping.
-  {
-    id: "members",
-    label: "Members & roles",
-    title: "Members & roles",
-    description: "Control who has access, what they can do, and how seats are used.",
-    saveLabel: "Save members",
-  },
-  // Scope notes:
-  // Must have: current plan, renewal date, upgrade path, seat usage, conversation usage, payment method, invoices, usage caps.
-  // Nice to have: spend forecast, cost-center tags, anomaly alerts, invoice downloads, tax settings.
-  {
-    id: "billing",
-    label: "Billing",
-    title: "Billing",
-    description: "Review plan, usage, payment method, invoices, and spending controls.",
-    saveLabel: "Save billing",
-  },
-  // Scope notes:
-  // Must have: provider selection, verified domain, enforcement mode, SCIM token, connection testing.
-  // Nice to have: attribute mapping, JIT provisioning, break-glass owner account, IdP metadata exchange.
-  {
-    id: "sso",
-    label: "SSO",
-    title: "SSO",
-    description: "Configure organization sign-in, identity providers, domain enforcement, and provisioning.",
-    saveLabel: "Save SSO",
-  },
-  // Scope notes:
-  // Must have: MFA requirements, verified-domain sign-in, session duration, device review, admin audit log.
-  // Nice to have: IP allowlist, anomaly alerts, export controls, retention and legal hold policy.
-  {
-    id: "org-security",
-    label: "Org security",
-    title: "Org security",
-    description: "Set organization-wide security requirements, session policy, and audit controls.",
-    saveLabel: "Save security",
-  },
-  // Scope notes:
-  // Must have: connected app status, owner, OAuth scope review, sync health, retry, disconnect, credential rotation.
-  // Nice to have: field mapping, webhook logs, sandbox mode, per-integration data retention controls.
-  {
-    id: "integrations",
-    label: "Integrations",
-    title: "Integrations",
-    description: "Connect shared support, CRM, communication, and automation systems.",
-    saveLabel: "Save integrations",
-  },
-];
+export type { WorkspaceSettingsSectionId };
+export { workspaceSettingsSectionIds, workspaceSettingsSections, isWorkspaceSettingsSection, getWorkspaceSettingsSection };
 
 const sectionDetails = Object.fromEntries(workspaceSettingsSections.map((section) => [section.id, section])) as Record<
   WorkspaceSettingsSectionId,
   SectionDetail
 >;
 
-const memberRows = [
-  { name: "Author Name", email: "author@velion.ai", role: "Owner", status: "Active" },
-  { name: "Mina Larsen", email: "mina@velion.ai", role: "Admin", status: "Active" },
-  { name: "Ola Hansen", email: "ola@velion.ai", role: "Agent", status: "Invited" },
-];
+type StatusCard = { label: string; value: string; detail: string; tone?: "ok" | "warn" | "neutral" };
+
+type LiveMember = { userId: string; name?: string; email: string; role: string; status: string };
+
+// memberRows removed — members are fetched live from /api/org/orgs/{orgId}/members
 
 const integrationRows = [
   { name: "Intercom", detail: "Customer conversations", status: "Connect" },
@@ -136,16 +72,9 @@ const sectionStatusCards: Record<
     { label: "Data region", value: "Europe", detail: "All new workspace data is stored in EU infrastructure.", tone: "neutral" },
     { label: "Routing owner", value: "Support ops", detail: "Default inbox ownership is assigned.", tone: "ok" },
   ],
-  members: [
-    { label: "Seats", value: "3 / 5", detail: "2 seats available before plan upgrade.", tone: "ok" },
-    { label: "Pending invites", value: "1", detail: "Ola Hansen has not accepted yet.", tone: "warn" },
-    { label: "Access review", value: "Due in 21d", detail: "Owner review is scheduled for next month.", tone: "neutral" },
-  ],
-  billing: [
-    { label: "Current plan", value: "Free", detail: "Upgrade available when seats or usage grow.", tone: "neutral" },
-    { label: "Monthly usage", value: "18k", detail: "72% of the conversation allowance used.", tone: "warn" },
-    { label: "Payment method", value: "Missing", detail: "Required before upgrading to a paid plan.", tone: "warn" },
-  ],
+  // members and billing status cards are rendered by their respective live-data sections
+  members: [],
+  billing: [],
   sso: [
     { label: "Provider", value: "Google", detail: "Metadata loaded from Google Workspace.", tone: "ok" },
     { label: "SCIM", value: "Ready", detail: "Provisioning token generated but not enforced.", tone: "neutral" },
@@ -180,11 +109,7 @@ const roleRows = [
   { role: "Viewer", access: "Reports and read-only customer context", members: "0" },
 ];
 
-const invoiceRows = [
-  { invoice: "May 2026 estimate", amount: "$0", status: "Draft" },
-  { invoice: "Apr 2026", amount: "$0", status: "Paid" },
-  { invoice: "Mar 2026", amount: "$0", status: "Paid" },
-];
+// invoiceRows removed — no invoice-list endpoint exists; replaced with empty state
 
 const ssoMappingRows = [
   { attribute: "email", source: "primaryEmail", destination: "User email" },
@@ -192,11 +117,16 @@ const ssoMappingRows = [
   { attribute: "role", source: "customSchema.velionRole", destination: "Workspace role" },
 ];
 
-const auditRows = [
-  { event: "MFA requirement enabled", actor: "Author Name", time: "Today, 09:42" },
-  { event: "Zendesk token rotated", actor: "Mina Larsen", time: "Yesterday, 16:10" },
-  { event: "Billing email changed", actor: "Author Name", time: "May 20, 2026" },
-];
+type AuditEvent = {
+  id?: string;
+  action?: string;
+  actor?: string;
+  outcome?: string;
+  resource?: string;
+  ipAddress?: string;
+  requestId?: string;
+  createdAt?: string;
+};
 
 const webhookRows = [
   { endpoint: "Zendesk ticket sync", status: "200 OK", lastRun: "8 min ago" },
@@ -204,20 +134,46 @@ const webhookRows = [
   { endpoint: "CRM customer upsert", status: "Paused", lastRun: "2 days ago" },
 ];
 
-export function isWorkspaceSettingsSection(value: string): value is WorkspaceSettingsSectionId {
-  return workspaceSettingsSectionIds.includes(value as WorkspaceSettingsSectionId);
-}
-
-export function getWorkspaceSettingsSection(value: WorkspaceSettingsSectionId) {
-  return sectionDetails[value];
-}
-
 export function VelionWorkspaceSettingsPage({
   section = "workspace",
 }: {
   section?: WorkspaceSettingsSectionId;
 }) {
   const details = sectionDetails[section];
+  const entitlements = useEntitlements();
+  const orgId = useOrgId();
+
+  // Build live status cards for billing and members; fall back to static cards
+  // for sections that have no live data source yet.
+  const billingStatusCards: StatusCard[] = [
+    {
+      label: "Current plan",
+      value: entitlements?.plan ?? "—",
+      detail: entitlements?.subscriptionStatus
+        ? `Status: ${entitlements.subscriptionStatus}`
+        : "Loading plan information…",
+      tone: "neutral",
+    },
+    {
+      label: "Credits",
+      value: entitlements != null ? String(entitlements.credits) : "—",
+      detail: "Available credits on this plan",
+      tone: "neutral",
+    },
+    {
+      label: "Payment method",
+      value: "—",
+      detail: "Manage payment in billing settings.",
+      tone: "neutral",
+    },
+  ];
+
+  const liveStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
+    ...sectionStatusCards,
+    billing: billingStatusCards,
+    // members status grid is rendered inline by MembersSection (needs async count)
+    members: sectionStatusCards.members,
+  };
 
   return (
     <div className="relative h-full overflow-y-auto bg-[#F2F2F1] text-[#111111] [scrollbar-gutter:stable] dark:bg-[#111214] dark:text-[#F7F8F8]">
@@ -238,10 +194,12 @@ export function VelionWorkspaceSettingsPage({
             </p>
           </div>
 
-          <StatusGrid cards={sectionStatusCards[section]} />
+          {liveStatusCards[section].length > 0 && (
+            <StatusGrid cards={liveStatusCards[section]} />
+          )}
 
           <section id={details.id} className="mt-10 scroll-mt-24">
-            <WorkspaceSettingsSection section={section} />
+            <WorkspaceSettingsSection section={section} orgId={orgId} entitlements={entitlements} />
           </section>
 
           <div className="relative z-30 mt-10 flex items-center justify-end gap-3 border-t border-[#E8E8EA] pt-6 dark:border-white/10">
@@ -264,12 +222,20 @@ export function VelionWorkspaceSettingsPage({
   );
 }
 
-function WorkspaceSettingsSection({ section }: { section: WorkspaceSettingsSectionId }) {
+function WorkspaceSettingsSection({
+  section,
+  orgId,
+  entitlements,
+}: {
+  section: WorkspaceSettingsSectionId;
+  orgId: string | null;
+  entitlements: ControlPlaneEntitlements | null;
+}) {
   switch (section) {
     case "members":
-      return <MembersSection />;
+      return <MembersSection orgId={orgId} />;
     case "billing":
-      return <BillingSection />;
+      return <BillingSection entitlements={entitlements} />;
     case "sso":
       return <SsoSection />;
     case "org-security":
@@ -380,7 +346,43 @@ function WorkspaceSection() {
   );
 }
 
-function MembersSection() {
+function MembersSection({ orgId }: { orgId: string | null }) {
+  // When orgId is null (unauthenticated / pre-onboarding), skip the fetch entirely.
+  // loading starts true only when we expect a fetch; false immediately when there is no orgId.
+  const [members, setMembers] = useState<LiveMember[]>([]);
+  const [loading, setLoading] = useState(orgId != null);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!orgId) return;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    fetch(`/api/org/orgs/${orgId}/members`, {
+      credentials: "include",
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load members (${res.status})`);
+        return res.json() as Promise<{ members: LiveMember[]; count: number }>;
+      })
+      .then((data) => {
+        setMembers(data.members ?? []);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setError("Could not load members.");
+        setLoading(false);
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [orgId]);
+
   return (
     <>
       <SectionHeader title="Members & roles" description="Invite teammates, assign access, and review seat status." />
@@ -398,15 +400,24 @@ function MembersSection() {
         />
       </div>
       <div className="overflow-hidden rounded-[18px] border border-[#E1E2E4] bg-white/42 dark:border-white/10 dark:bg-white/5">
-        {memberRows.map((member) => (
-          <div key={member.email} className="grid gap-3 border-b border-[#E8E8EA] px-5 py-4 last:border-b-0 sm:grid-cols-[1fr_120px_96px_32px] sm:items-center dark:border-white/10">
+        {loading && (
+          <p className="px-5 py-6 text-[13px] text-[#737780] dark:text-[#A9ADB6]">Loading members…</p>
+        )}
+        {!loading && error && (
+          <p className="px-5 py-6 text-[13px] text-[#737780] dark:text-[#A9ADB6]">{error}</p>
+        )}
+        {!loading && !error && members.length === 0 && (
+          <p className="px-5 py-6 text-[13px] text-[#737780] dark:text-[#A9ADB6]">No members found.</p>
+        )}
+        {!loading && !error && members.map((member) => (
+          <div key={member.userId} className="grid gap-3 border-b border-[#E8E8EA] px-5 py-4 last:border-b-0 sm:grid-cols-[1fr_120px_96px_32px] sm:items-center dark:border-white/10">
             <div className="min-w-0">
-              <p className="truncate text-[13px] font-medium text-[#111111] dark:text-white">{member.name}</p>
+              <p className="truncate text-[13px] font-medium text-[#111111] dark:text-white">{member.name ?? member.email}</p>
               <p className="mt-1 truncate text-[12px] text-[#737780] dark:text-[#A9ADB6]">{member.email}</p>
             </div>
             <span className="text-[13px] font-medium text-[#4D5159] dark:text-[#CACDD4]">{member.role}</span>
             <span className="text-[12px] text-[#737780] dark:text-[#A9ADB6]">{member.status}</span>
-            <VelionIconButton aria-label={`More actions for ${member.name}`} className="text-[#777B84] hover:bg-white dark:hover:bg-white/10">
+            <VelionIconButton aria-label={`More actions for ${member.name ?? member.email}`} className="text-[#777B84] hover:bg-white dark:hover:bg-white/10">
               <MoreHorizontal className="size-4" strokeWidth={1.7} />
             </VelionIconButton>
           </div>
@@ -433,17 +444,25 @@ function MembersSection() {
   );
 }
 
-function BillingSection() {
+function BillingSection({ entitlements }: { entitlements: ControlPlaneEntitlements | null }) {
+  const plan = entitlements?.plan ?? "—";
+  const status = entitlements?.subscriptionStatus ?? "—";
+  const credits = entitlements != null ? String(entitlements.credits) : "—";
+
+  // Derive a seat quota from the entitlements quota map if present
+  const seatLimit = entitlements?.quotas?.["seats"] ?? null;
+  const seatDisplay = seatLimit != null ? `— / ${seatLimit}` : "—";
+
   return (
     <>
       <SectionHeader title="Plan & usage" description="Review plan, usage, payment method, and invoices." />
       <div className="grid gap-4 sm:grid-cols-3">
-        <Metric label="Plan" value="Free" detail="Upgrade available" />
-        <Metric label="Seats" value="3 / 5" detail="2 seats open" />
-        <Metric label="Messages" value="18k" detail="This month" />
+        <Metric label="Plan" value={plan} detail={`Status: ${status}`} />
+        <Metric label="Seats" value={seatDisplay} detail={seatLimit != null ? `Up to ${seatLimit} seats on this plan` : "Seat quota unavailable"} />
+        <Metric label="Credits" value={credits} detail="Available on this plan" />
       </div>
       <div className="mt-6 grid gap-6 sm:grid-cols-2">
-        <SettingsField id="billing-email" label="Billing email" type="email" defaultValue="billing@aquatiq.no" />
+        <SettingsField id="billing-email" label="Billing email" type="email" placeholder="billing@yourcompany.com" />
         <SettingsSelect
           id="usage-cap"
           label="Usage cap"
@@ -461,27 +480,33 @@ function BillingSection() {
           description="Workspace invoice history and downloadable billing records."
           actionLabel="Download CSV"
         >
-          <div className="divide-y divide-[#E8E8EA] dark:divide-white/10">
-            {invoiceRows.map((invoice) => (
-              <DataRow
-                key={invoice.invoice}
-                primary={invoice.invoice}
-                secondary={invoice.status}
-                meta={invoice.amount}
-              />
-            ))}
-          </div>
+          <p className="py-3 text-[13px] text-[#737780] dark:text-[#A9ADB6]">
+            Ingen fakturaer ennå — invoices will appear here once a paid plan is active.
+          </p>
         </FeaturePanel>
         <FeaturePanel
           title="Spend controls"
-          description="Plan limits, usage alerts, and overage behavior for paid plans."
+          description="Plan limits and quota details for this workspace."
           actionLabel="Configure"
         >
-          <div className="space-y-3 text-[13px] text-[#565B65] dark:text-[#B5BAC4]">
-            <p className="flex items-center justify-between gap-4"><span>Forecast</span><strong className="font-semibold text-[#111111] dark:text-white">$42 / mo</strong></p>
-            <p className="flex items-center justify-between gap-4"><span>Alert threshold</span><strong className="font-semibold text-[#111111] dark:text-white">80%</strong></p>
-            <p className="flex items-center justify-between gap-4"><span>Overage action</span><strong className="font-semibold text-[#111111] dark:text-white">Notify admins</strong></p>
-          </div>
+          {entitlements != null ? (
+            <div className="space-y-3 text-[13px] text-[#565B65] dark:text-[#B5BAC4]">
+              <p className="flex items-center justify-between gap-4">
+                <span>Plan</span>
+                <strong className="font-semibold text-[#111111] dark:text-white">{plan}</strong>
+              </p>
+              <p className="flex items-center justify-between gap-4">
+                <span>Status</span>
+                <strong className="font-semibold text-[#111111] dark:text-white">{status}</strong>
+              </p>
+              <p className="flex items-center justify-between gap-4">
+                <span>Credits</span>
+                <strong className="font-semibold text-[#111111] dark:text-white">{credits}</strong>
+              </p>
+            </div>
+          ) : (
+            <p className="py-3 text-[13px] text-[#737780] dark:text-[#A9ADB6]">Loading plan details…</p>
+          )}
         </FeaturePanel>
       </div>
     </>
@@ -549,6 +574,72 @@ function SsoSection() {
   );
 }
 
+function RecentSecurityEvents() {
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    fetch("/api/v1/audit", {
+      credentials: "include",
+      signal: controller.signal,
+    })
+      .then((res) => res.json() as Promise<{ success: boolean; data: AuditEvent[] }>)
+      .then((json) => {
+        setEvents(Array.isArray(json.data) ? json.data : []);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setEvents([]);
+        setLoading(false);
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, []);
+
+  if (loading) {
+    return (
+      <p className="py-3 text-[13px] text-[#737780] dark:text-[#A9ADB6]">
+        Loading security events…
+      </p>
+    );
+  }
+
+  if (events.length === 0) {
+    return (
+      <p className="py-3 text-[13px] text-[#737780] dark:text-[#A9ADB6]">
+        Ingen sikkerhetshendelser ennå
+      </p>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-[#E8E8EA] dark:divide-white/10">
+      {events.map((event, idx) => {
+        const dateStr =
+          event.createdAt && !isNaN(new Date(event.createdAt).getTime())
+            ? new Date(event.createdAt).toLocaleString()
+            : null;
+        const secondary = [event.actor, event.ipAddress].filter(Boolean).join(" · ");
+        return (
+          <DataRow
+            key={event.id ?? event.requestId ?? String(idx)}
+            primary={`${event.action ?? "Event"}${event.outcome ? ` — ${event.outcome}` : ""}`}
+            secondary={secondary || ""}
+            meta={dateStr ?? ""}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function OrgSecuritySection() {
   return (
     <>
@@ -577,16 +668,7 @@ function OrgSecuritySection() {
         actionLabel="Open audit log"
         className="mt-8"
       >
-        <div className="divide-y divide-[#E8E8EA] dark:divide-white/10">
-          {auditRows.map((row) => (
-            <DataRow
-              key={`${row.event}-${row.time}`}
-              primary={row.event}
-              secondary={row.actor}
-              meta={row.time}
-            />
-          ))}
-        </div>
+        <RecentSecurityEvents />
       </FeaturePanel>
     </>
   );

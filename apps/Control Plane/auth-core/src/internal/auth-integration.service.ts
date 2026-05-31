@@ -91,6 +91,8 @@ export class AuthIntegrationService {
     userAgent?: string;
     provider?: string;
     name?: string;
+    /** Active org at sign-in time — undefined at raw sign-in before org selection */
+    activeOrganizationId?: string;
   }): Promise<void> {
     this.logger.log(`Handling user login: ${loginData.email}`);
 
@@ -126,6 +128,7 @@ export class AuthIntegrationService {
         ipAddress: loginData.ipAddress,
         userAgent: loginData.userAgent,
         provider: loginData.provider,
+        activeOrganizationId: loginData.activeOrganizationId,
       });
 
       // Publish session created event
@@ -216,6 +219,8 @@ export class AuthIntegrationService {
     email: string;
     sessionId: string;
     reason?: 'manual' | 'timeout' | 'force';
+    /** Active org at sign-out time — present when user had an active org in this session */
+    activeOrganizationId?: string;
   }): Promise<void> {
     this.logger.log(`Handling user logout: ${logoutData.email}`);
 
@@ -226,6 +231,7 @@ export class AuthIntegrationService {
         email: logoutData.email,
         sessionId: logoutData.sessionId,
         reason: logoutData.reason || 'manual',
+        activeOrganizationId: logoutData.activeOrganizationId,
       });
 
       // Publish session ended event

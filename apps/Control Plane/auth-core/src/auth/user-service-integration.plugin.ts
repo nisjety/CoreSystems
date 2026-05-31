@@ -118,6 +118,12 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
               ipAddress: ipHeader,
               userAgent,
               provider: 'email',
+              // Better Auth does NOT set activeOrganizationId at raw sign-in time;
+              // the org plugin sets it only after explicit org selection.
+              // Pass it through anyway so if the session already carries it
+              // (re-authentication flow), the audit event fires correctly.
+              activeOrganizationId:
+                (newSession.session as any).activeOrganizationId ?? undefined,
             });
           }),
         },
@@ -232,6 +238,11 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
                 ipAddress: ipHeader,
                 userAgent,
                 provider: account.providerId || 'oauth',
+                // activeOrganizationId is not set by Better Auth during the OAuth
+                // callback — org selection happens post-login. Pass through in case
+                // a re-authentication carries it on an existing session.
+                activeOrganizationId:
+                  (newSession.session as any).activeOrganizationId ?? undefined,
               });
             }
           }),
@@ -254,11 +265,16 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
             if (!sessionId) return;
             const user = ctx.context.user;
             if (!user) return;
+            // ctx.context.session is the session being terminated; it carries
+            // activeOrganizationId when the user had an active org in this session.
+            const activeOrganizationId =
+              (ctx.context.session as any)?.activeOrganizationId ?? undefined;
             await authIntegrationService.handleUserLogout({
               userId: user.id,
               email: user.email,
               sessionId,
               reason: 'manual',
+              activeOrganizationId,
             });
           }),
         },

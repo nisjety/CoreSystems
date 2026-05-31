@@ -1,13 +1,14 @@
-// Package api wires the two read endpoints. Both require the caller to
-// scope by `org_id`. In Phase A · A1.6 the auth check is a shared
-// internal-api-key header (same pattern as the other Control Plane
-// services); A1.3/A1.2 enforce mode replaces it with the auth-core JWT
-// once Wave 3 lands.
+// Package api wires the read endpoints and the HTTP ingest endpoint.
+// Both read and write endpoints require the caller to scope by `org_id`.
+// In Phase A · A1.6 the auth check is a shared internal-api-key header
+// (same pattern as the other Control Plane services); A1.3/A1.2 enforce
+// mode replaces it with the auth-core JWT once Wave 3 lands.
 package api
 
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 
+	"github.com/triodelab/controlplane/audit-core/internal/events"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
 )
 
@@ -34,6 +36,7 @@ func (a *API) Mount(r chi.Router) {
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(a.internalAuth)
 		r.Get("/audit", a.listAudit)
+		r.Post("/audit", a.ingestAudit)
 		r.Get("/usage", a.listUsage)
 		r.Get("/usage/summary", a.summariseUsage)
 	})
@@ -134,6 +137,34 @@ func (a *API) summariseUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "meta": map[string]any{
 		"count": len(rows),
 	}, "error": nil})
+}
+
+// ingestAudit accepts a single AuditEvent JSON body from an internal
+// service caller (e.g. the velionv2 BFF) and persists it via the same
+// path the NATS subscriber uses. Validation and normalization
+// (occurred_at default, outcome default "ok", required-field checks)
+// are performed by AuditEvent.Validate(), which DecodeAudit already
+// calls — so we reuse that same normalise+validate function here to
+// keep both paths identical.
+func (a *API) ingestAudit(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		return
+	}
+	ev, err := events.DecodeAudit(body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if _, err := a.store.InsertAudit(r.Context(), ev); err != nil {
+		log.Error().Err(err).Str("org_id", ev.OrgID).Msg("ingestAudit: insert failed")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "insert failed"})
+		return
+	}
+	log.Info().Str("org_id", ev.OrgID).Str("plane", ev.Plane).Str("event", ev.Event).
+		Msg("ingestAudit: persisted")
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

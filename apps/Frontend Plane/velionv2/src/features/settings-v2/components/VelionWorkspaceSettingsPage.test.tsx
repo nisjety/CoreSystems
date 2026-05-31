@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { VelionWorkspaceSettingsPage, workspaceSettingsSections } from "@/features/settings-v2/components/VelionWorkspaceSettingsPage";
+import { VelionWorkspaceSettingsPage } from "@/features/settings-v2/components/VelionWorkspaceSettingsPage";
+import { workspaceSettingsSections } from "@/features/settings-v2/lib/settings-sections";
 
 describe("VelionWorkspaceSettingsPage", () => {
   it("renders a single workspace settings page with mocked workspace controls, not planning notes", () => {
@@ -21,9 +22,7 @@ describe("VelionWorkspaceSettingsPage", () => {
     render(<VelionWorkspaceSettingsPage section="members" />);
 
     expect(screen.getByRole("heading", { name: /members & roles/i, level: 1 })).toBeVisible();
-    expect(screen.getByText("2 seats available before plan upgrade.")).toBeVisible();
     expect(screen.getByRole("textbox", { name: /invite by email/i })).toBeVisible();
-    expect(screen.getByText("Mina Larsen")).toBeVisible();
     expect(screen.getByRole("heading", { name: /role templates/i })).toBeVisible();
     expect(screen.getByText("Full workspace, billing, and security")).toBeVisible();
     expect(screen.queryByRole("textbox", { name: /workspace name/i })).not.toBeInTheDocument();
@@ -37,7 +36,7 @@ describe("VelionWorkspaceSettingsPage", () => {
     expect(screen.getByRole("switch", { name: /require mfa for admins/i })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("combobox", { name: /session duration/i })).toHaveValue("30-days");
     expect(screen.getByRole("heading", { name: /recent security events/i })).toBeVisible();
-    expect(screen.getByText("Zendesk token rotated")).toBeVisible();
+    expect(screen.getByText(/loading security events/i)).toBeVisible();
   });
 
   it("defines one route-level page for every settings sidebar tab", () => {
@@ -54,7 +53,7 @@ describe("VelionWorkspaceSettingsPage", () => {
 
     expect(screen.getByRole("heading", { name: /billing/i, level: 1 })).toBeVisible();
     expect(screen.getByRole("heading", { name: /invoice history/i })).toBeVisible();
-    expect(screen.getByText("May 2026 estimate")).toBeVisible();
+    expect(screen.getByText(/ingen fakturaer ennå/i)).toBeVisible();
     expect(screen.getByRole("button", { name: /download csv/i })).toBeVisible();
     expect(screen.queryByText("Current plan, renewal date, and upgrade path")).not.toBeInTheDocument();
 

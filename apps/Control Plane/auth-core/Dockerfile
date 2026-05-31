@@ -6,17 +6,14 @@
 # ── Builder ──────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-    NO_UPDATE_NOTIFIER=1
-
 # Use corepack for zero-install pnpm (faster, cached by Docker layer)
-RUN corepack enable && corepack prepare pnpm@10.34.1 --activate
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 WORKDIR /app
 
 # Install deps first — only invalidated when lockfile changes
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --config.update-notifier=false
+RUN pnpm install --frozen-lockfile
 
 # Copy source and build
 COPY . .
@@ -26,20 +23,14 @@ RUN mkdir -p dist && \
 RUN if [ ! -d "dist/src" ]; then echo "ERROR: Build failed completely"; exit 1; fi
 
 # Prune dev-dependencies so we only copy prod deps to runtime
-RUN pnpm prune --prod --ignore-scripts --config.update-notifier=false
+RUN pnpm prune --prod --ignore-scripts
 
 # ── Runtime ──────────────────────────────────────────────────
 FROM node:20-alpine
 
 # Add postgresql-client BEFORE copying application files
 # (keeps this layer cached when app code changes)
-RUN set -e; \
-    if ! apk add --no-cache --quiet postgresql-client \
-        > /tmp/apk-add.log 2>&1; then \
-        cat /tmp/apk-add.log; \
-        exit 1; \
-    fi; \
-    rm -f /tmp/apk-add.log; \
+RUN apk add --no-cache postgresql-client && \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app

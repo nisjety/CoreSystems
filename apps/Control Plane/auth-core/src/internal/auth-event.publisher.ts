@@ -60,6 +60,8 @@ export interface UserRegisteredEvent extends BaseEvent {
     timezone?: string;
   };
   metadata?: Record<string, any>;
+  /** Active org at sign-up time — gates velion.audit.v1.control.sign_up emission */
+  activeOrganizationId?: string;
 }
 
 export interface UserLoginEvent extends BaseEvent {
@@ -71,6 +73,8 @@ export interface UserLoginEvent extends BaseEvent {
   ipAddress?: string;
   userAgent?: string;
   provider?: string;
+  /** Active org at sign-in time — gates velion.audit.v1.control.sign_in emission */
+  activeOrganizationId?: string;
 }
 
 export interface UserLogoutEvent extends BaseEvent {
@@ -79,6 +83,8 @@ export interface UserLogoutEvent extends BaseEvent {
   email: string;
   sessionId: string;
   reason?: 'manual' | 'timeout' | 'force';
+  /** Active org at sign-out time — gates velion.audit.v1.control.sign_out emission */
+  activeOrganizationId?: string;
 }
 
 export interface UserCreatedEvent extends BaseEvent {
@@ -485,6 +491,16 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       scopes_granted: data.scopesGranted,
       trace_id: traceId,
     });
+
+    // Velion audit — no-ops when org_id is absent (brand-new users pre-onboarding)
+    this.publishVelionAudit({
+      org_id: data.activeOrganizationId,
+      user_id: data.userId,
+      event: 'sign_up',
+      subject: data.email,
+      outcome: 'ok',
+      details: { provider: data.provider },
+    });
   }
 
   /**
@@ -508,6 +524,18 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       provider: data.provider,
       trace_id: traceId,
     });
+
+    // Velion audit — no-ops when org_id is absent (returning users without an active org)
+    this.publishVelionAudit({
+      org_id: data.activeOrganizationId,
+      user_id: data.userId,
+      event: 'sign_in',
+      subject: data.email,
+      outcome: 'ok',
+      details: { provider: data.provider, session_id: data.sessionId },
+      ip_address: data.ipAddress,
+      user_agent: data.userAgent,
+    });
   }
 
   /**
@@ -522,6 +550,16 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       type: 'auth.user.logout',
       traceId,
     } as UserLogoutEvent);
+
+    // Velion audit — no-ops when org_id is absent
+    this.publishVelionAudit({
+      org_id: data.activeOrganizationId,
+      user_id: data.userId,
+      event: 'sign_out',
+      subject: data.email,
+      outcome: 'ok',
+      details: { session_id: data.sessionId, reason: data.reason },
+    });
   }
 
   /**
@@ -722,6 +760,57 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   private getSubjectForEvent(eventType: string): string {
     // Convert auth.user.registered to auth.user.registered
     return eventType;
+  }
+
+  /**
+   * Publish an audit event to velion.audit.v1.control.<event> via SharedNatsService.
+   *
+   * org_id is REQUIRED by audit-core. This method silently no-ops when org_id is
+   * absent so callers don't need to guard.
+   *
+   * Events that reach audit-core when org_id is present:
+   *   - twofa_enable / twofa_disable / twofa_verify  (session.activeOrganizationId via audit-plugin)
+   *   - session_revoke  (same)
+   *   - sign_in  (data.activeOrganizationId passed by caller — returning users with active org)
+   *   - sign_out (data.activeOrganizationId — same)
+   *   - sign_up  (data.activeOrganizationId — rare; brand-new users will have undefined and no-op)
+   *
+   * Events that silently no-op (org_id undefined):
+   *   - sign_in / sign_out / sign_up for users with no active org (pre-onboarding or single-org
+   *     users whose org context isn't carried by the caller). Still published on auth.> / user.>
+   *     JetStream subjects regardless.
+   */
+  publishVelionAudit(payload: {
+    org_id: string | undefined;
+    user_id?: string;
+    actor_role?: string;
+    event: string;
+    subject?: string;
+    resource_id?: string;
+    outcome: 'ok' | 'denied' | 'error';
+    details?: Record<string, unknown>;
+    request_id?: string;
+    ip_address?: string;
+    user_agent?: string;
+  }): void {
+    if (!payload.org_id || !this.sharedNats) return;
+    const natsSubject = `velion.audit.v1.control.${payload.event}`;
+    this.sharedNats.publishPlain(natsSubject, {
+      occurred_at: new Date().toISOString(),
+      org_id: payload.org_id,
+      user_id: payload.user_id,
+      actor_role: payload.actor_role,
+      plane: 'control',
+      event: payload.event,
+      subject: payload.subject,
+      resource_id: payload.resource_id,
+      outcome: payload.outcome,
+      details: payload.details,
+      request_id: payload.request_id,
+      ip_address: payload.ip_address,
+      user_agent: payload.user_agent,
+    });
+    this.logger.debug(`velion.audit → ${natsSubject}`);
   }
 
   /**

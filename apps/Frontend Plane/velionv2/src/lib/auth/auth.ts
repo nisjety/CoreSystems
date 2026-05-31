@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { twoFactor } from "better-auth/plugins/two-factor";
+import { passkey } from "@better-auth/passkey";
 import { createAuthDatabase } from "@/lib/auth/database";
 import {
   authRuntimePlan,
@@ -55,6 +56,11 @@ export const auth = betterAuth({
         amount: 10,
         length: 10,
       },
+    }),
+    passkey({
+      rpID: process.env.PASSKEY_RP_ID || "localhost",
+      rpName: process.env.PASSKEY_RP_NAME || "Velion",
+      origin: process.env.PASSKEY_ORIGIN || getAuthBaseUrl(),
     }),
     nextCookies(),
   ],

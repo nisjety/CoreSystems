@@ -5,6 +5,14 @@ const nextConfig: NextConfig = {
   typedRoutes: true,
   poweredByHeader: false,
   compress: true,
+  experimental: {
+    optimizePackageImports: [
+      "lucide-react",
+      "zod",
+      "@tanstack/react-virtual",
+    ],
+    turbopackFileSystemCacheForDev: true,
+  },
   images: {
     formats: ["image/avif", "image/webp"],
     minimumCacheTTL: 3600,

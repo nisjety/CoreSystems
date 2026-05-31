@@ -55,12 +55,7 @@ func main() {
 
 	st := store.New(pool)
 
-	natsOpts := []nats.Option{
-		nats.Name("audit-core"),
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2 * time.Second),
-	}
+	natsOpts := []nats.Option{nats.Name("audit-core")}
 	if cfg.NATSToken != "" {
 		natsOpts = append(natsOpts, nats.Token(cfg.NATSToken))
 	}

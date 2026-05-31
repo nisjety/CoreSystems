@@ -8,15 +8,18 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "next typegen && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
+    "@better-auth/passkey": "^1.6.12",
+    "@simplewebauthn/browser": "^13.3.0",
+    "@simplewebauthn/server": "^13.3.1",
     "@tanstack/react-virtual": "^3.13.26",
-    "better-auth": "^1.6.11",
+    "better-auth": "^1.6.12",
     "clsx": "^2.1.1",
     "lucide-react": "^1.16.0",
     "next": "16.2.6",
@@ -45,5 +48,11 @@
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.7"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.15",
+      "ws": "8.20.1"
+    }
   }
 }

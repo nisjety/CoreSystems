@@ -24,9 +24,9 @@ describe("VelionSettingsPage", () => {
     expect(screen.getByRole("switch", { name: /sound notifications/i })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText("Google")).toBeVisible();
     expect(screen.getByRole("switch", { name: /profile visibility/i })).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByText(/only your personal profile and account preferences/i)).toBeVisible();
+    expect(screen.getByText(/personal profile, preferences, and security/i)).toBeVisible();
     expect(screen.getByRole("button", { name: /save profile/i })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: /^security$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^security$/i })).toBeVisible();
     expect(screen.queryByRole("heading", { name: /delete account/i })).not.toBeInTheDocument();
   });
 
