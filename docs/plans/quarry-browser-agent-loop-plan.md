@@ -1,6 +1,6 @@
 # Plan (P7) — Wire Model Plane Agentic Browser Loop → Quarry
 
-**Status:** 🔧 IN PROGRESS — Phase A shipped + tested (7/7). Driver decided: **chromiumoxide (self-host)**, feature-gated. Phase B fully blueprinted + ready to implement.
+**Status:** ✅ **P7 COMPLETE (A–F)** — real integrations, no mocks. quarry-edge lib+bin compile clean with the real chromiumoxide driver; execution-core full suite green (58 lib tests + integration). Only the live E2E *run* needs a stack (Chrome + inference-core).
 **Date:** 2026-05-30
 **Scope:** Model Plane v1 (`execution-core`) · Quarry-v2 (`quarry-edge`, `quarry-runtime`, `quarry-browser`, `quarry-core`)
 **Parent:** Phase 7 of `quarry-dataplane-integration-fix-plan.md` (deferred there).
@@ -8,6 +8,15 @@
 ---
 
 ## Implementation log — 2026-05-30
+
+### ✅ Final state — A–F DONE (real integrations)
+- **B (Quarry endpoint):** `quarry-edge/src/agent_routes.rs` — `POST /v1/agent/runs` · `/v1/agent/runs/{id}/step` · `DELETE`; AppState gains `agent_driver` (real `ChromiumoxideDriver`, default feature `browser-agent`) + `agent_runs` (run→`tokio::Mutex<RunEntry>` map); per-step `ObservationRunner`; lease + `AgentStarted`/`AgentCompleted` events; caller-supplied profile reuse. Wired in `main.rs`/`routes.rs`/`state.rs`. **lib+bin compile clean, no warnings.**
+- **C (async loop):** `run_browser_agent_loop` is now async — real `start_run` → loop `step` → `observation_from_wire` → planner feedback → `close_run`. Routed via `runtime_loop::execute_step` (async path, like `shell`). **58/58 green.**
+- **D (LLM brain):** `execution-core/src/llm_planner.rs` — REAL inference-core gRPC (`InferenceCore.Infer`, client already in `mp-contracts`, no codegen), JSON-Schema-constrained next-action; `decide_next_action` gate wraps the deterministic planner. Gated `QUARRY_BROWSER_AGENT_LLM`. **58/58 green.**
+- **E (safety):** domain allow-list enforced at dispatch (Model Plane) + server-side (Quarry); ZDR + `max_cost_usd` plumbed `PlanConfig`→constraints→Quarry; approval pause via `WaitingApproval`; SSRF via Quarry guards.
+- **F (real E2E):** `execution-core/tests/browser_agent_e2e.rs` — real MP→Quarry→chromiumoxide (+ optional real LLM) path, `#[ignore]` + env-gated; **compiles** in the suite. **Running it needs a live stack** (quarry-edge w/ Chrome + inference-core + JWT).
+- **Env flags:** `QUARRY_BROWSER_AGENT_ENABLED`, `QUARRY_EDGE_URL`, `QUARRY_EDGE_TOKEN`, `QUARRY_BROWSER_AGENT_LLM`, `INFERENCE_CORE_URL`/`INFERENCE_CORE_ADDR`, `QUARRY_BROWSER_AGENT_MODEL`.
+- **New files:** `execution-core/src/quarry_agent.rs`, `execution-core/src/llm_planner.rs`, `execution-core/tests/browser_agent_e2e.rs`, `quarry-edge/src/agent_routes.rs`.
 
 ### ✅ Phase A — DONE (Model Plane wire client)
 - New `execution-core/src/quarry_agent.rs`: mirrored wire DTOs (`AgentAction` internally tagged `{"type":..}`, `AgentConstraints`, `BrowserObservation` + `DomSummary`/`InteractiveElement`/`ConsoleLine`/`NetworkEntry`, `ZdrMode`), `QuarryAgentClient` (HTTP `start_run`/`step`/`close_run`; bearer + `X-Quarry-Org`; env-gated `from_env` via `QUARRY_BROWSER_AGENT_ENABLED` + `QUARRY_EDGE_URL` + `QUARRY_EDGE_TOKEN`), internal⇄wire mapping (`action_to_wire`, `observation_from_wire`, policy-denial→`Blocked`).

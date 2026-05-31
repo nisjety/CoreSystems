@@ -6,6 +6,7 @@ pub mod executor;
 pub mod grpc;
 pub mod hook;
 pub mod http_health;
+pub mod llm_planner;
 pub mod permission;
 pub mod policy;
 pub mod quarry_agent;

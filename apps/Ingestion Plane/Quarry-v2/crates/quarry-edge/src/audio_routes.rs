@@ -166,6 +166,18 @@ pub async fn audio_unsupported(
     audio(state, claims, body).await
 }
 
+impl std::fmt::Debug for AudioRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AudioRequest::Tts(_) => write!(f, "AudioRequest::Tts(..)"),
+            AudioRequest::Stt(_) => write!(f, "AudioRequest::Stt(..)"),
+            AudioRequest::Bare { url } => {
+                write!(f, "AudioRequest::Bare {{ url: {:?} }}", url)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,18 +219,6 @@ mod tests {
         match r {
             AudioRequest::Bare { url } => assert!(url.is_none()),
             other => panic!("expected Bare(None), got {:?}", other),
-        }
-    }
-}
-
-impl std::fmt::Debug for AudioRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AudioRequest::Tts(_) => write!(f, "AudioRequest::Tts(..)"),
-            AudioRequest::Stt(_) => write!(f, "AudioRequest::Stt(..)"),
-            AudioRequest::Bare { url } => {
-                write!(f, "AudioRequest::Bare {{ url: {:?} }}", url)
-            }
         }
     }
 }

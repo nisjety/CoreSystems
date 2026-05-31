@@ -72,4 +72,11 @@ pub struct AppState {
     /// return 501.
     #[cfg(feature = "postgres-queue")]
     pub baseline_store: Option<Arc<quarry_runtime::postgres_baseline_store::PostgresBaselineStore>>,
+    /// P7 — real chromiumoxide-backed browser driver for the agentic loop.
+    /// Acquires a leased session per `/v1/agent/runs`; one action per `/step`.
+    #[cfg(feature = "browser-agent")]
+    pub agent_driver: Arc<dyn quarry_browser::BrowserDriver>,
+    /// P7 — live agent runs keyed by run_id (session + observation ctx + lease).
+    #[cfg(feature = "browser-agent")]
+    pub agent_runs: crate::agent_routes::AgentRuns,
 }

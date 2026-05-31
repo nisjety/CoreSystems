@@ -92,7 +92,7 @@ pub fn adapt(output: &NormalizedOutput) -> FirecrawlResponse {
                 description: None,
                 language: output.metadata.lang.clone(),
                 source_url: output.url.requested.clone(),
-                status_code: output.status as u16,
+                status_code: output.status,
                 quarry_fingerprint: Some(output.fingerprint.clone()),
             },
         },

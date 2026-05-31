@@ -66,6 +66,13 @@ tracing-opentelemetry = { workspace = true }
 sqlx = { workspace = true, optional = true }
 
 [features]
+# P7 — agentic browser loop. ON by default: pulls the real chromiumoxide
+# CDP driver into the edge so the /v1/agent/* endpoints drive a live
+# browser session. Build `--no-default-features` to drop Chrome from the
+# build (the agent routes then compile to a no-op router).
+default = ["browser-agent"]
+browser-agent = ["quarry-browser/chromiumoxide"]
+
 # P2 / cluster #grpc — propagates to quarry-runtime so the gRPC clients
 # (GrpcDataPlaneClient + GrpcIngestAdapter + GrpcGrantValidator) compile
 # into the binary. Off by default to keep the default image small;

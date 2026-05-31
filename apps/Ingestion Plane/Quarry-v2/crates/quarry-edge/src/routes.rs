@@ -197,6 +197,9 @@ pub fn router(state: AppState) -> Router {
             "/v1/schedules/:id/backfill",
             post(crate::schedule_routes::backfill_schedule),
         )
+        // P7 — agentic browser loop (real chromiumoxide). No-op router when
+        // the `browser-agent` feature is disabled. Inherits `require_auth`.
+        .merge(crate::agent_routes::agent_router())
         .layer(middleware::from_fn(crate::auth::require_auth));
 
     // Cap request bodies at 1 MB. Largest legit payload is /v1/batch
@@ -205,7 +208,7 @@ pub fn router(state: AppState) -> Router {
     // /v1/scrape and pin a request thread in serde decoding. axum's
     // default body-limit middleware is permissive; this layer is
     // explicit and tunable.
-    let body_limit = RequestBodyLimitLayer::new(1 * 1024 * 1024);
+    let body_limit = RequestBodyLimitLayer::new(1024 * 1024);
 
     Router::new()
         .merge(public)
@@ -892,6 +895,10 @@ mod tests {
             event_history: None,
             #[cfg(feature = "postgres-queue")]
             baseline_store: None,
+            #[cfg(feature = "browser-agent")]
+            agent_driver: Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new()),
+            #[cfg(feature = "browser-agent")]
+            agent_runs: crate::agent_routes::new_runs(),
         }
     }
 

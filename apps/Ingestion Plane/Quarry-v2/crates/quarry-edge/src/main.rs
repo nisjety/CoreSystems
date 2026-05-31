@@ -22,6 +22,7 @@ use quarry_runtime::tls_driver::TlsProfileDriver;
 use quarry_security::preflight::DefaultEngine;
 use quarry_tls::TlsProfile;
 
+mod agent_routes;
 mod answer_routes;
 mod api_error;
 mod audio_routes;
@@ -649,6 +650,15 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "http3"))]
     let http3_driver: Option<std::sync::Arc<dyn quarry_runtime::Driver>> = None;
 
+    // P7 — real chromiumoxide CDP driver for the agentic browser loop, plus
+    // the live run→session map. Acquire fails at runtime if no Chrome is
+    // reachable; that is a real (not mocked) driver, simply unconfigured.
+    #[cfg(feature = "browser-agent")]
+    let agent_driver: Arc<dyn quarry_browser::BrowserDriver> =
+        Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new());
+    #[cfg(feature = "browser-agent")]
+    let agent_runs = agent_routes::new_runs();
+
     let app_state = state::AppState {
         driver: default_driver,
         drivers,
@@ -699,6 +709,10 @@ async fn main() -> anyhow::Result<()> {
         scheduler: Some(std::sync::Arc::new(
             quarry_runtime::HostScheduler::with_defaults(),
         )),
+        #[cfg(feature = "browser-agent")]
+        agent_driver,
+        #[cfg(feature = "browser-agent")]
+        agent_runs,
     };
 
     let app = routes::router(app_state);

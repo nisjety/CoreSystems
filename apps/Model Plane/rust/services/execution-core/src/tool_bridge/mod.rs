@@ -28,7 +28,8 @@ pub fn execute(tool_name: &str, tool_input: &str) -> ToolExecution {
             output: String::new(),
             error: Some("tool execution failed".to_owned()),
         },
-        "browser_agent" => execute_browser_agent(tool_input),
+        // `browser_agent` is async (drives the live Quarry loop); it is
+        // dispatched from the async `runtime_loop::execute_step`, not here.
         "wiki_propose_edit" => execute_wiki_propose_edit(tool_input),
         "wiki_lint" => execute_wiki_lint(tool_input),
         _ => ToolExecution {
@@ -87,7 +88,7 @@ fn execute_wiki_lint(tool_input: &str) -> ToolExecution {
     }
 }
 
-fn execute_browser_agent(tool_input: &str) -> ToolExecution {
+pub(crate) async fn execute_browser_agent(tool_input: &str) -> ToolExecution {
     let config: Result<BrowserAgentInput, _> = serde_json::from_str(tool_input);
     match config {
         Ok(input) => {
@@ -102,9 +103,16 @@ fn execute_browser_agent(tool_input: &str) -> ToolExecution {
                 allowed_domains: input.allowed_domains.unwrap_or_default(),
                 stop_criteria: input.stop_criteria.unwrap_or_default(),
                 require_approval: input.require_approval.unwrap_or(false),
+                max_cost_usd: input.max_cost_usd,
+                zdr: input.zdr.unwrap_or(false),
             };
+            // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
+            // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
+            let client = crate::quarry_agent::QuarryAgentClient::from_env();
+            let planner = crate::llm_planner::LlmPlanner::from_env();
             let (status, _observations, summary) =
-                browser_agent::run_browser_agent_loop(plan_config);
+                browser_agent::run_browser_agent_loop(plan_config, client.as_ref(), planner.as_ref())
+                    .await;
             ToolExecution {
                 output: format!("status={} summary={}", status.as_str(), summary),
                 error: if status == browser_agent::PlanStatus::Failed {
@@ -133,4 +141,6 @@ struct BrowserAgentInput {
     allowed_domains: Option<Vec<String>>,
     stop_criteria: Option<String>,
     require_approval: Option<bool>,
+    max_cost_usd: Option<f64>,
+    zdr: Option<bool>,
 }

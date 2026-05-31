@@ -10,6 +10,10 @@ use crate::tool_bridge;
 /// the deterministic `tool_bridge` stub. Input is JSON `{"program","args"}`.
 const SHELL_TOOL: &str = "shell";
 
+/// Tool name that drives the live agentic browser loop through Quarry
+/// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
+const BROWSER_AGENT_TOOL: &str = "browser_agent";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepOutcome {
     pub status: String,
@@ -83,6 +87,8 @@ pub async fn execute_step(
     // the same approval/deny policy.
     let exec = if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
+    } else if tool_name == BROWSER_AGENT_TOOL {
+        tool_bridge::execute_browser_agent(tool_input).await
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };

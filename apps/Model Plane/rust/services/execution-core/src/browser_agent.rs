@@ -111,6 +111,10 @@ pub struct PlanConfig {
     pub allowed_domains: Vec<String>,
     pub stop_criteria: String,
     pub require_approval: bool,
+    /// Per-run cost ceiling (USD) forwarded to Quarry's `AgentConstraints`.
+    pub max_cost_usd: Option<f64>,
+    /// Zero-data-retention: when true, Quarry must not persist page content.
+    pub zdr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -289,54 +293,153 @@ pub fn plan_next_action(
     })
 }
 
-/// Execute the full browser-agent loop synchronously (for integration with execution-core tool bridge).
-pub fn run_browser_agent_loop(config: PlanConfig) -> (PlanStatus, Vec<BrowserObservation>, String) {
+/// Execute the full browser-agent loop, dispatching each action to Quarry's
+/// `/v1/agent/*` endpoint and feeding the observation back into the planner.
+///
+/// `client` is `None` when the browser agent is unconfigured
+/// (`QUARRY_BROWSER_AGENT_ENABLED`/`QUARRY_EDGE_URL` unset) — the loop then
+/// fails fast rather than silently no-op'ing. The planner (`plan_next_action`)
+/// is still deterministic (always `Observe`) until the LLM decider lands; the
+/// dispatch path itself is real.
+pub async fn run_browser_agent_loop(
+    config: PlanConfig,
+    client: Option<&crate::quarry_agent::QuarryAgentClient>,
+    planner: Option<&crate::llm_planner::LlmPlanner>,
+) -> (PlanStatus, Vec<BrowserObservation>, String) {
     let mut plan = AgentPlan::new(config);
-
     info!(plan_id = %plan.config.plan_id, "browser-agent loop started");
 
-    // NOTE: until Quarry is wired (Phase 7) this dispatches a single step and
-    // returns — there is no second iteration yet, so this is intentionally
-    // straight-line rather than a `loop` (a `loop` here would never actually
-    // loop and trips the deny-by-default `clippy::never_loop`). When the Quarry
-    // action/observation round-trip lands, restore a loop that re-evaluates
-    // `plan_next_action` after each observation until a terminal state.
-    let last_obs = plan.observations.last().cloned();
-    let result = plan_next_action(&mut plan, last_obs.as_ref());
+    let Some(client) = client else {
+        plan.status = PlanStatus::Failed;
+        let summary =
+            "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL"
+                .to_owned();
+        warn!(plan_id = %plan.config.plan_id, "{summary}");
+        return (plan.status, plan.observations, summary);
+    };
 
-    let summary = match result {
-        PlanStepResult::Action(action) => {
-            info!(
-                plan_id = %plan.config.plan_id,
-                step = plan.current_step,
-                action_type = action.action_type.as_str(),
-                "dispatching browser action"
+    let constraints = crate::quarry_agent::AgentConstraints {
+        max_steps: u32::try_from(plan.config.max_steps).unwrap_or(0),
+        allowed_domains: plan.config.allowed_domains.clone(),
+        max_runtime_s: if plan.config.max_runtime_s > 0 {
+            Some(u32::try_from(plan.config.max_runtime_s).unwrap_or(0))
+        } else {
+            None
+        },
+        max_cost_usd: plan.config.max_cost_usd,
+    };
+    let zdr = plan.config.zdr;
+
+    // Acquire a leased browser session for this run.
+    let run = match client
+        .start_run(&plan.config.org_id, &constraints, zdr, None)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            plan.status = PlanStatus::Failed;
+            warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent start_run failed");
+            return (
+                plan.status,
+                plan.observations,
+                format!("browser-agent start_run failed: {e}"),
             );
-            // In production this would send the action to Quarry via gRPC/NATS
-            // and wait for the observation response. For now we simulate a timeout
-            // after dispatching since Quarry is not wired yet.
-            plan.status = PlanStatus::Completed;
-            format!(
-                "browser-agent plan {} dispatched {} steps; awaiting Quarry wiring",
-                plan.config.plan_id, plan.current_step
-            )
-        }
-        PlanStepResult::Completed(reason) => {
-            info!(plan_id = %plan.config.plan_id, reason = %reason, "browser-agent loop completed");
-            reason
-        }
-        PlanStepResult::WaitingApproval => {
-            info!(plan_id = %plan.config.plan_id, "browser-agent paused for approval");
-            "paused for approval".to_owned()
-        }
-        PlanStepResult::Failed(error) => {
-            warn!(plan_id = %plan.config.plan_id, error = %error, "browser-agent loop failed");
-            error
         }
     };
 
+    let mut pending: Option<BrowserObservation> = None;
+    let summary = loop {
+        let last = pending.take();
+        let result = decide_next_action(&mut plan, last.as_ref(), planner).await;
+        match result {
+            PlanStepResult::Action(action) => {
+                // Enforce the domain allow-list at dispatch for navigations
+                // (defense in depth alongside Quarry's server-side check).
+                if matches!(action.action_type, ActionType::Goto)
+                    && !plan.is_domain_allowed(&action.url)
+                {
+                    plan.status = PlanStatus::Failed;
+                    break format!("navigation blocked by allow-list: {}", action.url);
+                }
+                info!(
+                    plan_id = %plan.config.plan_id,
+                    step = plan.current_step,
+                    action_type = action.action_type.as_str(),
+                    "dispatching browser action to quarry"
+                );
+                let wire_action = crate::quarry_agent::action_to_wire(&action);
+                match client
+                    .step(
+                        &run.run_id,
+                        &run.lease_id,
+                        &plan.config.org_id,
+                        wire_action,
+                        &constraints,
+                        zdr,
+                    )
+                    .await
+                {
+                    Ok(wire_obs) => {
+                        pending = Some(crate::quarry_agent::observation_from_wire(
+                            &wire_obs,
+                            &action.action_id,
+                            &plan.config.grant_id,
+                        ));
+                    }
+                    Err(e) => {
+                        plan.status = PlanStatus::Failed;
+                        break format!("browser-agent step failed: {e}");
+                    }
+                }
+            }
+            PlanStepResult::Completed(reason) => break reason,
+            PlanStepResult::WaitingApproval => break "paused for approval".to_owned(),
+            PlanStepResult::Failed(error) => break error,
+        }
+    };
+
+    // Always release the leased session.
+    if let Err(e) = client.close_run(&run.run_id, &plan.config.org_id).await {
+        warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent close_run failed");
+    }
+
+    info!(plan_id = %plan.config.plan_id, status = plan.status.as_str(), "browser-agent loop finished");
     let observations = plan.observations.clone();
     (plan.status, observations, summary)
+}
+
+/// Decide the next step: run the deterministic gate (`plan_next_action` —
+/// terminal/limit/stop-criteria/approval checks + step bookkeeping), then, when
+/// it yields an action and an LLM planner is configured, let the model choose
+/// the real action from the latest observation. Falls back to the deterministic
+/// `Observe` action when the planner is absent or errors.
+async fn decide_next_action(
+    plan: &mut AgentPlan,
+    last_observation: Option<&BrowserObservation>,
+    planner: Option<&crate::llm_planner::LlmPlanner>,
+) -> PlanStepResult {
+    let gate = plan_next_action(plan, last_observation);
+    let PlanStepResult::Action(candidate) = gate else {
+        return gate;
+    };
+    let Some(planner) = planner else {
+        return PlanStepResult::Action(candidate);
+    };
+    match planner.next_action(&plan.config, last_observation).await {
+        Ok(Some(action)) => PlanStepResult::Action(BrowserAction {
+            action_id: candidate.action_id,
+            grant_id: candidate.grant_id,
+            ..action
+        }),
+        Ok(None) => {
+            plan.status = PlanStatus::Completed;
+            PlanStepResult::Completed("agent reported task complete".to_owned())
+        }
+        Err(e) => {
+            warn!(error = %e, "llm planner failed; falling back to deterministic observe");
+            PlanStepResult::Action(candidate)
+        }
+    }
 }
 
 /// In-memory plan store for tracking active browser-agent plans.
@@ -398,6 +501,8 @@ mod tests {
             allowed_domains: vec!["example.com".to_owned()],
             stop_criteria: String::new(),
             require_approval: false,
+            max_cost_usd: None,
+            zdr: false,
         }
     }
 

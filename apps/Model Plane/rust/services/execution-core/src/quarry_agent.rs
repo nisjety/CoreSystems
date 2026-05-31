@@ -6,15 +6,21 @@
 //! JSON wire contract via local DTOs (the same approach `model-gateway`'s Fetch
 //! client takes) rather than importing `quarry-core`.
 //!
-//! Transport — HTTP per-step against `quarry-edge` (added in Phase B):
+//! Transport — HTTP per-step against `quarry-edge` (`/v1/agent/*`):
 //!   POST   /v1/agent/runs             → start a run (acquire a browser lease)
 //!   POST   /v1/agent/runs/{id}/step   → execute one `AgentAction`, return observation
 //!   DELETE /v1/agent/runs/{id}        → release the run / lease
 //!
-//! The DTOs intentionally match `quarry-core::contracts` field-for-field
-//! (`AgentAction` is internally tagged: `{"type":"navigate","url":...}`) so the
-//! Quarry endpoint can deserialize straight into its existing `AgentLoop`
-//! machinery.
+//! Quarry wraps every response in `Envelope { data, meta, error }`, so the
+//! client unwraps `.data`. `AgentAction` is internally tagged
+//! (`{"type":"navigate","url":...}`) to match quarry-core exactly; `zdr` is a
+//! bool because the edge converts it via `ZdrMode::from(bool)`.
+
+// Error enums are self-evident (`AgentClientError`); `# Errors` prose would be
+// noise. `doc_markdown` over-flags wire tokens like `snake_case`. Both are
+// low-signal pedantic lints — scoped-allowed here (cf. workspace-allowed
+// `must_use_candidate`).
+#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
 use std::time::Duration;
 
@@ -25,20 +31,6 @@ use crate::browser_agent::{ActionType, BrowserAction, BrowserObservation, Observ
 // ---------------------------------------------------------------------------
 // Wire DTOs — mirror of quarry-core::contracts (JSON-compatible).
 // ---------------------------------------------------------------------------
-
-/// Zero-data-retention mode. Mirrors quarry-core `ZdrMode` (`"off"` / `"on"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ZdrMode {
-    Off,
-    On,
-}
-
-impl Default for ZdrMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
 
 /// A single browser action. Internally tagged on `type`, snake_case — matches
 /// quarry-core `AgentAction` exactly.
@@ -79,10 +71,10 @@ pub struct StartRunRequest {
     pub constraints: AgentConstraints,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
-    pub zdr: ZdrMode,
+    pub zdr: bool,
 }
 
-/// `POST /v1/agent/runs` response body.
+/// `POST /v1/agent/runs` response payload (inside the envelope `data`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartRunResponse {
     pub run_id: String,
@@ -90,7 +82,8 @@ pub struct StartRunResponse {
 }
 
 /// `POST /v1/agent/runs/{id}/step` request body. Mirrors quarry-core
-/// `AgentActionRequest`.
+/// `AgentActionRequest` (the edge uses the run's stored constraints/zdr; the
+/// extra fields are accepted and ignored server-side).
 #[derive(Debug, Clone, Serialize)]
 pub struct StepRequest {
     pub run_id: String,
@@ -99,7 +92,7 @@ pub struct StepRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
     pub constraints: AgentConstraints,
-    pub zdr: ZdrMode,
+    pub zdr: bool,
 }
 
 /// Observation returned by a step. Mirrors quarry-core `BrowserObservation`.
@@ -160,6 +153,16 @@ pub struct NetworkEntry {
     pub status: u16,
     #[serde(default)]
     pub content_type: Option<String>,
+}
+
+/// Quarry's REST envelope (`{ data, meta, error }`). We only need `data` +
+/// `error`; `meta` is ignored.
+#[derive(Debug, Clone, Deserialize)]
+struct WireEnvelope<T> {
+    #[serde(default = "Option::default")]
+    data: Option<T>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +289,9 @@ impl QuarryAgentClient {
         if !enabled {
             return None;
         }
-        let base_url = std::env::var("QUARRY_EDGE_URL").ok().filter(|s| !s.is_empty())?;
+        let base_url = std::env::var("QUARRY_EDGE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())?;
         let token = std::env::var("QUARRY_EDGE_TOKEN").unwrap_or_default();
         Self::new(base_url, token).ok()
     }
@@ -309,7 +314,7 @@ impl QuarryAgentClient {
         &self,
         org_id: &str,
         constraints: &AgentConstraints,
-        zdr: ZdrMode,
+        zdr: bool,
         profile_id: Option<String>,
     ) -> Result<StartRunResponse, AgentClientError> {
         let body = StartRunRequest {
@@ -337,7 +342,7 @@ impl QuarryAgentClient {
         org_id: &str,
         action: AgentAction,
         constraints: &AgentConstraints,
-        zdr: ZdrMode,
+        zdr: bool,
     ) -> Result<WireObservation, AgentClientError> {
         let body = StepRequest {
             run_id: run_id.to_owned(),
@@ -364,10 +369,7 @@ impl QuarryAgentClient {
     /// Release a run and its browser lease. Best-effort; non-2xx is surfaced.
     pub async fn close_run(&self, run_id: &str, org_id: &str) -> Result<(), AgentClientError> {
         let req = self
-            .auth(
-                self.http
-                    .delete(self.url(&format!("/v1/agent/runs/{run_id}"))),
-            )
+            .auth(self.http.delete(self.url(&format!("/v1/agent/runs/{run_id}"))))
             .header("x-quarry-org", org_id);
         let resp = req
             .send()
@@ -385,20 +387,31 @@ impl QuarryAgentClient {
         }
     }
 
+    /// Decode a Quarry `Envelope<T>` response, returning the unwrapped `data`.
     async fn decode<T: for<'de> Deserialize<'de>>(
         resp: reqwest::Response,
     ) -> Result<T, AgentClientError> {
         let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             return Err(AgentClientError::Status {
                 status: status.as_u16(),
-                body,
+                body: text,
             });
         }
-        resp.json::<T>()
-            .await
-            .map_err(|e| AgentClientError::Decode(e.to_string()))
+        let env: WireEnvelope<T> =
+            serde_json::from_str(&text).map_err(|e| AgentClientError::Decode(e.to_string()))?;
+        if let Some(err) = env.error {
+            return Err(AgentClientError::Status {
+                status: status.as_u16(),
+                body: err.to_string(),
+            });
+        }
+        env.data
+            .ok_or_else(|| AgentClientError::Decode("envelope contained no data".into()))
     }
 }
 
@@ -442,12 +455,6 @@ mod tests {
             serde_json::to_value(AgentAction::GetContent).unwrap()["type"],
             "get_content"
         );
-    }
-
-    #[test]
-    fn zdr_serializes_lowercase() {
-        assert_eq!(serde_json::to_value(ZdrMode::On).unwrap(), "on");
-        assert_eq!(serde_json::to_value(ZdrMode::Off).unwrap(), "off");
     }
 
     #[test]
@@ -513,22 +520,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_run_posts_and_parses() {
+    async fn start_run_posts_and_unwraps_envelope() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/agent/runs"))
             .and(header("authorization", "Bearer tok"))
             .and(header("x-quarry-org", "org_1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "run_id": "run_abc",
-                "lease_id": "lease_xyz",
+                "data": { "run_id": "run_abc", "lease_id": "lease_xyz" },
+                "meta": { "request_id": "req_1" },
+                "error": null,
             })))
             .mount(&server)
             .await;
 
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         let resp = client
-            .start_run("org_1", &AgentConstraints::default(), ZdrMode::Off, None)
+            .start_run("org_1", &AgentConstraints::default(), false, None)
             .await
             .unwrap();
         assert_eq!(resp.run_id, "run_abc");
@@ -536,17 +544,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn step_posts_action_and_parses_observation() {
+    async fn step_posts_action_and_unwraps_observation() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/agent/runs/run_abc/step"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "run_id": "run_abc",
-                "step": 1,
-                "url": "https://example.com",
-                "title": "Example",
-                "dom_summary": {"node_count": 3, "interactive_elements": [], "text_snippet": "hi"},
-                "observed_at": "2026-05-30T00:00:00Z",
+                "data": {
+                    "run_id": "run_abc",
+                    "step": 1,
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "dom_summary": {"node_count": 3, "interactive_elements": [], "text_snippet": "hi"},
+                    "observed_at": "2026-05-30T00:00:00Z",
+                },
+                "meta": { "request_id": "req_2" },
+                "error": null,
             })))
             .mount(&server)
             .await;
@@ -559,7 +571,7 @@ mod tests {
                 "org_1",
                 AgentAction::GetContent,
                 &AgentConstraints::default(),
-                ZdrMode::Off,
+                false,
             )
             .await
             .unwrap();
@@ -588,7 +600,7 @@ mod tests {
                     url: "https://evil.io".into(),
                 },
                 &AgentConstraints::default(),
-                ZdrMode::Off,
+                false,
             )
             .await
             .unwrap_err();
