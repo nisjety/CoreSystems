@@ -12,13 +12,19 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/natsx"
+	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
+	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -73,6 +79,34 @@ func main() {
 
 	pol := policy.New(reg)
 
+	// --- §4.3 reconcile event publisher -------------------------------------
+	// capability-core is the registry system-of-record; on a create/update it
+	// emits mp.v1.capability.<kind>.<action> so cache holders (the gateway's
+	// runtime registries) stay coherent. The gateway-side consumer is built
+	// (model-gateway capability_consumer); this is the emit half. Best-effort
+	// and guarded: with NATS_URL unset the publisher is nil and reconcile.Emit
+	// no-ops, so the service runs cleanly without a bus. ModeV1Only because
+	// capability events are v1-native (no legacy mapping).
+	var recPub publisher.EventPublisher
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		nc, nerr := nats.Connect(natsURL)
+		if nerr != nil {
+			slog.Warn("NATS connect failed; capability reconcile events disabled", "error", nerr)
+		} else {
+			defer nc.Close()
+			recPub = publisher.NewNATSPublisher(natsx.NewPublisher(nc, natsx.ModeV1Only))
+			slog.Info("capability reconcile events enabled", "nats_url", natsURL)
+
+			// G7 learning-review trigger: on RUN_COMPLETED, review the session
+			// and persist learned skills. Needs session-core + inference-core;
+			// guarded on their addrs (absent → consumer not started, service
+			// still runs). The decode→review→persist core is unit-tested
+			// (sessionreview.HandleRunCompleted); this wiring is e2e-verified
+			// only against the running stack.
+			startLearningConsumer(ctx, nc)
+		}
+	}
+
 	// --- HTTP server on :8085 -----------------------------------------------
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -89,10 +123,12 @@ func main() {
 	if capStore != nil {
 		api.NewCapabilitiesHandler(capStore).Register(mux)
 	}
-	api.NewSkillsHandler(pool).Register(mux)
-	api.NewMCPHandler(pool).Register(mux)
-	api.NewRoutingHandler(pool).Register(mux)
-	api.NewSafetyHandler(pool).Register(mux)
+	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
+	// recPub makes reconcile.Emit a no-op).
+	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(mux)
+	api.NewMCPHandler(pool).WithPublisher(recPub).Register(mux)
+	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(mux)
+	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(mux)
 	api.NewMemoryHandler(pool).Register(mux)
 	api.NewTasksHandler(pool).Register(mux)
 	api.NewCronHandler(pool).Register(mux)
@@ -127,4 +163,39 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+// startLearningConsumer wires the G7 learning-review trigger: dial session-core
+// + inference-core and spawn the RUN_COMPLETED consumer (sessionreview). Guarded
+// on SESSION_CORE_ADDR + INFERENCE_CORE_ADDR — absent, it is a no-op so the
+// service runs without the learning loop. Best-effort: dial failures are logged,
+// never fatal. The decode→review→persist core is unit-tested; this dial/subscribe
+// wiring is e2e-verified only against the running stack.
+func startLearningConsumer(ctx context.Context, nc *nats.Conn) {
+	sessAddr := os.Getenv("SESSION_CORE_ADDR")
+	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
+	if sessAddr == "" || infAddr == "" {
+		slog.Info("learning-review consumer disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
+		return
+	}
+	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
+	sessConn, err := grpc.NewClient(sessAddr, creds)
+	if err != nil {
+		slog.Warn("learning consumer: dial session-core failed", "error", err)
+		return
+	}
+	infConn, err := grpc.NewClient(infAddr, creds)
+	if err != nil {
+		slog.Warn("learning consumer: dial inference-core failed", "error", err)
+		_ = sessConn.Close()
+		return
+	}
+	sc := mpv1.NewSessionCoreClient(sessConn)
+	ic := mpv1.NewInferenceCoreClient(infConn)
+	model := os.Getenv("LEARNING_REVIEW_MODEL") // empty -> llmreviewer.DefaultModel
+	go func() {
+		if rerr := sessionreview.RunConsumer(ctx, nc, sc, ic, model); rerr != nil {
+			slog.Warn("learning-review consumer stopped", "error", rerr)
+		}
+	}()
 }

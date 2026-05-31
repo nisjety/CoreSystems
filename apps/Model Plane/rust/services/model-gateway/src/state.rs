@@ -90,6 +90,12 @@ pub struct AppState {
     /// degrade to "persist row only" mode in that case.
     pub azure_finetune: Option<AzureFinetuneClient>,
     pub wiki_client: WikiServiceClient<Channel>,
+    /// Phase 4 — Data Plane v2 durable-retrieval readiness registry. Populated
+    /// by the `dataplane.documents.indexed` NATS consumer
+    /// ([`crate::doc_indexed_consumer`]); lets the retrieval relay await a
+    /// just-ingested document's embeddings landing instead of guessing.
+    /// Best-effort, process-local, bounded; cheap clone (Arc-backed).
+    pub doc_ready: crate::doc_indexed_consumer::DocReadyRegistry,
     /// Wave 9 — Quarry-v2 edge client used by `Fetch` + `ExtractStructured`
     /// gRPC handlers. Constructed unconditionally; the client itself
     /// reports `Available() == false` when `QUARRY_EDGE_URL` is unset
@@ -169,6 +175,10 @@ impl AppState {
             finetune_jobs_client: FinetuneJobsClient::new(finetune_channel),
             azure_finetune: None,
             wiki_client: WikiServiceClient::new(dp_wiki_channel),
+            // Phase 4 readiness registry. Shared as-is by `with_nats`/`from_env`
+            // (both build on `new()`); the `dataplane.documents.indexed`
+            // consumer is spawned against this same instance in `main.rs`.
+            doc_ready: crate::doc_indexed_consumer::DocReadyRegistry::new(),
             // `Client::new` with empty base_url returns an Unavailable
             // client; the gRPC handlers degrade to Unimplemented in
             // that case.

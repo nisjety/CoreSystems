@@ -138,6 +138,71 @@ pub enum ComparisonVerdict {
     Fail,
 }
 
+/// Default regression thresholds (percent drop) for release/baseline gating.
+pub const WARN_PCT: f64 = 5.0;
+pub const FAIL_PCT: f64 = 10.0;
+
+/// Verdict for a `candidate` score vs a `baseline`, honoring the metric's
+/// direction (`MetricTarget`). `warn_pct`/`fail_pct` are regression magnitudes
+/// in percent (e.g. 5.0, 10.0). A zero baseline yields `Pass` (nothing to
+/// regress against). This is the scoring primitive behind release comparisons
+/// and producer bake-offs (OSS-parity P2 3E).
+pub fn compare_score(
+    candidate: f64,
+    baseline: f64,
+    target: MetricTarget,
+    warn_pct: f64,
+    fail_pct: f64,
+) -> ComparisonVerdict {
+    if baseline.abs() < f64::EPSILON {
+        return ComparisonVerdict::Pass;
+    }
+    // improvement_pct: positive ⇒ candidate is better than baseline.
+    let improvement_pct = match target {
+        MetricTarget::HigherBetter => (candidate - baseline) / baseline * 100.0,
+        MetricTarget::LowerBetter => (baseline - candidate) / baseline * 100.0,
+        MetricTarget::InRange => -((candidate - baseline).abs() / baseline * 100.0),
+    };
+    if improvement_pct < -fail_pct {
+        ComparisonVerdict::Fail
+    } else if improvement_pct < -warn_pct {
+        ComparisonVerdict::Warn
+    } else {
+        ComparisonVerdict::Pass
+    }
+}
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+
+    #[test]
+    fn higher_better_regression_grades() {
+        // 12% drop → Fail, 7% drop → Warn, improvement → Pass.
+        assert_eq!(compare_score(88.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Fail);
+        assert_eq!(compare_score(93.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Warn);
+        assert_eq!(compare_score(105.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
+    }
+
+    #[test]
+    fn lower_better_inverts() {
+        // latency: lower candidate beats baseline → Pass; much higher → Fail.
+        assert_eq!(compare_score(80.0, 100.0, MetricTarget::LowerBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
+        assert_eq!(compare_score(120.0, 100.0, MetricTarget::LowerBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Fail);
+    }
+
+    #[test]
+    fn in_range_grades_by_distance() {
+        assert_eq!(compare_score(102.0, 100.0, MetricTarget::InRange, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
+        assert_eq!(compare_score(120.0, 100.0, MetricTarget::InRange, WARN_PCT, FAIL_PCT), ComparisonVerdict::Fail);
+    }
+
+    #[test]
+    fn zero_baseline_passes() {
+        assert_eq!(compare_score(50.0, 0.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
+    }
+}
+
 /// Built-in suites Quarry ships. Cycle 28 covers shape + registration;
 /// actual run harness lives in `lab/evals`.
 pub fn builtin_suites() -> Vec<BenchmarkSuite> {

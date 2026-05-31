@@ -9,6 +9,7 @@ pub mod charset;
 pub mod chunk;
 pub mod determinism;
 pub mod diff;
+pub mod docx;
 pub mod fingerprint;
 pub mod images;
 pub mod json_ld;
@@ -20,6 +21,7 @@ pub mod pdf;
 pub mod readability;
 pub mod robots;
 pub mod sitemap;
+pub mod synonyms;
 pub mod soft_404;
 pub mod source_trace;
 

@@ -1,0 +1,21 @@
+[package]
+name = "bridge-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bridge-cli"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+# ratatui re-exports crossterm (default feature), so one dep — no version skew.
+ratatui = "0.29"
+
+[lints]
+workspace = true

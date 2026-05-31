@@ -23,6 +23,7 @@ use quarry_security::preflight::DefaultEngine;
 use quarry_tls::TlsProfile;
 
 mod answer_routes;
+mod api_error;
 mod audio_routes;
 mod auth;
 mod cache;
@@ -30,10 +31,12 @@ mod canary;
 mod change_routes;
 mod config;
 mod experiments;
+mod extract_routes;
 mod firecrawl_adapter;
 mod graphql;
 mod handoff;
 mod internal_auth;
+mod map_routes;
 mod profile_routes;
 mod resource_routes;
 mod routes;
@@ -539,6 +542,30 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::warn!("no SearchProvider configured; /v1/search and /v1/answer will 501");
         None
+    };
+
+    // OSS-parity P0 1C: hybrid search (Path A). When a Data Plane URL is
+    // configured, wrap the lexical/SERP router in a HybridSearchProvider that
+    // RRF-fuses Quarry's own-corpus lexical recall with the Data Plane's
+    // semantic (Qdrant) retrieval. Best-effort: vector failures degrade to
+    // lexical-only. Transparent to /v1/search + AnswerPipeline (both read
+    // `search`). No new infra — delegates to the Data Plane's retrieval_v2.
+    let search: Option<Arc<dyn quarry_runtime::serp::SearchProvider>> = match (
+        search,
+        cfg.data_plane_url.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        (Some(lexical), Some(dp_url)) => {
+            let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url);
+            if let Some(key) = cfg.data_plane_api_key.as_deref().filter(|s| !s.is_empty()) {
+                vidx = vidx.with_api_key(key);
+            }
+            tracing::info!("hybrid search: lexical ⊕ Data Plane vector (RRF) wired");
+            Some(Arc::new(quarry_runtime::HybridSearchProvider::new(
+                lexical,
+                Arc::new(vidx),
+            )))
+        }
+        (other, _) => other,
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).

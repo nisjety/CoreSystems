@@ -498,6 +498,15 @@ pub struct RetrieveBody {
     pub context_format: Option<String>,
     #[serde(default)]
     pub zdr_mode: Option<String>,
+    /// Phase 4 durable-retrieval readiness await (best-effort, opt-in). When set
+    /// (> 0) **and** `filters.document_ids` is non-empty, the gateway waits up to
+    /// this many milliseconds (capped at [`MAX_READY_WAIT_MS`]) for each named
+    /// document's `dataplane.documents.indexed` signal before retrieving — the
+    /// "retrieve durable on next turn" path, without polling. Omitted/`None`
+    /// preserves the prior immediate read; a timeout simply proceeds (the caller
+    /// still holds inline scrape context and `pending_documents` reports truth).
+    #[serde(default)]
+    pub wait_for_ready_ms: Option<u64>,
 }
 
 fn default_top_k() -> i32 {
@@ -529,6 +538,16 @@ pub async fn retrieve(
     Json(body): Json<RetrieveBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let filters = body.filters.unwrap_or_default();
+
+    // Phase 4: optionally give Data Plane v2's async index/embed pipeline a
+    // bounded window to land the `dataplane.documents.indexed` signal for the
+    // named documents before we read. Best-effort and additive — `None` keeps
+    // the prior behavior, and a timeout falls through to the read below.
+    if let Some(ms) = body.wait_for_ready_ms {
+        if ms > 0 && !filters.document_ids.is_empty() {
+            await_documents_ready(&state, &claims.org_id, &filters.document_ids, ms).await;
+        }
+    }
 
     let pending_documents = if filters.document_ids.is_empty() {
         Vec::new()
@@ -577,6 +596,27 @@ pub async fn retrieve(
         "context_pack": resp.context_pack.as_ref().map(context_pack_value),
         "pending_documents": pending_documents,
     })))
+}
+
+/// Upper bound on how long a single `retrieve` will block on readiness signals,
+/// regardless of the caller-supplied `wait_for_ready_ms`. Keeps a stray large
+/// value from pinning a connection; on the order of the Quarry scrape timeout.
+const MAX_READY_WAIT_MS: u64 = 30_000;
+
+/// Best-effort: await the `dataplane.documents.indexed` signal for each
+/// requested document concurrently, bounded by `min(ms, MAX_READY_WAIT_MS)`.
+///
+/// Never fails retrieval and returns nothing — a document that never signals
+/// within the window just falls through to the normal `check_pending_documents`
+/// report (and the agent's inline scrape context). The registry is populated by
+/// [`crate::doc_indexed_consumer`]; when NATS is absent it stays empty and every
+/// wait simply times out, degrading to the prior immediate-read behavior.
+async fn await_documents_ready(state: &AppState, org_id: &str, document_ids: &[String], ms: u64) {
+    let within = std::time::Duration::from_millis(ms.min(MAX_READY_WAIT_MS));
+    let waits = document_ids
+        .iter()
+        .map(|doc_id| state.doc_ready.await_ready(org_id, doc_id, within));
+    let _ = futures::future::join_all(waits).await;
 }
 
 /// Pre-flight check: query DocumentService.GetDocumentIndexStatus for each requested

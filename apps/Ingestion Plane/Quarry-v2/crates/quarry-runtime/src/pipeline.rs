@@ -25,6 +25,7 @@ use serde_json::json;
 use crate::artifact_store::ArtifactStore;
 use crate::driver::{Driver, FetchHints, RenderHints};
 use crate::events::EventSink;
+use crate::autoscale::AutoscaledPool;
 use crate::host_scheduler::{BadKind, HostScheduler};
 use crate::ingest_client::DataPlaneIngest;
 use crate::local_index::{LocalDocument, TantivyLocalIndex};
@@ -64,6 +65,11 @@ pub struct PageRunner {
     /// disables throttling (used in test harnesses); production wires
     /// a single shared scheduler so all in-flight scrapes coordinate.
     pub scheduler: Option<Arc<HostScheduler>>,
+    /// 2C / cluster #autoscale — process-wide concurrency governor layered
+    /// above the per-host scheduler. Acquired before each fetch (global cap),
+    /// AIMD-adjusted by fetch outcome. `None` disables it (tests/dev);
+    /// production wires `global_autoscale()`.
+    pub autoscale: Option<Arc<AutoscaledPool>>,
     /// Wave 6 — render hints from the public API (`ScrapeRequest.render`).
     /// Only the browser driver honours these; static / TLS-profile
     /// drivers ignore them. Default empty.
@@ -136,6 +142,12 @@ impl PageRunner {
         // and drops eagerly (`drop(_slot)` before any other work) so
         // we don't hold scarce per-host concurrency during DOM cleanup
         // / markdown conversion / artifact storage.
+        // 2C — global concurrency permit, acquired before the per-host slot
+        // and held for the fetch duration (drops with `_slot`).
+        let _global_slot = match self.autoscale.as_ref() {
+            Some(p) => Some(p.acquire().await),
+            None => None,
+        };
         let host_for_scheduler = requested_url.host_str().unwrap_or("unknown").to_string();
         let _slot = match self.scheduler.as_ref() {
             Some(s) => Some(s.acquire(&host_for_scheduler).await),
@@ -170,6 +182,17 @@ impl PageRunner {
             };
             s.record_bad(&host_for_scheduler, kind).await;
         }
+        // 2C — global pool backs off on block/rate-limit/timeout-class errors.
+        if let (Some(p), Err(err)) = (self.autoscale.as_ref(), fetch_result.as_ref()) {
+            if matches!(
+                err.code,
+                quarry_core::error::ErrorCode::RateLimited
+                    | quarry_core::error::ErrorCode::UpstreamBlocked
+                    | quarry_core::error::ErrorCode::Forbidden
+            ) {
+                p.record_overload();
+            }
+        }
         let resp = fetch_result?;
         if let Some(s) = self.scheduler.as_ref() {
             // Use the driver-reported duration so the scheduler EWMA
@@ -181,7 +204,17 @@ impl PageRunner {
             )
             .await;
         }
+        // 2C — global pool: grow on a clean fetch, back off on a block status
+        // (FallbackDriver may surface a block resp after rotating its chain).
+        if let Some(p) = self.autoscale.as_ref() {
+            if crate::fingerprint_rotation::is_block_status(resp.status) {
+                p.record_overload();
+            } else {
+                p.record_ok();
+            }
+        }
         drop(_slot);
+        drop(_global_slot);
 
         // Defensive body-size cap. `scraper::Html::parse_document`
         // (used by readability, branding, metadata) builds a full

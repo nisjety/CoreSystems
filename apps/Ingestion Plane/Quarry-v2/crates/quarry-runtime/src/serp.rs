@@ -34,6 +34,15 @@ pub struct SearchOptions {
     pub country: Option<String>,
     pub language: Option<String>,
     pub safe_search: bool,
+    /// Topic vertical (Tavily parity): "general" | "news" | "finance".
+    /// Providers that support verticals use it; others ignore it.
+    pub topic: Option<String>,
+    /// Recency window: "day" | "week" | "month" | "year". Mapped to each
+    /// provider's freshness parameter when supported.
+    pub time_range: Option<String>,
+    /// When true the query is treated as an exact phrase (quoted) — lexical
+    /// providers do phrase matching; SERP providers honor the quotes.
+    pub exact_match: bool,
     /// Tenant scope. When set, providers that index private corpora (e.g.
     /// `TantivyLocalIndex`) MUST restrict results to documents whose
     /// `org_id` matches. Remote SERP providers (Brave/Serper/SearXNG/
@@ -49,6 +58,9 @@ impl Default for SearchOptions {
             country: None,
             language: None,
             safe_search: true,
+            topic: None,
+            time_range: None,
+            exact_match: false,
             org_id: None,
         }
     }

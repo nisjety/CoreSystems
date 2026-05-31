@@ -45,6 +45,19 @@ service SessionCore {
   // `background_review` upsert never overwrites a `user`-authored skill.
   rpc UpsertAgentSkill(UpsertAgentSkillRequest) returns (UpsertAgentSkillResponse);
 
+  // List an org's agent skills (the read path for the gateway's MatchSkills
+  // cache, G7's "last mile"): learned skills persisted via UpsertAgentSkill are
+  // read back here so they become usable in inference, not just stored.
+  // Org-scoped — only the caller's org's skills are returned.
+  rpc ListAgentSkills(ListAgentSkillsRequest) returns (ListAgentSkillsResponse);
+
+  // List a thread's conversation messages in order (the durable transcript
+  // source for the G7 learning review). Distinct from the gateway's in-memory
+  // ListThreadMessages cache — this reads the session-core system-of-record.
+  // Org-scoped via the owning thread, so a caller reads only its own org's
+  // conversation.
+  rpc ListConversation(ListConversationRequest) returns (ListConversationResponse);
+
   // Set a run's mode (execute | plan | reactive | research) durably on the
   // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
   // write-throughs here so plan mode survives restart — auditability/resume
@@ -268,6 +281,55 @@ message UpsertAgentSkillResponse {
   // True if the write was suppressed because the target is a protected
   // user-authored skill (no error — the loop simply yields to the human).
   bool skipped_protected = 3;
+}
+
+// --- ListAgentSkills (G7 read path: learned skills -> gateway MatchSkills) ---
+
+message ListAgentSkillsRequest {
+  // Required. Only this org's skills are returned (per-org isolation).
+  string org_id = 1;
+  // When true, only enabled skills are returned (the gateway match-cache wants
+  // active skills only); when false, all of the org's skills are returned.
+  bool enabled_only = 2;
+}
+
+message AgentSkill {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string content = 4;
+  repeated string trigger_keywords = 5;
+  repeated string trigger_file_patterns = 6;
+  repeated string tool_restrictions = 7;
+  bool enabled = 8;
+  // Provenance: "user" or "background_review".
+  string origin = 9;
+}
+
+message ListAgentSkillsResponse {
+  repeated AgentSkill skills = 1;
+}
+
+// --- ListConversation (G7 transcript source) ---
+
+message ListConversationRequest {
+  // Required. The owning org (per-org isolation — enforced via the thread).
+  string org_id = 1;
+  // Required. The thread whose conversation to return.
+  string thread_id = 2;
+}
+
+// One conversation turn. Named SessionMessage (not ThreadMessage, which the
+// gateway proto already defines in this package) to avoid a name collision.
+message SessionMessage {
+  // "user" | "assistant" | "system" | "tool".
+  string role = 1;
+  string content = 2;
+}
+
+message ListConversationResponse {
+  // Messages in conversation order (by sequence).
+  repeated SessionMessage messages = 1;
 }
 
 // --- SetRunMode (ROADMAP P3 run modes) ---

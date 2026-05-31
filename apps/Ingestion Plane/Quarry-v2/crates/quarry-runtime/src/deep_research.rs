@@ -213,6 +213,9 @@ impl ResearchExecutor {
             country: country.map(String::from),
             language: language.map(String::from),
             safe_search: true,
+            topic: None,
+            time_range: None,
+            exact_match: false,
             // Tenant scoping: research tasks carry the org through the
             // envelope so any private-corpus provider (TantivyLocalIndex)
             // restricts results to this org's documents.

@@ -145,6 +145,9 @@ impl AnswerPipeline {
             country: req.country.clone(),
             language: req.language.clone(),
             safe_search: true,
+            topic: None,
+            time_range: None,
+            exact_match: false,
             org_id: req.org_id.clone(),
         };
         let results = self.search.search(&req.query, &opts).await?;

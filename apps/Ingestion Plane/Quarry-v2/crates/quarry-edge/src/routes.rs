@@ -122,6 +122,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/audio", post(crate::audio_routes::audio))
         .route("/v1/search", post(crate::search_routes::search))
+        .route("/v1/map", post(crate::map_routes::map))
+        .route("/v1/extract", post(crate::extract_routes::extract))
         .route("/v1/answer", post(crate::answer_routes::answer))
         // Cycle 22 / cluster #4 part 1 — resource list endpoints.
         // /v1/artifacts is served locally; the rest forward to control plane.
@@ -322,6 +324,7 @@ async fn scrape(
         local_index: state.local_index.clone(),
         policy: quarry_runtime::RunPolicy::default(),
         scheduler: state.scheduler.clone(),
+        autoscale: Some(quarry_runtime::global_autoscale()),
         render: req
             .render
             .clone()
@@ -594,6 +597,7 @@ async fn internal_run_page(
         local_index: state.local_index.clone(),
         policy: quarry_runtime::RunPolicy::default(),
         scheduler: state.scheduler.clone(),
+        autoscale: Some(quarry_runtime::global_autoscale()),
         render: req
             .render
             .clone()
@@ -707,6 +711,7 @@ async fn scrape_stream(
             local_index: state.local_index.clone(),
             policy: quarry_runtime::RunPolicy::default(),
             scheduler: state.scheduler.clone(),
+            autoscale: Some(quarry_runtime::global_autoscale()),
             render: req.render.clone().map(RenderHints::from).unwrap_or_default(),
         };
         let run_id = RunKind::new();

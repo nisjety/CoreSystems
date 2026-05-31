@@ -16,8 +16,8 @@ use mp_ids::new_ulid;
 use tonic::Status;
 
 use mp_contracts::model_plane::v1::{
-    GetSkillRequest, GetSkillResponse, ListSkillsRequest, ListSkillsResponse, MatchSkillsRequest,
-    MatchSkillsResponse, Skill, SkillMatch,
+    AgentSkill, GetSkillRequest, GetSkillResponse, ListSkillsRequest, ListSkillsResponse,
+    MatchSkillsRequest, MatchSkillsResponse, Skill, SkillMatch,
 };
 
 const DEFAULT_MATCH_LIMIT: i32 = 5;
@@ -28,6 +28,9 @@ pub struct SkillStore {
     // Keyed by (org_id, skill_id) so multi-tenant skill sets don't
     // bleed. Cheap clone (Arc<DashMap>).
     inner: Arc<DashMap<(String, String), Skill>>,
+    // Orgs whose LEARNED skills (session-core agent_skills) have been pulled in
+    // via the §G7 lazy-load, so we fetch once per org rather than per match.
+    loaded: Arc<DashMap<String, ()>>,
 }
 
 impl SkillStore {
@@ -44,6 +47,18 @@ impl SkillStore {
         self.inner
             .insert((org_id.to_string(), s.id.clone()), s.clone());
         s
+    }
+
+    /// Whether this org's learned skills have already been lazily loaded from
+    /// session-core (G7 read path). Used to fetch once per org.
+    #[must_use]
+    pub fn is_org_loaded(&self, org_id: &str) -> bool {
+        self.loaded.contains_key(org_id)
+    }
+
+    /// Mark this org's learned skills as loaded (call after a successful pull).
+    pub fn mark_org_loaded(&self, org_id: &str) {
+        self.loaded.insert(org_id.to_owned(), ());
     }
 
     fn list(&self, org_id: &str) -> Vec<Skill> {
@@ -98,6 +113,24 @@ pub fn handle_get_skill(
         request_id: req.request_id,
         skill: Some(s),
     })
+}
+
+/// Map a session-core [`AgentSkill`] (the durable learned-skill row, G7) into a
+/// gateway match-cache [`Skill`]. The body is the skill content; the trigger
+/// keywords become the match tags; `source_path` records provenance so learned
+/// skills are distinguishable from disk-loaded ones. The gateway `Skill` has no
+/// description field, so `description` is intentionally not carried (the body
+/// holds the substance used for matching).
+#[must_use]
+pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
+    Skill {
+        id: a.id,
+        name: a.name,
+        body: a.content,
+        tags: a.trigger_keywords,
+        source_path: format!("session-core:{}", a.origin),
+        min_score: 0.0,
+    }
 }
 
 /// Keyword overlap score. Lowercases everything and counts how many
@@ -198,6 +231,56 @@ mod tests {
         let store = SkillStore::new();
         let out = store.upsert("o", s("test", &["a"], "body"));
         assert!(!out.id.is_empty());
+    }
+
+    #[test]
+    fn org_loaded_tracking() {
+        let store = SkillStore::new();
+        assert!(!store.is_org_loaded("o"));
+        store.mark_org_loaded("o");
+        assert!(store.is_org_loaded("o"));
+        assert!(!store.is_org_loaded("other"), "tracking is per-org");
+    }
+
+    #[test]
+    fn agent_skill_maps_into_match_cache_skill() {
+        let a = AgentSkill {
+            id: "sk-1".into(),
+            name: "Cache Tips".into(),
+            description: "ignored by the gateway Skill shape".into(),
+            content: "use the cache".into(),
+            trigger_keywords: vec!["cache".into(), "perf".into()],
+            trigger_file_patterns: vec![],
+            tool_restrictions: vec![],
+            enabled: true,
+            origin: "background_review".into(),
+        };
+        let sk = agent_skill_to_skill(a);
+        assert_eq!(sk.id, "sk-1");
+        assert_eq!(sk.name, "Cache Tips");
+        assert_eq!(sk.body, "use the cache"); // content -> body
+        assert_eq!(sk.tags, vec!["cache".to_owned(), "perf".to_owned()]); // keywords -> tags
+        assert_eq!(sk.source_path, "session-core:background_review"); // provenance marker
+                                                                      // A learned skill, once mapped, is matchable by its keywords.
+        let store = SkillStore::new();
+        store.upsert("o", sk);
+        let resp = handle_match_skills(
+            &store,
+            MatchSkillsRequest {
+                request_id: "r".into(),
+                org_id: "o".into(),
+                query: "help with cache".into(),
+                limit: 0,
+                min_score: 0.0,
+            },
+        )
+        .unwrap();
+        assert!(
+            resp.matches
+                .iter()
+                .any(|m| m.skill.as_ref().is_some_and(|s| s.name == "Cache Tips")),
+            "learned skill should be matchable after mapping+upsert"
+        );
     }
 
     #[test]

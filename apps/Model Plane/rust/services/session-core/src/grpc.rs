@@ -929,6 +929,112 @@ impl SessionCore for SessionService {
         result
     }
 
+    // G7 read path (the loop's "last mile"): list an org's agent skills so the
+    // gateway's MatchSkills cache can surface LEARNED skills, not just disk
+    // ones. Org-scoped — only this org's rows. The jsonb array columns are
+    // NOT NULL DEFAULT '[]', so they decode cleanly into Vec<String>.
+    async fn list_agent_skills(
+        &self,
+        request: Request<pb::ListAgentSkillsRequest>,
+    ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListAgentSkillsResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.org_id.is_empty() {
+                return Err(Status::invalid_argument("org_id is required"));
+            }
+            type Row = (
+                String,
+                String,
+                String,
+                String,
+                sqlx::types::Json<Vec<String>>,
+                sqlx::types::Json<Vec<String>>,
+                sqlx::types::Json<Vec<String>>,
+                bool,
+                String,
+            );
+            let rows: Vec<Row> = sqlx::query_as(
+                "SELECT id, name, description, content, trigger_keywords,
+                        trigger_file_patterns, tool_restrictions, enabled, origin
+                 FROM agent_skills
+                 WHERE org_id = $1 AND (NOT $2 OR enabled)
+                 ORDER BY name",
+            )
+            .bind(&req.org_id)
+            .bind(req.enabled_only)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "list_agent_skills failed");
+                Status::internal(e.to_string())
+            })?;
+            let skills = rows
+                .into_iter()
+                .map(
+                    |(id, name, description, content, kw, fp, tr, enabled, origin)| {
+                        pb::AgentSkill {
+                            id,
+                            name,
+                            description,
+                            content,
+                            trigger_keywords: kw.0,
+                            trigger_file_patterns: fp.0,
+                            tool_restrictions: tr.0,
+                            enabled,
+                            origin,
+                        }
+                    },
+                )
+                .collect();
+            Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
+        }
+        .await;
+        record_metrics("list_agent_skills", started, result.is_ok());
+        result
+    }
+
+    // G7 transcript source: list a thread's conversation in order. Org-scoped
+    // via a JOIN on threads.org_id, so a caller can only read its own org's
+    // conversation (the messages table has no org_id of its own).
+    async fn list_conversation(
+        &self,
+        request: Request<pb::ListConversationRequest>,
+    ) -> Result<Response<pb::ListConversationResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListConversationResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.org_id.is_empty() || req.thread_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "org_id and thread_id are required",
+                ));
+            }
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT m.role, m.content
+                 FROM messages m
+                 JOIN threads t ON t.id = m.thread_id
+                 WHERE m.thread_id = $1 AND t.org_id = $2
+                 ORDER BY m.sequence",
+            )
+            .bind(&req.thread_id)
+            .bind(&req.org_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "list_thread_messages failed");
+                Status::internal(e.to_string())
+            })?;
+            let messages = rows
+                .into_iter()
+                .map(|(role, content)| pb::SessionMessage { role, content })
+                .collect();
+            Ok(Response::new(pb::ListConversationResponse { messages }))
+        }
+        .await;
+        record_metrics("list_conversation", started, result.is_ok());
+        result
+    }
+
     async fn get_context_assembly(
         &self,
         request: Request<pb::GetContextAssemblyRequest>,
@@ -1963,7 +2069,83 @@ mod tests {
         assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
         assert_upsert_skill_guards(&svc, &org).await;
 
-        // cleanup
+        // G7 read path: list_agent_skills returns this org's skills (Cache +
+        // Runbook), proving the learned-skill last mile is readable.
+        let listed = svc
+            .list_agent_skills(Request::new(pb::ListAgentSkillsRequest {
+                org_id: org.clone(),
+                enabled_only: true,
+            }))
+            .await
+            .expect("list_agent_skills")
+            .into_inner();
+        let names: std::collections::BTreeSet<&str> =
+            listed.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains("Cache") && names.contains("Runbook"),
+            "list must return the upserted skills, got {names:?}"
+        );
+        // Per-org isolation: another org sees none of them.
+        let other = svc
+            .list_agent_skills(Request::new(pb::ListAgentSkillsRequest {
+                org_id: format!("other-{sfx}"),
+                enabled_only: true,
+            }))
+            .await
+            .expect("list other org")
+            .into_inner();
+        assert!(
+            other.skills.is_empty(),
+            "another org must not see this org's skills"
+        );
+
+        // G7 transcript source: list_thread_messages returns the conversation
+        // in sequence order, org-scoped via the owning thread.
+        for (i, (role, content)) in [("user", "hello"), ("assistant", "hi there")]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1,$2,$3,$4)")
+                .bind(format!("m-{sfx}-{i}"))
+                .bind(&thread_id)
+                .bind(*role)
+                .bind(*content)
+                .execute(&pool)
+                .await
+                .expect("seed message");
+        }
+        let convo = svc
+            .list_conversation(Request::new(pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+            }))
+            .await
+            .expect("list_thread_messages")
+            .into_inner();
+        assert_eq!(convo.messages.len(), 2, "expected 2 messages");
+        assert_eq!(convo.messages[0].role, "user");
+        assert_eq!(convo.messages[0].content, "hello");
+        assert_eq!(convo.messages[1].role, "assistant", "ordered by sequence");
+        // Per-org isolation: another org cannot read this thread's conversation.
+        let cross_convo = svc
+            .list_conversation(Request::new(pb::ListConversationRequest {
+                org_id: format!("attacker-{sfx}"),
+                thread_id: thread_id.clone(),
+            }))
+            .await
+            .expect("list other-org convo")
+            .into_inner();
+        assert!(
+            cross_convo.messages.is_empty(),
+            "another org must not read this thread's messages"
+        );
+
+        // cleanup (messages first — FK to threads)
+        sqlx::query("DELETE FROM messages WHERE thread_id=$1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .ok();
         for q in [
             "DELETE FROM agent_skills WHERE org_id=$1",
             "DELETE FROM approvals WHERE org_id=$1",

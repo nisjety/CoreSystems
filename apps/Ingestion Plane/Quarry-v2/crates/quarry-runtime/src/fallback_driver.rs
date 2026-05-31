@@ -65,6 +65,10 @@ impl FallbackDriver {
         // 502]` instead of a single mystery error from the last attempt.
         let mut attempts: Vec<(DriverKind, String)> = Vec::with_capacity(order.len());
         let mut last_err: Option<quarry_core::QuarryError> = None;
+        // 2D — on a block STATUS (403/429/503/…), fall through to the next
+        // driver (a different TLS fingerprint / transport) instead of
+        // returning the block. Bounded naturally by the chain length.
+        let mut best_block: Option<FetchResponse> = None;
 
         for (idx, kind) in order.iter().enumerate() {
             let driver = match self.drivers.get(kind) {
@@ -79,7 +83,22 @@ impl FallbackDriver {
                 None => driver.fetch(url).await,
             };
             match result {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    if crate::fingerprint_rotation::is_block_status(resp.status)
+                        && idx < order.len() - 1
+                    {
+                        attempts.push((*kind, format!("blocked: HTTP {}", resp.status)));
+                        warn!(
+                            driver = ?kind,
+                            status = resp.status,
+                            next = ?order.get(idx + 1),
+                            "block status — rotating fingerprint/driver"
+                        );
+                        best_block = Some(resp);
+                        continue;
+                    }
+                    return Ok(resp);
+                }
                 Err(e) => {
                     let is_retryable = is_retryable_driver_error(e.code);
                     attempts.push((
@@ -104,6 +123,13 @@ impl FallbackDriver {
                     })));
                 }
             }
+        }
+
+        // All drivers rotated through; if every one was blocked, surface the
+        // last block response (the caller's scheduler reads the status) rather
+        // than a generic error.
+        if let Some(resp) = best_block {
+            return Ok(resp);
         }
 
         let aggregate_msg = attempts
@@ -244,6 +270,62 @@ mod tests {
                 "simulated failure",
             ))
         }
+    }
+
+    struct BlockDriver {
+        kind: DriverKind,
+        calls: AtomicU32,
+    }
+
+    impl BlockDriver {
+        fn new(kind: DriverKind) -> Self {
+            Self { kind, calls: AtomicU32::new(0) }
+        }
+    }
+
+    #[async_trait]
+    impl Driver for BlockDriver {
+        fn kind(&self) -> DriverKind {
+            self.kind
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(FetchResponse {
+                status: 403,
+                final_url: url.clone(),
+                headers: vec![],
+                body: b"blocked".to_vec(),
+                duration_ms: 1,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn block_status_rotates_to_next_fingerprint() {
+        // primary returns a 403 block → fall through to the next (different
+        // fingerprint) driver, which succeeds.
+        let primary = Arc::new(BlockDriver::new(DriverKind::Static));
+        let fallback = Arc::new(OkDriver::new(DriverKind::Tls));
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Static, primary.clone());
+        drivers.insert(DriverKind::Tls, fallback.clone());
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
+        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn all_blocked_returns_last_block_response() {
+        let primary = Arc::new(BlockDriver::new(DriverKind::Static));
+        let fallback = Arc::new(BlockDriver::new(DriverKind::Tls));
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Static, primary.clone());
+        drivers.insert(DriverKind::Tls, fallback.clone());
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
+        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        assert_eq!(resp.status, 403); // exhausted rotation → surface the block
     }
 
     #[tokio::test]

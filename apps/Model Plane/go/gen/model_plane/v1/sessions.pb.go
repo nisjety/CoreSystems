@@ -1206,6 +1206,368 @@ func (x *UpsertAgentSkillResponse) GetSkippedProtected() bool {
 	return false
 }
 
+type ListAgentSkillsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. Only this org's skills are returned (per-org isolation).
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// When true, only enabled skills are returned (the gateway match-cache wants
+	// active skills only); when false, all of the org's skills are returned.
+	EnabledOnly   bool `protobuf:"varint,2,opt,name=enabled_only,json=enabledOnly,proto3" json:"enabled_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAgentSkillsRequest) Reset() {
+	*x = ListAgentSkillsRequest{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAgentSkillsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAgentSkillsRequest) ProtoMessage() {}
+
+func (x *ListAgentSkillsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAgentSkillsRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentSkillsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ListAgentSkillsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ListAgentSkillsRequest) GetEnabledOnly() bool {
+	if x != nil {
+		return x.EnabledOnly
+	}
+	return false
+}
+
+type AgentSkill struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Id                  string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name                string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Description         string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	Content             string                 `protobuf:"bytes,4,opt,name=content,proto3" json:"content,omitempty"`
+	TriggerKeywords     []string               `protobuf:"bytes,5,rep,name=trigger_keywords,json=triggerKeywords,proto3" json:"trigger_keywords,omitempty"`
+	TriggerFilePatterns []string               `protobuf:"bytes,6,rep,name=trigger_file_patterns,json=triggerFilePatterns,proto3" json:"trigger_file_patterns,omitempty"`
+	ToolRestrictions    []string               `protobuf:"bytes,7,rep,name=tool_restrictions,json=toolRestrictions,proto3" json:"tool_restrictions,omitempty"`
+	Enabled             bool                   `protobuf:"varint,8,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// Provenance: "user" or "background_review".
+	Origin        string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentSkill) Reset() {
+	*x = AgentSkill{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentSkill) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentSkill) ProtoMessage() {}
+
+func (x *AgentSkill) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentSkill.ProtoReflect.Descriptor instead.
+func (*AgentSkill) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *AgentSkill) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetTriggerKeywords() []string {
+	if x != nil {
+		return x.TriggerKeywords
+	}
+	return nil
+}
+
+func (x *AgentSkill) GetTriggerFilePatterns() []string {
+	if x != nil {
+		return x.TriggerFilePatterns
+	}
+	return nil
+}
+
+func (x *AgentSkill) GetToolRestrictions() []string {
+	if x != nil {
+		return x.ToolRestrictions
+	}
+	return nil
+}
+
+func (x *AgentSkill) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *AgentSkill) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
+}
+
+type ListAgentSkillsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Skills        []*AgentSkill          `protobuf:"bytes,1,rep,name=skills,proto3" json:"skills,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAgentSkillsResponse) Reset() {
+	*x = ListAgentSkillsResponse{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAgentSkillsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAgentSkillsResponse) ProtoMessage() {}
+
+func (x *ListAgentSkillsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAgentSkillsResponse.ProtoReflect.Descriptor instead.
+func (*ListAgentSkillsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ListAgentSkillsResponse) GetSkills() []*AgentSkill {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+type ListConversationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. The owning org (per-org isolation — enforced via the thread).
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Required. The thread whose conversation to return.
+	ThreadId      string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListConversationRequest) Reset() {
+	*x = ListConversationRequest{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListConversationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListConversationRequest) ProtoMessage() {}
+
+func (x *ListConversationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListConversationRequest.ProtoReflect.Descriptor instead.
+func (*ListConversationRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ListConversationRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ListConversationRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+// One conversation turn. Named SessionMessage (not ThreadMessage, which the
+// gateway proto already defines in this package) to avoid a name collision.
+type SessionMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// "user" | "assistant" | "system" | "tool".
+	Role          string `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	Content       string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionMessage) Reset() {
+	*x = SessionMessage{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionMessage) ProtoMessage() {}
+
+func (x *SessionMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionMessage.ProtoReflect.Descriptor instead.
+func (*SessionMessage) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *SessionMessage) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+type ListConversationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Messages in conversation order (by sequence).
+	Messages      []*SessionMessage `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListConversationResponse) Reset() {
+	*x = ListConversationResponse{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListConversationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListConversationResponse) ProtoMessage() {}
+
+func (x *ListConversationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListConversationResponse.ProtoReflect.Descriptor instead.
+func (*ListConversationResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ListConversationResponse) GetMessages() []*SessionMessage {
+	if x != nil {
+		return x.Messages
+	}
+	return nil
+}
+
 type SetRunModeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	RunId string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -1221,7 +1583,7 @@ type SetRunModeRequest struct {
 
 func (x *SetRunModeRequest) Reset() {
 	*x = SetRunModeRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1233,7 +1595,7 @@ func (x *SetRunModeRequest) String() string {
 func (*SetRunModeRequest) ProtoMessage() {}
 
 func (x *SetRunModeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1246,7 +1608,7 @@ func (x *SetRunModeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRunModeRequest.ProtoReflect.Descriptor instead.
 func (*SetRunModeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{18}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SetRunModeRequest) GetRunId() string {
@@ -1280,7 +1642,7 @@ type SetRunModeResponse struct {
 
 func (x *SetRunModeResponse) Reset() {
 	*x = SetRunModeResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1292,7 +1654,7 @@ func (x *SetRunModeResponse) String() string {
 func (*SetRunModeResponse) ProtoMessage() {}
 
 func (x *SetRunModeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1305,7 +1667,7 @@ func (x *SetRunModeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRunModeResponse.ProtoReflect.Descriptor instead.
 func (*SetRunModeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{19}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SetRunModeResponse) GetRunId() string {
@@ -1409,14 +1771,38 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x18UpsertAgentSkillResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\acreated\x18\x02 \x01(\bR\acreated\x12+\n" +
-	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\"U\n" +
+	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\"R\n" +
+	"\x16ListAgentSkillsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12!\n" +
+	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\"\xaa\x02\n" +
+	"\n" +
+	"AgentSkill\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x18\n" +
+	"\acontent\x18\x04 \x01(\tR\acontent\x12)\n" +
+	"\x10trigger_keywords\x18\x05 \x03(\tR\x0ftriggerKeywords\x122\n" +
+	"\x15trigger_file_patterns\x18\x06 \x03(\tR\x13triggerFilePatterns\x12+\n" +
+	"\x11tool_restrictions\x18\a \x03(\tR\x10toolRestrictions\x12\x18\n" +
+	"\aenabled\x18\b \x01(\bR\aenabled\x12\x16\n" +
+	"\x06origin\x18\t \x01(\tR\x06origin\"M\n" +
+	"\x17ListAgentSkillsResponse\x122\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"M\n" +
+	"\x17ListConversationRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\">\n" +
+	"\x0eSessionMessage\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\"V\n" +
+	"\x18ListConversationResponse\x12:\n" +
+	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\"U\n" +
 	"\x11SetRunModeRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x15\n" +
 	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"?\n" +
 	"\x12SetRunModeResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x12\n" +
-	"\x04mode\x18\x02 \x01(\tR\x04mode2\x9d\a\n" +
+	"\x04mode\x18\x02 \x01(\tR\x04mode2\xe8\b\n" +
 	"\vSessionCore\x12Y\n" +
 	"\fCreateThread\x12#.model_plane.v1.CreateThreadRequest\x1a$.model_plane.v1.CreateThreadResponse\x12\\\n" +
 	"\rAppendMessage\x12$.model_plane.v1.AppendMessageRequest\x1a%.model_plane.v1.AppendMessageResponse\x12M\n" +
@@ -1427,7 +1813,9 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x12GetContextAssembly\x12).model_plane.v1.GetContextAssemblyRequest\x1a*.model_plane.v1.GetContextAssemblyResponse\x12S\n" +
 	"\n" +
 	"CompactNow\x12!.model_plane.v1.CompactNowRequest\x1a\".model_plane.v1.CompactNowResponse\x12e\n" +
-	"\x10UpsertAgentSkill\x12'.model_plane.v1.UpsertAgentSkillRequest\x1a(.model_plane.v1.UpsertAgentSkillResponse\x12S\n" +
+	"\x10UpsertAgentSkill\x12'.model_plane.v1.UpsertAgentSkillRequest\x1a(.model_plane.v1.UpsertAgentSkillResponse\x12b\n" +
+	"\x0fListAgentSkills\x12&.model_plane.v1.ListAgentSkillsRequest\x1a'.model_plane.v1.ListAgentSkillsResponse\x12e\n" +
+	"\x10ListConversation\x12'.model_plane.v1.ListConversationRequest\x1a(.model_plane.v1.ListConversationResponse\x12S\n" +
 	"\n" +
 	"SetRunMode\x12!.model_plane.v1.SetRunModeRequest\x1a\".model_plane.v1.SetRunModeResponseB\xb5\x01\n" +
 	"\x12com.model_plane.v1B\rSessionsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
@@ -1444,7 +1832,7 @@ func file_model_plane_v1_sessions_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_sessions_proto_rawDescData
 }
 
-var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(*CreateThreadRequest)(nil),        // 0: model_plane.v1.CreateThreadRequest
 	(*CreateThreadResponse)(nil),       // 1: model_plane.v1.CreateThreadResponse
@@ -1464,44 +1852,56 @@ var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(*CompactNowResponse)(nil),         // 15: model_plane.v1.CompactNowResponse
 	(*UpsertAgentSkillRequest)(nil),    // 16: model_plane.v1.UpsertAgentSkillRequest
 	(*UpsertAgentSkillResponse)(nil),   // 17: model_plane.v1.UpsertAgentSkillResponse
-	(*SetRunModeRequest)(nil),          // 18: model_plane.v1.SetRunModeRequest
-	(*SetRunModeResponse)(nil),         // 19: model_plane.v1.SetRunModeResponse
-	(*structpb.Struct)(nil),            // 20: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),      // 21: google.protobuf.Timestamp
-	(*Event)(nil),                      // 22: model_plane.v1.Event
+	(*ListAgentSkillsRequest)(nil),     // 18: model_plane.v1.ListAgentSkillsRequest
+	(*AgentSkill)(nil),                 // 19: model_plane.v1.AgentSkill
+	(*ListAgentSkillsResponse)(nil),    // 20: model_plane.v1.ListAgentSkillsResponse
+	(*ListConversationRequest)(nil),    // 21: model_plane.v1.ListConversationRequest
+	(*SessionMessage)(nil),             // 22: model_plane.v1.SessionMessage
+	(*ListConversationResponse)(nil),   // 23: model_plane.v1.ListConversationResponse
+	(*SetRunModeRequest)(nil),          // 24: model_plane.v1.SetRunModeRequest
+	(*SetRunModeResponse)(nil),         // 25: model_plane.v1.SetRunModeResponse
+	(*structpb.Struct)(nil),            // 26: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),      // 27: google.protobuf.Timestamp
+	(*Event)(nil),                      // 28: model_plane.v1.Event
 }
 var file_model_plane_v1_sessions_proto_depIdxs = []int32{
-	20, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
-	21, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
-	20, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
-	21, // 3: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
-	21, // 4: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
+	26, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
+	27, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
+	26, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
+	27, // 3: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
+	27, // 4: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
 	13, // 5: model_plane.v1.GetContextAssemblyResponse.segments:type_name -> model_plane.v1.ContextSegment
-	0,  // 6: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
-	2,  // 7: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
-	4,  // 8: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
-	6,  // 9: model_plane.v1.SessionCore.CompleteStep:input_type -> model_plane.v1.CompleteStepRequest
-	8,  // 10: model_plane.v1.SessionCore.SaveCheckpoint:input_type -> model_plane.v1.SaveCheckpointRequest
-	10, // 11: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
-	11, // 12: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
-	14, // 13: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
-	16, // 14: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
-	18, // 15: model_plane.v1.SessionCore.SetRunMode:input_type -> model_plane.v1.SetRunModeRequest
-	1,  // 16: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
-	3,  // 17: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
-	5,  // 18: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
-	7,  // 19: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
-	9,  // 20: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
-	22, // 21: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
-	12, // 22: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
-	15, // 23: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
-	17, // 24: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
-	19, // 25: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
-	16, // [16:26] is the sub-list for method output_type
-	6,  // [6:16] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	19, // 6: model_plane.v1.ListAgentSkillsResponse.skills:type_name -> model_plane.v1.AgentSkill
+	22, // 7: model_plane.v1.ListConversationResponse.messages:type_name -> model_plane.v1.SessionMessage
+	0,  // 8: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
+	2,  // 9: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
+	4,  // 10: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
+	6,  // 11: model_plane.v1.SessionCore.CompleteStep:input_type -> model_plane.v1.CompleteStepRequest
+	8,  // 12: model_plane.v1.SessionCore.SaveCheckpoint:input_type -> model_plane.v1.SaveCheckpointRequest
+	10, // 13: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
+	11, // 14: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
+	14, // 15: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
+	16, // 16: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
+	18, // 17: model_plane.v1.SessionCore.ListAgentSkills:input_type -> model_plane.v1.ListAgentSkillsRequest
+	21, // 18: model_plane.v1.SessionCore.ListConversation:input_type -> model_plane.v1.ListConversationRequest
+	24, // 19: model_plane.v1.SessionCore.SetRunMode:input_type -> model_plane.v1.SetRunModeRequest
+	1,  // 20: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
+	3,  // 21: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
+	5,  // 22: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
+	7,  // 23: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
+	9,  // 24: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
+	28, // 25: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
+	12, // 26: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
+	15, // 27: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
+	17, // 28: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
+	20, // 29: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
+	23, // 30: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
+	25, // 31: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
+	20, // [20:32] is the sub-list for method output_type
+	8,  // [8:20] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sessions_proto_init() }
@@ -1516,7 +1916,7 @@ func file_model_plane_v1_sessions_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sessions_proto_rawDesc), len(file_model_plane_v1_sessions_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

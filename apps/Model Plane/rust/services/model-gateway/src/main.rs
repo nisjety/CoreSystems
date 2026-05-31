@@ -5,7 +5,8 @@
 
 use anyhow::Result;
 use model_gateway::{
-    capability_consumer, finetune_poller, gateway_metrics, grpc, http_routes, state,
+    capability_consumer, doc_indexed_consumer, finetune_poller, gateway_metrics, grpc, http_routes,
+    state,
 };
 use tracing::info;
 
@@ -25,6 +26,13 @@ async fn main() -> Result<()> {
     // NATS_URL and never breaks the gateway when the bus is absent, so the
     // gateway's lifetime stays governed by the http/grpc servers + shutdown.
     tokio::spawn(capability_consumer::run(app_state.mcp.clone()));
+
+    // Phase 4 — Data Plane v2 durable-retrieval readiness. Subscribes to
+    // `dataplane.documents.indexed` and records (org, document) readiness so the
+    // retrieval relay can await a just-ingested doc's embeddings landing instead
+    // of guessing. Same best-effort, NATS_URL-self-guarding daemon shape as the
+    // capability consumer above — absent NATS, it logs and exits.
+    tokio::spawn(doc_indexed_consumer::run(app_state.doc_ready.clone()));
 
     // Wave 7 slice 2c — fine-tuning poller. Only spawn when Azure is
     // configured; otherwise the gateway has no provider to refresh against.

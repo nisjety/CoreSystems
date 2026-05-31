@@ -81,23 +81,12 @@ func main() {
 	// double-publish. Honors `ctx.Done()` for graceful shutdown.
 	events.NewOutboxPublisher(pool, nc).Start(ctx)
 
-	// Subscribe to shared NATS (velion-nats) for Quarry crawl events
-	if cfg.SharedNatsURL != "" {
-		opts := []nats.Option{}
-		if cfg.SharedNatsToken != "" {
-			opts = append(opts, nats.Token(cfg.SharedNatsToken))
-		}
-		sharedNC, err := nats.Connect(cfg.SharedNatsURL, opts...)
-		if err != nil {
-			log.Warn().Err(err).Str("url", cfg.SharedNatsURL).Msg("shared NATS connect failed, quarry events disabled")
-		} else {
-			defer sharedNC.Close()
-			sub := events.NewSubscriber(sharedNC, nc, docRepo, publisher)
-			if err := sub.SubscribeQuarryCrawl(ctx); err != nil {
-				log.Warn().Err(err).Msg("quarry subscription failed")
-			}
-		}
-	}
+	// NOTE: the legacy shared-NATS "quarry.documents.crawled" subscriber was
+	// removed. Quarry-v2 never published that subject (it emits quarry.run.* /
+	// quarry.events.* for observability only); Quarry document ingestion is now
+	// the canonical synchronous HTTP write to POST /v1/documents, and retrieval
+	// readiness is signalled by dataplane.documents.indexed (embedding-engine).
+	// See docs/plans/quarry-dataplane-integration-fix-plan.md.
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)
