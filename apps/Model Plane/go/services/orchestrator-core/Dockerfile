@@ -17,13 +17,19 @@ RUN apk --no-cache add git ca-certificates
 WORKDIR /workspace
 COPY . .
 WORKDIR /workspace/services/orchestrator-core
-ENV GOPROXY=https://proxy.golang.org,https://goproxy.io,direct
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
-      go mod download && break || { echo "go mod download retry $i"; sleep 8; }; \
-    done
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -o /service ./cmd/

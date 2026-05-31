@@ -13,4 +13,7 @@ coverage/
 *.out
 # Local binaries and generated proto (regenerated in Dockerfile)
 user-service
+user-core
+server
+tmp/
 bin/

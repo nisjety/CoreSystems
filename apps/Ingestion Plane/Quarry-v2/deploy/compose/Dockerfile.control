@@ -9,6 +9,8 @@
 
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
+ENV GOSUMDB=sum.golang.org
 
 # Copy local module dependencies first (pkg/) so cache survives service-only edits.
 COPY pkg ./pkg
@@ -17,7 +19,15 @@ COPY pkg ./pkg
 COPY services/quarry-control ./services/quarry-control
 
 WORKDIR /src/services/quarry-control
-RUN go mod download
+RUN set -e; \
+    for i in 1 2 3 4 5; do \
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -ldflags="-s -w -extldflags=-static" \
         -o /out/control ./cmd/control

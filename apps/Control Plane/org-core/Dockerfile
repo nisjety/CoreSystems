@@ -9,10 +9,20 @@ FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git
 
 WORKDIR /build
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
+ENV GOSUMDB=sum.golang.org
 
 # Copy both go.mod AND go.sum — layer only invalidated when deps change
 COPY go.mod go.sum ./
-RUN go mod download
+RUN set -e; \
+    for i in 1 2 3 4 5; do \
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 
 COPY . .
 # -ldflags="-s -w" strips debug symbols; -trimpath removes local path references

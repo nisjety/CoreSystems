@@ -9,8 +9,8 @@ artifacts alone — it needs the cores running.
 
 | Var | Purpose | Local | Docker (in-cluster) |
 |---|---|---|---|
-| `NEXT_PUBLIC_APP_URL` | app origin | `http://localhost:3107` | `https://app.velion…` |
-| `NEXT_PUBLIC_AUTH_BASE_URL` | Better Auth client base (= app origin) | `http://localhost:3107` | `https://app.velion…` |
+| `NEXT_PUBLIC_APP_URL` | app origin | `http://localhost:3000` | `https://app.velion…` |
+| `NEXT_PUBLIC_AUTH_BASE_URL` | Better Auth client base (= app origin) | `http://localhost:3000` | `https://app.velion…` |
 | `AUTH_CORE_URL` | auth-core (proxy target) | `http://localhost:3011` | `http://auth-service:3011` |
 | `USER_CORE_URL` | user-core | `http://localhost:3012` | `http://user-service:3012` |
 | `ORG_SERVICE_URL` | org-core (+BREG) | `http://localhost:8080` | `http://org-core-service:8080` |

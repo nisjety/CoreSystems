@@ -40,25 +40,15 @@ export class AuthServiceInitializer implements OnModuleInit {
       setAuditNatsPublisher(this.sharedNats);
       this.logger.log('Audit NATS publisher initialized');
 
-      // Perform health checks
-      const health = await this.authIntegrationService.healthCheck();
-
       this.logger.log('Auth service integration initialized successfully', {
-        userService: health.userService ? 'connected' : 'disconnected',
-        natsEvents: health.natsEvents ? 'connected' : 'disconnected',
+        // user-core authenticates against auth-core during its own startup, so
+        // probing user-core here creates a startup-order loop. Runtime calls and
+        // health endpoints still perform the actual user-core checks.
+        userService: 'lazy',
+        natsEvents: this.authEventPublisher.isHealthy()
+          ? 'connected'
+          : 'deferred',
       });
-
-      if (!health.userService) {
-        this.logger.warn(
-          'User service is not available - integration will retry automatically',
-        );
-      }
-
-      if (!health.natsEvents) {
-        this.logger.warn(
-          'NATS events are not available - events will be skipped',
-        );
-      }
     } catch (error) {
       this.logger.error('Failed to initialize auth service integration', error);
       // Don't throw to prevent app startup failure

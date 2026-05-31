@@ -166,8 +166,6 @@ services:
         condition: service_healthy
       controlplane-nats:
         condition: service_healthy
-      user-core:
-        condition: service_healthy
     stop_signal: SIGTERM
     stop_grace_period: 15s
     healthcheck:
@@ -218,6 +216,8 @@ services:
       controlplane-redis:
         condition: service_healthy
       controlplane-nats:
+        condition: service_healthy
+      auth-core:
         condition: service_healthy
     stop_signal: SIGTERM
     stop_grace_period: 10s

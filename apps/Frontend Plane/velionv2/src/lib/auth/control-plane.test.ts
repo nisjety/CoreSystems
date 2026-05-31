@@ -75,13 +75,13 @@ describe("control plane auth integration", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const response = await proxyControlPlaneAuthRequest(
-      new Request("http://localhost:3107/api/auth/sign-in/email", {
+      new Request("http://localhost:3000/api/auth/sign-in/email", {
         body: JSON.stringify({ email: "ima@example.com", password: "secret" }),
         headers: {
           "content-type": "application/json",
           cookie: "existing=value",
-          host: "localhost:3107",
-          origin: "http://localhost:3107",
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
         },
         method: "POST",
       }),
@@ -96,5 +96,32 @@ describe("control plane auth integration", () => {
       }),
     );
     expect(response.headers.get("set-cookie")).toBe("sid=abc; Path=/; HttpOnly");
+  });
+
+  it("rewrites auth-core browser redirects back to the requesting app origin", async () => {
+    vi.stubEnv("AUTH_CORE_URL", "http://auth-core:3011");
+    const fetchMock = vi.fn(async () => {
+      return new Response(null, {
+        headers: {
+          location: "http://localhost:3011/dashboard",
+        },
+        status: 302,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await proxyControlPlaneAuthRequest(
+      new Request("http://localhost:3000/api/auth/sign-in/email", {
+        body: JSON.stringify({ email: "ima@example.com", password: "secret" }),
+        headers: {
+          "content-type": "application/json",
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(response.headers.get("location")).toBe("http://localhost:3000/dashboard");
   });
 });

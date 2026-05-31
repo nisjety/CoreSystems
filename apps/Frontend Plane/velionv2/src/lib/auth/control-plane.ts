@@ -62,6 +62,45 @@ function requestOrigin(headers: HeaderReader) {
   return `${proto}://${host}`;
 }
 
+function originFromUrl(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return new URL(value).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function redirectRewriteOrigins() {
+  return Array.from(
+    new Set(
+      [
+        originFromUrl(getControlPlaneAuthUrl()),
+        originFromUrl(readOptionalEnv("AUTH_CORE_PUBLIC_URL")),
+        originFromUrl(readOptionalEnv("CONTROL_PLANE_AUTH_PUBLIC_URL")),
+        originFromUrl(readOptionalEnv("BETTER_AUTH_URL")),
+        "http://auth-core:3011",
+        "http://localhost:3011",
+        "http://127.0.0.1:3011",
+        "http://frontend:3000",
+      ].filter((origin): origin is string => Boolean(origin)),
+    ),
+  );
+}
+
+function rewriteLocationForProxy(location: string, appOrigin: string) {
+  for (const origin of redirectRewriteOrigins()) {
+    if (location === origin || location.startsWith(`${origin}/`) || location.startsWith(`${origin}?`)) {
+      return `${appOrigin}${location.slice(origin.length)}`;
+    }
+  }
+
+  return location;
+}
+
 export function buildControlPlaneAuthUrl(pathname: string, search = "") {
   const baseUrl = getControlPlaneAuthUrl();
   if (!baseUrl) {
@@ -172,9 +211,8 @@ function responseHeadersForProxy(upstreamResponse: Response, requestHeaders: Hea
 
   const location = upstreamResponse.headers.get("location");
   const appOrigin = requestOrigin(requestHeaders);
-  const authOrigin = getControlPlaneAuthUrl();
-  if (location && appOrigin && authOrigin && location.startsWith(authOrigin)) {
-    headers.set("location", `${appOrigin}${location.slice(authOrigin.length)}`);
+  if (location && appOrigin) {
+    headers.set("location", rewriteLocationForProxy(location, appOrigin));
   }
 
   for (const cookie of extractSetCookie(upstreamResponse.headers)) {

@@ -57,7 +57,7 @@ class SharedNatsPublisher:
                     await self.js.add_stream(
                         name="AQENCIA_DATAPLANE",
                         subjects=["aqencia.data.>"],
-                        max_age=14 * 24 * 60 * 60 * 1_000_000_000,
+                        max_age=14 * 24 * 60 * 60,
                         max_msgs=100_000,
                         discard="old",
                     )

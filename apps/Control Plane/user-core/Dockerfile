@@ -18,7 +18,7 @@ WORKDIR /build
 
 # Dep layer — only invalidated when go.mod/go.sum changes
 COPY go.mod go.sum ./
-ENV GOPROXY=https://proxy.golang.org,https://goproxy.io,direct
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 RUN set -e; \
     for i in 1 2 3 4 5; do \

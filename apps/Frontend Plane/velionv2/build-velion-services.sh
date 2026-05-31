@@ -5,6 +5,8 @@ set -Eeuo pipefail
 #
 # Subcommands:
 #   ./build-velion-services.sh                Build/start every plane (default).
+#   ./build-velion-services.sh --no-cache     Build all buildable images without
+#                                              Docker layer cache, then start.
 #   ./build-velion-services.sh --dry-run      Validate compose files only; no build/start.
 #   ./build-velion-services.sh --compose-bootstrap
 #                                              Called by velionv2 docker-compose.
@@ -19,16 +21,22 @@ set -Eeuo pipefail
 #   CORE_ROOT_OVERRIDE=/path/to/CoreSystem
 #   WAIT_TIMEOUT_SECONDS=900   Max seconds to wait for one-shot services.
 #   WAIT_INTERVAL_SECONDS=3    Poll interval while waiting for one-shot services.
+#   REMOVE_TIMEOUT_SECONDS=60  Max seconds to wait for one-shot cleanup.
+#   COMPOSE_PARALLEL_LIMIT=4   Max concurrent Docker Compose engine calls.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="${CORE_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 cd "$CORE_ROOT"
 
+export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-4}"
+
 MODE="build"
 DRY_RUN=false
+NO_CACHE=false
 while (( $# > 0 )); do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
+    --no-cache) NO_CACHE=true; shift ;;
     --compose-bootstrap) MODE="compose-bootstrap"; shift ;;
     --prune)   MODE="prune"; shift ;;
     --status)  MODE="status"; shift ;;
@@ -37,7 +45,7 @@ while (( $# > 0 )); do
       exit 0
       ;;
     *)
-      printf 'Usage: %s [--dry-run] [--compose-bootstrap|--prune|--status]\n' "$0" >&2
+      printf 'Usage: %s [--dry-run] [--no-cache] [--compose-bootstrap|--prune|--status]\n' "$0" >&2
       exit 2
       ;;
   esac
@@ -45,6 +53,11 @@ done
 
 if [[ "$MODE" != "build" && "$MODE" != "compose-bootstrap" && "$DRY_RUN" == "true" ]]; then
   printf 'Usage: %s [--dry-run] [--compose-bootstrap]\n' "$0" >&2
+  exit 2
+fi
+
+if [[ "$MODE" != "build" && "$MODE" != "compose-bootstrap" && "$NO_CACHE" == "true" ]]; then
+  printf 'Usage: %s [--no-cache] [--compose-bootstrap]\n' "$0" >&2
   exit 2
 fi
 
@@ -111,13 +124,14 @@ POST_BUILD_HOOKS=(
   "ensure_finspo_database"
   ""
   ""
-  "deploy_convex_functions"
+  "wait_for_convex_gateway_ready"
   ""
 )
 
 FRONTEND_STACK_INDEX=5
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-900}"
 WAIT_INTERVAL_SECONDS="${WAIT_INTERVAL_SECONDS:-3}"
+REMOVE_TIMEOUT_SECONDS="${REMOVE_TIMEOUT_SECONDS:-60}"
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -133,6 +147,30 @@ run() {
   fi
 
   "$@"
+}
+
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  "$@" &
+  local command_pid=$!
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while kill -0 "$command_pid" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      pkill -TERM -P "$command_pid" >/dev/null 2>&1 || true
+      kill -TERM "$command_pid" >/dev/null 2>&1 || true
+      sleep 1
+      pkill -KILL -P "$command_pid" >/dev/null 2>&1 || true
+      kill -KILL "$command_pid" >/dev/null 2>&1 || true
+      wait "$command_pid" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+  done
+
+  wait "$command_pid"
 }
 
 ensure_velion_network() {
@@ -175,6 +213,18 @@ validate_ingestion_plane_targets_quarry_v2() {
 compose_services() {
   local compose_file="$1"
   docker compose -f "$compose_file" config --services
+}
+
+buildable_services() {
+  local compose_file="$1"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'jq is required for --no-cache service targeting\n' >&2
+    return 1
+  fi
+
+  docker compose -f "$compose_file" config --format json \
+    | jq -r '.services | to_entries[] | select(.value.build != null) | .key'
 }
 
 service_in_list() {
@@ -229,6 +279,88 @@ stack_runtime_ready() {
   done < <(runtime_services "$compose_file" "$bootstrap_services")
 
   (( total > 0 ))
+}
+
+no_cache_build_services() {
+  local compose_file="$1"
+
+  buildable_services "$compose_file" | xargs
+}
+
+no_cache_runtime_start_services() {
+  local compose_file="$1"
+  local bootstrap_services="$2"
+  local services=""
+  local service
+
+  # Start image-only services when they are missing or unhealthy, but avoid
+  # recreating already-healthy infra containers with fixed host ports.
+  while IFS= read -r service; do
+    [[ -z "$service" ]] && continue
+    if service_ready "$compose_file" "$service"; then
+      continue
+    fi
+    if buildable_services "$compose_file" | grep -qx "$service"; then
+      continue
+    fi
+    services="$services $service"
+  done < <(runtime_services "$compose_file" "$bootstrap_services")
+
+  printf '%s\n' "$services" | xargs
+}
+
+non_build_runtime_services() {
+  local compose_file="$1"
+  local bootstrap_services="$2"
+  local build_services service
+
+  build_services="$(buildable_services "$compose_file" | xargs)"
+
+  while IFS= read -r service; do
+    [[ -z "$service" ]] && continue
+    if service_in_list "$service" "$build_services"; then
+      continue
+    fi
+    printf '%s\n' "$service"
+  done < <(runtime_services "$compose_file" "$bootstrap_services")
+}
+
+wait_for_services_ready() {
+  local compose_file="$1"
+  local services="$2"
+  local deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
+  local service pending
+
+  [[ -n "$services" ]] || return 0
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[dry-run] wait for runtime services: %s\n' "$services"
+    return 0
+  fi
+
+  while (( SECONDS < deadline )); do
+    pending=()
+    for service in $services; do
+      if ! service_ready "$compose_file" "$service"; then
+        pending+=("$service")
+      fi
+    done
+
+    if (( ${#pending[@]} == 0 )); then
+      return 0
+    fi
+
+    sleep "$WAIT_INTERVAL_SECONDS"
+  done
+
+  printf 'Timed out waiting for runtime services to become ready: %s\n' "$services" >&2
+  docker compose -f "$compose_file" ps || true
+  for service in $services; do
+    if ! service_ready "$compose_file" "$service"; then
+      docker compose -f "$compose_file" logs --tail=80 "$service" || true
+    fi
+  done
+  return 1
 }
 
 core_stacks_ready() {
@@ -345,7 +477,15 @@ remove_one_shot_containers() {
   if [[ "$DRY_RUN" == "true" ]]; then
     run docker compose -f "$compose_file" rm -f -s -v "${existing[@]}"
   else
-    docker compose -f "$compose_file" rm -f -s -v "${existing[@]}" >/dev/null
+    for service in "${existing[@]}"; do
+      local container_id
+      container_id="$(docker compose -f "$compose_file" ps -aq "$service" 2>/dev/null || true)"
+      [[ -z "$container_id" ]] && continue
+
+      if ! run_with_timeout "$REMOVE_TIMEOUT_SECONDS" docker rm -f -v "$container_id" >/dev/null; then
+        printf '[cleanup] WARN: timed out removing one-shot service %s (%s); continuing\n' "$service" "$container_id" >&2
+      fi
+    done
   fi
 }
 
@@ -366,10 +506,35 @@ build_stack() {
   stop_old_project "$compose_file" "$old_project"
 
   log "Building and starting $name"
-  if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
-    run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --build --remove-orphans frontend nats
+  if [[ "$NO_CACHE" == "true" ]]; then
+    local no_cache_build_service_list no_cache_runtime_service_list no_cache_runtime_ready_service_list
+    no_cache_build_service_list="$(no_cache_build_services "$compose_file")"
+    no_cache_runtime_service_list="$(no_cache_runtime_start_services "$compose_file" "$bootstrap_services")"
+    no_cache_runtime_ready_service_list="$(non_build_runtime_services "$compose_file" "$bootstrap_services" | xargs)"
+    if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
+      run docker compose -f "$compose_file" build --no-cache frontend
+      run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --no-deps --remove-orphans frontend nats
+    else
+      if [[ -z "$no_cache_build_service_list" && -z "$no_cache_runtime_service_list" ]]; then
+        run docker compose -f "$compose_file" up -d --remove-orphans
+      fi
+      if [[ -n "$no_cache_build_service_list" ]]; then
+        run docker compose -f "$compose_file" build --no-cache $no_cache_build_service_list
+      fi
+      if [[ -n "$no_cache_runtime_service_list" ]]; then
+        run docker compose -f "$compose_file" up -d --remove-orphans $no_cache_runtime_service_list
+      fi
+      wait_for_services_ready "$compose_file" "$no_cache_runtime_ready_service_list"
+      if [[ -n "$no_cache_build_service_list" ]]; then
+        run docker compose -f "$compose_file" up -d --no-deps --remove-orphans $no_cache_build_service_list
+      fi
+    fi
   else
-    run docker compose -f "$compose_file" up -d --build --remove-orphans
+    if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
+      run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --build --remove-orphans frontend nats
+    else
+      run docker compose -f "$compose_file" up -d --build --remove-orphans
+    fi
   fi
 
   if [[ "$DRY_RUN" == "false" ]]; then
@@ -394,84 +559,13 @@ build_stack() {
 # Post-build hooks
 # ─────────────────────────────────────────────────────────────────────────
 
-read_env_value() {
-  local file="$1"
-  local key="$2"
+wait_for_convex_gateway_ready() {
+  local compose_file="$CORE_ROOT/apps/Application Plane/docker-compose.yml"
 
-  [[ -f "$file" ]] || return 0
-
-  awk -F= -v key="$key" '
-    $1 == key {
-      value = substr($0, length(key) + 2)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      gsub(/^"|"$/, "", value)
-      gsub(/^'\''|'\''$/, "", value)
-      print value
-      exit
-    }
-  ' "$file"
-}
-
-# deploy_convex_functions — force-deploys the convex-core function registry
-# against the running convex-backend container. Idempotent: when the
-# backend already has the same code, `npx convex deploy` is a no-op.
-#
-# Rationale (velion ui-ux-velion-gap.md §10):
-# Convex backend's SQLite registry can drift from the on-disk source when
-# the container's volume is wiped or first brought up. Without this hook
-# the dashboard hits "Could not find public function for 'controlSessions:
-# byUser'" until something inside the convex/ directory mutates (which is
-# the only thing `convex dev`'s file-watcher triggers on).
-#
-# The convex-gateway container's startup.sh ALSO runs `convex deploy` on
-# every cold start — this build-script step belongs-and-suspenders the
-# same outcome for the case where a CI / fresh-clone run invokes this
-# script directly.
-deploy_convex_functions() {
-  local convex_dir="$CORE_ROOT/apps/Application Plane/convex-core"
-  local backend_url="${CONVEX_SELF_HOSTED_URL:-http://localhost:3210}"
-
-  if [[ ! -d "$convex_dir/convex" ]]; then
-    printf '[convex-deploy] Skipping — %s/convex not found\n' "$convex_dir" >&2
-    return 0
-  fi
-
-  local admin_key="${CONVEX_ADMIN_KEY:-${CONVEX_SELF_HOSTED_ADMIN_KEY:-}}"
-  if [[ -z "$admin_key" ]] && [[ -f "$convex_dir/.env.local" ]]; then
-    admin_key="$(read_env_value "$convex_dir/.env.local" "CONVEX_ADMIN_KEY")"
-  fi
-  if [[ -z "$admin_key" ]]; then
-    printf '[convex-deploy] WARN: no CONVEX_ADMIN_KEY available; skipping deploy\n' >&2
-    return 0
-  fi
-
-  # Wait for the backend to become reachable. 60 attempts × 2s = 2 min cap,
-  # well inside the convex-backend healthcheck start_period window.
-  local attempts=0
-  while ! curl -sf "$backend_url/version" >/dev/null 2>&1; do
-    attempts=$((attempts + 1))
-    if (( attempts >= 60 )); then
-      printf '[convex-deploy] WARN: backend %s did not respond after %d attempts; skipping deploy\n' "$backend_url" "$attempts" >&2
-      return 0
-    fi
-    sleep 2
-  done
-
-  log "Deploying Convex functions to $backend_url"
-  (
-    cd "$convex_dir"
-    mkdir -p .convex-tmp
-    CONVEX_SELF_HOSTED_URL="$backend_url" \
-    CONVEX_SELF_HOSTED_ADMIN_KEY="$admin_key" \
-    CONVEX_AUTH_ISSUER="${CONVEX_AUTH_ISSUER:-$(read_env_value "$convex_dir/.env.local" "CONVEX_AUTH_ISSUER")}" \
-    CONVEX_AUTH_JWKS_URL="${CONVEX_AUTH_JWKS_URL:-$(read_env_value "$convex_dir/.env.local" "CONVEX_AUTH_JWKS_URL")}" \
-    CONVEX_AUTH_AUDIENCE="${CONVEX_AUTH_AUDIENCE:-$(read_env_value "$convex_dir/.env.local" "CONVEX_AUTH_AUDIENCE")}" \
-    TMPDIR="$convex_dir/.convex-tmp" \
-    npx convex deploy --yes
-  ) || {
-    printf '[convex-deploy] WARN: deploy returned non-zero; verify convex-gateway logs for the auto-deploy fallback\n' >&2
-    return 0
-  }
+  # convex-gateway's startup script sets Convex env vars, deploys functions,
+  # and only then starts `convex dev`. Its healthcheck depends on that dev
+  # process, so readiness here also means the function registry is loaded.
+  wait_for_services_ready "$compose_file" "convex-gateway"
 }
 
 # ensure_finspo_database — idempotently CREATE DATABASE finspo on the

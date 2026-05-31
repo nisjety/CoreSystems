@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use inference_core::config::InferenceConfig;
 use inference_core::provider::fallback::{FallbackChain, ProviderRouterDyn};
 use inference_core::provider::{
     ChatMessage, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
@@ -236,4 +237,35 @@ fn list_models_filters_by_modality_and_provider() {
 
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].provider, "primary");
+}
+
+#[test]
+fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
+    let cfg = InferenceConfig {
+        provider_order: vec![
+            "azure".to_owned(),
+            "anthropic".to_owned(),
+            "openai".to_owned(),
+        ],
+        anthropic_api_key: None,
+        openai_api_base: None,
+        openai_api_key: None,
+        azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
+        azure_openai_api_key: Some("test-key".to_owned()),
+        azure_openai_api_version: "2025-01-01-preview".to_owned(),
+        openai_chat_models: vec!["gpt-test".to_owned()],
+        openai_embedding_models: vec!["embed-test".to_owned()],
+        azure_openai_chat_deployments: vec!["azure-chat".to_owned()],
+        azure_openai_embedding_deployments: vec!["azure-embed".to_owned()],
+        max_retries_per_provider: 1,
+        cache_ttl_secs: 60,
+    };
+
+    let chain = FallbackChain::from_config(&cfg);
+
+    assert_eq!(chain.provider_count(), 1);
+    assert_eq!(
+        chain.list_models("", "azure-openai")[0].id,
+        "azure-chat"
+    );
 }

@@ -5,6 +5,9 @@
 
 # ── Builder ──────────────────────────────────────────────────
 FROM node:20-alpine AS builder
+ENV PNPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    CI=true
 
 # Use corepack for zero-install pnpm (faster, cached by Docker layer)
 RUN corepack enable && corepack prepare pnpm@10 --activate
@@ -13,24 +16,27 @@ WORKDIR /app
 
 # Install deps first — only invalidated when lockfile changes
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile --loglevel=error
 
 # Copy source and build
 COPY . .
-RUN mkdir -p dist && \
-    pnpm exec tsc -p tsconfig.build.json --noEmitOnError false --skipLibCheck 2>&1 || \
-    pnpm exec nest build 2>&1 || true
-RUN if [ ! -d "dist/src" ]; then echo "ERROR: Build failed completely"; exit 1; fi
+RUN pnpm exec nest build
+RUN test -f "dist/src/main.js"
 
 # Prune dev-dependencies so we only copy prod deps to runtime
-RUN pnpm prune --prod --ignore-scripts
+RUN pnpm prune --prod --ignore-scripts --loglevel=error
 
 # ── Runtime ──────────────────────────────────────────────────
 FROM node:20-alpine
 
 # Add postgresql-client BEFORE copying application files
 # (keeps this layer cached when app code changes)
-RUN apk add --no-cache postgresql-client && \
+RUN set -e; \
+    if ! apk add --no-cache --quiet postgresql-client > /tmp/apk-add.log 2>&1; then \
+        cat /tmp/apk-add.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log; \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app

@@ -90,7 +90,7 @@ function createInitialOnboardingPageState(): OnboardingPageState {
     brief: "",
     connected: ["microsoft365"],
     plan: "standard",
-    viewportHeight: typeof window === "undefined" ? null : window.innerHeight,
+    viewportHeight: null,
   };
 }
 
@@ -211,6 +211,7 @@ export function VelionOnboardingPage() {
       dispatch({ type: "set-viewport-height", viewportHeight: window.innerHeight });
     };
 
+    updateViewportHeight();
     window.addEventListener("resize", updateViewportHeight);
     return () => {
       window.removeEventListener("resize", updateViewportHeight);

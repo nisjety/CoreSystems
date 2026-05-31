@@ -67,18 +67,14 @@ impl FallbackChain {
     /// Build a fallback chain from configuration.
     pub fn from_config(cfg: &InferenceConfig) -> Self {
         let mut providers: Vec<(String, BoxedProvider)> = Vec::new();
+        let has_explicit_azure = cfg
+            .provider_order
+            .iter()
+            .any(|name| matches!(name.as_str(), "azure" | "azure-openai"));
 
         for name in &cfg.provider_order {
             match name.as_str() {
-                "anthropic" => {
-                    if let Some(key) = &cfg.anthropic_api_key {
-                        if let Ok(p) = AnthropicProvider::new(key.clone()) {
-                            providers.push(("anthropic".to_owned(), Arc::new(p)));
-                            info!(provider = "anthropic", "provider registered");
-                        }
-                    }
-                }
-                "openai" => {
+                "azure" | "azure-openai" => {
                     if let (Some(endpoint), Some(key)) =
                         (&cfg.azure_openai_endpoint, &cfg.azure_openai_api_key)
                     {
@@ -94,15 +90,50 @@ impl FallbackChain {
                             providers.push(("azure-openai".to_owned(), Arc::new(p)));
                             info!(provider = "azure-openai", "provider registered");
                         }
-                    } else if let Some(key) = &cfg.openai_api_key {
-                        if let Ok(p) = OpenAiProvider::new(key.clone(), cfg.openai_api_base.clone())
+                    }
+                }
+                "anthropic" => {
+                    if let Some(key) = &cfg.anthropic_api_key {
+                        if let Ok(p) = AnthropicProvider::new(key.clone()) {
+                            providers.push(("anthropic".to_owned(), Arc::new(p)));
+                            info!(provider = "anthropic", "provider registered");
+                        }
+                    }
+                }
+                "openai" => {
+                    let mut registered_azure = false;
+                    if !has_explicit_azure {
+                        if let (Some(endpoint), Some(key)) =
+                            (&cfg.azure_openai_endpoint, &cfg.azure_openai_api_key)
                         {
-                            let p = p.with_model_catalog(
-                                cfg.openai_chat_models.clone(),
-                                cfg.openai_embedding_models.clone(),
-                            );
-                            providers.push(("openai".to_owned(), Arc::new(p)));
-                            info!(provider = "openai", "provider registered");
+                            if let Ok(p) = OpenAiProvider::new_azure(
+                                key.clone(),
+                                endpoint.clone(),
+                                cfg.azure_openai_api_version.clone(),
+                            ) {
+                                let p = p.with_model_catalog(
+                                    cfg.azure_openai_chat_deployments.clone(),
+                                    cfg.azure_openai_embedding_deployments.clone(),
+                                );
+                                providers.push(("azure-openai".to_owned(), Arc::new(p)));
+                                info!(provider = "azure-openai", "provider registered");
+                                registered_azure = true;
+                            }
+                        }
+                    }
+
+                    if !registered_azure {
+                        if let Some(key) = &cfg.openai_api_key {
+                            if let Ok(p) =
+                                OpenAiProvider::new(key.clone(), cfg.openai_api_base.clone())
+                            {
+                                let p = p.with_model_catalog(
+                                    cfg.openai_chat_models.clone(),
+                                    cfg.openai_embedding_models.clone(),
+                                );
+                                providers.push(("openai".to_owned(), Arc::new(p)));
+                                info!(provider = "openai", "provider registered");
+                            }
                         }
                     }
                 }

@@ -12,7 +12,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
 RUN set -e; \
-    if ! apk add --no-cache --quiet bash git docker-cli docker-cli-compose curl wget \
+    if ! apk add --no-cache --quiet bash git docker-cli docker-cli-compose curl jq wget \
       > /tmp/apk-add.log 2>&1; then \
       cat /tmp/apk-add.log; \
       exit 1; \

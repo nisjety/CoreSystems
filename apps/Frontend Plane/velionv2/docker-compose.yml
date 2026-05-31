@@ -32,8 +32,10 @@ services:
       dockerfile: Dockerfile.dev
     container_name: velionv2-frontend
     ports:
-      - "3107:3000"
+      - "3000:3000"
     env_file:
+      - path: ../../Control Plane/.env
+        required: false
       - path: .env
         required: false
     environment:
@@ -48,8 +50,10 @@ services:
       VELION_NATS_URL: nats://velion-nats:4222
       CONTROL_PLANE_AUTH_URL: http://auth-core:3011
       AUTH_CORE_URL: http://auth-core:3011
+      AUTH_CORE_PUBLIC_URL: http://localhost:3011
       USER_CORE_URL: http://user-core:3012
-      NEXT_PUBLIC_APP_URL: http://localhost:3107
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_AUTH_BASE_URL: http://localhost:3000
     command:
       [
         "sh",
@@ -74,6 +78,8 @@ services:
     depends_on:
       nats:
         condition: service_healthy
+    tmpfs:
+      - /app/.next:size=1024m
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q --timeout=5 --tries=1 -O /dev/null http://127.0.0.1:3000 || exit 1"]

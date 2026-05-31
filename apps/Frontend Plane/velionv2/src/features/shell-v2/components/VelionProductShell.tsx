@@ -4,7 +4,6 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { Route } from "next";
 import { usePathname, useRouter } from "next/navigation";
-import { useTheme } from "next-themes";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
@@ -42,6 +41,7 @@ import {
   type NavbarProfile,
 } from "@/features/shell-v2/lib/navbar-data";
 import { isLocalIntegrationUnavailable } from "@/lib/api/client-envelope";
+import { useTheme } from "@/lib/theme/theme-provider";
 
 type OpenPanel = "assistant" | "messages" | "notifications" | "calendar" | "profile" | "support" | null;
 

@@ -125,45 +125,43 @@ class ControlPlaneSubscriber:
                 )
                 self.js = self.nc.jetstream()
 
-                # Subscribe to Control Plane events
+                # Subscribe to live Control Plane events. These handlers do not
+                # need durable replay, so core NATS subscriptions avoid
+                # JetStream stream bootstrap coupling at service startup.
                 logger.info(f"📡 Control Plane Subscriber ({self.service_name}): subscribing to events...")
 
                 # Subscribe to user.provider_linked (M365 setup trigger)
-                sub1 = await self.js.subscribe(
+                sub1 = await self.nc.subscribe(
                     "velion.controlplane.user.provider_linked",
                     queue="ingestion-plane-m365",
                     cb=self._handle_user_provider_linked,
-                    ordered_consumer=False,
                 )
                 self._subscriptions.append(sub1)
                 logger.info("  ✅ Subscribed to: velion.controlplane.user.provider_linked")
 
                 # Subscribe to org.plan_changed (future: adjust sync resources)
-                sub2 = await self.js.subscribe(
+                sub2 = await self.nc.subscribe(
                     "velion.controlplane.org.plan_changed",
                     queue="ingestion-plane-plan",
                     cb=self._handle_org_plan_changed,
-                    ordered_consumer=False,
                 )
                 self._subscriptions.append(sub2)
                 logger.info("  ✅ Subscribed to: velion.controlplane.org.plan_changed")
 
                 # Subscribe to billing.quota_exceeded (pauses imports for the org)
-                sub3 = await self.js.subscribe(
+                sub3 = await self.nc.subscribe(
                     "velion.controlplane.billing.quota_exceeded",
                     queue="ingestion-plane-quota",
                     cb=self._handle_billing_quota_exceeded,
-                    ordered_consumer=False,
                 )
                 self._subscriptions.append(sub3)
                 logger.info("  ✅ Subscribed to: velion.controlplane.billing.quota_exceeded")
 
                 # Subscribe to Quarry's ingestion-level quota exceeded signal
-                sub4 = await self.js.subscribe(
+                sub4 = await self.nc.subscribe(
                     "velion.ingestion.quota.exceeded",
                     queue="ingestion-plane-quota-ingestion",
                     cb=self._handle_ingestion_quota_exceeded,
-                    ordered_consumer=False,
                 )
                 self._subscriptions.append(sub4)
                 logger.info("  ✅ Subscribed to: velion.ingestion.quota.exceeded")
@@ -201,7 +199,7 @@ class ControlPlaneSubscriber:
                     logger.info(
                         "Skipping M365 provisioning for identity-only auth-core link event"
                     )
-                    await msg.ack()
+                    await self._ack_msg(msg)
                     return
 
                 if self.on_user_provider_linked:
@@ -214,14 +212,11 @@ class ControlPlaneSubscriber:
                 else:
                     logger.warning("⚠️  No handler for user.provider_linked events")
 
-            await msg.ack()
+            await self._ack_msg(msg)
 
         except Exception as e:
             logger.error(f"Error handling user.provider_linked event: {e}")
-            try:
-                await msg.nak()
-            except:
-                pass
+            await self._nak_msg(msg)
 
     async def _handle_org_plan_changed(self, msg: Any) -> None:
         """Handle velion.controlplane.org.plan_changed event."""
@@ -243,14 +238,11 @@ class ControlPlaneSubscriber:
                     tier=tier,
                 )
 
-            await msg.ack()
+            await self._ack_msg(msg)
 
         except Exception as e:
             logger.error(f"Error handling org.plan_changed event: {e}")
-            try:
-                await msg.nak()
-            except:
-                pass
+            await self._nak_msg(msg)
 
     async def _handle_billing_quota_exceeded(self, msg: Any) -> None:
         """Handle velion.controlplane.billing.quota_exceeded event.
@@ -282,14 +274,11 @@ class ControlPlaneSubscriber:
                     current=current,
                 )
 
-            await msg.ack()
+            await self._ack_msg(msg)
 
         except Exception as e:
             logger.error(f"Error handling billing.quota_exceeded event: {e}")
-            try:
-                await msg.nak()
-            except:
-                pass
+            await self._nak_msg(msg)
 
     async def _handle_ingestion_quota_exceeded(self, msg: Any) -> None:
         """Handle velion.ingestion.quota.exceeded event (from Quarry).
@@ -310,14 +299,21 @@ class ControlPlaneSubscriber:
             if org_id:
                 self.pause_org(org_id)
 
-            await msg.ack()
+            await self._ack_msg(msg)
 
         except Exception as e:
             logger.error(f"Error handling ingestion.quota.exceeded event: {e}")
-            try:
-                await msg.nak()
-            except:
-                pass
+            await self._nak_msg(msg)
+
+    async def _ack_msg(self, msg: Any) -> None:
+        ack = getattr(msg, "ack", None)
+        if ack:
+            await ack()
+
+    async def _nak_msg(self, msg: Any) -> None:
+        nak = getattr(msg, "nak", None)
+        if nak:
+            await nak()
 
     async def close(self) -> None:
         """Close connection and unsubscribe."""

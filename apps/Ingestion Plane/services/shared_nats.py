@@ -108,7 +108,7 @@ class SharedNatsPublisher:
                 await self.js.add_stream(
                     name="VELION_INGESTION",
                     subjects=["velion.ingestion.>"],
-                    max_age=14 * 24 * 60 * 60 * 10**9,  # 14 days in nanoseconds
+                    max_age=14 * 24 * 60 * 60,
                     max_msgs=100_000,
                 )
             except Exception:

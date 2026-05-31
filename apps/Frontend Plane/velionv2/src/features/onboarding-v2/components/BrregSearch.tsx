@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { brregService, formatBrregAddress, type BrregEnhet } from "@/lib/services/brreg-service";
+import { useOnboardingCopy } from "../lib/onboarding-i18n";
 
 interface BrregSearchProps {
   /** Pre-filled search term (usually the org name already typed). */
@@ -21,23 +22,8 @@ function useDebounce<T>(value: T, delay: number): T {
   return debounced;
 }
 
-const COPY = {
-  label: "Verifiser i Enhetsregisteret",
-  optional: "(valgfritt)",
-  skip: "Hopp over, jeg skriver inn manuelt",
-  placeholder: "Søk på organisasjonsnavn…",
-  searching: "Søker…",
-  unreachable: "Kunne ikke nå Enhetsregisteret",
-  empty: "Ingen organisasjoner funnet",
-  orgNumber: "Org.nr",
-  employees: "ansatte",
-  bankrupt: "Konkurs",
-  closing: "Under avvikling",
-  verified: "Verifisert",
-  change: "Bytt",
-} as const;
-
 export function BrregSearch({ initialQuery = "", onSelect, onManualEntry }: BrregSearchProps) {
+  const COPY = useOnboardingCopy().copy.brreg;
   const [query, setQuery] = useState(initialQuery);
   const [selected, setSelected] = useState<BrregEnhet | null>(null);
   const [results, setResults] = useState<BrregEnhet[]>([]);
@@ -107,7 +93,7 @@ export function BrregSearch({ initialQuery = "", onSelect, onManualEntry }: Brre
     <div className="flex flex-col gap-3">
       <div className="relative">
         <span className="block text-[11px] uppercase tracking-[0.16em] text-[#6B6660]">
-          {COPY.label}{" "}
+          {COPY.verify}{" "}
           <span className="normal-case tracking-normal text-[#A09890]">{COPY.optional}</span>
         </span>
         <input

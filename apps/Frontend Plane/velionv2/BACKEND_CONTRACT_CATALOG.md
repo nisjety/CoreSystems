@@ -210,7 +210,7 @@ Source: `auth-core/src/auth/auth.ts`
 |---------|----------------|-----------|
 | `secret` | `BETTER_AUTH_SECRET` (required in prod) | `auth.ts:218` |
 | `baseURL` | `BETTER_AUTH_URL` (default `http://localhost:3011`) | `auth.ts:219` |
-| `trustedOrigins` | Computed from: `localhost:3000`, `localhost:3107`, `BETTER_AUTH_URL`, `FRONTEND_URL`, `NEXT_PUBLIC_APP_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `AUTH_ALLOWED_ORIGINS` | `auth.ts:59–69` |
+| `trustedOrigins` | Computed from: `localhost:3000`, `BETTER_AUTH_URL`, `FRONTEND_URL`, `NEXT_PUBLIC_APP_URL`, `BETTER_AUTH_TRUSTED_ORIGINS`, `AUTH_ALLOWED_ORIGINS` | `auth.ts:59–69` |
 | Rate limiting | Enabled when `RATE_LIMIT_ENABLED=true`; Redis storage; global 100 req/60s | `auth.ts:223–250` |
 | Rate limit `/sign-in/email` | 3 req / 10s window | `auth.ts:229` |
 | Rate limit `/two-factor/verify-totp` + `/verify-otp` | `RATE_LIMIT_2FA_VERIFY_MAX` / `RATE_LIMIT_2FA_VERIFY_WINDOW` (default 5/300s) | `auth.ts:234–244` |

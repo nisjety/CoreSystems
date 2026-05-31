@@ -189,6 +189,14 @@ function normalizeCallbackUrl(value: string | null) {
   return value;
 }
 
+function toBrowserCallbackUrl(value: string) {
+  if (typeof window === "undefined") {
+    return value;
+  }
+
+  return new URL(value, window.location.origin).toString();
+}
+
 export function VelionAuthPage({
   callbackUrl: callbackUrlInput,
   initialMode = "signin",
@@ -290,7 +298,7 @@ export function VelionAuthPage({
           email: parsed.data.email,
           password: parsed.data.password,
           name: parsed.data.name,
-          callbackURL: "/onboarding",
+          callbackURL: toBrowserCallbackUrl("/onboarding"),
         });
 
         if (account.error) {
@@ -301,7 +309,7 @@ export function VelionAuthPage({
         const newSession = await authClient.signIn.email({
           email: parsed.data.email,
           password: parsed.data.password,
-          callbackURL: "/onboarding",
+          callbackURL: toBrowserCallbackUrl("/onboarding"),
         });
 
         if (newSession.error) {
@@ -340,7 +348,7 @@ export function VelionAuthPage({
       const session = await authClient.signIn.email({
         email: parsed.data.email,
         password: parsed.data.password,
-        callbackURL: callbackUrl,
+        callbackURL: toBrowserCallbackUrl(callbackUrl),
       });
       const sessionData = session.data as { twoFactorRedirect?: boolean } | null;
 
@@ -399,7 +407,7 @@ export function VelionAuthPage({
     try {
       const result = await authClient.signIn.social({
         provider,
-        callbackURL: callbackUrl,
+        callbackURL: toBrowserCallbackUrl(callbackUrl),
       });
 
       if (result.error) {
