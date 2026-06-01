@@ -179,14 +179,23 @@ type WebSearchCitation = {
   title?: string;
 };
 
+type FetchedPage = {
+  url: string;
+  title: string;
+  description: string | null;
+  excerpt: string | null;
+};
+
 type SearchPanelState = {
   query: string;
   submittedQuery: string;
   suggestions: SearchSuggestion[];
   suggestionsQuery: string;
+  webMode: "search" | "fetch" | null;
   webResults: WebSearchResult[];
   webAnswer: string;
   webCitations: WebSearchCitation[];
+  webFetchedPage: FetchedPage | null;
   webLoading: boolean;
   webError: string | null;
 };
@@ -203,6 +212,7 @@ type SearchPanelAction =
       answer: string;
       citations: WebSearchCitation[];
     }
+  | { type: "web-fetch-loaded"; page: FetchedPage }
   | { type: "web-search-error"; message: string };
 
 const initialSearchPanelState: SearchPanelState = {
@@ -210,9 +220,11 @@ const initialSearchPanelState: SearchPanelState = {
   submittedQuery: "",
   suggestions: [],
   suggestionsQuery: "",
+  webMode: null,
   webResults: [],
   webAnswer: "",
   webCitations: [],
+  webFetchedPage: null,
   webLoading: false,
   webError: null,
 };
@@ -228,14 +240,31 @@ function searchPanelReducer(state: SearchPanelState, action: SearchPanelAction):
     case "suggestions-loaded":
       return { ...state, suggestions: action.suggestions, suggestionsQuery: action.query };
     case "web-search-started":
-      return { ...state, webLoading: true, webError: null, webResults: [], webAnswer: "", webCitations: [] };
+      return {
+        ...state,
+        webLoading: true,
+        webError: null,
+        webMode: null,
+        webResults: [],
+        webAnswer: "",
+        webCitations: [],
+        webFetchedPage: null,
+      };
     case "web-results-loaded":
       return {
         ...state,
         webLoading: false,
+        webMode: "search",
         webResults: action.results,
         webAnswer: action.answer,
         webCitations: action.citations,
+      };
+    case "web-fetch-loaded":
+      return {
+        ...state,
+        webLoading: false,
+        webMode: "fetch",
+        webFetchedPage: action.page,
       };
     case "web-search-error":
       return { ...state, webLoading: false, webError: action.message };
@@ -528,7 +557,7 @@ function PlanBadge({ planLabel }: { planLabel: string }) {
 
 function SearchPanel() {
   const [searchState, dispatchSearch] = useReducer(searchPanelReducer, initialSearchPanelState);
-  const { query, submittedQuery, suggestions, suggestionsQuery, webResults, webAnswer, webCitations, webLoading, webError } = searchState;
+  const { query, submittedQuery, suggestions, suggestionsQuery, webMode, webResults, webAnswer, webCitations, webFetchedPage, webLoading, webError } = searchState;
   const activeQuery = query.trim();
   const isTyping = activeQuery.length > 0 && submittedQuery !== activeQuery;
   const visibleSuggestions = isTyping && suggestionsQuery === activeQuery ? suggestions : [];
@@ -600,15 +629,21 @@ function SearchPanel() {
           signal: webAbort.signal,
         });
 
+        type FetchPayloadData = {
+          mode: "fetch";
+          url: string;
+          title: string;
+          description: string | null;
+          excerpt: string | null;
+        };
+        type SearchPayloadData = {
+          mode: "search";
+          results: WebSearchResult[];
+          answer: string | null;
+          citations: WebSearchCitation[];
+        };
         const payload = (await response.json().catch(() => null)) as
-          | {
-              data?: {
-                results: WebSearchResult[];
-                answer: string | null;
-                citations: WebSearchCitation[];
-              };
-              error?: { message: string };
-            }
+          | { data?: FetchPayloadData | SearchPayloadData; error?: { code?: string; message: string } }
           | null;
 
         if (!response.ok || !payload || !payload.data) {
@@ -619,12 +654,24 @@ function SearchPanel() {
           return;
         }
 
-        dispatchSearch({
-          type: "web-results-loaded",
-          results: payload.data.results ?? [],
-          answer: payload.data.answer ?? "",
-          citations: payload.data.citations ?? [],
-        });
+        if (payload.data.mode === "fetch") {
+          dispatchSearch({
+            type: "web-fetch-loaded",
+            page: {
+              url: payload.data.url,
+              title: payload.data.title,
+              description: payload.data.description,
+              excerpt: payload.data.excerpt,
+            },
+          });
+        } else {
+          dispatchSearch({
+            type: "web-results-loaded",
+            results: payload.data.results ?? [],
+            answer: payload.data.answer ?? "",
+            citations: payload.data.citations ?? [],
+          });
+        }
       } catch (error: unknown) {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
@@ -721,8 +768,46 @@ function SearchPanel() {
               </div>
             ) : null}
 
-            {/* AI answer summary card */}
-            {!webLoading && !webError && webAnswer ? (
+            {/* Fetched page card (mode: "fetch") */}
+            {!webLoading && !webError && webMode === "fetch" && webFetchedPage ? (
+              <div className="rounded-[16px] bg-white px-4 py-3 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-black/[0.04] dark:bg-[#1A1B20] dark:ring-white/[0.06]">
+                <p className="mb-1.5 text-[12px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
+                  Hentet side
+                </p>
+                <a
+                  href={webFetchedPage.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[13px] font-semibold text-[#EE7A50] underline-offset-2 hover:underline"
+                >
+                  {webFetchedPage.title}
+                </a>
+                <p className="mt-0.5 truncate text-[11px] text-[#9A9188] dark:text-[#737780]">
+                  {webFetchedPage.url}
+                </p>
+                {webFetchedPage.description ? (
+                  <p className="mt-1.5 text-[12px] leading-relaxed text-[#5F5A54] dark:text-[#AEB4C0]">
+                    {webFetchedPage.description}
+                  </p>
+                ) : null}
+                {webFetchedPage.excerpt ? (
+                  <p className="mt-2 border-t border-black/[0.06] pt-2 text-[12px] leading-relaxed text-[#3A3530] dark:border-white/[0.06] dark:text-[#D4D6DC]">
+                    {webFetchedPage.excerpt}
+                  </p>
+                ) : null}
+                <a
+                  href={webFetchedPage.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2.5 inline-flex items-center gap-1 rounded-full bg-[#F4F1EB] px-3 py-1 text-[12px] font-medium text-[#504A43] transition hover:bg-[#EBE6DD] dark:bg-[#2A2C31] dark:text-[#D4D6DC] dark:hover:bg-[#35373D]"
+                >
+                  Åpne side
+                </a>
+              </div>
+            ) : null}
+
+            {/* AI answer summary card (mode: "search") */}
+            {!webLoading && !webError && webMode === "search" && webAnswer ? (
               <div className="rounded-[16px] bg-[#F4F1EB] px-4 py-3 dark:bg-[#1D1A17]">
                 <p className="mb-1.5 text-[12px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
                   AI-sammendrag
@@ -751,8 +836,8 @@ function SearchPanel() {
               </div>
             ) : null}
 
-            {/* Web results list */}
-            {!webLoading && !webError && webResults.length > 0 ? (
+            {/* Web results list (mode: "search") */}
+            {!webLoading && !webError && webMode === "search" && webResults.length > 0 ? (
               <ul className="flex flex-col gap-2" aria-label="Webresultater">
                 {webResults.map((result, idx) => (
                   <li key={idx}>
@@ -781,8 +866,8 @@ function SearchPanel() {
               </ul>
             ) : null}
 
-            {/* Empty state */}
-            {!webLoading && !webError && webResults.length === 0 && !webAnswer ? (
+            {/* Empty state — only when search succeeded with zero results */}
+            {!webLoading && !webError && webMode === "search" && webResults.length === 0 && !webAnswer ? (
               <div className="rounded-[14px] bg-[#F4F1EB] px-4 py-3 text-[13px] text-[#7A756F] dark:bg-[#1D1A17] dark:text-[#AEB4C0]">
                 Ingen webresultater funnet for{" "}
                 <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.

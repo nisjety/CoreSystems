@@ -31,6 +31,42 @@ type QuarrySearchResponse = {
   context?: string;
 };
 
+type QuarryScrapeResponse = {
+  data: {
+    markdown?: string;
+    metadata?: {
+      title?: string;
+      description?: string;
+      url?: string;
+    };
+  };
+};
+
+// Matches bare domains like "google.com", "sub.example.co.uk/path" and full URLs.
+// Bare domain rule: one or more labels of [a-z0-9-], a dot, TLD of 2+ chars, optional path.
+// No spaces allowed (queries with spaces are always keyword searches).
+const URL_RE = /^([a-z0-9-]+\.)+[a-z]{2,}(\/\S*)?$/i;
+
+function isUrlInput(query: string): boolean {
+  if (query.startsWith("http://") || query.startsWith("https://")) {
+    try {
+      new URL(query);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  // Bare domain — must have no spaces and match the pattern
+  return !query.includes(" ") && URL_RE.test(query);
+}
+
+function normalizeUrl(query: string): string {
+  if (query.startsWith("http://") || query.startsWith("https://")) {
+    return query;
+  }
+  return `https://${query}`;
+}
+
 function isSameOriginRequest(request: Request) {
   const origin = request.headers.get("origin");
   const host = request.headers.get("host");
@@ -72,7 +108,6 @@ export async function POST(request: NextRequest) {
 
     const token = await mintAudienceToken(request, getQuarryAudience());
 
-    const quarryUrl = `${getQuarryEdgeUrl()}/v1/search`;
     const quarryHeaders: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -81,7 +116,53 @@ export async function POST(request: NextRequest) {
       quarryHeaders["Authorization"] = `Bearer ${token}`;
     }
 
-    const upstream = await fetch(quarryUrl, {
+    // --- URL / bare-domain path: scrape the page ---
+    if (isUrlInput(query)) {
+      const targetUrl = normalizeUrl(query);
+
+      const upstream = await fetch(`${getQuarryEdgeUrl()}/v1/scrape`, {
+        method: "POST",
+        headers: quarryHeaders,
+        body: JSON.stringify({ url: targetUrl, maxPages: 1, formats: ["markdown"] }),
+        signal: AbortSignal.timeout(20000),
+      });
+
+      if (!upstream.ok) {
+        const status = upstream.status;
+        return NextResponse.json(
+          fail({
+            code: "fetch_failed",
+            message: `Could not fetch "${targetUrl}" (upstream ${status}).`,
+          }),
+          { status: 502 },
+        );
+      }
+
+      const data = (await upstream.json().catch(() => null)) as QuarryScrapeResponse | null;
+
+      if (!data?.data) {
+        return NextResponse.json(
+          fail({ code: "fetch_parse_error", message: "Page fetch returned an unexpected response." }),
+          { status: 502 },
+        );
+      }
+
+      const markdown = typeof data.data.markdown === "string" ? data.data.markdown : "";
+      const excerpt = markdown.replace(/\s+/g, " ").trim().slice(0, 600).trimEnd();
+
+      return NextResponse.json(
+        ok({
+          mode: "fetch" as const,
+          url: targetUrl,
+          title: data.data.metadata?.title ?? targetUrl,
+          description: data.data.metadata?.description ?? null,
+          excerpt: excerpt || null,
+        }),
+      );
+    }
+
+    // --- Keyword search path ---
+    const upstream = await fetch(`${getQuarryEdgeUrl()}/v1/search`, {
       method: "POST",
       headers: quarryHeaders,
       body: JSON.stringify({
@@ -94,8 +175,23 @@ export async function POST(request: NextRequest) {
     });
 
     if (!upstream.ok) {
+      const status = upstream.status;
+
+      if (status === 501) {
+        return NextResponse.json(
+          fail({
+            code: "search_provider_unconfigured",
+            message: "Web search is unavailable — no search provider is configured.",
+          }),
+          { status: 501 },
+        );
+      }
+
       return NextResponse.json(
-        fail({ code: "web_search_unavailable", message: "Web search could not be completed." }),
+        fail({
+          code: "web_search_unavailable",
+          message: `Web search could not be completed (upstream ${status}).`,
+        }),
         { status: 502 },
       );
     }
@@ -111,6 +207,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       ok({
+        mode: "search" as const,
         results: Array.isArray(data.results) ? data.results : [],
         answer: typeof data.answer === "string" ? data.answer : null,
         citations: Array.isArray(data.citations) ? data.citations : [],
