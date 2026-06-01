@@ -8,15 +8,18 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Bell,
+  Building2,
   CalendarDays,
-  CircleDashed,
+  Check,
   MessageSquareMore,
   MoonStar,
   Search,
   Sparkles,
   Sun,
+  UserRound,
 } from "lucide-react";
 import { authClient } from "@/lib/auth/auth-client";
+import type { ControlPlaneContextValue } from "@/lib/control-plane/context-types";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
 import {
   BadgeButton,
@@ -33,7 +36,13 @@ import {
   ProfileDropdown,
 } from "@/features/shell-v2/components/VelionNavbarPanels";
 import { VelionSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from "@/features/shell-v2/components/VelionSidebar";
-import { workspaceIdentity, type VelionRoute } from "@/features/shell-v2/lib/shell-data";
+import {
+  fallbackWorkspaceIdentity,
+  formatPlanLabel,
+  type VelionRoute,
+  type WorkspaceIdentity,
+} from "@/features/shell-v2/lib/shell-data";
+import { useControlPlaneContext } from "@/features/shell-v2/lib/control-plane-provider";
 import {
   markNavbarNotificationRead,
   saveNavbarTheme,
@@ -43,7 +52,7 @@ import {
 import { isLocalIntegrationUnavailable } from "@/lib/api/client-envelope";
 import { useTheme } from "@/lib/theme/theme-provider";
 
-type OpenPanel = "assistant" | "messages" | "notifications" | "calendar" | "profile" | "support" | null;
+type OpenPanel = "assistant" | "messages" | "notifications" | "calendar" | "profile" | "support" | "workspace" | null;
 
 const LazyGlobalSearchDialog = dynamic(
   () => import("@/features/shell-v2/components/VelionNavbarOverlays").then((module) => module.GlobalSearchDialog),
@@ -84,6 +93,74 @@ function getNavbarLabels(activeRoute: VelionRoute) {
   }
 }
 
+const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+function cleanOrganizationName(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return fallbackWorkspaceIdentity.name;
+
+  if (!/^[A-ZÆØÅ0-9 .&-]+$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return trimmed
+    .toLowerCase()
+    .split(" ")
+    .map((word) => {
+      if (["as", "asa", "ab", "sa", "ba", "llc", "inc"].includes(word)) {
+        return word.toUpperCase();
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+}
+
+function firstInitial(...values: Array<string | null | undefined>) {
+  const first = values.find((value) => value?.trim());
+  return (first?.trim().charAt(0) || fallbackWorkspaceIdentity.initial).toUpperCase();
+}
+
+function safeAccentColor(...values: Array<string | null | undefined>) {
+  const found = values.find((value) => value && HEX_COLOR.test(value));
+  return found?.toLowerCase() ?? null;
+}
+
+function resolveWorkspaceIdentity(
+  context: ControlPlaneContextValue,
+  profile: NavbarProfile | null,
+): WorkspaceIdentity {
+  const organization = context.organization;
+  const userName = profile?.name ?? context.user?.name ?? null;
+  const userEmail = profile?.email ?? context.user?.email ?? null;
+  const userAvatar = profile?.avatar ?? context.user?.image ?? null;
+  const plan = context.entitlements?.plan ?? organization?.plan ?? "free";
+  const name = organization?.name ?? userName ?? fallbackWorkspaceIdentity.name;
+
+  return {
+    accentColor: safeAccentColor(context.appearance?.colorScheme, organization?.accentColor),
+    domain: organization?.primaryDomain ?? null,
+    initial: firstInitial(organization?.name, userName, userEmail),
+    logoUrl: organization?.logoUrl ?? null,
+    name: cleanOrganizationName(name),
+    plan: formatPlanLabel(plan),
+    role: context.role,
+    userAvatar,
+    userEmail,
+    userName,
+  };
+}
+
+function useWorkspaceAccent(accentColor: string | null | undefined) {
+  useEffect(() => {
+    if (!accentColor || !HEX_COLOR.test(accentColor)) {
+      return;
+    }
+
+    const root = document.documentElement;
+    root.style.setProperty("--velion-accent", accentColor);
+  }, [accentColor]);
+}
+
 export function VelionProductShell({
   activeRoute,
   children,
@@ -100,12 +177,32 @@ export function VelionProductShell({
   const [sidebarExpanded, setSidebarExpanded] = useState(defaultSidebarExpanded);
   const [searchOpen, setSearchOpen] = useState(false);
   const [profile, setProfile] = useState<NavbarProfile | null>(null);
+  const controlPlane = useControlPlaneContext();
+  const { setTheme } = useTheme();
+  const workspace = resolveWorkspaceIdentity(controlPlane, profile);
   const effectiveSidebarExpanded = lockSidebarCollapsed ? false : sidebarExpanded;
   const sidebarWidth = effectiveSidebarExpanded ? expandedSidebarWidth : SIDEBAR_MINIMIZED_WIDTH;
+  useWorkspaceAccent(workspace.accentColor);
+
+  // Apply the server-side theme preference only when the user has no explicit
+  // local override stored in localStorage (key "theme").
+  const serverTheme = controlPlane.appearance?.theme;
+  useEffect(() => {
+    if (!serverTheme) return;
+    try {
+      const stored = window.localStorage.getItem("theme");
+      if (!stored) {
+        setTheme(serverTheme);
+      }
+    } catch {
+      // localStorage unavailable — skip silently.
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverTheme]);
 
   return (
     <div
-      className="relative h-dvh overflow-hidden bg-[#F7F7F8] text-[#1A1A1A] transition-colors dark:bg-[#101114] dark:text-[#F7F8F8]"
+      className="relative h-dvh overflow-hidden bg-[#F7F7F8] text-[#1A1A1A] transition-colors dark:bg-[#1C1E24] dark:text-[#ECEEF2]"
       style={{
         ["--dashboard-navbar-height" as string]: "56px",
         ["--dashboard-rail-width" as string]: `${sidebarWidth}px`,
@@ -115,6 +212,7 @@ export function VelionProductShell({
         activeRoute={activeRoute}
         profile={profile}
         searchOpen={searchOpen}
+        workspace={workspace}
         onProfileChange={setProfile}
         onSearchOpenChange={setSearchOpen}
       />
@@ -127,7 +225,7 @@ export function VelionProductShell({
         onOpenSearch={() => setSearchOpen(true)}
       />
       <main className="relative h-full overflow-hidden pt-14 md:pl-[var(--dashboard-rail-width)]">
-        <div className="velion-workspace-panel dashboard-main-panel relative h-full overflow-hidden bg-[#FCFCFD] text-[#1A1A1A] transition-colors dark:bg-[#101114] dark:text-[#F7F8F8]">
+        <div className="velion-workspace-panel dashboard-main-panel relative h-full overflow-hidden bg-[#FCFCFD] text-[#1A1A1A] transition-colors dark:bg-[#1C1E24] dark:text-[#ECEEF2]">
           {children}
         </div>
       </main>
@@ -139,12 +237,14 @@ function TopNavbar({
   activeRoute,
   profile,
   searchOpen,
+  workspace,
   onProfileChange,
   onSearchOpenChange,
 }: {
   activeRoute: VelionRoute;
   profile: NavbarProfile | null;
   searchOpen: boolean;
+  workspace: WorkspaceIdentity;
   onProfileChange: (profile: NavbarProfile) => void;
   onSearchOpenChange: (open: boolean) => void;
 }) {
@@ -168,7 +268,8 @@ function TopNavbar({
   const { moduleLabel, tabLabel } = getNavbarLabels(activeRoute);
   const unreadMessageCount = notifications.messages.filter((message) => !message.read).length;
   const unreadNotificationCount = notifications.notifications.filter((notification) => !notification.read).length;
-  const profileInitial = profile?.name ? (profile.name.trim().charAt(0) || workspaceIdentity.profile).toUpperCase() : workspaceIdentity.profile;
+  const profileAvatar = workspace.userAvatar ?? profile?.avatar;
+  const profileInitial = firstInitial(profile?.name, workspace.userName, workspace.userEmail);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -216,7 +317,7 @@ function TopNavbar({
     const nextTheme = resolvedTheme === "dark" ? "light" : "dark";
     setTheme(nextTheme);
 
-    await saveNavbarTheme(nextTheme).catch((error: unknown) => {
+    await saveNavbarTheme(nextTheme, workspace.accentColor).catch((error: unknown) => {
       if (isLocalIntegrationUnavailable(error)) {
         return;
       }
@@ -240,7 +341,7 @@ function TopNavbar({
 
   return (
     <>
-      <header ref={headerRef} className="dashboard-navbar-bg fixed inset-x-0 top-0 z-[var(--velion-z-navbar)] bg-[#F7F7F8]/95 backdrop-blur transition-colors dark:bg-[#101114]/92">
+      <header ref={headerRef} className="dashboard-navbar-bg fixed inset-x-0 top-0 z-[var(--velion-z-navbar)] bg-[#F7F7F8]/95 backdrop-blur transition-colors dark:bg-[#1E2027]/88">
         <div className="flex h-14 items-center justify-between gap-4 pl-3 pr-5">
           <div className="flex min-w-0 items-center gap-3">
             <TopLayerTooltip label="Home">
@@ -248,9 +349,18 @@ function TopNavbar({
                 href={"/dashboard" as Route}
                 aria-label="Go to home"
                 title="Go to home"
-                className="hidden size-9 shrink-0 items-center justify-center rounded-[10px] text-[#DD7A1F] transition-colors hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#DD7A1F]/40 dark:hover:bg-white/10 md:flex"
+                className="hidden size-9 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-black/[0.05] bg-white text-[var(--velion-accent)] shadow-sm transition-colors hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--velion-accent)] dark:border-white/[0.08] dark:bg-[#202229] dark:hover:bg-white/10 md:flex"
               >
-                <CircleDashed className="size-4" strokeWidth={1.8} />
+                {workspace.logoUrl ? (
+                  <img
+                    src={workspace.logoUrl}
+                    alt=""
+                    referrerPolicy="no-referrer"
+                    className="size-full object-cover"
+                  />
+                ) : (
+                  <span className="text-[11px] font-semibold">{workspace.initial}</span>
+                )}
               </Link>
             </TopLayerTooltip>
 
@@ -259,8 +369,11 @@ function TopNavbar({
             <Breadcrumb
               moduleLabel={moduleLabel}
               moduleHref={activeRoute}
+              onWorkspaceClick={() => openExclusivePanel("workspace")}
               tabLabel={tabLabel}
               tabHref={activeRoute}
+              workspace={workspace}
+              workspaceActive={openPanel === "workspace"}
             />
           </div>
 
@@ -270,8 +383,8 @@ function TopNavbar({
 
           <div className="relative flex min-w-0 items-center justify-end gap-2">
             <NavbarActionButton
-              label="Open global search"
-              tooltip="Open global search"
+              label="Open knowledge search"
+              tooltip="Open knowledge search"
               onClick={() => onSearchOpenChange(true)}
               className="md:hidden"
             >
@@ -348,7 +461,16 @@ function TopNavbar({
                   }}
                 />
                 <span className="flex size-[26px] items-center justify-center rounded-full bg-[linear-gradient(135deg,#F2DFC2,#E6B783)] text-[10px] font-bold text-[#4A341A]">
-                  {profileInitial}
+                  {profileAvatar ? (
+                    <img
+                      src={profileAvatar}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="size-full rounded-full object-cover"
+                    />
+                  ) : (
+                    profileInitial
+                  )}
                 </span>
               </button>
             </div>
@@ -369,6 +491,7 @@ function TopNavbar({
             {openPanel === "profile" ? (
               <ProfileDropdown
                 profile={profile}
+                planLabel={workspace.plan}
                 onSupport={() => openExclusivePanel("support")}
                 onSignOut={async () => {
                   await authClient.signOut();
@@ -378,11 +501,100 @@ function TopNavbar({
             ) : null}
           </div>
         </div>
+        {openPanel === "workspace" ? (
+          <WorkspaceSwitcher workspace={workspace} onClose={() => setOpenPanel(null)} />
+        ) : null}
       </header>
 
       {searchOpen ? <LazyGlobalSearchDialog onClose={() => onSearchOpenChange(false)} /> : null}
       {openPanel === "assistant" ? <LazyAssistantModal pathname={pathname} onClose={() => setOpenPanel(null)} /> : null}
       {openPanel === "support" ? <LazySupportModal pathname={pathname} onClose={() => setOpenPanel(null)} /> : null}
     </>
+  );
+}
+
+type ActiveWorkspace = "org" | "personal";
+
+function WorkspaceSwitcher({
+  onClose,
+  workspace,
+}: {
+  onClose: () => void;
+  workspace: WorkspaceIdentity;
+}) {
+  const [active, setActive] = useState<ActiveWorkspace>("org");
+
+  return (
+    <div className="fixed left-[150px] top-12 z-[var(--velion-z-popover)] w-[340px] overflow-hidden rounded-[18px] border border-black/[0.08] bg-white/96 p-2 shadow-[0_22px_70px_rgba(15,16,20,0.18)] backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#232630]/96">
+      {/* Organization workspace */}
+      <button
+        type="button"
+        aria-pressed={active === "org"}
+        onClick={() => { setActive("org"); onClose(); }}
+        className="flex w-full items-center gap-3 rounded-[14px] bg-[#F7F7F8] px-3 py-3 text-left transition-colors hover:bg-[#EFEFEF] dark:bg-white/[0.06] dark:hover:bg-white/[0.10]"
+      >
+        <WorkspaceMark workspace={workspace} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[13px] font-semibold text-[#111111] dark:text-white">{workspace.name}</p>
+          <p className="mt-0.5 truncate text-[12px] text-[#777] dark:text-[#B8BEC8]">
+            Organization workspace · {workspace.plan}
+          </p>
+        </div>
+        {active === "org" ? (
+          <Check className="size-4 shrink-0 text-[var(--velion-accent)]" aria-hidden="true" />
+        ) : null}
+      </button>
+
+      {/* Personal workspace */}
+      <button
+        type="button"
+        aria-pressed={active === "personal"}
+        onClick={() => { setActive("personal"); onClose(); }}
+        className="mt-1 flex w-full items-center gap-3 rounded-[14px] border border-black/[0.06] px-3 py-3 text-left transition-colors hover:bg-[#F7F7F8] dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
+      >
+        <span className="grid size-9 shrink-0 place-items-center rounded-[12px] bg-[#F2F3F5] text-[#4B5563] dark:bg-[#2A2D35] dark:text-[#D7DBE3]">
+          <UserRound className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[13px] font-semibold text-[#111111] dark:text-white">
+            {workspace.userName ?? "Personal workspace"}
+          </p>
+          <p className="mt-0.5 truncate text-[12px] text-[#777] dark:text-[#B8BEC8]">
+            {workspace.userEmail ?? "Signed in"}
+          </p>
+        </div>
+        {active === "personal" ? (
+          <Check className="size-4 shrink-0 text-[var(--velion-accent)]" aria-hidden="true" />
+        ) : null}
+      </button>
+
+      <Link
+        href={"/settings/workspace" as Route}
+        onClick={onClose}
+        className="mt-2 flex items-center gap-2 rounded-[12px] px-3 py-2 text-[12px] font-medium text-[#555] transition-colors hover:bg-black/[0.04] dark:text-[#D0D6E0] dark:hover:bg-white/[0.08]"
+      >
+        <Building2 className="size-4" />
+        Manage workspaces and members
+      </Link>
+    </div>
+  );
+}
+
+function WorkspaceMark({ workspace }: { workspace: WorkspaceIdentity }) {
+  if (workspace.logoUrl) {
+    return (
+      <span className="size-10 shrink-0 overflow-hidden rounded-[13px] bg-white shadow-sm ring-1 ring-black/[0.06] dark:bg-[#17191F] dark:ring-white/[0.08]">
+        <img src={workspace.logoUrl} alt="" referrerPolicy="no-referrer" className="size-full object-cover" />
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="grid size-10 shrink-0 place-items-center rounded-[13px] text-[13px] font-semibold text-white shadow-sm"
+      style={{ backgroundColor: workspace.accentColor ?? "var(--velion-accent)" }}
+    >
+      {workspace.initial}
+    </span>
   );
 }

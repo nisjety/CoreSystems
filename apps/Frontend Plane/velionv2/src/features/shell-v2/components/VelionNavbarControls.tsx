@@ -5,7 +5,7 @@ import type { Route } from "next";
 import { ChevronLeft, ChevronRight, Search, Slash } from "lucide-react";
 import type { ReactNode } from "react";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
-import { workspaceIdentity, type VelionRoute } from "@/features/shell-v2/lib/shell-data";
+import type { VelionRoute, WorkspaceIdentity } from "@/features/shell-v2/lib/shell-data";
 import { cn } from "@/lib/utils";
 
 export function SearchTrigger({ onOpen }: { onOpen: () => void }) {
@@ -13,12 +13,12 @@ export function SearchTrigger({ onOpen }: { onOpen: () => void }) {
     <button
       type="button"
       onClick={onOpen}
-      title="Open global search"
+      title="Open knowledge search"
       className="velion-navbar-search-trigger"
-      aria-label="Open global search"
+      aria-label="Open knowledge search"
     >
       <Search className="velion-navbar-search-icon" strokeWidth={1.8} />
-      <span className="velion-navbar-search-label">Search across the whole system</span>
+      <span className="velion-navbar-search-label">Search knowledge base</span>
       <span className="velion-navbar-shortcut-key velion-navbar-shortcut-key-min">
         /
       </span>
@@ -32,23 +32,34 @@ export function SearchTrigger({ onOpen }: { onOpen: () => void }) {
 export function Breadcrumb({
   moduleLabel,
   moduleHref,
+  onWorkspaceClick,
   tabLabel,
   tabHref,
+  workspace,
+  workspaceActive = false,
 }: {
   moduleLabel: string;
   moduleHref: VelionRoute;
+  onWorkspaceClick?: () => void;
   tabLabel: string;
   tabHref: VelionRoute;
+  workspace: WorkspaceIdentity;
+  workspaceActive?: boolean;
 }) {
   return (
     <div className="hidden min-w-0 items-center gap-2 text-[14px] text-[#6D717B] dark:text-[#8A8F98] lg:flex">
       <BreadcrumbSeparator />
-      <Link href={"/dashboard" as Route} className="group inline-flex min-w-0 items-center gap-2 transition-colors hover:text-[#111111] dark:hover:text-white">
-        <span className="truncate font-medium text-[#2A2D35] group-hover:text-[#111111] dark:text-[#F7F8F8] dark:group-hover:text-white">{workspaceIdentity.name}</span>
-        <span className="shrink-0 rounded-full border border-[#DDE0E7] bg-white px-2 py-0.5 text-[12px] font-medium leading-none text-[#FF2E63] dark:border-[#34343A] dark:bg-[#17181C]">
-          {workspaceIdentity.plan}
+      <button
+        type="button"
+        onClick={onWorkspaceClick}
+        aria-expanded={workspaceActive}
+        className="group inline-flex min-w-0 items-center gap-2 rounded-[10px] px-1.5 py-1 transition-colors hover:bg-black/[0.04] hover:text-[#111111] dark:hover:bg-white/[0.08] dark:hover:text-white"
+      >
+        <span className="truncate font-medium text-[#2A2D35] group-hover:text-[#111111] dark:text-[#F2F4F8] dark:group-hover:text-white">{workspace.name}</span>
+        <span className="shrink-0 rounded-full border border-[#DDE0E7] bg-white px-2 py-0.5 text-[12px] font-medium leading-none text-[var(--velion-accent)] dark:border-[#3A3D46] dark:bg-[#202229]">
+          {workspace.plan}
         </span>
-      </Link>
+      </button>
       <BreadcrumbSeparator />
       <Link href={moduleHref as Route} className="truncate font-medium text-[#2A2D35] transition-colors hover:text-[#111111] dark:text-[#F7F8F8] dark:hover:text-white">
         {moduleLabel}
@@ -151,7 +162,7 @@ export function BadgeButton({
 }
 
 export function NavDivider() {
-  return <div className="mx-2 h-7 w-px bg-[#E4E0D8] dark:bg-[#2A2C31]" aria-hidden="true" />;
+  return <div className="mx-2 h-7 w-px bg-[#E4E0D8] dark:bg-[#2E3038]" aria-hidden="true" />;
 }
 
 function BreadcrumbSeparator() {
