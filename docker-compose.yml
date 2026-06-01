@@ -859,7 +859,7 @@ services:
       # /v1/answer at 501.
       - QUARRY_EDGE__LOCAL_INDEX_DIR=${QUARRY_LOCAL_INDEX_DIR:-/app/data/local_index}
       - QUARRY_EDGE__STRACT_URL=${STRACT_URL:-http://stract:3000}
-      - QUARRY_EDGE__SEARXNG_URL=${SEARXNG_URL:-http://searxng:8888}
+      - QUARRY_EDGE__SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
       - QUARRY_EDGE__BRAVE_SEARCH_KEY=${BRAVE_SEARCH_KEY:-}
       - QUARRY_EDGE__SERPER_KEY=${SERPER_KEY:-}
       # Cycle 19 / cluster #20 — LLM-backed intent classifier.
@@ -907,6 +907,7 @@ services:
     depends_on:
       - quarry-control
       - quarry-nats
+      - searxng
     restart: unless-stopped
     healthcheck:
       # /health is GET-only — use -O - (write to stdout) instead of --spider (HEAD).
@@ -1414,12 +1415,17 @@ services:
     image: searxng/searxng:latest
     container_name: searxng
     environment:
-      - SEARXNG_BASE_URL=http://searxng:8888/
+      - SEARXNG_BASE_URL=http://searxng:8080/
       - SEARXNG_REDIS_URL=redis://:${REDIS_PASSWORD:-redis}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/7
+      # Secret used to sign SearXNG's internal cookies / HMAC. Set in .env (or override).
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-change-me-searxng-secret-32chars!!}
     ports:
       - "8888:8080"
     volumes:
-      - searxng-data:/etc/searxng
+      # Bind-mount settings.yml so JSON output format is pre-enabled without
+      # manual one-time init. SearXNG disables JSON by default; this file
+      # adds it under search.formats. Any other customisation lives here too.
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks:
       - aquatiq-local
     restart: unless-stopped
@@ -1535,8 +1541,7 @@ volumes:
   # Cycle 19 — search depth
   stract-data:
     driver: local
-  searxng-data:
-    driver: local
+  # searxng-data removed: replaced by bind-mount ./config/searxng/settings.yml
   # P1 / cluster #nats — Quarry NATS JetStream durable storage
   quarry-nats-data:
     driver: local
