@@ -48,10 +48,19 @@ impl Settings {
         let sonic_password = env::var("SONIC_PASSWORD").unwrap_or_default();
         let sonic_enabled = env_bool("SONIC_ENABLED", !sonic_password.is_empty());
 
-        let nats_url = env::var("NATS_URL")
+        let nats_url_explicit = env::var("NATS_URL")
             .or_else(|_| env::var("QUARRY_EDGE__NATS_URL"))
-            .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
-        let nats_enabled = env_bool("NATS_ENABLED", false);
+            .ok();
+        // Enable NATS by default when an explicit URL is configured, matching
+        // the same convention as SONIC_ENABLED (enabled iff credentials present).
+        // Previously hard-coded to false, which silently disabled the consumer
+        // and left the Sonic index permanently empty even when NATS_URL was set.
+        let nats_enabled = env_bool(
+            "NATS_ENABLED",
+            nats_url_explicit.is_some(),
+        );
+        let nats_url = nats_url_explicit
+            .unwrap_or_else(|| "nats://127.0.0.1:4222".to_string());
 
         Ok(Self {
             http_addr,
