@@ -168,24 +168,53 @@ function velionHomeReducer(state: VelionHomeState, action: VelionHomeAction): Ve
   }
 }
 
+type WebSearchResult = {
+  url: string;
+  title?: string;
+  snippet?: string;
+};
+
+type WebSearchCitation = {
+  url: string;
+  title?: string;
+};
+
 type SearchPanelState = {
   query: string;
   submittedQuery: string;
   suggestions: SearchSuggestion[];
   suggestionsQuery: string;
+  webResults: WebSearchResult[];
+  webAnswer: string;
+  webCitations: WebSearchCitation[];
+  webLoading: boolean;
+  webError: string | null;
 };
 
 type SearchPanelAction =
   | { type: "query-changed"; query: string }
   | { type: "submitted"; query: string }
   | { type: "suggestions-cleared" }
-  | { type: "suggestions-loaded"; query: string; suggestions: SearchSuggestion[] };
+  | { type: "suggestions-loaded"; query: string; suggestions: SearchSuggestion[] }
+  | { type: "web-search-started" }
+  | {
+      type: "web-results-loaded";
+      results: WebSearchResult[];
+      answer: string;
+      citations: WebSearchCitation[];
+    }
+  | { type: "web-search-error"; message: string };
 
 const initialSearchPanelState: SearchPanelState = {
   query: "",
   submittedQuery: "",
   suggestions: [],
   suggestionsQuery: "",
+  webResults: [],
+  webAnswer: "",
+  webCitations: [],
+  webLoading: false,
+  webError: null,
 };
 
 function searchPanelReducer(state: SearchPanelState, action: SearchPanelAction): SearchPanelState {
@@ -198,6 +227,18 @@ function searchPanelReducer(state: SearchPanelState, action: SearchPanelAction):
       return { ...state, suggestions: [], suggestionsQuery: "" };
     case "suggestions-loaded":
       return { ...state, suggestions: action.suggestions, suggestionsQuery: action.query };
+    case "web-search-started":
+      return { ...state, webLoading: true, webError: null, webResults: [], webAnswer: "", webCitations: [] };
+    case "web-results-loaded":
+      return {
+        ...state,
+        webLoading: false,
+        webResults: action.results,
+        webAnswer: action.answer,
+        webCitations: action.citations,
+      };
+    case "web-search-error":
+      return { ...state, webLoading: false, webError: action.message };
     default:
       return state;
   }
@@ -487,10 +528,11 @@ function PlanBadge({ planLabel }: { planLabel: string }) {
 
 function SearchPanel() {
   const [searchState, dispatchSearch] = useReducer(searchPanelReducer, initialSearchPanelState);
-  const { query, submittedQuery, suggestions, suggestionsQuery } = searchState;
+  const { query, submittedQuery, suggestions, suggestionsQuery, webResults, webAnswer, webCitations, webLoading, webError } = searchState;
   const activeQuery = query.trim();
   const isTyping = activeQuery.length > 0 && submittedQuery !== activeQuery;
   const visibleSuggestions = isTyping && suggestionsQuery === activeQuery ? suggestions : [];
+  const webSearchAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!isTyping || activeQuery.length < 2) {
@@ -540,6 +582,59 @@ function SearchPanel() {
     }
 
     dispatchSearch({ type: "submitted", query: trimmed });
+
+    // Cancel any in-flight web search before starting a new one
+    webSearchAbortRef.current?.abort();
+    const webAbort = new AbortController();
+    webSearchAbortRef.current = webAbort;
+
+    dispatchSearch({ type: "web-search-started" });
+
+    void (async () => {
+      try {
+        const response = await fetch("/api/v1/search/web", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: trimmed }),
+          signal: webAbort.signal,
+        });
+
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              data?: {
+                results: WebSearchResult[];
+                answer: string | null;
+                citations: WebSearchCitation[];
+              };
+              error?: { message: string };
+            }
+          | null;
+
+        if (!response.ok || !payload || !payload.data) {
+          dispatchSearch({
+            type: "web-search-error",
+            message: payload?.error?.message ?? "Web search could not be completed.",
+          });
+          return;
+        }
+
+        dispatchSearch({
+          type: "web-results-loaded",
+          results: payload.data.results ?? [],
+          answer: payload.data.answer ?? "",
+          citations: payload.data.citations ?? [],
+        });
+      } catch (error: unknown) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        dispatchSearch({
+          type: "web-search-error",
+          message: "Web search could not be completed.",
+        });
+      }
+    })();
   };
 
   return (
@@ -606,8 +701,93 @@ function SearchPanel() {
         ) : null}
 
         {submittedQuery && !isTyping ? (
-          <div className="velion-fade-up mt-4 rounded-[16px] bg-[#F4F1EB] p-3 text-[13px] text-[#5F5A54] dark:bg-[#1D1A17] dark:text-[#AEB4C0]">
-            Søket er klart: <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>. Koble en kilde i kunnskapsbasen for å hente live resultater.
+          <div className="velion-fade-up mt-4 flex flex-col gap-3">
+            {/* Loading skeleton */}
+            {webLoading ? (
+              <div className="flex flex-col gap-2" aria-busy="true" aria-label="Søker på nettet…">
+                {[1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="h-16 animate-pulse rounded-[14px] bg-[#F4F1EB] dark:bg-[#1D1A17]"
+                  />
+                ))}
+              </div>
+            ) : null}
+
+            {/* Error state */}
+            {!webLoading && webError ? (
+              <div className="rounded-[14px] bg-[#FDF2F0] px-4 py-3 text-[13px] text-[#B04020] dark:bg-[#2A1A17] dark:text-[#E8A090]">
+                {webError}
+              </div>
+            ) : null}
+
+            {/* AI answer summary card */}
+            {!webLoading && !webError && webAnswer ? (
+              <div className="rounded-[16px] bg-[#F4F1EB] px-4 py-3 dark:bg-[#1D1A17]">
+                <p className="mb-1.5 text-[12px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
+                  AI-sammendrag
+                </p>
+                <p className="text-[13px] leading-relaxed text-[#3A3530] dark:text-[#D4D6DC]">
+                  {webAnswer}
+                </p>
+                {webCitations.length > 0 ? (
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    <span className="text-[12px] font-medium text-[#7A756F] dark:text-[#888E9A]">
+                      Kilder:
+                    </span>
+                    {webCitations.map((citation, idx) => (
+                      <a
+                        key={idx}
+                        href={citation.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[12px] text-[#EE7A50] underline-offset-2 hover:underline"
+                      >
+                        {citation.title ?? new URL(citation.url).hostname}
+                      </a>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* Web results list */}
+            {!webLoading && !webError && webResults.length > 0 ? (
+              <ul className="flex flex-col gap-2" aria-label="Webresultater">
+                {webResults.map((result, idx) => (
+                  <li key={idx}>
+                    <a
+                      href={result.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group block rounded-[14px] bg-white px-4 py-3 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-black/[0.04] transition hover:shadow-[0_4px_16px_rgba(20,21,24,0.10)] dark:bg-[#1A1B20] dark:ring-white/[0.06]"
+                    >
+                      {result.title ? (
+                        <p className="text-[13px] font-semibold text-[#1A1A1A] group-hover:text-[#EE7A50] dark:text-[#F7F8F8]">
+                          {result.title}
+                        </p>
+                      ) : null}
+                      <p className="mt-0.5 truncate text-[11px] text-[#9A9188] dark:text-[#737780]">
+                        {result.url}
+                      </p>
+                      {result.snippet ? (
+                        <p className="mt-1 text-[12px] leading-relaxed text-[#5F5A54] dark:text-[#AEB4C0]">
+                          {result.snippet}
+                        </p>
+                      ) : null}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {/* Empty state */}
+            {!webLoading && !webError && webResults.length === 0 && !webAnswer ? (
+              <div className="rounded-[14px] bg-[#F4F1EB] px-4 py-3 text-[13px] text-[#7A756F] dark:bg-[#1D1A17] dark:text-[#AEB4C0]">
+                Ingen webresultater funnet for{" "}
+                <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
+              </div>
+            ) : null}
           </div>
         ) : null}
       </form>
