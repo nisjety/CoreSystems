@@ -3,7 +3,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import type { Route } from "next";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { streamChat } from "@/features/chat-v2/lib/chat-stream";
 import {
   ArrowRight,
   CirclePlus,
@@ -21,6 +22,8 @@ import {
   type ResponseMode,
 } from "@/features/dashboard-v2/lib/dashboard-composer-model";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
+import { useControlPlaneContext } from "@/features/shell-v2/lib/control-plane-provider";
+import { formatPlanLabel } from "@/features/shell-v2/lib/shell-data";
 import { apiGet } from "@/lib/api/client-envelope";
 import { cn } from "@/lib/utils";
 
@@ -40,6 +43,10 @@ type VelionHomeState = {
   deepSearch: boolean;
   files: ComposerFile[];
   historyOpen: boolean;
+  /** Accumulating assistant response text during streaming. */
+  streamingResponse: string;
+  /** True while an SSE stream is in-flight. */
+  isStreaming: boolean;
   message: string;
   modelOpen: boolean;
   responseMode: ResponseMode;
@@ -68,7 +75,11 @@ type VelionHomeAction =
   | { type: "settings-open-changed"; open: boolean }
   | { type: "suggestions-open-changed"; open: boolean }
   | { type: "voice-mode-changed"; active: boolean }
-  | { type: "card-prompt-applied"; card: DashboardCard };
+  | { type: "card-prompt-applied"; card: DashboardCard }
+  | { type: "stream-started" }
+  | { type: "stream-delta"; delta: string }
+  | { type: "stream-done" }
+  | { type: "stream-error" };
 
 function createInitialVelionHomeState(): VelionHomeState {
   return {
@@ -78,6 +89,8 @@ function createInitialVelionHomeState(): VelionHomeState {
     deepSearch: false,
     files: [],
     historyOpen: false,
+    streamingResponse: "",
+    isStreaming: false,
     message: "",
     modelOpen: false,
     responseMode: "auto",
@@ -142,6 +155,14 @@ function velionHomeReducer(state: VelionHomeState, action: VelionHomeAction): Ve
         deepSearch: action.card.id === "knowledge" ? true : state.deepSearch,
         message: action.card.prompt,
       };
+    case "stream-started":
+      return { ...state, isStreaming: true, streamingResponse: "" };
+    case "stream-delta":
+      return { ...state, streamingResponse: state.streamingResponse + action.delta };
+    case "stream-done":
+      return { ...state, isStreaming: false };
+    case "stream-error":
+      return { ...state, isStreaming: false };
     default:
       return state;
   }
@@ -200,8 +221,39 @@ function getNorwegianGreeting() {
   return "God kveld";
 }
 
+function firstName(value?: string | null) {
+  const trimmed = value?.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("@")) return trimmed.split("@")[0] || "";
+  return trimmed.split(/\s+/)[0] || "";
+}
+
+/** Streaming assistant response bubble shown above the composer while tokens arrive. */
+function StreamingResponseBubble({
+  text,
+  isStreaming,
+}: {
+  text: string;
+  isStreaming: boolean;
+}) {
+  return (
+    <div className="velion-fade-up mb-3 rounded-[18px] border border-black/[0.05] bg-white/90 p-4 text-[14px] text-[#1A1A1A] shadow-[0_10px_28px_rgba(0,0,0,0.04)] backdrop-blur-sm dark:border-[#2A2C31] dark:bg-[#141516]/90 dark:text-[#F0F1F3]">
+      <p className="whitespace-pre-wrap leading-relaxed">
+        {text}
+        {isStreaming ? (
+          <span
+            aria-hidden="true"
+            className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle opacity-70"
+          />
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
 export function VelionHome() {
   const composerRef = useRef<HTMLDivElement>(null);
+  const controlPlane = useControlPlaneContext();
   const greeting = getNorwegianGreeting();
   const [state, dispatch] = useReducer(velionHomeReducer, undefined, createInitialVelionHomeState);
   const {
@@ -211,6 +263,8 @@ export function VelionHome() {
     deepSearch,
     files,
     historyOpen,
+    isStreaming,
+    streamingResponse,
     message,
     modelOpen,
     responseMode,
@@ -222,15 +276,18 @@ export function VelionHome() {
     voiceMode,
   } = state;
 
+  // Ref so the async stream loop can read the latest abort controller
+  const streamAbortRef = useRef<AbortController | null>(null);
+
   const pageCount = Math.ceil(dashboardCards.length / 3);
   const visibleCards = dashboardCards.slice(cardPage * 3, cardPage * 3 + 3);
+  const displayName = firstName(controlPlane.user?.name ?? controlPlane.user?.email);
+  const planLabel = formatPlanLabel(controlPlane.entitlements?.plan ?? controlPlane.organization?.plan);
 
-  const submitMessage = () => {
+  const submitMessage = useCallback(() => {
     const body = message.trim();
-
-    if (!body && files.length === 0) {
-      return;
-    }
+    if (!body && files.length === 0) return;
+    if (isStreaming) return; // prevent double-submit while streaming
 
     const now = new Date();
     const nextTurn: ComposerTurn = {
@@ -246,7 +303,34 @@ export function VelionHome() {
     };
 
     dispatch({ type: "message-submitted", turn: nextTurn });
-  };
+
+    // Abort any in-flight stream before starting a new one
+    streamAbortRef.current?.abort();
+    const abortController = new AbortController();
+    streamAbortRef.current = abortController;
+
+    dispatch({ type: "stream-started" });
+
+    void (async () => {
+      try {
+        for await (const chunk of streamChat({
+          content: body,
+          model: selectedModel,
+          browseWeb,
+          signal: abortController.signal,
+        })) {
+          if (chunk.type === "delta") {
+            dispatch({ type: "stream-delta", delta: chunk.delta });
+          } else if (chunk.type === "done") {
+            dispatch({ type: "stream-done" });
+          }
+        }
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        dispatch({ type: "stream-error" });
+      }
+    })();
+  }, [browseWeb, deepSearch, files, isStreaming, message, responseMode, selectedModel]);
 
   const applyCardPrompt = (card: DashboardCard) => {
     dispatch({ type: "card-prompt-applied", card });
@@ -269,11 +353,14 @@ export function VelionHome() {
         <section className="velion-home-header velion-fade-up shrink-0 px-4">
           <div className="mx-auto flex w-full max-w-5xl flex-col items-center">
             <div className="velion-home-plan w-full max-w-[720px]">
-              <PlanBadge />
+              <PlanBadge planLabel={planLabel} />
             </div>
 
-            <h1 className="velion-home-title w-full max-w-[720px] font-[450] leading-none tracking-tight text-[#1A1A1A] transition-colors dark:text-[#F7F8F8]">
-              {greeting}, Ima
+            <h1
+              suppressHydrationWarning
+              className="velion-home-title w-full max-w-[720px] font-[450] leading-none tracking-tight text-[#1A1A1A] transition-colors dark:text-[#F7F8F8]"
+            >
+              {displayName ? `${greeting}, ${displayName}` : greeting}
             </h1>
           </div>
         </section>
@@ -281,6 +368,12 @@ export function VelionHome() {
         <section className="velion-home-composer-section shrink-0 px-4 pb-0">
           <div className="relative mx-auto w-full px-0 lg:w-[60%]">
             <div ref={composerRef} className="velion-home-composer velion-fade-up velion-stagger-1 mx-auto w-full max-w-[720px]">
+              {activeTab === "Chat" && (isStreaming || streamingResponse) ? (
+                <StreamingResponseBubble
+                  text={streamingResponse}
+                  isStreaming={isStreaming}
+                />
+              ) : null}
               {activeTab === "Chat" ? (
                 <DashboardComposer
                   browseWeb={browseWeb}
@@ -379,10 +472,10 @@ function DashboardTabs({
   );
 }
 
-function PlanBadge() {
+function PlanBadge({ planLabel }: { planLabel: string }) {
   return (
     <span className="inline-flex items-center gap-1.5 rounded-full border border-[#E5E0D8] bg-white px-3.5 py-1 text-[12.5px] font-medium text-[#6B6560] transition-colors dark:border-[#2A2C31] dark:bg-[#17181C] dark:text-[#AEB4C0]">
-      Pro Plan
+      {planLabel} Plan
       <span className="text-[#D4C9BF]">·</span>
       <button type="button" className="font-semibold text-[#E8853D] hover:underline" title="Oppgrader plan">
         Upgrade
