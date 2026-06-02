@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { Route } from "next";
-import { useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, ExternalLink, Search } from "lucide-react";
 
@@ -28,6 +28,18 @@ type FetchedPage = {
   excerpt: string | null;
 };
 
+// Sanitized image hit from /api/v1/search/images.
+type ImageHit = {
+  url: string;
+  thumbnailUrl: string;
+  imageUrl: string;
+  title: string | null;
+};
+
+// Status for the lazily-loaded Bilder (images) vertical. It loads
+// independently of the Info (web) vertical so switching tabs is instant.
+type ImagesStatus = "idle" | "loading" | "loaded" | "error";
+
 type SearchState = {
   query: string;
   submittedQuery: string;
@@ -38,6 +50,12 @@ type SearchState = {
   fetchedPage: FetchedPage | null;
   loading: boolean;
   error: string | null;
+  // Images vertical (Bilder tab).
+  images: ImageHit[];
+  imagesStatus: ImagesStatus;
+  imagesError: string | null;
+  // The query the loaded images correspond to, so a new search invalidates them.
+  imagesQuery: string;
 };
 
 type SearchAction =
@@ -51,7 +69,10 @@ type SearchAction =
       citations: WebSearchCitation[];
     }
   | { type: "fetch-loaded"; page: FetchedPage }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "images-started"; query: string }
+  | { type: "images-loaded"; query: string; images: ImageHit[] }
+  | { type: "images-error"; query: string; message: string };
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -67,6 +88,10 @@ const initialState: SearchState = {
   fetchedPage: null,
   loading: false,
   error: null,
+  images: [],
+  imagesStatus: "idle",
+  imagesError: null,
+  imagesQuery: "",
 };
 
 function searchReducer(state: SearchState, action: SearchAction): SearchState {
@@ -85,6 +110,11 @@ function searchReducer(state: SearchState, action: SearchAction): SearchState {
         answer: "",
         citations: [],
         fetchedPage: null,
+        // A new search invalidates any previously loaded images.
+        images: [],
+        imagesStatus: "idle",
+        imagesError: null,
+        imagesQuery: "",
       };
     case "results-loaded":
       return {
@@ -99,6 +129,20 @@ function searchReducer(state: SearchState, action: SearchAction): SearchState {
       return { ...state, loading: false, mode: "fetch", fetchedPage: action.page };
     case "error":
       return { ...state, loading: false, error: action.message };
+    case "images-started":
+      return {
+        ...state,
+        imagesStatus: "loading",
+        imagesError: null,
+        imagesQuery: action.query,
+      };
+    case "images-loaded":
+      // Ignore stale responses for a query the user has moved on from.
+      if (action.query !== state.imagesQuery) return state;
+      return { ...state, imagesStatus: "loaded", images: action.images };
+    case "images-error":
+      if (action.query !== state.imagesQuery) return state;
+      return { ...state, imagesStatus: "error", imagesError: action.message };
     default:
       return state;
   }
@@ -120,10 +164,15 @@ function safeHostname(url: string): string {
 // Tab bar
 // ---------------------------------------------------------------------------
 
-const TABS = ["Info", "Videos", "Kart", "Bilder", "Shopping"] as const;
+const TABS = ["Info", "Bilder", "Videos", "Kart", "Shopping"] as const;
 type Tab = (typeof TABS)[number];
 
-function TabBar({ active }: { active: Tab }) {
+// Tabs backed by a real provider today. Info → web search/answer; Bilder →
+// SearXNG image vertical. Videos/Kart/Shopping have no provider yet and stay
+// honestly disabled with a "Snart" (soon) badge.
+const ENABLED_TABS: ReadonlySet<Tab> = new Set<Tab>(["Info", "Bilder"]);
+
+function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => void }) {
   return (
     <div
       role="tablist"
@@ -132,7 +181,7 @@ function TabBar({ active }: { active: Tab }) {
     >
       {TABS.map((tab) => {
         const isActive = tab === active;
-        const isDisabled = tab !== "Info";
+        const isDisabled = !ENABLED_TABS.has(tab);
         return (
           <button
             key={tab}
@@ -140,6 +189,9 @@ function TabBar({ active }: { active: Tab }) {
             aria-selected={isActive}
             aria-disabled={isDisabled}
             disabled={isDisabled}
+            onClick={() => {
+              if (!isDisabled && !isActive) onSelect(tab);
+            }}
             title={isDisabled ? `${tab} — Kommer snart` : tab}
             className={[
               "relative px-4 py-2.5 text-[13px] font-medium transition-colors focus:outline-none",
@@ -187,6 +239,61 @@ function LoadingSkeleton() {
 }
 
 // ---------------------------------------------------------------------------
+// Image grid (Bilder tab)
+// ---------------------------------------------------------------------------
+
+function ImageGridSkeleton() {
+  return (
+    <div
+      aria-busy="true"
+      aria-label="Laster bilder…"
+      className="[column-fill:_balance] gap-3 [column-count:2] sm:[column-count:3]"
+    >
+      {[36, 28, 44, 32, 40, 30, 38, 34, 42].map((h, i) => (
+        <div
+          key={i}
+          style={{ height: `${h * 4}px` }}
+          className="mb-3 w-full animate-pulse rounded-[12px] bg-[#F4F1EB] dark:bg-[#1D1A17]"
+        />
+      ))}
+    </div>
+  );
+}
+
+function ImageGallery({ images }: { images: ImageHit[] }) {
+  return (
+    <div className="[column-fill:_balance] gap-3 [column-count:2] sm:[column-count:3]">
+      {images.map((image, idx) => (
+        <a
+          key={`${image.url}-${idx}`}
+          href={image.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={image.title ?? safeHostname(image.url)}
+          className="group mb-3 block break-inside-avoid overflow-hidden rounded-[12px] bg-[#F4F1EB] shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-black/[0.04] transition hover:shadow-[0_4px_16px_rgba(20,21,24,0.12)] dark:bg-[#1D1A17] dark:ring-white/[0.06]"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={image.thumbnailUrl}
+            alt={image.title ?? ""}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            className="block h-auto w-full object-cover transition group-hover:opacity-95"
+          />
+          <div className="flex items-center gap-1 px-2.5 py-1.5">
+            <span className="truncate text-[10px] text-[#9A9188] dark:text-[#737780]">
+              {safeHostname(image.url)}
+            </span>
+            <ExternalLink className="size-2.5 shrink-0 text-[#9A9188] opacity-0 transition group-hover:opacity-70 dark:text-[#737780]" />
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -194,6 +301,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
   const router = useRouter();
   const abortRef = useRef<AbortController | null>(null);
   const followUpAbortRef = useRef<AbortController | null>(null);
+  const imagesAbortRef = useRef<AbortController | null>(null);
+
+  const [activeTab, setActiveTab] = useState<Tab>("Info");
 
   const [state, dispatch] = useReducer(searchReducer, {
     ...initialState,
@@ -211,6 +321,10 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
     fetchedPage,
     loading,
     error,
+    images,
+    imagesStatus,
+    imagesError,
+    imagesQuery,
   } = state;
 
   // -------------------------------------------------------------------------
@@ -299,9 +413,73 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
     return () => {
       abortRef.current?.abort();
       followUpAbortRef.current?.abort();
+      imagesAbortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // -------------------------------------------------------------------------
+  // Images (Bilder) fetch — lazy, independent of the web vertical
+  // -------------------------------------------------------------------------
+
+  const fetchImages = useCallback((q: string) => {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+
+    imagesAbortRef.current?.abort();
+    const abort = new AbortController();
+    imagesAbortRef.current = abort;
+
+    dispatch({ type: "images-started", query: trimmed });
+
+    void (async () => {
+      try {
+        const response = await fetch("/api/v1/search/images", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: trimmed, limit: 24 }),
+          signal: abort.signal,
+        });
+
+        const payload = (await response.json().catch(() => null)) as
+          | { data?: { images?: ImageHit[] }; error?: { code?: string; message: string } }
+          | null;
+
+        if (!response.ok || !payload || !payload.data) {
+          dispatch({
+            type: "images-error",
+            query: trimmed,
+            message: payload?.error?.message ?? "Bildesøk kunne ikke fullføres.",
+          });
+          return;
+        }
+
+        dispatch({
+          type: "images-loaded",
+          query: trimmed,
+          images: Array.isArray(payload.data.images) ? payload.data.images : [],
+        });
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        dispatch({ type: "images-error", query: trimmed, message: "Bildesøk kunne ikke fullføres." });
+      }
+    })();
+  }, []);
+
+  // When the Bilder tab is active and we have a fresh query, load images once.
+  // `imagesStatus === "idle"` is reset on every new search, so each query
+  // triggers exactly one fetch the first time the tab is viewed.
+  useEffect(() => {
+    if (
+      activeTab === "Bilder" &&
+      submittedQuery.trim() &&
+      imagesStatus === "idle" &&
+      imagesQuery !== submittedQuery.trim()
+    ) {
+      fetchImages(submittedQuery);
+    }
+  }, [activeTab, submittedQuery, imagesStatus, imagesQuery, fetchImages]);
 
   // -------------------------------------------------------------------------
   // Header submit
@@ -380,7 +558,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
       {/* Tab bar */}
       {/* ------------------------------------------------------------------ */}
       <div className="shrink-0 bg-[#FCFCFD] px-4 dark:bg-[#1C1E24]">
-        <TabBar active="Info" />
+        <TabBar active={activeTab} onSelect={setActiveTab} />
       </div>
 
       {/* ------------------------------------------------------------------ */}
@@ -398,6 +576,11 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             </h1>
           ) : null}
 
+          {/* ================================================================ */}
+          {/* Info tab — web search / answer / fetched page */}
+          {/* ================================================================ */}
+          {activeTab === "Info" ? (
+            <>
           {/* Loading skeleton */}
           {loading ? <LoadingSkeleton /> : null}
 
@@ -528,6 +711,40 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
               Ingen webresultater funnet for{" "}
               <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
             </div>
+          ) : null}
+            </>
+          ) : null}
+
+          {/* ================================================================ */}
+          {/* Bilder tab — SearXNG image vertical */}
+          {/* ================================================================ */}
+          {activeTab === "Bilder" ? (
+            <section aria-label="Bilderesultater">
+              {/* Loading skeleton */}
+              {imagesStatus === "loading" || imagesStatus === "idle" ? (
+                <ImageGridSkeleton />
+              ) : null}
+
+              {/* Error state */}
+              {imagesStatus === "error" ? (
+                <div className="rounded-[14px] bg-[#FDF2F0] px-4 py-3 text-[13px] text-[#B04020] dark:bg-[#2A1A17] dark:text-[#E8A090]">
+                  {imagesError ?? "Bildesøk kunne ikke fullføres."}
+                </div>
+              ) : null}
+
+              {/* Results */}
+              {imagesStatus === "loaded" && images.length > 0 ? (
+                <ImageGallery images={images} />
+              ) : null}
+
+              {/* Empty state */}
+              {imagesStatus === "loaded" && images.length === 0 ? (
+                <div className="rounded-[14px] bg-[#F4F1EB] px-4 py-3 text-[13px] text-[#7A756F] dark:bg-[#1D1A17] dark:text-[#AEB4C0]">
+                  Ingen bilder funnet for{" "}
+                  <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
+                </div>
+              ) : null}
+            </section>
           ) : null}
         </div>
       </main>
