@@ -6,7 +6,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { Easing, Transition, Variants } from "framer-motion";
-import { ArrowLeft, ExternalLink, Globe, Search, SendHorizontal } from "lucide-react";
+import { ArrowLeft, ExternalLink, Globe, Play, Search, SendHorizontal, X } from "lucide-react";
 
 import { streamChat } from "@/features/chat-v2/lib/chat-stream";
 import { LiquidBackdrop } from "@/features/search-v2/components/LiquidBackdrop";
@@ -251,9 +251,10 @@ const TABS = ["Info", "Bilder", "Videos", "Kart", "Shopping"] as const;
 type Tab = (typeof TABS)[number];
 
 // Tabs backed by a real provider today. Info → web search/answer; Bilder →
-// SearXNG image vertical. Videos/Kart/Shopping have no provider yet and stay
-// honestly disabled with a "Snart" (soon) badge.
-const ENABLED_TABS: ReadonlySet<Tab> = new Set<Tab>(["Info", "Bilder"]);
+// SearXNG image vertical; Videos → SearXNG video vertical (inline-play cards).
+// Kart/Shopping have no provider yet and stay honestly disabled with a "Snart"
+// (soon) badge.
+const ENABLED_TABS: ReadonlySet<Tab> = new Set<Tab>(["Info", "Bilder", "Videos"]);
 
 function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => void }) {
   return (
@@ -344,33 +345,307 @@ function ImageGridSkeleton() {
 }
 
 function ImageGallery({ images }: { images: ImageHit[] }) {
+  // Two-step interaction (per product spec): the first click on a thumbnail
+  // EXPANDS the image in an in-page lightbox (no navigation); clicking the
+  // expanded image then opens the source page. Backdrop / ✕ / Escape dismiss.
+  const [expanded, setExpanded] = useState<ImageHit | null>(null);
+  const reduceMotion = useReducedMotion();
+
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
+
   return (
-    <div className="[column-fill:_balance] gap-3 [column-count:2] sm:[column-count:3]">
-      {images.map((image, idx) => (
-        <a
-          key={`${image.url}-${idx}`}
-          href={image.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={image.title ?? safeHostname(image.url)}
-          className="velion-glass-soft group mb-3 block break-inside-avoid overflow-hidden rounded-[18px] transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={image.thumbnailUrl}
-            alt={image.title ?? ""}
-            loading="lazy"
-            decoding="async"
-            referrerPolicy="no-referrer"
-            className="block h-auto w-full object-cover transition group-hover:opacity-95"
-          />
-          <div className="flex items-center gap-1 px-2.5 py-1.5">
-            <span className="truncate text-[10px] text-[#9A9188] dark:text-[#737780]">
-              {safeHostname(image.url)}
-            </span>
-            <ExternalLink className="size-2.5 shrink-0 text-[#9A9188] opacity-0 transition group-hover:opacity-70 dark:text-[#737780]" />
+    <>
+      <div className="[column-fill:_balance] gap-3 [column-count:2] sm:[column-count:3]">
+        {images.map((image, idx) => (
+          <button
+            key={`${image.url}-${idx}`}
+            type="button"
+            onClick={() => setExpanded(image)}
+            title={image.title ?? safeHostname(image.url)}
+            aria-label={`Forstørr bilde — ${image.title ?? safeHostname(image.url)}`}
+            className="velion-glass-soft group mb-3 block w-full break-inside-avoid cursor-zoom-in overflow-hidden rounded-[18px] text-left transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={image.thumbnailUrl}
+              alt={image.title ?? ""}
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              className="block h-auto w-full object-cover transition group-hover:opacity-95"
+            />
+            <div className="flex items-center gap-1 px-2.5 py-1.5">
+              <span className="truncate text-[10px] text-[#9A9188] dark:text-[#737780]">
+                {safeHostname(image.url)}
+              </span>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <AnimatePresence>
+        {expanded ? (
+          <motion.div
+            key="image-lightbox"
+            className="fixed inset-0 z-[60] grid place-items-center bg-black/70 p-4 backdrop-blur-sm"
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onClick={() => setExpanded(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label={expanded.title ?? "Forstørret bilde"}
+          >
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded(null);
+              }}
+              aria-label="Lukk"
+              className="absolute right-4 top-4 grid size-9 place-items-center rounded-full bg-white/15 text-white backdrop-blur transition hover:bg-white/25"
+            >
+              <X className="size-5" />
+            </button>
+            <motion.figure
+              className="flex max-h-[88vh] max-w-[92vw] flex-col items-center gap-3"
+              initial={reduceMotion ? false : { scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.97, opacity: 0 }}
+              transition={{ duration: 0.22, ease: EASE_OUT }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Clicking the expanded image opens the source page. */}
+              <a
+                href={expanded.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Åpne kilde — ${safeHostname(expanded.url)}`}
+                className="block cursor-zoom-in overflow-hidden rounded-[18px]"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={expanded.imageUrl}
+                  alt={expanded.title ?? ""}
+                  decoding="async"
+                  referrerPolicy="no-referrer"
+                  className="max-h-[80vh] w-auto max-w-full object-contain"
+                />
+              </a>
+              <figcaption className="flex max-w-full items-center gap-1.5 text-[12px] text-white/80">
+                <span className="truncate">{expanded.title ?? safeHostname(expanded.url)}</span>
+                <ExternalLink className="size-3 shrink-0 opacity-70" />
+                <span className="shrink-0 opacity-60">{safeHostname(expanded.url)}</span>
+              </figcaption>
+            </motion.figure>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Video grid (Videos tab) — SearXNG video vertical
+// ---------------------------------------------------------------------------
+
+// Sanitized video hit from /api/v1/search/videos. `url` = source page (card
+// click); `embedUrl` = inline-playable iframe (video click).
+type VideoHit = {
+  url: string;
+  title: string | null;
+  thumbnailUrl: string | null;
+  embedUrl: string | null;
+  author: string | null;
+  length: string | null;
+};
+
+type VideosStatus = "idle" | "loading" | "loaded" | "error";
+
+function VideoGridSkeleton() {
+  return (
+    <div
+      aria-busy="true"
+      aria-label="Laster videoer…"
+      className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
+    >
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} className="velion-glass-soft overflow-hidden rounded-[18px]">
+          <div className="aspect-video w-full animate-pulse bg-white/45 dark:bg-white/[0.06]" />
+          <div className="space-y-1.5 px-3 py-2">
+            <div className="h-3 w-4/5 animate-pulse rounded bg-white/45 dark:bg-white/[0.06]" />
+            <div className="h-2.5 w-2/5 animate-pulse rounded bg-white/45 dark:bg-white/[0.06]" />
           </div>
-        </a>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** A single video result. Per spec: clicking the *video* (thumbnail / play
+ *  button) plays it inline via the embed iframe; clicking anywhere else on the
+ *  *card* opens the source page in a new tab. */
+function VideoCard({ video }: { video: VideoHit }) {
+  const [playing, setPlaying] = useState(false);
+
+  const openSource = () => {
+    if (typeof window !== "undefined") {
+      window.open(video.url, "_blank", "noopener,noreferrer");
+    }
+  };
+
+  const embedSrc = video.embedUrl
+    ? `${video.embedUrl}${video.embedUrl.includes("?") ? "&" : "?"}autoplay=1`
+    : null;
+
+  return (
+    <div
+      role="link"
+      tabIndex={0}
+      onClick={openSource}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openSource();
+        }
+      }}
+      title={video.title ?? safeHostname(video.url)}
+      className="velion-glass-soft group flex cursor-pointer flex-col overflow-hidden rounded-[18px] transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
+    >
+      <div className="relative aspect-video w-full overflow-hidden bg-black/[0.06] dark:bg-white/[0.04]">
+        {playing && embedSrc ? (
+          // The iframe captures its own clicks, so playback never bubbles to
+          // the card's navigation handler.
+          <iframe
+            src={embedSrc}
+            title={video.title ?? "Video"}
+            allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+            allowFullScreen
+            referrerPolicy="no-referrer"
+            className="absolute inset-0 h-full w-full"
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation(); // pressing the video must NOT navigate
+              if (embedSrc) setPlaying(true);
+              else openSource(); // no embeddable player → fall back to source
+            }}
+            aria-label={`Spill av${video.title ? ` — ${video.title}` : " video"}`}
+            className="absolute inset-0 grid place-items-center"
+          >
+            {video.thumbnailUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={video.thumbnailUrl}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
+              />
+            ) : (
+              <div className="absolute inset-0 bg-gradient-to-br from-[#EE7A50]/12 to-[#A06CD5]/12" />
+            )}
+            <span className="relative grid size-12 place-items-center rounded-full bg-black/55 text-white shadow-lg backdrop-blur transition group-hover:scale-110 group-hover:bg-black/70">
+              <Play className="size-5 translate-x-[1px]" fill="currentColor" />
+            </span>
+            {video.length ? (
+              <span className="absolute bottom-2 right-2 rounded-md bg-black/70 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white">
+                {video.length}
+              </span>
+            ) : null}
+          </button>
+        )}
+      </div>
+      <div className="flex flex-col gap-0.5 px-3 py-2">
+        <span className="line-clamp-2 text-[13px] font-medium leading-snug text-[#24262D] dark:text-white">
+          {video.title ?? safeHostname(video.url)}
+        </span>
+        <span className="flex items-center gap-1 truncate text-[11px] text-[#9A9188] dark:text-[#737780]">
+          {video.author ? <span className="truncate">{video.author}</span> : null}
+          {video.author ? <span aria-hidden>·</span> : null}
+          <span className="truncate">{safeHostname(video.url)}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Self-contained Videos vertical: lazily fetches SearXNG video results when
+ *  the tab is first viewed for a query. Independent of the reducer-backed Info
+ *  / Bilder verticals. */
+function VideosTab({ query }: { query: string }) {
+  const [status, setStatus] = useState<VideosStatus>("idle");
+  const [videos, setVideos] = useState<VideoHit[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loadedQuery, setLoadedQuery] = useState("");
+
+  useEffect(() => {
+    const q = query.trim();
+    if (!q || q === loadedQuery) return;
+    const abort = new AbortController();
+    setStatus("loading");
+    setError(null);
+    void (async () => {
+      try {
+        const res = await fetch("/api/v1/search/videos", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: q, limit: 24 }),
+          signal: abort.signal,
+        });
+        const payload = (await res.json().catch(() => null)) as
+          | { data?: { videos?: VideoHit[] }; error?: { message: string } }
+          | null;
+        if (!res.ok || !payload?.data) {
+          setError(payload?.error?.message ?? "Videosøk kunne ikke fullføres.");
+          setStatus("error");
+          return;
+        }
+        setVideos(Array.isArray(payload.data.videos) ? payload.data.videos : []);
+        setLoadedQuery(q);
+        setStatus("loaded");
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setError("Videosøk kunne ikke fullføres.");
+        setStatus("error");
+      }
+    })();
+    return () => abort.abort();
+  }, [query, loadedQuery]);
+
+  if (status === "loading" || status === "idle") return <VideoGridSkeleton />;
+  if (status === "error") {
+    return (
+      <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
+        {error ?? "Videosøk kunne ikke fullføres."}
+      </div>
+    );
+  }
+  if (videos.length === 0) {
+    return (
+      <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
+        Ingen videoer funnet for{" "}
+        <span className="font-medium text-[#1A1A1A] dark:text-white">{query}</span>.
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {videos.map((v, i) => (
+        <VideoCard key={`${v.url}-${i}`} video={v} />
       ))}
     </div>
   );
@@ -1052,6 +1327,22 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                   <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
                 </div>
               ) : null}
+            </motion.section>
+          ) : null}
+
+          {/* ================================================================ */}
+          {/* Videos tab — SearXNG video vertical (inline-play cards) */}
+          {/* ================================================================ */}
+          {activeTab === "Videos" ? (
+            <motion.section
+              key="tab-videos"
+              aria-label="Videoresultater"
+              variants={tabPanel}
+              initial="hidden"
+              animate="show"
+              exit="exit"
+            >
+              <VideosTab query={submittedQuery} />
             </motion.section>
           ) : null}
           </AnimatePresence>
