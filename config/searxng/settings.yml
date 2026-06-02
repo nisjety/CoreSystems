@@ -57,3 +57,13 @@ ui:
 # documentation clarity.
 redis:
   url: false
+
+# Engine request timeouts. SearXNG's defaults (~3s) are too aggressive for some
+# networks/engines and make every engine report "timeout" (empty results even
+# though container egress works). Give upstream engines room to respond.
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
