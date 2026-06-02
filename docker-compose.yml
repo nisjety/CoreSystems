@@ -1428,6 +1428,9 @@ services:
       - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks:
       - aquatiq-local
+      # Shared cross-plane bus so quarry-edge (ingestion-plane) can reach
+      # http://searxng:8080 for web search.
+      - inter-plane-bus
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8080/ || exit 1"]
@@ -1530,6 +1533,9 @@ networks:
   controlplane-network:
     external: true
     name: controlplane-net
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
 
 volumes:
   letta-data:

@@ -21,6 +21,10 @@ services:
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
       QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
+      # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
+      # searxng must share a network with quarry-edge (inter-plane-bus).
+      QUARRY_EDGE__SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      QUARRY_EDGE__BRAVE_SEARCH_KEY: ${BRAVE_SEARCH_KEY:-}
       # Accept any non-empty Bearer in dev so the orchestrator's calls
       # to /v1/internal/run_page succeed without a real auth-core JWT.
       # The Rust binary refuses to start when this is `1` AND
@@ -220,20 +224,57 @@ services:
   # ==================== INTEGRATION-CORE (M365 OAuth + Discovery) ====================
   integration-api:
     build:
-      context: ./integration-core
+      context: ./integration-corev2
       dockerfile: Dockerfile
     container_name: integration-api
     restart: unless-stopped
-    env_file:
-      - ./integration-core/.env
     environment:
-      # Database for first-party connection mappings and webhook journal entries
+      PORT: "3026"
+      SERVICE_NAME: integration-corev2
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
       DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
-      # integration-api is on inter-plane-bus so velion-nats resolves correctly.
-      VELION_NATS_URL: nats://velion-nats:4222
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
-      CONNECTOR_RUNTIME_PUBLIC_BASE_URL: ${CONNECTOR_RUNTIME_PUBLIC_BASE_URL:-http://localhost:3003}
-      DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}
+      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:9091}
+      BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
+      AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:3015}
+      FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
+      DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
+      DATA_PLANE_GRAPH_INDEX_URL: ${DATA_PLANE_GRAPH_INDEX_URL:-${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}}
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
+      NATS_ENABLED: ${NATS_ENABLED:-false}
+      NATS_URL: ${NATS_URL:-nats://velion-nats:4222}
+      NATS_USERNAME: ${NATS_USERNAME:-}
+      NATS_PASSWORD: ${NATS_PASSWORD:-}
+      NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
+      # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      MICROSOFT_GRAPH_BASE_URL: ${MICROSOFT_GRAPH_BASE_URL:-https://graph.microsoft.com}
+      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
+      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      NOTION_CLIENT_ID: ${NOTION_CLIENT_ID:-}
+      NOTION_CLIENT_SECRET: ${NOTION_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-}
+      SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-}
+      STRIPE_CLIENT_ID: ${STRIPE_CLIENT_ID:-}
+      STRIPE_CLIENT_SECRET: ${STRIPE_CLIENT_SECRET:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      OKTA_DOMAIN: ${OKTA_DOMAIN:-}
+      OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-}
+      OKTA_CLIENT_SECRET: ${OKTA_CLIENT_SECRET:-}
+      OKTA_API_TOKEN: ${OKTA_API_TOKEN:-}
+      SCIM_BEARER_TOKEN: ${SCIM_BEARER_TOKEN:-}
     deploy:
       resources:
         limits:
@@ -243,8 +284,6 @@ services:
           memory: 64M
     depends_on:
       postgres:
-        condition: service_healthy
-      connector-runtime-engine:
         condition: service_healthy
     ports:
       - "3026:3026"
@@ -257,7 +296,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3026/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3026/health || exit 1"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -482,6 +521,7 @@ services:
 
   # ==================== CONNECTOR RUNTIME ENGINE ====================
   connector-runtime-db:
+    profiles: ["legacy-nango"]
     image: postgres:16.0-alpine
     container_name: connector-runtime-db
     restart: unless-stopped
@@ -500,6 +540,7 @@ services:
       retries: 5
 
   connector-runtime-redis:
+    profiles: ["legacy-nango"]
     image: redis:7.2.4
     container_name: connector-runtime-redis
     restart: unless-stopped
@@ -507,6 +548,7 @@ services:
       - ingestion-net
 
   connector-runtime-engine:
+    profiles: ["legacy-nango"]
     image: nangohq/nango-server:hosted
     container_name: connector-runtime-engine
     platform: linux/amd64
@@ -563,6 +605,7 @@ services:
   # One-shot seed: registers OAuth provider integrations in self-hosted Nango.
   # Idempotent (PUT/upsert). Runs once then exits; no auto-restart.
   nango-seed:
+    profiles: ["legacy-nango"]
     build:
       context: ./integration-core
       dockerfile: Dockerfile
