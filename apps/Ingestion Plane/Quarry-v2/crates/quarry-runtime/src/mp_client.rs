@@ -114,6 +114,78 @@ impl ModelPlaneClient {
             )
         })
     }
+
+    /// Streaming variant of [`invoke`]. POSTs to `/v1/invoke/stream` and yields
+    /// answer-text deltas as the gateway produces them. The gateway emits SSE
+    /// frames (`event: …\ndata: {json}\n\n`); we surface the `delta` string from
+    /// each `data:` JSON object. A transport/parse failure ends the stream with
+    /// a single `Err` item. (Note: bounded by the client's 30s request timeout.)
+    pub async fn invoke_stream(
+        &self,
+        req: &ModelPlaneInvokeRequest,
+    ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
+        let url = format!("{}/v1/invoke/stream", self.base_url.trim_end_matches('/'));
+        let mut builder = self
+            .http
+            .post(&url)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(req);
+        if let Some(token) = &self.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        let resp = builder.send().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("model-plane invoke/stream transport failure: {e}"),
+            )
+        })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("model-plane invoke/stream returned {status}: {body}"),
+            ));
+        }
+
+        Ok(async_stream::stream! {
+            use futures::StreamExt;
+            let mut bytes = resp.bytes_stream();
+            let mut buf = String::new();
+            while let Some(chunk) = bytes.next().await {
+                match chunk {
+                    Ok(b) => buf.push_str(&String::from_utf8_lossy(&b)),
+                    Err(e) => {
+                        yield Err(QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            format!("model-plane invoke/stream read failed: {e}"),
+                        ));
+                        return;
+                    }
+                }
+                // Emit the `delta` from each complete SSE frame (blank-line-delimited).
+                while let Some(idx) = buf.find("\n\n") {
+                    let frame: String = buf.drain(..idx + 2).collect();
+                    for line in frame.lines() {
+                        let Some(data) = line.trim_start().strip_prefix("data:") else {
+                            continue;
+                        };
+                        let data = data.trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(delta) = v.get("delta").and_then(|d| d.as_str()) {
+                                if !delta.is_empty() {
+                                    yield Ok(delta.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
 }
 
 /// LLM-driven planner that calls Model Plane gateway to decide next actions.

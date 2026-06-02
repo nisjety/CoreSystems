@@ -37,6 +37,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+async-stream = { workspace = true }
 blake3 = { workspace = true }
 tempfile = "3"
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
