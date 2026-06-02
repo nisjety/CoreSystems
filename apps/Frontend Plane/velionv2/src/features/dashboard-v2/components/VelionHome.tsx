@@ -22,6 +22,7 @@ import {
   type DashboardComposerModel,
   type ResponseMode,
 } from "@/features/dashboard-v2/lib/dashboard-composer-model";
+import { LiquidBackdrop } from "@/features/search-v2/components/LiquidBackdrop";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
 import { useControlPlaneContext } from "@/features/shell-v2/lib/control-plane-provider";
 import { formatPlanLabel } from "@/features/shell-v2/lib/shell-data";
@@ -751,12 +752,18 @@ function SearchPanel() {
   const isDropdownOpen = visibleSuggestions.length > 0;
 
   return (
-    <div className="velion-panel-in">
-      <h2 className="mb-4 text-center text-[20px] font-[520] tracking-[-0.03em] text-[#273038] dark:text-[#F7F8F8]">
+    <div className="velion-panel-in relative">
+      {/* Soft animated wavy gradient drifting behind the prompt + input. */}
+      <LiquidBackdrop
+        variant="idle"
+        className="-inset-x-8 -inset-y-10 rounded-[40px]"
+      />
+
+      <h2 className="relative mb-4 text-center text-[20px] font-[520] tracking-[-0.03em] text-[#273038] dark:text-[#F7F8F8]">
         What <span className="text-[#EE7A50]">do you want</span> to know?
       </h2>
 
-      <form onSubmit={submit} className="relative w-full">
+      <form onSubmit={submit} className="relative z-[1] w-full">
         <label className="sr-only" htmlFor="dashboard-search">
           Søk i selskapets kunnskap
         </label>
@@ -765,12 +772,12 @@ function SearchPanel() {
             <button
               type="button"
               aria-label="Add search context"
-              className="grid size-11 shrink-0 place-items-center rounded-full bg-white/78 text-[#34363D] shadow-[0_12px_28px_rgba(72,55,41,0.08)] transition hover:bg-white dark:bg-[#1D1E22] dark:text-white"
+              className="velion-glass-input grid size-11 shrink-0 place-items-center rounded-full text-[#34363D] transition hover:shadow-[0_16px_36px_rgba(76,60,92,0.16)] dark:text-white"
             >
               <CirclePlus className="size-4" />
             </button>
           </TopLayerTooltip>
-          <div className="flex h-12 min-w-0 flex-1 items-center rounded-full bg-white/88 px-4 shadow-[0_16px_42px_rgba(72,55,41,0.10)] ring-1 ring-[#EFE7DC] backdrop-blur-xl dark:bg-[#1A1B20]/92 dark:ring-[#2A2C31]">
+          <div className="velion-glass-input flex h-12 min-w-0 flex-1 items-center rounded-full px-4">
             <Search className="mr-2 size-4 shrink-0 text-[#9A9188]" />
             <input
               id="dashboard-search"
@@ -814,7 +821,7 @@ function SearchPanel() {
             id={listboxId}
             role="listbox"
             aria-label="Søkeforslag"
-            className="velion-fade-up ml-[52px] mt-2 overflow-hidden rounded-[22px] bg-white/96 p-2 shadow-[0_24px_58px_rgba(72,55,41,0.16)] ring-1 ring-[#EFE7DC] backdrop-blur-xl dark:bg-[#1A1B20]/96 dark:ring-[#2A2C31]"
+            className="velion-glass velion-fade-up ml-[52px] mt-2 overflow-hidden rounded-[22px] p-2"
           >
             <p className="px-3 pb-1.5 pt-1 text-[12px] font-semibold text-[#504A43] dark:text-[#D4D6DC]">Forslag</p>
             {visibleSuggestions.map((suggestion, idx) => {
@@ -863,7 +870,7 @@ function SearchPanel() {
                 href={result.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex min-w-0 flex-col gap-0.5 rounded-[16px] bg-white/90 px-4 py-3 shadow-[0_4px_16px_rgba(72,55,41,0.08)] ring-1 ring-[#EFE7DC] backdrop-blur-xl transition hover:bg-white hover:shadow-[0_8px_24px_rgba(72,55,41,0.12)] dark:bg-[#1A1B20]/90 dark:ring-[#2A2C31] dark:hover:bg-[#1A1B20]"
+                className="velion-glass-soft flex min-w-0 flex-col gap-0.5 rounded-[18px] px-4 py-3 transition hover:shadow-[0_12px_30px_rgba(76,60,92,0.14)]"
               >
                 <span className="truncate text-[11px] font-medium text-[#AAA198] dark:text-[#5A5E66]">
                   {result.hostname}

@@ -4,15 +4,42 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import type { Easing, Transition, Variants } from "framer-motion";
 import { ArrowLeft, ExternalLink, Globe, Search, SendHorizontal } from "lucide-react";
 
 import { streamChat } from "@/features/chat-v2/lib/chat-stream";
+import { LiquidBackdrop } from "@/features/search-v2/components/LiquidBackdrop";
 import {
   buildGroundingContent,
   dedupeSources,
   type GroundingSource,
   type ThreadTurn,
 } from "@/features/search-v2/lib/answer-thread";
+
+// ---------------------------------------------------------------------------
+// Motion presets (gentle fade/slide-in with a small stagger). All durations
+// collapse to ~0 when prefers-reduced-motion is set via the global
+// prefers-reduced-motion CSS rule + per-component useReducedMotion guards.
+// ---------------------------------------------------------------------------
+
+const EASE_OUT: Easing = [0.19, 1, 0.22, 1];
+
+const listContainer: Variants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.06, delayChildren: 0.04 } },
+};
+
+const listItem: Variants = {
+  hidden: { opacity: 0, y: 12 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.42, ease: EASE_OUT } },
+};
+
+const tabPanel: Variants = {
+  hidden: { opacity: 0, y: 8 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.32, ease: EASE_OUT } },
+  exit: { opacity: 0, y: -6, transition: { duration: 0.18, ease: "easeIn" } },
+};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -279,16 +306,16 @@ function LoadingSkeleton() {
   return (
     <div className="flex flex-col gap-3" aria-busy="true" aria-label="Søker på nettet…">
       {/* Answer card skeleton */}
-      <div className="h-24 animate-pulse rounded-[16px] bg-[#F4F1EB] dark:bg-[#1D1A17]" />
+      <div className="h-24 animate-pulse rounded-3xl bg-white/45 dark:bg-white/[0.06]" />
       {/* Sources skeleton */}
       <div className="flex gap-2">
         {[1, 2, 3].map((i) => (
-          <div key={i} className="h-6 w-20 animate-pulse rounded-full bg-[#F4F1EB] dark:bg-[#1D1A17]" />
+          <div key={i} className="h-6 w-20 animate-pulse rounded-full bg-white/45 dark:bg-white/[0.06]" />
         ))}
       </div>
       {/* Results skeleton */}
       {[1, 2, 3, 4].map((i) => (
-        <div key={i} className="h-16 animate-pulse rounded-[14px] bg-[#F4F1EB] dark:bg-[#1D1A17]" />
+        <div key={i} className="h-16 animate-pulse rounded-3xl bg-white/45 dark:bg-white/[0.06]" />
       ))}
     </div>
   );
@@ -309,7 +336,7 @@ function ImageGridSkeleton() {
         <div
           key={i}
           style={{ height: `${h * 4}px` }}
-          className="mb-3 w-full animate-pulse rounded-[12px] bg-[#F4F1EB] dark:bg-[#1D1A17]"
+          className="mb-3 w-full animate-pulse rounded-[18px] bg-white/45 dark:bg-white/[0.06]"
         />
       ))}
     </div>
@@ -326,7 +353,7 @@ function ImageGallery({ images }: { images: ImageHit[] }) {
           target="_blank"
           rel="noopener noreferrer"
           title={image.title ?? safeHostname(image.url)}
-          className="group mb-3 block break-inside-avoid overflow-hidden rounded-[12px] bg-[#F4F1EB] shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-black/[0.04] transition hover:shadow-[0_4px_16px_rgba(20,21,24,0.12)] dark:bg-[#1D1A17] dark:ring-white/[0.06]"
+          className="velion-glass-soft group mb-3 block break-inside-avoid overflow-hidden rounded-[18px] transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
@@ -355,13 +382,22 @@ function ImageGallery({ images }: { images: ImageHit[] }) {
 
 /** A single rendered turn (question bubble or streaming answer) in the thread. */
 function ThreadTurnView({ turn }: { turn: ThreadTurn }) {
+  const reduceMotion = useReducedMotion();
+  const bubbleMotion = reduceMotion
+    ? {}
+    : {
+        initial: { opacity: 0, y: 8 },
+        animate: { opacity: 1, y: 0 },
+        transition: { duration: 0.32, ease: EASE_OUT } as Transition,
+      };
+
   if (turn.role === "user") {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-[16px] rounded-br-[6px] bg-[#111111] px-4 py-2.5 text-[13px] leading-relaxed text-white dark:bg-white dark:text-[#111111]">
+      <motion.div className="flex justify-end" {...bubbleMotion}>
+        <div className="max-w-[85%] rounded-[18px] rounded-br-[6px] bg-[#111111] px-4 py-2.5 text-[13px] leading-relaxed text-white dark:bg-white dark:text-[#111111]">
           <p className="whitespace-pre-wrap">{turn.text}</p>
         </div>
-      </div>
+      </motion.div>
     );
   }
 
@@ -369,8 +405,8 @@ function ThreadTurnView({ turn }: { turn: ThreadTurn }) {
   const isEmptyStreaming = turn.streaming && turn.text.length === 0;
 
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[92%] rounded-[16px] rounded-bl-[6px] bg-[#F4F1EB] px-4 py-3 dark:bg-[#1D1A17]">
+    <motion.div className="flex justify-start" {...bubbleMotion}>
+      <div className="velion-glass-soft max-w-[92%] rounded-[18px] rounded-bl-[6px] px-4 py-3">
         <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
           Velion
         </p>
@@ -402,7 +438,7 @@ function ThreadTurnView({ turn }: { turn: ThreadTurn }) {
           </p>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -745,11 +781,14 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
+    <div className="relative flex h-full flex-col overflow-hidden">
+      {/* Animated liquid-glass backdrop behind everything. */}
+      <LiquidBackdrop variant="answer" />
+
       {/* ------------------------------------------------------------------ */}
       {/* Header / query bar */}
       {/* ------------------------------------------------------------------ */}
-      <header className="flex shrink-0 items-center gap-3 border-b border-black/[0.06] bg-[#FCFCFD] px-4 py-3 dark:border-white/[0.06] dark:bg-[#1C1E24]">
+      <header className="relative z-[1] flex shrink-0 items-center gap-3 border-b border-white/40 bg-white/40 px-4 py-3 backdrop-blur-xl dark:border-white/[0.06] dark:bg-[#1C1E24]/55">
         <Link
           href={"/dashboard" as Route}
           aria-label="Tilbake til dashboard"
@@ -763,7 +802,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           <label className="sr-only" htmlFor="answer-search-query">
             Søk
           </label>
-          <div className="flex h-10 min-w-0 flex-1 items-center rounded-full bg-white/88 px-4 shadow-[0_2px_8px_rgba(20,21,24,0.08)] ring-1 ring-[#EFE7DC] backdrop-blur-sm dark:bg-[#1A1B20]/92 dark:ring-[#2A2C31]">
+          <div className="velion-glass-input flex h-10 min-w-0 flex-1 items-center rounded-full px-4">
             <Search className="mr-2 size-4 shrink-0 text-[#9A9188]" />
             <input
               id="answer-search-query"
@@ -789,7 +828,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
       {/* ------------------------------------------------------------------ */}
       {/* Tab bar */}
       {/* ------------------------------------------------------------------ */}
-      <div className="shrink-0 bg-[#FCFCFD] px-4 dark:bg-[#1C1E24]">
+      <div className="relative z-[1] shrink-0 bg-white/30 px-4 backdrop-blur-xl dark:bg-[#1C1E24]/45">
         <TabBar active={activeTab} onSelect={setActiveTab} />
       </div>
 
@@ -797,7 +836,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
       {/* Scrollable results area */}
       {/* ------------------------------------------------------------------ */}
       <main
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-5"
+        className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-4 py-5"
         aria-label="Søkeresultater"
       >
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
@@ -809,23 +848,31 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           ) : null}
 
           {/* ================================================================ */}
-          {/* Info tab — web search / answer / fetched page */}
+          {/* Tab content — animated cross-fade between verticals */}
           {/* ================================================================ */}
+          <AnimatePresence mode="wait" initial={false}>
           {activeTab === "Info" ? (
-            <>
+            <motion.div
+              key="tab-info"
+              className="flex flex-col gap-4"
+              variants={tabPanel}
+              initial="hidden"
+              animate="show"
+              exit="exit"
+            >
           {/* Loading skeleton */}
           {loading ? <LoadingSkeleton /> : null}
 
           {/* Error state */}
           {!loading && error ? (
-            <div className="rounded-[14px] bg-[#FDF2F0] px-4 py-3 text-[13px] text-[#B04020] dark:bg-[#2A1A17] dark:text-[#E8A090]">
+            <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
               {error}
             </div>
           ) : null}
 
           {/* ---- mode: "fetch" ---- */}
           {!loading && !error && mode === "fetch" && fetchedPage ? (
-            <div className="rounded-[16px] bg-white px-5 py-4 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-black/[0.04] dark:bg-[#1A1B20] dark:ring-white/[0.06]">
+            <div className="velion-glass rounded-3xl px-5 py-4">
               <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
                 Hentet side
               </p>
@@ -864,22 +911,25 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
           {/* ---- mode: "search" — AI summary card ---- */}
           {!loading && !error && mode === "search" && answer ? (
-            <section
+            <motion.section
               aria-labelledby="ai-summary-heading"
-              className="rounded-[16px] bg-[#F4F1EB] px-5 py-4 dark:bg-[#1D1A17]"
+              className="velion-glass rounded-3xl px-5 py-4"
+              variants={listItem}
+              initial="hidden"
+              animate="show"
             >
               <h2
                 id="ai-summary-heading"
-                className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]"
+                className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#9C5985] dark:text-[#C39FBC]"
               >
                 AI-sammendrag
               </h2>
-              <p className="text-[13px] leading-relaxed text-[#3A3530] dark:text-[#D4D6DC]">
+              <p className="text-[13.5px] leading-relaxed text-[#3A3037] dark:text-[#E6E2E8]">
                 {answer}
               </p>
               {citations.length > 0 ? (
-                <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-black/[0.06] pt-3 dark:border-white/[0.06]">
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
+                <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-black/[0.06] pt-3 dark:border-white/[0.08]">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#9A9EA8]">
                     Kilder
                   </span>
                   {citations.map((citation, idx) => (
@@ -888,7 +938,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                       href={citation.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-[#504A43] shadow-sm ring-1 ring-black/[0.06] transition hover:bg-[#EBE6DD] dark:bg-[#2A2C31] dark:text-[#D4D6DC] dark:ring-white/[0.06] dark:hover:bg-[#35373D]"
+                      className="velion-glass-soft inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-[#504A43] transition hover:shadow-[0_8px_20px_rgba(76,60,92,0.14)] dark:text-[#D4D6DC]"
                     >
                       {citation.title ?? safeHostname(citation.url)}
                       <ExternalLink className="size-2.5 shrink-0 opacity-60" />
@@ -896,7 +946,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                   ))}
                 </div>
               ) : null}
-            </section>
+            </motion.section>
           ) : null}
 
           {/* ---- mode: "search" — web results list ---- */}
@@ -904,42 +954,47 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             <section aria-labelledby="web-results-heading">
               <h2
                 id="web-results-heading"
-                className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]"
+                className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#9A9EA8]"
               >
                 Webresultater
               </h2>
-              <ul className="flex flex-col gap-2">
+              <motion.ul
+                className="flex flex-col gap-2"
+                variants={listContainer}
+                initial="hidden"
+                animate="show"
+              >
                 {results.map((result, idx) => (
-                  <li key={idx}>
+                  <motion.li key={idx} variants={listItem}>
                     <a
                       href={result.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="group block rounded-[14px] bg-white px-4 py-3 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-black/[0.04] transition hover:shadow-[0_4px_16px_rgba(20,21,24,0.10)] dark:bg-[#1A1B20] dark:ring-white/[0.06]"
+                      className="velion-glass-soft group block rounded-3xl px-4 py-3 transition hover:shadow-[0_14px_34px_rgba(76,60,92,0.14)]"
                     >
                       {result.title ? (
                         <p className="text-[13px] font-semibold text-[#1A1A1A] group-hover:text-[#EE7A50] dark:text-[#F7F8F8]">
                           {result.title}
                         </p>
                       ) : null}
-                      <p className="mt-0.5 truncate text-[11px] text-[#9A9188] dark:text-[#737780]">
+                      <p className="mt-0.5 truncate text-[11px] text-[#9A9188] dark:text-[#9A9EA8]">
                         {safeHostname(result.url)}
                       </p>
                       {result.snippet ? (
-                        <p className="mt-1 text-[12px] leading-relaxed text-[#5F5A54] dark:text-[#AEB4C0]">
+                        <p className="mt-1 text-[12px] leading-relaxed text-[#5F5A54] dark:text-[#B6BAC4]">
                           {result.snippet}
                         </p>
                       ) : null}
                     </a>
-                  </li>
+                  </motion.li>
                 ))}
-              </ul>
+              </motion.ul>
             </section>
           ) : null}
 
           {/* Empty state */}
           {!loading && !error && mode === "search" && results.length === 0 && !answer ? (
-            <div className="rounded-[14px] bg-[#F4F1EB] px-4 py-3 text-[13px] text-[#7A756F] dark:bg-[#1D1A17] dark:text-[#AEB4C0]">
+            <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
               Ingen webresultater funnet for{" "}
               <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
             </div>
@@ -947,14 +1002,21 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
           {/* ---- Conversational follow-up thread ---- */}
           <FollowUpThread turns={thread} />
-            </>
+            </motion.div>
           ) : null}
 
           {/* ================================================================ */}
           {/* Bilder tab — SearXNG image vertical */}
           {/* ================================================================ */}
           {activeTab === "Bilder" ? (
-            <section aria-label="Bilderesultater">
+            <motion.section
+              key="tab-bilder"
+              aria-label="Bilderesultater"
+              variants={tabPanel}
+              initial="hidden"
+              animate="show"
+              exit="exit"
+            >
               {/* Loading skeleton */}
               {imagesStatus === "loading" || imagesStatus === "idle" ? (
                 <ImageGridSkeleton />
@@ -962,7 +1024,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
               {/* Error state */}
               {imagesStatus === "error" ? (
-                <div className="rounded-[14px] bg-[#FDF2F0] px-4 py-3 text-[13px] text-[#B04020] dark:bg-[#2A1A17] dark:text-[#E8A090]">
+                <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
                   {imagesError ?? "Bildesøk kunne ikke fullføres."}
                 </div>
               ) : null}
@@ -974,13 +1036,14 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
               {/* Empty state */}
               {imagesStatus === "loaded" && images.length === 0 ? (
-                <div className="rounded-[14px] bg-[#F4F1EB] px-4 py-3 text-[13px] text-[#7A756F] dark:bg-[#1D1A17] dark:text-[#AEB4C0]">
+                <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
                   Ingen bilder funnet for{" "}
                   <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
                 </div>
               ) : null}
-            </section>
+            </motion.section>
           ) : null}
+          </AnimatePresence>
 
           {/* Scroll anchor: keeps the latest thread turn in view. */}
           <div ref={threadEndRef} aria-hidden="true" />
@@ -990,12 +1053,12 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
       {/* ------------------------------------------------------------------ */}
       {/* Pinned follow-up composer */}
       {/* ------------------------------------------------------------------ */}
-      <div className="shrink-0 border-t border-black/[0.06] bg-[#FCFCFD] px-4 py-3 dark:border-white/[0.06] dark:bg-[#1C1E24]">
+      <div className="relative z-[1] shrink-0 border-t border-white/40 bg-white/40 px-4 py-3 backdrop-blur-xl dark:border-white/[0.06] dark:bg-[#1C1E24]/55">
         <form onSubmit={handleFollowUp} className="mx-auto flex max-w-3xl items-end gap-2">
           <label className="sr-only" htmlFor="search-follow-up">
             Stille oppfølgingsspørsmål
           </label>
-          <div className="flex min-w-0 flex-1 items-end rounded-[22px] bg-white/88 px-4 py-2 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-[#EFE7DC] backdrop-blur-sm dark:bg-[#1A1B20]/92 dark:ring-[#2A2C31]">
+          <div className="velion-glass-input flex min-w-0 flex-1 items-end rounded-[22px] px-4 py-2">
             <textarea
               id="search-follow-up"
               rows={1}

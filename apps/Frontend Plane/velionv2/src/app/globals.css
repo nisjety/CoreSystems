@@ -48,9 +48,9 @@
 	--velion-border: #e4e4e7;
 	--velion-border-soft: #e9ebf2;
 	--velion-border-warm: #e1dad1;
-	--velion-dark-surface: #141516;
-	--velion-dark-surface-soft: #17181c;
-	--velion-dark-border: #2a2c31;
+	--velion-dark-surface: #181a1f;
+	--velion-dark-surface-soft: #202229;
+	--velion-dark-border: #343741;
 	--danger: #c0402a;
 	--info: #3578f6;
 	--sidebar: #111318;
@@ -311,13 +311,13 @@ button:disabled {
 }
 
 .dark .velion-navbar-search-trigger {
-	border-color: #2b2d33;
-	background: #17181c;
-	color: #aeb4c0;
+	border-color: #393c45;
+	background: #202229;
+	color: #d7dbe3;
 }
 
 .dark .velion-navbar-search-trigger:hover {
-	background: #1f2025;
+	background: #272a32;
 }
 
 .velion-navbar-search-icon {
@@ -369,9 +369,9 @@ button:disabled {
 }
 
 .dark .velion-navbar-shortcut-key {
-	border-color: #34343a;
-	background: #111216;
-	color: #8a8f98;
+	border-color: #3a3d46;
+	background: #181a1f;
+	color: #aeb4c0;
 }
 
 .velion-navbar-action-button {
@@ -420,7 +420,7 @@ button:disabled {
 
 .dark .velion-navbar-action-button:hover,
 .dark .velion-navbar-action-button[data-active="true"] {
-	background: #23252a;
+	background: #2a2d35;
 	color: #ffffff;
 }
 
@@ -2018,6 +2018,191 @@ button:disabled {
 
 	50% {
 		background-position: 100% 50%;
+	}
+}
+
+/* ---------------------------------------------------------------------------
+ * Liquid-glass aesthetic (P5)
+ * Frosted translucent panels + an animated wavy gradient backdrop. Used by the
+ * search answer view and the dashboard search prompt. GPU-friendly: motion is
+ * limited to transform/opacity on isolated layers.
+ * ------------------------------------------------------------------------- */
+
+/* Frosted glass surface. Translucent fill, hairline border, soft shadow and a
+   faint inner highlight so it reads as a piece of glass over the backdrop. */
+.velion-glass {
+	border: 1px solid rgba(255, 255, 255, 0.55);
+	background: rgba(255, 255, 255, 0.62);
+	box-shadow:
+		0 18px 48px rgba(76, 60, 92, 0.1),
+		inset 0 1px 0 rgba(255, 255, 255, 0.7);
+	-webkit-backdrop-filter: blur(18px) saturate(150%);
+	backdrop-filter: blur(18px) saturate(150%);
+}
+
+.dark .velion-glass {
+	border-color: rgba(255, 255, 255, 0.08);
+	background: rgba(32, 34, 41, 0.58);
+	box-shadow:
+		0 18px 48px rgba(0, 0, 0, 0.34),
+		inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Softer, lower-elevation glass for nested rows / result cards. */
+.velion-glass-soft {
+	border: 1px solid rgba(255, 255, 255, 0.5);
+	background: rgba(255, 255, 255, 0.52);
+	box-shadow:
+		0 8px 24px rgba(76, 60, 92, 0.07),
+		inset 0 1px 0 rgba(255, 255, 255, 0.6);
+	-webkit-backdrop-filter: blur(14px) saturate(140%);
+	backdrop-filter: blur(14px) saturate(140%);
+}
+
+.dark .velion-glass-soft {
+	border-color: rgba(255, 255, 255, 0.07);
+	background: rgba(28, 30, 36, 0.5);
+	box-shadow:
+		0 8px 24px rgba(0, 0, 0, 0.28),
+		inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Glass input pill (search field / composer). */
+.velion-glass-input {
+	border: 1px solid rgba(255, 255, 255, 0.6);
+	background: rgba(255, 255, 255, 0.66);
+	box-shadow:
+		0 12px 34px rgba(76, 60, 92, 0.1),
+		inset 0 1px 0 rgba(255, 255, 255, 0.75);
+	-webkit-backdrop-filter: blur(16px) saturate(150%);
+	backdrop-filter: blur(16px) saturate(150%);
+}
+
+.dark .velion-glass-input {
+	border-color: rgba(255, 255, 255, 0.09);
+	background: rgba(32, 34, 41, 0.62);
+	box-shadow:
+		0 12px 34px rgba(0, 0, 0, 0.32),
+		inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* --- Animated wavy gradient backdrop (LiquidBackdrop.tsx) --- */
+.velion-liquid-backdrop {
+	z-index: 0;
+}
+
+.velion-liquid-base {
+	background:
+		radial-gradient(ellipse 120% 80% at 50% -10%, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0) 60%),
+		linear-gradient(180deg, #fcfbff 0%, #fbf9fd 48%, #faf8fb 100%);
+}
+
+.dark .velion-liquid-base {
+	background:
+		radial-gradient(ellipse 120% 80% at 50% -10%, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0) 60%),
+		linear-gradient(180deg, #1c1e24 0%, #1b1d23 50%, #191b21 100%);
+}
+
+/* Answer variant gets a slightly warmer pink/purple wash. */
+.velion-liquid-backdrop[data-variant="answer"] .velion-liquid-base {
+	background:
+		radial-gradient(ellipse 120% 90% at 50% -10%, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0) 55%),
+		linear-gradient(170deg, #ffffff 0%, #fdf6fb 42%, #fbf2f8 72%, #f7eef9 100%);
+}
+
+.dark .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-base {
+	background:
+		radial-gradient(ellipse 120% 90% at 50% -10%, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0) 55%),
+		linear-gradient(170deg, #1d1f25 0%, #211c26 48%, #231d29 100%);
+}
+
+.velion-liquid-blob {
+	position: absolute;
+	border-radius: 50%;
+	opacity: 0.55;
+	filter: blur(60px);
+	will-change: transform;
+}
+
+.dark .velion-liquid-blob {
+	opacity: 0.4;
+}
+
+.velion-liquid-blob-1 {
+	top: -18%;
+	left: -8%;
+	width: 52%;
+	height: 52%;
+	background: radial-gradient(circle at 50% 50%, rgba(255, 196, 222, 0.85), rgba(255, 196, 222, 0) 70%);
+}
+
+.velion-liquid-blob-2 {
+	top: 8%;
+	right: -12%;
+	width: 56%;
+	height: 56%;
+	background: radial-gradient(circle at 50% 50%, rgba(201, 196, 255, 0.8), rgba(201, 196, 255, 0) 70%);
+}
+
+.velion-liquid-blob-3 {
+	bottom: -22%;
+	left: 22%;
+	width: 50%;
+	height: 50%;
+	background: radial-gradient(circle at 50% 50%, rgba(189, 224, 255, 0.7), rgba(189, 224, 255, 0) 70%);
+}
+
+.dark .velion-liquid-blob-1 {
+	background: radial-gradient(circle at 50% 50%, rgba(176, 96, 140, 0.5), rgba(176, 96, 140, 0) 70%);
+}
+
+.dark .velion-liquid-blob-2 {
+	background: radial-gradient(circle at 50% 50%, rgba(112, 100, 178, 0.5), rgba(112, 100, 178, 0) 70%);
+}
+
+.dark .velion-liquid-blob-3 {
+	background: radial-gradient(circle at 50% 50%, rgba(80, 122, 168, 0.45), rgba(80, 122, 168, 0) 70%);
+}
+
+.velion-liquid-blob-1.is-animated {
+	animation: velionLiquidDrift1 22s ease-in-out infinite alternate;
+}
+
+.velion-liquid-blob-2.is-animated {
+	animation: velionLiquidDrift2 26s ease-in-out infinite alternate;
+}
+
+.velion-liquid-blob-3.is-animated {
+	animation: velionLiquidDrift3 30s ease-in-out infinite alternate;
+}
+
+@keyframes velionLiquidDrift1 {
+	0% {
+		transform: translate3d(0, 0, 0) scale(1);
+	}
+
+	100% {
+		transform: translate3d(14%, 10%, 0) scale(1.12);
+	}
+}
+
+@keyframes velionLiquidDrift2 {
+	0% {
+		transform: translate3d(0, 0, 0) scale(1.05);
+	}
+
+	100% {
+		transform: translate3d(-12%, 8%, 0) scale(0.95);
+	}
+}
+
+@keyframes velionLiquidDrift3 {
+	0% {
+		transform: translate3d(0, 0, 0) scale(1);
+	}
+
+	100% {
+		transform: translate3d(8%, -12%, 0) scale(1.1);
 	}
 }
 
