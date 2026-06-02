@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use quarry_core::output::NormalizedOutput;
 use redis::{aio::ConnectionManager, AsyncCommands};
+use serde::{de::DeserializeOwned, Serialize};
 
 pub const DEFAULT_TTL_SECS: u64 = 3600;
 
@@ -96,6 +97,79 @@ pub fn fingerprint(url: &str, vary_headers: &[(&str, &str)], js_required: bool) 
     hasher.finalize().to_hex().to_string()
 }
 
+/// Generic org-scoped JSON cache over the shared Redis connection, used for
+/// `/v1/search` (and answer) responses. Separate key space + TTL policy from
+/// [`PageCache`] (scrape bodies). Every operation is best-effort — a cache
+/// failure must never fail the request path.
+#[derive(Clone)]
+pub struct SearchCache {
+    conn: ConnectionManager,
+}
+
+impl SearchCache {
+    pub fn new(conn: ConnectionManager) -> Self {
+        Self { conn }
+    }
+
+    /// Org-scoped key: `quarry:search:{org}:{blake3(query \u{1f} params)}`.
+    /// The `org` segment is a hard tenant-isolation boundary — one org can
+    /// never read another's cached results. `params` must encode every field
+    /// that changes the *result set* (limit, locale, topic, recency,
+    /// exact_match, include_answer) but NOT pure post-processing
+    /// (highlight/facets/format), which are re-applied per request so those
+    /// variants share a cache entry.
+    pub fn key(org_id: &str, query: &str, params: &str) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(query.as_bytes());
+        h.update(b"\x1f");
+        h.update(params.as_bytes());
+        format!("quarry:search:{org_id}:{}", h.finalize().to_hex())
+    }
+
+    /// `Some(value)` on hit; `None` on miss or any recoverable error.
+    pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        let mut conn = self.conn.clone();
+        let raw: Option<String> = conn.get(key).await.ok()?;
+        match serde_json::from_str::<T>(&raw?) {
+            Ok(v) => Some(v),
+            Err(err) => {
+                tracing::warn!(error = %err, key, "search cache: deserialize failed");
+                None
+            }
+        }
+    }
+
+    /// Store a JSON value under `key` with a per-call TTL (clamped ≥1s).
+    pub async fn put_with_ttl<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl_secs: u64,
+    ) -> redis::RedisResult<()> {
+        let mut conn = self.conn.clone();
+        let encoded = serde_json::to_string(value).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "serialize search cache value",
+                e.to_string(),
+            ))
+        })?;
+        conn.set_ex::<_, _, ()>(key, encoded, ttl_secs.max(1)).await
+    }
+}
+
+/// Intent-driven TTL (seconds) for the search/answer cache. Fresh /
+/// time-sensitive queries expire fast; general informational queries use the
+/// operator-configured default. Mirrors common CDN/search practice (news →
+/// minutes, general → ~5–15 min).
+pub fn search_ttl_secs(topic: Option<&str>, time_range: Option<&str>, default_ttl: u64) -> u64 {
+    match topic.map(|t| t.trim().to_ascii_lowercase()).as_deref() {
+        Some("news") | Some("finance") => 120, // breaking content — 2 min
+        _ if time_range.is_some() => 300,      // any recency-scoped query — 5 min
+        _ => default_ttl.max(60),              // general — operator default (≥60s)
+    }
+}
+
 #[cfg(test)]
 mod fingerprint_tests {
     use super::fingerprint;
@@ -126,5 +200,37 @@ mod fingerprint_tests {
         let a = fingerprint("https://a.com", &[], false);
         let b = fingerprint("https://b.com", &[], false);
         assert_ne!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod search_cache_tests {
+    use super::{search_ttl_secs, SearchCache};
+
+    #[test]
+    fn key_is_org_scoped() {
+        // Same query + params, different orgs → different keys (tenant isolation).
+        let a = SearchCache::key("org_a", "rust ownership", "limit=10");
+        let b = SearchCache::key("org_b", "rust ownership", "limit=10");
+        assert_ne!(a, b);
+        assert!(a.starts_with("quarry:search:org_a:"));
+        assert!(b.starts_with("quarry:search:org_b:"));
+    }
+
+    #[test]
+    fn key_stable_and_param_sensitive() {
+        let base = SearchCache::key("o", "q", "limit=10|answer=true");
+        assert_eq!(base, SearchCache::key("o", "q", "limit=10|answer=true"));
+        assert_ne!(base, SearchCache::key("o", "q", "limit=20|answer=true"));
+        assert_ne!(base, SearchCache::key("o", "q2", "limit=10|answer=true"));
+    }
+
+    #[test]
+    fn ttl_news_short_recency_medium_general_default() {
+        assert_eq!(search_ttl_secs(Some("news"), None, 900), 120);
+        assert_eq!(search_ttl_secs(Some("finance"), None, 900), 120);
+        assert_eq!(search_ttl_secs(None, Some("day"), 900), 300);
+        assert_eq!(search_ttl_secs(None, None, 900), 900);
+        assert_eq!(search_ttl_secs(None, None, 0), 60); // clamp floor
     }
 }

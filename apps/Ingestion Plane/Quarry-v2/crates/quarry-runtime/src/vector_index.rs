@@ -81,6 +81,10 @@ struct RetrieveRequestBody<'a> {
     /// Retrieval is read-only; never persists. ZDR is therefore irrelevant,
     /// but we pass "off" explicitly so the Data Plane doesn't gate the call.
     zdr_mode: &'a str,
+    /// The engine's `RetrievalRequest.filters` is REQUIRED (non-Option, no
+    /// serde default) — omitting it makes `/v1/retrieve` reject the body with
+    /// 400. An empty object means "no filters": search the whole org corpus.
+    filters: serde_json::Value,
 }
 
 // Tolerant mirror of the Data Plane `RetrieveResponse` (retrieval_v2.proto):
@@ -126,6 +130,7 @@ impl VectorIndex for DataPlaneVectorIndex {
             query,
             top_k: top_k.min(i32::MAX as usize) as i32,
             zdr_mode: "off",
+            filters: serde_json::json!({}),
         };
         let mut req = self.client.post(&self.retrieve_url).json(&body);
         if let Some(key) = &self.api_key {

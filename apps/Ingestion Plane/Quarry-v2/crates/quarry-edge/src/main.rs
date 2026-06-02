@@ -585,16 +585,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                     let mp_arc = Arc::new(mp_client);
                     let formats = quarry_runtime::ai_formats::AiFormatRunner::new(mp_arc);
-                    // The fetcher does a degenerate "fetch via the
-                    // existing search-result snippet" pass for now.
-                    // Future iteration plugs in a real `PageRunner`-backed
-                    // MarkdownFetcher; for cycle 19 we wire a no-op
-                    // closure so the pipeline boots and the typed shape
-                    // works end-to-end. Real scrape integration is
-                    // tracked in a follow-up gap-quarry slice.
-                    let fetcher = Arc::new(quarry_runtime::answer::ClosureFetcher(
-                        |_url: String, _zdr: quarry_core::zdr::ZdrMode| async move { None::<String> },
-                    ));
+                    // Real HTTP markdown fetcher: GET → readability → markdown.
+                    // Pages that block / 4xx-5xx / time out return None, and the
+                    // AnswerPipeline falls back to the search-result snippet (which
+                    // also carries Data Plane chunk text), so the synthesized answer
+                    // is populated whenever a provider returned any text. A
+                    // PageRunner-backed fetcher (TLS impersonation / JS render) is the
+                    // natural follow-up — same trait, swap the impl.
+                    let fetcher = Arc::new(
+                        quarry_runtime::answer::SimpleHttpMarkdownFetcher::new()
+                            .with_user_agent(cfg.user_agent.clone()),
+                    );
                     let pipeline = quarry_runtime::answer::AnswerPipeline::new(
                         search_arc.clone(),
                         fetcher,

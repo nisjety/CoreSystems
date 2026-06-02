@@ -189,7 +189,16 @@ impl AnswerPipeline {
                 rank: (i as u32) + 1,
                 provider: result.provider.clone(),
             });
-            let Some(md) = markdown else {
+            // Prefer the fetched page body; fall back to the search-result
+            // snippet when the fetch failed/was skipped (paywall, block,
+            // timeout) or when the result carries its content inline (e.g.
+            // Data Plane retrieval chunks). Guarantees a grounded, non-empty
+            // answer whenever the provider returned any text for the source.
+            let source_text: Option<String> = match markdown {
+                Some(md) if !md.trim().is_empty() => Some(md.clone()),
+                _ => result.snippet.clone().filter(|s| !s.trim().is_empty()),
+            };
+            let Some(md) = source_text else {
                 sources_skipped += 1;
                 continue;
             };

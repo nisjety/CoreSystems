@@ -107,6 +107,24 @@ pub struct ErrorBody {
     pub hint: Option<String>,
 }
 
+/// Default TTL (seconds) for the general search/answer cache bucket. News /
+/// recency-scoped queries override this downward — see `cache::search_ttl_secs`.
+const SEARCH_CACHE_DEFAULT_TTL_SECS: u64 = 900;
+
+/// Cached upstream of a search: provider results + any synthesized answer.
+/// Post-processing (facets/highlight/context) is re-applied per request, and
+/// billing/events still fire on cache hits — only the expensive provider + LLM
+/// calls are skipped. Keyed org-scoped so one tenant never reads another's.
+#[derive(Serialize, Deserialize)]
+struct CachedSearch {
+    provider: String,
+    results: Vec<SearchResult>,
+    #[serde(default)]
+    answer: Option<String>,
+    #[serde(default)]
+    citations: Option<Vec<Citation>>,
+}
+
 // ── pure helpers (unit-tested) ──────────────────────────────────────────────
 
 /// Wrap the query in double-quotes for exact-phrase matching, unless it is
@@ -275,151 +293,203 @@ pub async fn search(
         org_id: Some(claims.org_id.clone()),
     };
 
-    match provider.search(&effective_query, &opts).await {
-        Ok(results) => {
-            let count = results.len();
-            let provider_name = provider.name().to_string();
+    // ── Cache lookup (org-scoped, intent-driven TTL) ─────────────────────────
+    // Key encodes only result-affecting params; highlight/facets/format are
+    // re-applied per request so those variants share one entry. The org_id
+    // segment is a hard tenant-isolation boundary. Billing + events still fire
+    // on a hit (below) — only the expensive provider + synthesis are skipped.
+    let params_sig = format!(
+        "l={}|c={:?}|lg={:?}|s={}|t={:?}|tr={:?}|x={}|a={}",
+        opts.limit,
+        opts.country,
+        opts.language,
+        opts.safe_search,
+        req.topic,
+        opts.time_range,
+        req.exact_match,
+        req.include_answer,
+    );
+    let cache_key = crate::cache::SearchCache::key(&claims.org_id, &effective_query, &params_sig);
+    let scache = state.redis.clone().map(crate::cache::SearchCache::new);
+    let from_cache: Option<CachedSearch> = match &scache {
+        Some(c) => c.get(&cache_key).await,
+        None => None,
+    };
 
-            // format=context — token-bounded RAG context for Velion.
-            let context = match req.format.as_deref() {
-                Some("context") => {
-                    Some(build_context(&results, req.chunks_per_source, MAX_CONTEXT_CHARS))
-                }
-                _ => None,
-            };
+    let (results, answer, citations, provider_name, cache_hit) = match from_cache {
+        Some(c) => (c.results, c.answer, c.citations, c.provider, true),
+        None => match provider.search(&effective_query, &opts).await {
+            Ok(results) => {
+                let provider_name = provider.name().to_string();
 
-            // include_answer — best-effort synthesis; never fail search on it.
-            let (answer, citations) = if req.include_answer {
-                match state.answer_pipeline.as_ref() {
-                    Some(p) => {
-                        let areq = AnswerRequest {
-                            query: req.query.clone(),
-                            top_k: Some(ANSWER_TOP_K),
-                            country: req.country.clone(),
-                            language: req.language.clone(),
-                            zdr: None,
-                            org_id: Some(claims.org_id.clone()),
-                        };
-                        match p.answer(areq).await {
-                            Ok(ar) => (Some(ar.answer), Some(ar.citations)),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "include_answer synthesis failed");
-                                (None, None)
+                // include_answer — best-effort synthesis; never fail search on it.
+                let (answer, citations) = if req.include_answer {
+                    match state.answer_pipeline.as_ref() {
+                        Some(p) => {
+                            let areq = AnswerRequest {
+                                query: req.query.clone(),
+                                top_k: Some(ANSWER_TOP_K),
+                                country: req.country.clone(),
+                                language: req.language.clone(),
+                                zdr: None,
+                                org_id: Some(claims.org_id.clone()),
+                            };
+                            match p.answer(areq).await {
+                                Ok(ar) => (Some(ar.answer), Some(ar.citations)),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "include_answer synthesis failed");
+                                    (None, None)
+                                }
                             }
                         }
+                        None => (None, None),
                     }
-                    None => (None, None),
+                } else {
+                    (None, None)
+                };
+
+                // Write-back (best-effort). Cache failures never fail the request.
+                if let Some(c) = &scache {
+                    let ttl = crate::cache::search_ttl_secs(
+                        req.topic.as_deref(),
+                        opts.time_range.as_deref(),
+                        SEARCH_CACHE_DEFAULT_TTL_SECS,
+                    );
+                    let payload = CachedSearch {
+                        provider: provider_name.clone(),
+                        results: results.clone(),
+                        answer: answer.clone(),
+                        citations: citations.clone(),
+                    };
+                    if let Err(e) = c.put_with_ttl(&cache_key, &payload, ttl).await {
+                        tracing::warn!(error = %e, "search cache: put failed");
+                    }
                 }
-            } else {
-                (None, None)
-            };
 
-            // Cycle 19 / cluster #19: emit SearchIssued for autocomplete-core.
-            let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
-            let run_id_str = run_id.to_string();
-            let idem = format!("search:{}", run_id);
-            state
-                .event_sink
-                .emit(
-                    run_id,
-                    quarry_core::event::EventType::SearchIssued,
-                    serde_json::json!({
-                        "query": req.query,
-                        "provider": provider_name,
-                        "result_count": count,
-                        "limit": opts.limit,
-                        "topic": req.topic,
-                        "exact_match": req.exact_match,
-                        "org_id": claims.org_id,
-                        "user_id": claims.user_id,
-                    }),
-                    idem,
-                )
-                .await;
-
-            // P3 / billing — one unit per query.
-            state
-                .usage
-                .meter(quarry_runtime::UsageEvent::new(
-                    run_id_str,
-                    claims.org_id.clone(),
-                    quarry_runtime::usage_metrics::SEARCH_QUERY,
-                    1.0,
-                    serde_json::json!({
-                        "user_id": claims.user_id,
-                        "result_count": count,
-                        "provider": provider_name,
-                        "query_chars": req.query.chars().count(),
-                        "include_answer": req.include_answer,
-                        "format": req.format,
-                    }),
-                ))
-                .await;
-
-            // 2E — facets computed from clean results (before highlight markup).
-            let facets = if req.facets { Some(compute_host_facets(&results)) } else { None };
-            // 2E — highlight query terms in titles/snippets when requested.
-            let results = if req.highlight {
-                results
-                    .into_iter()
-                    .map(|mut r| {
-                        if let Some(t) = r.title.take() {
-                            r.title = Some(highlight_terms(&t, &req.query));
-                        }
-                        if let Some(s) = r.snippet.take() {
-                            r.snippet = Some(highlight_terms(&s, &req.query));
-                        }
-                        r
-                    })
-                    .collect()
-            } else {
-                results
-            };
-
-            (
-                StatusCode::OK,
-                Json(SearchResponse {
-                    query: req.query,
-                    provider: provider_name,
-                    results,
-                    count,
-                    answer,
-                    citations,
-                    context,
-                    facets,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            let status = match e.code.http_status() {
-                400 => StatusCode::BAD_REQUEST,
-                401 => StatusCode::UNAUTHORIZED,
-                403 => StatusCode::FORBIDDEN,
-                429 => StatusCode::TOO_MANY_REQUESTS,
-                502 => StatusCode::BAD_GATEWAY,
-                504 => StatusCode::GATEWAY_TIMEOUT,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            // 3D — structured rate-limit envelope (Tavily-style) on 429.
-            if status == StatusCode::TOO_MANY_REQUESTS {
+                (results, answer, citations, provider_name, false)
+            }
+            Err(e) => {
+                let status = match e.code.http_status() {
+                    400 => StatusCode::BAD_REQUEST,
+                    401 => StatusCode::UNAUTHORIZED,
+                    403 => StatusCode::FORBIDDEN,
+                    429 => StatusCode::TOO_MANY_REQUESTS,
+                    502 => StatusCode::BAD_GATEWAY,
+                    504 => StatusCode::GATEWAY_TIMEOUT,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                // 3D — structured rate-limit envelope (Tavily-style) on 429.
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    return (
+                        status,
+                        Json(crate::api_error::ApiError::rate_limited(e.message, 60)),
+                    )
+                        .into_response();
+                }
                 return (
                     status,
-                    Json(crate::api_error::ApiError::rate_limited(e.message, 60)),
+                    Json(ErrorBody {
+                        error: e.message,
+                        code: format!("{:?}", e.code).to_uppercase(),
+                        hint: None,
+                    }),
                 )
                     .into_response();
             }
-            (
-                status,
-                Json(ErrorBody {
-                    error: e.message,
-                    code: format!("{:?}", e.code).to_uppercase(),
-                    hint: None,
-                }),
-            )
-                .into_response()
-        }
-    }
+        },
+    };
+
+    let count = results.len();
+
+    // format=context — token-bounded RAG context for Velion.
+    let context = match req.format.as_deref() {
+        Some("context") => Some(build_context(&results, req.chunks_per_source, MAX_CONTEXT_CHARS)),
+        _ => None,
+    };
+
+    // Cycle 19 / cluster #19: emit SearchIssued for autocomplete-core.
+    let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+    let run_id_str = run_id.to_string();
+    let idem = format!("search:{}", run_id);
+    state
+        .event_sink
+        .emit(
+            run_id,
+            quarry_core::event::EventType::SearchIssued,
+            serde_json::json!({
+                "query": req.query,
+                "provider": provider_name,
+                "result_count": count,
+                "limit": opts.limit,
+                "topic": req.topic,
+                "exact_match": req.exact_match,
+                "org_id": claims.org_id,
+                "user_id": claims.user_id,
+                "cache_hit": cache_hit,
+            }),
+            idem,
+        )
+        .await;
+
+    // P3 / billing — one unit per query (cache hits included: the query still
+    // happened; only upstream compute was saved).
+    state
+        .usage
+        .meter(quarry_runtime::UsageEvent::new(
+            run_id_str,
+            claims.org_id.clone(),
+            quarry_runtime::usage_metrics::SEARCH_QUERY,
+            1.0,
+            serde_json::json!({
+                "user_id": claims.user_id,
+                "result_count": count,
+                "provider": provider_name,
+                "query_chars": req.query.chars().count(),
+                "include_answer": req.include_answer,
+                "format": req.format,
+                "cache_hit": cache_hit,
+            }),
+        ))
+        .await;
+
+    // 2E — facets computed from clean results (before highlight markup).
+    let facets = if req.facets {
+        Some(compute_host_facets(&results))
+    } else {
+        None
+    };
+    // 2E — highlight query terms in titles/snippets when requested.
+    let results = if req.highlight {
+        results
+            .into_iter()
+            .map(|mut r| {
+                if let Some(t) = r.title.take() {
+                    r.title = Some(highlight_terms(&t, &req.query));
+                }
+                if let Some(s) = r.snippet.take() {
+                    r.snippet = Some(highlight_terms(&s, &req.query));
+                }
+                r
+            })
+            .collect()
+    } else {
+        results
+    };
+
+    (
+        StatusCode::OK,
+        Json(SearchResponse {
+            query: req.query,
+            provider: provider_name,
+            results,
+            count,
+            answer,
+            citations,
+            context,
+            facets,
+        }),
+    )
+        .into_response()
 }
 
 // ── /v1/search/images — IMAGES vertical ──────────────────────────────────────

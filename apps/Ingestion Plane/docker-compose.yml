@@ -36,12 +36,20 @@ services:
       QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}@ingestion-redis:6379/6
       QUARRY_EDGE__ARTIFACT_BACKEND: ${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
       QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
-      QUARRY_EDGE__MODEL_PLANE_BASE_URL: ${MODEL_PLANE_URL:-http://ai-core:8001}
-      QUARRY_EDGE__MODEL_PLANE_BEARER_TOKEN: ${MODEL_PLANE_TOKEN:-}
-      QUARRY_EDGE__MODEL_PLANE_MODEL: ${MODEL_PLANE_MODEL:-}
-      QUARRY_EDGE__DATA_PLANE_DOCUMENTS_BASE_URL: ${DATA_PLANE_URL:-http://dpv2-documents-api:8010}
-      QUARRY_EDGE__DATA_PLANE_RETRIEVAL_BASE_URL: ${DATA_PLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:8004}
-      QUARRY_EDGE__DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
+      # Model Plane gateway. EdgeConfig field is `model_plane_url` (NOT *_base_url) —
+      # the config crate maps QUARRY_EDGE__MODEL_PLANE_URL → model_plane_url. Serves
+      # /v1/invoke for answer synthesis; the gateway chooses the model (no model id needed).
+      QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-http://model-gateway:8080}
+      # Bearer the answer pipeline sends to model-gateway /v1/invoke. The gateway
+      # runs MODEL_GATEWAY_AUTH_DEV_BYPASS=1 (accepts any non-empty bearer in dev);
+      # an empty token omits the header → 401. `dev-token` is the shared dev value.
+      QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-dev-token}
+      # Data Plane retrieval (EdgeConfig field `data_plane_url`) → retrieval_v2 /v1/retrieve,
+      # powering hybrid search (lexical ⊕ Qdrant semantic, RRF-fused). A separate
+      # ingest/documents URL (dpv2-documents-api:8010) is added in Phase 4 for content
+      # promotion — see docs/AI_SEARCH_PLATFORM_PLAN.md.
+      QUARRY_EDGE__DATA_PLANE_URL: ${DATA_PLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:8004}
+      QUARRY_EDGE__DATA_PLANE_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
       QUARRY_EDGE__CANARY_PCT: ${QUARRY_CANARY_PCT:-100}
       QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
       QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}
@@ -228,6 +236,12 @@ services:
       dockerfile: Dockerfile
     container_name: integration-api
     restart: unless-stopped
+    env_file:
+      # Cutover compatibility: reuse the existing v1 credential source while
+      # the runtime is integration-corev2. Service URLs and safety knobs below
+      # intentionally override this file, but provider secrets should flow
+      # through instead of being masked to empty values.
+      - ./integration-core/.env
     environment:
       PORT: "3026"
       SERVICE_NAME: integration-corev2
@@ -254,27 +268,23 @@ services:
       # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
       INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
-      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
-      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
       MICROSOFT_GRAPH_BASE_URL: ${MICROSOFT_GRAPH_BASE_URL:-https://graph.microsoft.com}
-      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
-      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      NOTION_CLIENT_ID: ${NOTION_CLIENT_ID:-}
-      NOTION_CLIENT_SECRET: ${NOTION_CLIENT_SECRET:-}
-      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
-      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
-      SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-}
-      SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-}
-      STRIPE_CLIENT_ID: ${STRIPE_CLIENT_ID:-}
-      STRIPE_CLIENT_SECRET: ${STRIPE_CLIENT_SECRET:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-      OKTA_DOMAIN: ${OKTA_DOMAIN:-}
-      OKTA_CLIENT_ID: ${OKTA_CLIENT_ID:-}
-      OKTA_CLIENT_SECRET: ${OKTA_CLIENT_SECRET:-}
-      OKTA_API_TOKEN: ${OKTA_API_TOKEN:-}
-      SCIM_BEARER_TOKEN: ${SCIM_BEARER_TOKEN:-}
+      NANGO_API_KEY: ""
+      CONNECTOR_RUNTIME_BASE_URL: ""
+      CONNECTOR_RUNTIME_PUBLIC_BASE_URL: ""
+      CONNECTOR_RUNTIME_SECRET: ""
+      CONNECTOR_RUNTIME_TIMEOUT_MS: ""
+      CONNECTOR_RUNTIME_WEBHOOK_SECRET: ""
+      CONNECTOR_RUNTIME_WEBHOOK_URL: ""
+      GOOGLE_INTEGRATION_KEY: ""
+      GOOGLE_DRIVE_INTEGRATION_KEY: ""
+      MICROSOFT_INTEGRATION_KEY: ""
+      NOTION_INTEGRATION_KEY: ""
+      SLACK_INTEGRATION_KEY: ""
+      GITHUB_INTEGRATION_KEY: ""
+      SHOPIFY_INTEGRATION_KEY: ""
+      STRIPE_INTEGRATION_KEY: ""
+      HUBSPOT_INTEGRATION_KEY: ""
     deploy:
       resources:
         limits:
