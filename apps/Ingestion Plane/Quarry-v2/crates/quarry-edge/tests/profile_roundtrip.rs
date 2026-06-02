@@ -41,6 +41,7 @@ async fn spawn_app() -> SocketAddr {
         ingest: None,
         profiles: Arc::new(InMemoryProfileStore::new()),
         search: None,
+        searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
         answer_pipeline: None,

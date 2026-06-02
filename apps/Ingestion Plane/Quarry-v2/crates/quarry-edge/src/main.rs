@@ -672,6 +672,7 @@ async fn main() -> anyhow::Result<()> {
         ingest,
         profiles,
         search,
+        searxng_url: cfg.searxng_url.clone().filter(|s| !s.is_empty()),
         model_plane_url: cfg.model_plane_url.clone(),
         model_plane_token: cfg.model_plane_token.clone(),
         answer_pipeline,

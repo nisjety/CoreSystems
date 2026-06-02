@@ -122,6 +122,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/audio", post(crate::audio_routes::audio))
         .route("/v1/search", post(crate::search_routes::search))
+        .route("/v1/search/images", post(crate::search_routes::images))
         .route("/v1/map", post(crate::map_routes::map))
         .route("/v1/extract", post(crate::extract_routes::extract))
         .route("/v1/answer", post(crate::answer_routes::answer))
@@ -883,6 +884,7 @@ mod tests {
             ingest: None,
             profiles: Arc::new(quarry_browser::session::InMemoryProfileStore::new()),
             search: None,
+            searxng_url: None,
             model_plane_url: None,
             model_plane_token: None,
             answer_pipeline: None,

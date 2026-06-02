@@ -52,6 +52,7 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
         ingest: None,
         profiles: Arc::new(quarry_browser::session::InMemoryProfileStore::new()),
         search: None,
+        searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
         answer_pipeline: None,

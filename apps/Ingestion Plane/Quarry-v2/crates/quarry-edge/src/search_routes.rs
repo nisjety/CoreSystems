@@ -17,7 +17,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, 
 use serde::{Deserialize, Serialize};
 
 use quarry_runtime::answer::{AnswerRequest, Citation};
-use quarry_runtime::serp::{SearchOptions, SearchResult};
+use quarry_runtime::serp::{ImageResult, SearchOptions, SearchResult, SearXNGImages};
 
 use crate::state::AppState;
 
@@ -402,6 +402,117 @@ pub async fn search(
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             // 3D — structured rate-limit envelope (Tavily-style) on 429.
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                return (
+                    status,
+                    Json(crate::api_error::ApiError::rate_limited(e.message, 60)),
+                )
+                    .into_response();
+            }
+            (
+                status,
+                Json(ErrorBody {
+                    error: e.message,
+                    code: format!("{:?}", e.code).to_uppercase(),
+                    hint: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ── /v1/search/images — IMAGES vertical ──────────────────────────────────────
+
+/// Request body for `POST /v1/search/images`. Deliberately minimal: the web
+/// `SmartSearchRouter` has no image concept, so this path talks to SearXNG's
+/// image vertical directly. Same Bearer auth as `/v1/search`.
+#[derive(Debug, Deserialize)]
+pub struct ImageSearchRequest {
+    pub query: String,
+    /// Max images to return. Defaults to 24, capped at 50.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImageSearchResponse {
+    pub query: String,
+    pub provider: String,
+    pub images: Vec<ImageResult>,
+}
+
+/// `POST /v1/search/images` — focused SearXNG image search.
+///
+/// Reuses the configured `searxng_url`. When SearXNG isn't configured the
+/// route returns 501 with a hint (mirrors `/v1/search`). The response is
+/// `{ images: [{ img_src, thumbnail_src, source_url, title }], query,
+/// provider: "searxng" }`.
+pub async fn images(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<crate::auth::Claims>,
+    Json(req): Json<ImageSearchRequest>,
+) -> impl IntoResponse {
+    if req.query.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "query must not be empty".into(),
+                code: "BAD_REQUEST".into(),
+                hint: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(searxng_url) = state.searxng_url.as_deref().filter(|s| !s.is_empty()) else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorBody {
+                error: "image search requires a SearXNG provider".into(),
+                code: "UNSUPPORTED".into(),
+                hint: Some("set SEARXNG_URL (QUARRY_EDGE__SEARXNG_URL) in edge config".into()),
+            }),
+        )
+            .into_response();
+    };
+
+    let provider = match SearXNGImages::new(searxng_url) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: e.message,
+                    code: "INTERNAL".into(),
+                    hint: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let limit = req.limit.unwrap_or(24).clamp(1, 50);
+    match provider.search(req.query.trim(), limit).await {
+        Ok(images) => (
+            StatusCode::OK,
+            Json(ImageSearchResponse {
+                query: req.query,
+                provider: "searxng".into(),
+                images,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            let status = match e.code.http_status() {
+                400 => StatusCode::BAD_REQUEST,
+                401 => StatusCode::UNAUTHORIZED,
+                403 => StatusCode::FORBIDDEN,
+                429 => StatusCode::TOO_MANY_REQUESTS,
+                502 => StatusCode::BAD_GATEWAY,
+                504 => StatusCode::GATEWAY_TIMEOUT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
             if status == StatusCode::TOO_MANY_REQUESTS {
                 return (
                     status,

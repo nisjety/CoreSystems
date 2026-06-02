@@ -45,6 +45,7 @@ async fn sse_streams_page_fetched_and_artifact_written() {
         ingest: None,
         profiles: Arc::new(quarry_browser::session::InMemoryProfileStore::new()),
         search: None,
+        searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
         answer_pipeline: None,

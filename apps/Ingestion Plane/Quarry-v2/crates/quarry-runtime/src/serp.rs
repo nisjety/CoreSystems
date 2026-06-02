@@ -385,6 +385,115 @@ struct SearXNGResult {
     content: Option<String>,
 }
 
+// ── Image search ─────────────────────────────────────────────────────────────
+
+/// A single image hit from a SERP image vertical.
+///
+/// `img_src` is the full-resolution image URL; `thumbnail_src` is the (often
+/// proxied) thumbnail; `source_url` is the page the image was found on. The web
+/// `SearchResult` has no image fields, so image search returns this dedicated
+/// shape rather than overloading the text result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageResult {
+    /// Full-resolution image URL.
+    pub img_src: String,
+    /// Thumbnail URL (may be a SearXNG-proxied path). `None` if the provider
+    /// only returned a full-size image.
+    pub thumbnail_src: Option<String>,
+    /// The page the image was found on (for attribution / click-through).
+    pub source_url: String,
+    /// Image title / alt text when provided.
+    pub title: Option<String>,
+}
+
+/// SearXNG image-search adapter (self-hosted meta-search, no auth).
+///
+/// SearXNG natively supports an image vertical via
+/// `GET /search?q=<q>&format=json&categories=images`, returning results with
+/// `img_src`, `thumbnail_src`, `url` (source page), and `title`. This is a
+/// focused companion to [`SearXNGSearch`] (which serves the general/web
+/// vertical) so Quarry can back Velion's IMAGES tab without disturbing the
+/// `SearchProvider` chain.
+pub struct SearXNGImages {
+    http: Client,
+    base_url: String,
+}
+
+impl SearXNGImages {
+    pub fn new(base_url: impl Into<String>) -> QuarryResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("searxng-images: {e}")))?;
+        Ok(Self {
+            http,
+            base_url: base_url.into(),
+        })
+    }
+
+    /// Run an image search. `limit` caps the number of returned hits.
+    pub async fn search(&self, query: &str, limit: u32) -> QuarryResult<Vec<ImageResult>> {
+        let url = format!("{}/search", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("q", query)])
+            .query(&[("format", "json")])
+            .query(&[("categories", "images")])
+            .send()
+            .await
+            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("searxng-images: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status.as_u16(), "searxng-images"));
+        }
+        let body: SearXNGImageResponse = resp.json().await.map_err(|e| {
+            QuarryError::new(ErrorCode::DriverFailed, format!("searxng-images decode: {e}"))
+        })?;
+        Ok(map_image_results(body, limit))
+    }
+}
+
+/// Pure mapping from the SearXNG image-search JSON envelope to [`ImageResult`].
+/// Skips entries with no usable image URL and caps the result count at `limit`.
+/// Extracted so it can be unit-tested without a live SearXNG.
+fn map_image_results(body: SearXNGImageResponse, limit: u32) -> Vec<ImageResult> {
+    body.results
+        .into_iter()
+        .filter_map(|r| {
+            // Prefer the full image; fall back to the thumbnail so we never
+            // surface an entry that can't render anything.
+            let img_src = r.img_src.or_else(|| r.thumbnail_src.clone())?;
+            Some(ImageResult {
+                img_src,
+                thumbnail_src: r.thumbnail_src,
+                source_url: r.url.unwrap_or_default(),
+                title: r.title,
+            })
+        })
+        .take(limit.max(1) as usize)
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct SearXNGImageResponse {
+    #[serde(default)]
+    results: Vec<SearXNGImageResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearXNGImageResult {
+    /// Source page the image was found on.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    img_src: Option<String>,
+    #[serde(default)]
+    thumbnail_src: Option<String>,
+}
+
 /// Stract adapter — self-hosted independent search engine (Rust).
 ///
 /// Unlike SearXNG (which aggregates Google/Bing/DDG behind a proxy),
@@ -592,6 +701,79 @@ mod tests {
             .search("q", &SearchOptions::default())
             .await
             .unwrap_err();
+        assert_eq!(err.code, ErrorCode::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn searxng_images_maps_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wpath("/search"))
+            .and(query_param("format", "json"))
+            .and(query_param("categories", "images"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {
+                        "url": "https://page.com/a",
+                        "title": "Cat",
+                        "img_src": "https://cdn.com/cat.jpg",
+                        "thumbnail_src": "https://searx/thumb/cat.jpg"
+                    },
+                    // No img_src — falls back to thumbnail_src.
+                    {
+                        "url": "https://page.com/b",
+                        "thumbnail_src": "https://searx/thumb/dog.jpg"
+                    },
+                    // No usable image URL — dropped.
+                    { "url": "https://page.com/c", "title": "nothing" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = SearXNGImages::new(server.uri()).unwrap();
+        let images = provider.search("cats", 24).await.unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!(
+            images[0],
+            ImageResult {
+                img_src: "https://cdn.com/cat.jpg".into(),
+                thumbnail_src: Some("https://searx/thumb/cat.jpg".into()),
+                source_url: "https://page.com/a".into(),
+                title: Some("Cat".into()),
+            }
+        );
+        // Fallback: img_src defaults to thumbnail_src when absent.
+        assert_eq!(images[1].img_src, "https://searx/thumb/dog.jpg");
+        assert_eq!(images[1].source_url, "https://page.com/b");
+    }
+
+    #[test]
+    fn image_mapping_respects_limit() {
+        let body = SearXNGImageResponse {
+            results: (0..10)
+                .map(|i| SearXNGImageResult {
+                    url: Some(format!("https://p/{i}")),
+                    title: None,
+                    img_src: Some(format!("https://img/{i}.jpg")),
+                    thumbnail_src: None,
+                })
+                .collect(),
+        };
+        assert_eq!(map_image_results(body, 3).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn searxng_images_rate_limited_maps_to_typed_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wpath("/search"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let provider = SearXNGImages::new(server.uri()).unwrap();
+        let err = provider.search("q", 24).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::RateLimited);
     }
 

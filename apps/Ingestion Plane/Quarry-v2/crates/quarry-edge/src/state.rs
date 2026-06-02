@@ -29,6 +29,11 @@ pub struct AppState {
     pub ingest: Option<Arc<dyn DataPlaneIngest>>,
     pub profiles: Arc<dyn ProfileStore>,
     pub search: Option<Arc<dyn SearchProvider>>,
+    /// IMAGES vertical (`POST /v1/search/images`). The web `search` provider
+    /// above is the `SmartSearchRouter` and has no image concept, so image
+    /// search talks to SearXNG directly. `Some` when `SEARXNG_URL` is
+    /// configured; `None` makes the image route return 501 with a hint.
+    pub searxng_url: Option<String>,
     /// Model Plane gateway URL (e.g. `http://model-gateway:8080`). When set,
     /// `/v1/audio` proxies to `/v1/ai/speech` + `/v1/ai/transcribe`. When
     /// unset, the route returns 501 Unsupported.
