@@ -4,7 +4,15 @@ import Link from "next/link";
 import type { Route } from "next";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, ExternalLink, Search } from "lucide-react";
+import { ArrowLeft, ExternalLink, Globe, Search, SendHorizontal } from "lucide-react";
+
+import { streamChat } from "@/features/chat-v2/lib/chat-stream";
+import {
+  buildGroundingContent,
+  dedupeSources,
+  type GroundingSource,
+  type ThreadTurn,
+} from "@/features/search-v2/lib/answer-thread";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +64,12 @@ type SearchState = {
   imagesError: string | null;
   // The query the loaded images correspond to, so a new search invalidates them.
   imagesQuery: string;
+  // Conversational follow-up thread (turn 0 = the initial search, rendered
+  // separately above). Each follow-up appends a user turn + a streaming
+  // assistant turn. Reset whenever a fresh search starts.
+  thread: ThreadTurn[];
+  // True while an assistant turn is streaming; gates the composer send button.
+  threadStreaming: boolean;
 };
 
 type SearchAction =
@@ -72,7 +86,13 @@ type SearchAction =
   | { type: "error"; message: string }
   | { type: "images-started"; query: string }
   | { type: "images-loaded"; query: string; images: ImageHit[] }
-  | { type: "images-error"; query: string; message: string };
+  | { type: "images-error"; query: string; message: string }
+  // Follow-up thread actions. `turn-appended` adds the user question + an
+  // empty streaming assistant turn in one step (ids supplied by the caller).
+  | { type: "turn-appended"; userTurn: ThreadTurn; assistantTurn: ThreadTurn }
+  | { type: "turn-delta"; id: string; delta: string }
+  | { type: "turn-done"; id: string }
+  | { type: "turn-error"; id: string; message: string };
 
 // ---------------------------------------------------------------------------
 // Reducer
@@ -92,6 +112,8 @@ const initialState: SearchState = {
   imagesStatus: "idle",
   imagesError: null,
   imagesQuery: "",
+  thread: [],
+  threadStreaming: false,
 };
 
 function searchReducer(state: SearchState, action: SearchAction): SearchState {
@@ -115,6 +137,9 @@ function searchReducer(state: SearchState, action: SearchAction): SearchState {
         imagesStatus: "idle",
         imagesError: null,
         imagesQuery: "",
+        // A fresh search starts a brand-new conversation.
+        thread: [],
+        threadStreaming: false,
       };
     case "results-loaded":
       return {
@@ -143,6 +168,37 @@ function searchReducer(state: SearchState, action: SearchAction): SearchState {
     case "images-error":
       if (action.query !== state.imagesQuery) return state;
       return { ...state, imagesStatus: "error", imagesError: action.message };
+    case "turn-appended":
+      return {
+        ...state,
+        thread: [...state.thread, action.userTurn, action.assistantTurn],
+        threadStreaming: true,
+      };
+    case "turn-delta":
+      return {
+        ...state,
+        thread: state.thread.map((turn) =>
+          turn.id === action.id ? { ...turn, text: turn.text + action.delta } : turn,
+        ),
+      };
+    case "turn-done":
+      return {
+        ...state,
+        threadStreaming: false,
+        thread: state.thread.map((turn) =>
+          turn.id === action.id ? { ...turn, streaming: false } : turn,
+        ),
+      };
+    case "turn-error":
+      return {
+        ...state,
+        threadStreaming: false,
+        thread: state.thread.map((turn) =>
+          turn.id === action.id
+            ? { ...turn, streaming: false, error: action.message }
+            : turn,
+        ),
+      };
     default:
       return state;
   }
@@ -294,6 +350,79 @@ function ImageGallery({ images }: { images: ImageHit[] }) {
 }
 
 // ---------------------------------------------------------------------------
+// Follow-up conversation thread
+// ---------------------------------------------------------------------------
+
+/** A single rendered turn (question bubble or streaming answer) in the thread. */
+function ThreadTurnView({ turn }: { turn: ThreadTurn }) {
+  if (turn.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-[16px] rounded-br-[6px] bg-[#111111] px-4 py-2.5 text-[13px] leading-relaxed text-white dark:bg-white dark:text-[#111111]">
+          <p className="whitespace-pre-wrap">{turn.text}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const showCursor = turn.streaming;
+  const isEmptyStreaming = turn.streaming && turn.text.length === 0;
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[92%] rounded-[16px] rounded-bl-[6px] bg-[#F4F1EB] px-4 py-3 dark:bg-[#1D1A17]">
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
+          Velion
+        </p>
+        {turn.error ? (
+          <p
+            role="alert"
+            className="text-[13px] leading-relaxed text-[#B04020] dark:text-[#E8A090]"
+          >
+            {turn.error}
+          </p>
+        ) : isEmptyStreaming ? (
+          <p
+            className="flex items-center gap-1 text-[13px] text-[#9A9188] dark:text-[#737780]"
+            aria-label="Velion skriver…"
+          >
+            <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.2s]" />
+            <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.1s]" />
+            <span className="size-1.5 animate-bounce rounded-full bg-current" />
+          </p>
+        ) : (
+          <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#3A3530] dark:text-[#D4D6DC]">
+            {turn.text}
+            {showCursor ? (
+              <span
+                aria-hidden="true"
+                className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle opacity-70"
+              />
+            ) : null}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The full conversation thread below the initial search answer. */
+function FollowUpThread({ turns }: { turns: ThreadTurn[] }) {
+  if (turns.length === 0) return null;
+  return (
+    <section
+      aria-label="Oppfølgingssamtale"
+      aria-live="polite"
+      className="flex flex-col gap-3 border-t border-black/[0.06] pt-4 dark:border-white/[0.06]"
+    >
+      {turns.map((turn) => (
+        <ThreadTurnView key={turn.id} turn={turn} />
+      ))}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -302,8 +431,13 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
   const abortRef = useRef<AbortController | null>(null);
   const followUpAbortRef = useRef<AbortController | null>(null);
   const imagesAbortRef = useRef<AbortController | null>(null);
+  // Anchor at the end of the thread, scrolled into view as turns/tokens arrive.
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
 
   const [activeTab, setActiveTab] = useState<Tab>("Info");
+  // Optional "search the web again for this follow-up" toggle. Off by default:
+  // the original search already grounded the conversation.
+  const [browseFollowUp, setBrowseFollowUp] = useState(false);
 
   const [state, dispatch] = useReducer(searchReducer, {
     ...initialState,
@@ -325,6 +459,8 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
     imagesStatus,
     imagesError,
     imagesQuery,
+    thread,
+    threadStreaming,
   } = state;
 
   // -------------------------------------------------------------------------
@@ -498,15 +634,111 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
   const [followUp, setFollowUp] = useLocalState("");
 
+  // Send a follow-up: build a bounded, source-grounded context block from the
+  // current answer + prior thread, append a user turn and a streaming
+  // assistant turn, then stream tokens from the chat BFF into the assistant
+  // turn. One AbortController per in-flight stream; a new submit cancels the
+  // previous (the button is disabled while streaming, but this is belt-and-
+  // suspenders for Enter-key races and unmount).
+  const sendFollowUp = useCallback(
+    (raw: string) => {
+      const question = raw.trim();
+      if (!question || state.threadStreaming) return;
+
+      // Top sources: prefer citations, fall back to / augment with results.
+      const sources: GroundingSource[] = dedupeSources([
+        ...state.citations.map((c) => ({ url: c.url, title: c.title })),
+        ...state.results.map((r) => ({ url: r.url, title: r.title })),
+      ]);
+
+      const content = buildGroundingContent({
+        query: state.submittedQuery || state.query,
+        answer: state.answer,
+        sources,
+        priorTurns: state.thread,
+        question,
+      });
+
+      const baseId = `t-${Date.now()}`;
+      const userTurn: ThreadTurn = { id: `${baseId}-u`, role: "user", text: question };
+      const assistantId = `${baseId}-a`;
+      const assistantTurn: ThreadTurn = {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        streaming: true,
+        error: null,
+      };
+
+      setFollowUp("");
+      dispatch({ type: "turn-appended", userTurn, assistantTurn });
+
+      followUpAbortRef.current?.abort();
+      const abort = new AbortController();
+      followUpAbortRef.current = abort;
+
+      void (async () => {
+        try {
+          for await (const chunk of streamChat({
+            content,
+            browseWeb: browseFollowUp,
+            signal: abort.signal,
+          })) {
+            if (chunk.type === "delta") {
+              dispatch({ type: "turn-delta", id: assistantId, delta: chunk.delta });
+            } else if (chunk.type === "error") {
+              dispatch({ type: "turn-error", id: assistantId, message: chunk.message });
+              return;
+            } else if (chunk.type === "done") {
+              dispatch({ type: "turn-done", id: assistantId });
+            }
+          }
+          // Generator can complete without an explicit "done" event; ensure the
+          // turn is marked finished so the typing indicator stops.
+          dispatch({ type: "turn-done", id: assistantId });
+        } catch (err: unknown) {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          if (err instanceof Error && err.name === "AbortError") return;
+          dispatch({
+            type: "turn-error",
+            id: assistantId,
+            message: "Kunne ikke hente svar. Prøv igjen.",
+          });
+        }
+      })();
+    },
+    [
+      browseFollowUp,
+      setFollowUp,
+      state.answer,
+      state.citations,
+      state.query,
+      state.results,
+      state.submittedQuery,
+      state.thread,
+      state.threadStreaming,
+    ],
+  );
+
   const handleFollowUp = (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmed = followUp.trim();
-    if (!trimmed) return;
-    setFollowUp("");
-    // TODO(P4): wire to /api/chat/stream for conversational follow-up
-    dispatch({ type: "query-changed", query: trimmed });
-    runSearch(trimmed);
+    sendFollowUp(followUp);
   };
+
+  // Enter submits, Shift+Enter inserts a newline.
+  const handleFollowUpKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendFollowUp(followUp);
+    }
+  };
+
+  // Auto-scroll the thread to the latest content as turns append and tokens
+  // stream in.
+  useEffect(() => {
+    if (thread.length === 0) return;
+    threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [thread]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -712,6 +944,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
               <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
             </div>
           ) : null}
+
+          {/* ---- Conversational follow-up thread ---- */}
+          <FollowUpThread turns={thread} />
             </>
           ) : null}
 
@@ -746,6 +981,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
               ) : null}
             </section>
           ) : null}
+
+          {/* Scroll anchor: keeps the latest thread turn in view. */}
+          <div ref={threadEndRef} aria-hidden="true" />
         </div>
       </main>
 
@@ -753,28 +991,50 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
       {/* Pinned follow-up composer */}
       {/* ------------------------------------------------------------------ */}
       <div className="shrink-0 border-t border-black/[0.06] bg-[#FCFCFD] px-4 py-3 dark:border-white/[0.06] dark:bg-[#1C1E24]">
-        <form onSubmit={handleFollowUp} className="mx-auto flex max-w-3xl items-center gap-2">
+        <form onSubmit={handleFollowUp} className="mx-auto flex max-w-3xl items-end gap-2">
           <label className="sr-only" htmlFor="search-follow-up">
             Stille oppfølgingsspørsmål
           </label>
-          <div className="flex h-11 min-w-0 flex-1 items-center rounded-full bg-white/88 px-4 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-[#EFE7DC] backdrop-blur-sm dark:bg-[#1A1B20]/92 dark:ring-[#2A2C31]">
-            <input
+          <div className="flex min-w-0 flex-1 items-end rounded-[22px] bg-white/88 px-4 py-2 shadow-[0_2px_8px_rgba(20,21,24,0.06)] ring-1 ring-[#EFE7DC] backdrop-blur-sm dark:bg-[#1A1B20]/92 dark:ring-[#2A2C31]">
+            <textarea
               id="search-follow-up"
-              type="text"
+              rows={1}
               value={followUp}
               onChange={(e) => setFollowUp(e.target.value)}
-              className="h-full min-w-0 flex-1 bg-transparent text-[13px] text-[#24262D] placeholder:text-[#AAA198] focus:outline-none dark:text-white dark:placeholder:text-[#737780]"
+              onKeyDown={handleFollowUpKeyDown}
+              className="max-h-32 min-h-[24px] min-w-0 flex-1 resize-none bg-transparent py-0.5 text-[13px] leading-relaxed text-[#24262D] placeholder:text-[#AAA198] focus:outline-none dark:text-white dark:placeholder:text-[#737780]"
               placeholder="Spør mer om dette…"
               autoComplete="off"
+              aria-describedby="search-follow-up-hint"
             />
+            {/* Optional: re-ground this follow-up with a fresh web search. */}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={browseFollowUp}
+              aria-label="Søk på nettet for dette oppfølgingsspørsmålet"
+              title={browseFollowUp ? "Nettsøk på (klikk for å slå av)" : "Slå på nettsøk for oppfølging"}
+              onClick={() => setBrowseFollowUp((v) => !v)}
+              className={[
+                "ml-2 grid size-7 shrink-0 place-items-center rounded-full transition",
+                browseFollowUp
+                  ? "bg-[#EE7A50]/15 text-[#EE7A50]"
+                  : "text-[#9A9188] hover:bg-black/[0.05] dark:text-[#737780] dark:hover:bg-white/[0.08]",
+              ].join(" ")}
+            >
+              <Globe className="size-4" />
+            </button>
           </div>
+          <span id="search-follow-up-hint" className="sr-only">
+            Trykk Enter for å sende, Shift+Enter for ny linje.
+          </span>
           <button
             type="submit"
             aria-label="Send oppfølgingsspørsmål"
-            disabled={!followUp.trim() || loading}
+            disabled={!followUp.trim() || threadStreaming}
             className="grid size-11 shrink-0 place-items-center rounded-full bg-[#111111] text-white transition hover:bg-[#2A2A2A] disabled:bg-[#E9E4DD] disabled:text-[#A99E93] dark:bg-white dark:text-[#111111] dark:disabled:bg-[#35373D] dark:disabled:text-[#5A5D65]"
           >
-            <Search className="size-4" />
+            <SendHorizontal className="size-4" />
           </button>
         </form>
       </div>
