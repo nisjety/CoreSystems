@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
     await requireRequestActor();
 
     const body = (await request.json().catch(() => null)) as
-      | { query?: string; limit?: number }
+      | { query?: string; limit?: number; includeAnswer?: boolean }
       | null;
 
     const query = typeof body?.query === "string" ? body.query.trim() : "";
@@ -168,7 +168,9 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         query,
         limit: typeof body?.limit === "number" ? body.limit : 8,
-        include_answer: true,
+        // Default on (dashboard summary). The /search page opts out
+        // (includeAnswer:false) and streams the answer client-side instead.
+        include_answer: body?.includeAnswer === false ? false : true,
         safe_search: true,
       }),
       signal: AbortSignal.timeout(15000),

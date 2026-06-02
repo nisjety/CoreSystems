@@ -97,6 +97,8 @@ type SearchState = {
   thread: ThreadTurn[];
   // True while an assistant turn is streaming; gates the composer send button.
   threadStreaming: boolean;
+  // True while the initial (turn-0) answer is streaming in token-by-token.
+  answerStreaming: boolean;
 };
 
 type SearchAction =
@@ -114,6 +116,10 @@ type SearchAction =
   | { type: "images-started"; query: string }
   | { type: "images-loaded"; query: string; images: ImageHit[] }
   | { type: "images-error"; query: string; message: string }
+  // Initial (turn-0) answer streaming, mirroring the follow-up turn deltas.
+  | { type: "answer-stream-started" }
+  | { type: "answer-delta"; delta: string }
+  | { type: "answer-stream-done" }
   // Follow-up thread actions. `turn-appended` adds the user question + an
   // empty streaming assistant turn in one step (ids supplied by the caller).
   | { type: "turn-appended"; userTurn: ThreadTurn; assistantTurn: ThreadTurn }
@@ -141,6 +147,7 @@ const initialState: SearchState = {
   imagesQuery: "",
   thread: [],
   threadStreaming: false,
+  answerStreaming: false,
 };
 
 function searchReducer(state: SearchState, action: SearchAction): SearchState {
@@ -167,6 +174,7 @@ function searchReducer(state: SearchState, action: SearchAction): SearchState {
         // A fresh search starts a brand-new conversation.
         thread: [],
         threadStreaming: false,
+        answerStreaming: false,
       };
     case "results-loaded":
       return {
@@ -195,6 +203,12 @@ function searchReducer(state: SearchState, action: SearchAction): SearchState {
     case "images-error":
       if (action.query !== state.imagesQuery) return state;
       return { ...state, imagesStatus: "error", imagesError: action.message };
+    case "answer-stream-started":
+      return { ...state, answer: "", answerStreaming: true };
+    case "answer-delta":
+      return { ...state, answer: state.answer + action.delta };
+    case "answer-stream-done":
+      return { ...state, answerStreaming: false };
     case "turn-appended":
       return {
         ...state,
@@ -772,6 +786,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
     imagesQuery,
     thread,
     threadStreaming,
+    answerStreaming,
   } = state;
 
   // -------------------------------------------------------------------------
@@ -797,7 +812,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: q.trim() }),
+          // includeAnswer:false → the edge skips its (blocking) synthesis and
+          // returns results fast; the answer is streamed client-side below.
+          body: JSON.stringify({ query: q.trim(), includeAnswer: false }),
           signal: abort.signal,
         });
 
@@ -838,12 +855,57 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             },
           });
         } else {
+          const resultList = payload.data.results ?? [];
+          // With include_answer=false the edge returns no citations, so derive
+          // source chips from the top results (the answer itself streams below).
+          const citationList =
+            payload.data.citations && payload.data.citations.length > 0
+              ? payload.data.citations
+              : resultList.slice(0, 8).map((r) => ({ url: r.url, title: r.title ?? undefined }));
           dispatch({
             type: "results-loaded",
-            results: payload.data.results ?? [],
-            answer: payload.data.answer ?? "",
-            citations: payload.data.citations ?? [],
+            results: resultList,
+            answer: "",
+            citations: citationList,
           });
+
+          // Phase 3: stream the initial answer token-by-token, grounded on the
+          // results — the same path the follow-up thread uses. Reuses the search
+          // AbortController, so starting a new search cancels an in-flight stream.
+          if (resultList.length > 0) {
+            const sources: GroundingSource[] = dedupeSources(
+              resultList.map((r) => ({ url: r.url, title: r.title })),
+            );
+            const content = buildGroundingContent({
+              query: q.trim(),
+              answer: "",
+              sources,
+              priorTurns: [],
+              question: q.trim(),
+            });
+            dispatch({ type: "answer-stream-started" });
+            try {
+              for await (const chunk of streamChat({
+                content,
+                browseWeb: false,
+                signal: abort.signal,
+              })) {
+                if (chunk.type === "delta") {
+                  dispatch({ type: "answer-delta", delta: chunk.delta });
+                } else if (chunk.type === "error") {
+                  dispatch({ type: "answer-stream-done" });
+                  break;
+                } else if (chunk.type === "done") {
+                  dispatch({ type: "answer-stream-done" });
+                }
+              }
+              dispatch({ type: "answer-stream-done" });
+            } catch (streamErr: unknown) {
+              if (!(streamErr instanceof DOMException && streamErr.name === "AbortError")) {
+                dispatch({ type: "answer-stream-done" });
+              }
+            }
+          }
         }
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1184,8 +1246,8 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             </div>
           ) : null}
 
-          {/* ---- mode: "search" — AI summary card ---- */}
-          {!loading && !error && mode === "search" && answer ? (
+          {/* ---- mode: "search" — AI summary card (streams in token-by-token) ---- */}
+          {!loading && !error && mode === "search" && (answer || answerStreaming) ? (
             <motion.section
               aria-labelledby="ai-summary-heading"
               className="velion-glass rounded-3xl px-5 py-4"
@@ -1201,6 +1263,12 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
               </h2>
               <p className="text-[13.5px] leading-relaxed text-[#3A3530] dark:text-[#D4D6DC]">
                 {answer}
+                {answerStreaming ? (
+                  <span
+                    aria-hidden
+                    className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[2px] animate-pulse bg-[#EE7A50] align-text-bottom dark:bg-[#F6AF6E]"
+                  />
+                ) : null}
               </p>
               {citations.length > 0 ? (
                 <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-black/[0.06] pt-3 dark:border-white/[0.08]">
