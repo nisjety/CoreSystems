@@ -920,11 +920,11 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             >
               <h2
                 id="ai-summary-heading"
-                className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#9C5985] dark:text-[#C39FBC]"
+                className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#EE7A50] dark:text-[#F6AF6E]"
               >
                 AI-sammendrag
               </h2>
-              <p className="text-[13.5px] leading-relaxed text-[#3A3037] dark:text-[#E6E2E8]">
+              <p className="text-[13.5px] leading-relaxed text-[#3A3530] dark:text-[#D4D6DC]">
                 {answer}
               </p>
               {citations.length > 0 ? (
@@ -992,11 +992,22 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             </section>
           ) : null}
 
-          {/* Empty state */}
-          {!loading && !error && mode === "search" && results.length === 0 && !answer ? (
-            <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
-              Ingen webresultater funnet for{" "}
-              <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
+          {/* Empty state. A 200 with zero results, no answer and no citations
+              can mean either a genuinely empty search OR a search provider that
+              returned nothing because it is down/unconfigured — the route can't
+              always tell the two apart. So we keep the headline calm and add a
+              muted hint pointing at the provider, rather than a scary error. */}
+          {!loading && !error && mode === "search" && results.length === 0 && !answer && citations.length === 0 ? (
+            <div
+              role="status"
+              className="velion-glass-soft rounded-3xl px-4 py-3.5 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]"
+            >
+              <p className="font-medium text-[#1A1A1A] dark:text-white">Ingen webresultater</p>
+              <p className="mt-1 text-[12px] leading-relaxed text-[#9A9188] dark:text-[#9A9EA8]">
+                Ingen treff for{" "}
+                <span className="font-medium text-[#5F5A54] dark:text-[#D4D6DC]">«{submittedQuery}»</span>{" "}
+                — sjekk at søkeleverandøren (SearXNG) kjører hvis dette er uventet.
+              </p>
             </div>
           ) : null}
 

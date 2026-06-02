@@ -3,11 +3,12 @@
 /**
  * LiquidBackdrop — a pure-presentational animated "liquid glass" gradient.
  *
- * Renders an airy, near-white surface with a few pale colour blobs that drift
+ * Renders an airy, near-white cream surface with a few pale warm colour blobs
+ * (coral + apricot + soft-accent, from the Velion brand palette) that drift
  * slowly behind the content. Two visual variants:
  *
- *  - "idle"   → barely-there pale drift for the empty search prompt.
- *  - "answer" → a gentle white → soft pink/purple wash for the answer view.
+ *  - "idle"   → barely-there pale warm drift for the empty search prompt.
+ *  - "answer" → a gentle cream → soft apricot wash for the answer view.
  *
  * The motion is GPU-friendly (only `transform` + `opacity` on absolutely
  * positioned layers, `will-change: transform`) and is driven by CSS keyframes

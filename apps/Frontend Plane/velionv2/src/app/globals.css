@@ -2093,8 +2093,8 @@ button:disabled {
 
 .velion-liquid-base {
 	background:
-		radial-gradient(ellipse 120% 80% at 50% -10%, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0) 60%),
-		linear-gradient(180deg, #fcfbff 0%, #fbf9fd 48%, #faf8fb 100%);
+		radial-gradient(ellipse 120% 80% at 50% -10%, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0) 60%),
+		linear-gradient(180deg, var(--velion-bg-white) 0%, #f8f5ef 52%, var(--velion-bg-cream) 100%);
 }
 
 .dark .velion-liquid-base {
@@ -2103,11 +2103,11 @@ button:disabled {
 		linear-gradient(180deg, #1c1e24 0%, #1b1d23 50%, #191b21 100%);
 }
 
-/* Answer variant gets a slightly warmer pink/purple wash. */
+/* Answer variant gets a slightly warmer cream → apricot wash. */
 .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-base {
 	background:
-		radial-gradient(ellipse 120% 90% at 50% -10%, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0) 55%),
-		linear-gradient(170deg, #ffffff 0%, #fdf6fb 42%, #fbf2f8 72%, #f7eef9 100%);
+		radial-gradient(ellipse 120% 90% at 50% -10%, rgba(255, 255, 255, 0.94) 0%, rgba(255, 255, 255, 0) 55%),
+		linear-gradient(170deg, #fffdf9 0%, #fdf6ee 42%, #fbf0e4 72%, #f9ecdf 100%);
 }
 
 .dark .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-base {
@@ -2119,8 +2119,8 @@ button:disabled {
 .velion-liquid-blob {
 	position: absolute;
 	border-radius: 50%;
-	opacity: 0.55;
-	filter: blur(60px);
+	opacity: 0.4;
+	filter: blur(64px);
 	will-change: transform;
 }
 
@@ -2128,12 +2128,15 @@ button:disabled {
 	opacity: 0.4;
 }
 
+/* Warm brand blobs — coral (--velion-accent), apricot (--velion-bg-apricot)
+   and soft-accent (--velion-accent-soft) at low alpha so the wash stays pale
+   and airy rather than saturated. */
 .velion-liquid-blob-1 {
 	top: -18%;
 	left: -8%;
 	width: 52%;
 	height: 52%;
-	background: radial-gradient(circle at 50% 50%, rgba(255, 196, 222, 0.85), rgba(255, 196, 222, 0) 70%);
+	background: radial-gradient(circle at 50% 50%, rgba(238, 122, 80, 0.32), rgba(238, 122, 80, 0) 70%);
 }
 
 .velion-liquid-blob-2 {
@@ -2141,7 +2144,7 @@ button:disabled {
 	right: -12%;
 	width: 56%;
 	height: 56%;
-	background: radial-gradient(circle at 50% 50%, rgba(201, 196, 255, 0.8), rgba(201, 196, 255, 0) 70%);
+	background: radial-gradient(circle at 50% 50%, rgba(247, 200, 168, 0.5), rgba(247, 200, 168, 0) 70%);
 }
 
 .velion-liquid-blob-3 {
@@ -2149,19 +2152,32 @@ button:disabled {
 	left: 22%;
 	width: 50%;
 	height: 50%;
-	background: radial-gradient(circle at 50% 50%, rgba(189, 224, 255, 0.7), rgba(189, 224, 255, 0) 70%);
+	background: radial-gradient(circle at 50% 50%, rgba(246, 175, 110, 0.38), rgba(246, 175, 110, 0) 70%);
+}
+
+/* Answer variant leans a touch warmer than idle: stronger coral + apricot. */
+.velion-liquid-backdrop[data-variant="answer"] .velion-liquid-blob-1 {
+	background: radial-gradient(circle at 50% 50%, rgba(238, 122, 80, 0.42), rgba(238, 122, 80, 0) 70%);
+}
+
+.velion-liquid-backdrop[data-variant="answer"] .velion-liquid-blob-2 {
+	background: radial-gradient(circle at 50% 50%, rgba(247, 200, 168, 0.58), rgba(247, 200, 168, 0) 70%);
+}
+
+.velion-liquid-backdrop[data-variant="answer"] .velion-liquid-blob-3 {
+	background: radial-gradient(circle at 50% 50%, rgba(246, 175, 110, 0.46), rgba(246, 175, 110, 0) 70%);
 }
 
 .dark .velion-liquid-blob-1 {
-	background: radial-gradient(circle at 50% 50%, rgba(176, 96, 140, 0.5), rgba(176, 96, 140, 0) 70%);
+	background: radial-gradient(circle at 50% 50%, rgba(221, 122, 31, 0.4), rgba(221, 122, 31, 0) 70%);
 }
 
 .dark .velion-liquid-blob-2 {
-	background: radial-gradient(circle at 50% 50%, rgba(112, 100, 178, 0.5), rgba(112, 100, 178, 0) 70%);
+	background: radial-gradient(circle at 50% 50%, rgba(238, 122, 80, 0.34), rgba(238, 122, 80, 0) 70%);
 }
 
 .dark .velion-liquid-blob-3 {
-	background: radial-gradient(circle at 50% 50%, rgba(80, 122, 168, 0.45), rgba(80, 122, 168, 0) 70%);
+	background: radial-gradient(circle at 50% 50%, rgba(246, 175, 110, 0.3), rgba(246, 175, 110, 0) 70%);
 }
 
 .velion-liquid-blob-1.is-animated {
