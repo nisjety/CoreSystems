@@ -25,7 +25,7 @@ import {
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
 import { useControlPlaneContext } from "@/features/shell-v2/lib/control-plane-provider";
 import { formatPlanLabel } from "@/features/shell-v2/lib/shell-data";
-import { apiGet } from "@/lib/api/client-envelope";
+import { apiGet, apiSend } from "@/lib/api/client-envelope";
 import { cn } from "@/lib/utils";
 
 type DashboardTab = "Chat" | "Søk" | "Kunnskap";
@@ -187,11 +187,22 @@ type FetchedPage = {
   excerpt: string | null;
 };
 
+type PreviewResult = {
+  url: string;
+  title: string;
+  hostname: string;
+  snippet: string | null;
+};
+
 type SearchPanelState = {
   query: string;
   submittedQuery: string;
   suggestions: SearchSuggestion[];
   suggestionsQuery: string;
+  highlightedIndex: number;
+  previewResults: PreviewResult[];
+  previewQuery: string;
+  previewLoading: boolean;
   webMode: "search" | "fetch" | null;
   webResults: WebSearchResult[];
   webAnswer: string;
@@ -206,6 +217,10 @@ type SearchPanelAction =
   | { type: "submitted"; query: string }
   | { type: "suggestions-cleared" }
   | { type: "suggestions-loaded"; query: string; suggestions: SearchSuggestion[] }
+  | { type: "highlight-changed"; index: number }
+  | { type: "preview-loading"; query: string }
+  | { type: "preview-loaded"; query: string; results: PreviewResult[] }
+  | { type: "preview-cleared" }
   | { type: "web-search-started" }
   | {
       type: "web-results-loaded";
@@ -221,6 +236,10 @@ const initialSearchPanelState: SearchPanelState = {
   submittedQuery: "",
   suggestions: [],
   suggestionsQuery: "",
+  highlightedIndex: -1,
+  previewResults: [],
+  previewQuery: "",
+  previewLoading: false,
   webMode: null,
   webResults: [],
   webAnswer: "",
@@ -233,13 +252,30 @@ const initialSearchPanelState: SearchPanelState = {
 function searchPanelReducer(state: SearchPanelState, action: SearchPanelAction): SearchPanelState {
   switch (action.type) {
     case "query-changed":
-      return { ...state, query: action.query };
+      return { ...state, query: action.query, highlightedIndex: -1 };
     case "submitted":
-      return { ...state, submittedQuery: action.query };
+      return {
+        ...state,
+        submittedQuery: action.query,
+        suggestions: [],
+        suggestionsQuery: "",
+        highlightedIndex: -1,
+        previewResults: [],
+        previewQuery: "",
+        previewLoading: false,
+      };
     case "suggestions-cleared":
-      return { ...state, suggestions: [], suggestionsQuery: "" };
+      return { ...state, suggestions: [], suggestionsQuery: "", highlightedIndex: -1 };
     case "suggestions-loaded":
-      return { ...state, suggestions: action.suggestions, suggestionsQuery: action.query };
+      return { ...state, suggestions: action.suggestions, suggestionsQuery: action.query, highlightedIndex: -1 };
+    case "highlight-changed":
+      return { ...state, highlightedIndex: action.index };
+    case "preview-loading":
+      return { ...state, previewLoading: true, previewQuery: action.query };
+    case "preview-loaded":
+      return { ...state, previewLoading: false, previewResults: action.results, previewQuery: action.query };
+    case "preview-cleared":
+      return { ...state, previewLoading: false, previewResults: [], previewQuery: "" };
     case "web-search-started":
       return {
         ...state,
@@ -271,6 +307,14 @@ function searchPanelReducer(state: SearchPanelState, action: SearchPanelAction):
       return { ...state, webLoading: false, webError: action.message };
     default:
       return state;
+  }
+}
+
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
   }
 }
 
@@ -559,12 +603,18 @@ function PlanBadge({ planLabel }: { planLabel: string }) {
 function SearchPanel() {
   const router = useRouter();
   const [searchState, dispatchSearch] = useReducer(searchPanelReducer, initialSearchPanelState);
-  const { query, suggestions, suggestionsQuery } = searchState;
+  const { query, suggestions, suggestionsQuery, highlightedIndex, previewResults, previewLoading } = searchState;
   const activeQuery = query.trim();
   const submittedQuery = searchState.submittedQuery;
   const isTyping = activeQuery.length > 0 && submittedQuery !== activeQuery;
   const visibleSuggestions = isTyping && suggestionsQuery === activeQuery ? suggestions : [];
+  const showPreview = previewResults.length > 0 && isTyping;
 
+  // Unique IDs for ARIA
+  const listboxId = "dashboard-search-listbox";
+  const getOptionId = (index: number) => `dashboard-search-option-${index}`;
+
+  // --- Suggestions fetch (120 ms debounce, existing) ---
   useEffect(() => {
     if (!isTyping || activeQuery.length < 2) {
       return;
@@ -581,19 +631,16 @@ function SearchPanel() {
             dispatchSearch({ type: "suggestions-cleared" });
             return;
           }
-
           dispatchSearch({
             type: "suggestions-loaded",
             query: activeQuery,
             suggestions: payload.suggestions.filter(
-              (suggestion) => typeof suggestion.text === "string" && suggestion.text.trim().length > 0,
+              (s) => typeof s.text === "string" && s.text.trim().length > 0,
             ),
           });
         })
         .catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError") {
-            return;
-          }
+          if (error instanceof DOMException && error.name === "AbortError") return;
           dispatchSearch({ type: "suggestions-cleared" });
         });
     }, 120);
@@ -604,17 +651,104 @@ function SearchPanel() {
     };
   }, [activeQuery, isTyping]);
 
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    const trimmed = query.trim();
-
-    if (!trimmed) {
+  // --- Preview fetch (350 ms debounce, only when >= 4 chars) ---
+  useEffect(() => {
+    if (!isTyping || activeQuery.length < 4) {
+      dispatchSearch({ type: "preview-cleared" });
       return;
     }
 
-    // Navigate to the answer view instead of running inline web search.
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      dispatchSearch({ type: "preview-loading", query: activeQuery });
+      apiSend<{
+        mode?: "search" | "fetch";
+        results?: { url: string; title?: string; snippet?: string }[];
+        url?: string;
+        title?: string;
+        description?: string;
+        excerpt?: string | null;
+      }>(
+        "/api/v1/search/web",
+        { query: activeQuery, limit: 3 },
+        "POST",
+        { credentials: "include", signal: controller.signal },
+      )
+        .then((payload) => {
+          if (payload.mode === "fetch") {
+            const results: PreviewResult[] = payload.url
+              ? [
+                  {
+                    url: payload.url,
+                    title: payload.title ?? payload.url,
+                    hostname: safeHostname(payload.url),
+                    snippet: payload.description ?? payload.excerpt ?? null,
+                  },
+                ]
+              : [];
+            dispatchSearch({ type: "preview-loaded", query: activeQuery, results });
+          } else if (payload.mode === "search" && Array.isArray(payload.results)) {
+            const results: PreviewResult[] = payload.results.slice(0, 3).map((r) => ({
+              url: r.url,
+              title: r.title ?? r.url,
+              hostname: safeHostname(r.url),
+              snippet: r.snippet ?? null,
+            }));
+            dispatchSearch({ type: "preview-loaded", query: activeQuery, results });
+          } else {
+            dispatchSearch({ type: "preview-cleared" });
+          }
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          dispatchSearch({ type: "preview-cleared" });
+        });
+    }, 350);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [activeQuery, isTyping]);
+
+  const navigateToSearch = (q: string) => {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+    dispatchSearch({ type: "submitted", query: trimmed });
     router.push(`/search?q=${encodeURIComponent(trimmed)}` as Route);
   };
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const highlighted = highlightedIndex >= 0 ? visibleSuggestions[highlightedIndex] : null;
+    navigateToSearch(highlighted?.text ?? query);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!visibleSuggestions.length) return;
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      dispatchSearch({
+        type: "highlight-changed",
+        index: (highlightedIndex + 1) % visibleSuggestions.length,
+      });
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const next = highlightedIndex <= 0 ? visibleSuggestions.length - 1 : highlightedIndex - 1;
+      dispatchSearch({ type: "highlight-changed", index: next });
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      dispatchSearch({ type: "suggestions-cleared" });
+      dispatchSearch({ type: "preview-cleared" });
+    } else if (event.key === "Enter" && highlightedIndex >= 0) {
+      event.preventDefault();
+      const suggestion = visibleSuggestions[highlightedIndex];
+      if (suggestion) navigateToSearch(suggestion.text);
+    }
+  };
+
+  const isDropdownOpen = visibleSuggestions.length > 0;
 
   return (
     <div className="velion-panel-in">
@@ -640,10 +774,24 @@ function SearchPanel() {
             <Search className="mr-2 size-4 shrink-0 text-[#9A9188]" />
             <input
               id="dashboard-search"
+              role="combobox"
               aria-label="Søk i selskapets kunnskap"
+              aria-expanded={isDropdownOpen}
+              aria-controls={isDropdownOpen ? listboxId : undefined}
+              aria-activedescendant={highlightedIndex >= 0 ? getOptionId(highlightedIndex) : undefined}
+              aria-autocomplete="list"
+              autoComplete="off"
               value={query}
               onChange={(event) => {
                 dispatchSearch({ type: "query-changed", query: event.target.value });
+              }}
+              onKeyDown={handleKeyDown}
+              onBlur={() => {
+                // Slight delay so click on suggestions can fire first
+                window.setTimeout(() => {
+                  dispatchSearch({ type: "suggestions-cleared" });
+                  dispatchSearch({ type: "preview-cleared" });
+                }, 150);
               }}
               className="h-full min-w-0 flex-1 bg-transparent text-[14px] font-medium text-[#24262D] placeholder:text-[#AAA198] focus:outline-none dark:text-white dark:placeholder:text-[#737780]"
               placeholder="Ask anything…"
@@ -660,25 +808,94 @@ function SearchPanel() {
           </div>
         </div>
 
-        {visibleSuggestions.length > 0 ? (
-          <div className="velion-fade-up ml-[52px] mt-2 overflow-hidden rounded-[22px] bg-white/96 p-2 shadow-[0_24px_58px_rgba(72,55,41,0.16)] ring-1 ring-[#EFE7DC] backdrop-blur-xl dark:bg-[#1A1B20]/96 dark:ring-[#2A2C31]">
-            <p className="px-3 pb-1.5 pt-1 text-[12px] font-semibold text-[#504A43] dark:text-[#D4D6DC]">Find me</p>
-            {visibleSuggestions.map((suggestion) => (
-              <button
-                key={`${suggestion.collection}:${suggestion.object}`}
-                type="button"
-                onClick={() => {
-                  dispatchSearch({ type: "query-changed", query: suggestion.text });
-                }}
-                className="flex w-full items-center gap-3 rounded-[12px] px-3 py-2.5 text-left text-[13px] font-medium text-[#2E3137] transition hover:bg-[#F4F1EB] dark:text-white dark:hover:bg-white/10"
-              >
-                <Search className="size-4 shrink-0 text-[#7E776F]" />
-                <span>{suggestion.text}</span>
-              </button>
-            ))}
+        {/* Typeahead suggestions dropdown */}
+        {isDropdownOpen ? (
+          <div
+            id={listboxId}
+            role="listbox"
+            aria-label="Søkeforslag"
+            className="velion-fade-up ml-[52px] mt-2 overflow-hidden rounded-[22px] bg-white/96 p-2 shadow-[0_24px_58px_rgba(72,55,41,0.16)] ring-1 ring-[#EFE7DC] backdrop-blur-xl dark:bg-[#1A1B20]/96 dark:ring-[#2A2C31]"
+          >
+            <p className="px-3 pb-1.5 pt-1 text-[12px] font-semibold text-[#504A43] dark:text-[#D4D6DC]">Forslag</p>
+            {visibleSuggestions.map((suggestion, idx) => {
+              const isHighlighted = idx === highlightedIndex;
+              const hasLabel = suggestion.collection || suggestion.source;
+              return (
+                <button
+                  key={`${suggestion.collection}:${suggestion.object}`}
+                  id={getOptionId(idx)}
+                  role="option"
+                  aria-selected={isHighlighted}
+                  type="button"
+                  onMouseDown={(e) => {
+                    // Prevent blur from firing before click
+                    e.preventDefault();
+                    dispatchSearch({ type: "query-changed", query: suggestion.text });
+                    navigateToSearch(suggestion.text);
+                  }}
+                  onMouseEnter={() => dispatchSearch({ type: "highlight-changed", index: idx })}
+                  className={cn(
+                    "flex w-full items-center gap-3 rounded-[12px] px-3 py-2.5 text-left text-[13px] font-medium text-[#2E3137] transition dark:text-white",
+                    isHighlighted
+                      ? "bg-[#F4F1EB] dark:bg-white/10"
+                      : "hover:bg-[#F4F1EB] dark:hover:bg-white/10",
+                  )}
+                >
+                  <Search className="size-4 shrink-0 text-[#7E776F]" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{suggestion.text}</span>
+                  {hasLabel ? (
+                    <span className="shrink-0 text-[11px] font-normal text-[#AAA198] dark:text-[#5A5E66]">
+                      {suggestion.collection || suggestion.source}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         ) : null}
 
+        {/* Inline preview cards */}
+        {showPreview ? (
+          <div className="velion-fade-up ml-[52px] mt-3 space-y-2">
+            {previewResults.map((result) => (
+              <a
+                key={result.url}
+                href={result.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-w-0 flex-col gap-0.5 rounded-[16px] bg-white/90 px-4 py-3 shadow-[0_4px_16px_rgba(72,55,41,0.08)] ring-1 ring-[#EFE7DC] backdrop-blur-xl transition hover:bg-white hover:shadow-[0_8px_24px_rgba(72,55,41,0.12)] dark:bg-[#1A1B20]/90 dark:ring-[#2A2C31] dark:hover:bg-[#1A1B20]"
+              >
+                <span className="truncate text-[11px] font-medium text-[#AAA198] dark:text-[#5A5E66]">
+                  {result.hostname}
+                </span>
+                <span className="truncate text-[13px] font-semibold text-[#1A1A1A] dark:text-white">
+                  {result.title}
+                </span>
+                {result.snippet ? (
+                  <span className="line-clamp-1 text-[12px] leading-relaxed text-[#7A756F] dark:text-[#8A8E96]">
+                    {result.snippet}
+                  </span>
+                ) : null}
+              </a>
+            ))}
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                navigateToSearch(query);
+              }}
+              className="flex w-full items-center gap-1.5 px-1 pt-0.5 text-[12px] font-medium text-[#7A756F] transition hover:text-[#EE7A50] dark:text-[#8A8E96] dark:hover:text-[#EE7A50]"
+            >
+              <ArrowRight className="size-3.5" aria-hidden="true" />
+              Alle resultater
+            </button>
+          </div>
+        ) : previewLoading && activeQuery.length >= 4 ? (
+          <div className="ml-[52px] mt-3 flex items-center gap-2 px-1 text-[12px] text-[#AAA198] dark:text-[#5A5E66]">
+            <span className="inline-block size-3 animate-spin rounded-full border border-current border-t-transparent" aria-hidden="true" />
+            Laster forhåndsvisning…
+          </div>
+        ) : null}
       </form>
     </div>
   );
