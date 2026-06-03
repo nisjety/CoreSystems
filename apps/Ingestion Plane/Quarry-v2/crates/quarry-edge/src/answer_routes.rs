@@ -232,26 +232,34 @@ pub async fn answer_stream(
             return;
         }
 
+        // The model-gateway's /v1/invoke/stream is currently a stub (returns an
+        // immediate empty `done`: model_used="default", 0 tokens), so synthesize
+        // the full answer via the WORKING non-streaming /v1/invoke (`query`) and
+        // reveal it to the client in word-chunked delta frames. `query_stream` /
+        // `invoke_stream` stay wired and switch on to TRUE token streaming once
+        // the gateway implements it (swap `query` → `query_stream` here).
         let mut full = String::new();
-        match pipeline.formats().query_stream(&prepared.combined, &query, zdr).await {
-            Ok(delta_stream) => {
-                futures::pin_mut!(delta_stream);
-                use futures::StreamExt;
-                while let Some(item) = delta_stream.next().await {
-                    match item {
-                        Ok(delta) => {
-                            full.push_str(&delta);
-                            yield Ok(Event::default()
-                                .event("delta")
-                                .data(serde_json::json!({ "delta": delta }).to_string()));
-                        }
-                        Err(e) => {
-                            yield Ok(Event::default()
-                                .event("error")
-                                .data(serde_json::json!({ "message": e.message }).to_string()));
-                            return;
-                        }
+        match pipeline.formats().query(&prepared.combined, &query, zdr).await {
+            Ok(qr) => {
+                full = qr.answer;
+                // Emit ~4-word delta frames (whitespace preserved) for a smooth
+                // streaming reveal; the client concatenates them back verbatim.
+                let mut frame = String::new();
+                let mut words_in_frame = 0usize;
+                for token in full.split_inclusive(char::is_whitespace) {
+                    frame.push_str(token);
+                    words_in_frame += 1;
+                    if words_in_frame >= 4 {
+                        yield Ok(Event::default().event("delta").data(
+                            serde_json::json!({ "delta": std::mem::take(&mut frame) }).to_string(),
+                        ));
+                        words_in_frame = 0;
                     }
+                }
+                if !frame.is_empty() {
+                    yield Ok(Event::default()
+                        .event("delta")
+                        .data(serde_json::json!({ "delta": frame }).to_string()));
                 }
             }
             Err(e) => {
