@@ -13,7 +13,7 @@
 //!   - policy:     Per-org runtime guardrails (Wave 10i)
 //!   - messages:   Thread message append/list (Wave 10j)
 //!   - analytics:  Per-org counter rollups (Wave 10j)
-//!   - voice:      TTS/STT passthrough to inference-core (Wave 10j; stub)
+//!   - voice:      TTS/STT — served by grpc.rs + /v1/ai/speech → inference-core
 //!   - tasks:      Gateway-scoped task ingress (Wave 10j; durable state
 //!     belongs in session-core `tasks` tables, cron in Temporal —
 //!     the orphaned task-core service was retired, matrix §4.2)
@@ -39,8 +39,7 @@ use mp_contracts::model_plane::v1::{
     ProxyMcpToolResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest,
     RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, SetPermissionRequest,
     SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest,
-    SetPolicyResponse, SpeechToTextRequest, SpeechToTextResponse, TaskRecord, TextToSpeechRequest,
-    TextToSpeechResponse, ThreadMessage, ToolCallCount,
+    SetPolicyResponse, TaskRecord, ThreadMessage, ToolCallCount,
 };
 
 fn now_unix() -> i64 {
@@ -947,33 +946,13 @@ pub fn handle_get_analytics(
     })
 }
 
-// Voice handlers — stub returns Unimplemented until the inference-core
-// speech provider is wired through. The actual implementation would
-// route to crate::state::AppState::inference_client with a speech-
-// specific InferRequest variant. Kept as RPCs so the API surface
-// matches v2.
-
-/// Text-to-speech passthrough (stub).
-///
-/// # Errors
-///
-/// Always returns `Status::unimplemented` until the inference-core speech provider is wired.
-pub fn handle_text_to_speech(_req: TextToSpeechRequest) -> Result<TextToSpeechResponse, Status> {
-    Err(Status::unimplemented(
-        "TTS requires inference-core speech provider wiring; coming in a follow-up.",
-    ))
-}
-
-/// Speech-to-text passthrough (stub).
-///
-/// # Errors
-///
-/// Always returns `Status::unimplemented` until the inference-core speech provider is wired.
-pub fn handle_speech_to_text(_req: SpeechToTextRequest) -> Result<SpeechToTextResponse, Status> {
-    Err(Status::unimplemented(
-        "STT requires inference-core speech provider wiring; coming in a follow-up.",
-    ))
-}
+// Voice (TTS/STT) is served for real — there is NO stub here. The gRPC
+// `text_to_speech`/`speech_to_text` handlers (grpc.rs) and the HTTP
+// `/v1/ai/speech` route (http_routes.rs) both proxy to inference-core's
+// `SynthesizeSpeech`/`TranscribeSpeech`, which route through the real
+// OpenAI/Azure `SpeechChain` (inference-core `provider/speech.rs`). The old
+// dead `handle_text_to_speech`/`handle_speech_to_text` stubs here had no
+// callers and were removed.
 
 #[derive(Clone, Default, Debug)]
 pub struct TaskStore {
