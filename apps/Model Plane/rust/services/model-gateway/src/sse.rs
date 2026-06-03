@@ -99,6 +99,9 @@ pub async fn invoke_stream_sse(
         zdr: req.zdr,
     };
 
+    // Clone the request so a streaming failure can retry via the (working)
+    // non-streaming Infer fallback below.
+    let grpc_req_fallback = grpc_req.clone();
     let grpc_response = state
         .inference_client
         .clone()
@@ -108,45 +111,26 @@ pub async fn invoke_stream_sse(
     let mut grpc_stream = match grpc_response {
         Ok(response) => response.into_inner(),
         Err(e) => {
-            tracing::error!(error = %e, request_id = %request_id, "infer_stream failed");
-
-            let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let close_envelope =
-                build_stream_envelope(&request_id, "STREAM_CLOSED", &org_id, &user_id, &model);
-            if let Err(pub_err) = state
-                .publisher
-                .publish(&subjects::stream_subject("closed"), &close_envelope)
-                .await
-            {
-                tracing::warn!(error = %pub_err, "failed to publish STREAM_CLOSED");
-            }
-            gateway_metrics::stream_closed();
-
-            let usage_envelope =
-                build_usage_envelope(&request_id, &org_id, &user_id, &model, 0, 0, latency_ms);
-            if let Err(pub_err) = state
-                .publisher
-                .publish(&subjects::usage_subject(&org_id), &usage_envelope)
-                .await
-            {
-                tracing::warn!(error = %pub_err, "failed to publish USAGE_ENVELOPE");
-            }
-
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
-            let done_chunk = SseChunk {
+            // Streaming RPC unavailable. Do NOT emit a bare `done` — that reads
+            // as a successful *empty* completion and forces every client to work
+            // around it. Fall back to the non-streaming Infer (which works) and
+            // reveal its real content in chunks: one robust endpoint, no
+            // per-client fallback duplication. If Infer also fails, the fallback
+            // emits an honest `error` event rather than a fake `done`.
+            tracing::warn!(
+                error = %e,
+                request_id = %request_id,
+                "infer_stream unavailable; falling back to non-streaming Infer"
+            );
+            return infer_fallback_stream(
+                state.clone(),
+                grpc_req_fallback,
                 request_id,
-                delta: String::new(),
-                done: true,
-                model_used: model,
-                input_tokens: 0,
-                output_tokens: 0,
-            };
-            let data = serde_json::to_string(&done_chunk).unwrap_or_default();
-            let _ = tx
-                .send(Ok(Event::default().id("0").event("done").data(data)))
-                .await;
-
-            return Sse::new(ReceiverStream::new(rx));
+                org_id,
+                user_id,
+                model,
+                start,
+            );
         }
     };
 
@@ -268,6 +252,196 @@ pub async fn invoke_stream_sse(
     });
 
     Sse::new(ReceiverStream::new(rx))
+}
+
+/// Split `text` into streaming-friendly pieces (~`target` chars, broken at
+/// whitespace where possible) so the non-streaming Infer fallback reveals
+/// content progressively instead of in one blob. Rejoining the pieces
+/// reproduces `text` exactly — no content is added or dropped.
+fn chunk_for_stream(text: &str, target: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_inclusive(char::is_whitespace) {
+        if !cur.is_empty() && cur.len() + word.len() > target {
+            out.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Fallback SSE stream used when `InferStream` is unavailable: call the
+/// (working) non-streaming `Infer` and reveal its content in chunks so
+/// `/v1/invoke/stream` still returns real tokens. If `Infer` ALSO fails, emit
+/// an honest `error` event — never a fake successful `done`.
+#[allow(clippy::too_many_lines)] // cohesive streaming emission, mirrors invoke_stream_sse
+fn infer_fallback_stream(
+    state: AppState,
+    grpc_req: InferRequest,
+    request_id: String,
+    org_id: String,
+    user_id: String,
+    model: String,
+    start: std::time::Instant,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    tokio::spawn(async move {
+        let publisher = state.publisher.clone();
+        let buffers = state.stream_buffers.clone();
+        let result = state
+            .inference_client
+            .clone()
+            .infer(tonic::Request::new(grpc_req))
+            .await;
+        let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        match result {
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                let model_used = if resp.model_used.is_empty() {
+                    model.clone()
+                } else {
+                    resp.model_used.clone()
+                };
+                let input_tokens = u32::try_from(resp.input_tokens).unwrap_or(0);
+                let output_tokens = u32::try_from(resp.output_tokens).unwrap_or(0);
+
+                let mut seq: u64 = 0;
+                for piece in chunk_for_stream(&resp.content, 48) {
+                    buffers.append(&request_id, seq, &piece).await;
+                    let sse_chunk = SseChunk {
+                        request_id: request_id.clone(),
+                        delta: piece,
+                        done: false,
+                        model_used: model_used.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    };
+                    let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
+                    if tx
+                        .send(Ok(Event::default()
+                            .id(seq.to_string())
+                            .event("chunk")
+                            .data(data)))
+                        .await
+                        .is_err()
+                    {
+                        return; // client disconnected
+                    }
+                    seq += 1;
+                }
+
+                let close = build_stream_envelope(
+                    &request_id,
+                    "STREAM_CLOSED",
+                    &org_id,
+                    &user_id,
+                    &model_used,
+                );
+                let _ = publisher
+                    .publish(&subjects::stream_subject("closed"), &close)
+                    .await;
+                let usage = build_usage_envelope(
+                    &request_id,
+                    &org_id,
+                    &user_id,
+                    &model_used,
+                    input_tokens,
+                    output_tokens,
+                    latency_ms,
+                );
+                let _ = publisher
+                    .publish(&subjects::usage_subject(&org_id), &usage)
+                    .await;
+                gateway_metrics::stream_closed();
+                buffers
+                    .finish(
+                        &request_id,
+                        crate::stream_buffer::StreamDone {
+                            seq,
+                            model_used: model_used.clone(),
+                            input_tokens,
+                            output_tokens,
+                        },
+                    )
+                    .await;
+
+                let done_chunk = SseChunk {
+                    request_id: request_id.clone(),
+                    delta: String::new(),
+                    done: true,
+                    model_used,
+                    input_tokens,
+                    output_tokens,
+                };
+                let data = serde_json::to_string(&done_chunk).unwrap_or_default();
+                let _ = tx
+                    .send(Ok(Event::default()
+                        .id(seq.to_string())
+                        .event("done")
+                        .data(data)))
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    request_id = %request_id,
+                    "infer fallback also failed; emitting error event"
+                );
+                let close =
+                    build_stream_envelope(&request_id, "STREAM_CLOSED", &org_id, &user_id, &model);
+                let _ = publisher
+                    .publish(&subjects::stream_subject("closed"), &close)
+                    .await;
+                gateway_metrics::stream_closed();
+                let err = json!({ "request_id": request_id, "error": e.message() });
+                let _ = tx
+                    .send(Ok(Event::default().event("error").data(err.to_string())))
+                    .await;
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx))
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::chunk_for_stream;
+
+    #[test]
+    fn chunk_for_stream_is_lossless_and_splits() {
+        let text = "the quick brown fox jumps over the lazy dog";
+        let chunks = chunk_for_stream(text, 12);
+        assert!(chunks.len() > 1, "should split into multiple pieces");
+        assert_eq!(
+            chunks.concat(),
+            text,
+            "rejoin must reproduce the input exactly"
+        );
+        assert!(chunks.iter().all(|c| !c.is_empty()));
+    }
+
+    #[test]
+    fn chunk_for_stream_empty_yields_nothing() {
+        assert!(chunk_for_stream("", 10).is_empty());
+    }
+
+    #[test]
+    fn chunk_for_stream_short_is_single_piece() {
+        assert_eq!(chunk_for_stream("hello", 100), vec!["hello".to_owned()]);
+    }
+
+    #[test]
+    fn chunk_for_stream_keeps_overlong_word_whole() {
+        let word = "supercalifragilisticexpialidocious";
+        assert_eq!(chunk_for_stream(word, 5), vec![word.to_owned()]);
+    }
 }
 
 /// Resume a chat stream after a reconnect/reload (`HARNESS_PHASE1` §3b).
