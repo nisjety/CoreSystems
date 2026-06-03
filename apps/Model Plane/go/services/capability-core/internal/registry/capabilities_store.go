@@ -6,6 +6,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -225,6 +226,53 @@ func (s *CapabilitiesStore) AppendAuditLog(ctx context.Context, entityKind, enti
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 	`, id, entityKind, entityID, action, actor, orgID, diffJSON)
 	return err
+}
+
+// AuditLogEntry is one registry_audit_log row, newest-first when listed.
+type AuditLogEntry struct {
+	ID         string          `json:"id"`
+	EntityKind string          `json:"entity_kind"`
+	EntityID   string          `json:"entity_id"`
+	Action     string          `json:"action"`
+	Actor      string          `json:"actor"`
+	OrgID      string          `json:"org_id"`
+	Diff       json.RawMessage `json:"diff"`
+	Ts         time.Time       `json:"ts"`
+}
+
+// QueryAuditLog returns audit entries newest-first, optionally filtered by
+// entity_kind and entity_id (empty string = no filter on that field). `limit`
+// is clamped to [1, 500] (default 100). Parameterized — no SQL injection.
+func (s *CapabilitiesStore) QueryAuditLog(ctx context.Context, entityKind, entityID string, limit int) ([]AuditLogEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, entity_kind, entity_id, action, actor, org_id, diff_json, ts
+		FROM registry_audit_log
+		WHERE ($1 = '' OR entity_kind = $1) AND ($2 = '' OR entity_id = $2)
+		ORDER BY ts DESC
+		LIMIT $3
+	`, entityKind, entityID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query audit log: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]AuditLogEntry, 0, limit)
+	for rows.Next() {
+		var e AuditLogEntry
+		var diff []byte
+		if err := rows.Scan(&e.ID, &e.EntityKind, &e.EntityID, &e.Action, &e.Actor, &e.OrgID, &diff, &e.Ts); err != nil {
+			return nil, fmt.Errorf("scan audit log row: %w", err)
+		}
+		e.Diff = json.RawMessage(diff)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }
 
 // -- helpers ------------------------------------------------------------------

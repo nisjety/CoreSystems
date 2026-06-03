@@ -172,10 +172,27 @@ func (h *CapabilitiesHandler) setRollout(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"id": req.ID, "rollout_state": req.State, "updated_at": time.Now().UTC()})
 }
 
-func (h *CapabilitiesHandler) auditLog(w http.ResponseWriter, _ *http.Request) {
-	// Audit log is append-only; reads will be added in a follow-up slice.
-	// Return a placeholder for now so the route exists.
-	writeJSON(w, map[string]any{"entries": []any{}, "note": "full query endpoint coming soon"})
+// auditLog handles GET /api/v1/capabilities/audit — registry audit entries
+// newest-first, filterable by ?entity_kind=, ?entity_id=, and ?limit= (≤500).
+func (h *CapabilitiesHandler) auditLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	limit := 0
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil {
+			limit = n
+		}
+	}
+	entries, err := h.store.QueryAuditLog(r.Context(), q.Get("entity_kind"), q.Get("entity_id"), limit)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"entries": entries, "count": len(entries)})
 }
 
 // -- helpers ------------------------------------------------------------------
