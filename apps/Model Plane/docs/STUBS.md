@@ -57,13 +57,20 @@ absent. That is the right behavior (fail loud, not fake success):
 | MCP transport | `runtime_registries.rs:402` | `Unimplemented` for transports other than `http`/`stdio` (both implemented). |
 | Run-events SSE | `go/.../internal/sse/sse.go` | `503` when orchestrator-core client is nil. |
 
-## 4. Duplicate-system flag (harmonization, per /goal)
+## 4. Duplicate-system — RESOLVED (Go `model-gateway` removed, 2026-06-03)
 
-There are **two** `model-gateway` services — Rust (`rust/services/model-gateway`,
-the full engine: SSE, auth, registries, streaming) and Go
-(`go/services/model-gateway`, a thin Invoke/InvokeStream proxy with semantic
-cache). Both implement `ModelGateway.Invoke`/`InvokeStream`. This is a candidate
-duplication to resolve (pick one front-door, or make the Go proxy a pure
-cache/edge in front of the Rust engine) — flagged here; not changed in this pass
-(needs the running pair to decide + verify, and a product call on which is the
-canonical front-door).
+There were **two** `model-gateway` services. Resolution: the **Rust**
+`rust/services/model-gateway` is the canonical front-door — it is the only one
+built by **any** compose (root `mp-model-gateway`, `deploy/`, and consumed by
+Application/Control Plane via DNS), and it covers the full surface
+(`Invoke`/`InvokeStream` + Quarry `Fetch`/`ExtractStructured` + SSE + auth +
+registries + voice + MCP + plan-mode). The **Go** `go/services/model-gateway`
+was a v2-cutover proxy shim that only duplicated `Invoke`/`InvokeStream` (+ a
+superseded Quarry `Fetch`/`ExtractStructured`).
+
+Verified dead before removal: **no compose builds it** (all build the Rust one),
+**no Go package imports it**, and its "v2 fallback" was vestigial (nothing
+deployed it to *be* a fallback). Removed the directory + its `go.work` entry;
+all remaining Go modules build + vet clean. Same safe-retirement pattern used
+for the orphaned `task-core` (matrix §4.2). One canonical gateway — duplication
+gone.

@@ -15,7 +15,6 @@ use (
 	./services/capability-core
 	./services/cost-core
 	./services/letta-bridge
-	./services/model-gateway
 	./services/orchestrator-core
 	./services/sandbox-manager
 )
