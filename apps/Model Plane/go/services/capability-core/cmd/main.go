@@ -79,6 +79,13 @@ func main() {
 
 	pol := policy.New(reg)
 
+	// Dial session-core + inference-core ONCE (guarded on their addrs; lazy grpc
+	// clients). Shared by the /commands delegation (/models → inference
+	// ListModels, /compact → session CompactNow) and the G7 learning consumer —
+	// one dial site, no duplication. Nil when addrs are unset → both consumers
+	// degrade gracefully.
+	sessionClient, inferenceClient := dialBackends()
+
 	// --- §4.3 reconcile event publisher -------------------------------------
 	// capability-core is the registry system-of-record; on a create/update it
 	// emits mp.v1.capability.<kind>.<action> so cache holders (the gateway's
@@ -103,7 +110,7 @@ func main() {
 			// still runs). The decode→review→persist core is unit-tested
 			// (sessionreview.HandleRunCompleted); this wiring is e2e-verified
 			// only against the running stack.
-			startLearningConsumer(ctx, nc)
+			startLearningConsumer(ctx, nc, sessionClient, inferenceClient)
 		}
 	}
 
@@ -132,7 +139,9 @@ func main() {
 	api.NewMemoryHandler(pool).Register(mux)
 	api.NewTasksHandler(pool).Register(mux)
 	api.NewCronHandler(pool).Register(mux)
-	commands.NewHandler().Register(mux)
+	// /models delegates to inference-core ListModels, /compact to session-core
+	// CompactNow (nil-safe: unwired → honest "unavailable").
+	commands.NewHandler().WithModels(inferenceClient).WithCompactor(sessionClient).Register(mux)
 
 	healthServer := &http.Server{Addr: ":8085", Handler: mux}
 	go func() {
@@ -165,37 +174,47 @@ func main() {
 	_ = healthServer.Shutdown(context.Background())
 }
 
-// startLearningConsumer wires the G7 learning-review trigger: dial session-core
-// + inference-core and spawn the RUN_COMPLETED consumer (sessionreview). Guarded
-// on SESSION_CORE_ADDR + INFERENCE_CORE_ADDR — absent, it is a no-op so the
-// service runs without the learning loop. Best-effort: dial failures are logged,
-// never fatal. The decode→review→persist core is unit-tested; this dial/subscribe
-// wiring is e2e-verified only against the running stack.
-func startLearningConsumer(ctx context.Context, nc *nats.Conn) {
-	sessAddr := os.Getenv("SESSION_CORE_ADDR")
-	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
-	if sessAddr == "" || infAddr == "" {
-		slog.Info("learning-review consumer disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
+// startLearningConsumer wires the G7 learning-review trigger on the shared
+// session-core + inference-core clients: spawn the RUN_COMPLETED consumer
+// (sessionreview). No-op when the clients are nil (backends unset) so the
+// service runs without the learning loop. The decode→review→persist core is
+// unit-tested; this subscribe wiring is e2e-verified only against the stack.
+func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient) {
+	if sc == nil || ic == nil {
+		slog.Info("learning-review consumer disabled (session-core/inference-core not dialed)")
 		return
 	}
-	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
-	sessConn, err := grpc.NewClient(sessAddr, creds)
-	if err != nil {
-		slog.Warn("learning consumer: dial session-core failed", "error", err)
-		return
-	}
-	infConn, err := grpc.NewClient(infAddr, creds)
-	if err != nil {
-		slog.Warn("learning consumer: dial inference-core failed", "error", err)
-		_ = sessConn.Close()
-		return
-	}
-	sc := mpv1.NewSessionCoreClient(sessConn)
-	ic := mpv1.NewInferenceCoreClient(infConn)
 	model := os.Getenv("LEARNING_REVIEW_MODEL") // empty -> llmreviewer.DefaultModel
 	go func() {
 		if rerr := sessionreview.RunConsumer(ctx, nc, sc, ic, model); rerr != nil {
 			slog.Warn("learning-review consumer stopped", "error", rerr)
 		}
 	}()
+}
+
+// dialBackends dials session-core + inference-core once (guarded on
+// SESSION_CORE_ADDR + INFERENCE_CORE_ADDR; lazy grpc clients shared by the
+// /commands delegation and the learning consumer — one dial site, no
+// duplication). Returns (nil, nil) when the addrs are unset or a dial fails, so
+// callers degrade gracefully.
+func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
+	sessAddr := os.Getenv("SESSION_CORE_ADDR")
+	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
+	if sessAddr == "" || infAddr == "" {
+		slog.Info("backend clients disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
+		return nil, nil
+	}
+	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
+	sessConn, err := grpc.NewClient(sessAddr, creds)
+	if err != nil {
+		slog.Warn("dial session-core failed", "error", err)
+		return nil, nil
+	}
+	infConn, err := grpc.NewClient(infAddr, creds)
+	if err != nil {
+		slog.Warn("dial inference-core failed", "error", err)
+		_ = sessConn.Close()
+		return nil, nil
+	}
+	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn)
 }

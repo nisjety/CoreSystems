@@ -1,16 +1,34 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"google.golang.org/grpc"
 )
+
+// modelLister is the one inference-core method `/models` delegates to (the
+// canonical model registry). compactor is the one session-core method
+// `/compact` delegates to. Interface segregation keeps the handler unit-testable
+// with tiny fakes and avoids depending on the full generated client surface.
+type modelLister interface {
+	ListModels(ctx context.Context, in *mpv1.ListModelsRequest, opts ...grpc.CallOption) (*mpv1.ListModelsResponse, error)
+}
+
+type compactor interface {
+	CompactNow(ctx context.Context, in *mpv1.CompactNowRequest, opts ...grpc.CallOption) (*mpv1.CompactNowResponse, error)
+}
 
 // CommandHandler serves the slash command registry over HTTP. It holds an
 // in-memory slice of commands seeded from the catalog in data.go.
 type CommandHandler struct {
-	commands []Command
+	commands  []Command
+	models    modelLister // optional; nil → /models reports unavailable
+	compactor compactor   // optional; nil → /compact reports unavailable
 }
 
 // NewHandler constructs a CommandHandler pre-loaded with the built-in catalog.
@@ -19,6 +37,19 @@ func NewHandler() *CommandHandler {
 	cmds := make([]Command, len(src.Commands))
 	copy(cmds, src.Commands)
 	return &CommandHandler{commands: cmds}
+}
+
+// WithModels wires the inference-core client `/models` delegates to. Nil-safe
+// and chainable: NewHandler().WithModels(ic).WithCompactor(sc).Register(mux).
+func (h *CommandHandler) WithModels(m modelLister) *CommandHandler {
+	h.models = m
+	return h
+}
+
+// WithCompactor wires the session-core client `/compact` delegates to.
+func (h *CommandHandler) WithCompactor(c compactor) *CommandHandler {
+	h.compactor = c
+	return h
 }
 
 // Register mounts the command routes on the provided mux.
@@ -141,44 +172,78 @@ func (h *CommandHandler) exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := h.dispatchWithArgs(name, req.Args)
+	result := h.dispatch(r.Context(), name, req)
 	writeJSON(w, result)
 }
 
-// dispatchWithArgs routes a validated command name with its arguments to handler logic.
-func (h *CommandHandler) dispatchWithArgs(name string, args map[string]string) CommandExecResult {
+// dispatch routes a validated command to handler logic. Commands with a
+// canonical owner DELEGATE to it (no duplicate logic): /models → inference-core
+// ListModels, /compact → session-core CompactNow. /help is served locally from
+// the catalog.
+func (h *CommandHandler) dispatch(ctx context.Context, name string, req CommandExecRequest) CommandExecResult {
 	switch name {
 	case "/help":
 		return h.dispatchHelp()
 	case "/compact":
-		return h.dispatchCompact(args)
-	case "/budget":
-		return CommandExecResult{
-			Output:  "query cost-core for usage",
-			Success: true,
-		}
+		return h.dispatchCompact(ctx, req)
 	case "/models":
+		return h.dispatchModels(ctx, req)
+	case "/budget":
+		// cost-core owns usage/billing; point to it rather than fabricating
+		// numbers (no cost-core client is wired in this layer).
 		return CommandExecResult{
-			Output:  "query model registry",
+			Output:  "budget/usage is served by cost-core (GET /v1/usage)",
 			Success: true,
 		}
 	default:
+		// Registered (verified by the caller) but no server-side action here —
+		// it is dispatched client-side. Report that honestly rather than
+		// claiming a fabricated result.
 		return CommandExecResult{
-			Output:  fmt.Sprintf("command %s acknowledged", name),
+			Output:  fmt.Sprintf("%s has no server-side action (client-handled)", name),
 			Success: true,
 		}
 	}
 }
 
-// dispatchCompact triggers on-demand compaction via session-core CompactNow RPC.
-// The "toon" arg requests a terse single-line summary.
-func (h *CommandHandler) dispatchCompact(args map[string]string) CommandExecResult {
-	toon := args["toon"] == "true" || args["toon"] == "1"
-	_ = toon // forwarded to session-core CompactNow(toon=<bool>) when gRPC client is wired
-	return CommandExecResult{
-		Output:  "compaction dispatched to session-core",
-		Success: true,
+// dispatchModels delegates to inference-core's ListModels — the canonical model
+// registry — rather than keeping a duplicate catalog here. Optional args
+// `modality` and `provider` filter the result.
+func (h *CommandHandler) dispatchModels(ctx context.Context, req CommandExecRequest) CommandExecResult {
+	if h.models == nil {
+		return CommandExecResult{Output: "model registry unavailable (inference-core not wired)", Success: false}
 	}
+	resp, err := h.models.ListModels(ctx, &mpv1.ListModelsRequest{
+		Modality: req.Args["modality"],
+		Provider: req.Args["provider"],
+	})
+	if err != nil {
+		return CommandExecResult{Success: false, Error: fmt.Sprintf("list models: %s", err)}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d model(s):\n", len(resp.GetModels()))
+	for _, m := range resp.GetModels() {
+		streaming := ""
+		if m.GetStreaming() {
+			streaming = " (streaming)"
+		}
+		fmt.Fprintf(&b, "  %-28s %s/%s%s\n", m.GetId(), m.GetProvider(), m.GetModality(), streaming)
+	}
+	return CommandExecResult{Output: b.String(), Success: true}
+}
+
+// dispatchCompact delegates to session-core's CompactNow. The "toon" arg
+// requests a terse single-line summary.
+func (h *CommandHandler) dispatchCompact(ctx context.Context, req CommandExecRequest) CommandExecResult {
+	if h.compactor == nil {
+		return CommandExecResult{Output: "compaction unavailable (session-core not wired)", Success: false}
+	}
+	toon := req.Args["toon"] == "true" || req.Args["toon"] == "1"
+	resp, err := h.compactor.CompactNow(ctx, &mpv1.CompactNowRequest{Toon: toon})
+	if err != nil {
+		return CommandExecResult{Success: false, Error: fmt.Sprintf("compact: %s", err)}
+	}
+	return CommandExecResult{Output: resp.GetSummary(), Success: true}
 }
 
 // dispatchHelp builds a summary of all enabled commands.
