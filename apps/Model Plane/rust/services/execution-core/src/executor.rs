@@ -15,11 +15,12 @@
 //! is Linux-gated and verified separately (`sandbox.rs` tests +
 //! `scripts/verify-sandbox-isolation.sh`).
 //!
-//! What remains the **integration decision** (deliberately NOT wired here): how
-//! this plugs into tool dispatch — an async call from `runtime_loop` for
-//! shell-class tools is the natural seam (`tool_bridge::execute` is sync), but
-//! that is the executor-design call flagged for the team. This primitive is
-//! standalone + tested so the wiring is mechanical once that's decided.
+//! Wiring (DONE): `runtime_loop::execute_step` routes the `shell` tool to this
+//! primitive (`execute_shell` → `execute_sandboxed`) under a ReadOnly +
+//! no-network default policy, behind the same permission/hook gates as every
+//! other tool; non-shell tools keep the deterministic `tool_bridge` path by
+//! design. A broader per-call policy (a `policy` field on the shell input) is
+//! the natural future extension.
 //!
 //! SECURITY: the `AllowDomains` network policy is not self-enforcing (see
 //! `sandbox.rs`) — a caller using it MUST also run behind a configured egress
