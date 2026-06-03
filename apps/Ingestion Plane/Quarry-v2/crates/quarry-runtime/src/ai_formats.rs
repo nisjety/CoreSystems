@@ -171,6 +171,33 @@ impl AiFormatRunner {
         })
     }
 
+    /// Streaming variant of [`query`] — same grounding prompt, but yields the
+    /// answer text in deltas as the model produces it (via the gateway's
+    /// `/v1/invoke/stream`). The caller accumulates + reports the model id.
+    pub async fn query_stream(
+        &self,
+        markdown: &str,
+        question: &str,
+        zdr: ZdrMode,
+    ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
+        validate_input(markdown, zdr)?;
+        if question.trim().is_empty() {
+            return Err(QuarryError::new(ErrorCode::BadRequest, "question is empty"));
+        }
+        let prompt = format!(
+            "Answer the question using ONLY the markdown below. If the markdown does not \
+             contain the answer, say \"Not found in source\". Output ONLY the answer.\n\n\
+             Question: {question}\n\nMarkdown:\n===\n{markdown}\n==="
+        );
+        let req = ModelPlaneInvokeRequest {
+            content: prompt,
+            model: self.model.clone(),
+            session_key: None,
+            thread_id: None,
+        };
+        self.client.invoke_stream(&req).await
+    }
+
     async fn invoke(
         &self,
         content: &str,

@@ -12,6 +12,7 @@
 //! - `501 Unsupported` when no answer pipeline is configured on the edge
 //!   (i.e. no SearchProvider or no Model Plane URL)
 
+use axum::response::sse::{Event, Sse};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +131,166 @@ pub async fn answer(
         )
             .into_response(),
     }
+}
+
+/// `POST /v1/answer/stream` — SSE variant of `/v1/answer`. Runs the SAME
+/// pipeline (hybrid search → full-page fetch → grounded context) and streams
+/// synthesis token-by-token, preserving full-page grounding AND answer caching.
+/// Frames: `event: citations` (array), `event: delta` ({delta}), repeated,
+/// then `event: done` ({answer, cached}); `event: error` ({message}) on failure.
+/// A warm org-scoped answer-cache hit replays instantly with no LLM call.
+pub async fn answer_stream(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<AnswerHttpRequest>,
+) -> axum::response::Response {
+    if req.query.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::to_value(ErrorBody {
+                    error: "query must not be empty".into(),
+                    code: "BAD_REQUEST".into(),
+                    hint: None,
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+    let Some(pipeline) = state.answer_pipeline.clone() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(
+                serde_json::to_value(ErrorBody {
+                    error: "answer pipeline not configured".into(),
+                    code: "UNSUPPORTED".into(),
+                    hint: Some(
+                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
+                            .into(),
+                    ),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    };
+
+    let query = req.query.clone();
+    let org_id = claims.org_id.clone();
+    let user_id = claims.user_id.clone();
+    let zdr = quarry_core::zdr::ZdrMode::from(req.zdr.unwrap_or(false));
+    let pipeline_req = AnswerRequest {
+        query: query.clone(),
+        top_k: req.top_k,
+        country: req.country.clone(),
+        language: req.language.clone(),
+        zdr: req.zdr,
+        // Tenant isolation: server-asserted from the verified JWT.
+        org_id: Some(org_id.clone()),
+    };
+
+    let scache = state.redis.clone().map(crate::cache::SearchCache::new);
+    let cache_key = crate::cache::SearchCache::key(&org_id, &query, "answer:stream:v1");
+    let usage = state.usage.clone();
+
+    let sse = Sse::new(async_stream::stream! {
+        // Warm answer-cache hit → replay instantly, skip search + synthesis.
+        if let Some(c) = &scache {
+            if let Some(cached) = c.get::<String>(&cache_key).await {
+                yield Ok::<Event, std::convert::Infallible>(Event::default().event("citations").data("[]"));
+                if !cached.is_empty() {
+                    yield Ok(Event::default()
+                        .event("delta")
+                        .data(serde_json::json!({ "delta": cached }).to_string()));
+                }
+                yield Ok(Event::default()
+                    .event("done")
+                    .data(serde_json::json!({ "answer": cached, "cached": true }).to_string()));
+                return;
+            }
+        }
+
+        let prepared = match pipeline.prepare(&pipeline_req).await {
+            Ok(p) => p,
+            Err(e) => {
+                yield Ok(Event::default()
+                    .event("error")
+                    .data(serde_json::json!({ "message": e.message }).to_string()));
+                return;
+            }
+        };
+
+        let citations_json =
+            serde_json::to_string(&prepared.citations).unwrap_or_else(|_| "[]".into());
+        yield Ok(Event::default().event("citations").data(citations_json));
+
+        if prepared.sources_used == 0 {
+            yield Ok(Event::default()
+                .event("done")
+                .data(serde_json::json!({ "answer": "", "cached": false }).to_string()));
+            return;
+        }
+
+        let mut full = String::new();
+        match pipeline.formats().query_stream(&prepared.combined, &query, zdr).await {
+            Ok(delta_stream) => {
+                futures::pin_mut!(delta_stream);
+                use futures::StreamExt;
+                while let Some(item) = delta_stream.next().await {
+                    match item {
+                        Ok(delta) => {
+                            full.push_str(&delta);
+                            yield Ok(Event::default()
+                                .event("delta")
+                                .data(serde_json::json!({ "delta": delta }).to_string()));
+                        }
+                        Err(e) => {
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(serde_json::json!({ "message": e.message }).to_string()));
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                yield Ok(Event::default()
+                    .event("error")
+                    .data(serde_json::json!({ "message": e.message }).to_string()));
+                return;
+            }
+        }
+
+        // Best-effort cache write-back + usage meter (only when we got an answer).
+        if !full.is_empty() {
+            if let Some(c) = &scache {
+                let _ = c.put_with_ttl(&cache_key, &full, 3600).await;
+            }
+            usage
+                .meter(quarry_runtime::UsageEvent::new(
+                    format!(
+                        "answer-stream-{}",
+                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                    ),
+                    org_id.clone(),
+                    quarry_runtime::usage_metrics::ANSWER_SYNTH,
+                    1.0,
+                    serde_json::json!({
+                        "user_id": user_id,
+                        "sources_used": prepared.sources_used,
+                        "streamed": true,
+                    }),
+                ))
+                .await;
+        }
+
+        yield Ok(Event::default()
+            .event("done")
+            .data(serde_json::json!({ "answer": full, "cached": false }).to_string()));
+    });
+
+    sse.into_response()
 }
 
 // Re-export the runtime AnswerResult so the OpenAPI / SDK generators

@@ -126,6 +126,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/map", post(crate::map_routes::map))
         .route("/v1/extract", post(crate::extract_routes::extract))
         .route("/v1/answer", post(crate::answer_routes::answer))
+        .route("/v1/answer/stream", post(crate::answer_routes::answer_stream))
         // Cycle 22 / cluster #4 part 1 — resource list endpoints.
         // /v1/artifacts is served locally; the rest forward to control plane.
         .route("/v1/artifacts", get(crate::resource_routes::list_artifacts))

@@ -113,6 +113,16 @@ pub struct AnswerPipeline {
     formats: AiFormatRunner,
 }
 
+/// Grounded inputs for synthesis, shared by `answer()` (blocking) and the edge's
+/// streaming `/v1/answer/stream` route. `combined` is empty when no source
+/// contributed text (callers then return a citations-only empty answer).
+pub struct PreparedAnswer {
+    pub citations: Vec<Citation>,
+    pub combined: String,
+    pub sources_used: usize,
+    pub sources_skipped: usize,
+}
+
 impl AnswerPipeline {
     pub fn new(
         search: Arc<dyn SearchProvider>,
@@ -126,8 +136,17 @@ impl AnswerPipeline {
         }
     }
 
-    pub async fn answer(&self, req: AnswerRequest) -> QuarryResult<AnswerResult> {
-        let started = Instant::now();
+    /// Accessor so the edge's streaming route can drive synthesis itself
+    /// (`formats().query_stream(...)`) over the prepared context.
+    pub fn formats(&self) -> &AiFormatRunner {
+        &self.formats
+    }
+
+    /// Search + concurrent fetch + context assembly — everything up to (but not
+    /// including) synthesis. Shared by `answer()` and the streaming route. The
+    /// verified `org_id` flows through so private-corpus providers filter to the
+    /// tenant; public-web providers ignore it.
+    pub async fn prepare(&self, req: &AnswerRequest) -> QuarryResult<PreparedAnswer> {
         if req.query.trim().is_empty() {
             return Err(QuarryError::new(
                 ErrorCode::BadRequest,
@@ -137,9 +156,6 @@ impl AnswerPipeline {
         let top_k = req.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, 20);
         let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
 
-        // 1. Search. The verified org_id flows in from the edge handler
-        // so private-corpus providers (TantivyLocalIndex) filter results
-        // to this tenant only; public-web providers ignore the field.
         let opts = SearchOptions {
             limit: top_k as u32,
             country: req.country.clone(),
@@ -152,21 +168,15 @@ impl AnswerPipeline {
         };
         let results = self.search.search(&req.query, &opts).await?;
         if results.is_empty() {
-            // No sources to synthesize over — return an empty-but-typed
-            // result rather than erroring, so callers can show "no
-            // results" UX without parsing error envelopes.
-            return Ok(AnswerResult {
-                query: req.query,
-                answer: String::new(),
+            return Ok(PreparedAnswer {
                 citations: vec![],
-                model: String::new(),
-                latency_ms: started.elapsed().as_millis() as u64,
+                combined: String::new(),
                 sources_used: 0,
                 sources_skipped: 0,
             });
         }
 
-        // 2. Concurrent fetch of top-K sources.
+        // Concurrent fetch of top-K sources.
         let fetch_futures = results.iter().map(|r| {
             let url = r.url.clone();
             let fetcher = self.fetcher.clone();
@@ -174,9 +184,6 @@ impl AnswerPipeline {
         });
         let markdowns = futures::future::join_all(fetch_futures).await;
 
-        // Pair search results with their (optional) markdown and build
-        // the synthesis prompt. Track skipped sources so the response is
-        // honest about how many actually contributed.
         let mut sources_used = 0usize;
         let mut sources_skipped = 0usize;
         let mut combined = String::with_capacity(MAX_TOTAL_CHARS);
@@ -190,10 +197,7 @@ impl AnswerPipeline {
                 provider: result.provider.clone(),
             });
             // Prefer the fetched page body; fall back to the search-result
-            // snippet when the fetch failed/was skipped (paywall, block,
-            // timeout) or when the result carries its content inline (e.g.
-            // Data Plane retrieval chunks). Guarantees a grounded, non-empty
-            // answer whenever the provider returned any text for the source.
+            // snippet (paywall/block/timeout, or Data Plane chunk text).
             let source_text: Option<String> = match markdown {
                 Some(md) if !md.trim().is_empty() => Some(md.clone()),
                 _ => result.snippet.clone().filter(|s| !s.trim().is_empty()),
@@ -211,40 +215,46 @@ impl AnswerPipeline {
             } else {
                 md.clone()
             };
-            combined.push_str(&format!(
-                "\n\n[Source {} — {}]\n{}",
-                i + 1,
-                result.url,
-                trimmed
-            ));
+            combined.push_str(&format!("\n\n[Source {} — {}]\n{}", i + 1, result.url, trimmed));
             sources_used += 1;
         }
 
-        if sources_used == 0 {
-            // Every fetch failed. Return citations-only so the caller
-            // sees which URLs we tried.
+        Ok(PreparedAnswer {
+            citations,
+            combined,
+            sources_used,
+            sources_skipped,
+        })
+    }
+
+    pub async fn answer(&self, req: AnswerRequest) -> QuarryResult<AnswerResult> {
+        let started = Instant::now();
+        let prepared = self.prepare(&req).await?;
+        if prepared.sources_used == 0 {
+            // No source contributed text — citations-only empty answer.
             return Ok(AnswerResult {
                 query: req.query,
                 answer: String::new(),
-                citations,
+                citations: prepared.citations,
                 model: String::new(),
                 latency_ms: started.elapsed().as_millis() as u64,
                 sources_used: 0,
-                sources_skipped,
+                sources_skipped: prepared.sources_skipped,
             });
         }
-
-        // 3. Synthesize via AiFormatRunner.query (grounded-on-markdown).
-        let query_result = self.formats.query(&combined, &req.query, zdr).await?;
-
+        let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+        let query_result = self
+            .formats
+            .query(&prepared.combined, &req.query, zdr)
+            .await?;
         Ok(AnswerResult {
             query: req.query,
             answer: query_result.answer,
-            citations,
+            citations: prepared.citations,
             model: query_result.model,
             latency_ms: started.elapsed().as_millis() as u64,
-            sources_used,
-            sources_skipped,
+            sources_used: prepared.sources_used,
+            sources_skipped: prepared.sources_skipped,
         })
     }
 }
