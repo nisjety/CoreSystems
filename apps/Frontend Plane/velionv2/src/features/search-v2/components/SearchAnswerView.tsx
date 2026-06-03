@@ -873,30 +873,54 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           // results — the same path the follow-up thread uses. Reuses the search
           // AbortController, so starting a new search cancels an in-flight stream.
           if (resultList.length > 0) {
-            const sources: GroundingSource[] = dedupeSources(
-              resultList.map((r) => ({ url: r.url, title: r.title })),
-            );
-            const content = buildGroundingContent({
-              query: q.trim(),
-              answer: "",
-              sources,
-              priorTurns: [],
-              question: q.trim(),
-            });
+            // Edge-side streaming: the high-quality answer (full-page grounded +
+            // cached) streams from quarry-edge /v1/answer/stream via the BFF SSE
+            // proxy. Reuses the search AbortController so a new search cancels an
+            // in-flight stream. The `citations` SSE event is ignored — the UI
+            // already shows source chips derived from resultList above.
             dispatch({ type: "answer-stream-started" });
             try {
-              for await (const chunk of streamChat({
-                content,
-                browseWeb: false,
+              const sres = await fetch("/api/v1/search/answer/stream", {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ query: q.trim() }),
                 signal: abort.signal,
-              })) {
-                if (chunk.type === "delta") {
-                  dispatch({ type: "answer-delta", delta: chunk.delta });
-                } else if (chunk.type === "error") {
-                  dispatch({ type: "answer-stream-done" });
-                  break;
-                } else if (chunk.type === "done") {
-                  dispatch({ type: "answer-stream-done" });
+              });
+              if (sres.ok && sres.body) {
+                const reader = sres.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = "";
+                let finished = false;
+                while (!finished) {
+                  const { value, done: readDone } = await reader.read();
+                  if (readDone) break;
+                  buf += decoder.decode(value, { stream: true });
+                  // Parse complete SSE frames (blank-line-delimited).
+                  let sep = buf.indexOf("\n\n");
+                  while (sep !== -1) {
+                    const frame = buf.slice(0, sep);
+                    buf = buf.slice(sep + 2);
+                    let event = "message";
+                    const dataLines: string[] = [];
+                    for (const line of frame.split("\n")) {
+                      if (line.startsWith("event:")) event = line.slice(6).trim();
+                      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+                    }
+                    const dataStr = dataLines.join("\n");
+                    if (event === "delta") {
+                      try {
+                        const parsed = JSON.parse(dataStr) as { delta?: string };
+                        if (parsed.delta) dispatch({ type: "answer-delta", delta: parsed.delta });
+                      } catch {
+                        /* ignore a malformed frame */
+                      }
+                    } else if (event === "done" || event === "error") {
+                      finished = true;
+                      break;
+                    }
+                    sep = buf.indexOf("\n\n");
+                  }
                 }
               }
               dispatch({ type: "answer-stream-done" });
