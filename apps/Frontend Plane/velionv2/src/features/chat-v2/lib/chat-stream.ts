@@ -11,15 +11,26 @@
 export type ChatStreamOptions = {
   content: string;
   model?: string;
+  sessionId?: string;
   browseWeb?: boolean;
+  tools?: string[];
   url?: string;
   signal?: AbortSignal;
+};
+
+export type ChatTiming = {
+  authMs?: number;
+  mintMs?: number;
+  scrapeMs?: number;
+  upstreamConnectMs?: number;
+  ttftMs?: number;
+  totalMs?: number;
 };
 
 export type ChatStreamChunk =
   | { type: "connected" }
   | { type: "delta"; delta: string; requestId?: string }
-  | { type: "done"; modelUsed: string; inputTokens: number; outputTokens: number }
+  | { type: "done"; modelUsed: string; inputTokens: number; outputTokens: number; timing?: ChatTiming }
   | { type: "error"; message: string };
 
 /**
@@ -29,13 +40,13 @@ export type ChatStreamChunk =
 export async function* streamChat(
   opts: ChatStreamOptions,
 ): AsyncGenerator<ChatStreamChunk, void, void> {
-  const { content, model, browseWeb, url, signal } = opts;
+  const { content, model, sessionId, browseWeb, tools, url, signal } = opts;
 
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ content, model, browseWeb, url }),
+    body: JSON.stringify({ content, model, sessionId, browseWeb, tools, url }),
     signal,
   });
 
@@ -83,6 +94,14 @@ export async function* streamChat(
           continue;
         }
 
+        if (eventName === "error") {
+          yield {
+            type: "error",
+            message: readErrorMessage(data),
+          };
+          return;
+        }
+
         if (eventName === "done" || data["done"] === true) {
           yield {
             type: "done",
@@ -91,6 +110,10 @@ export async function* streamChat(
               typeof data["inputTokens"] === "number" ? data["inputTokens"] : 0,
             outputTokens:
               typeof data["outputTokens"] === "number" ? data["outputTokens"] : 0,
+            timing:
+              data["timing"] && typeof data["timing"] === "object"
+                ? (data["timing"] as ChatTiming)
+                : undefined,
           };
           return;
         }
@@ -107,4 +130,11 @@ export async function* streamChat(
   } finally {
     reader.releaseLock();
   }
+}
+
+function readErrorMessage(data: Record<string, unknown>) {
+  const message = data["message"] ?? data["error"];
+  return typeof message === "string" && message.trim()
+    ? message.trim()
+    : "Model Plane stream failed.";
 }

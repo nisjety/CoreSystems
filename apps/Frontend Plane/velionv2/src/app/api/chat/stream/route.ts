@@ -49,7 +49,9 @@ function quarryRuntimeToken(): string | undefined {
 type ChatStreamRequest = {
   content: string;
   model?: string;
+  sessionId?: string;
   browseWeb?: boolean;
+  tools?: string[];
   url?: string; // explicit URL to scrape
 };
 
@@ -60,6 +62,19 @@ type ChatStreamRequest = {
 function encodeSse(event: string, data: unknown): Uint8Array {
   const enc = new TextEncoder();
   return enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+function normalizeOptionalString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) {
+    return undefined;
+  }
+
+  return trimmed;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -99,6 +114,18 @@ async function scrapeUrl(
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest): Promise<Response> {
+  // Latency tracking — time each phase (auth → mint → upstream-connect → TTFT
+  // → done) so a slow chat shows WHERE the time goes. Logged server-side and
+  // returned to the client in the `done` event's `timing` field. A large gap
+  // between `upstreamConnectMs` and `ttftMs` means the Model Plane stream is
+  // waiting on generation (e.g. the non-streaming Infer fallback) — not the BFF.
+  const t0 = Date.now();
+  const sinceStart = () => Date.now() - t0;
+  let authMs = 0;
+  let mintMs = 0;
+  let scrapeMs = 0;
+  let upstreamConnectMs = 0;
+
   // 1. Auth
   let actor: Awaited<ReturnType<typeof requireRequestActor>>;
   try {
@@ -109,6 +136,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
     return NextResponse.json({ error: "Auth error" }, { status: 500 });
   }
+  authMs = sinceStart();
 
   // 2. Parse body
   let parsed: ChatStreamRequest;
@@ -118,10 +146,15 @@ export async function POST(request: NextRequest): Promise<Response> {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { content, model, browseWeb, url: explicitUrl } = parsed;
+  const { content, browseWeb, url: explicitUrl } = parsed;
+  const model = normalizeOptionalString(parsed.model, 120);
+  const sessionId = normalizeOptionalString(parsed.sessionId, 160);
 
   if (!content || typeof content !== "string" || !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
+  }
+  if (content.length > 102_400) {
+    return NextResponse.json({ error: "content exceeds maximum length" }, { status: 413 });
   }
 
   // 3. Optional Quarry scrape (browse_web toggle or explicit URL)
@@ -129,7 +162,9 @@ export async function POST(request: NextRequest): Promise<Response> {
   if ((browseWeb || explicitUrl) && (explicitUrl || browseWeb)) {
     const scrapeTarget = explicitUrl ?? undefined;
     if (scrapeTarget) {
+      const scrapeStart = Date.now();
       groundingMarkdown = await scrapeUrl(request, scrapeTarget);
+      scrapeMs = Date.now() - scrapeStart;
     }
   }
 
@@ -138,7 +173,9 @@ export async function POST(request: NextRequest): Promise<Response> {
     : content;
 
   // 4. Mint Model Plane JWT
+  const mintStart = Date.now();
   const bearerToken = await mintAudienceToken(request, getModelPlaneAudience());
+  mintMs = Date.now() - mintStart;
 
   if (!bearerToken) {
     // Dev: fall back to env bypass token
@@ -172,9 +209,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       },
       body: JSON.stringify({
         content: finalContent,
-        model: model ?? undefined,
+        model,
+        session_key: sessionId,
+        thread_id: sessionId,
         profile: "chat",
-        browse_web: browseWeb ?? false,
       }),
       // Don't use the request's signal — keep the Model Plane call alive even
       // if the browser tab closes (ported from v1 rationale).
@@ -193,6 +231,10 @@ export async function POST(request: NextRequest): Promise<Response> {
     );
   }
 
+  // Time-to-open the Model Plane stream (auth + mint + scrape + connect).
+  // Everything after this is generation latency, not BFF overhead.
+  upstreamConnectMs = sinceStart();
+
   // 6. Pipe upstream SSE → browser SSE via ReadableStream
   const upstreamReader = upstream.body.getReader();
   const decoder = new TextDecoder();
@@ -200,6 +242,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let buffer = "";
+      let firstDeltaMs = 0;
 
       // Emit an initial "connected" event so the client knows the stream is live
       try {
@@ -247,6 +290,8 @@ export async function POST(request: NextRequest): Promise<Response> {
               model_used?: string;
               input_tokens?: number;
               output_tokens?: number;
+              error?: string;
+              message?: string;
             };
             try {
               chunk = JSON.parse(dataLines.join("\n")) as typeof chunk;
@@ -254,16 +299,49 @@ export async function POST(request: NextRequest): Promise<Response> {
               continue;
             }
 
+            if (eventName === "error") {
+              try {
+                controller.enqueue(
+                  encodeSse("error", {
+                    message: chunk.message ?? chunk.error ?? "Model Plane stream failed.",
+                    requestId: chunk.request_id,
+                  }),
+                );
+              } catch {
+                // consumer gone
+              }
+              controller.close();
+              return;
+            }
+
             const isDone = eventName === "done" || chunk.done === true;
 
             if (isDone) {
+              const timing = {
+                authMs,
+                mintMs,
+                scrapeMs,
+                upstreamConnectMs,
+                ttftMs: firstDeltaMs,
+                totalMs: sinceStart(),
+              };
+              // `upstreamConnectMs` ≈ BFF overhead; `ttftMs - upstreamConnectMs`
+              // ≈ Model Plane time-to-first-token; if ttftMs ≈ totalMs the
+              // gateway didn't stream (Infer fallback) — generation, not BFF.
+              console.info("[chat-stream timing]", {
+                sessionId,
+                modelUsed: chunk.model_used ?? "",
+                ...timing,
+              });
               try {
                 controller.enqueue(
                   encodeSse("done", {
                     done: true,
+                    requestId: chunk.request_id,
                     modelUsed: chunk.model_used ?? "",
                     inputTokens: chunk.input_tokens ?? 0,
                     outputTokens: chunk.output_tokens ?? 0,
+                    timing,
                   }),
                 );
               } catch {
@@ -274,6 +352,9 @@ export async function POST(request: NextRequest): Promise<Response> {
             }
 
             if (chunk.delta) {
+              if (firstDeltaMs === 0) {
+                firstDeltaMs = sinceStart();
+              }
               try {
                 controller.enqueue(
                   encodeSse("message", {

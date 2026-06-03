@@ -7,9 +7,15 @@ import type {
   ComposerToolId,
 } from "@/features/chat-v2/components/VelionComposer";
 import { toolLabels } from "@/features/chat-v2/lib/chat-format";
+import { streamChat, type ChatStreamChunk } from "@/features/chat-v2/lib/chat-stream";
 
 const STORAGE_KEY = "velion:v2:chat:sessions";
+const LAUNCH_MOTION_KEY = "velion:v2:chat:launch-motion";
+const LAUNCH_MOTION_TTL_MS = 4_000;
 const SESSION_LIMIT = 30;
+const WAITING_ASSISTANT_CONTENT = "Awaiting the live Velion agent stream.";
+const EMPTY_MODEL_RESPONSE_CONTENT = "Model Plane completed without returning text.";
+const MODEL_STREAM_ERROR_CONTENT = "I couldn't connect to the Model Plane stream. Try again in a moment.";
 
 export type MessageRole = "user" | "assistant";
 export type TaskStepStatus = "done" | "active" | "waiting" | "error" | "stopped";
@@ -21,7 +27,12 @@ export type ChatMessage = {
   createdAt: string;
   tools: ComposerToolId[];
   attachments: ComposerAttachment[];
-  status?: "waiting" | "stopped";
+  status?: "waiting" | "stopped" | "error";
+  model?: string;
+  requestId?: string;
+  modelUsed?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 };
 
 export type AgentTaskStep = {
@@ -76,6 +87,7 @@ type ChatStoreUpdate = ChatPageState | ((current: ChatPageState) => ChatPageStat
 let chatStoreState = hydrationSafeInitialState;
 let chatStoreHydrated = false;
 const chatStoreListeners = new Set<() => void>();
+const assistantStreamControllers = new Map<string, AbortController>();
 
 export function VelionChatWorkspaceProvider({ children }: { children: ReactNode }) {
   const chatState = useSyncExternalStore(
@@ -97,44 +109,7 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
 
   const submit = (payload: ComposerSubmitPayload) => {
-    updateChatStore((current) => {
-      const submittedAt = new Date().toISOString();
-      const targetSessionId = current.activeSessionId ?? createId();
-      const existingSession = current.sessions.find((session) => session.id === targetSessionId);
-      const userMessage: ChatMessage = {
-        id: createId(),
-        role: "user",
-        content: payload.text,
-        createdAt: submittedAt,
-        tools: payload.tools,
-        attachments: payload.attachments,
-      };
-      const assistantStatus: ChatMessage = {
-        id: createId(),
-        role: "assistant",
-        content: "Awaiting the live Velion agent stream.",
-        createdAt: submittedAt,
-        tools: payload.tools,
-        attachments: [],
-        status: "waiting",
-      };
-      const nextSession: ChatSession = {
-        id: targetSessionId,
-        title: existingSession?.messages.length ? existingSession.title : createTitle(payload.text),
-        preview: createPreview(payload.text),
-        updatedAt: submittedAt,
-        messages: [...(existingSession?.messages ?? []), userMessage, assistantStatus],
-        taskSteps: buildTaskSteps(payload, submittedAt, "submit"),
-        branchCount: existingSession?.branchCount ?? 0,
-      };
-      const withoutTarget = current.sessions.filter((session) => session.id !== targetSessionId);
-
-      return {
-        activeSessionId: targetSessionId,
-        composerDraft: "",
-        sessions: [nextSession, ...withoutTarget].slice(0, SESSION_LIMIT),
-      };
-    });
+    submitChatPayload(payload);
   };
 
   const startNewChat = () => {
@@ -146,11 +121,16 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
   };
 
   const stopTask = () => {
-    updateChatStore((current) => {
-      if (!current.activeSessionId) {
-        return current;
-      }
+    hydrateChatStore();
+    const activeTaskSessionId = chatStoreState.activeSessionId;
+    if (!activeTaskSessionId) {
+      return;
+    }
 
+    assistantStreamControllers.get(activeTaskSessionId)?.abort();
+    assistantStreamControllers.delete(activeTaskSessionId);
+
+    updateChatStore((current) => {
       const stoppedAt = new Date().toISOString();
 
       return {
@@ -176,45 +156,52 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
   };
 
   const regenerate = () => {
-    updateChatStore((current) => {
-      const active = current.sessions.find((session) => session.id === current.activeSessionId);
-      const lastUserMessage = [...(active?.messages ?? [])].reverse().find((message) => message.role === "user");
+    hydrateChatStore();
+    const current = chatStoreState;
+    const active = current.sessions.find((session) => session.id === current.activeSessionId);
+    const lastUserMessage = [...(active?.messages ?? [])].reverse().find((message) => message.role === "user");
 
-      if (!active || !lastUserMessage) {
-        return current;
-      }
+    if (!active || !lastUserMessage) {
+      return;
+    }
 
-      const regeneratedAt = new Date().toISOString();
-      const payload: ComposerSubmitPayload = {
-        text: lastUserMessage.content,
-        tools: lastUserMessage.tools,
-        attachments: lastUserMessage.attachments,
-      };
-      const assistantStatus: ChatMessage = {
-        id: createId(),
-        role: "assistant",
-        content: "Regeneration queued for the live Velion agent stream.",
-        createdAt: regeneratedAt,
-        tools: lastUserMessage.tools,
-        attachments: [],
-        status: "waiting",
-      };
+    const regeneratedAt = new Date().toISOString();
+    const payload: ComposerSubmitPayload = {
+      text: lastUserMessage.content,
+      model: lastUserMessage.model,
+      tools: lastUserMessage.tools,
+      attachments: lastUserMessage.attachments,
+    };
+    const assistantStatus: ChatMessage = {
+      id: createId(),
+      role: "assistant",
+      content: "Regeneration queued for the live Velion agent stream.",
+      createdAt: regeneratedAt,
+      model: payload.model,
+      tools: lastUserMessage.tools,
+      attachments: [],
+      status: "waiting",
+    };
 
-      return {
-        ...current,
-        sessions: current.sessions.map((session) => (
-          session.id === active.id
-            ? {
-                ...session,
-                branchCount: session.branchCount + 1,
-                preview: createPreview(lastUserMessage.content),
-                updatedAt: regeneratedAt,
-                messages: [...session.messages, assistantStatus],
-                taskSteps: buildTaskSteps(payload, regeneratedAt, "regenerate"),
-              }
-            : session
-        )),
-      };
+    updateChatStore({
+      ...current,
+      sessions: current.sessions.map((session) => (
+        session.id === active.id
+          ? {
+              ...session,
+              branchCount: session.branchCount + 1,
+              preview: createPreview(lastUserMessage.content),
+              updatedAt: regeneratedAt,
+              messages: [...session.messages, assistantStatus],
+              taskSteps: buildTaskSteps(payload, regeneratedAt, "regenerate"),
+            }
+          : session
+      )),
+    });
+    startAssistantStream({
+      assistantMessageId: assistantStatus.id,
+      payload,
+      sessionId: active.id,
     });
   };
 
@@ -309,6 +296,89 @@ export function useVelionChatWorkspaceSafe() {
   return use(ChatWorkspaceContext);
 }
 
+export function launchChatSessionFromComposer(payload: ComposerSubmitPayload) {
+  return submitChatPayload(payload, { targetSessionId: createId() });
+}
+
+function submitChatPayload(
+  payload: ComposerSubmitPayload,
+  options: { targetSessionId?: string } = {},
+) {
+  hydrateChatStore();
+
+  const current = chatStoreState;
+  const submittedAt = new Date().toISOString();
+  const targetSessionId = options.targetSessionId ?? current.activeSessionId ?? createId();
+  const existingSession = current.sessions.find((session) => session.id === targetSessionId);
+  const nextSession = createSubmittedChatSession({
+    existingSession: existingSession ?? null,
+    payload,
+    submittedAt,
+    targetSessionId,
+  });
+  const withoutTarget = current.sessions.filter((session) => session.id !== targetSessionId);
+
+  updateChatStore({
+    activeSessionId: targetSessionId,
+    composerDraft: "",
+    sessions: [nextSession, ...withoutTarget].slice(0, SESSION_LIMIT),
+  });
+
+  const assistantMessage = [...nextSession.messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.status === "waiting");
+  if (assistantMessage) {
+    startAssistantStream({
+      assistantMessageId: assistantMessage.id,
+      payload,
+      sessionId: nextSession.id,
+    });
+  }
+
+  return nextSession;
+}
+
+export function writeChatLaunchMotion(sessionId: string, prompt: string) {
+  if (typeof sessionStorage === "undefined") {
+    return;
+  }
+
+  try {
+    sessionStorage.setItem(
+      LAUNCH_MOTION_KEY,
+      JSON.stringify({
+        prompt,
+        sessionId,
+        createdAt: Date.now(),
+      }),
+    );
+  } catch {
+    // Motion metadata is optional; the chat launch itself must still succeed.
+  }
+}
+
+export function consumeChatLaunchMotion(sessionId: string) {
+  if (typeof sessionStorage === "undefined") {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(LAUNCH_MOTION_KEY) ?? "null") as {
+      createdAt?: unknown;
+      sessionId?: unknown;
+    } | null;
+
+    sessionStorage.removeItem(LAUNCH_MOTION_KEY);
+
+    return parsed?.sessionId === sessionId &&
+      typeof parsed.createdAt === "number" &&
+      Date.now() - parsed.createdAt < LAUNCH_MOTION_TTL_MS;
+  } catch {
+    sessionStorage.removeItem(LAUNCH_MOTION_KEY);
+    return false;
+  }
+}
+
 function subscribeChatStore(listener: () => void) {
   chatStoreListeners.add(listener);
   hydrateChatStore();
@@ -354,6 +424,307 @@ function updateChatStore(update: ChatStoreUpdate) {
   emitChatStoreChange();
 }
 
+function startAssistantStream({
+  assistantMessageId,
+  payload,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  payload: ComposerSubmitPayload;
+  sessionId: string;
+}) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  assistantStreamControllers.get(sessionId)?.abort();
+  const controller = new AbortController();
+  assistantStreamControllers.set(sessionId, controller);
+
+  void runAssistantStream({
+    assistantMessageId,
+    controller,
+    payload,
+    sessionId,
+  });
+}
+
+async function runAssistantStream({
+  assistantMessageId,
+  controller,
+  payload,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  controller: AbortController;
+  payload: ComposerSubmitPayload;
+  sessionId: string;
+}) {
+  let completed = false;
+
+  try {
+    for await (const chunk of streamChat({
+      browseWeb: payload.tools.includes("search"),
+      content: payload.text,
+      model: payload.model,
+      sessionId,
+      signal: controller.signal,
+      tools: payload.tools,
+    })) {
+      if (controller.signal.aborted) {
+        return;
+      }
+
+      if (applyStreamChunk({ assistantMessageId, chunk, sessionId })) {
+        completed = true;
+        return;
+      }
+    }
+
+    if (!completed && !controller.signal.aborted) {
+      failAssistantStream({
+        assistantMessageId,
+        message: "Model Plane stream closed before completion.",
+        sessionId,
+      });
+    }
+  } catch (error) {
+    if (controller.signal.aborted || isAbortError(error)) {
+      return;
+    }
+
+    failAssistantStream({
+      assistantMessageId,
+      message: error instanceof Error ? error.message : "Model Plane stream failed.",
+      sessionId,
+    });
+  } finally {
+    if (assistantStreamControllers.get(sessionId) === controller) {
+      assistantStreamControllers.delete(sessionId);
+    }
+  }
+}
+
+function applyStreamChunk({
+  assistantMessageId,
+  chunk,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  chunk: ChatStreamChunk;
+  sessionId: string;
+}) {
+  switch (chunk.type) {
+    case "connected":
+      markAssistantStreamConnected(sessionId);
+      return false;
+    case "delta":
+      appendAssistantDelta({
+        assistantMessageId,
+        delta: chunk.delta,
+        requestId: chunk.requestId,
+        sessionId,
+      });
+      return false;
+    case "done":
+      if (chunk.timing) {
+        // Latency breakdown for the just-finished turn — see where slow chats
+        // spend time. ttftMs ≈ totalMs means the gateway didn't stream tokens.
+        console.info("[velion-chat timing]", {
+          sessionId,
+          modelUsed: chunk.modelUsed,
+          ...chunk.timing,
+        });
+      }
+      finishAssistantStream({
+        assistantMessageId,
+        inputTokens: chunk.inputTokens,
+        modelUsed: chunk.modelUsed,
+        outputTokens: chunk.outputTokens,
+        sessionId,
+      });
+      return true;
+    case "error":
+      failAssistantStream({
+        assistantMessageId,
+        message: chunk.message,
+        sessionId,
+      });
+      return true;
+  }
+}
+
+function markAssistantStreamConnected(sessionId: string) {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    taskSteps: session.taskSteps.map((step) => {
+      if (step.title === "Context route prepared") {
+        return {
+          ...step,
+          detail: "Request authorized and routed to the Model Plane gateway.",
+          status: "done",
+        };
+      }
+      if (step.title === "Model gateway") {
+        return {
+          ...step,
+          detail: "Streaming response from Model Plane.",
+          status: "active",
+        };
+      }
+      return step;
+    }),
+  }));
+}
+
+function appendAssistantDelta({
+  assistantMessageId,
+  delta,
+  requestId,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  delta: string;
+  requestId?: string;
+  sessionId: string;
+}) {
+  if (!delta) {
+    return;
+  }
+
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    messages: session.messages.map((message) => {
+      if (message.id !== assistantMessageId) {
+        return message;
+      }
+
+      const previousContent = message.status === "waiting" && isAssistantPlaceholder(message.content)
+        ? ""
+        : message.content;
+
+      return {
+        ...message,
+        content: `${previousContent}${delta}`,
+        requestId: requestId ?? message.requestId,
+        status: "waiting",
+      };
+    }),
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
+function finishAssistantStream({
+  assistantMessageId,
+  inputTokens,
+  modelUsed,
+  outputTokens,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  inputTokens: number;
+  modelUsed: string;
+  outputTokens: number;
+  sessionId: string;
+}) {
+  const finishedAt = new Date().toISOString();
+
+  updateChatSession(sessionId, (session) => {
+    let assistantContent = "";
+
+    const messages = session.messages.map((message) => {
+      if (message.id !== assistantMessageId) {
+        return message;
+      }
+
+      const streamedContent = isAssistantPlaceholder(message.content) ? "" : message.content;
+      assistantContent = streamedContent.trim() ? streamedContent : EMPTY_MODEL_RESPONSE_CONTENT;
+      return {
+        ...message,
+        content: assistantContent,
+        inputTokens,
+        modelUsed,
+        outputTokens,
+        status: undefined,
+      };
+    });
+
+    return {
+      ...session,
+      messages,
+      preview: assistantContent ? createPreview(assistantContent) : session.preview,
+      taskSteps: session.taskSteps.map((step) => {
+        if (step.title === "Context route prepared") {
+          return { ...step, status: "done" };
+        }
+        if (step.title === "Model gateway") {
+          const tokenSummary = outputTokens > 0 ? `${outputTokens} output tokens` : "no output token count";
+          return {
+            ...step,
+            detail: `Completed via ${modelUsed || "Model Plane"} with ${tokenSummary}.`,
+            status: "done",
+          };
+        }
+        return step;
+      }),
+      updatedAt: finishedAt,
+    };
+  });
+}
+
+function failAssistantStream({
+  assistantMessageId,
+  message,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  message: string;
+  sessionId: string;
+}) {
+  const failedAt = new Date().toISOString();
+
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    messages: session.messages.map((chatMessage) => (
+      chatMessage.id === assistantMessageId
+        ? {
+            ...chatMessage,
+            content: MODEL_STREAM_ERROR_CONTENT,
+            status: "error",
+          }
+        : chatMessage
+    )),
+    taskSteps: session.taskSteps.map((step) => (
+      step.title === "Model gateway"
+        ? {
+            ...step,
+            detail: message,
+            status: "error",
+          }
+        : step
+    )),
+    updatedAt: failedAt,
+  }));
+}
+
+function updateChatSession(sessionId: string, updater: (session: ChatSession) => ChatSession) {
+  updateChatStore((current) => ({
+    ...current,
+    sessions: current.sessions.map((session) => (
+      session.id === sessionId ? updater(session) : session
+    )),
+  }));
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function isAssistantPlaceholder(content: string) {
+  return content === WAITING_ASSISTANT_CONTENT ||
+    content === "Regeneration queued for the live Velion agent stream.";
+}
+
 function emitChatStoreChange() {
   for (const listener of chatStoreListeners) {
     listener();
@@ -379,18 +750,60 @@ function buildTaskSteps(payload: ComposerSubmitPayload, createdAt: string, mode:
     {
       id: createId(),
       title: "Context route prepared",
-      detail: "Ready to request the signed-in user's inbox, knowledge, and connected source context.",
+      detail: "Ready to request the signed-in user's Model Plane context.",
       status: "active",
       createdAt,
     },
     {
       id: createId(),
       title: "Model gateway",
-      detail: "Waiting for the production agent stream endpoint. The UI does not generate fallback answers.",
+      detail: "Opening the production Model Plane stream endpoint.",
       status: "waiting",
       createdAt,
     },
   ];
+}
+
+function createSubmittedChatSession({
+  existingSession,
+  payload,
+  submittedAt,
+  targetSessionId,
+}: {
+  existingSession: ChatSession | null;
+  payload: ComposerSubmitPayload;
+  submittedAt: string;
+  targetSessionId: string;
+}): ChatSession {
+  const userMessage: ChatMessage = {
+    id: createId(),
+    role: "user",
+    content: payload.text,
+    createdAt: submittedAt,
+    model: payload.model,
+    tools: payload.tools,
+    attachments: payload.attachments,
+  };
+  const assistantStatus: ChatMessage = {
+    id: createId(),
+    role: "assistant",
+    content: WAITING_ASSISTANT_CONTENT,
+    createdAt: submittedAt,
+    model: payload.model,
+    tools: payload.tools,
+    attachments: [],
+    status: "waiting",
+  };
+
+  return {
+    id: targetSessionId,
+    title: existingSession?.messages.length ? existingSession.title : createTitle(payload.text),
+    preview: createPreview(payload.text),
+    updatedAt: submittedAt,
+    messages: [...(existingSession?.messages ?? []), userMessage, assistantStatus],
+    taskSteps: buildTaskSteps(payload, submittedAt, "submit"),
+    branchCount: existingSession?.branchCount ?? 0,
+  };
 }
 
 function readStoredSessions(): ChatSession[] {
