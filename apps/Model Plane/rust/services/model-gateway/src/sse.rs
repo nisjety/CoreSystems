@@ -137,6 +137,11 @@ pub async fn invoke_stream_sse(
         }
     };
 
+    // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
+    // stop it cooperatively. `cancels` is moved into the task to finish() on end.
+    let cancels = state.cancels.clone();
+    let cancel_flag = cancels.register(&request_id);
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     tokio::spawn(async move {
@@ -146,6 +151,15 @@ pub async fn invoke_stream_sse(
         // docs/HARNESS_PHASE1.md §3b).
         let mut seq: u64 = 0;
         while let Some(result) = grpc_stream.next().await {
+            // chat-parity §4: cooperative cancel — the cancel endpoint flipped
+            // this flag; emit a terminal `stopped` and end the stream.
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                let stopped = crate::sse_events::ChatEvent::Stopped {
+                    reason: "client cancelled".to_owned(),
+                };
+                let _ = tx.send(Ok(stopped.to_sse(&req_id))).await;
+                break;
+            }
             match result {
                 Ok(chunk) if !chunk.done => {
                     let sse_chunk = SseChunk {
@@ -267,6 +281,8 @@ pub async fn invoke_stream_sse(
                 }
             }
         }
+        // chat-parity §4: stop tracking this stream for cancellation.
+        cancels.finish(&req_id);
     });
 
     Sse::new(ReceiverStream::new(rx))

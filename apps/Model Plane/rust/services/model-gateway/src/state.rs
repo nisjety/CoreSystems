@@ -96,6 +96,9 @@ pub struct AppState {
     /// just-ingested document's embeddings landing instead of guessing.
     /// Best-effort, process-local, bounded; cheap clone (Arc-backed).
     pub doc_ready: crate::doc_indexed_consumer::DocReadyRegistry,
+    /// chat-parity §4 — active in-flight stream cancellation registry. Populated
+    /// by `/v1/invoke/stream`; flipped by `POST /v1/invoke/{id}/cancel`.
+    pub cancels: crate::cancel_registry::CancelRegistry,
     /// Wave 9 — Quarry-v2 edge client used by `Fetch` + `ExtractStructured`
     /// gRPC handlers. Constructed unconditionally; the client itself
     /// reports `Available() == false` when `QUARRY_EDGE_URL` is unset
@@ -179,6 +182,7 @@ impl AppState {
             // (both build on `new()`); the `dataplane.documents.indexed`
             // consumer is spawned against this same instance in `main.rs`.
             doc_ready: crate::doc_indexed_consumer::DocReadyRegistry::new(),
+            cancels: crate::cancel_registry::CancelRegistry::new(),
             // `Client::new` with empty base_url returns an Unavailable
             // client; the gRPC handlers degrade to Unimplemented in
             // that case.

@@ -65,7 +65,10 @@ mod tests {
         let flag = reg.register("req-1");
         assert!(!flag.load(Ordering::Relaxed), "starts un-cancelled");
         assert!(reg.cancel("req-1"), "found the active stream");
-        assert!(flag.load(Ordering::Relaxed), "flag flipped — the loop will stop");
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "flag flipped — the loop will stop"
+        );
     }
 
     #[test]

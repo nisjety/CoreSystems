@@ -76,6 +76,8 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route("/v1/invoke", post(invoke))
         .route("/v1/invoke/stream", post(sse::invoke_stream_sse))
         .route("/v1/invoke/resume/:request_id", get(sse::invoke_resume_sse))
+        // chat-parity §4: cooperative stop/cancel of an in-flight stream.
+        .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
         // Orchestration read + mutations
         .merge(orchestration_routes())
         // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
@@ -2736,6 +2738,29 @@ pub struct InvokeResponse {
     pub request_id: String,
     pub content: String,
     pub model_used: String,
+}
+
+/// chat-parity §4 — cooperatively cancel an in-flight `/v1/invoke/stream`.
+/// Flips the registered cancel flag; the SSE loop emits a terminal `stopped`
+/// event and closes. 404 when no active stream matches the id.
+async fn invoke_cancel(State(state): State<AppState>, Path(request_id): Path<String>) -> Response {
+    if state.cancels.cancel(&request_id) {
+        (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "request_id": request_id, "cancelled": true })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "request_id": request_id,
+                "cancelled": false,
+                "error": "no active stream",
+            })),
+        )
+            .into_response()
+    }
 }
 
 #[allow(clippy::too_many_lines)]
