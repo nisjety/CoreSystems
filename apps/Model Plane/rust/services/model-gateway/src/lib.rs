@@ -23,6 +23,7 @@ pub mod normalize;
 pub mod profile;
 pub mod quarry;
 pub mod rate_limit;
+pub mod retrieval;
 pub mod runtime_registries;
 pub mod session_flow;
 pub mod skills;

@@ -85,16 +85,40 @@ pub async fn invoke_stream_sse(
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
     let features = req.features.clone();
 
+    // chat-parity §8: RAG grounding via Data Plane v2 retrieval (reused — no
+    // new RAG store). When the request opts in, retrieve context, prepend it as
+    // a system message, and carry the sources to emit as `citation` events.
+    // Degrades to ungrounded chat if retrieval is unavailable.
+    let grounding = if crate::retrieval::wants_grounding(&features) {
+        crate::retrieval::retrieve(&state, &org_id, &user_id, &req.content).await
+    } else {
+        None
+    };
+    let (context_block, citations) = match grounding {
+        Some(g) => (g.context_block, g.citations),
+        None => (String::new(), Vec::new()),
+    };
+
+    let mut messages = Vec::new();
+    if !context_block.is_empty() {
+        messages.push(ChatMessage {
+            role: "system".to_owned(),
+            content: context_block,
+            name: String::new(),
+        });
+    }
+    messages.push(ChatMessage {
+        role: "user".to_owned(),
+        content: req.content.clone(),
+        name: String::new(),
+    });
+
     let grpc_req = InferRequest {
         request_id: request_id.clone(),
         org_id: org_id.clone(),
         model: model.clone(),
         provider_hint: String::new(),
-        messages: vec![ChatMessage {
-            role: "user".to_owned(),
-            content: req.content.clone(),
-            name: String::new(),
-        }],
+        messages,
         temperature: 0.7,
         max_tokens: 1024,
         structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
@@ -133,6 +157,7 @@ pub async fn invoke_stream_sse(
                 model,
                 start,
                 features,
+                citations,
             );
         }
     };
@@ -145,6 +170,21 @@ pub async fn invoke_stream_sse(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     tokio::spawn(async move {
+        // chat-parity §8: emit retrieved sources up front (gated on the
+        // `citations` family) so the UI can render the Sources panel before
+        // the answer streams in.
+        for c in citations {
+            let cite = crate::sse_events::ChatEvent::Citation {
+                id: c.id,
+                title: c.title,
+                url: c.url,
+                snippet: c.snippet,
+            };
+            if cite.should_emit(&features) {
+                let _ = tx.send(Ok(cite.to_sse(&req_id))).await;
+            }
+        }
+
         // Per-request sequence index used as the SSE `id:` field so a
         // reconnecting client can send `Last-Event-Id` and resume from the
         // next delta (replay endpoint lands in Phase 2 — see
@@ -324,9 +364,24 @@ fn infer_fallback_stream(
     model: String,
     start: std::time::Instant,
     features: Vec<String>,
+    citations: Vec<crate::retrieval::GroundingCitation>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
+        // chat-parity §8: surface retrieved sources before the answer (gated on
+        // the `citations` family), mirroring the streaming path.
+        for c in citations {
+            let cite = crate::sse_events::ChatEvent::Citation {
+                id: c.id,
+                title: c.title,
+                url: c.url,
+                snippet: c.snippet,
+            };
+            if cite.should_emit(&features) {
+                let _ = tx.send(Ok(cite.to_sse(&request_id))).await;
+            }
+        }
+
         let publisher = state.publisher.clone();
         let buffers = state.stream_buffers.clone();
         let result = state
