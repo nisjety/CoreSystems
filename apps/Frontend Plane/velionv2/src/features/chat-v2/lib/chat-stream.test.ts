@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadModels, loadThreadHistory, streamChat } from "./chat-stream";
+import { loadModels, loadThreadHistory, streamChat, uploadDocument } from "./chat-stream";
 
 describe("streamChat", () => {
   afterEach(() => {
@@ -249,5 +249,31 @@ describe("loadModels", () => {
       ),
     );
     expect(await loadModels()).toEqual([{ id: "ok", features: [] }]);
+  });
+});
+
+describe("uploadDocument", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs the document and returns its id + status", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ documentId: "doc-9", status: "indexed" }), { status: 200 }),
+    );
+    const out = await uploadDocument({ title: "Notes", content: "hello world" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/chat/documents");
+    expect(init).toMatchObject({ method: "POST", credentials: "include" });
+    expect(out).toEqual({ documentId: "doc-9", status: "indexed" });
+  });
+
+  it("returns null for empty content without fetching, and on failure", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    expect(await uploadDocument({ title: "x", content: "   " })).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValueOnce(new Response("err", { status: 502 }));
+    expect(await uploadDocument({ title: "x", content: "real" })).toBeNull();
   });
 });

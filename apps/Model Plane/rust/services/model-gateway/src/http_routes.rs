@@ -82,6 +82,8 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
+        // chat-parity §2: upload a document into Data Plane (→ retrievable via RAG).
+        .route("/v1/documents", post(create_document))
         // Orchestration read + mutations
         .merge(orchestration_routes())
         // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
@@ -2832,6 +2834,68 @@ async fn list_models(
         .collect();
 
     Ok(Json(ListModelsHttpResponse { models }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDocumentHttpRequest {
+    title: String,
+    content: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default, rename = "type")]
+    doc_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateDocumentHttpResponse {
+    document_id: String,
+    status: String,
+}
+
+/// chat-parity §2 — upload a document into Data Plane v2 (the document/ingest
+/// owner) so it becomes retrievable by the RAG path. Org scope comes from the
+/// authenticated claims. No document store is duplicated in the gateway.
+async fn create_document(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<CreateDocumentHttpRequest>,
+) -> Result<Json<CreateDocumentHttpResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use mp_contracts::dataplane::documents_v2::CreateDocumentRequest;
+
+    if req.content.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "content is required"})),
+        ));
+    }
+
+    let resp = state
+        .document_client
+        .clone()
+        .create_document(CreateDocumentRequest {
+            org_id: claims.org_id.clone(),
+            source: req.source.unwrap_or_else(|| "chat-upload".to_owned()),
+            r#type: req.doc_type.unwrap_or_else(|| "text".to_owned()),
+            title: req.title,
+            content: req.content,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("data-plane create_document failed: {}", e.message()),
+                })),
+            )
+        })?
+        .into_inner();
+
+    let document = resp.document.unwrap_or_default();
+    Ok(Json(CreateDocumentHttpResponse {
+        document_id: document.document_id,
+        status: document.status,
+    }))
 }
 
 #[derive(Debug, Serialize)]

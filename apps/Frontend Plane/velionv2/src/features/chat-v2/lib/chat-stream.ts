@@ -45,6 +45,10 @@ export type ChatStreamChunk =
   | { type: "citation"; id: string; title: string; url: string; snippet: string }
   | { type: "step_update"; id: string; title: string; detail: string; status: string }
   | { type: "artifact"; id: string; kind: string; title: string; content: string; version: number }
+  | { type: "tool_call"; id: string; name: string; args: unknown }
+  | { type: "tool_result"; id: string; status: string; output: string; error?: string }
+  | { type: "attachment"; id: string; name: string; mime: string; url: string; size: number }
+  | { type: "stopped"; reason: string }
   | {
       type: "usage";
       inputTokens: number;
@@ -213,6 +217,45 @@ export async function* streamChat(
           continue;
         }
 
+        if (eventName === "tool_call") {
+          yield {
+            type: "tool_call",
+            id: asString(data["id"]),
+            name: asString(data["name"]),
+            args: data["args"] ?? null,
+          };
+          continue;
+        }
+
+        if (eventName === "tool_result") {
+          yield {
+            type: "tool_result",
+            id: asString(data["id"]),
+            status: asString(data["status"]),
+            output: asString(data["output"]),
+            error: typeof data["error"] === "string" ? data["error"] : undefined,
+          };
+          continue;
+        }
+
+        if (eventName === "attachment") {
+          yield {
+            type: "attachment",
+            id: asString(data["id"]),
+            name: asString(data["name"]),
+            mime: asString(data["mime"]),
+            url: asString(data["url"]),
+            size: asNumber(data["size"]),
+          };
+          continue;
+        }
+
+        // Terminal control event: server-side stop/cancel acknowledgement.
+        if (eventName === "stopped") {
+          yield { type: "stopped", reason: asString(data["reason"]) };
+          return;
+        }
+
         if (eventName === "usage") {
           yield {
             type: "usage",
@@ -296,6 +339,41 @@ export async function loadModels(): Promise<ModelDescriptor[]> {
     );
   } catch {
     return [];
+  }
+}
+
+export type UploadedDocument = { documentId: string; status: string };
+
+/**
+ * Upload a document into Data Plane (chat-parity §2 file upload) so subsequent
+ * RAG turns can ground on it. Returns null on any failure.
+ */
+export async function uploadDocument(input: {
+  title: string;
+  content: string;
+  source?: string;
+  type?: string;
+}): Promise<UploadedDocument | null> {
+  if (!input.content.trim()) {
+    return null;
+  }
+  try {
+    const res = await fetch("/api/chat/documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const data = (await res.json()) as { documentId?: string; status?: string };
+    return {
+      documentId: typeof data.documentId === "string" ? data.documentId : "",
+      status: typeof data.status === "string" ? data.status : "",
+    };
+  } catch {
+    return null;
   }
 }
 
