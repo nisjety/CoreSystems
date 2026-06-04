@@ -132,6 +132,7 @@ mod tests {
             max_tokens: 1024,
             structured_output_schema: None,
             zdr: false,
+            ..Default::default()
         }
     }
 
@@ -143,6 +144,7 @@ mod tests {
             stop_reason: "end_turn".to_owned(),
             input_tokens: 10,
             output_tokens: 5,
+            ..Default::default()
         }
     }
 

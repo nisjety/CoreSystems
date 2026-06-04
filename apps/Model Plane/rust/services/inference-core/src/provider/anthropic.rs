@@ -65,7 +65,60 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         }
     }
 
+    // chat-parity §2 function-calling: translate tool definitions to the
+    // Anthropic `tools`/`tool_choice` shape. Empty → omitted.
+    if !req.tools.is_empty() {
+        let tools: Vec<serde_json::Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                let schema = serde_json::from_str::<serde_json::Value>(&t.parameters_json)
+                    .unwrap_or_else(|_| serde_json::json!({ "type": "object", "properties": {} }));
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": schema,
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::Value::Array(tools);
+        let tc = if req.tool_choice.is_empty() {
+            "auto"
+        } else {
+            req.tool_choice.as_str()
+        };
+        body["tool_choice"] = match tc {
+            "auto" => serde_json::json!({ "type": "auto" }),
+            "none" => serde_json::json!({ "type": "none" }),
+            "required" => serde_json::json!({ "type": "any" }),
+            name => serde_json::json!({ "type": "tool", "name": name }),
+        };
+    }
+
     body
+}
+
+/// Parse Anthropic `tool_use` content blocks into the internal [`ToolCall`].
+fn parse_tool_calls(json: &serde_json::Value) -> Vec<super::ToolCall> {
+    json["content"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|b| b["type"].as_str() == Some("tool_use"))
+                .filter_map(|b| {
+                    let id = b["id"].as_str()?.to_owned();
+                    let name = b["name"].as_str()?.to_owned();
+                    let arguments_json =
+                        serde_json::to_string(&b["input"]).unwrap_or_else(|_| "{}".to_owned());
+                    Some(super::ToolCall {
+                        id,
+                        name,
+                        arguments_json,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse the Anthropic response JSON into our unified response type.
@@ -74,12 +127,16 @@ fn to_i32_or_max(value: i64) -> i32 {
 }
 
 fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
+    // Concatenate all text blocks (a response may interleave text + tool_use).
     let content = json["content"]
         .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|block| block["text"].as_str())
-        .unwrap_or("")
-        .to_owned();
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
 
     let model_used = json["model"].as_str().unwrap_or("unknown").to_owned();
     let stop_reason = json["stop_reason"]
@@ -88,6 +145,7 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         .to_owned();
     let input_tokens = to_i32_or_max(json["usage"]["input_tokens"].as_i64().unwrap_or(0));
     let output_tokens = to_i32_or_max(json["usage"]["output_tokens"].as_i64().unwrap_or(0));
+    let tool_calls = parse_tool_calls(json);
 
     InferResponse {
         request_id: request_id.to_owned(),
@@ -96,6 +154,7 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         stop_reason,
         input_tokens,
         output_tokens,
+        tool_calls,
     }
 }
 
@@ -291,5 +350,47 @@ impl ProviderRouter for AnthropicProvider {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::{build_request_body, parse_tool_calls};
+    use crate::provider::{InferRequest, ToolDefinition};
+
+    #[test]
+    fn build_request_body_includes_tools_in_anthropic_shape() {
+        let req = InferRequest {
+            model: "claude-sonnet-4-20250514".to_owned(),
+            max_tokens: 1024,
+            tools: vec![ToolDefinition {
+                name: "get_weather".to_owned(),
+                description: "Get weather".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{"city":{"type":"string"}}}"#
+                    .to_owned(),
+            }],
+            tool_choice: "required".to_owned(),
+            ..Default::default()
+        };
+        let body = build_request_body(&req);
+        assert_eq!(body["tools"][0]["name"], "get_weather");
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+        // "required" maps to Anthropic's "any".
+        assert_eq!(body["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn parse_tool_calls_extracts_tool_use_blocks() {
+        let json = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "Let me check." },
+                { "type": "tool_use", "id": "tu_1", "name": "get_weather", "input": { "city": "Oslo" } }
+            ]
+        });
+        let calls = parse_tool_calls(&json);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "tu_1");
+        assert_eq!(calls[0].name, "get_weather");
+        assert!(calls[0].arguments_json.contains("Oslo"));
     }
 }

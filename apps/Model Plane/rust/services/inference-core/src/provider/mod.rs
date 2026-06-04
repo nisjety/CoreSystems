@@ -30,7 +30,7 @@ pub(crate) fn narrow_f64(value: f64) -> f32 {
 }
 
 /// A unified inference request used internally across providers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct InferRequest {
     pub request_id: String,
     pub provider_hint: String,
@@ -40,6 +40,27 @@ pub struct InferRequest {
     pub max_tokens: i32,
     pub structured_output_schema: Option<String>,
     pub zdr: bool,
+    /// chat-parity §2 function-calling: tools the model may call (empty = none).
+    pub tools: Vec<ToolDefinition>,
+    /// Tool selection policy: "auto" | "none" | "required" | a tool name.
+    pub tool_choice: String,
+}
+
+/// A function the model may call (chat-parity §2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema (as a JSON string) for the tool's parameters.
+    pub parameters_json: String,
+}
+
+/// A model-requested tool invocation (chat-parity §2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments_json: String,
 }
 
 /// A single chat message.
@@ -52,7 +73,7 @@ pub struct ChatMessage {
 }
 
 /// Unified inference response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct InferResponse {
     pub request_id: String,
     pub content: String,
@@ -60,6 +81,8 @@ pub struct InferResponse {
     pub stop_reason: String,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    /// chat-parity §2: tool calls the model requested (empty for a plain answer).
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// A single streaming chunk.

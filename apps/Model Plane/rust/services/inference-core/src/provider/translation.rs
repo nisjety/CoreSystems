@@ -754,6 +754,7 @@ impl LlmTranslationProvider {
                 max_tokens: 2048,
                 structured_output_schema: None,
                 zdr: true,
+                ..Default::default()
             })
             .await?;
         Ok(result.content.trim().to_owned())

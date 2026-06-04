@@ -251,6 +251,7 @@ pub async fn invoke_stream_sse(
         max_tokens: 1024,
         structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
         zdr: req.zdr,
+        ..Default::default()
     };
 
     // Clone the request so a streaming failure can retry via the (working)

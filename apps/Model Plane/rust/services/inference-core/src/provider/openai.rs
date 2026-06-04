@@ -218,7 +218,63 @@ fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
         }
     }
 
+    // chat-parity §2 function-calling: translate tool definitions to the
+    // OpenAI `tools`/`tool_choice` shape. Empty → omitted (plain completion).
+    if !req.tools.is_empty() {
+        let tools: Vec<serde_json::Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                let params = serde_json::from_str::<serde_json::Value>(&t.parameters_json)
+                    .unwrap_or_else(|_| serde_json::json!({ "type": "object", "properties": {} }));
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": params,
+                    }
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::Value::Array(tools);
+        let choice = if req.tool_choice.is_empty() {
+            "auto"
+        } else {
+            req.tool_choice.as_str()
+        };
+        body["tool_choice"] = match choice {
+            "auto" | "none" | "required" => serde_json::json!(choice),
+            name => serde_json::json!({ "type": "function", "function": { "name": name } }),
+        };
+    }
+
     body
+}
+
+/// Parse the chat-completion `message.tool_calls` into the internal
+/// [`ToolCall`] shape. Returns empty when the model produced a plain answer.
+fn parse_tool_calls(json: &serde_json::Value) -> Vec<super::ToolCall> {
+    json["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|tc| {
+                    let id = tc["id"].as_str()?.to_owned();
+                    let name = tc["function"]["name"].as_str()?.to_owned();
+                    let arguments_json = tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_owned();
+                    Some(super::ToolCall {
+                        id,
+                        name,
+                        arguments_json,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn build_embedding_request_body(req: &EmbedRequest, include_model: bool) -> serde_json::Value {
@@ -306,6 +362,7 @@ impl ProviderRouter for OpenAiProvider {
             .to_owned();
         let input_tokens = to_i32_or_max(json["usage"]["prompt_tokens"].as_i64().unwrap_or(0));
         let output_tokens = to_i32_or_max(json["usage"]["completion_tokens"].as_i64().unwrap_or(0));
+        let tool_calls = parse_tool_calls(&json);
 
         info!(model = %req.model, provider = "openai", "infer completed");
 
@@ -316,6 +373,7 @@ impl ProviderRouter for OpenAiProvider {
             stop_reason,
             input_tokens,
             output_tokens,
+            tool_calls,
         })
     }
 
@@ -544,7 +602,57 @@ mod tests {
             max_tokens: 1024,
             structured_output_schema: None,
             zdr: false,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn build_request_body_includes_tools_and_choice() {
+        let mut req = make_request("gpt-4o");
+        req.tools = vec![super::super::ToolDefinition {
+            name: "search_web".to_owned(),
+            description: "Search the web".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.to_owned(),
+        }];
+        req.tool_choice = "auto".to_owned();
+        let body = build_request_body(&req, false);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "search_web");
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn build_request_body_omits_tools_when_empty() {
+        let body = build_request_body(&make_request("gpt-4o"), false);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn parse_tool_calls_extracts_function_calls() {
+        let json = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "search_web", "arguments": "{\"q\":\"rust\"}" }
+                    }]
+                }
+            }]
+        });
+        let calls = parse_tool_calls(&json);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "search_web");
+        assert_eq!(calls[0].arguments_json, "{\"q\":\"rust\"}");
+    }
+
+    #[test]
+    fn parse_tool_calls_empty_for_plain_answer() {
+        let json = serde_json::json!({ "choices": [{ "message": { "content": "hi" } }] });
+        assert!(parse_tool_calls(&json).is_empty());
     }
 
     #[test]

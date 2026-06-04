@@ -898,6 +898,7 @@ async fn ai_chat(
             max_tokens: 4096,
             structured_output_schema: req.structured_output_schema.unwrap_or_default(),
             zdr: false,
+            ..Default::default()
         })
         .await
         .map_err(|e| grpc_status_to_http(&e))?
@@ -1025,6 +1026,7 @@ async fn recommend_plan(
             max_tokens: 1100,
             structured_output_schema: RECOMMEND_PLAN_SCHEMA.to_owned(),
             zdr: true,
+            ..Default::default()
         })
         .await
         .map_err(|e| grpc_status_to_http(&e))?
@@ -3088,6 +3090,7 @@ async fn invoke(
                     .clone()
                     .unwrap_or_default(),
                 zdr: normalized.zdr,
+                ..Default::default()
             })
             .await
             .map_err(|e| {

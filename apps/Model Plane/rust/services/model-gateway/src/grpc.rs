@@ -155,6 +155,7 @@ fn build_infer_request(
         max_tokens: req.max_tokens,
         structured_output_schema: req.structured_output_schema.clone(),
         zdr: req.zdr,
+        ..Default::default()
     }
 }
 
@@ -1247,6 +1248,7 @@ impl ModelGateway for GatewayService {
             max_tokens: 2048,
             structured_output_schema: req.schema_json.clone(),
             zdr: req.zdr,
+            ..Default::default()
         };
 
         let mut client = self.state.inference_client.clone();
@@ -1413,6 +1415,7 @@ mod tests {
                 stop_reason: "stop".to_owned(),
                 input_tokens: 1,
                 output_tokens: 1,
+                tool_calls: Vec::new(),
             }))
         }
 

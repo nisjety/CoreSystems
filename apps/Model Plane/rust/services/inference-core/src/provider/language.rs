@@ -445,6 +445,7 @@ impl LanguageAnalyticsProvider for LlmLanguageProvider {
                 max_tokens: 2_048,
                 structured_output_schema: None,
                 zdr: true,
+                ..Default::default()
             })
             .await?;
         let results = parse_llm_results(req.operation, &response.content, &req.texts);

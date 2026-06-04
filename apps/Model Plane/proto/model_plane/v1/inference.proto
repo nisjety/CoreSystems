@@ -99,6 +99,34 @@ message InferRequest {
 
   // Zero Data Retention mode. When true, inference results are not cached or logged durably.
   bool zdr = 9;
+
+  // chat-parity §2 function-calling: tool/function definitions the model may
+  // call. Empty → no tools offered (plain text completion, unchanged).
+  repeated ToolDefinition tools = 10;
+
+  // Tool selection policy: "auto" (default), "none", "required", or a specific
+  // tool name. Empty is treated as "auto" when `tools` is non-empty.
+  string tool_choice = 11;
+}
+
+// ToolDefinition — a function the model may call (chat-parity §2).
+message ToolDefinition {
+  // Function name (e.g. "search_web").
+  string name = 1;
+  // Human/model-readable description of what the tool does.
+  string description = 2;
+  // JSON Schema (as a JSON string) describing the tool's parameters.
+  string parameters_json = 3;
+}
+
+// ToolCall — a model-requested tool invocation (chat-parity §2).
+message ToolCall {
+  // Provider-assigned call id (echoed back with the result).
+  string id = 1;
+  // Name of the tool to invoke.
+  string name = 2;
+  // JSON-encoded arguments object.
+  string arguments_json = 3;
 }
 
 // ChatMessage — a single message in the conversation.
@@ -131,6 +159,9 @@ message InferResponse {
   int32 input_tokens = 5;
   // Number of generated tokens.
   int32 output_tokens = 6;
+
+  // chat-parity §2: tool calls the model requested (empty for a plain answer).
+  repeated ToolCall tool_calls = 7;
 }
 
 // InferChunk — a single chunk in a streaming inference response.

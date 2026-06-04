@@ -77,6 +77,15 @@ impl InferenceCore for InferenceService {
             stop_reason: result.stop_reason,
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,
+            tool_calls: result
+                .tool_calls
+                .into_iter()
+                .map(|tc| pb::ToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    arguments_json: tc.arguments_json,
+                })
+                .collect(),
         }))
     }
 
@@ -841,6 +850,16 @@ fn to_internal_request(req: &pb::InferRequest) -> provider::InferRequest {
         })
         .collect();
 
+    let tools = req
+        .tools
+        .iter()
+        .map(|t| provider::ToolDefinition {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            parameters_json: t.parameters_json.clone(),
+        })
+        .collect();
+
     provider::InferRequest {
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
@@ -854,6 +873,8 @@ fn to_internal_request(req: &pb::InferRequest) -> provider::InferRequest {
             Some(req.structured_output_schema.clone())
         },
         zdr: req.zdr,
+        tools,
+        tool_choice: req.tool_choice.clone(),
     }
 }
 
