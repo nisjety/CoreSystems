@@ -34,6 +34,7 @@ export type ChatStreamChunk =
   | { type: "delta"; delta: string; requestId?: string }
   | { type: "reasoning_delta"; delta: string }
   | { type: "citation"; id: string; title: string; url: string; snippet: string }
+  | { type: "step_update"; id: string; title: string; detail: string; status: string }
   | {
       type: "usage";
       inputTokens: number;
@@ -151,6 +152,17 @@ export async function* streamChat(
           continue;
         }
 
+        if (eventName === "step_update") {
+          yield {
+            type: "step_update",
+            id: asString(data["id"]),
+            title: asString(data["title"]),
+            detail: asString(data["detail"]),
+            status: asString(data["status"]),
+          };
+          continue;
+        }
+
         if (eventName === "usage") {
           yield {
             type: "usage",
@@ -171,12 +183,35 @@ export async function* streamChat(
             requestId: typeof data["requestId"] === "string" ? data["requestId"] : undefined,
           };
         }
-        // Any other event family (tool_call, artifact, step_update, …) is
-        // ignored gracefully until its consumer lands — forward-compatible.
+        // Any other event family (tool_call, artifact, …) is ignored
+        // gracefully until its consumer lands — forward-compatible.
       }
     }
   } finally {
     reader.releaseLock();
+  }
+}
+
+/**
+ * Best-effort cooperative cancel of an in-flight stream (chat-parity §4). POSTs
+ * to the BFF cancel route, which forwards to Model Plane
+ * /v1/invoke/{requestId}/cancel so the server emits a terminal `stopped` and
+ * stops billing. Fire-and-forget — the client's AbortController already halts
+ * the local read; this stops the upstream generation too.
+ */
+export async function cancelChat(requestId: string): Promise<void> {
+  if (!requestId) {
+    return;
+  }
+  try {
+    await fetch("/api/chat/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ requestId }),
+    });
+  } catch {
+    // best-effort; the local abort already stopped the read.
   }
 }
 

@@ -7,7 +7,12 @@ import type {
   ComposerToolId,
 } from "@/features/chat-v2/components/VelionComposer";
 import { toolLabels } from "@/features/chat-v2/lib/chat-format";
-import { streamChat, type ChatStreamChunk, type ChatTiming } from "@/features/chat-v2/lib/chat-stream";
+import {
+  cancelChat,
+  streamChat,
+  type ChatStreamChunk,
+  type ChatTiming,
+} from "@/features/chat-v2/lib/chat-stream";
 
 const STORAGE_KEY = "velion:v2:chat:sessions";
 const LAUNCH_MOTION_KEY = "velion:v2:chat:launch-motion";
@@ -144,6 +149,17 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
 
     assistantStreamControllers.get(activeTaskSessionId)?.abort();
     assistantStreamControllers.delete(activeTaskSessionId);
+
+    // chat-parity §4: the abort only halts the local read — also tell the
+    // server to stop generating, keyed by the in-flight assistant message's
+    // request_id (captured from the streamed deltas). Best-effort.
+    const cancelSession = chatStoreState.sessions.find((session) => session.id === activeTaskSessionId);
+    const waitingMessage = cancelSession?.messages.find(
+      (message) => message.role === "assistant" && message.status === "waiting",
+    );
+    if (waitingMessage?.requestId) {
+      void cancelChat(waitingMessage.requestId);
+    }
 
     updateChatStore((current) => {
       const stoppedAt = new Date().toISOString();
@@ -533,7 +549,7 @@ async function runAssistantStream({
       content: payload.text,
       // Opt into the rich event families the chat UI renders (chat-parity §2):
       // real usage (insight chip), citations (Sources), reasoning (thinking).
-      features: ["usage", "citations", "reasoning"],
+      features: ["usage", "citations", "reasoning", "steps"],
       model: payload.model,
       sessionId,
       signal: controller.signal,
@@ -646,7 +662,62 @@ function applyStreamChunk({
         confidence: chunk.confidence,
       }));
       return false;
+    case "step_update":
+      upsertTaskStep({ sessionId, step: chunk });
+      return false;
   }
+}
+
+function coerceTaskStepStatus(value: string): TaskStepStatus {
+  switch (value) {
+    case "done":
+    case "active":
+    case "waiting":
+    case "error":
+    case "stopped":
+      return value;
+    default:
+      return "active";
+  }
+}
+
+/// Insert or update a live agent step (drives the Steps tab + activity card).
+function upsertTaskStep({
+  sessionId,
+  step,
+}: {
+  sessionId: string;
+  step: { id: string; title: string; detail: string; status: string };
+}) {
+  updateChatSession(sessionId, (session) => {
+    const status = coerceTaskStepStatus(step.status);
+    const existingIndex = session.taskSteps.findIndex((existing) => existing.id === step.id);
+
+    if (existingIndex >= 0) {
+      const taskSteps = session.taskSteps.slice();
+      taskSteps[existingIndex] = {
+        ...taskSteps[existingIndex],
+        title: step.title || taskSteps[existingIndex].title,
+        detail: step.detail || taskSteps[existingIndex].detail,
+        status,
+      };
+      return { ...session, taskSteps };
+    }
+
+    return {
+      ...session,
+      taskSteps: [
+        ...session.taskSteps,
+        {
+          id: step.id || createId(),
+          title: step.title,
+          detail: step.detail,
+          status,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    };
+  });
 }
 
 /// Apply an update to one assistant message within a session.
