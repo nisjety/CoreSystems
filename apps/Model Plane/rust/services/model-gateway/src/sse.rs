@@ -447,10 +447,15 @@ fn infer_fallback_stream(
                     .publish(&subjects::stream_subject("closed"), &close)
                     .await;
                 gateway_metrics::stream_closed();
-                let err = json!({ "request_id": request_id, "error": e.message() });
-                let _ = tx
-                    .send(Ok(Event::default().event("error").data(err.to_string())))
-                    .await;
+                // chat-parity §20: structured error — stable `code` + `retryable`
+                // so the client can branch (the `message` field is preserved for
+                // back-compat with existing error handlers).
+                let err_evt = crate::sse_events::ChatEvent::Error {
+                    code: "model_plane_unavailable".to_owned(),
+                    message: e.message().to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(err_evt.to_sse(&request_id))).await;
             }
         }
     });

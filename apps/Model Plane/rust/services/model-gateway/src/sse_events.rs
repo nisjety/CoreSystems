@@ -75,6 +75,13 @@ pub enum ChatEvent {
     },
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
+    /// Terminal control: a structured error (chat-parity §20). `code` is a
+    /// stable machine token; `retryable` tells the client whether to offer retry.
+    Error {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
 }
 
 impl ChatEvent {
@@ -89,7 +96,8 @@ impl ChatEvent {
             ChatEvent::Citation { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. } => Some("usage"),
-            ChatEvent::Stopped { .. } => None, // terminal control — always allowed
+            // terminal control events — always allowed
+            ChatEvent::Stopped { .. } | ChatEvent::Error { .. } => None,
         }
     }
 
@@ -118,6 +126,7 @@ impl ChatEvent {
             ChatEvent::Attachment { .. } => "attachment",
             ChatEvent::Usage { .. } => "usage",
             ChatEvent::Stopped { .. } => "stopped",
+            ChatEvent::Error { .. } => "error",
         }
     }
 
@@ -187,6 +196,12 @@ impl ChatEvent {
                 "confidence": confidence,
             }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
+            ChatEvent::Error { code, message, retryable } => json!({
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+                "request_id": request_id,
+            }),
         }
     }
 
@@ -262,6 +277,20 @@ mod tests {
             reason: "user".into()
         }
         .should_emit(&no_features));
+        // Error is a control event too — it must reach the plain path so a
+        // profile:"chat" client still learns the stream failed (chat-parity §20).
+        let err = ChatEvent::Error {
+            code: "model_plane_unavailable".into(),
+            message: "boom".into(),
+            retryable: true,
+        };
+        assert!(err.should_emit(&no_features));
+        assert_eq!(err.name(), "error");
+        let payload = err.payload("req-1");
+        assert_eq!(payload["code"], "model_plane_unavailable");
+        assert_eq!(payload["message"], "boom");
+        assert_eq!(payload["retryable"], true);
+        assert_eq!(payload["request_id"], "req-1");
     }
 
     #[test]
