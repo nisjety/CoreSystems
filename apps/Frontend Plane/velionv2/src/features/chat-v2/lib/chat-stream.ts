@@ -220,6 +220,38 @@ export async function cancelChat(requestId: string): Promise<void> {
   }
 }
 
+export type ThreadHistoryMessage = { role: string; content: string };
+
+/**
+ * Reload a thread's conversation for cross-device resume (chat-parity §1).
+ * GETs the BFF history route, which reads session-core's canonical
+ * ListConversation via Model Plane. Returns [] on any failure so the caller
+ * can degrade to an empty thread rather than throwing.
+ */
+export async function loadThreadHistory(threadId: string): Promise<ThreadHistoryMessage[]> {
+  if (!threadId) {
+    return [];
+  }
+  try {
+    const res = await fetch(`/api/chat/history?threadId=${encodeURIComponent(threadId)}`, {
+      method: "GET",
+      credentials: "include",
+    });
+    if (!res.ok) {
+      return [];
+    }
+    const data = (await res.json()) as { messages?: ThreadHistoryMessage[] };
+    return Array.isArray(data.messages)
+      ? data.messages.filter(
+          (m): m is ThreadHistoryMessage =>
+            typeof m?.role === "string" && typeof m?.content === "string",
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { streamChat } from "./chat-stream";
+import { loadThreadHistory, streamChat } from "./chat-stream";
 
 describe("streamChat", () => {
   afterEach(() => {
@@ -132,5 +132,84 @@ describe("streamChat", () => {
       },
       { type: "done", inputTokens: 12, modelUsed: "gpt-4o", outputTokens: 34 },
     ]);
+  });
+
+  it("surfaces structured error code + retryable when present", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response([
+        "event: error",
+        'data: {"code":"model_plane_unavailable","message":"down","retryable":true}',
+        "",
+        "",
+      ].join("\n")),
+    );
+    const chunks = [];
+    for await (const chunk of streamChat({ content: "Hi" })) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toEqual([
+      { type: "error", message: "down", code: "model_plane_unavailable", retryable: true },
+    ]);
+  });
+});
+
+describe("loadThreadHistory", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("GETs the BFF history route and returns parsed messages", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          threadId: "t-1",
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "assistant", content: "hello" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const messages = await loadThreadHistory("t-1");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("/api/chat/history?threadId=t-1");
+    expect(init).toMatchObject({ method: "GET", credentials: "include" });
+    expect(messages).toEqual([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]);
+  });
+
+  it("returns [] without fetching for an empty threadId", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    expect(await loadThreadHistory("")).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns [] on a non-ok response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("nope", { status: 404 }),
+    );
+    expect(await loadThreadHistory("t-2")).toEqual([]);
+  });
+
+  it("filters malformed messages from the payload", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          messages: [
+            { role: "user", content: "ok" },
+            { role: 42, content: "bad-role" },
+            { role: "assistant" },
+            "garbage",
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    expect(await loadThreadHistory("t-3")).toEqual([{ role: "user", content: "ok" }]);
   });
 });

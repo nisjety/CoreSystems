@@ -78,6 +78,8 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route("/v1/invoke/resume/:request_id", get(sse::invoke_resume_sse))
         // chat-parity §4: cooperative stop/cancel of an in-flight stream.
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
+        // chat-parity §1: reload a thread's conversation (cross-device resume).
+        .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Orchestration read + mutations
         .merge(orchestration_routes())
         // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
@@ -2766,6 +2768,70 @@ async fn invoke_cancel(State(state): State<AppState>, Path(request_id): Path<Str
         )
             .into_response()
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListThreadMessagesResponse {
+    thread_id: String,
+    messages: Vec<ThreadMessage>,
+}
+
+/// chat-parity §1 — reload a thread's conversation history (cross-device
+/// resume). Reads from session-core's `ListConversation` (the canonical
+/// conversation store); org scope comes from the authenticated claims so a
+/// caller can never read another org's thread.
+async fn list_thread_messages(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(thread_id): Path<String>,
+) -> Result<Json<ListThreadMessagesResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use mp_contracts::model_plane::v1::ListConversationRequest;
+
+    let trimmed = thread_id.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "thread_id is required"})),
+        ));
+    }
+
+    let response = state
+        .session_client
+        .clone()
+        .list_conversation(ListConversationRequest {
+            org_id: claims.org_id.clone(),
+            thread_id: trimmed.to_owned(),
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("session-core list_conversation failed: {}", e.message()),
+                })),
+            )
+        })?
+        .into_inner();
+
+    let messages = response
+        .messages
+        .into_iter()
+        .map(|m| ThreadMessage {
+            role: m.role,
+            content: m.content,
+        })
+        .collect();
+
+    Ok(Json(ListThreadMessagesResponse {
+        thread_id: trimmed.to_owned(),
+        messages,
+    }))
 }
 
 #[allow(clippy::too_many_lines)]
