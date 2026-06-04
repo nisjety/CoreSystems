@@ -1462,6 +1462,7 @@ mod tests {
                     provider: "mock".to_owned(),
                     modality: "embedding".to_owned(),
                     streaming: false,
+                    features: Vec::new(),
                 }],
             }))
         }

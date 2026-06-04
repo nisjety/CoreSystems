@@ -2740,6 +2740,10 @@ pub struct InvokeRequest {
     /// the original response without re-running inference or re-charging budget.
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// chat-parity §2 — multimodal attachments. An image attachment routes the
+    /// turn through inference-core `AnalyzeImage` (vision) on the stream path.
+    #[serde(default)]
+    pub attachments: Vec<crate::vision::InvokeAttachment>,
 }
 
 #[derive(Debug, Serialize)]

@@ -59,6 +59,14 @@ type ChatStreamRequest = {
   // Optional client idempotency key (chat-parity §1). Dedupes a concurrent
   // duplicate stream (double-click / retry) and enables cached-answer replay.
   idempotencyKey?: string;
+  // Multimodal attachments (chat-parity §2). An image attachment routes the
+  // turn through inference-core AnalyzeImage (vision). Forwarded verbatim.
+  attachments?: Array<{
+    kind?: string;
+    url?: string;
+    data_base64?: string;
+    mime_type?: string;
+  }>;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -172,6 +180,11 @@ export async function POST(request: NextRequest): Promise<Response> {
     : [];
   const wantsCitations = features.includes("citations");
   const idempotencyKey = normalizeOptionalString(parsed.idempotencyKey, 160);
+  // Multimodal attachments (chat-parity §2): forward up to 8, image kinds only
+  // matter to the gateway's vision branch; others are ignored downstream.
+  const attachments = Array.isArray(parsed.attachments)
+    ? parsed.attachments.filter((a) => a && typeof a === "object").slice(0, 8)
+    : [];
 
   if (!content || typeof content !== "string" || !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
@@ -242,6 +255,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         profile: "chat",
         features,
         ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       }),
       // Don't use the request's signal — keep the Model Plane call alive even
       // if the browser tab closes (ported from v1 rationale).

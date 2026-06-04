@@ -174,6 +174,21 @@ pub async fn invoke_stream_sse(
         None => None,
     };
 
+    // chat-parity §2: multimodal vision input. If an image is attached, route
+    // the turn through inference-core AnalyzeImage (the vision owner) with the
+    // user message as the prompt and stream the analysis as the answer.
+    if let Some(image) = crate::vision::select_image(&req.attachments) {
+        return vision_stream(
+            state.clone(),
+            request_id,
+            org_id,
+            model,
+            image,
+            req.content.clone(),
+            idem_guard,
+        );
+    }
+
     // chat-parity §8: RAG grounding via Data Plane v2 retrieval (reused — no
     // new RAG store). When the request opts in, retrieve context, prepend it as
     // a system message, and carry the sources to emit as `citation` events.
@@ -453,6 +468,98 @@ fn chunk_for_stream(text: &str, target: usize) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// SSE stream for a multimodal (vision) turn: route the image + the user's
+/// prompt to inference-core `AnalyzeImage` (the vision owner) and stream the
+/// analysis as the answer (chat-parity §2). Emits an honest `error` event on
+/// failure — never a fake `done`.
+#[allow(clippy::too_many_arguments)]
+fn vision_stream(
+    state: AppState,
+    request_id: String,
+    org_id: String,
+    model: String,
+    image: crate::vision::ImageInput,
+    prompt: String,
+    idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    tokio::spawn(async move {
+        use mp_contracts::model_plane::v1::AnalyzeImageRequest;
+        let _idem_guard = idem_guard;
+        let result = state
+            .inference_client
+            .clone()
+            .analyze_image(tonic::Request::new(AnalyzeImageRequest {
+                request_id: request_id.clone(),
+                org_id,
+                image_url: image.url,
+                image_data: image.data,
+                mime_type: image.mime_type,
+                prompt,
+                model: model.clone(),
+                provider_hint: String::new(),
+                max_tokens: 1024,
+            }))
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                let model_used = if resp.model_used.is_empty() {
+                    model
+                } else {
+                    resp.model_used
+                };
+                let mut seq: u64 = 0;
+                for piece in chunk_for_stream(&resp.description, 48) {
+                    let sse_chunk = SseChunk {
+                        request_id: request_id.clone(),
+                        delta: piece,
+                        done: false,
+                        model_used: model_used.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    };
+                    if tx
+                        .send(Ok(Event::default()
+                            .id(seq.to_string())
+                            .event("chunk")
+                            .data(serde_json::to_string(&sse_chunk).unwrap_or_default())))
+                        .await
+                        .is_err()
+                    {
+                        return; // client disconnected
+                    }
+                    seq += 1;
+                }
+                let done = SseChunk {
+                    request_id: request_id.clone(),
+                    delta: String::new(),
+                    done: true,
+                    model_used,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                };
+                let _ = tx
+                    .send(Ok(Event::default()
+                        .id(seq.to_string())
+                        .event("done")
+                        .data(serde_json::to_string(&done).unwrap_or_default())))
+                    .await;
+            }
+            Err(e) => {
+                let evt = crate::sse_events::ChatEvent::Error {
+                    code: "vision_unavailable".to_owned(),
+                    message: e.message().to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(evt.to_sse(&request_id))).await;
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx))
 }
 
 /// Fallback SSE stream used when `InferStream` is unavailable: call the

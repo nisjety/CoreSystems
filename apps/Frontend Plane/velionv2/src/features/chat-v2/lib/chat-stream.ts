@@ -20,6 +20,9 @@ export type ChatStreamOptions = {
   /** Optional idempotency key (chat-parity §1) — dedupes a concurrent duplicate
    *  stream and enables cached-answer replay on retry. */
   idempotencyKey?: string;
+  /** Multimodal attachments (chat-parity §2). An image routes the turn through
+   *  inference-core AnalyzeImage (vision). */
+  attachments?: Array<{ kind?: string; url?: string; data_base64?: string; mime_type?: string }>;
   signal?: AbortSignal;
 };
 
@@ -56,8 +59,18 @@ export type ChatStreamChunk =
 export async function* streamChat(
   opts: ChatStreamOptions,
 ): AsyncGenerator<ChatStreamChunk, void, void> {
-  const { content, model, sessionId, browseWeb, tools, url, features, idempotencyKey, signal } =
-    opts;
+  const {
+    content,
+    model,
+    sessionId,
+    browseWeb,
+    tools,
+    url,
+    features,
+    idempotencyKey,
+    attachments,
+    signal,
+  } = opts;
 
   const response = await fetch("/api/chat/stream", {
     method: "POST",
@@ -72,6 +85,7 @@ export async function* streamChat(
       url,
       features,
       idempotencyKey,
+      attachments,
     }),
     signal,
   });
