@@ -178,13 +178,20 @@ and voice realtime transport (P3, highest risk).
   `GET /v1/threads/:id/messages` → `ListConversation`, BFF `/api/chat/history`, client
   `loadThreadHistory`, and workspace `hydrateSessionFromServer` on select. (commits `1828820`, `e535366`)
 
-**Phase 1 — remaining:**
-- Per-model feature flags: `ProviderCapabilities` exists in inference-core but is unconsumed; needs a
-  gateway `ListModels` proxy + UI gating before the proto plumbing earns its keep (defer to P2/5).
-- Moderation: owned by **capability-core** (`safety_policies`: pii_filter/content_safety/injection_defense
-  + `cap.safety.pii-filter`) — wire the gateway's Wave-10i `Policy` into the invoke path; do NOT
-  build a second moderation system.
-- Stream-path idempotency (regenerate dedup over the SSE path) — coupled to durable result storage.
+- **Stream-path regenerate-dedup**: idempotency guard extended to
+  `/v1/invoke/stream` — concurrent dup rejected (`duplicate_in_flight`), completed key replays its
+  answer, claim released on stream end via the guard's Drop. (commit `4a77c9d`)
+- **Moderation at the prompt boundary** (`moderation.rs`): always-on injection-defense framing of
+  untrusted RAG context (`scan_injection`) + opt-in (`moderation`/`pii`) PII redaction before the
+  prompt reaches an external provider. capability-core owns the policy; the gateway enforces.
+  (commit `3f10354`)
+- **Per-model feature flags** end-to-end: `ProviderCapabilities::feature_flags()` →
+  `ModelInfo.features` → gateway `GET /v1/models` → BFF `/api/chat/models` → client `loadModels()`.
+  (commit `82ecd1c`)
+
+**Phase 1 — COMPLETE.** Remaining safety nuance: `content_safety` (toxicity) classification needs a
+classifier model behind an inference-core moderation route (owner-correct) — not faked with a
+keyword list.
 
 **Phase 2 — landed & verified:**
 - **RAG grounding via Data Plane v2** (`retrieval.rs`): opt-in (`rag`/`knowledge`/`citations`) →
