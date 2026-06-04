@@ -23,6 +23,9 @@ export type ChatStreamOptions = {
   /** Multimodal attachments (chat-parity §2). An image routes the turn through
    *  inference-core AnalyzeImage (vision). */
   attachments?: Array<{ kind?: string; url?: string; data_base64?: string; mime_type?: string }>;
+  /** Explicit image-generation intent (chat-parity §2) — routes to GenerateImage
+   *  and yields an `artifact` chunk. */
+  generateImage?: boolean;
   signal?: AbortSignal;
 };
 
@@ -41,6 +44,7 @@ export type ChatStreamChunk =
   | { type: "reasoning_delta"; delta: string }
   | { type: "citation"; id: string; title: string; url: string; snippet: string }
   | { type: "step_update"; id: string; title: string; detail: string; status: string }
+  | { type: "artifact"; id: string; kind: string; title: string; content: string; version: number }
   | {
       type: "usage";
       inputTokens: number;
@@ -69,6 +73,7 @@ export async function* streamChat(
     features,
     idempotencyKey,
     attachments,
+    generateImage,
     signal,
   } = opts;
 
@@ -86,6 +91,7 @@ export async function* streamChat(
       features,
       idempotencyKey,
       attachments,
+      generateImage,
     }),
     signal,
   });
@@ -191,6 +197,18 @@ export async function* streamChat(
             title: asString(data["title"]),
             detail: asString(data["detail"]),
             status: asString(data["status"]),
+          };
+          continue;
+        }
+
+        if (eventName === "artifact") {
+          yield {
+            type: "artifact",
+            id: asString(data["id"]),
+            kind: asString(data["kind"]),
+            title: asString(data["title"]),
+            content: asString(data["content"]),
+            version: asNumber(data["version"]),
           };
           continue;
         }

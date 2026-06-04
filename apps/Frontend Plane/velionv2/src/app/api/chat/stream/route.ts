@@ -67,6 +67,9 @@ type ChatStreamRequest = {
     data_base64?: string;
     mime_type?: string;
   }>;
+  // Explicit image-generation intent (chat-parity §2). Routes to GenerateImage
+  // and emits an `artifact` event.
+  generateImage?: boolean;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -185,6 +188,12 @@ export async function POST(request: NextRequest): Promise<Response> {
   const attachments = Array.isArray(parsed.attachments)
     ? parsed.attachments.filter((a) => a && typeof a === "object").slice(0, 8)
     : [];
+  const generateImage = parsed.generateImage === true;
+  // Image generation emits an `artifact` event — ensure the family is enabled
+  // so the gateway forwards it (the BFF re-streams artifacts verbatim).
+  if (generateImage && !features.includes("artifacts")) {
+    features.push("artifacts");
+  }
 
   if (!content || typeof content !== "string" || !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
@@ -256,6 +265,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         features,
         ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(generateImage ? { generate_image: true } : {}),
       }),
       // Don't use the request's signal — keep the Model Plane call alive even
       // if the browser tab closes (ported from v1 rationale).

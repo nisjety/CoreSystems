@@ -146,6 +146,7 @@ mod tests {
             features: Vec::new(),
             idempotency_key: None,
             attachments: Vec::new(),
+            generate_image: false,
         }
     }
 

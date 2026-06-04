@@ -189,6 +189,20 @@ pub async fn invoke_stream_sse(
         );
     }
 
+    // chat-parity §2: explicit image generation. Routes the prompt to
+    // inference-core GenerateImage (the image owner) and emits an `artifact`.
+    if req.generate_image {
+        return image_gen_stream(
+            state.clone(),
+            request_id,
+            org_id,
+            req.model.clone().unwrap_or_default(),
+            req.content.clone(),
+            features,
+            idem_guard,
+        );
+    }
+
     // chat-parity §8: RAG grounding via Data Plane v2 retrieval (reused — no
     // new RAG store). When the request opts in, retrieve context, prepend it as
     // a system message, and carry the sources to emit as `citation` events.
@@ -552,6 +566,116 @@ fn vision_stream(
             Err(e) => {
                 let evt = crate::sse_events::ChatEvent::Error {
                     code: "vision_unavailable".to_owned(),
+                    message: e.message().to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(evt.to_sse(&request_id))).await;
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// SSE stream for an explicit image-generation turn: route the prompt to
+/// inference-core `GenerateImage` (the image owner) and emit the result as an
+/// `artifact` event (gated on the artifacts family) plus a `chunk` carrying the
+/// image reference so plain clients still receive it (chat-parity §2).
+#[allow(clippy::too_many_arguments)]
+fn image_gen_stream(
+    state: AppState,
+    request_id: String,
+    org_id: String,
+    model: String,
+    prompt: String,
+    features: Vec<String>,
+    idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    tokio::spawn(async move {
+        use mp_contracts::model_plane::v1::GenerateImageRequest;
+        let _idem_guard = idem_guard;
+        let result = state
+            .inference_client
+            .clone()
+            .generate_image(tonic::Request::new(GenerateImageRequest {
+                request_id: request_id.clone(),
+                org_id,
+                prompt: prompt.clone(),
+                model,
+                provider_hint: String::new(),
+                size: "1024x1024".to_owned(),
+                quality: "standard".to_owned(),
+                n: 1,
+            }))
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                let model_used = resp.model_used.clone();
+                let (content, title) = match resp.images.into_iter().next() {
+                    Some(img) => {
+                        let content = if !img.url.is_empty() {
+                            img.url
+                        } else if img.b64_json.is_empty() {
+                            String::new()
+                        } else {
+                            format!("data:image/png;base64,{}", img.b64_json)
+                        };
+                        let title = if img.revised_prompt.is_empty() {
+                            prompt.clone()
+                        } else {
+                            img.revised_prompt
+                        };
+                        (content, title)
+                    }
+                    None => (String::new(), prompt.clone()),
+                };
+
+                let artifact = crate::sse_events::ChatEvent::Artifact {
+                    id: request_id.clone(),
+                    kind: "image".to_owned(),
+                    title,
+                    content: content.clone(),
+                    version: 1,
+                };
+                if artifact.should_emit(&features) {
+                    let _ = tx.send(Ok(artifact.to_sse(&request_id))).await;
+                }
+                if !content.is_empty() {
+                    let sse_chunk = SseChunk {
+                        request_id: request_id.clone(),
+                        delta: content,
+                        done: false,
+                        model_used: model_used.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    };
+                    let _ = tx
+                        .send(Ok(Event::default()
+                            .id("0")
+                            .event("chunk")
+                            .data(serde_json::to_string(&sse_chunk).unwrap_or_default())))
+                        .await;
+                }
+                let done = SseChunk {
+                    request_id: request_id.clone(),
+                    delta: String::new(),
+                    done: true,
+                    model_used,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                };
+                let _ = tx
+                    .send(Ok(Event::default()
+                        .id("1")
+                        .event("done")
+                        .data(serde_json::to_string(&done).unwrap_or_default())))
+                    .await;
+            }
+            Err(e) => {
+                let evt = crate::sse_events::ChatEvent::Error {
+                    code: "image_gen_unavailable".to_owned(),
                     message: e.message().to_owned(),
                     retryable: true,
                 };

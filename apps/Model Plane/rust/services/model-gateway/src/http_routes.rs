@@ -2744,6 +2744,11 @@ pub struct InvokeRequest {
     /// turn through inference-core `AnalyzeImage` (vision) on the stream path.
     #[serde(default)]
     pub attachments: Vec<crate::vision::InvokeAttachment>,
+    /// chat-parity §2 — explicit image-generation intent. When true, the prompt
+    /// is routed to inference-core `GenerateImage` and the result is emitted as
+    /// an `artifact` event (deterministic trigger — no intent guessing).
+    #[serde(default)]
+    pub generate_image: bool,
 }
 
 #[derive(Debug, Serialize)]
