@@ -197,9 +197,14 @@ keyword list.
 - **RAG grounding via Data Plane v2** (`retrieval.rs`): opt-in (`rag`/`knowledge`/`citations`) →
   `Retrieve` → numbered system-context block + `citation` events on stream & fallback paths.
   Reuses the canonical retrieval owner — no new RAG store. (commit `d087f48`)
+- **Vision input** (`vision.rs`): an image attachment routes the turn through inference-core
+  `AnalyzeImage` (vision owner) — `select_image()` (url / inline base64 / data: URLs), `vision_stream()`
+  streams the description; `InvokeRequest.attachments` + BFF/client forwarding. (commit `11585f6`)
 
-**Phase 2 — remaining:** vision input (`content_parts` via `AnalyzeImage`), image `artifact`
-(`GenerateImage`), file-upload ingest, `tools[]`+`tool_call`/`tool_result`+MCP loop, `artifact`/canvas.
+**Phase 2 — remaining:** image `artifact` (`GenerateImage` + `ChatEvent::Artifact`), file-upload
+ingest (→ Data Plane RAG), `tools[]`+`tool_call`/`tool_result`+MCP loop, `artifact`/canvas. The
+image-gen + tool-loop items need a UI trigger / intent signal; the vision UI needs an image-upload
+affordance (capture bytes/URL into `ComposerAttachment`) — the API capability is complete.
 
 **Phase 3 — remaining:** `step_update` from `mp.v1.orchestration.*`, sandboxed code-exec tool,
 live browser/computer view (Quarry agent), replay, memory/projects, voice realtime.
