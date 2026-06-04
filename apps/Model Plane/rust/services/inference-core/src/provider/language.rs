@@ -365,6 +365,7 @@ impl LanguageAnalyticsProvider for AzureLanguageProvider {
             provider: "azure-language".to_owned(),
             modality: "language_analytics".to_owned(),
             streaming: false,
+            ..Default::default()
         })
         .collect()
     }
@@ -461,6 +462,7 @@ impl LanguageAnalyticsProvider for LlmLanguageProvider {
             provider: self.provider_used.clone(),
             modality: "language_analytics".to_owned(),
             streaming: false,
+            ..Default::default()
         }]
     }
 }

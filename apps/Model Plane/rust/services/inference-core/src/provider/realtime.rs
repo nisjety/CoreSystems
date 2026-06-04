@@ -229,6 +229,7 @@ impl RealtimeProvider for OpenAiRealtimeProvider {
                 provider: "openai".to_owned(),
                 modality: "realtime".to_owned(),
                 streaming: true,
+                ..Default::default()
             })
             .collect()
     }

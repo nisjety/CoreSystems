@@ -478,6 +478,7 @@ impl VisionProvider for OpenAiVisionProvider {
                 provider: provider.clone(),
                 modality: "image".to_owned(),
                 streaming: false,
+                ..Default::default()
             })
             .chain(self.vision_models.iter().flat_map(|id| {
                 [
@@ -486,12 +487,14 @@ impl VisionProvider for OpenAiVisionProvider {
                         provider: provider.clone(),
                         modality: "vision".to_owned(),
                         streaming: false,
+                        ..Default::default()
                     },
                     ModelInfo {
                         id: id.clone(),
                         provider: provider.clone(),
                         modality: "ocr".to_owned(),
                         streaming: false,
+                        ..Default::default()
                     },
                 ]
             }))

@@ -677,6 +677,7 @@ impl TranslationProvider for AzureTranslatorProvider {
             provider: self.provider_name().to_owned(),
             modality: "translation".to_owned(),
             streaming: false,
+            ..Default::default()
         }]
     }
 }
@@ -827,6 +828,7 @@ impl TranslationProvider for LlmTranslationProvider {
             provider: self.provider_name().to_owned(),
             modality: "translation".to_owned(),
             streaming: false,
+            ..Default::default()
         }]
     }
 }

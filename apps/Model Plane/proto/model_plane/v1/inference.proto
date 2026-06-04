@@ -208,6 +208,12 @@ message ModelInfo {
 
   // Whether the model supports streaming responses.
   bool streaming = 4;
+
+  // chat-parity §2 per-model feature flags: the rich-event / capability
+  // families this model supports, derived from the provider's
+  // ProviderCapabilities (e.g. "reasoning", "tools", "vision", "image").
+  // Lets the client gate the opt-in `features[]` per selected model.
+  repeated string features = 5;
 }
 
 // ListModelsResponse — available models in the active provider chain.

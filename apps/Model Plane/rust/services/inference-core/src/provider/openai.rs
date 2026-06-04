@@ -503,6 +503,9 @@ impl ProviderRouter for OpenAiProvider {
 
     fn list_models(&self) -> Vec<ModelInfo> {
         let provider = self.provider_name().to_owned();
+        // chat-parity §2: advertise the model's supported feature families so
+        // the client can gate the opt-in `features[]` per model.
+        let chat_features = self.capabilities().feature_flags();
         self.chat_models
             .iter()
             .map(|id| ModelInfo {
@@ -510,12 +513,14 @@ impl ProviderRouter for OpenAiProvider {
                 provider: provider.clone(),
                 modality: "chat".to_owned(),
                 streaming: true,
+                features: chat_features.clone(),
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),
                 provider: provider.clone(),
                 modality: "embedding".to_owned(),
                 streaming: false,
+                ..Default::default()
             }))
             .collect()
     }

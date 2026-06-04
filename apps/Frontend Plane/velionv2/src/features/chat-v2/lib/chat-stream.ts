@@ -233,6 +233,40 @@ export async function cancelChat(requestId: string): Promise<void> {
   }
 }
 
+export type ModelDescriptor = {
+  id: string;
+  provider: string;
+  modality: string;
+  streaming: boolean;
+  /** chat-parity §2 per-model feature families (e.g. "reasoning","tools","vision"). */
+  features: string[];
+};
+
+/**
+ * List available models + their per-model feature families (chat-parity §2) so
+ * the composer can gate the opt-in `features[]` per selected model. Returns []
+ * on any failure so the UI can fall back to its static model list.
+ */
+export async function loadModels(): Promise<ModelDescriptor[]> {
+  try {
+    const res = await fetch("/api/chat/models", { method: "GET", credentials: "include" });
+    if (!res.ok) {
+      return [];
+    }
+    const data = (await res.json()) as { models?: unknown };
+    if (!Array.isArray(data.models)) {
+      return [];
+    }
+    return data.models.filter(
+      (m): m is ModelDescriptor =>
+        typeof (m as ModelDescriptor)?.id === "string" &&
+        Array.isArray((m as ModelDescriptor)?.features),
+    );
+  } catch {
+    return [];
+  }
+}
+
 export type ThreadHistoryMessage = { role: string; content: string };
 
 /**

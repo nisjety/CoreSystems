@@ -146,6 +146,7 @@ impl InferenceCore for InferenceService {
                 provider: model.provider,
                 modality: model.modality,
                 streaming: model.streaming,
+                features: model.features,
             })
             .collect();
         models.extend(
@@ -157,6 +158,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
         models.extend(
@@ -168,6 +170,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
         models.extend(
@@ -179,6 +182,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
         models.extend(
@@ -190,6 +194,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
         models.extend(
@@ -201,6 +206,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
         models.extend(
@@ -212,6 +218,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
         models.extend(
@@ -223,6 +230,7 @@ impl InferenceCore for InferenceService {
                     provider: model.provider,
                     modality: model.modality,
                     streaming: model.streaming,
+                    features: model.features,
                 }),
         );
 

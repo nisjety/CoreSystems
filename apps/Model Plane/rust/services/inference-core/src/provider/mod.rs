@@ -92,12 +92,15 @@ pub struct EmbedResponse {
 }
 
 /// Provider model/deployment metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModelInfo {
     pub id: String,
     pub provider: String,
     pub modality: String,
     pub streaming: bool,
+    /// chat-parity §2 per-model feature families (e.g. "reasoning", "tools",
+    /// "vision", "image"), derived from the provider's `ProviderCapabilities`.
+    pub features: Vec<String>,
 }
 
 /// Introspectable feature flags for a provider.
@@ -152,6 +155,28 @@ impl ProviderCapabilities {
     pub fn serves_modality(&self, modality: &str) -> bool {
         self.modalities.iter().any(|m| m == modality)
     }
+
+    /// Project these capabilities onto chat-parity §2 feature-family strings so
+    /// the client can gate the opt-in `features[]` per model. `usage` is always
+    /// available (the gateway emits real token/latency); `citations` is
+    /// gateway-side (Quarry/Data-Plane) so it is not advertised per-model here.
+    #[must_use]
+    pub fn feature_flags(&self) -> Vec<String> {
+        let mut out = vec!["usage".to_owned()];
+        if self.supports_thinking {
+            out.push("reasoning".to_owned());
+        }
+        if self.supports_tools {
+            out.push("tools".to_owned());
+        }
+        if self.supports_vision {
+            out.push("vision".to_owned());
+        }
+        if self.serves_modality("image") {
+            out.push("image".to_owned());
+        }
+        out
+    }
 }
 
 /// Provider routing trait for inference backends.
@@ -185,6 +210,34 @@ pub trait ProviderRouter: Send + Sync {
     #[allow(dead_code)] // intended surface; consumed by router/policy (Phase 2/5)
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::ProviderCapabilities;
+
+    #[test]
+    fn feature_flags_reflect_capability_bits() {
+        let caps = ProviderCapabilities {
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+            modalities: vec!["chat".to_owned(), "image".to_owned()],
+            ..ProviderCapabilities::default()
+        };
+        let flags = caps.feature_flags();
+        assert!(flags.contains(&"usage".to_owned()));
+        assert!(flags.contains(&"reasoning".to_owned()));
+        assert!(flags.contains(&"tools".to_owned()));
+        assert!(flags.contains(&"vision".to_owned()));
+        assert!(flags.contains(&"image".to_owned()));
+    }
+
+    #[test]
+    fn baseline_caps_only_advertise_usage() {
+        let flags = ProviderCapabilities::default().feature_flags();
+        assert_eq!(flags, vec!["usage".to_owned()]);
     }
 }
 

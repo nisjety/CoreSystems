@@ -636,12 +636,14 @@ impl SpeechProvider for OpenAiSpeechProvider {
                 provider: provider.clone(),
                 modality: "tts".to_owned(),
                 streaming: false,
+                ..Default::default()
             },
             ModelInfo {
                 id: stt_model,
                 provider,
                 modality: "stt".to_owned(),
                 streaming: false,
+                ..Default::default()
             },
         ]
     }
@@ -767,6 +769,7 @@ impl SpeechProvider for AzureSpeechProvider {
             provider: self.provider_name().to_owned(),
             modality: "tts".to_owned(),
             streaming: false,
+            ..Default::default()
         }]
     }
 

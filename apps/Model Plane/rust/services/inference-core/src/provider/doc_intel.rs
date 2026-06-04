@@ -256,6 +256,7 @@ impl DocIntelProvider for AzureDocIntelProvider {
             provider: "azure-document-intelligence".to_owned(),
             modality: "document_intelligence".to_owned(),
             streaming: false,
+            ..Default::default()
         })
         .collect()
     }

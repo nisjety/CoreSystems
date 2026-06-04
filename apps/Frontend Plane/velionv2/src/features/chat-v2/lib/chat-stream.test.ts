@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadThreadHistory, streamChat } from "./chat-stream";
+import { loadModels, loadThreadHistory, streamChat } from "./chat-stream";
 
 describe("streamChat", () => {
   afterEach(() => {
@@ -211,5 +211,43 @@ describe("loadThreadHistory", () => {
       ),
     );
     expect(await loadThreadHistory("t-3")).toEqual([{ role: "user", content: "ok" }]);
+  });
+});
+
+describe("loadModels", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns models with their feature families", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          models: [
+            { id: "gpt-4o", provider: "openai", modality: "chat", streaming: true, features: ["usage", "vision", "tools"] },
+            { id: "text-embedding-3", provider: "openai", modality: "embedding", streaming: false, features: [] },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const models = await loadModels();
+    expect(models).toHaveLength(2);
+    expect(models[0]).toMatchObject({ id: "gpt-4o", features: ["usage", "vision", "tools"] });
+  });
+
+  it("returns [] on non-ok response and filters malformed rows", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("nope", { status: 502 }),
+    );
+    expect(await loadModels()).toEqual([]);
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ models: [{ id: "ok", features: [] }, { id: 1, features: [] }, { id: "no-features" }] }),
+        { status: 200 },
+      ),
+    );
+    expect(await loadModels()).toEqual([{ id: "ok", features: [] }]);
   });
 });

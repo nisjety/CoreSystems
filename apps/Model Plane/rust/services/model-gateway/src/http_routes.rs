@@ -80,6 +80,8 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
         // chat-parity §1: reload a thread's conversation (cross-device resume).
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
+        // chat-parity §2: list models + per-model feature families for the picker.
+        .route("/v1/models", get(list_models))
         // Orchestration read + mutations
         .merge(orchestration_routes())
         // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
@@ -2768,6 +2770,59 @@ async fn invoke_cancel(State(state): State<AppState>, Path(request_id): Path<Str
         )
             .into_response()
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ModelDescriptor {
+    id: String,
+    provider: String,
+    modality: String,
+    streaming: bool,
+    features: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListModelsHttpResponse {
+    models: Vec<ModelDescriptor>,
+}
+
+/// chat-parity §2 — list available models with their per-model feature
+/// families so the client can gate the opt-in `features[]` (reasoning, tools,
+/// vision, image, …) per selected model. Proxies inference-core `ListModels`
+/// (the capability owner) — no model catalog is duplicated in the gateway.
+async fn list_models(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+) -> Result<Json<ListModelsHttpResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use mp_contracts::model_plane::v1::ListModelsRequest;
+    let resp = state
+        .inference_client
+        .clone()
+        .list_models(ListModelsRequest::default())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("inference-core list_models failed: {}", e.message()),
+                })),
+            )
+        })?
+        .into_inner();
+
+    let models = resp
+        .models
+        .into_iter()
+        .map(|m| ModelDescriptor {
+            id: m.id,
+            provider: m.provider,
+            modality: m.modality,
+            streaming: m.streaming,
+            features: m.features,
+        })
+        .collect();
+
+    Ok(Json(ListModelsHttpResponse { models }))
 }
 
 #[derive(Debug, Serialize)]

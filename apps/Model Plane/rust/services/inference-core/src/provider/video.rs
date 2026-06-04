@@ -344,6 +344,7 @@ impl VideoProvider for AzureOpenAiVideoProvider {
                 provider: "azure-openai".to_owned(),
                 modality: "video".to_owned(),
                 streaming: false,
+                ..Default::default()
             })
             .collect()
     }
