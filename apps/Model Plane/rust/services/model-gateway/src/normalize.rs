@@ -144,6 +144,7 @@ mod tests {
             max_tokens: None,
             profile: None,
             features: Vec::new(),
+            idempotency_key: None,
         }
     }
 

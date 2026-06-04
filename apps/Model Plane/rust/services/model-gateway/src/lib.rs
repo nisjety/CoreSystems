@@ -14,6 +14,7 @@ pub mod finetune_routes;
 pub mod gateway_metrics;
 pub mod grpc;
 pub mod http_routes;
+pub mod idempotency_registry;
 pub mod langcache;
 pub mod lsp;
 pub mod mcp_jsonrpc;

@@ -99,6 +99,10 @@ pub struct AppState {
     /// chat-parity §4 — active in-flight stream cancellation registry. Populated
     /// by `/v1/invoke/stream`; flipped by `POST /v1/invoke/{id}/cancel`.
     pub cancels: crate::cancel_registry::CancelRegistry,
+    /// chat-parity §1 — idempotent-regenerate guard for `/v1/invoke`. Keyed by
+    /// a client-supplied `idempotency_key`; dedupes double-submit / regenerate
+    /// retries so they neither re-run inference nor re-charge budget.
+    pub idempotency: crate::idempotency_registry::IdempotencyRegistry,
     /// Wave 9 — Quarry-v2 edge client used by `Fetch` + `ExtractStructured`
     /// gRPC handlers. Constructed unconditionally; the client itself
     /// reports `Available() == false` when `QUARRY_EDGE_URL` is unset
@@ -183,6 +187,7 @@ impl AppState {
             // consumer is spawned against this same instance in `main.rs`.
             doc_ready: crate::doc_indexed_consumer::DocReadyRegistry::new(),
             cancels: crate::cancel_registry::CancelRegistry::new(),
+            idempotency: crate::idempotency_registry::IdempotencyRegistry::new(),
             // `Client::new` with empty base_url returns an Unavailable
             // client; the gRPC handlers degrade to Unimplemented in
             // that case.

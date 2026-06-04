@@ -2731,6 +2731,11 @@ pub struct InvokeRequest {
     /// → plain stream (connected/chunk/done/error only); protects profile:"chat".
     #[serde(default)]
     pub features: Vec<String>,
+    /// chat-parity §1 — optional client idempotency key. When set, a duplicate
+    /// `/v1/invoke` (double-submit, regenerate retry, network replay) returns
+    /// the original response without re-running inference or re-charging budget.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2773,6 +2778,38 @@ async fn invoke(
 
     // Normalize and validate the request
     let normalized = normalize::normalize(&req)?;
+
+    // chat-parity §1 — idempotent regenerate. A duplicate `/v1/invoke` carrying
+    // the same `idempotency_key` returns the original response (no second
+    // inference run, no second budget charge); a concurrent duplicate is 409.
+    // The guard releases its claim on any early-return below (Drop), so an
+    // errored request does not wedge the key.
+    let idem_guard = match req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        Some(key) => match state.idempotency.claim(key) {
+            crate::idempotency_registry::Claim::Cached(v) => {
+                return Ok(Json(InvokeResponse {
+                    request_id: v.request_id,
+                    content: v.content,
+                    model_used: v.model_used,
+                }));
+            }
+            crate::idempotency_registry::Claim::InFlight => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "duplicate request in flight for this idempotency_key",
+                    })),
+                ));
+            }
+            crate::idempotency_registry::Claim::Proceed(guard) => Some(guard),
+        },
+        None => None,
+    };
 
     // Pre-flight budget check against cost-core
     crate::budget::check_budget(&state.http_client, &claims.org_id, &normalized).await?;
@@ -2904,6 +2941,16 @@ async fn invoke(
         .await
     {
         warn!(error = %e, "failed to publish USAGE_ENVELOPE");
+    }
+
+    // Cache the completed result so a later duplicate with this key replays it
+    // verbatim. No-op when the client supplied no key.
+    if let Some(guard) = idem_guard {
+        guard.commit(crate::idempotency_registry::CachedInvoke {
+            request_id: request_id.clone(),
+            content: infer_resp.content.clone(),
+            model_used: infer_resp.model_used.clone(),
+        });
     }
 
     Ok(Json(InvokeResponse {
