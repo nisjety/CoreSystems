@@ -9,6 +9,7 @@ import type {
 import { toolLabels } from "@/features/chat-v2/lib/chat-format";
 import {
   cancelChat,
+  loadThreadHistory,
   streamChat,
   type ChatStreamChunk,
   type ChatTiming,
@@ -337,6 +338,11 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
       activeSessionId: sessionId,
       composerDraft: "",
     }));
+    // chat-parity §1 — cross-device resume. The local sessionId IS the
+    // session-core threadId (the BFF stream sends thread_id = sessionId), so
+    // an empty local session can be rehydrated from the server (e.g. opened
+    // on another device or after localStorage was cleared). Best-effort.
+    void hydrateSessionFromServer(sessionId);
   };
 
   const value: ChatWorkspaceValue = {
@@ -898,6 +904,70 @@ function updateChatSession(sessionId: string, updater: (session: ChatSession) =>
       session.id === sessionId ? updater(session) : session
     )),
   }));
+}
+
+/**
+ * Rehydrate a session's transcript from session-core (chat-parity §1,
+ * cross-device resume). Best-effort and conservative:
+ *   - skips if a live stream is in flight for this session (never clobber it);
+ *   - skips if the session already has local messages (server is the fallback,
+ *     not the source of truth, once the device has its own copy);
+ *   - only user/assistant turns are rendered (system/tool rows are dropped);
+ *   - any failure is swallowed — the session simply stays empty.
+ */
+export async function hydrateSessionFromServer(sessionId: string): Promise<void> {
+  if (!sessionId || assistantStreamControllers.has(sessionId)) {
+    return;
+  }
+  const existing = chatStoreState.sessions.find((session) => session.id === sessionId);
+  if (existing && existing.messages.length > 0) {
+    return;
+  }
+
+  const history = await loadThreadHistory(sessionId);
+  if (history.length === 0) {
+    return;
+  }
+
+  const messages: ChatMessage[] = history
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({
+      id: createId(),
+      role: m.role as MessageRole,
+      content: m.content,
+      createdAt: new Date().toISOString(),
+      tools: [],
+      attachments: [],
+    }));
+  if (messages.length === 0) {
+    return;
+  }
+
+  // Re-check the in-flight guard: a stream may have started during the await.
+  if (assistantStreamControllers.has(sessionId)) {
+    return;
+  }
+  updateChatStore((current) => {
+    const found = current.sessions.find((session) => session.id === sessionId);
+    // Don't overwrite if the session gained messages while we were fetching.
+    if (found && found.messages.length > 0) {
+      return current;
+    }
+    const lastText = messages[messages.length - 1]?.content ?? "";
+    const hydrated: ChatSession = found
+      ? { ...found, messages, preview: createPreview(lastText) }
+      : {
+          id: sessionId,
+          title: createTitle(messages[0]?.content ?? "Conversation"),
+          preview: createPreview(lastText),
+          updatedAt: new Date().toISOString(),
+          messages,
+          taskSteps: [],
+          branchCount: 0,
+        };
+    const others = current.sessions.filter((session) => session.id !== sessionId);
+    return { ...current, sessions: [hydrated, ...others] };
+  });
 }
 
 function isAbortError(error: unknown) {
