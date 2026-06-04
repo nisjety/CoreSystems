@@ -53,6 +53,9 @@ type ChatStreamRequest = {
   browseWeb?: boolean;
   tools?: string[];
   url?: string; // explicit URL to scrape
+  // Opt-in rich SSE event families (chat-parity §2). Forwarded to Model Plane
+  // so the gateway emits the matching events; the BFF re-streams them verbatim.
+  features?: string[];
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -76,6 +79,16 @@ function normalizeOptionalString(value: unknown, maxLength: number): string | un
 
   return trimmed;
 }
+
+// Nudge the model to emit GitHub-flavoured Markdown tables for tabular data so
+// the chat renderer (ChatMarkdown) can display them. Mirrors the existing
+// `[Web context]` content-framing convention. Scoped to velionv2 chat only —
+// no shared Model Plane prompt change required.
+const RESPONSE_FORMAT_DIRECTIVE = [
+  "[Response formatting]",
+  "When the answer contains comparisons, specifications, metrics, schedules, or other tabular data, present it as a GitHub-flavoured Markdown table: a header row, a |---|---| separator row, then one row per record. Keep tables compact and do not wrap them in code fences.",
+  "Use normal Markdown (headings, bold, lists, code) for everything else.",
+].join("\n");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Quarry web-scrape (best-effort, degrades gracefully)
@@ -149,6 +162,12 @@ export async function POST(request: NextRequest): Promise<Response> {
   const { content, browseWeb, url: explicitUrl } = parsed;
   const model = normalizeOptionalString(parsed.model, 120);
   const sessionId = normalizeOptionalString(parsed.sessionId, 160);
+  // Opt-in rich SSE event families (chat-parity §2). Forwarded to Model Plane;
+  // the gateway gates rich events on this, the BFF re-streams them verbatim.
+  const features = Array.isArray(parsed.features)
+    ? parsed.features.filter((f): f is string => typeof f === "string").slice(0, 16)
+    : [];
+  const wantsCitations = features.includes("citations");
 
   if (!content || typeof content !== "string" || !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
@@ -168,9 +187,13 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
   }
 
-  const finalContent = groundingMarkdown
-    ? `[Web context]\n${groundingMarkdown}\n\n[User message]\n${content}`
-    : content;
+  const finalContent = [
+    RESPONSE_FORMAT_DIRECTIVE,
+    groundingMarkdown ? `[Web context]\n${groundingMarkdown}` : null,
+    `[User message]\n${content}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   // 4. Mint Model Plane JWT
   const mintStart = Date.now();
@@ -213,6 +236,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         session_key: sessionId,
         thread_id: sessionId,
         profile: "chat",
+        features,
       }),
       // Don't use the request's signal — keep the Model Plane call alive even
       // if the browser tab closes (ported from v1 rationale).
@@ -247,6 +271,19 @@ export async function POST(request: NextRequest): Promise<Response> {
       // Emit an initial "connected" event so the client knows the stream is live
       try {
         controller.enqueue(encodeSse("connected", { ok: true }));
+        // chat-parity §7: surface the Quarry-scraped source as a citation when
+        // the client opted into "citations". Reuses the grounding scrape — no
+        // extra fetch.
+        if (wantsCitations && groundingMarkdown && explicitUrl) {
+          controller.enqueue(
+            encodeSse("citation", {
+              id: "src-1",
+              title: explicitUrl,
+              url: explicitUrl,
+              snippet: groundingMarkdown.slice(0, 240),
+            }),
+          );
+        }
       } catch {
         return;
       }
@@ -351,7 +388,8 @@ export async function POST(request: NextRequest): Promise<Response> {
               return;
             }
 
-            if (chunk.delta) {
+            if (eventName === "chunk" && typeof chunk.delta === "string") {
+              // Text answer delta → re-emit on the client's "message" channel.
               if (firstDeltaMs === 0) {
                 firstDeltaMs = sinceStart();
               }
@@ -364,6 +402,18 @@ export async function POST(request: NextRequest): Promise<Response> {
                 );
               } catch {
                 // consumer gone — stop writing
+                upstreamReader.cancel().catch(() => undefined);
+                return;
+              }
+            } else if (eventName !== "connected" && eventName !== "message") {
+              // chat-parity §2: forward rich/opt-in events VERBATIM under their
+              // own name (usage, reasoning_delta, citation, tool_call,
+              // tool_result, artifact, attachment, step_update, stopped). The
+              // gateway only emits these when the client opted in via features[];
+              // forwarding by name means new event types need NO BFF change.
+              try {
+                controller.enqueue(encodeSse(eventName, chunk));
+              } catch {
                 upstreamReader.cancel().catch(() => undefined);
                 return;
               }

@@ -7,7 +7,7 @@ import type {
   ComposerToolId,
 } from "@/features/chat-v2/components/VelionComposer";
 import { toolLabels } from "@/features/chat-v2/lib/chat-format";
-import { streamChat, type ChatStreamChunk } from "@/features/chat-v2/lib/chat-stream";
+import { streamChat, type ChatStreamChunk, type ChatTiming } from "@/features/chat-v2/lib/chat-stream";
 
 const STORAGE_KEY = "velion:v2:chat:sessions";
 const LAUNCH_MOTION_KEY = "velion:v2:chat:launch-motion";
@@ -33,6 +33,20 @@ export type ChatMessage = {
   modelUsed?: string;
   inputTokens?: number;
   outputTokens?: number;
+  latencyMs?: number;
+  ttftMs?: number;
+  // chat-parity §2: rich event data rendered by the chat UI.
+  reasoning?: string;
+  citations?: Citation[];
+  costUsd?: number;
+  confidence?: number;
+};
+
+export type Citation = {
+  id: string;
+  title: string;
+  url: string;
+  snippet: string;
 };
 
 export type AgentTaskStep = {
@@ -68,6 +82,7 @@ export type ChatWorkspaceValue = {
   branch: (messageId: string) => void;
   clearHistory: () => void;
   copy: (message: ChatMessage) => Promise<void>;
+  editAndResubmit: (messageId: string, text: string) => void;
   regenerate: () => void;
   selectSession: (sessionId: string) => void;
   startNewChat: () => void;
@@ -140,9 +155,19 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
             ? {
                 ...session,
                 updatedAt: stoppedAt,
-                messages: session.messages.map((message) => (
-                  message.status === "waiting" ? { ...message, content: "Task stopped.", status: "stopped" } : message
-                )),
+                messages: session.messages.map((message) => {
+                  if (message.status !== "waiting") {
+                    return message;
+                  }
+                  // Preserve whatever streamed in before the user hit stop.
+                  // Empty when nothing arrived yet — the UI shows a "Stoppet" tag.
+                  const partial = isAssistantPlaceholder(message.content) ? "" : message.content.trim();
+                  return {
+                    ...message,
+                    content: partial,
+                    status: "stopped" as const,
+                  };
+                }),
                 taskSteps: session.taskSteps.map((step) => (
                   step.status === "active" || step.status === "waiting"
                     ? { ...step, status: "stopped", detail: "Stopped by the user before the live stream returned." }
@@ -202,6 +227,45 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
       assistantMessageId: assistantStatus.id,
       payload,
       sessionId: active.id,
+    });
+  };
+
+  const editAndResubmit = (messageId: string, text: string) => {
+    hydrateChatStore();
+    const current = chatStoreState;
+    const active = current.sessions.find((session) => session.id === current.activeSessionId);
+    if (!active) {
+      return;
+    }
+
+    const index = active.messages.findIndex((message) => message.id === messageId);
+    if (index < 0) {
+      return;
+    }
+
+    const original = active.messages[index];
+    const nextText = text.trim();
+    if (!nextText) {
+      return;
+    }
+
+    // Abort any in-flight stream, then drop the edited message and everything
+    // after it. Resubmitting appends a fresh user turn + assistant stream,
+    // reusing the original turn's model / tools / attachments.
+    assistantStreamControllers.get(active.id)?.abort();
+    assistantStreamControllers.delete(active.id);
+
+    updateChatSession(active.id, (session) => ({
+      ...session,
+      messages: session.messages.slice(0, index),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    submitChatPayload({
+      text: nextText,
+      model: original.model,
+      tools: original.tools,
+      attachments: original.attachments,
     });
   };
 
@@ -267,6 +331,7 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
     composerDraft,
     copiedMessageId,
     copy,
+    editAndResubmit,
     regenerate,
     selectSession,
     sessions,
@@ -466,6 +531,9 @@ async function runAssistantStream({
     for await (const chunk of streamChat({
       browseWeb: payload.tools.includes("search"),
       content: payload.text,
+      // Opt into the rich event families the chat UI renders (chat-parity §2):
+      // real usage (insight chip), citations (Sources), reasoning (thinking).
+      features: ["usage", "citations", "reasoning"],
       model: payload.model,
       sessionId,
       signal: controller.signal,
@@ -541,6 +609,7 @@ function applyStreamChunk({
         inputTokens: chunk.inputTokens,
         modelUsed: chunk.modelUsed,
         outputTokens: chunk.outputTokens,
+        timing: chunk.timing,
         sessionId,
       });
       return true;
@@ -551,7 +620,47 @@ function applyStreamChunk({
         sessionId,
       });
       return true;
+    case "reasoning_delta":
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        reasoning: `${m.reasoning ?? ""}${chunk.delta}`,
+      }));
+      return false;
+    case "citation":
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        citations: [
+          ...(m.citations ?? []),
+          { id: chunk.id, title: chunk.title, url: chunk.url, snippet: chunk.snippet },
+        ],
+      }));
+      return false;
+    case "usage":
+      // Real usage for the insight chip + reasoning popover (no placeholders).
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        inputTokens: chunk.inputTokens,
+        outputTokens: chunk.outputTokens,
+        latencyMs: chunk.latencyMs,
+        costUsd: chunk.costUsd,
+        confidence: chunk.confidence,
+      }));
+      return false;
   }
+}
+
+/// Apply an update to one assistant message within a session.
+function updateAssistantMessage(
+  sessionId: string,
+  assistantMessageId: string,
+  updater: (message: ChatMessage) => ChatMessage,
+) {
+  updateChatSession(sessionId, (session) => ({
+    ...session,
+    messages: session.messages.map((message) =>
+      message.id === assistantMessageId ? updater(message) : message,
+    ),
+  }));
 }
 
 function markAssistantStreamConnected(sessionId: string) {
@@ -619,12 +728,14 @@ function finishAssistantStream({
   inputTokens,
   modelUsed,
   outputTokens,
+  timing,
   sessionId,
 }: {
   assistantMessageId: string;
   inputTokens: number;
   modelUsed: string;
   outputTokens: number;
+  timing?: ChatTiming;
   sessionId: string;
 }) {
   const finishedAt = new Date().toISOString();
@@ -645,6 +756,8 @@ function finishAssistantStream({
         inputTokens,
         modelUsed,
         outputTokens,
+        latencyMs: timing?.totalMs,
+        ttftMs: timing?.ttftMs,
         status: undefined,
       };
     });

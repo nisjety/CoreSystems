@@ -1,0 +1,136 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { streamChat } from "./chat-stream";
+
+describe("streamChat", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("posts chat context to the BFF stream route and yields SSE chunks", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response([
+        "event: connected",
+        "data: {\"ok\":true}",
+        "",
+        "event: message",
+        "data: {\"delta\":\"Hello\",\"requestId\":\"req-1\"}",
+        "",
+        "event: done",
+        "data: {\"done\":true,\"modelUsed\":\"gpt-4o-mini\",\"inputTokens\":3,\"outputTokens\":2}",
+        "",
+        "",
+      ].join("\n")),
+    );
+
+    const chunks = [];
+    for await (const chunk of streamChat({
+      browseWeb: true,
+      content: "Hello",
+      model: "gpt-4o-mini",
+      sessionId: "session-1",
+      tools: ["search"],
+    })) {
+      chunks.push(chunk);
+    }
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init).toMatchObject({
+      credentials: "include",
+      method: "POST",
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      browseWeb: true,
+      content: "Hello",
+      model: "gpt-4o-mini",
+      sessionId: "session-1",
+      tools: ["search"],
+    });
+    expect(chunks).toEqual([
+      { type: "connected" },
+      { type: "delta", delta: "Hello", requestId: "req-1" },
+      {
+        type: "done",
+        inputTokens: 3,
+        modelUsed: "gpt-4o-mini",
+        outputTokens: 2,
+      },
+    ]);
+  });
+
+  it("yields an error chunk for upstream Model Plane error events", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response([
+        "event: error",
+        "data: {\"message\":\"gateway unavailable\"}",
+        "",
+        "",
+      ].join("\n")),
+    );
+
+    const chunks = [];
+    for await (const chunk of streamChat({ content: "Hello" })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { type: "error", message: "gateway unavailable" },
+    ]);
+  });
+
+  it("forwards opt-in features in the request body", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(["event: done", 'data: {"done":true}', "", ""].join("\n")),
+    );
+    for await (const _chunk of streamChat({ content: "Hi", features: ["usage", "citations"] })) {
+      void _chunk;
+    }
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body)).features).toEqual(["usage", "citations"]);
+  });
+
+  it("parses rich events by NAME — reasoning_delta is never mistaken for answer text", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response([
+        "event: reasoning_delta",
+        'data: {"delta":"thinking...","request_id":"r1"}',
+        "",
+        "event: citation",
+        'data: {"id":"src-1","title":"Doc","url":"https://x","snippet":"hello"}',
+        "",
+        "event: message",
+        'data: {"delta":"Answer","requestId":"r1"}',
+        "",
+        "event: usage",
+        'data: {"input_tokens":12,"output_tokens":34,"cost_usd":0.002,"latency_ms":880,"confidence":0.77}',
+        "",
+        "event: done",
+        'data: {"done":true,"modelUsed":"gpt-4o","inputTokens":12,"outputTokens":34}',
+        "",
+        "",
+      ].join("\n")),
+    );
+
+    const chunks = [];
+    for await (const chunk of streamChat({
+      content: "Hi",
+      features: ["reasoning", "citations", "usage"],
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { type: "reasoning_delta", delta: "thinking..." },
+      { type: "citation", id: "src-1", title: "Doc", url: "https://x", snippet: "hello" },
+      { type: "delta", delta: "Answer", requestId: "r1" },
+      {
+        type: "usage",
+        inputTokens: 12,
+        outputTokens: 34,
+        costUsd: 0.002,
+        latencyMs: 880,
+        confidence: 0.77,
+      },
+      { type: "done", inputTokens: 12, modelUsed: "gpt-4o", outputTokens: 34 },
+    ]);
+  });
+});

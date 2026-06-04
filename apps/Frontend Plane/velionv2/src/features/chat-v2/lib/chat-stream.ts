@@ -15,6 +15,8 @@ export type ChatStreamOptions = {
   browseWeb?: boolean;
   tools?: string[];
   url?: string;
+  /** Opt-in rich SSE event families (chat-parity §2), e.g. ["usage","citations"]. */
+  features?: string[];
   signal?: AbortSignal;
 };
 
@@ -30,6 +32,16 @@ export type ChatTiming = {
 export type ChatStreamChunk =
   | { type: "connected" }
   | { type: "delta"; delta: string; requestId?: string }
+  | { type: "reasoning_delta"; delta: string }
+  | { type: "citation"; id: string; title: string; url: string; snippet: string }
+  | {
+      type: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      costUsd?: number;
+      latencyMs?: number;
+      confidence?: number;
+    }
   | { type: "done"; modelUsed: string; inputTokens: number; outputTokens: number; timing?: ChatTiming }
   | { type: "error"; message: string };
 
@@ -40,13 +52,13 @@ export type ChatStreamChunk =
 export async function* streamChat(
   opts: ChatStreamOptions,
 ): AsyncGenerator<ChatStreamChunk, void, void> {
-  const { content, model, sessionId, browseWeb, tools, url, signal } = opts;
+  const { content, model, sessionId, browseWeb, tools, url, features, signal } = opts;
 
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ content, model, sessionId, browseWeb, tools, url }),
+    body: JSON.stringify({ content, model, sessionId, browseWeb, tools, url, features }),
     signal,
   });
 
@@ -118,18 +130,62 @@ export async function* streamChat(
           return;
         }
 
-        if (typeof data["delta"] === "string") {
+        // Rich opt-in events (chat-parity §2), dispatched by event NAME so a
+        // `reasoning_delta` (which also carries a `delta` field) is never
+        // mistaken for answer text.
+        if (eventName === "reasoning_delta") {
+          if (typeof data["delta"] === "string") {
+            yield { type: "reasoning_delta", delta: data["delta"] };
+          }
+          continue;
+        }
+
+        if (eventName === "citation") {
+          yield {
+            type: "citation",
+            id: asString(data["id"]),
+            title: asString(data["title"]),
+            url: asString(data["url"]),
+            snippet: asString(data["snippet"]),
+          };
+          continue;
+        }
+
+        if (eventName === "usage") {
+          yield {
+            type: "usage",
+            inputTokens: asNumber(data["input_tokens"]),
+            outputTokens: asNumber(data["output_tokens"]),
+            costUsd: typeof data["cost_usd"] === "number" ? data["cost_usd"] : undefined,
+            latencyMs: typeof data["latency_ms"] === "number" ? data["latency_ms"] : undefined,
+            confidence: typeof data["confidence"] === "number" ? data["confidence"] : undefined,
+          };
+          continue;
+        }
+
+        // Text answer delta — ONLY the "message" channel.
+        if (eventName === "message" && typeof data["delta"] === "string") {
           yield {
             type: "delta",
             delta: data["delta"],
             requestId: typeof data["requestId"] === "string" ? data["requestId"] : undefined,
           };
         }
+        // Any other event family (tool_call, artifact, step_update, …) is
+        // ignored gracefully until its consumer lands — forward-compatible.
       }
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function asNumber(value: unknown): number {
+  return typeof value === "number" ? value : 0;
 }
 
 function readErrorMessage(data: Record<string, unknown>) {
