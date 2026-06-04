@@ -1,30 +1,38 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AlertCircle,
+  ArrowDown,
   Check,
   CheckCircle2,
   Clock3,
   Copy,
-  GitBranch,
   MessageSquarePlus,
+  MoreHorizontal,
+  Pencil,
   RefreshCw,
   Sparkles,
   Square,
+  ThumbsDown,
+  ThumbsUp,
+  Volume2,
+  X,
 } from "lucide-react";
 import type { ComposerSubmitPayload } from "@/features/chat-v2/components/VelionComposer";
 import { VelionIconButton } from "@/components/ui/velion-ui";
+import { ChatMarkdown } from "@/features/chat-v2/components/ChatMarkdown";
 import { EmptyChatPromptChips } from "@/features/chat-v2/components/EmptyChatPromptChips";
 import {
+  consumeChatLaunchMotion,
   useVelionChatWorkspace,
   type AgentTaskStep,
   type ChatMessage,
   type ChatSession,
   type TaskStepStatus,
 } from "@/features/chat-v2/lib/chat-workspace";
-import { formatTime, toolLabels } from "@/features/chat-v2/lib/chat-format";
+import { formatRelative, formatTime, toolLabels } from "@/features/chat-v2/lib/chat-format";
 import { useChatDashboardComposer } from "@/features/chat-v2/hooks/use-chat-dashboard-composer";
 import type { DashboardComposerProps } from "@/features/dashboard-v2/lib/dashboard-composer-model";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
@@ -40,6 +48,34 @@ export function VelionChatPage() {
   const chat = useVelionChatWorkspace();
   const { activeSession, activeSessionId, composerDraft, copiedMessageId } = chat;
   const hasActiveMessages = Boolean(activeSession?.messages.length);
+  const [launchMotion, setLaunchMotion] = useState(false);
+  const [showScrollDown, setShowScrollDown] = useState(false);
+  const autoFollowRef = useRef(true);
+
+  const messages = activeSession?.messages ?? [];
+  const isStreaming = messages.some((message) => message.status === "waiting");
+  // Grows as deltas append → drives the streaming auto-follow effect.
+  const streamSignal = messages.length > 0 ? messages[messages.length - 1].content.length : 0;
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const list = messageListRef.current;
+    if (!list) {
+      return;
+    }
+    list.scrollTo({ top: list.scrollHeight, behavior });
+    autoFollowRef.current = true;
+    setShowScrollDown(false);
+  }, []);
+
+  const handleScroll = () => {
+    const list = messageListRef.current;
+    if (!list) {
+      return;
+    }
+    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    autoFollowRef.current = distanceFromBottom < 80;
+    setShowScrollDown(distanceFromBottom > 160);
+  };
 
   useEffect(() => {
     if (!hasActiveMessages) {
@@ -52,11 +88,43 @@ export function VelionChatPage() {
     }
 
     list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
-  }, [activeSession?.messages.length, activeSessionId, hasActiveMessages]);
+  }, [messages.length, activeSessionId, hasActiveMessages]);
+
+  // Follow streamed tokens to the bottom only while the user is already there.
+  useEffect(() => {
+    if (autoFollowRef.current) {
+      scrollToBottom(isStreaming ? "auto" : "smooth");
+    }
+  }, [streamSignal, isStreaming, scrollToBottom]);
+
+  useEffect(() => {
+    if (!activeSessionId || !hasActiveMessages || !consumeChatLaunchMotion(activeSessionId)) {
+      return;
+    }
+
+    let timeout: number | null = null;
+    const frame = window.requestAnimationFrame(() => {
+      setLaunchMotion(true);
+      timeout = window.setTimeout(() => setLaunchMotion(false), 1_200);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (timeout) {
+        window.clearTimeout(timeout);
+      }
+    };
+  }, [activeSessionId, hasActiveMessages]);
 
   return (
-    <div className="flex h-full min-h-0 w-full overflow-hidden bg-transparent text-[#26282f] transition-colors dark:text-[#F7F8F8]">
-      <section className="flex min-w-0 flex-1 flex-col" aria-label="Velion chat workspace">
+    <div
+      className={cn(
+        "velion-chat-page relative flex h-full min-h-0 w-full overflow-hidden bg-transparent text-[#202126] transition-colors dark:text-[#F7F8F8]",
+        launchMotion ? "velion-chat-page-launch" : "",
+      )}
+    >
+      {launchMotion ? <div className="velion-chat-launch-wash" aria-hidden="true" /> : null}
+      <section className="relative z-10 flex min-w-0 flex-1 flex-col" aria-label="Velion chat workspace">
         {hasActiveMessages ? (
           <ChatHeader
             activeSession={activeSession}
@@ -65,20 +133,33 @@ export function VelionChatPage() {
           />
         ) : null}
         {hasActiveMessages ? (
-          <div ref={messageListRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
-            <div className="mx-auto flex min-h-full w-full max-w-[880px] flex-col">
-              <div className="space-y-7 pb-6">
-                {activeSession?.messages.map((message) => (
-                  <MessageBlock
-                    key={message.id}
-                    copied={copiedMessageId === message.id}
-                    message={message}
-                    onBranch={() => chat.branch(message.id)}
-                    onCopy={() => {
-                      void chat.copy(message);
-                    }}
-                  />
-                ))}
+          <div
+            ref={messageListRef}
+            onScroll={handleScroll}
+            className="min-h-0 flex-1 overflow-y-auto px-4 py-8 md:px-8"
+          >
+            <div className="mx-auto flex min-h-full w-full max-w-[840px] flex-col">
+              <div className="velion-chat-thread space-y-7 pb-16 md:pb-20">
+                {activeSession?.messages.map((message, index) => {
+                  const previous = index > 0 ? activeSession.messages[index - 1] : null;
+                  const showDivider =
+                    !previous || dayKey(previous.createdAt) !== dayKey(message.createdAt);
+                  return (
+                    <Fragment key={message.id}>
+                      {showDivider ? <DateDivider value={message.createdAt} /> : null}
+                      <MessageBlock
+                        copied={copiedMessageId === message.id}
+                        message={message}
+                        onBranch={() => chat.branch(message.id)}
+                        onCopy={() => {
+                          void chat.copy(message);
+                        }}
+                        onEdit={(text) => chat.editAndResubmit(message.id, text)}
+                        onRegenerate={chat.regenerate}
+                      />
+                    </Fragment>
+                  );
+                })}
                 {activeSession?.taskSteps.length ? (
                   <TaskStreamCard steps={activeSession.taskSteps} onStopTask={chat.stopTask} />
                 ) : null}
@@ -92,8 +173,30 @@ export function VelionChatPage() {
           />
         )}
         {hasActiveMessages ? (
-          <div className="shrink-0 bg-[#FCFCFD]/96 p-4 backdrop-blur dark:bg-[#101114]/94 md:px-6">
+          <div className="velion-chat-composer-dock relative shrink-0 bg-[#FCFCFD]/92 px-4 pb-5 pt-3 backdrop-blur-xl dark:bg-[#101114]/90 md:px-6">
+            {showScrollDown ? (
+              <button
+                type="button"
+                onClick={() => scrollToBottom()}
+                aria-label="Bla til bunnen"
+                className="absolute -top-5 left-1/2 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-[#E7E8EC] bg-white text-[#6F757E] shadow-[0_8px_20px_rgba(20,21,24,0.12)] transition hover:text-[#26282f] dark:border-[#2A2C31] dark:bg-[#17181C] dark:text-[#AEB4C0] dark:hover:text-white"
+              >
+                <ArrowDown className="size-4" />
+              </button>
+            ) : null}
             <div className="mx-auto w-full max-w-[760px]">
+              {isStreaming ? (
+                <div className="mb-2 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={chat.stopTask}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-[#E2E3E9] bg-white px-3.5 py-1.5 text-[12px] font-semibold text-[#6F757E] shadow-sm transition hover:text-[#26282f] dark:border-[#2A2C31] dark:bg-[#17181C] dark:text-[#AEB4C0] dark:hover:text-white"
+                  >
+                    <Square className="size-3" />
+                    Stopp svar
+                  </button>
+                </div>
+              ) : null}
               <ChatDashboardComposer
                 key={`${activeSessionId ?? "new"}:${composerDraft}`}
                 initialValue={composerDraft}
@@ -129,13 +232,13 @@ function ChatHeader({
   onRegenerate: () => void;
 }) {
   return (
-    <header className="flex h-[58px] shrink-0 items-center justify-between bg-[var(--linear-main-bg)]/92 px-4 backdrop-blur dark:bg-[#101114]/90">
+    <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ECECF0]/80 bg-[#FCFCFD]/86 px-4 backdrop-blur-xl dark:border-[#25272D] dark:bg-[#101114]/86 md:px-6">
       <div className="min-w-0">
-        <h1 className="truncate text-[15px] font-semibold text-[#26282f] dark:text-white">
+        <h1 className="truncate text-[14px] font-semibold leading-5 text-[#202126] dark:text-white">
           {activeSession?.title ?? "Velion Chat"}
         </h1>
         {activeSession ? (
-          <p className="truncate text-[11px] font-medium text-[#8A8D96] dark:text-[#7A808B]">
+          <p className="truncate text-[11px] font-medium leading-4 text-[#858992] dark:text-[#8B929F]">
             {activeSession.messages.length} messages · {activeSession.branchCount} regenerations
           </p>
         ) : null}
@@ -183,11 +286,11 @@ function EmptyChatState({
   const composerValue = selectedPrompt ?? composerDraft;
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center px-4 py-10">
+    <div className="velion-chat-empty flex min-h-0 flex-1 items-center justify-center px-4 py-10">
       <div className="w-full max-w-[980px] -translate-y-[2vh]">
         <div className="mb-8 flex items-center justify-center gap-3 text-center">
           <Sparkles className="size-7 text-[#DD7A1F]" strokeWidth={1.75} />
-          <h1 className="text-[38px] font-semibold leading-none tracking-normal text-[#202126] dark:text-white sm:text-[50px]">
+          <h1 className="text-[38px] font-[520] leading-none tracking-normal text-[#202126] dark:text-white sm:text-[50px]">
             Hva kan jeg hjelpe med?
           </h1>
         </div>
@@ -204,77 +307,560 @@ function EmptyChatState({
   );
 }
 
+function dayKey(value: string) {
+  return new Date(value).toDateString();
+}
+
+function formatDayLabel(value: string) {
+  const date = new Date(value);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) {
+    return "Today";
+  }
+  if (date.toDateString() === yesterday.toDateString()) {
+    return "Yesterday";
+  }
+
+  return new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function prettyModel(model: string) {
+  const lower = model.toLowerCase();
+  if (lower.includes("gpt-4o-mini")) return "GPT-4o Mini";
+  if (lower.includes("gpt-4.1")) return "GPT-4.1";
+  if (lower.includes("gpt-4o")) return "GPT-4o";
+  if (lower.includes("claude")) return "Claude Sonnet";
+  if (lower.includes("reason")) return "Velion Reasoner";
+  return model.length > 22 ? `${model.slice(0, 22)}…` : model;
+}
+
+function DateDivider({ value }: { value: string }) {
+  return (
+    <div className="velion-chat-divider relative flex items-center justify-center py-1">
+      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-transparent via-[#ECECEF] to-transparent dark:via-[#26282E]" />
+      <span className="relative rounded-full px-3 text-[11px] font-semibold uppercase tracking-[0.09em] text-[#A8ADB5] dark:text-[#6F7682]">
+        {formatDayLabel(value)}
+      </span>
+    </div>
+  );
+}
+
+function ThinkingDots() {
+  return (
+    <span className="velion-chat-thinking inline-flex items-center gap-2 text-[14px] font-medium text-[#8A8F98] dark:text-[#8B929F]">
+      <span className="velion-thinking-dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+      Tenker
+    </span>
+  );
+}
+
+function formatLatency(ms: number) {
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+/**
+ * Inline "Reasoning" chip that opens a popover with the real per-turn metrics
+ * the Model Plane already emits (model, token counts, latency). No placeholder
+ * fields — confidence/sector arrive once the backend emits `usage`/`reasoning`
+ * events, then get added here.
+ */
+function ReasoningPopover({ message }: { message: ChatMessage }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const model = message.modelUsed ?? message.model;
+  const { inputTokens, outputTokens, latencyMs, ttftMs, confidence, costUsd, reasoning, citations } =
+    message;
+  const hasMetrics =
+    Boolean(model) ||
+    inputTokens != null ||
+    outputTokens != null ||
+    latencyMs != null ||
+    confidence != null ||
+    costUsd != null ||
+    Boolean(reasoning) ||
+    Boolean(citations?.length);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onPointerDown = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (!hasMetrics) {
+    return null;
+  }
+
+  const rows: Array<{ label: string; value: string }> = [];
+  if (model) rows.push({ label: "Modell", value: prettyModel(model) });
+  if (inputTokens != null) rows.push({ label: "Input", value: `${inputTokens} tokens` });
+  if (outputTokens != null) rows.push({ label: "Output", value: `${outputTokens} tokens` });
+  if (ttftMs != null && ttftMs > 0) rows.push({ label: "Første token", value: formatLatency(ttftMs) });
+  if (latencyMs != null && latencyMs > 0) rows.push({ label: "Total tid", value: formatLatency(latencyMs) });
+  if (confidence != null) rows.push({ label: "Sikkerhet", value: `${Math.round(confidence * 100)}%` });
+  if (costUsd != null && costUsd > 0) rows.push({ label: "Kostnad", value: `$${costUsd.toFixed(4)}` });
+
+  return (
+    <div ref={ref} className="relative ml-auto">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-label="Vis reasoning-detaljer"
+        className="inline-flex items-center gap-1.5 rounded-full border border-[#ECECEF] bg-[#FBFBFA] px-2.5 py-1 text-[10.5px] font-medium text-[#8A8F98] transition hover:border-[#E0E0E4] hover:text-[#6E737C] dark:border-[#2A2C32] dark:bg-[#17181C] dark:text-[#8B929F] dark:hover:text-[#C4CAD3]"
+      >
+        <Sparkles className="size-3 text-[#C07B33]" strokeWidth={2} />
+        {model ? <span className="text-[#6E737C] dark:text-[#AEB4C0]">{prettyModel(model)}</span> : null}
+        {outputTokens != null ? (
+          <span className="text-[#B4B8C0] dark:text-[#5F6671]">· {outputTokens} tokens</span>
+        ) : null}
+      </button>
+
+      {open ? (
+        <div className="absolute bottom-full right-0 z-30 mb-2 w-60 rounded-[14px] border border-[#ECECEF] bg-white p-3 shadow-[0_18px_44px_rgba(20,21,24,0.12)] dark:border-[#2A2C32] dark:bg-[#15161A]">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[13px] font-semibold text-[#26282f] dark:text-white">Reasoning</span>
+            <button
+              type="button"
+              aria-label="Lukk"
+              onClick={() => setOpen(false)}
+              className="grid size-6 place-items-center rounded-md text-[#9AA0A9] transition hover:bg-[#F0F1F4] hover:text-[#26282f] dark:hover:bg-[#1C1E24] dark:hover:text-white"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+          <dl className="space-y-1.5">
+            {rows.map((row) => (
+              <div key={row.label} className="flex items-center justify-between gap-3 text-[12px]">
+                <dt className="text-[#8A8F98] dark:text-[#8B929F]">{row.label}</dt>
+                <dd className="font-medium text-[#3A3D45] dark:text-[#E2E6EC]">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+          {reasoning ? (
+            <div className="mt-3 border-t border-[#ECECEF] pt-2 dark:border-[#2A2C32]">
+              <p className="mb-1 text-[11px] font-semibold text-[#8A8F98] dark:text-[#8B929F]">Tenkte</p>
+              <p className="max-h-40 overflow-y-auto whitespace-pre-wrap text-[11.5px] leading-[1.5] text-[#6E737C] dark:text-[#AEB4C0]">
+                {reasoning}
+              </p>
+            </div>
+          ) : null}
+          {citations && citations.length > 0 ? (
+            <div className="mt-3 border-t border-[#ECECEF] pt-2 dark:border-[#2A2C32]">
+              <p className="mb-1 text-[11px] font-semibold text-[#8A8F98] dark:text-[#8B929F]">
+                Kilder ({citations.length})
+              </p>
+              <ul className="space-y-1">
+                {citations.map((citation) => (
+                  <li key={citation.id}>
+                    <a
+                      href={citation.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={citation.snippet || citation.title}
+                      className="block truncate text-[11.5px] font-medium text-[#C07B33] hover:underline dark:text-[#E29A4D]"
+                    >
+                      {citation.title || citation.url}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolChips({ tools }: { tools: ChatMessage["tools"] }) {
+  if (tools.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2.5 flex flex-wrap gap-1.5">
+      {tools.map((tool) => (
+        <span
+          key={tool}
+          className="inline-flex items-center rounded-full bg-[#F2F5FF] px-2 py-0.5 text-[10.5px] font-semibold text-[#3578F6] dark:bg-[#172236] dark:text-[#8BB7FF]"
+        >
+          {toolLabels[tool]}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function AttachmentChips({
+  attachments,
+  tone,
+}: {
+  attachments: ChatMessage["attachments"];
+  tone: "assistant" | "user";
+}) {
+  if (attachments.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2.5 flex flex-wrap gap-2">
+      {attachments.map((attachment) => (
+        <span
+          key={attachment.id}
+          className={cn(
+            "rounded-full px-2.5 py-1 text-[11px] font-medium ring-1",
+            tone === "assistant"
+              ? "bg-[#F4F5F7] text-[#5C606B] ring-[#E7E8EC] dark:bg-white/8 dark:text-[#C4CAD3] dark:ring-white/10"
+              : "bg-white/70 text-[#5C606B] ring-black/5 dark:bg-white/10 dark:text-[#C4CAD3] dark:ring-white/10",
+          )}
+        >
+          {attachment.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function ErrorNotice({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-start gap-2.5 rounded-[12px] border border-[#F0D9D4] bg-[#FCF4F2] px-3.5 py-3 dark:border-[#3A2A28] dark:bg-[#1F1715]">
+      <div className="flex items-start gap-2 text-[14px] leading-[1.55] text-[#A2483B] dark:text-[#E0897C]">
+        <AlertCircle className="mt-0.5 size-4 shrink-0" />
+        <span>{message}</span>
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="inline-flex items-center gap-1.5 rounded-full border border-[#E7D3CE] bg-white px-3 py-1 text-[12px] font-semibold text-[#A2483B] transition hover:bg-[#FBEEEB] dark:border-[#3A2A28] dark:bg-[#241A18] dark:text-[#E0897C] dark:hover:bg-[#2A1E1B]"
+      >
+        <RefreshCw className="size-3.5" />
+        Prøv igjen
+      </button>
+    </div>
+  );
+}
+
+type MessageMenuItem = {
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+};
+
+/** Speak text via the browser Web Speech API — fully client-side. */
+function readAloud(text: string) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return;
+  }
+  const clean = text.trim();
+  if (!clean) {
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(clean);
+  utterance.lang = "nb-NO";
+  window.speechSynthesis.speak(utterance);
+}
+
+function MessageMenu({
+  items,
+  align = "start",
+}: {
+  items: MessageMenuItem[];
+  align?: "start" | "end";
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onPointerDown = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <TopLayerTooltip label="Flere handlinger" placement="top">
+        <button
+          type="button"
+          aria-label="Flere handlinger"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="grid size-7 place-items-center rounded-[8px] text-[#9AA0A9] transition hover:bg-[#F0F1F4] hover:text-[#26282f] dark:text-[#7A808B] dark:hover:bg-[#1C1E24] dark:hover:text-white"
+        >
+          <MoreHorizontal className="size-3.5" />
+        </button>
+      </TopLayerTooltip>
+      {open ? (
+        <div
+          className={cn(
+            "absolute bottom-full z-30 mb-1 w-52 rounded-[12px] border border-[#ECECEF] bg-white p-1 shadow-[0_18px_44px_rgba(20,21,24,0.12)] dark:border-[#2A2C32] dark:bg-[#15161A]",
+            align === "end" ? "right-0" : "left-0",
+          )}
+        >
+          {items.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              onClick={() => {
+                item.onClick();
+                setOpen(false);
+              }}
+              className="flex w-full items-center gap-2.5 rounded-[8px] px-2.5 py-1.5 text-left text-[13px] text-[#3A3D45] transition hover:bg-[#F4F5F7] dark:text-[#D6DAE2] dark:hover:bg-[#1C1E24]"
+            >
+              <span className="text-[#8A8F98] dark:text-[#8B929F]">{item.icon}</span>
+              {item.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MessageBlock({
   copied,
   message,
   onBranch,
   onCopy,
+  onEdit,
+  onRegenerate,
 }: {
   copied: boolean;
   message: ChatMessage;
   onBranch: () => void;
   onCopy: () => void;
+  onEdit: (text: string) => void;
+  onRegenerate: () => void;
 }) {
+  const [reaction, setReaction] = useState<"up" | "down" | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
   const assistant = message.role === "assistant";
+  const waiting = message.status === "waiting";
+  const errored = message.status === "error";
+  const stopped = message.status === "stopped";
+
+  const startEditing = () => {
+    setDraft(message.content);
+    setEditing(true);
+  };
+
+  const submitEdit = () => {
+    const next = draft.trim();
+    if (!next) {
+      return;
+    }
+    setEditing(false);
+    onEdit(next);
+  };
+
+  if (assistant) {
+    return (
+      <article className="velion-chat-message group flex flex-col">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="grid size-6 place-items-center rounded-[8px] border border-[#E7E8ED] bg-white text-[#C07B33] shadow-sm dark:border-[#2D3037] dark:bg-[#17181D]">
+            <Sparkles className="size-3.5" strokeWidth={1.8} />
+          </span>
+          <span className="text-[13px] font-semibold text-[#2B2D33] dark:text-white">Velion</span>
+          <span className="text-[11.5px] font-medium text-[#A8ADB5] dark:text-[#6F7682]">
+            {formatRelative(message.createdAt)}
+          </span>
+        </div>
+
+        <div className="min-w-0 pl-8">
+          {waiting && !message.content ? (
+            <ThinkingDots />
+          ) : errored ? (
+            <ErrorNotice message={message.content} onRetry={onRegenerate} />
+          ) : (
+            <div className={cn(waiting && "velion-chat-streaming")}>
+              {message.content ? <ChatMarkdown content={message.content} /> : null}
+              {stopped ? (
+                <span className="mt-1 inline-flex items-center gap-1 text-[11.5px] font-medium text-[#A8ADB5] dark:text-[#6F7682]">
+                  <Square className="size-3" />
+                  Stoppet
+                </span>
+              ) : null}
+            </div>
+          )}
+          <ToolChips tools={message.tools} />
+          <AttachmentChips attachments={message.attachments} tone="assistant" />
+
+          {waiting || errored ? null : (
+            <div className="mt-3 flex items-center gap-0.5">
+              <MessageAction label={copied ? "Copied" : "Copy"} onClick={onCopy}>
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              </MessageAction>
+              <MessageAction
+                active={reaction === "up"}
+                label="Good response"
+                onClick={() => setReaction((current) => (current === "up" ? null : "up"))}
+              >
+                <ThumbsUp className="size-3.5" />
+              </MessageAction>
+              <MessageAction
+                active={reaction === "down"}
+                label="Bad response"
+                onClick={() => setReaction((current) => (current === "down" ? null : "down"))}
+              >
+                <ThumbsDown className="size-3.5" />
+              </MessageAction>
+              <MessageAction label="Regenerate" onClick={onRegenerate}>
+                <RefreshCw className="size-3.5" />
+              </MessageAction>
+              <MessageMenu
+                items={[
+                  {
+                    label: "Fortsett i ny chat",
+                    icon: <MessageSquarePlus className="size-4" />,
+                    onClick: onBranch,
+                  },
+                  {
+                    label: "Les høyt",
+                    icon: <Volume2 className="size-4" />,
+                    onClick: () => readAloud(message.content),
+                  },
+                ]}
+              />
+              <ReasoningPopover message={message} />
+            </div>
+          )}
+        </div>
+      </article>
+    );
+  }
 
   return (
-    <article className={cn("flex", assistant ? "justify-start" : "justify-end")}>
-      <div className={cn("group max-w-[720px]", assistant ? "w-full" : "w-fit")}>
-        {assistant ? (
-          <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.12em] text-[#8A8D96] dark:text-[#7A808B]">
-            <Sparkles className="size-3.5" />
-            Velion
-          </div>
-        ) : null}
-        <div
-          className={cn(
-            "text-[15px] leading-7",
-            assistant
-              ? "rounded-[18px] border border-[#ECECF1] bg-white px-4 py-3 text-[#26282f] shadow-[0_12px_32px_rgba(20,21,24,0.05)] dark:border-[#2A2C31] dark:bg-[#15161A] dark:text-[#F7F8F8]"
-              : "rounded-[22px] bg-[#111111] px-4 py-3 text-white shadow-[0_12px_28px_rgba(17,17,17,0.12)] dark:bg-white dark:text-[#111111]",
-          )}
-        >
-          {message.status === "waiting" ? (
-            <span className="mr-2 inline-flex size-2 animate-pulse rounded-full bg-[#3578F6] align-middle" />
-          ) : null}
-          {message.content}
-          {message.attachments.length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {message.attachments.map((attachment) => (
-                <span key={attachment.id} className="rounded-full bg-white/12 px-2.5 py-1 text-[11px] font-medium text-current ring-1 ring-white/18">
-                  {attachment.name}
-                </span>
-              ))}
-            </div>
-          ) : null}
-          {message.tools.length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {message.tools.map((tool) => (
-                <span key={tool} className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", assistant ? "bg-[#F2F5FF] text-[#3578F6] dark:bg-[#172236] dark:text-[#8BB7FF]" : "bg-white/15 text-white dark:bg-[#111111]/10 dark:text-[#111111]")}>
-                  {toolLabels[tool]}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-        <div className={cn("mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100", assistant ? "justify-start" : "justify-end")}>
-          <MessageAction label={copied ? "Copied" : "Copy"} onClick={onCopy}>
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          </MessageAction>
-          <MessageAction label="Branch from here" onClick={onBranch}>
-            <GitBranch className="size-3.5" />
-          </MessageAction>
-        </div>
+    <article className="velion-chat-message group flex flex-col items-end">
+      <div className="mb-1 flex items-center gap-2 pr-1 text-[11.5px] font-medium text-[#9AA0A9] dark:text-[#737A85]">
+        <span className="font-semibold text-[#6E737C] dark:text-[#AEB4C0]">Meg</span>
+        <span>{formatRelative(message.createdAt)}</span>
       </div>
+
+      {editing ? (
+        <div className="w-[440px] max-w-full rounded-[18px] border border-[#E2E3E9] bg-white p-3 shadow-sm dark:border-[#2C2E34] dark:bg-[#1A1B20]">
+          <textarea
+            autoFocus
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                submitEdit();
+              } else if (event.key === "Escape") {
+                setEditing(false);
+                setDraft(message.content);
+              }
+            }}
+            rows={Math.min(10, Math.max(2, draft.split("\n").length))}
+            className="w-full resize-none bg-transparent text-[15px] leading-[1.6] text-[#26282D] outline-none placeholder:text-[#9AA0A9] dark:text-[#F2F4F7]"
+          />
+          <div className="mt-2 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(false);
+                setDraft(message.content);
+              }}
+              className="rounded-full px-3 py-1 text-[12px] font-semibold text-[#6F757E] transition hover:bg-[#F0F1F4] dark:text-[#AEB4C0] dark:hover:bg-[#1C1E24]"
+            >
+              Avbryt
+            </button>
+            <button
+              type="button"
+              onClick={submitEdit}
+              disabled={!draft.trim()}
+              className="rounded-full bg-[#111111] px-3.5 py-1 text-[12px] font-semibold text-white transition hover:bg-[#2A2A2A] disabled:opacity-40 dark:bg-white dark:text-[#111111]"
+            >
+              Send på nytt
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="velion-chat-bubble w-fit max-w-[560px] rounded-[18px] rounded-tr-[6px] bg-[#F3F3F4] px-4 py-2.5 text-[15px] leading-[1.6] text-[#26282D] dark:bg-[#202227] dark:text-[#F2F4F7]">
+            <span className="whitespace-pre-wrap">{message.content}</span>
+            <ToolChips tools={message.tools} />
+            <AttachmentChips attachments={message.attachments} tone="user" />
+          </div>
+          <div className="mt-1.5 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+            <MessageAction label="Rediger" onClick={startEditing}>
+              <Pencil className="size-3.5" />
+            </MessageAction>
+            <MessageAction label={copied ? "Copied" : "Copy"} onClick={onCopy}>
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </MessageAction>
+            <MessageMenu
+              align="end"
+              items={[
+                {
+                  label: "Fortsett i ny chat",
+                  icon: <MessageSquarePlus className="size-4" />,
+                  onClick: onBranch,
+                },
+              ]}
+            />
+          </div>
+        </>
+      )}
     </article>
   );
 }
 
 function MessageAction({
+  active = false,
   children,
   label,
   onClick,
 }: {
+  active?: boolean;
   children: ReactNode;
   label: string;
   onClick: () => void;
@@ -284,8 +870,14 @@ function MessageAction({
       <button
         type="button"
         aria-label={label}
+        aria-pressed={active}
         onClick={onClick}
-        className="grid size-8 place-items-center rounded-full text-[#7A8089] transition hover:bg-[#F0F1F4] hover:text-[#26282f] dark:text-[#8A909B] dark:hover:bg-[#1C1E24] dark:hover:text-white"
+        className={cn(
+          "grid size-7 place-items-center rounded-[8px] transition",
+          active
+            ? "bg-[#FBF0E4] text-[#C07B33] dark:bg-[#2A2014] dark:text-[#E29A4D]"
+            : "text-[#9AA0A9] hover:bg-[#F0F1F4] hover:text-[#26282f] dark:text-[#7A808B] dark:hover:bg-[#1C1E24] dark:hover:text-white",
+        )}
       >
         {children}
       </button>
@@ -303,7 +895,7 @@ function TaskStreamCard({
   const activeTask = steps.some((step) => step.status === "active" || step.status === "waiting");
 
   return (
-    <section className="velion-panel ml-0 max-w-[720px] p-4" aria-label="Agent activity">
+    <section className="velion-chat-task-card hidden max-w-[680px] rounded-[16px] border border-[#EEEEF1] bg-[#FBFBFA] p-4 dark:border-[#26282E] dark:bg-[#15161A] md:ml-8 md:block" aria-label="Agent activity">
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-[13px] font-semibold text-[#26282f] dark:text-white">Agent activity</p>
