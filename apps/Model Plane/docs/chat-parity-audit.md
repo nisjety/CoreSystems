@@ -200,14 +200,26 @@ keyword list.
 - **Vision input** (`vision.rs`): an image attachment routes the turn through inference-core
   `AnalyzeImage` (vision owner) — `select_image()` (url / inline base64 / data: URLs), `vision_stream()`
   streams the description; `InvokeRequest.attachments` + BFF/client forwarding. (commit `11585f6`)
+- **Image generation → artifact** (`image_gen_stream`): explicit `generate_image` routes to
+  inference-core `GenerateImage` (owner) → `ChatEvent::Artifact{kind:image}` + chunk. (commit `d2c905f`)
+- **File-upload ingest**: `POST /v1/documents` → Data Plane `CreateDocument` (ingest owner); BFF
+  `/api/chat/documents` + client `uploadDocument()` — closes the RAG loop. (commit `4a7d8ce`)
 
-**Phase 2 — remaining:** image `artifact` (`GenerateImage` + `ChatEvent::Artifact`), file-upload
-ingest (→ Data Plane RAG), `tools[]`+`tool_call`/`tool_result`+MCP loop, `artifact`/canvas. The
-image-gen + tool-loop items need a UI trigger / intent signal; the vision UI needs an image-upload
-affordance (capture bytes/URL into `ComposerAttachment`) — the API capability is complete.
+**Phase 2 — remaining:**
+- `tools[]` + `tool_call`/`tool_result` + MCP loop. **Blocked on a real prerequisite:** inference-core's
+  `InferRequest` has no tool/function-schema field and providers don't parse `tool_call` deltas, so a
+  model-driven function-calling loop needs deep inference-core provider work AND a live provider to
+  verify — not completable/verifiable headless. (Client already dispatches `tool_call`/`tool_result`.)
+- `artifact`/canvas is a UI surface; the `artifact` event + client chunk are shipped.
 
-**Phase 3 — remaining:** `step_update` from `mp.v1.orchestration.*`, sandboxed code-exec tool,
-live browser/computer view (Quarry agent), replay, memory/projects, voice realtime.
+**Phase 3 — landed:**
+- **Replay / resume**: `stream_buffer::replay_after` (memory + Redis, `Last-Event-Id` cursor) +
+  `GET /v1/invoke/resume/:request_id`; tested. Reconnect replays deltas after the cursor + terminal done.
+
+**Phase 3 — remaining (all gated on the tool/agentic loop or a live environment):** `step_update`
+from `mp.v1.orchestration.*` (needs chat→orchestration agentic integration), sandboxed code-exec
+tool + live browser/computer view (both need the tool loop above), voice realtime (needs WebRTC/WS
+transport + live verification), memory/projects.
 
 All landed work reuses canonical owners (Data Plane v2 retrieval/knowledge/graph/wiki, Quarry v2
 web, inference-core providers, session-core conversations, capability-core safety) — no duplicate
