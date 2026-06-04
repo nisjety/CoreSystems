@@ -1,0 +1,202 @@
+# Model Plane — Chat Feature-Parity Audit & Implementation Plan
+
+Audited 2026-06-04 against the real Model Plane code (not the brief's assumptions).
+Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
+existing `profile:"chat"` plain-stream path.
+
+---
+
+## 0. Executive finding — the reframe
+
+**The matrix's 🔴s overstate the work.** Code-grounded, the Model Plane already owns the
+*primitive* for nearly every capability; the dominant gap is a **chat-stream exposure
+layer**, not building features. Three additive pieces cover ~80% of the matrix:
+
+1. **A unified, opt-in SSE event taxonomy** emitted from `/v1/invoke/stream` (the brief's
+   set). Build the emitter ONCE; every later capability just emits into it.
+2. **A few additive `InvokeRequest` fields**: `content_parts[]` (multimodal), `tools[]`
+   (function schema), `attachments[]`, `features[]` (opt-in to rich events).
+3. **Gateway fan-in** wiring that bridges existing service RPCs/NATS events
+   (inference vision/image/speech, execution-core executor, orchestration plans/steps,
+   session-core memory/threads, Quarry scrape) into those SSE events.
+
+This is the "small but powerful / no duplicate systems / right tool for the job" path:
+**reuse the canonical owners, add one thin exposure seam.** Net: most rows move 🔴→🟡.
+
+---
+
+## 1. Current baseline (VERIFIED in code)
+
+| Service | Already built (relevant to chat parity) |
+|---|---|
+| **model-gateway** | `/v1/invoke` + `/v1/invoke/stream` (sse.rs): emits `connected`/`chunk`(delta)/`done`/`error`; **resume buffer** (`stream_buffer` + `invoke_resume_sse` + `Last-Event-Id`); **Infer fallback** when token-streaming is down. MCP transport (`mcp_jsonrpc`, `runtime_registries`). Approvals write-through, plan-mode, Quarry proxy, voice passthrough, per-org `rate_limiter`. Holds clients for inference/session/orchestration/sandbox/capability/**retrieval/knowledge/document/graph** (Data Plane v2). |
+| **InvokeRequest proto** | Already has: `session_key`, `thread_id`, `content`, `model`, `provider`, `max_tokens`, `temperature`, `stream`, **`metadata` (Struct)**, `structured_output_schema`, `zdr`, **`max_cost_usd`, `max_tokens_budget`**. *Missing:* multimodal parts, tools, attachments. |
+| **inference-core** | RPCs that ALREADY exist: `InferStream`, **`AnalyzeImage`/`ExtractImageText` (vision)**, **`GenerateImage`**, **`SynthesizeSpeech`/`TranscribeSpeech`**, **`CreateRealtimeSession`**, embeddings, translation, doc-intel, video. Real OpenAI+Azure providers. |
+| **execution-core** | **Real sandboxed executor** (`execute_sandboxed`, `shell` tool wired in `runtime_loop`, bwrap on Linux / passthrough else), permission + hook gates, secret-scrub, `browser_agent`. |
+| **session-core** | Durable threads/messages/runs/checkpoints; **`CompactNow`**; **`GetContextAssembly`** (policy→workspace→agent→user→thread→episodic→skill→retrieval = **memory injection already ordered**); `agent_skills`; `SetRunMode`; `orchestration_store` (plans/approvals). |
+| **capability-core** | Registry (capabilities/models/mcp_servers/skills/routing/safety), models registry w/ `streaming`+`modality` flags, `/commands`, audit-log, G7 learning loop. |
+| **orchestrator/orchestration** | Plans, steps, approvals, run-modes; NATS `mp.v1.orchestration.*`; `StreamRunEvents` (run-events SSE already in the Go gateway). |
+| **Quarry edge** | `/v1/scrape`, `/v1/agent/*` (live browser agent loop). |
+| **Reasoning schema v1** | `reasoning_trace[]`, `confidence`, `reasoning_time_ms`, `alternative_explanations[]`. |
+| **NATS** | `mp.v1.*` events, stream-open/closed subjects, **usage envelopes** (tokens+latency) already published per turn. |
+
+---
+
+## 2. Unified SSE taxonomy (adopt the brief's; additive + versioned + opt-in)
+
+The BFF already re-streams unknown events verbatim. Add the events below. **Gate richer
+events behind a request opt-in** so `profile:"chat"` keeps emitting only
+`connected`/`chunk`/`done`/`error` — the plain path is untouched.
+
+- New `InvokeRequest.features` (`repeated string`) OR `metadata.features` — client lists the
+  event families it understands (`reasoning`, `tools`, `citations`, `artifacts`, `steps`,
+  `usage`). Gateway only emits a family if requested. Forward-compatible: unknown families ignored.
+- Add `schema_version` to `done`.
+
+| event | payload | gateway emit point | owner of the data |
+|---|---|---|---|
+| `connected` | `{ ok, request_id }` | start of `invoke_stream_sse` (exists) | gateway |
+| `chunk`/`delta` | `{ delta, request_id }` | InferStream loop (exists) | inference-core |
+| `reasoning_delta` | `{ delta }` | new reasoning channel from InferStream | inference-core |
+| `step_update` | `{ id, title, detail, status }` | bridge `mp.v1.orchestration.*` → SSE | orchestrator-core |
+| `tool_call` | `{ id, name, args }` | tool-loop dispatch | execution-core / gateway |
+| `tool_result` | `{ id, status, output, error? }` | executor result | execution-core |
+| `citation` | `{ id, title, url, snippet }` | Quarry scrape / Data Plane retrieval | gateway / Data Plane |
+| `artifact` | `{ id, kind, title, content, version }` | image-gen / doc / canvas output | gateway / inference |
+| `attachment` | `{ id, name, type, url, size }` | generated assets | gateway |
+| `usage` | `{ input_tokens, output_tokens, cost_usd, latency_ms, confidence }` | done-time, from usage envelope + cost-core + reasoning | gateway/cost-core |
+| `error` | `{ code, message, request_id, retryable }` | error path (exists; add code+retryable) | gateway |
+| `done` | `{ request_id, model_used, finish_reason, schema_version, ...usage }` | terminal (exists) | gateway |
+| `stopped` | `{ request_id, reason }` | cancel path (NEW terminal) | gateway |
+
+**The single biggest lever:** one `RichEventSink` in `sse.rs` that maps a typed internal
+channel (`ReasoningDelta`/`StepUpdate`/`ToolCall`/`ToolResult`/`Citation`/`Artifact`/
+`Attachment`/`Usage`/`Stopped`) → SSE frames, gated by `features[]`. Build it in Phase 1;
+every later capability just pushes into it. No per-feature SSE plumbing duplicated.
+
+---
+
+## 3. Corrected capability matrix (real status → gap → owner → effort/risk → phase)
+
+Effort S/M/L; Risk L/M/H. "Has" = primitive already exists; "Gap" = the plumbing to expose it.
+
+| # | Capability | Brief | **Real** | Has (primitive) | Gap (plumbing) | Owner | Eff/Risk | Phase |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Token streaming | ✅ | ✅ | delta exists | — | gateway | — | — |
+| 2 | Markdown/tables/code/**LaTeX** | 🟡 | 🟡 | verbatim pass-through | client KaTeX render; ensure no `$$` escaping (gateway already passes delta raw) | client | S/L | 1 |
+| 3 | Reasoning trace | 🟡 | 🟡 | reasoning schema v1 | `reasoning_delta` SSE + separate reasoning channel from provider (Anthropic thinking / OpenAI reasoning); `reasoning_time_ms`+`confidence` on `usage` | inference-core + gateway | M/M | 1 |
+| 4 | Stop/cancel | 🟡 | 🟡 | client abort; stream ends on disconnect | server-side cancel (kill upstream) + `stopped` terminal event + partial-usage bill | gateway | S–M/L | 1 |
+| 5 | Regenerate | 🟡 | 🟡 | `request_id` on request | idempotent re-run keyed by `request_id`; persist the turn | gateway + session-core | M/L | 1 |
+| 6 | Branch/fork | 🟡 | 🟡 | runs have `parent_run_id` | message-level fork w/ `parent_message_id` | session-core | M/L | 1–2 |
+| 7 | Web browsing + citations | 🟡 | 🟡 | Quarry `/v1/scrape` wired in BFF | emit `citation` events from the grounding step | gateway + Quarry | S–M/L | 1 |
+| 8 | File upload + RAG | 🔴 | **🟡** | Data Plane v2 retrieval/knowledge/document clients in gateway | ingest endpoint (reuse Data Plane) + retrieval grounding in invoke path + `citation` source refs | Data Plane + gateway | L/M | 2 |
+| 9 | Vision (image in) | 🔴 | **🟡** | inference `AnalyzeImage`/`ExtractImageText` | `InvokeRequest.content_parts[] {text|image}`; gateway routes image parts to vision provider | gateway + inference-core | M/M | 2 |
+| 10 | Image generation | 🔴 | **🟡** | inference `GenerateImage` | `artifact{kind:image,url}` SSE + a gen tool/intent | gateway + inference-core | M/M | 2 |
+| 11 | Code execution | 🔴 | **🟡** | execution-core real executor (`shell`) | add `python`/`code` tool to `runtime_loop` + `tool_call`/`tool_result` SSE | execution-core + gateway | M–L/M | 2–3 |
+| 12 | Tool use / MCP | 🔴 | **🟡** | MCP transport + tool dispatch | `tools[]` schema in `InvokeRequest` + tool-loop + `tool_call`/`tool_result` SSE | gateway + execution-core + capability-core | L/M | 2 |
+| 13 | Artifacts / canvas | 🔴 | **🟡** | tool/image/doc outputs | `artifact{id,kind,title,content,version}` SSE | gateway + reasoning | M/L | 2 |
+| 14 | Agentic multi-step | 🔴 | **🟡** | orchestration plans/steps/approvals/run-modes + `StreamRunEvents` + Quarry agent loop | bridge `mp.v1.orchestration.*` → `step_update` SSE; async long-running task surface | orchestrator-core + gateway | L/M | 3 |
+| 15 | Memory / instructions / projects | 🔴 | **🟡** | session-core `GetContextAssembly` already injects memory/episodic/skill; G7 learning | add custom-instructions + project scope into context assembly + profile | session-core | M/L | 1–3 |
+| 16 | Voice realtime | 🔴 | **🟡** | inference `Synth`/`Transcribe`/`CreateRealtimeSession`; gateway voice passthrough | realtime duplex endpoint (WS/WebRTC) bridging `CreateRealtimeSession` | gateway + inference-core | L/H | 3 |
+| 17 | Usage / latency / cost / confidence | 🟡 | 🟡 | `done` tokens; NATS usage envelopes; `max_cost_usd` | `usage` SSE w/ **real** `cost_usd` (cost-core) + `confidence` (reasoning) + `latency_ms` | gateway + cost-core + reasoning | S–M/L | 1 |
+| 18 | Model routing / registry | 🟡 | 🟡 | capability-core models registry (streaming+modality flags) | expose per-model feature flags to the picker (BFF/`ListModels`) | capability-core | S/L | 1 |
+| 19 | Persistence + sync + resume | 🔴 | **🟡** | gateway resume buffer + `Last-Event-Id` (in-mem); session-core durable threads/runs/checkpoints | persist chat turns to session-core; back resume with session-core (not just in-mem) | session-core + gateway | M–L/M | 1 |
+| 20 | Safety / moderation / rate-limit | 🟡 | 🟡 | capability-core safety policies; gateway `rate_limiter`; structured errors | moderation pass (pre/post) + structured `error.code`+`retryable` | gateway + capability-core safety | M/M | 1 |
+
+---
+
+## 4. Proto / gateway contract changes (additive, versioned)
+
+**`proto/model_plane/v1/gateway.proto` — `InvokeRequest` (add fields, keep numbering):**
+- `repeated ContentPart content_parts = 16;` — `ContentPart { oneof { string text; ImageRef image; FileRef file; } }` (multimodal; `content` stays for plain text).
+- `repeated ToolSpec tools = 17;` — `ToolSpec { string name; string description; google.protobuf.Struct json_schema; }`.
+- `repeated AttachmentRef attachments = 18;` — `{ string id; string name; string mime; string url; int64 size; }`.
+- `repeated string features = 19;` — opt-in event families (gates rich SSE).
+- `string idempotency_key = 20;` — regenerate/idempotent re-run (defaults to `request_id`).
+- `string parent_message_id = 21;` — branch/fork.
+
+**SSE:** new `event:` names per §2; payloads as the brief's table + `error.code`/`retryable`,
+`stopped`, `schema_version` on `done`. The BFF needs **no change** to forward them (already
+re-streams unknown events); the velionv2 client adds handlers per family (it already ignores
+unknown events).
+
+**Cancel:** `POST /v1/invoke/{request_id}/cancel` (or a NATS `mp.v1.stream.cancel`) → gateway
+aborts the upstream `InferStream`, emits `stopped`, bills partial usage.
+
+---
+
+## 5. Phased rollout + acceptance
+
+**Phase 1 — Conversation parity (almost all plumbing of existing primitives).**
+Build the `RichEventSink` + `features[]` opt-in. Ship: `stopped`/cancel, idempotent
+regenerate, `reasoning_delta`+`usage` (real cost/confidence/latency), `citation` from the
+existing Quarry path, durable persistence + session-core-backed resume, per-model flags,
+moderation + structured errors.
+*Accept:* stop mid-stream; regenerate; see thinking + sources + real token/latency/cost;
+reload a thread across devices.
+
+**Phase 2 — Multimodal + tools (expose inference/execution/Data-Plane primitives).**
+`content_parts` (vision via `AnalyzeImage`), image `artifact` (`GenerateImage`), file
+upload + RAG (Data Plane retrieval) with `citation`, `tools[]` + `tool_call`/`tool_result`
++ MCP, `artifact`/canvas.
+*Accept:* attach an image/PDF and ask about it; model calls a tool and the chat shows
+call+result; a generated table/doc opens in a side panel.
+
+**Phase 3 — Agentic (Manus parity; bridge orchestration).**
+`step_update` from `mp.v1.orchestration.*`, sandboxed code-exec tool, live browser/computer
+view (Quarry agent), replay (`StreamRunEvents` + resume buffer), memory/projects, voice realtime.
+*Accept:* one prompt spawns a multi-step task that streams its plan, runs tools/code,
+produces file artifacts, and can be replayed.
+
+---
+
+## 6. Constraints honored
+- `profile:"chat"` plain stream unchanged: rich events are **opt-in via `features[]`**; without it the gateway emits only today's 4 events.
+- Formatting stays model-driven (client `ChatMarkdown`); gateway never per-feature-formats — it only passes deltas + structured side-events.
+- Reuse existing multi-tenant auth/audience minting for any new endpoint (cancel, ingest, realtime).
+- `confidence`/`latency`/`cost` in the Reasoning popover come from **real** `usage`/`reasoning`
+  events (NATS usage envelopes + cost-core + reasoning schema) — **no placeholders**.
+
+## 7. Net effort estimate
+Phase 1 is dominated by the one-time `RichEventSink` + persistence wiring — **M**, low new-capability
+risk (everything it surfaces already exists). Phases 2–3 are mostly *exposing* built primitives,
+with genuine new build only in: file-ingest pipeline (P2), code-exec tool hardening on Linux (P3),
+and voice realtime transport (P3, highest risk).
+
+## 8. Implementation status (this branch)
+
+**Phase 1 — landed & verified:**
+- `RichEventSink` + `features[]` opt-in (`sse_events.rs`); plain `profile:"chat"` path untouched.
+- `stopped`/cancel: `CancelRegistry` + `POST /v1/invoke/{id}/cancel` + BFF/client `cancelChat`.
+- `usage` event with **real** tokens + latency (cost/confidence null until cost-core join).
+- `reasoning_delta` + `citation` plumbed through gateway→BFF→client (event-name dispatch).
+- **Structured errors** (`ChatEvent::Error { code, message, retryable }`) — gateway emits, client
+  surfaces `code`/`retryable`. (commits `3c469d5`, `c9bac33`)
+- **Idempotent `/v1/invoke`** via client `idempotency_key` (`IdempotencyRegistry`, in-memory,
+  Pending/Done + TTL, Drop-guard release). (commit `8000fd7`)
+- **Persistence + cross-device resume**: writes via session-core (`prepare_run`/append) + read path
+  `GET /v1/threads/:id/messages` → `ListConversation`, BFF `/api/chat/history`, client
+  `loadThreadHistory`, and workspace `hydrateSessionFromServer` on select. (commits `1828820`, `e535366`)
+
+**Phase 1 — remaining:**
+- Per-model feature flags: `ProviderCapabilities` exists in inference-core but is unconsumed; needs a
+  gateway `ListModels` proxy + UI gating before the proto plumbing earns its keep (defer to P2/5).
+- Moderation: owned by **capability-core** (`safety_policies`: pii_filter/content_safety/injection_defense
+  + `cap.safety.pii-filter`) — wire the gateway's Wave-10i `Policy` into the invoke path; do NOT
+  build a second moderation system.
+- Stream-path idempotency (regenerate dedup over the SSE path) — coupled to durable result storage.
+
+**Phase 2 — landed & verified:**
+- **RAG grounding via Data Plane v2** (`retrieval.rs`): opt-in (`rag`/`knowledge`/`citations`) →
+  `Retrieve` → numbered system-context block + `citation` events on stream & fallback paths.
+  Reuses the canonical retrieval owner — no new RAG store. (commit `d087f48`)
+
+**Phase 2 — remaining:** vision input (`content_parts` via `AnalyzeImage`), image `artifact`
+(`GenerateImage`), file-upload ingest, `tools[]`+`tool_call`/`tool_result`+MCP loop, `artifact`/canvas.
+
+**Phase 3 — remaining:** `step_update` from `mp.v1.orchestration.*`, sandboxed code-exec tool,
+live browser/computer view (Quarry agent), replay, memory/projects, voice realtime.
+
+All landed work reuses canonical owners (Data Plane v2 retrieval/knowledge/graph/wiki, Quarry v2
+web, inference-core providers, session-core conversations, capability-core safety) — no duplicate
+subsystems introduced.
