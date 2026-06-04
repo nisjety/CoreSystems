@@ -214,6 +214,58 @@ message InvokeRequest {
 
   // Maximum total tokens (input + output) budget for this request.
   int32 max_tokens_budget = 15;
+
+  // ===== Chat-parity additive fields (docs/chat-parity-audit.md §4) =====
+
+  // Multimodal content parts. When non-empty, supersedes `content` (which
+  // stays for the plain-text path) so a turn can mix text + images + files.
+  repeated ContentPart content_parts = 16;
+
+  // Tool / function schemas the model may call this turn.
+  repeated ToolSpec tools = 17;
+
+  // Attachment references (uploaded files/images) for grounding.
+  repeated AttachmentRef attachments = 18;
+
+  // Opt-in SSE event families the client understands (e.g. "reasoning",
+  // "tools", "citations", "artifacts", "steps", "usage"). EMPTY = the plain
+  // chat stream (connected/delta/done/error only) — protects profile:"chat".
+  repeated string features = 19;
+
+  // Idempotency key for safe regenerate / retry (defaults to request_id).
+  string idempotency_key = 20;
+
+  // Parent message id for edit-and-resubmit / branch (thread fork).
+  string parent_message_id = 21;
+}
+
+// ContentPart — one piece of a multimodal turn (chat-parity §9 vision).
+message ContentPart {
+  // "text" | "image" | "file".
+  string type = 1;
+  // Text content (type=text).
+  string text = 2;
+  // Image/file URL or data ref (type=image|file).
+  string url = 3;
+  // MIME type (type=image|file).
+  string mime = 4;
+}
+
+// ToolSpec — a callable tool/function the model may invoke (chat-parity §12).
+message ToolSpec {
+  string name = 1;
+  string description = 2;
+  // JSON Schema for the tool's arguments.
+  google.protobuf.Struct json_schema = 3;
+}
+
+// AttachmentRef — an uploaded asset referenced by a turn (chat-parity §8 RAG).
+message AttachmentRef {
+  string id = 1;
+  string name = 2;
+  string mime = 3;
+  string url = 4;
+  int64 size = 5;
 }
 
 // SourceTrace records the provenance of a piece of generated content.

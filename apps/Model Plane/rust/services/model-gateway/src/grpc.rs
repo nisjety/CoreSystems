@@ -17,9 +17,9 @@ use mp_contracts::model_plane::v1::{
     ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest,
     FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse,
     GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InferChunk, InferRequest,
-    InferResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse,
-    ListCommandsRequest, ListCommandsResponse, ListHooksRequest, ListHooksResponse,
-    ListMcpServersRequest, ListMcpServersResponse, ListPendingApprovalsRequest,
+    InferResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest,
+    IsPlanModeResponse, ListCommandsRequest, ListCommandsResponse, ListHooksRequest,
+    ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest,
     ListSkillsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest,
     ListThreadMessagesResponse, ListTrajectoriesRequest, ListTrajectoriesResponse, LspQueryRequest,
@@ -2056,6 +2056,7 @@ mod tests {
             zdr: false,
             max_cost_usd: 0.0,
             max_tokens_budget: 0,
+            ..Default::default()
         }
     }
 

@@ -82,6 +82,8 @@ pub async fn invoke_stream_sse(
     let org_clone = org_id.clone();
     let user_clone = user_id.clone();
     let model_clone = model.clone();
+    // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
+    let features = req.features.clone();
 
     let grpc_req = InferRequest {
         request_id: request_id.clone(),
@@ -130,6 +132,7 @@ pub async fn invoke_stream_sse(
                 user_id,
                 model,
                 start,
+                features,
             );
         }
     };
@@ -226,6 +229,21 @@ pub async fn invoke_stream_sse(
                         )
                         .await;
 
+                    // chat-parity §17: opt-in usage event (real tokens + latency)
+                    // before the terminal done. cost_usd/confidence are wired in
+                    // later slices (cost-core / reasoning) — null until then,
+                    // never faked.
+                    let usage_event = crate::sse_events::ChatEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                        cost_usd: None,
+                        latency_ms,
+                        confidence: None,
+                    };
+                    if usage_event.should_emit(&features) {
+                        let _ = tx.send(Ok(usage_event.to_sse(&req_id))).await;
+                    }
+
                     let done_chunk = SseChunk {
                         request_id: req_id.clone(),
                         delta: String::new(),
@@ -280,7 +298,7 @@ fn chunk_for_stream(text: &str, target: usize) -> Vec<String> {
 /// (working) non-streaming `Infer` and reveal its content in chunks so
 /// `/v1/invoke/stream` still returns real tokens. If `Infer` ALSO fails, emit
 /// an honest `error` event — never a fake successful `done`.
-#[allow(clippy::too_many_lines)] // cohesive streaming emission, mirrors invoke_stream_sse
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // cohesive streaming emission, mirrors invoke_stream_sse
 fn infer_fallback_stream(
     state: AppState,
     grpc_req: InferRequest,
@@ -289,6 +307,7 @@ fn infer_fallback_stream(
     user_id: String,
     model: String,
     start: std::time::Instant,
+    features: Vec<String>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -371,6 +390,18 @@ fn infer_fallback_stream(
                         },
                     )
                     .await;
+
+                // chat-parity §17: opt-in usage event (real tokens + latency).
+                let usage_event = crate::sse_events::ChatEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cost_usd: None,
+                    latency_ms,
+                    confidence: None,
+                };
+                if usage_event.should_emit(&features) {
+                    let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
+                }
 
                 let done_chunk = SseChunk {
                     request_id: request_id.clone(),

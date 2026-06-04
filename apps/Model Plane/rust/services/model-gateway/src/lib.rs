@@ -25,6 +25,7 @@ pub mod runtime_registries;
 pub mod session_flow;
 pub mod skills;
 pub mod sse;
+pub mod sse_events;
 pub mod state;
 pub mod stream_buffer;
 pub mod tools;

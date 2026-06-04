@@ -206,6 +206,7 @@ fn proxy_routes() -> Router<AppState> {
 fn ai_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/ai/chat", post(ai_chat))
+        .route("/v1/recommend/plan", post(recommend_plan))
         .route("/v1/ai/embeddings", post(ai_embeddings))
         .route("/v1/ai/models", get(ai_models))
         .route("/v1/ai/images", post(ai_images))
@@ -899,6 +900,210 @@ async fn ai_chat(
         "model_used": resp.model_used,
         "usage": { "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens },
     })))
+}
+
+/// Versioned system prompt for the onboarding plan recommender. Bumping the
+/// version string changes the inference-core prompt-cache key.
+const RECOMMEND_PLAN_MODEL_VERSION: &str = "recommend-plan-v6";
+
+const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
+    "Velion product context: Velion is both the product name and the AI worker at the center of the product. ",
+    "The software exists to configure, feed, govern, deploy, and measure Velion for each company. ",
+    "Customers are not merely installing a helpdesk with an AI add-on; they are giving Velion the company's ",
+    "website, knowledge, integrations, rules, and goals so Velion can become their source-grounded support worker. ",
+    "Velion is an AI-native competitor to Intercom, Chatbase, Gorgias, Mimir, and Zendesk: it combines ",
+    "customer chat, support inbox, knowledge base, integrations, retrieval, graph context, workflow routing, ",
+    "automation, analytics, and AI agent capabilities in one workspace. ",
+    "It ingests a customer's public website and connected work systems into a Data Plane with documents, ",
+    "knowledge units, vector retrieval, and graph entities/relationships. The Model Plane uses that data for ",
+    "GraphRAG-style answers, scope analysis, routing suggestions, and knowledge-gap discovery. ",
+    "Velion can power a customer-facing chatbot, shared/team inbox workflows, source-grounded answers, ",
+    "handoff/routing rules, automation ideas, SLA/reporting views, and dashboard insights about missing answers ",
+    "or next sources to connect. Velion improves support by reducing repeated manual answers, making responses ",
+    "consistent across website and internal sources, surfacing gaps before launch, and suggesting the first ",
+    "automations a team should validate. ",
+    "Do not overpromise exact savings, guaranteed resolution rates, autonomous changes in third-party systems, ",
+    "or private model training unless the input explicitly supports it. Treat expected outcomes as directional ",
+    "launch estimates. ",
+    "Recommendation task: you are Velion's senior onboarding consultant writing a live AI recommendation ",
+    "for a customer who just connected their website and tools. Recommend exactly one Velion plan. ",
+    "Plans (id -> name): ",
+    "trial -> Free (14-day Pro trial, no card); ",
+    "hobby -> Essential (small team, single chatbot); ",
+    "standard -> Advanced (automation, routing, multiple sources/inboxes); ",
+    "pro -> Expert (SSO, SLA, reporting, multibrand, larger teams); ",
+    "enterprise -> Custom (governance, volume, dedicated onboarding). ",
+    "Heuristics: more employees, more connected sources, and intent signals like ",
+    "automation/SLA/SSO/governance push toward higher tiers; little or no signal -> trial. ",
+    "Write like a thoughtful product specialist, not a pricing template. ",
+    "Use the actual organization name, employee count if provided, website host, and connected systems. ",
+    "If context.dataPlane is present, use its graph counts, groups, sample nodes and sample edges as evidence; ",
+    "do not invent document contents that are not in the JSON. ",
+    "Paraphrase the user's goal and correct obvious spelling/grammar mistakes; never quote raw user input. ",
+    "Explain why this plan fits now, what Velion already appears to understand, and what the customer can expect ",
+    "in the first launch window. Expected outcomes must be rough directional estimates, not guarantees. ",
+    "Avoid generic phrases such as 'select this plan', 'static FAQ', or 'you can change later'. ",
+    "Reply with ONLY a JSON object: {\"planId\": one of trial|hobby|standard|pro|enterprise, ",
+    "\"reason\": a short natural sentence addressed to the user, \"summary\": two concise sentences, ",
+    "\"proofPoints\": 2-4 concrete evidence bullets, \"scopeSignals\": 2-4 scope bullets, ",
+    "\"opportunities\": 2-4 likely first improvements, ",
+    "\"expectedOutcomes\": 2-3 objects with {label,value,detail}, ",
+    "\"confidence\": number 0..1}. Write all user-facing text in the requested locale ",
+    "(nb = natural Norwegian Bokmål, en = English)."
+);
+
+const RECOMMEND_PLAN_SCHEMA: &str = concat!(
+    "{\"type\":\"object\",\"properties\":{",
+    "\"planId\":{\"type\":\"string\",\"enum\":[\"trial\",\"hobby\",\"standard\",\"pro\",\"enterprise\"]},",
+    "\"reason\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},",
+    "\"proofPoints\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},",
+    "\"scopeSignals\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},",
+    "\"opportunities\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},",
+    "\"expectedOutcomes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{",
+    "\"label\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"},\"detail\":{\"type\":\"string\"}},",
+    "\"required\":[\"label\",\"value\"]}},",
+    "\"confidence\":{\"type\":\"number\"}},",
+    "\"required\":[\"planId\",\"reason\",\"summary\",\"proofPoints\",\"scopeSignals\",\"opportunities\",\"expectedOutcomes\"]}"
+);
+
+#[derive(Debug, Deserialize)]
+struct RecommendPlanRequest {
+    /// Opaque onboarding-context object assembled by the frontend BFF.
+    #[serde(default)]
+    context: Value,
+    #[serde(default)]
+    locale: String,
+}
+
+/// Recommend an onboarding plan from accumulated onboarding signals. Wraps
+/// inference-core with a versioned prompt + JSON-schema structured output and
+/// runs with ZDR (the context contains org signals). The frontend renders an
+/// instant local recommendation first and swaps in this authoritative result;
+/// it also falls back to its local engine if this endpoint is unavailable, so
+/// this handler favors always returning a valid plan id.
+async fn recommend_plan(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<RecommendPlanRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+
+    let locale = if req.locale == "en" { "en" } else { "nb" };
+    let context_json = serde_json::to_string(&req.context).unwrap_or_else(|_| "{}".to_owned());
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_owned(),
+            content: RECOMMEND_PLAN_SYSTEM_PROMPT.to_owned(),
+            name: String::new(),
+        },
+        ChatMessage {
+            role: "user".to_owned(),
+            content: format!("Locale: {locale}\nOnboarding signals (JSON):\n{context_json}"),
+            name: String::new(),
+        },
+    ];
+
+    let request_id = new_ulid();
+    let resp = state
+        .inference_client
+        .clone()
+        .infer(InferRequest {
+            request_id: request_id.clone(),
+            org_id: claims.org_id.clone(),
+            model: String::new(),
+            provider_hint: String::new(),
+            messages,
+            temperature: 0.55,
+            max_tokens: 1100,
+            structured_output_schema: RECOMMEND_PLAN_SCHEMA.to_owned(),
+            zdr: true,
+        })
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    let parsed: Value = serde_json::from_str(resp.content.trim()).unwrap_or(Value::Null);
+    let plan_id = parsed
+        .get("planId")
+        .and_then(Value::as_str)
+        .filter(|p| matches!(*p, "trial" | "hobby" | "standard" | "pro" | "enterprise"))
+        .unwrap_or("trial");
+    let reason = parsed
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let summary = parsed
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let proof_points = string_array_field(&parsed, "proofPoints", 4);
+    let scope_signals = string_array_field(&parsed, "scopeSignals", 4);
+    let opportunities = string_array_field(&parsed, "opportunities", 4);
+    let expected_outcomes = expected_outcomes_field(&parsed, 3);
+    let confidence = parsed.get("confidence").and_then(Value::as_f64);
+
+    Ok(Json(json!({
+        "recommendation": {
+            "planId": plan_id,
+            "reason": reason,
+            "summary": summary,
+            "proofPoints": proof_points,
+            "scopeSignals": scope_signals,
+            "opportunities": opportunities,
+            "expectedOutcomes": expected_outcomes,
+            "confidence": confidence,
+            "modelVersion": RECOMMEND_PLAN_MODEL_VERSION,
+            "model_used": resp.model_used,
+            "request_id": request_id,
+        }
+    })))
+}
+
+fn string_array_field(parsed: &Value, key: &str, limit: usize) -> Vec<String> {
+    parsed
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|text| text.trim())
+                .filter(|text| !text.is_empty())
+                .take(limit)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn expected_outcomes_field(parsed: &Value, limit: usize) -> Vec<Value> {
+    parsed
+        .get("expectedOutcomes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let label = item.get("label").and_then(Value::as_str)?.trim();
+                    let value = item.get("value").and_then(Value::as_str)?.trim();
+                    if label.is_empty() || value.is_empty() {
+                        return None;
+                    }
+                    let detail = item
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty());
+                    Some(json!({
+                        "label": label,
+                        "value": value,
+                        "detail": detail,
+                    }))
+                })
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Embedding generation via inference-core. Data Plane owns vector storage and
@@ -1991,12 +2196,7 @@ async fn ai_video_content(
             Ok(Some(chunk)) if chunk.done => None,
             Ok(Some(chunk)) => Some((Ok::<Bytes, std::io::Error>(Bytes::from(chunk.data)), stream)),
             Ok(None) => None,
-            Err(status) => Some((
-                Err(std::io::Error::other(
-                    status.to_string(),
-                )),
-                stream,
-            )),
+            Err(status) => Some((Err(std::io::Error::other(status.to_string())), stream)),
         }
     });
 
@@ -2524,6 +2724,11 @@ pub struct InvokeRequest {
     /// posture (`HARNESS_PHASE1` §1). Absent → "chat" (auto, non-gating).
     #[serde(default)]
     pub profile: Option<String>,
+    /// Opt-in rich SSE event families the client understands (chat-parity §2:
+    /// "reasoning", "tools", "citations", "artifacts", "steps", "usage"). EMPTY
+    /// → plain stream (connected/chunk/done/error only); protects profile:"chat".
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
