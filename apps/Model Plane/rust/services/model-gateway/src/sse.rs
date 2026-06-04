@@ -188,6 +188,16 @@ pub async fn invoke_stream_sse(
         None => (String::new(), Vec::new()),
     };
 
+    // chat-parity safety (pii_filter): opt-in redaction of PII from the user
+    // message before it reaches an external provider. Retrieval above used the
+    // RAW query (Data Plane is internal); only the provider-bound prompt is
+    // redacted. Off by default → plain chat is unchanged.
+    let user_content = if crate::moderation::wants_moderation(&features) {
+        crate::moderation::redact_pii(&req.content).0
+    } else {
+        req.content.clone()
+    };
+
     let mut messages = Vec::new();
     if !context_block.is_empty() {
         messages.push(ChatMessage {
@@ -198,7 +208,7 @@ pub async fn invoke_stream_sse(
     }
     messages.push(ChatMessage {
         role: "user".to_owned(),
-        content: req.content.clone(),
+        content: user_content,
         name: String::new(),
     });
 

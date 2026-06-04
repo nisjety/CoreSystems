@@ -2929,6 +2929,14 @@ async fn invoke(
             )
         })?;
 
+    // chat-parity safety (pii_filter): opt-in redaction before the prompt
+    // reaches an external provider. Off by default → unchanged behavior.
+    let user_content = if crate::moderation::wants_moderation(&req.features) {
+        crate::moderation::redact_pii(&normalized.content).0
+    } else {
+        normalized.content.clone()
+    };
+
     // Call inference-core
     let infer_resp = {
         use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
@@ -2942,7 +2950,7 @@ async fn invoke(
                 provider_hint: String::new(),
                 messages: vec![ChatMessage {
                     role: "user".to_owned(),
-                    content: normalized.content.clone(),
+                    content: user_content,
                     name: String::new(),
                 }],
                 temperature: 0.7,

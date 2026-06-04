@@ -18,6 +18,7 @@ pub mod idempotency_registry;
 pub mod langcache;
 pub mod lsp;
 pub mod mcp_jsonrpc;
+pub mod moderation;
 pub mod nats_publisher;
 pub mod normalize;
 pub mod profile;
