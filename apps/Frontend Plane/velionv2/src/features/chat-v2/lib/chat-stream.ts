@@ -44,7 +44,7 @@ export type ChatStreamChunk =
       confidence?: number;
     }
   | { type: "done"; modelUsed: string; inputTokens: number; outputTokens: number; timing?: ChatTiming }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; code?: string; retryable?: boolean };
 
 /**
  * Async-generator that yields SSE chunks from the BFF chat stream route.
@@ -108,9 +108,14 @@ export async function* streamChat(
         }
 
         if (eventName === "error") {
+          // Structured error (chat-parity §20): the gateway sends a stable
+          // `code` + `retryable` alongside the human-readable `message`. All
+          // three are optional so older/plain error blobs still parse.
           yield {
             type: "error",
             message: readErrorMessage(data),
+            code: typeof data["code"] === "string" ? data["code"] : undefined,
+            retryable: typeof data["retryable"] === "boolean" ? data["retryable"] : undefined,
           };
           return;
         }
