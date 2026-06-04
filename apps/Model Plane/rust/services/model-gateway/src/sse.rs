@@ -38,6 +38,67 @@ pub struct SseChunk {
 
 type HttpJsonError = (StatusCode, Json<Value>);
 
+/// One-shot SSE stream that emits a single structured error and closes.
+/// Used to reject a duplicate in-flight stream (chat-parity §1 idempotency).
+fn error_stream(
+    request_id: &str,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let evt = crate::sse_events::ChatEvent::Error {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        retryable,
+    };
+    let sse = evt.to_sse(request_id);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(sse)).await;
+    });
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// One-shot SSE stream that replays a cached completed answer as a single
+/// `chunk` + terminal `done` (chat-parity §1 idempotent regenerate replay).
+fn replay_cached_stream(
+    cached: crate::idempotency_registry::CachedInvoke,
+    request_id: String,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(4);
+    tokio::spawn(async move {
+        let chunk = SseChunk {
+            request_id: request_id.clone(),
+            delta: cached.content,
+            done: false,
+            model_used: cached.model_used.clone(),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let _ = tx
+            .send(Ok(Event::default()
+                .id("0")
+                .event("chunk")
+                .data(serde_json::to_string(&chunk).unwrap_or_default())))
+            .await;
+        let done = SseChunk {
+            request_id,
+            delta: String::new(),
+            done: true,
+            model_used: cached.model_used,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let _ = tx
+            .send(Ok(Event::default()
+                .id("1")
+                .event("done")
+                .data(serde_json::to_string(&done).unwrap_or_default())))
+            .await;
+    });
+    Sse::new(ReceiverStream::new(rx))
+}
+
 /// SSE streaming invoke handler.
 ///
 /// Emits `STREAM_OPENED` on start, streams gRPC inference chunks,
@@ -84,6 +145,34 @@ pub async fn invoke_stream_sse(
     let model_clone = model.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
     let features = req.features.clone();
+
+    // chat-parity §1 — stream-path idempotency. A concurrent duplicate (same
+    // client `idempotency_key` mid-flight) is rejected so a double-click /
+    // retry never spawns a second generation; a completed key replays its
+    // cached answer; the guard releases the claim when the stream ends (Drop),
+    // so a later regenerate is free to run.
+    let idem_guard = match req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        Some(key) => match state.idempotency.claim(key) {
+            crate::idempotency_registry::Claim::Cached(v) => {
+                return replay_cached_stream(v, request_id);
+            }
+            crate::idempotency_registry::Claim::InFlight => {
+                return error_stream(
+                    &request_id,
+                    "duplicate_in_flight",
+                    "a request with this idempotency_key is already streaming",
+                    false,
+                );
+            }
+            crate::idempotency_registry::Claim::Proceed(g) => Some(g),
+        },
+        None => None,
+    };
 
     // chat-parity §8: RAG grounding via Data Plane v2 retrieval (reused — no
     // new RAG store). When the request opts in, retrieve context, prepend it as
@@ -158,6 +247,7 @@ pub async fn invoke_stream_sse(
                 start,
                 features,
                 citations,
+                idem_guard,
             );
         }
     };
@@ -170,6 +260,11 @@ pub async fn invoke_stream_sse(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     tokio::spawn(async move {
+        // chat-parity §1: hold the idempotency claim for the stream's lifetime.
+        // Dropped when the task ends (normal completion, cancel, error, or
+        // client disconnect) — which releases the key for a later regenerate.
+        let _idem_guard = idem_guard;
+
         // chat-parity §8: emit retrieved sources up front (gated on the
         // `citations` family) so the UI can render the Sources panel before
         // the answer streams in.
@@ -365,9 +460,14 @@ fn infer_fallback_stream(
     start: std::time::Instant,
     features: Vec<String>,
     citations: Vec<crate::retrieval::GroundingCitation>,
+    idem_guard: Option<crate::idempotency_registry::CommitGuard>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
+        // chat-parity §1: hold the idempotency claim for the fallback stream's
+        // lifetime; released on task end (Drop), mirroring the streaming path.
+        let _idem_guard = idem_guard;
+
         // chat-parity §8: surface retrieved sources before the answer (gated on
         // the `citations` family), mirroring the streaming path.
         for c in citations {

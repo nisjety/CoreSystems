@@ -56,6 +56,9 @@ type ChatStreamRequest = {
   // Opt-in rich SSE event families (chat-parity §2). Forwarded to Model Plane
   // so the gateway emits the matching events; the BFF re-streams them verbatim.
   features?: string[];
+  // Optional client idempotency key (chat-parity §1). Dedupes a concurrent
+  // duplicate stream (double-click / retry) and enables cached-answer replay.
+  idempotencyKey?: string;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -168,6 +171,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     ? parsed.features.filter((f): f is string => typeof f === "string").slice(0, 16)
     : [];
   const wantsCitations = features.includes("citations");
+  const idempotencyKey = normalizeOptionalString(parsed.idempotencyKey, 160);
 
   if (!content || typeof content !== "string" || !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
@@ -237,6 +241,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         thread_id: sessionId,
         profile: "chat",
         features,
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
       }),
       // Don't use the request's signal — keep the Model Plane call alive even
       // if the browser tab closes (ported from v1 rationale).

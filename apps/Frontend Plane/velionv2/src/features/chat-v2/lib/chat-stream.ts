@@ -17,6 +17,9 @@ export type ChatStreamOptions = {
   url?: string;
   /** Opt-in rich SSE event families (chat-parity §2), e.g. ["usage","citations"]. */
   features?: string[];
+  /** Optional idempotency key (chat-parity §1) — dedupes a concurrent duplicate
+   *  stream and enables cached-answer replay on retry. */
+  idempotencyKey?: string;
   signal?: AbortSignal;
 };
 
@@ -53,13 +56,23 @@ export type ChatStreamChunk =
 export async function* streamChat(
   opts: ChatStreamOptions,
 ): AsyncGenerator<ChatStreamChunk, void, void> {
-  const { content, model, sessionId, browseWeb, tools, url, features, signal } = opts;
+  const { content, model, sessionId, browseWeb, tools, url, features, idempotencyKey, signal } =
+    opts;
 
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ content, model, sessionId, browseWeb, tools, url, features }),
+    body: JSON.stringify({
+      content,
+      model,
+      sessionId,
+      browseWeb,
+      tools,
+      url,
+      features,
+      idempotencyKey,
+    }),
     signal,
   });
 
