@@ -3,6 +3,7 @@
 pub mod approvals;
 pub mod auth;
 pub mod budget;
+pub mod cancel_registry;
 pub mod capability_consumer;
 pub mod coordinator;
 pub mod dataplane;
