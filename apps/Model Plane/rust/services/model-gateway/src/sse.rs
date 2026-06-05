@@ -204,6 +204,25 @@ pub async fn invoke_stream_sse(
         );
     }
 
+    // chat-parity Phase 3 — agentic run. Opt-in via the `agentic` feature: the
+    // turn becomes a session-core run (StartRun) that orchestration/execution
+    // drive; the gateway streams the run's `step_update`s and the resulting
+    // answer. The gateway only ORCHESTRATES — code/tool execution happens in
+    // execution-core under its sandbox. Falls back to a direct answer if the
+    // run produces nothing (e.g. no live worker), so a reply is always returned.
+    if features.iter().any(|f| f == "agentic") {
+        return agentic_run_stream(
+            state.clone(),
+            request_id,
+            org_id,
+            user_id,
+            model,
+            req.content.clone(),
+            features,
+            idem_guard,
+        );
+    }
+
     // chat-parity §8: RAG grounding via Data Plane v2 retrieval (reused — no
     // new RAG store). When the request opts in, retrieve context, prepend it as
     // a system message, and carry the sources to emit as `citation` events.
@@ -1093,6 +1112,173 @@ pub async fn run_events_sse(
     });
 
     Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+/// Read the latest assistant message in a thread (the run's answer, if it
+/// appended one). Reuses session-core `ListConversation`.
+async fn read_latest_assistant(state: &AppState, org_id: &str, thread_id: &str) -> Option<String> {
+    use mp_contracts::model_plane::v1::ListConversationRequest;
+    let resp = state
+        .session_client
+        .clone()
+        .list_conversation(ListConversationRequest {
+            org_id: org_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+        })
+        .await
+        .ok()?;
+    resp.into_inner()
+        .messages
+        .into_iter()
+        .rev()
+        .find(|m| m.role == "assistant")
+        .map(|m| m.content)
+}
+
+/// Direct (non-agentic) inference fallback — used when an agentic run produced
+/// no answer (e.g. no live orchestration/execution worker), so a reply is
+/// always returned.
+async fn direct_infer(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    model: &str,
+    content: &str,
+) -> Option<String> {
+    let mut client = state.inference_client.clone();
+    client
+        .infer(tonic::Request::new(InferRequest {
+            request_id: request_id.to_owned(),
+            org_id: org_id.to_owned(),
+            model: model.to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                role: "user".to_owned(),
+                content: content.to_owned(),
+                name: String::new(),
+            }],
+            temperature: 0.7,
+            max_tokens: 1024,
+            structured_output_schema: String::new(),
+            zdr: false,
+            ..Default::default()
+        }))
+        .await
+        .ok()
+        .map(|r| r.into_inner().content)
+}
+
+/// chat-parity Phase 3 — agentic run stream. The chat turn becomes a
+/// session-core run (`StartRun` via `prepare_run`); the gateway streams the run's
+/// orchestration events as `step_update`, then streams the run's resulting
+/// assistant answer. The gateway only ORCHESTRATES + observes — tool/code
+/// execution happens in execution-core under its sandbox. If the run yields no
+/// answer within the idle window (e.g. no live worker), it falls back to a
+/// direct inference so a reply is always returned. Known contracts only
+/// (`StartRun`, `StreamRunEvents`, `ListConversation`, `Infer`).
+#[allow(clippy::too_many_arguments)] // cohesive stream entry — all are request context
+fn agentic_run_stream(
+    state: AppState,
+    request_id: String,
+    org_id: String,
+    user_id: String,
+    model: String,
+    content: String,
+    features: Vec<String>,
+    idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    tokio::spawn(async move {
+        let _idem_guard = idem_guard;
+        let _ = tx
+            .send(Ok(Event::default().event("connected").data("{\"ok\":true}")))
+            .await;
+
+        // 1. Spawn the run (session-core StartRun; also persists the user turn).
+        let run = match crate::session_flow::prepare_run(
+            &state, None, None, &org_id, &user_id, &content,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err = crate::sse_events::ChatEvent::Error {
+                    code: "agentic_run_start_failed".to_owned(),
+                    message: e.to_string(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(err.to_sse(&request_id))).await;
+                return;
+            }
+        };
+
+        // 2. Stream the run's orchestration events as step_update, bounded by an
+        //    idle timeout (stop once the run goes quiet / ends / errors).
+        if let Ok(resp) = state
+            .orchestration_client
+            .clone()
+            .stream_run_events(StreamRunEventsRequest {
+                run_id: run.run_id.clone(),
+                after_event_id: String::new(),
+            })
+            .await
+        {
+            let mut events = resp.into_inner();
+            // Observe until the run goes idle (25s), ends, or errors.
+            while let Ok(Some(Ok(ev))) =
+                tokio::time::timeout(std::time::Duration::from_secs(25), events.next()).await
+            {
+                if let Some(step) = orchestration_event_to_step_update(&ev) {
+                    if step.should_emit(&features) {
+                        let _ = tx.send(Ok(step.to_sse(&request_id))).await;
+                    }
+                }
+            }
+        }
+
+        // 3. The answer: the run's appended assistant message, else a direct
+        //    inference fallback (always reply).
+        let answer = read_latest_assistant(&state, &org_id, &run.thread_id)
+            .await
+            .filter(|a| !a.trim().is_empty());
+        let final_text = match answer {
+            Some(a) => a,
+            None => direct_infer(&state, &request_id, &org_id, &model, &content)
+                .await
+                .unwrap_or_else(|| "The agent run produced no output.".to_owned()),
+        };
+
+        // 4. Stream the answer as chunks + a terminal done.
+        for piece in chunk_for_stream(&final_text, 48) {
+            let chunk = SseChunk {
+                request_id: request_id.clone(),
+                delta: piece,
+                done: false,
+                model_used: model.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+            };
+            let data = serde_json::to_string(&chunk).unwrap_or_default();
+            if tx
+                .send(Ok(Event::default().event("chunk").data(data)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        let done = json!({
+            "done": true,
+            "modelUsed": model,
+            "inputTokens": 0,
+            "outputTokens": 0,
+        });
+        let _ = tx
+            .send(Ok(Event::default().event("done").data(done.to_string())))
+            .await;
+    });
+
+    Sse::new(ReceiverStream::new(rx))
 }
 
 fn build_stream_envelope(
