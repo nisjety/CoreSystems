@@ -490,7 +490,7 @@ impl RetrievalPipeline {
             return Ok(vec![]);
         }
 
-        let rows = sqlx::query_as::<_, SourceRow>(
+        let mut rows = sqlx::query_as::<_, SourceRow>(
             r#"
             SELECT document_id, title, source, type
             FROM documents
@@ -501,6 +501,25 @@ impl RetrievalPipeline {
         .bind(&doc_ids)
         .fetch_all(&self.pool)
         .await?;
+
+        // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
+        // page_id, which lives in wiki_pages, not documents. Look those up too
+        // so wiki citations get a real title + path + type="wiki" instead of a
+        // bare id. Best-effort: a failure here just omits the wiki title.
+        match sqlx::query_as::<_, SourceRow>(
+            r#"
+            SELECT page_id AS document_id, title, path AS source, 'wiki' AS type
+            FROM wiki_pages
+            WHERE page_id = ANY($1)
+            "#,
+        )
+        .bind(&doc_ids)
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(wiki_rows) => rows.extend(wiki_rows),
+            Err(e) => tracing::warn!(error = %e, "wiki source join failed; omitting wiki titles"),
+        }
 
         Ok(rows
             .into_iter()
