@@ -2892,14 +2892,16 @@ async fn create_document(
     let resp = state
         .document_client
         .clone()
-        .create_document(CreateDocumentRequest {
-            org_id: claims.org_id.clone(),
-            source: req.source.unwrap_or_else(|| "chat-upload".to_owned()),
-            r#type: req.doc_type.unwrap_or_else(|| "text".to_owned()),
-            title: req.title,
-            content: req.content,
-            ..Default::default()
-        })
+        .create_document(crate::retrieval::authorize(tonic::Request::new(
+            CreateDocumentRequest {
+                org_id: claims.org_id.clone(),
+                source: req.source.unwrap_or_else(|| "chat-upload".to_owned()),
+                r#type: req.doc_type.unwrap_or_else(|| "text".to_owned()),
+                title: req.title,
+                content: req.content,
+                ..Default::default()
+            },
+        )))
         .await
         .map_err(|e| {
             (

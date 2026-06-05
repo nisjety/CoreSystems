@@ -163,6 +163,20 @@ pub fn build_grounding(resp: &RetrieveResponse) -> Grounding {
     }
 }
 
+/// Attach the Data Plane v2 internal API key as `x-api-key` gRPC metadata so
+/// the retrieval-engine's `ApiKeyInterceptor` authorizes the call (it rejects
+/// missing creds with "invalid or missing credential"). Reads
+/// `DATAPLANE_INTERNAL_KEY`; no-op when unset (dev / no-auth deployments).
+#[must_use]
+pub fn authorize<T>(mut req: tonic::Request<T>) -> tonic::Request<T> {
+    if let Ok(key) = std::env::var("DATAPLANE_INTERNAL_KEY") {
+        if let Ok(val) = tonic::metadata::MetadataValue::try_from(key.as_str()) {
+            req.metadata_mut().insert("x-api-key", val);
+        }
+    }
+    req
+}
+
 /// Retrieve grounding for `query` from Data Plane v2. Returns `None` when the
 /// retrieval service is unavailable, errors, or yields nothing — callers then
 /// proceed ungrounded.
@@ -188,7 +202,7 @@ pub async fn retrieve(
     match state
         .retrieval_client
         .clone()
-        .retrieve(tonic::Request::new(request))
+        .retrieve(authorize(tonic::Request::new(request)))
         .await
     {
         Ok(resp) => {

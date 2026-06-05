@@ -151,6 +151,16 @@ services:
       LETTA_BRIDGE_ADDR: http://model-plane-letta-bridge-1:9096
       CAPABILITY_CORE_ADDR: http://model-plane-capability-core-1:9097
       CAPABILITY_CORE_HTTP_URL: http://model-plane-capability-core-1:8085
+      # Data Plane v2 — retrieval-engine serves Retrieval+Document+Knowledge on
+      # ONE gRPC port (50052). Without this the gateway falls to localhost:50052
+      # (unreachable in-container) → "tcp connect error" on RAG/upload. The
+      # var name is DATAPLANE_* (state.rs::from_env), NOT the .env DATA_PLANE_*.
+      # (graph/wiki gRPC clients have a separate HTTP-only architecture mismatch
+      # in Data Plane v2 — tracked, not wired here.)
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:50052}
+      # retrieval-engine's ApiKeyInterceptor requires this as `x-api-key` gRPC
+      # metadata (else "invalid or missing credential"). Maps the .env key.
+      DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
@@ -242,7 +252,7 @@ services:
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
-      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-anthropic,openai}
+      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -305,13 +315,16 @@ services:
       retries: 3
 
   execution-core:
-    # Sandbox note (Tier-2): the image ships `bubblewrap` so code execution is
+    # Sandbox (Tier-2): the image ships `bubblewrap` so code execution is
     # isolated (namespaces + filesystem). bwrap needs unprivileged user
-    # namespaces at runtime — modern Docker's default seccomp permits this; if
-    # this host disables unprivileged userns (or uses a stricter profile), grant
-    # the minimal allowance HERE (e.g. a scoped seccomp profile permitting
-    # clone/unshare with CLONE_NEWUSER). Prefer a scoped profile over
-    # `seccomp:unconfined`, which would defeat the sandbox's purpose.
+    # namespaces (clone/unshare CLONE_NEWUSER) which Docker's default seccomp
+    # blocks. seccomp-bwrap.json is a SCOPED profile (allow-by-default + an
+    # explicit deny-list of escape/escalation syscalls) — strictly safer than
+    # `seccomp:unconfined` while permitting the clone/unshare/mount bwrap needs.
+    # If the HOST disables unprivileged userns entirely, also set the host
+    # sysctl `kernel.unprivileged_userns_clone=1` (host-level, not compose).
+    security_opt:
+      - seccomp=./seccomp-bwrap.json
     build:
       context: ..
       dockerfile: rust/services/execution-core/Dockerfile
