@@ -461,6 +461,11 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
       HTTP_PORT: "8011"
+      # §16.3.8 — without NATS_URL the wiki publisher is nil, so CreatePage/
+      # CreateVersion never emit `dataplane.wiki.version.published` → the
+      # embedding-engine wiki subscriber never embeds wiki content → wiki pages
+      # never reach the RAG corpus (w_wiki contributes nothing). Wire it.
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
     networks:
       - dpv2-net
       - inter-plane-bus
