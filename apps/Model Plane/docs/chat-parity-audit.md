@@ -231,6 +231,8 @@ keyword list.
 - **Agentic `step_update`**: `run_events_sse` bridges all `mp.v1.orchestration.*` events
   (`orchestration_event_to_step_update`) into the unified `step_update` taxonomy, so a run's plan/
   todo/subagent/approval progress renders in the chat Steps timeline. 2 unit tests. (commit `8e503736`)
+- **Memory tools**: `recall_memory` (SearchMemory) + `save_memory` (IndexMemory) in the tool loop,
+  thread+org scoped, reusing MemoryService — durable cross-turn memory. (commit `ba5ccc69`)
 
 - **Voice realtime — server side built**: gateway already exposes `/v1/ai/realtime` (mints
   `CreateRealtimeSession` — the server's role in the WebRTC pattern), `/v1/ai/speech` (TTS via
@@ -247,9 +249,9 @@ keyword list.
   verifiable with live audio I/O.
 - **Live browser/computer view**: streaming an interactive Quarry agent session to the UI; needs a
   live Quarry agent + a frontend viewer. (`web_search` + `fetch_url` cover non-interactive web.)
-- **memory/projects** — product surface.
+- **memory** — *landed* as tools (recall/save); a "projects" UI grouping is product surface.
 
-These four require either the in-progress sandbox workstream, a live A/V/browser environment, or a
+These three require either the in-progress sandbox workstream, a live A/V/browser environment, or a
 large multi-session agentic-run integration — none completable+verifiable in a headless coding session.
 
 All landed work reuses canonical owners (Data Plane v2 retrieval/knowledge/graph/wiki, Quarry v2
