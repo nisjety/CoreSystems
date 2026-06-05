@@ -21,7 +21,9 @@ most were real **codebase config/wiring bugs**, now fixed:
    needs an Azure realtime deployment provisioned (external). (commit `5095fd63`)
 3. **Sandbox userns** — Docker default seccomp blocks `clone(CLONE_NEWUSER)`. FIXED: scoped
    `deploy/seccomp-bwrap.json` (allow-default + escape/escalation deny-list) + execution-core
-   `security_opt` — safer than `seccomp:unconfined`. (commit `80c77dd1`; image rebuild to ship bwrap)
+   `security_opt` — safer than `seccomp:unconfined`. **VERIFIED LIVE**: after rebuild+redeploy,
+   `bwrap --unshare-user --unshare-net --ro-bind / /` succeeds inside the deployed container
+   (`SANDBOX_ISOLATES_OK`) — userns + netns + ro-root isolation working. ✅ FULLY RESOLVED. (`80c77dd1`)
 4. **Provider order** — compose default `anthropic,openai` (both broken first). FIXED → `azure,
    anthropic,openai`. Azure streaming 404 already fixed (`512983a7` model resolution). OpenAI key /
    Anthropic credits = genuinely external. (commit `80c77dd1`)
