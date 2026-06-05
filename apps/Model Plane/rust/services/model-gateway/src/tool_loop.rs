@@ -20,6 +20,8 @@ use crate::state::AppState;
 
 /// Max tool rounds before forcing a final, tool-free answer.
 pub const MAX_TOOL_ROUNDS: usize = 3;
+/// Cap on inlined page content from `fetch_url` (keeps the prompt bounded).
+const MAX_FETCH_CHARS: usize = 4_000;
 
 /// The result of executing one model-requested tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,16 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
 /// Splits on the FIRST `__` after the prefix (tool names may contain `__`).
 fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"))
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_owned();
+    }
+    let mut out: String = trimmed.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
@@ -99,6 +111,35 @@ pub async fn dispatch_tool(state: &AppState, org_id: &str, call: &ToolCall) -> T
                     }
                 }
                 Err(e) => err_outcome(call, format!("web_search failed: {}", e.message())),
+            }
+        }
+        // Read a specific web page (reuses Quarry scrape — the canonical web
+        // fetch owner). Returns title + final URL + (truncated) page content.
+        "fetch_url" => {
+            let url = arg_str(&call.arguments_json, "url");
+            if url.trim().is_empty() {
+                return err_outcome(call, "fetch_url requires a 'url' argument");
+            }
+            match state.quarry.scrape(&url, org_id, None, false).await {
+                Ok(r) => {
+                    let body = if r.markdown.trim().is_empty() {
+                        r.text
+                    } else {
+                        r.markdown
+                    };
+                    let out = serde_json::json!({
+                        "final_url": r.final_url,
+                        "title": r.title,
+                        "content": truncate_chars(&body, MAX_FETCH_CHARS),
+                    });
+                    ToolOutcome {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: out.to_string(),
+                        error: None,
+                    }
+                }
+                Err(e) => err_outcome(call, format!("fetch_url failed: {e}")),
             }
         }
         // MCP proxy: `mcp__<server_id>__<tool_name>` routes to a registered MCP
@@ -260,6 +301,15 @@ mod tests {
         assert_eq!(arg_i64(args, "limit"), Some(3));
         assert_eq!(arg_str(args, "missing"), "");
         assert_eq!(arg_i64(args, "missing"), None);
+    }
+
+    #[test]
+    fn truncate_chars_caps_and_ellipsizes() {
+        assert_eq!(truncate_chars("  hi  ", 10), "hi");
+        let long = "x".repeat(20);
+        let out = truncate_chars(&long, 5);
+        assert_eq!(out.chars().count(), 6); // 5 + ellipsis
+        assert!(out.ends_with('…'));
     }
 
     #[test]
