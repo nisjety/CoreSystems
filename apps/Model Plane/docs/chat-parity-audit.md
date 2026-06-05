@@ -260,11 +260,14 @@ not code-in-this-layer but environment/ops:**
   with user-namespaces granted, `--unshare-net` genuinely isolates (the external `eth0` is removed →
   egress blocked). Remaining: the deploy host must grant unprivileged userns (documented on the
   compose service). The mechanism itself is proven — no code pending.
-- **voice**: full client built (mint + DSP + protocol + controller, all tested/tsc-clean). Remaining:
-  confirm the live **WS auth handshake** (one flagged line in `openSocket`) against the provider — a
-  live observation, not new logic.
-- **live agent view**: combined screen+steps view built. Remaining: a *live* agent stream to see it
-  populate — verification, not code.
+- **voice**: full client built (mint + DSP + protocol + controller, all tested/tsc-clean).
+  **Live-stack diagnosis:** `POST /v1/ai/realtime` reaches the handler (auth OK) but inference-core
+  logs show the realtime provider returns **`401 invalid_api_key`** — the configured OpenAI realtime
+  key is incorrect. So the remaining gate is an **operator credential** (supply a valid realtime key),
+  not code. General inference IS live (`POST /v1/invoke` → 200, "Pong." via Azure gpt-4o-mini).
+- **live agent view**: combined screen+steps view built. The running gateway image predates this
+  branch, so verifying the new agentic-run/tool paths live needs a `docker compose build model-gateway`
+  + redeploy; the data-composition logic is unit-tested.
 
 i.e. the three former gaps are now: **a Linux deploy**, **one live-confirmed WS-auth line**, and
 **live-stream verification** — each requires the running stack/host, none is missing gateway/BFF/client code.
