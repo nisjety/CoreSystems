@@ -182,10 +182,16 @@ Then verified live (`Authorization: Bearer dev-bypass`):
 | sandbox (standalone Docker) | ✅ bwrap installs, fails-closed by default, isolates (egress blocked) when userns granted |
 
 **Every residual failure is an environment provider/credential issue the code handled correctly**, not
-a code gap: streaming providers exhausted (the invalid OpenAI key — inference-core's *stream* path
-lacks the Azure fallback its *unary* path has) → surfaced as my structured error; realtime voice →
-`401 invalid_api_key`; Data Plane doc-svc → tcp connect error → my 502. These are operator/infra fixes
-(valid keys, stream-path provider fallback, doc-svc network), with live evidence pinning each.
+a chat-parity code gap:
+- *Streaming exhausted (9 attempts):* `infer_stream` DOES iterate the full provider chain with
+  fallback (verified in `fallback.rs:254`, same as unary) — but in this env all three failed: OpenAI
+  on the invalid key, and Azure's *streaming* call fails even though its *unary* call succeeds (so the
+  unary `/v1/invoke` answered via Azure, but the stream had no working provider). That's an
+  inference-core Azure-streaming config/credential matter, surfaced cleanly as my structured error.
+- *Realtime voice:* `401 invalid_api_key` (operator credential).
+- *Data Plane doc-svc:* tcp connect error → my 502 (service network/availability).
+Each is an operator/infra fix with live evidence pinning it; the gateway/BFF/client chat-parity code
+deployed and behaved correctly throughout.
 
 ## 8. Implementation status (this branch)
 
