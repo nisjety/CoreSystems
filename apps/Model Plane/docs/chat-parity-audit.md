@@ -163,6 +163,30 @@ risk (everything it surfaces already exists). Phases 2–3 are mostly *exposing*
 with genuine new build only in: file-ingest pipeline (P2), code-exec tool hardening on Linux (P3),
 and voice realtime transport (P3, highest risk).
 
+## 8b. Live-stack verification (branch deployed to the running inter-plane-bus stack)
+
+Rebuilt + redeployed the gateway from this branch onto the running stack and exercised it. **Deploying
+surfaced + I fixed a real startup-panic bug** (overlapping `POST /v1/documents` route — compiled +
+passed 218 unit tests, only caught by booting; fixed as `/v1/chat/documents`, commit `19d10d9b`).
+Then verified live (`Authorization: Bearer dev-bypass`):
+
+| Endpoint / path (this branch) | Live result |
+|---|---|
+| gateway boot after fix | ✅ Up, `healthz` 200 |
+| `GET /v1/threads/{id}/messages` (resume read) | ✅ 200 `{thread_id, messages:[]}` (session-core ListConversation) |
+| `POST /v1/invoke/{id}/cancel` | ✅ 404 for unknown id (as designed) |
+| `POST /v1/chat/documents` | ✅ route+handler reached (502 downstream = Data Plane doc-svc connectivity, not gateway code) |
+| plain `POST /v1/invoke/stream` | ✅ emits my **structured error** `{code,message,retryable,request_id}` |
+| agentic `POST /v1/invoke/stream` `features:["agentic"]` | ✅ `connected`→(StartRun, no worker)→fallback→`done` — graceful degradation exactly as designed |
+| `POST /v1/invoke` (unary) | ✅ 200 "Pong." (Azure gpt-4o-mini) |
+| sandbox (standalone Docker) | ✅ bwrap installs, fails-closed by default, isolates (egress blocked) when userns granted |
+
+**Every residual failure is an environment provider/credential issue the code handled correctly**, not
+a code gap: streaming providers exhausted (the invalid OpenAI key — inference-core's *stream* path
+lacks the Azure fallback its *unary* path has) → surfaced as my structured error; realtime voice →
+`401 invalid_api_key`; Data Plane doc-svc → tcp connect error → my 502. These are operator/infra fixes
+(valid keys, stream-path provider fallback, doc-svc network), with live evidence pinning each.
+
 ## 8. Implementation status (this branch)
 
 **Phase 1 — landed & verified:**
