@@ -12,7 +12,8 @@
 use std::fmt::Write as _;
 
 use mp_contracts::model_plane::v1::{
-    ChatMessage, InferRequest, ProxyMcpToolRequest, ToolCall, ToolDefinition, WebSearchRequest,
+    ChatMessage, IndexMemoryRequest, InferRequest, ProxyMcpToolRequest, SearchMemoryRequest,
+    ToolCall, ToolDefinition, WebSearchRequest,
 };
 
 use crate::sse_events::ChatEvent;
@@ -73,7 +74,13 @@ fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
 /// Execute a single model-requested tool call against the gateway's tool
 /// handlers. Unknown tools / bad args return an error outcome (the model is
 /// told, so it can recover). New tools plug in here (MCP proxy, etc.).
-pub async fn dispatch_tool(state: &AppState, org_id: &str, call: &ToolCall) -> ToolOutcome {
+#[allow(clippy::too_many_lines)] // cohesive tool dispatcher — one arm per tool
+pub async fn dispatch_tool(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    call: &ToolCall,
+) -> ToolOutcome {
     match call.name.as_str() {
         "web_search" => {
             let query = arg_str(&call.arguments_json, "query");
@@ -140,6 +147,84 @@ pub async fn dispatch_tool(state: &AppState, org_id: &str, call: &ToolCall) -> T
                     }
                 }
                 Err(e) => err_outcome(call, format!("fetch_url failed: {e}")),
+            }
+        }
+        // Long-term memory (chat-parity §Phase 3 memory/projects) — reuses the
+        // MemoryService (canonical owner). Thread+org scoped.
+        "recall_memory" => {
+            let query = arg_str(&call.arguments_json, "query");
+            if query.trim().is_empty() {
+                return err_outcome(call, "recall_memory requires a 'query' argument");
+            }
+            let mut client = state.memory_client.clone();
+            match client
+                .search_memory(tonic::Request::new(SearchMemoryRequest {
+                    thread_id: thread_id.to_owned(),
+                    query,
+                    topic_filter: Vec::new(),
+                    limit: 5,
+                    org_id: org_id.to_owned(),
+                    updated_after: None,
+                }))
+                .await
+            {
+                Ok(resp) => {
+                    let items: Vec<serde_json::Value> = resp
+                        .into_inner()
+                        .entries
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "topic": e.topic,
+                                "content": truncate_chars(&e.content, 600),
+                                "score": e.score,
+                            })
+                        })
+                        .collect();
+                    ToolOutcome {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned()),
+                        error: None,
+                    }
+                }
+                Err(e) => err_outcome(call, format!("recall_memory failed: {}", e.message())),
+            }
+        }
+        "save_memory" => {
+            let content = arg_str(&call.arguments_json, "content");
+            if content.trim().is_empty() {
+                return err_outcome(call, "save_memory requires a 'content' argument");
+            }
+            let topic = {
+                let t = arg_str(&call.arguments_json, "topic");
+                if t.is_empty() {
+                    "MEMORY".to_owned()
+                } else {
+                    t
+                }
+            };
+            let mut client = state.memory_client.clone();
+            match client
+                .index_memory(tonic::Request::new(IndexMemoryRequest {
+                    thread_id: thread_id.to_owned(),
+                    topic,
+                    content,
+                    org_id: org_id.to_owned(),
+                }))
+                .await
+            {
+                Ok(resp) => ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: serde_json::json!({
+                        "memory_id": resp.into_inner().memory_id,
+                        "saved": true,
+                    })
+                    .to_string(),
+                    error: None,
+                },
+                Err(e) => err_outcome(call, format!("save_memory failed: {}", e.message())),
             }
         }
         // MCP proxy: `mcp__<server_id>__<tool_name>` routes to a registered MCP
@@ -211,10 +296,12 @@ pub struct ToolRounds {
 /// The returned `messages` are then handed to the streaming infer (with tools
 /// withheld) to produce the final answer. Inference errors stop the loop
 /// gracefully (the normal stream path then handles the request).
+#[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
 pub async fn run_tool_rounds(
     state: &AppState,
     request_id: &str,
     org_id: &str,
+    thread_id: &str,
     model: &str,
     base_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
@@ -259,7 +346,7 @@ pub async fn run_tool_rounds(
                 name: call.name.clone(),
                 args,
             });
-            let outcome = dispatch_tool(state, org_id, call).await;
+            let outcome = dispatch_tool(state, org_id, thread_id, call).await;
             events.push(ChatEvent::ToolResult {
                 id: outcome.call_id.clone(),
                 status: if outcome.error.is_some() {

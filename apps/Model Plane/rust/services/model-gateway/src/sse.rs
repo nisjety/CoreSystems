@@ -262,10 +262,18 @@ pub async fn invoke_stream_sse(
     let tool_events = if tool_defs.is_empty() {
         Vec::new()
     } else {
+        // Thread scope for memory tools — the BFF sends thread_id == session id;
+        // fall back to session_key, then request_id.
+        let thread_scope = req
+            .thread_id
+            .clone()
+            .or_else(|| req.session_key.clone())
+            .unwrap_or_else(|| request_id.clone());
         let rounds = crate::tool_loop::run_tool_rounds(
             &state,
             &request_id,
             &org_id,
+            &thread_scope,
             &model,
             messages,
             tool_defs,
