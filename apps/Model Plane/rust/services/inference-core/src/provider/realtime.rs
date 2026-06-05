@@ -58,6 +58,15 @@ impl RealtimeChain {
     #[must_use]
     pub fn from_env() -> Self {
         let mut providers: Vec<(String, BoxedRealtimeProvider)> = Vec::new();
+        // Azure first (mirrors the chat FallbackChain order azure>…>openai): in
+        // Model Plane deployments OPENAI_API_KEY is set to the *Azure* key, so a
+        // bare OpenAI realtime call 401s. Azure realtime uses api-key auth + the
+        // valid Azure key. Registered only when an Azure realtime deployment is
+        // configured; otherwise the chain falls through to OpenAI as before.
+        if let Some(provider) = AzureRealtimeProvider::from_env() {
+            providers.push(("azure".to_owned(), Arc::new(provider)));
+            info!(provider = "azure", "realtime provider registered");
+        }
         if let Some(provider) = OpenAiRealtimeProvider::from_env() {
             providers.push(("openai".to_owned(), Arc::new(provider)));
             info!(provider = "openai", "realtime provider registered");
@@ -235,6 +244,130 @@ impl RealtimeProvider for OpenAiRealtimeProvider {
     }
 }
 
+/// Azure OpenAI realtime broker. Mints an ephemeral client secret via Azure's
+/// realtime sessions endpoint using `api-key` auth (not Bearer). All URLs are
+/// env-overridable so an operator can match their resource's exact preview API
+/// surface without a rebuild.
+#[derive(Clone)]
+pub struct AzureRealtimeProvider {
+    client: reqwest::Client,
+    api_key: String,
+    /// Full sessions URL (already includes `?api-version=…`).
+    sessions_url: String,
+    /// Browser WebSocket URL (already includes api-version + deployment).
+    websocket_url: String,
+    deployment: String,
+    model_catalog: Vec<String>,
+}
+
+impl AzureRealtimeProvider {
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        // Gate on an explicit realtime deployment so we don't hijack realtime
+        // when Azure realtime isn't provisioned.
+        let deployment = env_nonempty("AZURE_OPENAI_REALTIME_DEPLOYMENT")?;
+        let api_key = env_nonempty("AZURE_OPENAI_REALTIME_API_KEY")
+            .or_else(|| env_nonempty("AZURE_OPENAI_API_KEY"))?;
+        let endpoint = env_nonempty("AZURE_OPENAI_REALTIME_API_BASE")
+            .or_else(|| env_nonempty("AZURE_OPENAI_ENDPOINT"))?;
+        let endpoint = endpoint.trim_end_matches('/').to_owned();
+        let api_version = env_nonempty("AZURE_OPENAI_REALTIME_API_VERSION")
+            .or_else(|| env_nonempty("AZURE_OPENAI_API_VERSION"))
+            .unwrap_or_else(|| "2025-04-01-preview".to_owned());
+
+        let sessions_url = env_nonempty("AZURE_OPENAI_REALTIME_SESSIONS_URL").unwrap_or_else(|| {
+            format!("{endpoint}/openai/realtimeapi/sessions?api-version={api_version}")
+        });
+        let websocket_url = env_nonempty("AZURE_OPENAI_REALTIME_WEBSOCKET_URL").unwrap_or_else(
+            || {
+                let host = endpoint
+                    .strip_prefix("https://")
+                    .or_else(|| endpoint.strip_prefix("http://"))
+                    .unwrap_or(&endpoint);
+                format!(
+                    "wss://{host}/openai/realtime?api-version={api_version}&deployment={deployment}"
+                )
+            },
+        );
+
+        Some(Self {
+            client: reqwest::Client::new(),
+            api_key,
+            sessions_url,
+            websocket_url,
+            deployment: deployment.clone(),
+            model_catalog: vec![deployment],
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RealtimeProvider for AzureRealtimeProvider {
+    async fn create_session(
+        &self,
+        req: &RealtimeSessionRequest,
+    ) -> Result<RealtimeSessionResponse, ProviderError> {
+        // Azure addresses the model by deployment name.
+        let voice = defaulted(&req.voice, DEFAULT_REALTIME_VOICE);
+        let body = openai_client_secret_body(req, &self.deployment, &voice);
+
+        let response = self
+            .client
+            .post(&self.sessions_url)
+            .header("api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| ProviderError::Http(error.to_string()))?;
+
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(1);
+            return Err(ProviderError::RateLimited {
+                retry_after_ms: retry_after * 1000,
+            });
+        }
+        if !response.status().is_success() {
+            return Err(ProviderError::Http(format!(
+                "azure realtime returned {}: {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            )));
+        }
+
+        let json = response
+            .json::<Value>()
+            .await
+            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+        let mut parsed = parse_openai_client_secret_response(
+            &req.request_id,
+            &json,
+            &self.deployment,
+            &voice,
+            &self.websocket_url,
+        )?;
+        parsed.provider_used = "azure".to_owned();
+        Ok(parsed)
+    }
+
+    fn list_models(&self) -> Vec<ModelInfo> {
+        self.model_catalog
+            .iter()
+            .map(|id| ModelInfo {
+                id: id.clone(),
+                provider: "azure".to_owned(),
+                modality: "realtime".to_owned(),
+                streaming: true,
+                ..Default::default()
+            })
+            .collect()
+    }
+}
+
 fn openai_client_secret_body(req: &RealtimeSessionRequest, model: &str, voice: &str) -> Value {
     let input_audio_format = defaulted(&req.input_audio_format, DEFAULT_AUDIO_FORMAT);
     let output_audio_format = defaulted(&req.output_audio_format, DEFAULT_AUDIO_FORMAT);
@@ -326,8 +459,9 @@ fn provider_matches(name: &str, hint: &str) -> bool {
     let hint = hint.trim().to_ascii_lowercase();
     hint.is_empty()
         || hint == name
-        || (hint == "realtime" && name == "openai")
+        || (hint == "realtime" && (name == "openai" || name == "azure"))
         || (hint == "openai-realtime" && name == "openai")
+        || (hint == "azure-realtime" && name == "azure")
 }
 
 fn defaulted(value: &str, fallback: &str) -> String {
