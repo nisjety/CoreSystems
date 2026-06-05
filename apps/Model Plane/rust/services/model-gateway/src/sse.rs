@@ -1069,6 +1069,12 @@ pub async fn run_events_sse(
                         };
                         let _ = tx.send(Ok(sse_event)).await;
                     }
+                    // chat-parity §2/Phase 3: also surface the agentic step in the
+                    // unified `step_update` taxonomy (no SSE id — the raw event
+                    // above carries the resume cursor).
+                    if let Some(step) = orchestration_event_to_step_update(&event) {
+                        let _ = tx.send(Ok(step.to_sse(&run_id))).await;
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, run_id = %run_id, "orchestration run event stream closed with error");
@@ -1167,6 +1173,80 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
+}
+
+/// Map an orchestration event to the unified chat-parity `step_update`
+/// (chat-parity §2 Steps tab / Phase 3 agentic), so an agentic run's progress
+/// renders in the chat timeline. A derived view of `mp.v1.orchestration.*` —
+/// the raw event still carries the resume id. Returns `None` for events that
+/// don't correspond to a visible step.
+fn orchestration_event_to_step_update(event: &OrchestrationEvent) -> Option<crate::sse_events::ChatEvent> {
+    use orchestration_event::Event;
+    let (id, title, detail, status) = match event.event.as_ref()? {
+        Event::PlanTransitioned(p) => {
+            let to = enum_name(PlanState::try_from(p.to).ok().as_ref());
+            (
+                p.plan_id.clone(),
+                "Plan".to_owned(),
+                format!(
+                    "{} → {to}",
+                    enum_name(PlanState::try_from(p.from).ok().as_ref())
+                ),
+                to.to_owned(),
+            )
+        }
+        Event::TodoTransitioned(p) => {
+            let to = enum_name(TodoState::try_from(p.to).ok().as_ref());
+            (
+                format!("todo-{}", p.todo_id),
+                "Step".to_owned(),
+                format!(
+                    "{} → {to}",
+                    enum_name(TodoState::try_from(p.from).ok().as_ref())
+                ),
+                to.to_owned(),
+            )
+        }
+        Event::ApprovalStateChanged(p) => (
+            p.approval_id.clone(),
+            "Approval".to_owned(),
+            enum_name(ApprovalKind::try_from(p.approval_kind).ok().as_ref()).to_owned(),
+            enum_name(ApprovalState::try_from(p.to).ok().as_ref()).to_owned(),
+        ),
+        Event::SubagentAttached(p) => (
+            p.child_run_id.clone(),
+            format!(
+                "Subagent · {}",
+                enum_name(SubagentRole::try_from(p.role).ok().as_ref())
+            ),
+            "attached".to_owned(),
+            "running".to_owned(),
+        ),
+        Event::SubagentStopped(p) => (
+            p.child_run_id.clone(),
+            "Subagent".to_owned(),
+            p.status.clone(),
+            "done".to_owned(),
+        ),
+        Event::RunPausedForApproval(p) => (
+            p.run_id.clone(),
+            "Paused".to_owned(),
+            format!("awaiting approval {}", p.approval_id),
+            "paused".to_owned(),
+        ),
+        Event::RunResumedAfterApproval(p) => (
+            p.run_id.clone(),
+            "Resumed".to_owned(),
+            format!("after approval {}", p.approval_id),
+            "running".to_owned(),
+        ),
+    };
+    Some(crate::sse_events::ChatEvent::StepUpdate {
+        id,
+        title,
+        detail,
+        status,
+    })
 }
 
 fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
@@ -1288,7 +1368,38 @@ impl EnumName for SubagentRole {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_stream_envelope, build_usage_envelope};
+    use super::{build_stream_envelope, build_usage_envelope, orchestration_event_to_step_update};
+
+    #[test]
+    fn orchestration_plan_event_maps_to_step_update() {
+        use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
+        use orchestration_event::PlanTransitioned;
+        let ev = OrchestrationEvent {
+            event: Some(orchestration_event::Event::PlanTransitioned(PlanTransitioned {
+                plan_id: "plan-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                from: 0,
+                to: 1,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        match orchestration_event_to_step_update(&ev) {
+            Some(crate::sse_events::ChatEvent::StepUpdate { id, title, detail, .. }) => {
+                assert_eq!(id, "plan-1");
+                assert_eq!(title, "Plan");
+                assert!(detail.contains('→'));
+            }
+            other => panic!("expected a Plan StepUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orchestration_event_without_inner_maps_to_none() {
+        use mp_contracts::model_plane::v1::OrchestrationEvent;
+        let ev = OrchestrationEvent::default();
+        assert!(orchestration_event_to_step_update(&ev).is_none());
+    }
 
     // Golden parity: every envelope the gateway emits derives its
     // `correlation_id` from the per-request id, identically across the HTTP/SSE
