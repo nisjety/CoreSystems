@@ -213,19 +213,28 @@ keyword list.
   Events on stream + fallback paths; BFF forwards `toolDefs`→`tools`; client dispatches both events.
   Loop/dispatch unit-tested; live tool execution + model tool-choice verify on the stack. (commit `062564f4`)
 
+- **MCP tools in the loop** (`tool_loop::dispatch_tool`): `mcp__<server>__<tool>` calls route through
+  the existing MCP registry (`handle_proxy_mcp_tool`, http + stdio, allowlist-enforced). Unit-tested
+  name parsing. Reuses the registered-server registry — no new transport. (commit `86114b85`)
+
 **Phase 2 — remaining:**
-- More tools in the dispatcher (MCP-registry proxy, code-exec) — the loop + first tool (`web_search`)
-  are in; additional handlers plug into `dispatch_tool`.
+- `code-exec` tool — **deliberately gated on sandbox safety**: Tier 2 "real sandbox isolation" is
+  in-progress (the executor is still a transparent passthrough), so routing model-generated code
+  through it now would run unsandboxed. Plugs into `dispatch_tool` once the sandbox isolates.
 - `artifact`/canvas is a UI surface; the `artifact` event + client chunk are shipped.
 
 **Phase 3 — landed:**
 - **Replay / resume**: `stream_buffer::replay_after` (memory + Redis, `Last-Event-Id` cursor) +
   `GET /v1/invoke/resume/:request_id`; tested. Reconnect replays deltas after the cursor + terminal done.
+- **Agentic `step_update`**: `run_events_sse` bridges all `mp.v1.orchestration.*` events
+  (`orchestration_event_to_step_update`) into the unified `step_update` taxonomy, so a run's plan/
+  todo/subagent/approval progress renders in the chat Steps timeline. 2 unit tests. (commit `8e503736`)
 
-**Phase 3 — remaining (all gated on the tool/agentic loop or a live environment):** `step_update`
-from `mp.v1.orchestration.*` (needs chat→orchestration agentic integration), sandboxed code-exec
-tool + live browser/computer view (both need the tool loop above), voice realtime (needs WebRTC/WS
-transport + live verification), memory/projects.
+**Phase 3 — remaining (each gated on safety or live infrastructure, not headless-buildable):**
+- sandboxed code-exec — same gate as the Phase 2 `code-exec` tool (Tier 2 sandbox isolation).
+- live browser/computer view — needs a live Quarry agent session to verify.
+- voice realtime — needs a WebRTC/WS transport + live audio verification (new transport, highest risk).
+- memory/projects — product surface.
 
 All landed work reuses canonical owners (Data Plane v2 retrieval/knowledge/graph/wiki, Quarry v2
 web, inference-core providers, session-core conversations, capability-core safety) — no duplicate
