@@ -178,6 +178,7 @@ Then verified live (`Authorization: Bearer dev-bypass`):
 | `POST /v1/chat/documents` | ✅ route+handler reached (502 downstream = Data Plane doc-svc connectivity, not gateway code) |
 | plain `POST /v1/invoke/stream` | ✅ emits my **structured error** `{code,message,retryable,request_id}` |
 | agentic `POST /v1/invoke/stream` `features:["agentic"]` | ✅ `connected`→(StartRun, no worker)→fallback→`done` — graceful degradation exactly as designed |
+| RAG stream `features:["citations","rag"]` | ✅ `model_gateway::retrieval` fires → calls Data Plane Retrieve → on unreachable svc logs "retrieval grounding unavailable; proceeding ungrounded" + degrades (no crash) — wiring confirmed |
 | `POST /v1/invoke` (unary) | ✅ 200 "Pong." (Azure gpt-4o-mini) |
 | sandbox (standalone Docker) | ✅ bwrap installs, fails-closed by default, isolates (egress blocked) when userns granted |
 
