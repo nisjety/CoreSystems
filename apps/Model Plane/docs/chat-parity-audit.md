@@ -204,12 +204,18 @@ keyword list.
   inference-core `GenerateImage` (owner) → `ChatEvent::Artifact{kind:image}` + chunk. (commit `d2c905f`)
 - **File-upload ingest**: `POST /v1/documents` → Data Plane `CreateDocument` (ingest owner); BFF
   `/api/chat/documents` + client `uploadDocument()` — closes the RAG loop. (commit `4a7d8ce`)
+- **Function-calling foundation**: `InferRequest.tools/tool_choice` + `InferResponse.tool_calls`;
+  OpenAI (`tools`/`tool_choice` + `message.tool_calls`) and Anthropic (`tools` + `tool_use` blocks)
+  translation/parsing, unit-tested both ways. The prerequisite that was previously missing. (commit `0d04a88`)
+- **Gateway tool-execution loop** (`tool_loop.rs`): `run_tool_rounds()` — infer-with-tools → emit
+  `tool_call` → dispatch via a name→handler map (`web_search`→Quarry; unknown→error outcome) → emit
+  `tool_result` → inject results as context → repeat (cap 3) → stream the final answer tools-withheld.
+  Events on stream + fallback paths; BFF forwards `toolDefs`→`tools`; client dispatches both events.
+  Loop/dispatch unit-tested; live tool execution + model tool-choice verify on the stack. (commit `062564f4`)
 
 **Phase 2 — remaining:**
-- `tools[]` + `tool_call`/`tool_result` + MCP loop. **Blocked on a real prerequisite:** inference-core's
-  `InferRequest` has no tool/function-schema field and providers don't parse `tool_call` deltas, so a
-  model-driven function-calling loop needs deep inference-core provider work AND a live provider to
-  verify — not completable/verifiable headless. (Client already dispatches `tool_call`/`tool_result`.)
+- More tools in the dispatcher (MCP-registry proxy, code-exec) — the loop + first tool (`web_search`)
+  are in; additional handlers plug into `dispatch_tool`.
 - `artifact`/canvas is a UI surface; the `artifact` event + client chunk are shipped.
 
 **Phase 3 — landed:**
