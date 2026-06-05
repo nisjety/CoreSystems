@@ -4,6 +4,21 @@ Audited 2026-06-04 against the real Model Plane code (not the brief's assumption
 Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
+## 0b. Realtime VOICE now works live (2026-06-05)
+
+After the operator fixed the Azure side (set `AZURE_OPENAI_REALTIME_API_VERSION=2025-04-01-preview`,
+cleared the bad `OPENAI_API_KEY`; `gpt-realtime-2` + `text-embedding-3-large` deployments exist), two
+more **code/config bugs** were found + fixed, and realtime was verified working live:
+- `AzureRealtimeProvider` sent OpenAI v1's nested `{session:{model}}` body → Azure 404 DeploymentNotFound.
+  Fixed to the FLAT body the Azure preview `/openai/realtimeapi/sessions` API wants (per MS Learn). (`f35fee96`)
+- inference-core was only on `model-plane-network` → Data Plane's retrieval-engine `DNS_FAIL`ed reaching
+  `inference-core:9092`. Put it on `inter-plane-bus` (aliases), mirroring model-gateway. (`ec2e6b5e`)
+- **LIVE: `POST /v1/ai/realtime` → 200**, mints a real Azure ephemeral `client_secret`
+  (`provider_used=azure`, `gpt-realtime-2`, `wss://core-ai-rg.cognitiveservices.azure…`). ✅ VOICE WORKS.
+- RAG: gateway→dataplane connectivity+auth fixed; inference-core now DNS-reachable from dpv2
+  (verified). Remaining embedding fault is inside Data Plane v2's retrieval-engine embedding client
+  (no request reaches inference-core's handler despite open TCP/DNS/port/no-auth) — a dpv2-internal matter.
+
 ## 0. Runtime-gap root-cause + fixes (2026-06-05, code — not "operator must fix")
 
 Earlier these 5 were dismissed as operator/infra. Workflow root-cause + live deploy proved
