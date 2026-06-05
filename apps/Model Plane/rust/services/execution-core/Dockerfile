@@ -30,11 +30,15 @@ RUN cargo build --release --bin execution-core
 
 FROM debian:trixie-slim AS runtime
 # Trixie has GLIBC >= 2.38 to match the cargo-chef builder image. curl is
-# needed by the compose healthcheck (curl -f /healthz).
+# needed by the compose healthcheck (curl -f /healthz). bubblewrap (`bwrap`)
+# is REQUIRED for sandbox isolation: `sandbox::is_supported()` checks for it on
+# PATH, and without it code execution degrades to an UNSANDBOXED passthrough —
+# so it ships in the runtime image, not just dev hosts (chat-parity Phase 3 /
+# capability-ownership-matrix §G1, Tier-2 sandbox isolation).
 RUN set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
-    if ! apt-get install -y -qq --no-install-recommends ca-certificates curl \
+    if ! apt-get install -y -qq --no-install-recommends ca-certificates curl bubblewrap \
         > /tmp/apt-install.log 2>&1; then \
         cat /tmp/apt-install.log; \
         exit 1; \
