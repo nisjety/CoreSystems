@@ -305,6 +305,13 @@ services:
       retries: 3
 
   execution-core:
+    # Sandbox note (Tier-2): the image ships `bubblewrap` so code execution is
+    # isolated (namespaces + filesystem). bwrap needs unprivileged user
+    # namespaces at runtime — modern Docker's default seccomp permits this; if
+    # this host disables unprivileged userns (or uses a stricter profile), grant
+    # the minimal allowance HERE (e.g. a scoped seccomp profile permitting
+    # clone/unshare with CLONE_NEWUSER). Prefer a scoped profile over
+    # `seccomp:unconfined`, which would defeat the sandbox's purpose.
     build:
       context: ..
       dockerfile: rust/services/execution-core/Dockerfile
