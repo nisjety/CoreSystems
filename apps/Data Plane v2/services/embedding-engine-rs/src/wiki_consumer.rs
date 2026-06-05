@@ -1,9 +1,11 @@
-//! §16.3.8 — wiki publish subscriber.
+//! §16.3.8 — wiki publish subscriber (DURABLE JetStream).
 //!
-//! wiki-store-go emits `dataplane.wiki.version.published` on every published
-//! version (CreatePage / CreateVersion). We subscribe to it as a core-NATS
-//! subscription (not JetStream — the wiki publisher publishes core, and
-//! embedding for wiki is a best-effort enrichment, not a durable contract).
+//! wiki-store-go emits `dataplane.wiki.version.published` (core NATS) on every
+//! published version (CreatePage / CreateVersion). We own a durable JetStream
+//! stream (`DATAPLANE_WIKI`) that captures + persists that subject, and pull
+//! from it with a durable consumer so wiki embeds survive restarts and RETRY
+//! on transient failure (was best-effort core-NATS — silently lossy if the
+//! subscriber was offline or the embed failed).
 //!
 //! For each event we:
 //!   1. Embed `content` via the existing EmbeddingProvider.
@@ -11,10 +13,13 @@
 //!      keyed by `version_id`, with payload {org_id, page_id, workspace_id,
 //!      title, path}.
 //!
-//! Failure (embed timeout, Qdrant down) is logged and skipped — the next
-//! version_published event for that page will overwrite the point.
+//! Success → ack. Transient failure → no ack → JetStream redelivers (up to
+//! max_deliver). Poison payload → ack (don't redeliver forever).
+
+use std::time::Duration;
 
 use anyhow::Context;
+use async_nats::jetstream::{self, Context as JsContext};
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -22,6 +27,8 @@ use crate::provider::EmbeddingProvider;
 
 pub const SUBJECT_WIKI_PUBLISHED: &str = "dataplane.wiki.version.published";
 pub const WIKI_COLLECTION: &str = "wiki_block_embeddings";
+pub const WIKI_STREAM: &str = "DATAPLANE_WIKI";
+pub const WIKI_CONSUMER: &str = "embedding-engine-wiki";
 
 #[derive(Debug, Deserialize)]
 struct WikiPublishedEvent {
@@ -35,31 +42,81 @@ struct WikiPublishedEvent {
 }
 
 pub async fn spawn(
-    nats: async_nats::Client,
+    js: JsContext,
     qdrant: qdrant_client::Qdrant,
     provider: EmbeddingProvider,
 ) -> anyhow::Result<()> {
-    let mut sub = nats
-        .subscribe(SUBJECT_WIKI_PUBLISHED.to_string())
+    // Disjoint subject → its own stream (JetStream requires a subject belong
+    // to exactly one stream). WorkQueue: a message is removed once acked.
+    js.get_or_create_stream(jetstream::stream::Config {
+        name: WIKI_STREAM.to_string(),
+        subjects: vec![SUBJECT_WIKI_PUBLISHED.to_string()],
+        retention: jetstream::stream::RetentionPolicy::WorkQueue,
+        max_age: Duration::from_secs(7 * 24 * 3600),
+        ..Default::default()
+    })
+    .await
+    .context("create DATAPLANE_WIKI stream")?;
+
+    let stream = js.get_stream(WIKI_STREAM).await.context("get wiki stream")?;
+    let consumer = stream
+        .get_or_create_consumer(
+            WIKI_CONSUMER,
+            jetstream::consumer::pull::Config {
+                durable_name: Some(WIKI_CONSUMER.to_string()),
+                filter_subjects: vec![SUBJECT_WIKI_PUBLISHED.to_string()],
+                ack_wait: Duration::from_secs(60),
+                max_deliver: 5,
+                ..Default::default()
+            },
+        )
         .await
-        .context("subscribe wiki.published")?;
-    tracing::info!(subject = SUBJECT_WIKI_PUBLISHED, "wiki subscriber online");
+        .context("create wiki durable consumer")?;
+    tracing::info!(
+        subject = SUBJECT_WIKI_PUBLISHED,
+        stream = WIKI_STREAM,
+        "wiki durable subscriber online"
+    );
 
     tokio::spawn(async move {
-        while let Some(msg) = sub.next().await {
-            let evt: WikiPublishedEvent = match serde_json::from_slice(&msg.payload) {
-                Ok(e) => e,
+        loop {
+            let mut messages = match consumer.messages().await {
+                Ok(m) => m,
                 Err(e) => {
-                    tracing::warn!(error = %e, "invalid wiki.published payload");
+                    tracing::warn!(error = %e, "wiki consumer stream open failed; retrying");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
             };
-            if let Err(e) = handle(&evt, &qdrant, &provider).await {
-                tracing::warn!(
-                    error = %e,
-                    version_id = %evt.version_id,
-                    "wiki embed failed (will retry on next publish)"
-                );
+            while let Some(item) = messages.next().await {
+                let msg = match item {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wiki message recv error");
+                        continue;
+                    }
+                };
+                let evt: WikiPublishedEvent = match serde_json::from_slice(&msg.payload) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "invalid wiki.published payload; acking poison");
+                        let _ = msg.ack().await;
+                        continue;
+                    }
+                };
+                match handle(&evt, &qdrant, &provider).await {
+                    Ok(()) => {
+                        let _ = msg.ack().await;
+                    }
+                    Err(e) => {
+                        // No ack → JetStream redelivers (up to max_deliver).
+                        tracing::warn!(
+                            error = %e,
+                            version_id = %evt.version_id,
+                            "wiki embed failed; will redeliver"
+                        );
+                    }
+                }
             }
         }
     });

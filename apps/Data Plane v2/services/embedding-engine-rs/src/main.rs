@@ -63,10 +63,10 @@ async fn main() -> anyhow::Result<()> {
     stream::setup_stream(&js).await?;
     let consumer = stream::create_consumer(&js).await?;
 
-    // §16.3.8 — wiki publish subscriber: best-effort, core-NATS, no JS.
-    if let Err(e) =
-        wiki_consumer::spawn(nats_client.clone(), qdrant.clone(), provider.clone()).await
-    {
+    // §16.3.8 — wiki publish subscriber: now DURABLE JetStream (own
+    // DATAPLANE_WIKI stream + durable consumer) so wiki embeds survive restarts
+    // and retry on failure, instead of best-effort core-NATS.
+    if let Err(e) = wiki_consumer::spawn(js.clone(), qdrant.clone(), provider.clone()).await {
         tracing::warn!(error = %e, "wiki subscriber failed to start; continuing");
     }
 
