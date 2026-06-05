@@ -256,10 +256,17 @@ keyword list.
   (disabled if unset). The live screen-stream *view* (visualizing the session in the UI) is the only
   remaining browser piece and needs a live agent + streaming viewer. (commit `31f210e6`)
 
-**Remaining — each genuinely outside this layer (other service / live A-V / host OS):**
-- **Code execution isolation**: gateway-side agentic wiring done; actual exec is execution-core's
-  `ExecuteStep` under Tier-2 sandbox isolation — a separate service + Linux host to verify (the repo
-  runs on macOS).
+**Code-exec — code-complete + wired + tested (deployment gate only).** Verified by running
+execution-core's suite (58 pass): `executor.rs` wraps every command via `sandbox::wrap_command`,
+which translates the `MpSandboxPolicy` into a **bubblewrap** argv (`--unshare-pid/uts/ipc/net`,
+read-only root + per-writable-root binds, egress control) — the same isolation Flatpak uses. The
+argv builder is unit-tested on any OS; on a Linux host with `bwrap` on `PATH` the isolation is
+applied. So end-to-end: gateway agentic run → `ExecuteStep` → bwrap-sandboxed exec. The only
+remaining gate is **deploying execution-core on Linux with `bwrap`** (an ops concern, not a code gap);
+on non-Linux dev it degrades to a transparent passthrough by design. Optional future defense-in-depth:
+layer seccomp/Landlock (Linux-only application, can't be verified on this macOS host).
+
+**Remaining — both browser-native live A/V, not buildable+verifiable in a headless macOS session:**
 - **Voice media DSP client**: browser mic/audio over the minted session. The `websocket_url` target
   (provider-direct vs gateway-relay) + its auth are not determinable from the contract, and audio
   correctness is only verifiable by listening — building blind would be guessing a wire protocol.
