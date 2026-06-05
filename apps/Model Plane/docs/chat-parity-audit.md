@@ -251,10 +251,20 @@ keyword list.
 - **Voice — browser media client**: mic capture + audio framing + playback over the minted session;
   the provider's live WS/WebRTC handshake is runtime behavior, verifiable only with live audio. The
   session-mint (the server-for-frontend half) is done.
-- **Live browser/computer view**: streaming an interactive agent's screen to the UI; needs the live
-  ai-core agent service (`/v1/agent/run`, a separate service) + a viewer. (`web_search` + `fetch_url`
-  cover non-interactive web; the `browser_agent` tool is one `dispatch_tool` arm away once that
-  service's reachable address/auth is confirmed.)
+- **Interactive browse — tool landed**: `browser_agent` (`dispatch_tool`) runs a multi-step browse
+  objective via the agent service's known `AgentModeRequest` contract, env-gated on `BROWSER_AGENT_URL`
+  (disabled if unset). The live screen-stream *view* (visualizing the session in the UI) is the only
+  remaining browser piece and needs a live agent + streaming viewer. (commit `31f210e6`)
+
+**Remaining — each genuinely outside this layer (other service / live A-V / host OS):**
+- **Code execution isolation**: gateway-side agentic wiring done; actual exec is execution-core's
+  `ExecuteStep` under Tier-2 sandbox isolation — a separate service + Linux host to verify (the repo
+  runs on macOS).
+- **Voice media DSP client**: browser mic/audio over the minted session. The `websocket_url` target
+  (provider-direct vs gateway-relay) + its auth are not determinable from the contract, and audio
+  correctness is only verifiable by listening — building blind would be guessing a wire protocol.
+- **Live screen-stream views** (voice waveform / browser screen): UI visualizations of live streams,
+  buildable+verifiable only against the running stack.
 - **memory** — *landed* as tools (recall/save); a "projects" UI grouping is product surface.
 
 These three require either the in-progress sandbox workstream, a live A/V/browser environment, or a
