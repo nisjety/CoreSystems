@@ -4,6 +4,28 @@ Audited 2026-06-04 against the real Model Plane code (not the brief's assumption
 Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
+## 0d. graph/wiki indexing + model_plane gRPC follow-up (2026-06-05)
+
+**(a) graphRAG — WORKS.** Indexed docs auto-extract into the graph (`graph_entities=2,
+graph_claims=1` live); retrieval-engine `search/graph.rs::graph_expansion_search` queries the
+postgres graph tables with `w_graph=0.2` → graph signal blends into hybrid ranking. No separate
+wiring needed.
+
+**(a) wiki — publisher fixed; embed is the remaining weak link.** Root cause: wiki-store had **no
+`NATS_URL`** → publisher nil → `CreatePage` never emitted `dataplane.wiki.version.published`. Added
+`NATS_URL` (`ccef9e6e`) → "wiki publisher attached", pages create (201) + publish. BUT embedding-
+engine's wiki subscriber (best-effort **core NATS**, "not a durable contract" per its own comment)
+isn't reliably embedding wiki pages → wiki content not yet surfacing in RAG. Robust fix = make the
+wiki subscriber a **durable JetStream** consumer (dpv2 embedding-engine code change), not best-effort
+core-NATS. (Document creation indexing IS durable JetStream + works — that's why #1 docs surface.)
+
+**(b) #3 model_plane gRPC — REBUILD DISPROVEN; persistent client bug.** Rebuilt both dpv2 embed
+services fresh (current proto) → model_plane embedding STILL fails (`model-plane embedding failed`,
+zero inference-core log). So NOT a stale build. inference-core + network + proto all proven good
+(grpcurl `CreateEmbedding` from an inter-plane-bus container succeeds + logs). The fault is a genuine
+code-level bug in dpv2's `EmbeddingClient::model_plane` tonic call — needs gRPC-trace debugging.
+`azure_openai` remains the working path for both embed clients (they hold the Azure creds).
+
 ## 0c. RAG / graphRAG / LLM wiki in Data Plane v2 (2026-06-05)
 
 **#1 RAG — WORKS END-TO-END, verified live.** Root cause was embeddings: BOTH dpv2 embed
