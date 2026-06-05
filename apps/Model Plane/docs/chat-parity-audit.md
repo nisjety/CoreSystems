@@ -4,6 +4,40 @@ Audited 2026-06-04 against the real Model Plane code (not the brief's assumption
 Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
+## 0c. RAG / graphRAG / LLM wiki in Data Plane v2 (2026-06-05)
+
+**#1 RAG — WORKS END-TO-END, verified live.** Root cause was embeddings: BOTH dpv2 embed
+clients defaulted to `EMBEDDING_PROVIDER=model_plane` (gRPC → inference-core) which hangs the
+dpv2 client (see #3). Switched both to `azure_openai` (direct Azure, same `text-embedding-3-large`
+@3072 → vector-compatible; engines already hold the creds):
+- retrieval-engine (query embed) — `b6fd4dac`
+- embedding-engine (index embed) — `c32ce73b`
+Plus inference-core on inter-plane-bus (`ec2e6b5e`) + gateway DATAPLANE_RETRIEVAL_URL/auth
+(`80c77dd1`). **Live:** ingest doc via documents-api `POST /v1/documents` (201) → JetStream
+`DATAPLANE_DOCUMENTS`→index-engine→`DATAPLANE_KNOWLEDGE`→embedding-engine (Azure)→qdrant →
+RAG query returns it: `citation{title:"Index Probe", snippet:"Velion onboarding flow probe…"}`.
+(Note: gateway gRPC `DocumentService.CreateDocument` is deprecated §17.3.4 — ingest via
+documents-api HTTP `POST /v1/documents` with `X-Internal-Api-Key` + `X-Org-ID`.)
+
+**#2 graphRAG + LLM wiki — already wired via hybrid retrieval (no gateway work).** The
+retrieval-engine does hybrid retrieval with FOUR weighted sources: `w_dense=0.5, w_bm25=0.2,
+w_graph=0.2, w_wiki=0.1`, `HYBRID_ENABLED=true`. Graph claims + wiki pages are blended from the
+indexed corpus (`source_type`) and surface through the gateway's existing `Retrieve` call — the
+same RAG path now proven live. The gateway's graph_client/wiki_client (id/path-based RPCs:
+GetEntity/ExpandGraph/GetClaims, GetPage) are for DIRECT graph/wiki ops, not chat — chat gets
+graph/wiki via hybrid retrieval. So #2 = ensure graph/wiki content is indexed (same pipeline as #1);
+the chat integration already exists. Gateway DATAPLANE_GRAPH_URL/WIKI_URL wired for the direct
+clients anyway (`f24bb5e4`).
+
+**#3 model_plane embedding gRPC — diagnosed, bypassed.** The dpv2 embed clients' `model_plane`
+path (tonic `InferenceCoreClient` → inference-core:9092 `CreateEmbedding`) fails with no
+inference-core-side log, while: TCP connects ✓, proto shared (dpv2 build.rs imports Model Plane
+proto) ✓, and **grpcurl `CreateEmbedding` from an inter-plane-bus container → inference-core works
++ logs success** ✓. So inference-core + network + proto are all good; the fault is specific to the
+dpv2 embed client (likely the 2-day-old image's stale client build, or a tonic connect_lazy/timeout
+quirk). Fix path: rebuild the dpv2 embed services + retest model_plane; meanwhile azure_openai is
+the working path (dpv2 holds the Azure creds). Deferred — functionally moot (RAG works).
+
 ## 0b. Realtime VOICE now works live (2026-06-05)
 
 After the operator fixed the Azure side (set `AZURE_OPENAI_REALTIME_API_VERSION=2025-04-01-preview`,
