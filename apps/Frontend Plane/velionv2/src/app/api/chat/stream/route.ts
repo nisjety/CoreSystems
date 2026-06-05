@@ -70,6 +70,9 @@ type ChatStreamRequest = {
   // Explicit image-generation intent (chat-parity §2). Routes to GenerateImage
   // and emits an `artifact` event.
   generateImage?: boolean;
+  // Function-calling tool definitions (chat-parity §2). Distinct from `tools`
+  // (browse toggle names). Each is a name + description + JSON-schema string.
+  toolDefs?: Array<{ name: string; description?: string; parameters_json?: string }>;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -195,6 +198,25 @@ export async function POST(request: NextRequest): Promise<Response> {
     features.push("artifacts");
   }
 
+  // Function-calling tool definitions (chat-parity §2). Distinct from the
+  // `tools: string[]` browse toggle — these are name+description+schema specs
+  // the model may call. Forward up to 16, name-required. Enabling them turns on
+  // the `tools` family so the gateway runs the loop + streams tool events.
+  const toolDefs = Array.isArray(parsed.toolDefs)
+    ? parsed.toolDefs
+        .filter((t): t is { name: string; description?: string; parameters_json?: string } =>
+          Boolean(t) && typeof t === "object" && typeof (t as { name?: unknown }).name === "string")
+        .slice(0, 16)
+        .map((t) => ({
+          name: t.name,
+          description: typeof t.description === "string" ? t.description : "",
+          parameters_json: typeof t.parameters_json === "string" ? t.parameters_json : "",
+        }))
+    : [];
+  if (toolDefs.length > 0 && !features.includes("tools")) {
+    features.push("tools");
+  }
+
   if (!content || typeof content !== "string" || !content.trim()) {
     return NextResponse.json({ error: "content is required" }, { status: 400 });
   }
@@ -266,6 +288,7 @@ export async function POST(request: NextRequest): Promise<Response> {
         ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(generateImage ? { generate_image: true } : {}),
+        ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       }),
       // Don't use the request's signal — keep the Model Plane call alive even
       // if the browser tab closes (ported from v1 rationale).

@@ -147,6 +147,7 @@ mod tests {
             idempotency_key: None,
             attachments: Vec::new(),
             generate_image: false,
+            tools: Vec::new(),
         }
     }
 

@@ -2753,6 +2753,22 @@ pub struct InvokeRequest {
     /// an `artifact` event (deterministic trigger — no intent guessing).
     #[serde(default)]
     pub generate_image: bool,
+    /// chat-parity §2 function-calling: tool definitions the model may call.
+    /// Empty → no tools. With the `tools` feature opted in, the stream path runs
+    /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
+    #[serde(default)]
+    pub tools: Vec<ToolSpec>,
+}
+
+/// A tool/function definition supplied by the client (chat-parity §2).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// JSON Schema (as a JSON string) for the tool's parameters.
+    #[serde(default)]
+    pub parameters_json: String,
 }
 
 #[derive(Debug, Serialize)]

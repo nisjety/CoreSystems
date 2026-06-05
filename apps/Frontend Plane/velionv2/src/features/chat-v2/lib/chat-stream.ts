@@ -26,6 +26,10 @@ export type ChatStreamOptions = {
   /** Explicit image-generation intent (chat-parity §2) — routes to GenerateImage
    *  and yields an `artifact` chunk. */
   generateImage?: boolean;
+  /** Function-calling tool definitions (chat-parity §2). Distinct from `tools`
+   *  (browse toggle names). Supplying these runs the gateway tool loop and
+   *  yields `tool_call`/`tool_result` chunks. */
+  toolDefs?: Array<{ name: string; description?: string; parameters_json?: string }>;
   signal?: AbortSignal;
 };
 
@@ -78,6 +82,7 @@ export async function* streamChat(
     idempotencyKey,
     attachments,
     generateImage,
+    toolDefs,
     signal,
   } = opts;
 
@@ -96,6 +101,7 @@ export async function* streamChat(
       idempotencyKey,
       attachments,
       generateImage,
+      toolDefs,
     }),
     signal,
   });

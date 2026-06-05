@@ -15,6 +15,7 @@ use futures::Stream;
 use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, ChatMessage, InferRequest,
     OrchestrationEvent, PlanState, StreamRunEventsRequest, SubagentRole, TodoState,
+    ToolDefinition,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -241,6 +242,40 @@ pub async fn invoke_stream_sse(
         name: String::new(),
     });
 
+    // chat-parity §2 — function-calling tool loop. When the client supplies
+    // tools AND opts into the `tools` family, resolve tool calls first (unary
+    // infer → execute via gateway handlers → inject results), then stream the
+    // final answer with tools withheld. Reuses gateway tool handlers — no new
+    // runtime. Inference outage degrades to a normal ungrounded answer.
+    let tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
+        req.tools
+            .iter()
+            .map(|t| ToolDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters_json: t.parameters_json.clone(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let tool_events = if tool_defs.is_empty() {
+        Vec::new()
+    } else {
+        let rounds = crate::tool_loop::run_tool_rounds(
+            &state,
+            &request_id,
+            &org_id,
+            &model,
+            messages,
+            tool_defs,
+            "auto".to_owned(),
+        )
+        .await;
+        messages = rounds.messages;
+        rounds.events
+    };
+
     let grpc_req = InferRequest {
         request_id: request_id.clone(),
         org_id: org_id.clone(),
@@ -287,6 +322,7 @@ pub async fn invoke_stream_sse(
                 start,
                 features,
                 citations,
+                tool_events,
                 idem_guard,
             );
         }
@@ -317,6 +353,14 @@ pub async fn invoke_stream_sse(
             };
             if cite.should_emit(&features) {
                 let _ = tx.send(Ok(cite.to_sse(&req_id))).await;
+            }
+        }
+
+        // chat-parity §2 — emit the resolved tool_call/tool_result events
+        // (gated on the `tools` family) before the final answer streams.
+        for evt in tool_events {
+            if evt.should_emit(&features) {
+                let _ = tx.send(Ok(evt.to_sse(&req_id))).await;
             }
         }
 
@@ -702,6 +746,7 @@ fn infer_fallback_stream(
     start: std::time::Instant,
     features: Vec<String>,
     citations: Vec<crate::retrieval::GroundingCitation>,
+    tool_events: Vec<crate::sse_events::ChatEvent>,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -721,6 +766,13 @@ fn infer_fallback_stream(
             };
             if cite.should_emit(&features) {
                 let _ = tx.send(Ok(cite.to_sse(&request_id))).await;
+            }
+        }
+
+        // chat-parity §2 — emit resolved tool events before the fallback answer.
+        for evt in tool_events {
+            if evt.should_emit(&features) {
+                let _ = tx.send(Ok(evt.to_sse(&request_id))).await;
             }
         }
 
