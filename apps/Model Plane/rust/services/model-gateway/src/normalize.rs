@@ -36,8 +36,10 @@ fn load_allowed_models() -> Option<Vec<String>> {
     })
 }
 
-/// Load the default model from `DEFAULT_MODEL` env var.
-fn load_default_model() -> String {
+/// Load the default model from `DEFAULT_MODEL` env var. Shared with the SSE
+/// stream path so it resolves an unspecified model identically to the unary
+/// path (sending the literal "default" breaks provider deployment lookup).
+pub(crate) fn load_default_model() -> String {
     std::env::var("DEFAULT_MODEL").unwrap_or_else(|_| "default".to_owned())
 }
 

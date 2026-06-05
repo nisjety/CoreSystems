@@ -111,7 +111,15 @@ pub async fn invoke_stream_sse(
     axum::Json(req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
-    let model = req.model.clone().unwrap_or_else(|| "default".to_owned());
+    // Resolve the model the SAME way as the unary path (DEFAULT_MODEL env), not
+    // the literal "default" — providers have no deployment named "default", so
+    // sending it 404s and exhausts the chain (live-verified bug).
+    let model = req
+        .model
+        .clone()
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(crate::normalize::load_default_model);
     let org_id = claims.org_id.clone();
     let user_id = claims.user_id.clone();
 
