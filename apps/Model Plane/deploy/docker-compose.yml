@@ -158,6 +158,12 @@ services:
       # (graph/wiki gRPC clients have a separate HTTP-only architecture mismatch
       # in Data Plane v2 — tracked, not wired here.)
       DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:50052}
+      # graphRAG (dpv2-graph-index gRPC :50053) + LLM wiki (dpv2-wiki-store gRPC
+      # :50054). Both serve gRPC on inter-plane-bus; the gateway only defaulted
+      # to localhost. These make the graph_client/wiki_client REACHABLE; calling
+      # them from the chat path is a separate (not-yet-wired) integration.
+      DATAPLANE_GRAPH_URL: ${DATAPLANE_GRAPH_URL:-http://dpv2-graph-index:50053}
+      DATAPLANE_WIKI_URL: ${DATAPLANE_WIKI_URL:-http://dpv2-wiki-store:50054}
       # retrieval-engine's ApiKeyInterceptor requires this as `x-api-key` gRPC
       # metadata (else "invalid or missing credential"). Maps the .env key.
       DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
