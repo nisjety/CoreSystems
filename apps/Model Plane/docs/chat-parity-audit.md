@@ -234,21 +234,27 @@ keyword list.
 - **Memory tools**: `recall_memory` (SearchMemory) + `save_memory` (IndexMemory) in the tool loop,
   thread+org scoped, reusing MemoryService — durable cross-turn memory. (commit `ba5ccc69`)
 
-- **Voice realtime — server side built**: gateway already exposes `/v1/ai/realtime` (mints
-  `CreateRealtimeSession` — the server's role in the WebRTC pattern), `/v1/ai/speech` (TTS via
-  `SynthesizeSpeech`), and STT (`TranscribeSpeech`). The browser connects the minted session directly
-  to the provider for live audio.
+- **Agentic run path** (`agentic_run_stream`): opt-in via the `agentic` feature — the chat turn
+  becomes a session-core run (`StartRun` via `prepare_run`); the gateway streams the run's
+  `step_update`s + the run's resulting answer, falling back to direct inference if the run yields
+  nothing. The gateway only orchestrates+observes; tool/code execution happens in execution-core
+  under its sandbox. This is the chat→orchestration integration code-exec needed. (commit `7a5fc712`)
+- **Voice — server + session-mint**: gateway `/v1/ai/realtime` (mints `CreateRealtimeSession`),
+  `/v1/ai/speech` (TTS), STT (`TranscribeSpeech`); BFF `POST /api/voice/session` + client
+  `createVoiceSession()` mint the ephemeral session for the browser. (commit on voice session-mint)
 
-**Phase 3 — remaining (each gated on safety, live A/V, or a large integration — NOT headless-buildable+verifiable):**
-- **Sandboxed code-exec** — architecturally belongs *inside* an orchestration run: `ExecuteStep`
-  requires `run_id`/`step_id` and enforces `permission_mode` + hooks, with the sandbox below it. So
-  it needs the chat→orchestration agentic-run integration AND Tier 2 sandbox isolation (in-progress
-  separate workstream). A standalone gateway `dispatch_tool` arm would be the wrong shape (no run
-  context) and would run unsandboxed. The `step_update` *output* of such a run is already wired.
-- **Voice realtime — frontend**: a browser WebRTC mic/audio client against the minted session; only
-  verifiable with live audio I/O.
-- **Live browser/computer view**: streaming an interactive Quarry agent session to the UI; needs a
-  live Quarry agent + a frontend viewer. (`web_search` + `fetch_url` cover non-interactive web.)
+**Phase 3 — remaining (each now narrowed to a single live/safety gate below this layer):**
+- **Sandboxed code execution inside a run** — the gateway-side agentic wiring is DONE (above); actual
+  code exec runs in execution-core via `ExecuteStep` under **its** sandbox. The only remaining gate is
+  Tier-2 sandbox isolation *inside execution-core* (a separate in-progress workstream, a layer below
+  the gateway). No gateway change pending.
+- **Voice — browser media client**: mic capture + audio framing + playback over the minted session;
+  the provider's live WS/WebRTC handshake is runtime behavior, verifiable only with live audio. The
+  session-mint (the server-for-frontend half) is done.
+- **Live browser/computer view**: streaming an interactive agent's screen to the UI; needs the live
+  ai-core agent service (`/v1/agent/run`, a separate service) + a viewer. (`web_search` + `fetch_url`
+  cover non-interactive web; the `browser_agent` tool is one `dispatch_tool` arm away once that
+  service's reachable address/auth is confirmed.)
 - **memory** — *landed* as tools (recall/save); a "projects" UI grouping is product surface.
 
 These three require either the in-progress sandbox workstream, a live A/V/browser environment, or a
