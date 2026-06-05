@@ -176,19 +176,27 @@ Then verified live (`Authorization: Bearer dev-bypass`):
 | `GET /v1/threads/{id}/messages` (resume read) | ✅ 200 `{thread_id, messages:[]}` (session-core ListConversation) |
 | `POST /v1/invoke/{id}/cancel` | ✅ 404 for unknown id (as designed) |
 | `POST /v1/chat/documents` | ✅ route+handler reached (502 downstream = Data Plane doc-svc connectivity, not gateway code) |
-| plain `POST /v1/invoke/stream` | ✅ emits my **structured error** `{code,message,retryable,request_id}` |
+| plain `POST /v1/invoke/stream` (after model fix) | ✅ **streams real token-by-token answer** via `gpt-4o-mini-2024-07-18` (Azure) — primary chat path works live |
 | agentic `POST /v1/invoke/stream` `features:["agentic"]` | ✅ `connected`→(StartRun, no worker)→fallback→`done` — graceful degradation exactly as designed |
 | RAG stream `features:["citations","rag"]` | ✅ `model_gateway::retrieval` fires → calls Data Plane Retrieve → on unreachable svc logs "retrieval grounding unavailable; proceeding ungrounded" + degrades (no crash) — wiring confirmed |
 | `POST /v1/invoke` (unary) | ✅ 200 "Pong." (Azure gpt-4o-mini) |
 | sandbox (standalone Docker) | ✅ bwrap installs, fails-closed by default, isolates (egress blocked) when userns granted |
 
-**Every residual failure is an environment provider/credential issue the code handled correctly**, not
-a chat-parity code gap:
-- *Streaming exhausted (9 attempts):* `infer_stream` DOES iterate the full provider chain with
-  fallback (verified in `fallback.rs:254`, same as unary) — but in this env all three failed: OpenAI
-  on the invalid key, and Azure's *streaming* call fails even though its *unary* call succeeds (so the
-  unary `/v1/invoke` answered via Azure, but the stream had no working provider). That's an
-  inference-core Azure-streaming config/credential matter, surfaced cleanly as my structured error.
+**Two real bugs were found by deploying (invisible to unit tests) and fixed:**
+1. *Route-collision startup panic* — overlapping `POST /v1/documents` crashed the gateway at boot
+   (commit `19d10d9b`; namespaced as `/v1/chat/documents`).
+2. *Streaming sent the literal model `"default"`* — the SSE path used `req.model.unwrap_or("default")`
+   while the unary path resolves `DEFAULT_MODEL`; "default" is no provider deployment → Azure 404 →
+   the whole chain (and its unary fallback, also carrying "default") exhausted, so **every chat stream
+   errored** while unary worked. Fixed (`512983a7`) to resolve via `normalize::load_default_model()`.
+   **After the fix, the live stream produces real token-by-token answers via Azure** — the primary
+   chat path is operational. Diagnosed by diffing live stream-vs-unary provider logs.
+
+**Remaining residuals are environment provider/credential issues the code handles correctly** (not
+chat-parity code): OpenAI key invalid (`401`) + Anthropic out of credits + Azure deployment naming —
+the gateway falls through to a working provider where one exists (Azure for chat); realtime voice
+`401 invalid_api_key`; Data Plane retrieval/doc services unreachable (tcp connect → graceful
+degrade / 502). Each is an operator/infra fix with live evidence.
 - *Realtime voice:* `401 invalid_api_key` (operator credential).
 - *Data Plane doc-svc:* tcp connect error → my 502 (service network/availability).
 Each is an operator/infra fix with live evidence pinning it; the gateway/BFF/client chat-parity code
