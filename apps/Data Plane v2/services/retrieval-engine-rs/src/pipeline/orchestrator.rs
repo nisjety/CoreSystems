@@ -547,7 +547,7 @@ impl RetrievalPipeline {
             return Ok(candidates);
         }
 
-        let live: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
+        let mut live: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
             r#"
             SELECT document_id
             FROM documents
@@ -561,6 +561,28 @@ impl RetrievalPipeline {
         .into_iter()
         .map(|(id,)| id)
         .collect();
+
+        // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
+        // page_id, which is canonical in wiki_pages, not documents. Treat a
+        // published wiki page as live so this visibility gate doesn't drop
+        // every wiki hit as "missing from canonical documents". Best-effort:
+        // a failure here just means wiki candidates fall back to being gated
+        // by the documents table alone (i.e. filtered out).
+        match sqlx::query_as::<_, (String,)>(
+            r#"
+            SELECT page_id
+            FROM wiki_pages
+            WHERE page_id = ANY($1)
+              AND page_status = 'published'
+            "#,
+        )
+        .bind(&doc_ids)
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => live.extend(rows.into_iter().map(|(id,)| id)),
+            Err(e) => tracing::warn!(error = %e, "wiki live-gate lookup failed; wiki candidates may be dropped"),
+        }
 
         if live.len() == doc_ids.len() {
             return Ok(candidates);
