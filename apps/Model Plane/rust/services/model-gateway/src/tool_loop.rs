@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use mp_contracts::model_plane::v1::{
-    ChatMessage, InferRequest, ToolCall, ToolDefinition, WebSearchRequest,
+    ChatMessage, InferRequest, ProxyMcpToolRequest, ToolCall, ToolDefinition, WebSearchRequest,
 };
 
 use crate::sse_events::ChatEvent;
@@ -41,6 +41,12 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
     serde_json::from_str::<serde_json::Value>(args_json)
         .ok()
         .and_then(|v| v.get(key).and_then(serde_json::Value::as_i64))
+}
+
+/// Parse an MCP tool name `mcp__<server_id>__<tool_name>` into its parts.
+/// Splits on the FIRST `__` after the prefix (tool names may contain `__`).
+fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"))
 }
 
 fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
@@ -93,6 +99,37 @@ pub async fn dispatch_tool(state: &AppState, org_id: &str, call: &ToolCall) -> T
                     }
                 }
                 Err(e) => err_outcome(call, format!("web_search failed: {}", e.message())),
+            }
+        }
+        // MCP proxy: `mcp__<server_id>__<tool_name>` routes to a registered MCP
+        // server via the existing registry (matrix §G2) — no new transport.
+        mcp if mcp.starts_with("mcp__") => {
+            let Some((server_id, tool_name)) = parse_mcp_tool_name(mcp) else {
+                return err_outcome(
+                    call,
+                    format!("malformed MCP tool '{mcp}' (expected mcp__<server>__<tool>)"),
+                );
+            };
+            match crate::runtime_registries::handle_proxy_mcp_tool(
+                &state.mcp,
+                ProxyMcpToolRequest {
+                    request_id: String::new(),
+                    org_id: org_id.to_owned(),
+                    server_id: server_id.to_owned(),
+                    tool_name: tool_name.to_owned(),
+                    input_json: call.arguments_json.clone(),
+                },
+            )
+            .await
+            {
+                Ok(resp) if resp.error_message.is_empty() => ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: resp.output_json,
+                    error: None,
+                },
+                Ok(resp) => err_outcome(call, resp.error_message),
+                Err(e) => err_outcome(call, format!("mcp proxy failed: {}", e.message())),
             }
         }
         other => err_outcome(call, format!("unknown tool '{other}'")),
@@ -223,6 +260,21 @@ mod tests {
         assert_eq!(arg_i64(args, "limit"), Some(3));
         assert_eq!(arg_str(args, "missing"), "");
         assert_eq!(arg_i64(args, "missing"), None);
+    }
+
+    #[test]
+    fn parses_mcp_tool_names() {
+        assert_eq!(
+            parse_mcp_tool_name("mcp__github__create_issue"),
+            Some(("github", "create_issue"))
+        );
+        // tool name may itself contain `__` — split on the FIRST separator only.
+        assert_eq!(
+            parse_mcp_tool_name("mcp__srv__a__b"),
+            Some(("srv", "a__b"))
+        );
+        assert_eq!(parse_mcp_tool_name("web_search"), None);
+        assert_eq!(parse_mcp_tool_name("mcp__noseparator"), None);
     }
 
     #[test]
