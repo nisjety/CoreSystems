@@ -15,6 +15,10 @@ use crate::search::rerank::RerankClient;
 use crate::search::sparse::DynSparseSearchBackend;
 use crate::trace::persist_trace;
 
+/// Qdrant collection the embedding-engine writes wiki page embeddings to.
+/// Must match `embedding_engine_rs::wiki_consumer::WIKI_COLLECTION`.
+const WIKI_COLLECTION: &str = "wiki_block_embeddings";
+
 pub struct RetrievalPipeline {
     pub pool: PgPool,
     pub qdrant: Qdrant,
@@ -172,11 +176,11 @@ impl RetrievalPipeline {
 
         // 3. Dense vector search (only when routed).
         let dense_start = Instant::now();
-        let dense_candidates = if let Some(query_vector) = query_vector {
+        let dense_candidates = if let Some(ref qv) = query_vector {
             vector_search(
                 &self.qdrant,
                 &self.config.qdrant_collection,
-                query_vector,
+                qv.clone(),
                 &req.org_id,
                 conditions,
                 top_k,
@@ -221,6 +225,41 @@ impl RetrievalPipeline {
             }
         } else {
             (dense_candidates, 0)
+        };
+
+        // Wave-3 — 4-way merge: layer the wiki ANN arm into the fused list by
+        // its w_wiki share, now that wiki_block_embeddings is populated (durable
+        // embedding-engine wiki subscriber writes text+source_type+ids there).
+        // Reuses the query embedding; skipped on a purely-lexical route.
+        let fused_candidates = if mix_for_scoring.w_wiki > 0.0 {
+            if let Some(ref qv) = query_vector {
+                match vector_search(
+                    &self.qdrant,
+                    WIKI_COLLECTION,
+                    qv.clone(),
+                    &req.org_id,
+                    Vec::new(),
+                    top_k,
+                )
+                .await
+                {
+                    Ok(wiki) if !wiki.is_empty() => reciprocal_rank_fusion(
+                        &fused_candidates,
+                        &wiki,
+                        60.0,
+                        mix_for_scoring.w_wiki,
+                    ),
+                    Ok(_) => fused_candidates,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wiki ANN arm failed; skipping");
+                        fused_candidates
+                    }
+                }
+            } else {
+                fused_candidates
+            }
+        } else {
+            fused_candidates
         };
         let sparse_ms = sparse_start.elapsed().as_millis() as u64;
         let candidate_count_fused = fused_candidates.len();

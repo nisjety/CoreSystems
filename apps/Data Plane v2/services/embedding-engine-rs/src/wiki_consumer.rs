@@ -151,6 +151,19 @@ async fn handle(
     );
     payload.insert("title".to_string(), QdrantValue::from(evt.title.clone()));
     payload.insert("path".to_string(), QdrantValue::from(evt.path.clone()));
+    // Fields the retrieval-engine's vector_search reads so a wiki point can be
+    // a first-class hybrid candidate (text body + source tag + a stable key /
+    // document id). Without `text` the candidate would have an empty body.
+    payload.insert("text".to_string(), QdrantValue::from(evt.content.clone()));
+    payload.insert("source_type".to_string(), QdrantValue::from("wiki"));
+    payload.insert(
+        "knowledge_id".to_string(),
+        QdrantValue::from(evt.version_id.clone()),
+    );
+    payload.insert(
+        "document_id".to_string(),
+        QdrantValue::from(evt.page_id.clone()),
+    );
 
     let point = PointStruct::new(evt.version_id.clone(), vec, payload);
     qdrant
