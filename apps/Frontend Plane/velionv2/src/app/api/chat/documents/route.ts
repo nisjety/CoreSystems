@@ -2,7 +2,7 @@
  * BFF document-upload route — POST /api/chat/documents  { title, content, source?, type? }
  *
  * Uploads a document into Data Plane v2 (chat-parity §2 file upload) so it
- * becomes retrievable by the RAG path. Proxies Model Plane POST /v1/documents,
+ * becomes retrievable by the RAG path. Proxies Model Plane POST /v1/chat/documents,
  * which calls Data Plane's DocumentService (the ingest owner). Auth + JWT mint
  * reuse the stream/history routes; org scope is enforced server-side.
  */
@@ -54,7 +54,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     : `Bearer ${process.env.MODEL_GATEWAY_BEARER ?? process.env.INTERNAL_API_KEY ?? process.env.INTERNAL_SERVICE_SECRET ?? "dev-bypass"}`;
 
   try {
-    const res = await fetch(`${modelPlaneBase()}/v1/documents`, {
+    const res = await fetch(`${modelPlaneBase()}/v1/chat/documents`, {
       method: "POST",
       headers: { Authorization: authHeader, "Content-Type": "application/json" },
       body: JSON.stringify({

@@ -83,7 +83,9 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
         // chat-parity §2: upload a document into Data Plane (→ retrievable via RAG).
-        .route("/v1/documents", post(create_document))
+        // Chat-namespaced to avoid colliding with the Data Plane document CRUD
+        // route (`POST /v1/documents` in `dataplane_routes`).
+        .route("/v1/chat/documents", post(create_document))
         // Orchestration read + mutations
         .merge(orchestration_routes())
         // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
