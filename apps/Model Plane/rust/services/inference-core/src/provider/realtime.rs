@@ -309,7 +309,7 @@ impl RealtimeProvider for AzureRealtimeProvider {
     ) -> Result<RealtimeSessionResponse, ProviderError> {
         // Azure addresses the model by deployment name.
         let voice = defaulted(&req.voice, DEFAULT_REALTIME_VOICE);
-        let body = openai_client_secret_body(req, &self.deployment, &voice);
+        let body = azure_realtime_session_body(req, &self.deployment, &voice);
 
         let response = self
             .client
@@ -366,6 +366,28 @@ impl RealtimeProvider for AzureRealtimeProvider {
             })
             .collect()
     }
+}
+
+/// Azure preview realtime sessions (`/openai/realtimeapi/sessions`) takes a
+/// FLAT body (`model`=deployment, `voice`, `input_audio_format`, … at top
+/// level — the same params as `session.update`), NOT OpenAI v1's nested
+/// `{session:{…}}`. Using the nested shape made Azure resolve no deployment →
+/// 404 DeploymentNotFound. Verified against MS Learn realtime REST reference.
+fn azure_realtime_session_body(req: &RealtimeSessionRequest, model: &str, voice: &str) -> Value {
+    let input_audio_format = defaulted(&req.input_audio_format, DEFAULT_AUDIO_FORMAT);
+    let output_audio_format = defaulted(&req.output_audio_format, DEFAULT_AUDIO_FORMAT);
+    let turn_detection_type = defaulted(&req.turn_detection_type, DEFAULT_TURN_DETECTION);
+    let mut body = json!({
+        "model": model,
+        "voice": voice,
+        "input_audio_format": input_audio_format,
+        "output_audio_format": output_audio_format,
+        "turn_detection": { "type": turn_detection_type },
+    });
+    if !req.instructions.trim().is_empty() {
+        body["instructions"] = Value::String(req.instructions.clone());
+    }
+    body
 }
 
 fn openai_client_secret_body(req: &RealtimeSessionRequest, model: &str, voice: &str) -> Value {
@@ -536,6 +558,18 @@ mod tests {
             websocket_base_from_api_base("https://api.openai.com/v1"),
             "wss://api.openai.com/v1/realtime"
         );
+    }
+
+    #[test]
+    fn azure_body_is_flat_with_top_level_model() {
+        // Azure preview /realtimeapi/sessions wants a flat body; the deployment
+        // (model) must be top-level or Azure 404s DeploymentNotFound.
+        let body = azure_realtime_session_body(&request(), "gpt-realtime-2", "alloy");
+        assert_eq!(body["model"], "gpt-realtime-2");
+        assert_eq!(body["voice"], "alloy");
+        assert_eq!(body["input_audio_format"], "pcm16");
+        assert_eq!(body["turn_detection"]["type"], "server_vad");
+        assert!(body.get("session").is_none(), "must NOT nest under `session`");
     }
 
     #[test]
