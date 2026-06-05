@@ -217,11 +217,11 @@ keyword list.
   the existing MCP registry (`handle_proxy_mcp_tool`, http + stdio, allowlist-enforced). Unit-tested
   name parsing. Reuses the registered-server registry — no new transport. (commit `86114b85`)
 
-**Phase 2 — remaining:**
-- `code-exec` tool — **deliberately gated on sandbox safety**: Tier 2 "real sandbox isolation" is
-  in-progress (the executor is still a transparent passthrough), so routing model-generated code
-  through it now would run unsandboxed. Plugs into `dispatch_tool` once the sandbox isolates.
-- `artifact`/canvas is a UI surface; the `artifact` event + client chunk are shipped.
+- **artifact/canvas** — full surface: `artifact` event → client chunk → `ChatMessage.artifacts` →
+  `ArtifactsPanel` tab with prose (ChatMarkdown), code (`<pre>`), and **image** (`<img>` via
+  `imageArtifactSrc`) rendering. (commit on the image-render gap; rest pre-existing)
+
+**Phase 2 — COMPLETE.** (The `code-exec` tool is tracked under Phase 3 below, gated on sandbox safety.)
 
 **Phase 3 — landed:**
 - **Replay / resume**: `stream_buffer::replay_after` (memory + Redis, `Last-Event-Id` cursor) +
