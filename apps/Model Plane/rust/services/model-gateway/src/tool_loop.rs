@@ -149,6 +149,67 @@ pub async fn dispatch_tool(
                 Err(e) => err_outcome(call, format!("fetch_url failed: {e}")),
             }
         }
+        // Interactive browsing agent (chat-parity Phase 3) — runs a multi-step
+        // browse objective via the agent service (known `AgentModeRequest`
+        // contract). Operator points BROWSER_AGENT_URL at the service; disabled
+        // (error outcome) when unset, so it never calls an unknown endpoint.
+        "browser_agent" => {
+            let objective = arg_str(&call.arguments_json, "objective");
+            if objective.trim().is_empty() {
+                return err_outcome(call, "browser_agent requires an 'objective' argument");
+            }
+            let base = std::env::var("BROWSER_AGENT_URL").unwrap_or_default();
+            if base.trim().is_empty() {
+                return err_outcome(
+                    call,
+                    "browser_agent is not configured (BROWSER_AGENT_URL unset)",
+                );
+            }
+            let target_url = arg_str(&call.arguments_json, "target_url");
+            let body = serde_json::json!({
+                "user_id": org_id,
+                "objective": objective,
+                "target_url": if target_url.is_empty() { serde_json::Value::Null } else { serde_json::json!(target_url) },
+                "max_steps": 8,
+                "enable_web_search": true,
+            });
+            let endpoint = format!("{}/v1/agent/run", base.trim_end_matches('/'));
+            let mut http = state
+                .http_client
+                .post(&endpoint)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(60));
+            if let Ok(key) = std::env::var("BROWSER_AGENT_API_KEY") {
+                if !key.is_empty() {
+                    http = http.header("X-API-Key", key);
+                }
+            }
+            match http.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(v) => {
+                            let content =
+                                v.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+                            let out = serde_json::json!({
+                                "content": truncate_chars(content, MAX_FETCH_CHARS),
+                                "confidence": v.get("confidence").cloned().unwrap_or(serde_json::Value::Null),
+                            });
+                            ToolOutcome {
+                                call_id: call.id.clone(),
+                                name: call.name.clone(),
+                                output: out.to_string(),
+                                error: None,
+                            }
+                        }
+                        Err(e) => err_outcome(call, format!("browser_agent decode failed: {e}")),
+                    }
+                }
+                Ok(resp) => {
+                    err_outcome(call, format!("browser_agent returned {}", resp.status().as_u16()))
+                }
+                Err(e) => err_outcome(call, format!("browser_agent failed: {e}")),
+            }
+        }
         // Long-term memory (chat-parity §Phase 3 memory/projects) — reuses the
         // MemoryService (canonical owner). Thread+org scoped.
         "recall_memory" => {
