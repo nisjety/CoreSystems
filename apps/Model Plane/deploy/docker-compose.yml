@@ -314,6 +314,17 @@ services:
       AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-}
       AZURE_SPEECH_DEFAULT_VOICE: ${AZURE_SPEECH_DEFAULT_VOICE:-}
       DEFAULT_PROVIDER: anthropic
+    # Join the shared bus so cross-plane callers can reach inference-core by
+    # name. Data Plane v2's retrieval-engine embeds queries via
+    # MODEL_PLANE_AI_CORE_GRPC_URL=http://inference-core:9092 — without this it
+    # only sat on model-plane-network → dpv2 got DNS_FAIL → "model-plane
+    # embedding failed" → RAG silently degraded to ungrounded.
+    networks:
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-inference-core-1
+          - inference-core
     depends_on:
       nats:
         condition: service_healthy
