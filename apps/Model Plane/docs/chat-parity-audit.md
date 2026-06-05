@@ -266,12 +266,20 @@ remaining gate is **deploying execution-core on Linux with `bwrap`** (an ops con
 on non-Linux dev it degrades to a transparent passthrough by design. Optional future defense-in-depth:
 layer seccomp/Landlock (Linux-only application, can't be verified on this macOS host).
 
-**Remaining — both browser-native live A/V, not buildable+verifiable in a headless macOS session:**
-- **Voice media DSP client**: browser mic/audio over the minted session. The `websocket_url` target
-  (provider-direct vs gateway-relay) + its auth are not determinable from the contract, and audio
-  correctness is only verifiable by listening — building blind would be guessing a wire protocol.
-- **Live screen-stream views** (voice waveform / browser screen): UI visualizations of live streams,
-  buildable+verifiable only against the running stack.
+**Voice — verifiable core built:** server (`/v1/ai/realtime` + TTS/STT) + BFF/client session-mint
+(`createVoiceSession`) + **audio DSP helpers** (`voice-audio.ts`: float32↔PCM16 + base64 LE framing,
+unit-tested by math incl. a known wire vector). What's left is the **media controller** that wires
+these to `getUserMedia`/`AudioContext`/the live WS — and the WS message protocol + `websocket_url`
+target/auth are provider runtime behavior, not in the repo; correctness is only verifiable by ear.
+
+**Live agent/browser view — data already renders:** `step_update` events render in the Steps tab and
+image artifacts render as `<img>` (artifact panel), so an agent run's progress + screenshots already
+display. A dedicated combined "computer-use" live viewer is incremental UI over a *live* stream.
+
+**Remaining — exclusively browser-native live A/V wiring over the built cores:**
+- Voice media controller (mic/playback over the live WS) — needs a browser + live provider + the
+  provider's WS protocol (absent from the repo); guessing it would ship unhearable code.
+- A dedicated live screen-stream viewer — needs a live agent stream to build+verify against.
 - **memory** — *landed* as tools (recall/save); a "projects" UI grouping is product surface.
 
 These three require either the in-progress sandbox workstream, a live A/V/browser environment, or a
