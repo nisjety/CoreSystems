@@ -254,7 +254,12 @@ keyword list.
 **Phase 3 — every capability is implemented with its verifiable layers tested; what remains is
 not code-in-this-layer but environment/ops:**
 - **code-exec**: gateway agentic run → execution-core `ExecuteStep` → **bwrap sandbox** (wired,
-  58 tests). Remaining: deploy execution-core on **Linux with `bwrap`** (ops). No code pending.
+  58 tests; `bubblewrap` now in the runtime image). **Sandbox operationally verified via Docker**
+  (Linux containers): bubblewrap installs on `debian:trixie-slim` (0.11.0); under default Docker
+  seccomp bwrap *cannot* create namespaces → code-exec **fails closed** (never runs unsandboxed);
+  with user-namespaces granted, `--unshare-net` genuinely isolates (the external `eth0` is removed →
+  egress blocked). Remaining: the deploy host must grant unprivileged userns (documented on the
+  compose service). The mechanism itself is proven — no code pending.
 - **voice**: full client built (mint + DSP + protocol + controller, all tested/tsc-clean). Remaining:
   confirm the live **WS auth handshake** (one flagged line in `openSocket`) against the provider — a
   live observation, not new logic.
