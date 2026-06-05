@@ -316,7 +316,11 @@ services:
       BATCH_SIZE: "32"
       QDRANT_COLLECTION: "dataplane_knowledge"
       EMBEDDING_DIMENSION: "3072"
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
+      # Index-time embedding: azure_openai (direct Azure HTTP) — same fix as
+      # retrieval-engine. model_plane (gRPC → inference-core) hangs the
+      # dpv2 embed client (DATAPLANE_KNOWLEDGE stream stuck, docs never index).
+      # Same text-embedding-3-large@3072 → query/index vectors stay compatible.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
