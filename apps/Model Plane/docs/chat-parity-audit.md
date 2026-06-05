@@ -216,6 +216,8 @@ keyword list.
 - **MCP tools in the loop** (`tool_loop::dispatch_tool`): `mcp__<server>__<tool>` calls route through
   the existing MCP registry (`handle_proxy_mcp_tool`, http + stdio, allowlist-enforced). Unit-tested
   name parsing. Reuses the registered-server registry — no new transport. (commit `86114b85`)
+- **`fetch_url` tool**: reads a specific page via Quarry scrape (complements `web_search`); content
+  truncated. (commit `83c346a1`)
 
 - **artifact/canvas** — full surface: `artifact` event → client chunk → `ChatMessage.artifacts` →
   `ArtifactsPanel` tab with prose (ChatMarkdown), code (`<pre>`), and **image** (`<img>` via
@@ -230,11 +232,25 @@ keyword list.
   (`orchestration_event_to_step_update`) into the unified `step_update` taxonomy, so a run's plan/
   todo/subagent/approval progress renders in the chat Steps timeline. 2 unit tests. (commit `8e503736`)
 
-**Phase 3 — remaining (each gated on safety or live infrastructure, not headless-buildable):**
-- sandboxed code-exec — same gate as the Phase 2 `code-exec` tool (Tier 2 sandbox isolation).
-- live browser/computer view — needs a live Quarry agent session to verify.
-- voice realtime — needs a WebRTC/WS transport + live audio verification (new transport, highest risk).
-- memory/projects — product surface.
+- **Voice realtime — server side built**: gateway already exposes `/v1/ai/realtime` (mints
+  `CreateRealtimeSession` — the server's role in the WebRTC pattern), `/v1/ai/speech` (TTS via
+  `SynthesizeSpeech`), and STT (`TranscribeSpeech`). The browser connects the minted session directly
+  to the provider for live audio.
+
+**Phase 3 — remaining (each gated on safety, live A/V, or a large integration — NOT headless-buildable+verifiable):**
+- **Sandboxed code-exec** — architecturally belongs *inside* an orchestration run: `ExecuteStep`
+  requires `run_id`/`step_id` and enforces `permission_mode` + hooks, with the sandbox below it. So
+  it needs the chat→orchestration agentic-run integration AND Tier 2 sandbox isolation (in-progress
+  separate workstream). A standalone gateway `dispatch_tool` arm would be the wrong shape (no run
+  context) and would run unsandboxed. The `step_update` *output* of such a run is already wired.
+- **Voice realtime — frontend**: a browser WebRTC mic/audio client against the minted session; only
+  verifiable with live audio I/O.
+- **Live browser/computer view**: streaming an interactive Quarry agent session to the UI; needs a
+  live Quarry agent + a frontend viewer. (`web_search` + `fetch_url` cover non-interactive web.)
+- **memory/projects** — product surface.
+
+These four require either the in-progress sandbox workstream, a live A/V/browser environment, or a
+large multi-session agentic-run integration — none completable+verifiable in a headless coding session.
 
 All landed work reuses canonical owners (Data Plane v2 retrieval/knowledge/graph/wiki, Quarry v2
 web, inference-core providers, session-core conversations, capability-core safety) — no duplicate
