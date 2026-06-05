@@ -4,6 +4,35 @@ Audited 2026-06-04 against the real Model Plane code (not the brief's assumption
 Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
+## 0. Runtime-gap root-cause + fixes (2026-06-05, code — not "operator must fix")
+
+Earlier these 5 were dismissed as operator/infra. Workflow root-cause + live deploy proved
+most were real **codebase config/wiring bugs**, now fixed:
+
+1. **Data Plane RAG unreachable** — 3 stacked config bugs: gateway compose passed NO data-plane
+   env → `localhost:50052`; `.env` var was `DATA_PLANE_*` but `state.rs` reads `DATAPLANE_*`;
+   `.env` pointed at HTTP `:8004` not gRPC `:50052`. FIXED: compose `DATAPLANE_RETRIEVAL_URL=
+   http://dpv2-retrieval-engine:50052`. Then auth: retrieval-engine wants `x-api-key` metadata →
+   added `retrieval::authorize()` + `DATAPLANE_INTERNAL_KEY`. **Live: error advanced tcp-connect →
+   credential → embedding** (each layer fixed). Remaining = dpv2→inference-core query-embedding
+   (Azure embedding deployment, separate service). (commit `80c77dd1`)
+2. **Realtime voice 401** — `RealtimeChain` only had OpenAI, reading `OPENAI_API_KEY` (= the Azure
+   key) → 401. FIXED: added `AzureRealtimeProvider` (api-key auth), registered first. Activation
+   needs an Azure realtime deployment provisioned (external). (commit `5095fd63`)
+3. **Sandbox userns** — Docker default seccomp blocks `clone(CLONE_NEWUSER)`. FIXED: scoped
+   `deploy/seccomp-bwrap.json` (allow-default + escape/escalation deny-list) + execution-core
+   `security_opt` — safer than `seccomp:unconfined`. (commit `80c77dd1`; image rebuild to ship bwrap)
+4. **Provider order** — compose default `anthropic,openai` (both broken first). FIXED → `azure,
+   anthropic,openai`. Azure streaming 404 already fixed (`512983a7` model resolution). OpenAI key /
+   Anthropic credits = genuinely external. (commit `80c77dd1`)
+5. **Orchestration multi-step** — orchestrator-core subscribes+persists `mp.v1.orchestration.>` but
+   nothing publishes run-started, and it persists (doesn't plan). Multi-step needs a goal→steps
+   **planner** = Phase-3 feature, not a config bug. Agentic path already answers (single-shot +
+   tool-loop). DIAGNOSED, not a quick fix.
+
+Genuinely external (repo cannot hold): valid OpenAI key, Azure embedding+realtime deployment names,
+host `kernel.unprivileged_userns_clone=1`, and the multi-step planner feature.
+
 ---
 
 ## 0. Executive finding — the reframe
