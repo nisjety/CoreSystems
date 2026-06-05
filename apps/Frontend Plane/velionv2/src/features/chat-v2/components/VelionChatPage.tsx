@@ -45,7 +45,7 @@ import {
   type TaskStepStatus,
 } from "@/features/chat-v2/lib/chat-workspace";
 import { formatRelative, formatTime, toolLabels } from "@/features/chat-v2/lib/chat-format";
-import { imageArtifactSrc } from "@/features/chat-v2/lib/chat-artifacts";
+import { imageArtifactSrc, selectLatestImageArtifact } from "@/features/chat-v2/lib/chat-artifacts";
 import { useChatDashboardComposer } from "@/features/chat-v2/hooks/use-chat-dashboard-composer";
 import type { DashboardComposerProps } from "@/features/dashboard-v2/lib/dashboard-composer-model";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
@@ -71,6 +71,7 @@ export function VelionChatPage() {
   const taskSteps = activeSession?.taskSteps ?? [];
   const citations = collectCitations(messages);
   const artifacts = collectArtifacts(messages);
+  const agentScreen = selectLatestImageArtifact(messages);
 
   // Reset to the thread when the active session changes — render-time state
   // adjustment (React's "store previous value" pattern), no effect needed.
@@ -210,7 +211,7 @@ export function VelionChatPage() {
         ) : tab === "artifacts" ? (
           <ArtifactsPanel artifacts={artifacts} />
         ) : (
-          <StepsPanel steps={taskSteps} onStopTask={chat.stopTask} />
+          <StepsPanel steps={taskSteps} screen={agentScreen} onStopTask={chat.stopTask} />
         )}
         {hasActiveMessages && tab === "chat" ? (
           <div className="velion-chat-composer-dock relative shrink-0 bg-[#FCFCFD]/92 px-4 pb-5 pt-3 backdrop-blur-xl dark:bg-[#101114]/90 md:px-6">
@@ -406,8 +407,16 @@ function SourcesPanel({ citations }: { citations: Citation[] }) {
   );
 }
 
-function StepsPanel({ steps, onStopTask }: { steps: AgentTaskStep[]; onStopTask: () => void }) {
-  if (steps.length === 0) {
+function StepsPanel({
+  steps,
+  screen,
+  onStopTask,
+}: {
+  steps: AgentTaskStep[];
+  screen?: ChatArtifact | null;
+  onStopTask: () => void;
+}) {
+  if (steps.length === 0 && !screen) {
     return (
       <EmptyPanel
         icon={<ListChecks className="size-5" />}
@@ -437,6 +446,20 @@ function StepsPanel({ steps, onStopTask }: { steps: AgentTaskStep[]; onStopTask:
             Stopp
           </button>
         </div>
+        {screen ? (
+          <figure className="mb-4 overflow-hidden rounded-[14px] border border-[#ECECEF] bg-[#0B0B0D] dark:border-[#2A2C32]">
+            {/* chat-parity Phase 3: latest agent screen (computer-use live view). */}
+            {/* eslint-disable-next-line @next/next/no-img-element -- live agent frame, not a static asset */}
+            <img
+              src={imageArtifactSrc(screen.content)}
+              alt={screen.title || "Agent screen"}
+              className="mx-auto max-h-[420px] w-auto max-w-full object-contain"
+            />
+            <figcaption className="px-3 py-1.5 text-[11px] font-medium text-[#9AA0A9]">
+              {screen.title || "Live screen"}
+            </figcaption>
+          </figure>
+        ) : null}
         <div className="space-y-3">
           {steps.map((step, index) => (
             <TaskStep key={step.id} isLast={index === steps.length - 1} step={step} />
