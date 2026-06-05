@@ -685,6 +685,7 @@ impl InferenceCore for InferenceService {
                     confidence: item.confidence,
                     summary: item.summary,
                     raw_json: item.raw_json,
+                    content_safety_json: item.content_safety_json,
                 })
                 .collect(),
             model_used: result.model_used,

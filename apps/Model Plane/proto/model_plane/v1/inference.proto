@@ -842,6 +842,12 @@ message LanguageAnalysisResult {
 
   // Raw provider result JSON for audit/debug.
   string raw_json = 12;
+
+  // Content-safety verdict JSON for operation="content_safety":
+  // {"flagged":bool,"categories":{"hate":0..1,"harassment":0..1,
+  // "violence":0..1,"self_harm":0..1,"sexual":0..1}}. Empty otherwise.
+  // capability-core safety_policies (kind=content_safety) own the thresholds.
+  string content_safety_json = 13;
 }
 
 // AnalyzeLanguageResponse — language analytics results and serving metadata.

@@ -25,6 +25,11 @@ pub enum LanguageOperation {
     Pii,
     Detect,
     Summary,
+    /// Toxicity / content-safety classification (hate, harassment, violence,
+    /// self-harm, sexual). The genuine moderation classifier — the policy
+    /// thresholds/enforcement live in capability-core `safety_policies`
+    /// (kind=content_safety); this produces the per-category scores.
+    ContentSafety,
 }
 
 impl LanguageOperation {
@@ -41,6 +46,7 @@ impl LanguageOperation {
             "pii" | "redact" | "redaction" => Ok(Self::Pii),
             "detect" | "language_detection" | "detect_language" => Ok(Self::Detect),
             "summary" | "summarize" | "summarise" | "summary_text" => Ok(Self::Summary),
+            "content_safety" | "toxicity" | "moderate" | "moderation" => Ok(Self::ContentSafety),
             other => Err(ProviderError::InvalidResponse(format!(
                 "unsupported language operation: {other}"
             ))),
@@ -56,6 +62,7 @@ impl LanguageOperation {
             Self::Pii => "pii",
             Self::Detect => "detect",
             Self::Summary => "summary",
+            Self::ContentSafety => "content_safety",
         }
     }
 }
@@ -85,6 +92,10 @@ pub struct LanguageAnalysisItem {
     pub detected_language_code: String,
     pub confidence: f32,
     pub summary: String,
+    /// Content-safety verdict JSON: `{flagged, categories:{hate,harassment,
+    /// violence,self_harm,sexual}}` (per-category 0..1). Empty unless the
+    /// operation is `ContentSafety`.
+    pub content_safety_json: String,
     pub raw_json: String,
 }
 
@@ -336,6 +347,14 @@ impl LanguageAnalyticsProvider for AzureLanguageProvider {
         &self,
         req: &LanguageAnalyticsRequest,
     ) -> Result<LanguageAnalyticsResponse, ProviderError> {
+        // Azure AI Language has no toxicity task (that is Azure AI Content
+        // Safety, a separate resource). Decline so the chain falls through to
+        // the LLM classifier (LlmLanguageProvider).
+        if req.operation == LanguageOperation::ContentSafety {
+            return Err(ProviderError::UnsupportedModel(
+                "azure-language does not support content_safety".to_owned(),
+            ));
+        }
         let response = if req.operation == LanguageOperation::Summary {
             self.summarize(req).await?
         } else {
@@ -496,6 +515,9 @@ fn azure_kind(operation: LanguageOperation) -> &'static str {
         LanguageOperation::Pii => "PiiEntityRecognition",
         LanguageOperation::Detect => "LanguageDetection",
         LanguageOperation::Summary => "AbstractiveSummarization",
+        // Unreachable: AzureLanguageProvider::analyze declines ContentSafety
+        // before reaching azure_kind (handled by the LLM provider instead).
+        LanguageOperation::ContentSafety => "ContentSafety",
     }
 }
 
@@ -570,6 +592,8 @@ fn azure_doc_to_item(
             }
         }
         LanguageOperation::Summary => LanguageAnalysisItem::default(),
+        // Unreachable: ContentSafety is served by the LLM provider, never Azure.
+        LanguageOperation::ContentSafety => LanguageAnalysisItem::default(),
     }
 }
 
@@ -607,11 +631,25 @@ fn extract_summary_items(json: &serde_json::Value) -> Vec<LanguageAnalysisItem> 
 }
 
 fn language_prompt(req: &LanguageAnalyticsRequest) -> String {
+    let texts = serde_json::to_string(&req.texts).unwrap_or_else(|_| "[]".to_owned());
+    if req.operation == LanguageOperation::ContentSafety {
+        // Toxicity / content-safety classifier. Per-category float scores in
+        // [0,1] + a `flagged` boolean (true if any category is unsafe). The
+        // categories mirror the OpenAI moderation / Azure content-safety taxonomy.
+        return format!(
+            "You are a content-safety classifier. For EACH input text, score these categories \
+             from 0.0 (safe) to 1.0 (severe): hate, harassment, violence, self_harm, sexual. \
+             Set \"flagged\" true if ANY category is clearly unsafe (score >= 0.5). \
+             Return ONLY a JSON array; one object per input in order, shape: \
+             {{\"id\":\"1\",\"flagged\":false,\"categories\":{{\"hate\":0.0,\"harassment\":0.0,\
+             \"violence\":0.0,\"self_harm\":0.0,\"sexual\":0.0}}}}. Texts: {texts}"
+        );
+    }
     format!(
         "Operation: {}. Language hint: {}. Return JSON array of result objects with fields matching the operation. Texts: {}",
         req.operation.as_wire(),
         if req.language.is_empty() { "auto" } else { &req.language },
-        serde_json::to_string(&req.texts).unwrap_or_else(|_| "[]".to_owned())
+        texts
     )
 }
 
@@ -681,6 +719,19 @@ fn llm_item(
                 ""
             })
             .to_owned(),
+        content_safety_json: if operation == LanguageOperation::ContentSafety {
+            json!({
+                "flagged": item["flagged"].as_bool().unwrap_or(false),
+                "categories": if item["categories"].is_object() {
+                    item["categories"].clone()
+                } else {
+                    json!({})
+                },
+            })
+            .to_string()
+        } else {
+            String::new()
+        },
         raw_json: to_json_string(item, "{}"),
     }
 }
@@ -749,6 +800,48 @@ mod tests {
             LanguageOperation::from_wire("ner").expect("operation"),
             LanguageOperation::Entities
         );
+    }
+
+    #[test]
+    fn parses_content_safety_aliases() {
+        for alias in ["content_safety", "toxicity", "moderate", "moderation"] {
+            assert_eq!(
+                LanguageOperation::from_wire(alias).expect("operation"),
+                LanguageOperation::ContentSafety,
+            );
+        }
+    }
+
+    #[test]
+    fn content_safety_prompt_lists_categories() {
+        let req = LanguageAnalyticsRequest {
+            request_id: "r1".to_owned(),
+            provider_hint: String::new(),
+            operation: LanguageOperation::ContentSafety,
+            texts: vec!["you are awful".to_owned()],
+            language: String::new(),
+            model: String::new(),
+            sentence_count: 0,
+            summary_kind: String::new(),
+        };
+        let p = language_prompt(&req);
+        for cat in ["hate", "harassment", "violence", "self_harm", "sexual", "flagged"] {
+            assert!(p.contains(cat), "prompt must mention {cat}");
+        }
+    }
+
+    #[test]
+    fn parses_content_safety_llm_result_into_json() {
+        let content = r#"[{"id":"1","flagged":true,"categories":{"hate":0.9,"harassment":0.8,"violence":0.1,"self_harm":0.0,"sexual":0.0}}]"#;
+        let items = parse_llm_results(LanguageOperation::ContentSafety, content, &["x".to_owned()]);
+        assert_eq!(items.len(), 1);
+        let v: serde_json::Value =
+            serde_json::from_str(&items[0].content_safety_json).expect("valid json");
+        assert_eq!(v["flagged"], true);
+        assert_eq!(v["categories"]["hate"], 0.9);
+        // non-content-safety ops leave the field empty
+        let s = parse_llm_results(LanguageOperation::Sentiment, "[{\"sentiment\":\"neg\"}]", &["x".to_owned()]);
+        assert!(s[0].content_safety_json.is_empty());
     }
 
     #[test]
