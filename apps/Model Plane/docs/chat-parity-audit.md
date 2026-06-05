@@ -4,6 +4,26 @@ Audited 2026-06-04 against the real Model Plane code (not the brief's assumption
 Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
+## 0e. Toxicity classifier + follow-ups — verified live (2026-06-05)
+
+- **Toxicity / content_safety classifier (the one genuine code gap) — DONE + LIVE.** Implemented
+  owner-correct as a real `content_safety` op on inference-core `AnalyzeLanguage` (LlmLanguageProvider
+  scores via the real chat model; Azure-Language declines → LLM classifier). Live: toxic text →
+  `{flagged:true, categories:{hate:0.7,violence:0.8,harassment:0.6,self_harm:0,sexual:0}}` via
+  azure-openai. capability-core safety_policies own thresholds; this fills the missing scorer. (`2de3c9f5`)
+- **Wiki durable JetStream subscriber — DONE + LIVE.** embedding-engine wiki subscriber now a durable
+  `DATAPLANE_WIKI` stream + pull consumer (was best-effort core-NATS). Live: created page → stream
+  captured + drained (consumed+acked). (`53bcf0e0`, + wiki-store NATS_URL `ccef9e6e`). **New gap found:**
+  wiki embeds into the `wiki_block_embeddings` qdrant collection, but the retrieval-engine has a
+  `w_wiki` *weight* with NO wiki-search arm (never queries that collection) → wiki won't surface in RAG
+  until a wiki-search arm is added to the retrieval pipeline (separate from the durable-subscriber ask).
+- **Agentic + voice re-verified live** (after rebuilding inference-core+gateway): voice `POST
+  /v1/ai/realtime` → 200 Azure `client_secret`; agentic stream → connected→chunk(real answer)→done.
+  (Caught + fixed a runtime issue: `model-plane-session-core-1` had Exited; restarted → agentic green.
+  The agentic code correctly surfaced a structured `agentic_run_start_failed` error while it was down.)
+- **Host userns sysctl** — ops note only; sandbox isolates live. **model_plane embed gRPC** — accepted
+  azure_openai (rebuild disproved stale-build; functionally complete).
+
 ## 0d. graph/wiki indexing + model_plane gRPC follow-up (2026-06-05)
 
 **(a) graphRAG — WORKS.** Indexed docs auto-extract into the graph (`graph_entities=2,
