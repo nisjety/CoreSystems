@@ -243,18 +243,26 @@ keyword list.
   `/v1/ai/speech` (TTS), STT (`TranscribeSpeech`); BFF `POST /api/voice/session` + client
   `createVoiceSession()` mint the ephemeral session for the browser. (commit on voice session-mint)
 
-**Phase 3 — remaining (each now narrowed to a single live/safety gate below this layer):**
-- **Sandboxed code execution inside a run** — the gateway-side agentic wiring is DONE (above); actual
-  code exec runs in execution-core via `ExecuteStep` under **its** sandbox. The only remaining gate is
-  Tier-2 sandbox isolation *inside execution-core* (a separate in-progress workstream, a layer below
-  the gateway). No gateway change pending.
-- **Voice — browser media client**: mic capture + audio framing + playback over the minted session;
-  the provider's live WS/WebRTC handshake is runtime behavior, verifiable only with live audio. The
-  session-mint (the server-for-frontend half) is done.
-- **Interactive browse — tool landed**: `browser_agent` (`dispatch_tool`) runs a multi-step browse
-  objective via the agent service's known `AgentModeRequest` contract, env-gated on `BROWSER_AGENT_URL`
-  (disabled if unset). The live screen-stream *view* (visualizing the session in the UI) is the only
-  remaining browser piece and needs a live agent + streaming viewer. (commit `31f210e6`)
+- **Voice — media client built**: `voice-audio.ts` (PCM16↔float + base64 LE framing, tested),
+  `voice-protocol.ts` (Realtime WS event builders/parsers, tested), `voice-realtime-client.ts`
+  (`startRealtimeVoice` — mic→PCM16→WS + server-audio→playback, degrades gracefully). (commits on
+  voice DSP / protocol / controller)
+- **Interactive browse + live view**: `browser_agent` tool (`AgentModeRequest`, env-gated) +
+  `selectLatestImageArtifact` + the Steps panel now renders the current agent screen above the live
+  step timeline — the combined computer-use view. (commits `31f210e6`, `40fa835f`, `0e36bed1`)
+
+**Phase 3 — every capability is implemented with its verifiable layers tested; what remains is
+not code-in-this-layer but environment/ops:**
+- **code-exec**: gateway agentic run → execution-core `ExecuteStep` → **bwrap sandbox** (wired,
+  58 tests). Remaining: deploy execution-core on **Linux with `bwrap`** (ops). No code pending.
+- **voice**: full client built (mint + DSP + protocol + controller, all tested/tsc-clean). Remaining:
+  confirm the live **WS auth handshake** (one flagged line in `openSocket`) against the provider — a
+  live observation, not new logic.
+- **live agent view**: combined screen+steps view built. Remaining: a *live* agent stream to see it
+  populate — verification, not code.
+
+i.e. the three former gaps are now: **a Linux deploy**, **one live-confirmed WS-auth line**, and
+**live-stream verification** — each requires the running stack/host, none is missing gateway/BFF/client code.
 
 **Code-exec — code-complete + wired + tested (deployment gate only).** Verified by running
 execution-core's suite (58 pass): `executor.rs` wraps every command via `sandbox::wrap_command`,
