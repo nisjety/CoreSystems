@@ -63,8 +63,12 @@ export function LocaleProvider({
   // (which has no access to the cookie unless passed in) and the first
   // client render agree on `initialLocale`, then we reconcile.
   useEffect(() => {
+    // SSR renders with `initialLocale` (no cookie access); after mount we
+    // reconcile from the persisted cookie. This is the legitimate "sync from
+    // an external store after mount" case the rule warns about.
     const stored = readLocaleCookie();
     if (stored && stored !== currentLocale) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCurrentLocale(stored);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

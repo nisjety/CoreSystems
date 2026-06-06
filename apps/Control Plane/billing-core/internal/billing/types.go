@@ -36,8 +36,10 @@ type Account struct {
 	QuotaLimits        map[string]float64     `json:"quota_limits"`
 	ProviderCustomerID map[string]string      `json:"provider_customer_id"`
 	Metadata           map[string]interface{} `json:"metadata"`
-	UpdatedAt          time.Time              `json:"updated_at"`
-	CreatedAt          time.Time              `json:"created_at"`
+	// TrialEndsAt is set while SubscriptionState is "trialing"; nil otherwise.
+	TrialEndsAt *time.Time `json:"trial_ends_at,omitempty"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type UsageEvent struct {

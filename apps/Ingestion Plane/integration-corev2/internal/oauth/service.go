@@ -1,0 +1,573 @@
+package oauth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/triodelab/integration-corev2/internal/config"
+	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
+	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/providers"
+	"github.com/triodelab/integration-corev2/internal/store"
+)
+
+type Service struct {
+	cfg       config.Config
+	repo      store.Repository
+	vault     *secretcrypto.Vault
+	microsoft *MicrosoftClient
+	clients   map[string]ProviderOAuthClient
+	publisher events.Publisher
+	now       func() time.Time
+	refreshMu sync.Mutex
+	refreshes map[string]*refreshCall
+}
+
+type refreshCall struct {
+	done        chan struct{}
+	connection  store.Connection
+	accessToken string
+	err         error
+}
+
+type CreateSessionInput struct {
+	ProviderKey     string
+	OrganizationID  string
+	WorkspaceID     string
+	UserID          string
+	UserEmail       string
+	SelectedSources []string
+	Capabilities    []string
+	Bundles         []string
+	ReturnURL       string
+	ProviderContext map[string]string
+}
+
+type CreateSessionResult struct {
+	SessionToken      string    `json:"sessionToken"`
+	ConnectURL        string    `json:"connectUrl"`
+	AuthorizationURL  string    `json:"authorizationUrl"`
+	AuthMode          string    `json:"authMode"`
+	ExpiresAt         time.Time `json:"expiresAt"`
+	ProviderConfigKey string    `json:"providerConfigKey"`
+	Provider          struct {
+		Key       string `json:"key"`
+		Label     string `json:"label"`
+		ConfigKey string `json:"configKey"`
+	} `json:"provider"`
+	Capabilities []string `json:"capabilities"`
+	Scopes       []string `json:"scopes"`
+}
+
+type CallbackResult struct {
+	SessionID    string
+	ConnectionID string
+	ProviderKey  string
+	Success      bool
+	ErrorCode    string
+	Message      string
+	ReturnURL    string
+}
+
+type AccessTokenResult struct {
+	ConnectionID string    `json:"connectionId"`
+	ProviderKey  string    `json:"providerKey"`
+	AccessToken  string    `json:"accessToken"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	Scopes       []string  `json:"scopes"`
+	Capabilities []string  `json:"capabilities"`
+}
+
+func NewService(cfg config.Config, repo store.Repository, vault *secretcrypto.Vault, microsoft *MicrosoftClient) *Service {
+	clients := NewProviderClients(cfg, microsoft, nil)
+	return &Service{
+		cfg:       cfg,
+		repo:      repo,
+		vault:     vault,
+		microsoft: microsoft,
+		clients:   clients,
+		publisher: events.NoopPublisher{},
+		now:       func() time.Time { return time.Now().UTC() },
+		refreshes: map[string]*refreshCall{},
+	}
+}
+
+func (s *Service) SetEventPublisher(publisher events.Publisher) {
+	if publisher == nil {
+		s.publisher = events.NoopPublisher{}
+		return
+	}
+	s.publisher = publisher
+}
+
+func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (CreateSessionResult, error) {
+	provider, ok := providers.FindOAuth(input.ProviderKey)
+	if !ok {
+		return CreateSessionResult{}, fmt.Errorf("unsupported provider: %s", input.ProviderKey)
+	}
+	if err := s.cfg.ValidateProvider(provider.Key); err != nil {
+		return CreateSessionResult{}, err
+	}
+	client, ok := s.clients[provider.Key]
+	if !provider.DirectOAuthReady || !ok {
+		return CreateSessionResult{}, fmt.Errorf("provider %s is registered in the catalog but direct OAuth is not implemented yet", provider.Key)
+	}
+	if strings.TrimSpace(input.OrganizationID) == "" {
+		return CreateSessionResult{}, fmt.Errorf("organizationId is required")
+	}
+	if strings.TrimSpace(input.UserID) == "" {
+		return CreateSessionResult{}, fmt.Errorf("userId is required")
+	}
+	workspaceID := strings.TrimSpace(input.WorkspaceID)
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(input.OrganizationID)
+	}
+	providerContext, err := NormalizeProviderContext(provider.Key, input.ProviderContext)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+
+	sessionID := "cs_" + uuid.NewString()
+	state, err := RandomURLToken(32)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	verifier, err := RandomURLToken(64)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	redirectURI := s.callbackURL(provider.Key)
+	capabilities := providers.ResolveCapabilities(provider, input.Capabilities, input.Bundles)
+	scopes := providers.ResolveScopes(provider, capabilities)
+	verifierCiphertext, err := s.vault.Encrypt(verifier, []byte(sessionID))
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	session := store.ConnectSession{
+		ID:                     sessionID,
+		ProviderKey:            provider.Key,
+		ConnectorType:          provider.ConnectorType,
+		OrganizationID:         strings.TrimSpace(input.OrganizationID),
+		WorkspaceID:            workspaceID,
+		UserID:                 strings.TrimSpace(input.UserID),
+		UserEmail:              strings.TrimSpace(input.UserEmail),
+		StateHash:              HashState(state),
+		CodeVerifierCiphertext: verifierCiphertext,
+		RedirectURI:            redirectURI,
+		ReturnURL:              strings.TrimSpace(input.ReturnURL),
+		ProviderContext:        providerContext,
+		Capabilities:           capabilities,
+		Scopes:                 scopes,
+		ExpiresAt:              s.now().Add(s.cfg.SessionTTL),
+		CreatedAt:              s.now(),
+	}
+	authURL, err := client.AuthorizationURL(state, redirectURI, verifier, scopes, providerContext)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	if err := s.repo.CreateConnectSession(ctx, session); err != nil {
+		return CreateSessionResult{}, err
+	}
+	result := CreateSessionResult{
+		SessionToken:      sessionID,
+		ConnectURL:        authURL,
+		AuthorizationURL:  authURL,
+		AuthMode:          "direct-oauth",
+		ExpiresAt:         session.ExpiresAt,
+		ProviderConfigKey: provider.ConnectorType,
+		Capabilities:      capabilities,
+		Scopes:            scopes,
+	}
+	result.Provider.Key = provider.Key
+	result.Provider.Label = provider.Label
+	result.Provider.ConfigKey = provider.ConnectorType
+	return result, nil
+}
+
+func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code, errorCode, errorDescription string) (CallbackResult, error) {
+	stateHash := HashState(state)
+	session, err := s.repo.GetConnectSessionByStateHash(ctx, stateHash)
+	if err != nil {
+		return CallbackResult{Success: false, ErrorCode: "invalid_state", Message: "OAuth state was not recognized."}, err
+	}
+	result := CallbackResult{
+		SessionID:   session.ID,
+		ProviderKey: session.ProviderKey,
+		ReturnURL:   session.ReturnURL,
+	}
+	if session.ConsumedAt != nil {
+		result.ErrorCode = "session_consumed"
+		result.Message = "Connect session was already used."
+		return result, fmt.Errorf("connect session already consumed")
+	}
+	if s.now().After(session.ExpiresAt) {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, "session_expired", "Connect session expired.")
+		result.ErrorCode = "session_expired"
+		result.Message = "Connect session expired."
+		return result, fmt.Errorf("connect session expired")
+	}
+	if providers.NormalizeKey(providerKey) != session.ProviderKey {
+		result.ErrorCode = "provider_mismatch"
+		result.Message = "OAuth callback provider did not match the session."
+		return result, fmt.Errorf("provider mismatch")
+	}
+	if errorCode != "" {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, errorCode, errorDescription)
+		result.ErrorCode = errorCode
+		result.Message = errorDescription
+		return result, fmt.Errorf("provider returned OAuth error: %s", errorCode)
+	}
+	if strings.TrimSpace(code) == "" {
+		result.ErrorCode = "missing_code"
+		result.Message = "OAuth provider did not return a code."
+		return result, fmt.Errorf("missing oauth code")
+	}
+
+	verifier, err := s.vault.Decrypt(session.CodeVerifierCiphertext, []byte(session.ID))
+	if err != nil {
+		result.ErrorCode = "invalid_verifier"
+		result.Message = "OAuth session verifier could not be read."
+		return result, err
+	}
+	token, err := s.exchangeCode(ctx, session, code, verifier)
+	if err != nil {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, "token_exchange_failed", err.Error())
+		result.ErrorCode = "token_exchange_failed"
+		result.Message = err.Error()
+		return result, err
+	}
+	connection, err := s.persistConnection(ctx, session, token)
+	if err != nil {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, "connection_store_failed", err.Error())
+		result.ErrorCode = "connection_store_failed"
+		result.Message = err.Error()
+		return result, err
+	}
+	if err := s.repo.MarkConnectSessionConsumed(ctx, session.ID, "", ""); err != nil {
+		return result, err
+	}
+	_ = s.repo.InsertAuditEvent(ctx, store.AuditEvent{
+		ID:             "audit_" + uuid.NewString(),
+		OrganizationID: session.OrganizationID,
+		UserID:         session.UserID,
+		ConnectionID:   connection.ID,
+		EventType:      "connection.created",
+		ProviderKey:    session.ProviderKey,
+		Metadata: map[string]any{
+			"capabilities": session.Capabilities,
+			"scopes":       redactScopes(session.Scopes),
+		},
+		CreatedAt: s.now(),
+	})
+	_ = s.publisher.Publish(ctx, events.Event{
+		Type:           "integration.connected",
+		OrganizationID: connection.OrganizationID,
+		WorkspaceID:    connection.WorkspaceID,
+		UserID:         connection.UserID,
+		ConnectionID:   connection.ID,
+		ProviderKey:    connection.ProviderKey,
+		Data: map[string]any{
+			"connectorType": connection.ConnectorType,
+			"displayName":   connection.DisplayName,
+			"capabilities":  connection.Capabilities,
+			"scopes":        redactScopes(connection.Scopes),
+			"status":        connection.Status,
+		},
+		CreatedAt: s.now(),
+	})
+	result.Success = true
+	result.ConnectionID = connection.ID
+	result.Message = "Connection completed."
+	return result, nil
+}
+
+func (s *Service) AccessToken(ctx context.Context, organizationID, connectorType string) (AccessTokenResult, error) {
+	connection, err := s.repo.FindActiveConnection(ctx, organizationID, connectorType)
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	return s.accessTokenForConnection(ctx, connection)
+}
+
+func (s *Service) AccessTokenForConnection(ctx context.Context, connectionID string) (AccessTokenResult, error) {
+	connection, err := s.repo.GetConnection(ctx, connectionID)
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	if connection.DeletedAt != nil || connection.Status == "deleted" {
+		return AccessTokenResult{}, store.ErrNotFound
+	}
+	return s.accessTokenForConnection(ctx, connection)
+}
+
+func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason string) (store.Connection, error) {
+	connection, err := s.repo.GetConnection(ctx, connectionID)
+	if err != nil {
+		return store.Connection{}, err
+	}
+	revokeStatus := "not_supported"
+	revokeError := ""
+	if connection.DeletedAt == nil && connection.EncryptedAccessToken != "" {
+		if client, ok := s.clients[connection.ProviderKey]; ok {
+			accessToken, decryptErr := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
+			if decryptErr != nil {
+				revokeStatus = "token_decrypt_failed"
+				revokeError = decryptErr.Error()
+			} else if err := client.Revoke(ctx, accessToken, connection.ProviderContext); err != nil {
+				revokeStatus = "failed"
+				revokeError = err.Error()
+			} else {
+				revokeStatus = "completed"
+			}
+		}
+	}
+	deleted, err := s.repo.MarkConnectionDeleted(ctx, connection.ID)
+	if err != nil {
+		return store.Connection{}, err
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "user_requested"
+	}
+	_ = s.repo.InsertAuditEvent(ctx, store.AuditEvent{
+		ID:             "audit_" + uuid.NewString(),
+		OrganizationID: deleted.OrganizationID,
+		UserID:         deleted.UserID,
+		ConnectionID:   deleted.ID,
+		EventType:      "connection.deleted",
+		ProviderKey:    deleted.ProviderKey,
+		Metadata: map[string]any{
+			"reason":        reason,
+			"revoke_status": revokeStatus,
+			"revoke_error":  revokeError,
+		},
+		CreatedAt: s.now(),
+	})
+	_ = s.publisher.Publish(ctx, events.Event{
+		Type:           "integration.disconnected",
+		OrganizationID: deleted.OrganizationID,
+		WorkspaceID:    deleted.WorkspaceID,
+		UserID:         deleted.UserID,
+		ConnectionID:   deleted.ID,
+		ProviderKey:    deleted.ProviderKey,
+		Data: map[string]any{
+			"connectorType": deleted.ConnectorType,
+			"reason":        reason,
+			"revokeStatus":  revokeStatus,
+			"status":        deleted.Status,
+		},
+		CreatedAt: s.now(),
+	})
+	return deleted, nil
+}
+
+func (s *Service) accessTokenForConnection(ctx context.Context, connection store.Connection) (AccessTokenResult, error) {
+	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	if s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
+		return AccessTokenResult{
+			ConnectionID: connection.ID,
+			ProviderKey:  connection.ProviderKey,
+			AccessToken:  accessToken,
+			ExpiresAt:    connection.AccessTokenExpiresAt,
+			Scopes:       connection.Scopes,
+			Capabilities: connection.Capabilities,
+		}, nil
+	}
+	refreshed, accessToken, err := s.refreshCoordinated(ctx, connection)
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	return AccessTokenResult{
+		ConnectionID: refreshed.ID,
+		ProviderKey:  refreshed.ProviderKey,
+		AccessToken:  accessToken,
+		ExpiresAt:    refreshed.AccessTokenExpiresAt,
+		Scopes:       refreshed.Scopes,
+		Capabilities: refreshed.Capabilities,
+	}, nil
+}
+
+func (s *Service) callbackURL(providerKey string) string {
+	return s.cfg.PublicBaseURL + "/oauth/callback/" + providerKey
+}
+
+func (s *Service) exchangeCode(ctx context.Context, session store.ConnectSession, code, verifier string) (TokenResult, error) {
+	client, ok := s.clients[session.ProviderKey]
+	if !ok {
+		return TokenResult{}, fmt.Errorf("provider %s does not support token exchange yet", session.ProviderKey)
+	}
+	return client.ExchangeCode(ctx, code, session.RedirectURI, verifier, session.Scopes, session.ProviderContext)
+}
+
+func (s *Service) persistConnection(ctx context.Context, session store.ConnectSession, token TokenResult) (store.Connection, error) {
+	connectionID := "conn_" + uuid.NewString()
+	createdAt := s.now()
+	existing, err := s.repo.FindActiveConnection(ctx, session.OrganizationID, session.ConnectorType)
+	if err == nil {
+		connectionID = existing.ID
+		createdAt = existing.CreatedAt
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.Connection{}, err
+	}
+	accessToken, err := s.vault.Encrypt(token.AccessToken, []byte(connectionID))
+	if err != nil {
+		return store.Connection{}, err
+	}
+	refreshToken := existing.EncryptedRefreshToken
+	if token.RefreshToken != "" {
+		refreshToken, err = s.vault.Encrypt(token.RefreshToken, []byte(connectionID))
+		if err != nil {
+			return store.Connection{}, err
+		}
+	}
+	profile := ProviderProfile{}
+	if client, ok := s.clients[session.ProviderKey]; ok {
+		profile, _ = client.Profile(ctx, token.AccessToken, session.ProviderContext)
+	}
+	displayName := profile.DisplayName
+	if displayName == "" {
+		displayName = session.UserEmail
+	}
+	if displayName == "" {
+		displayName = session.ProviderKey + " connection"
+	}
+	connection := store.Connection{
+		ID:                    connectionID,
+		ProviderKey:           session.ProviderKey,
+		ConnectorType:         session.ConnectorType,
+		OrganizationID:        session.OrganizationID,
+		WorkspaceID:           session.WorkspaceID,
+		UserID:                session.UserID,
+		UserEmail:             session.UserEmail,
+		Status:                "active",
+		DisplayName:           displayName,
+		ProviderAccountID:     profile.ID,
+		TenantID:              profile.TenantID,
+		ProviderContext:       session.ProviderContext,
+		Capabilities:          session.Capabilities,
+		Scopes:                session.Scopes,
+		EncryptedAccessToken:  accessToken,
+		EncryptedRefreshToken: refreshToken,
+		AccessTokenExpiresAt:  token.ExpiresAt,
+		LastRefreshedAt:       s.now(),
+		LastSyncStatus:        "pending",
+		CreatedAt:             createdAt,
+		UpdatedAt:             s.now(),
+	}
+	return s.repo.UpsertConnection(ctx, connection)
+}
+
+func (s *Service) refresh(ctx context.Context, connection store.Connection, refreshToken string) (store.Connection, string, error) {
+	client, ok := s.clients[connection.ProviderKey]
+	if !ok {
+		return store.Connection{}, "", fmt.Errorf("provider %s does not support refresh yet", connection.ProviderKey)
+	}
+	token, err := client.Refresh(ctx, refreshToken, connection.Scopes, connection.ProviderContext)
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	encryptedAccessToken, err := s.vault.Encrypt(token.AccessToken, []byte(connection.ID))
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	connection.EncryptedAccessToken = encryptedAccessToken
+	if token.RefreshToken != "" {
+		encryptedRefreshToken, err := s.vault.Encrypt(token.RefreshToken, []byte(connection.ID))
+		if err != nil {
+			return store.Connection{}, "", err
+		}
+		connection.EncryptedRefreshToken = encryptedRefreshToken
+	}
+	connection.AccessTokenExpiresAt = token.ExpiresAt
+	connection.LastRefreshedAt = s.now()
+	connection.Status = "active"
+	saved, err := s.repo.UpsertConnection(ctx, connection)
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	return saved, token.AccessToken, nil
+}
+
+func (s *Service) refreshCoordinated(ctx context.Context, connection store.Connection) (store.Connection, string, error) {
+	return s.refreshSingleflight(ctx, connection.ID, func(ctx context.Context) (store.Connection, string, error) {
+		if locker, ok := s.repo.(store.ConnectionRefreshLocker); ok {
+			var refreshed store.Connection
+			var accessToken string
+			err := locker.WithConnectionRefreshLock(ctx, connection.ID, func(lockCtx context.Context) error {
+				var refreshErr error
+				refreshed, accessToken, refreshErr = s.refreshIfStillExpired(lockCtx, connection.ID)
+				return refreshErr
+			})
+			return refreshed, accessToken, err
+		}
+		return s.refreshIfStillExpired(ctx, connection.ID)
+	})
+}
+
+func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string) (store.Connection, string, error) {
+	connection, err := s.repo.GetConnection(ctx, connectionID)
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	if connection.DeletedAt != nil || connection.Status == "deleted" {
+		return store.Connection{}, "", store.ErrNotFound
+	}
+	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	if s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
+		return connection, accessToken, nil
+	}
+	if connection.EncryptedRefreshToken == "" {
+		return store.Connection{}, "", fmt.Errorf("connection has no refresh token")
+	}
+	refreshToken, err := s.vault.Decrypt(connection.EncryptedRefreshToken, []byte(connection.ID))
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	return s.refresh(ctx, connection, refreshToken)
+}
+
+type refreshWork func(context.Context) (store.Connection, string, error)
+
+func (s *Service) refreshSingleflight(ctx context.Context, connectionID string, work refreshWork) (store.Connection, string, error) {
+	s.refreshMu.Lock()
+	if call, ok := s.refreshes[connectionID]; ok {
+		s.refreshMu.Unlock()
+		select {
+		case <-call.done:
+			return call.connection, call.accessToken, call.err
+		case <-ctx.Done():
+			return store.Connection{}, "", ctx.Err()
+		}
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	s.refreshes[connectionID] = call
+	s.refreshMu.Unlock()
+
+	call.connection, call.accessToken, call.err = work(ctx)
+	close(call.done)
+
+	s.refreshMu.Lock()
+	delete(s.refreshes, connectionID)
+	s.refreshMu.Unlock()
+
+	return call.connection, call.accessToken, call.err
+}
+
+func redactScopes(scopes []string) []string {
+	out := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		out = append(out, scope)
+	}
+	return out
+}

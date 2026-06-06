@@ -28,6 +28,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="${CORE_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 cd "$CORE_ROOT"
 
+# Compose resolves `.env` relative to the compose file path, not this
+# monorepo root. Preload the root env here so every per-plane compose file
+# sees the same local secrets/config, including BRAVE_API_KEY.
+if [[ -f "$CORE_ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$CORE_ROOT/.env"
+  set +a
+fi
+
+# Quarry v2 expects BRAVE_SEARCH_KEY; the repo-local env currently stores the
+# same credential as BRAVE_API_KEY. Preserve an explicit BRAVE_SEARCH_KEY if
+# the caller already set one.
+if [[ -z "${BRAVE_SEARCH_KEY:-}" && -n "${BRAVE_API_KEY:-}" ]]; then
+  export BRAVE_SEARCH_KEY="$BRAVE_API_KEY"
+fi
+
 export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-4}"
 
 MODE="build"

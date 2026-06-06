@@ -38,8 +38,10 @@ impl SearchProvider for HybridSearchProvider {
         let limit = (opts.limit.max(1)) as usize;
 
         // Run both legs concurrently.
-        let (lex_res, vec_res) =
-            tokio::join!(self.lexical.search(query, opts), self.vector.retrieve(&org, query, limit));
+        let (lex_res, vec_res) = tokio::join!(
+            self.lexical.search(query, opts),
+            self.vector.retrieve(&org, query, limit)
+        );
 
         // Lexical is the primary leg — propagate its error.
         let lexical = lex_res?;
@@ -97,10 +99,22 @@ mod tests {
     }
 
     fn sr(url: &str) -> SearchResult {
-        SearchResult { url: url.into(), title: None, snippet: None, rank: 1, provider: "lex".into() }
+        SearchResult {
+            url: url.into(),
+            title: None,
+            snippet: None,
+            rank: 1,
+            provider: "lex".into(),
+        }
     }
     fn vh(url: &str) -> VectorHit {
-        VectorHit { url: url.into(), score: 0.9, title: None, snippet: None, document_id: None }
+        VectorHit {
+            url: url.into(),
+            score: 0.9,
+            title: None,
+            snippet: None,
+            document_id: None,
+        }
     }
 
     #[tokio::test]

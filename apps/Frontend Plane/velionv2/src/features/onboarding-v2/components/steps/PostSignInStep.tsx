@@ -3,7 +3,7 @@
 /**
  * Step 1 — post-sign-in. Brief greeting + spinner on the left; a product
  * reveal video (with poster fallback) on the right. Auto-advances to the
- * organization step after the video ends OR after 3s, whichever comes first.
+ * website step after the video ends OR after 3s, whichever comes first.
  */
 
 import { useEffect, useRef } from "react";
@@ -29,7 +29,7 @@ export function PostSignInStep({ machine }: { machine: OnboardingMachine }) {
     if (advancedRef.current) return;
     advancedRef.current = true;
     machine.markIntroPlayed();
-    machine.goTo("organization");
+    machine.goTo("website");
   };
 
   useEffect(() => {

@@ -1,3 +1,5 @@
+import type { NavbarPayload } from "@/features/shell-v2/lib/navbar-types";
+
 /**
  * Shared, framework-agnostic Control Plane context types.
  * Imported by BOTH the server composer (control-plane-context.ts) and the
@@ -22,22 +24,44 @@ export type ControlPlaneUser = {
   image?: string | null
 }
 
+export type ControlPlaneOrganization = {
+  id: string
+  name: string
+  slug?: string
+  plan?: string
+  status?: string
+  primaryDomain?: string
+  logoUrl?: string | null
+  accentColor?: string | null
+}
+
+export type ControlPlaneAppearance = {
+  theme: "light" | "dark" | "system"
+  colorScheme?: string | null
+}
+
 export type ControlPlaneContextValue = {
   user: ControlPlaneUser | null
   orgId: string | null
+  organization: ControlPlaneOrganization | null
   role: string | null
   onboardingStatus: string | null
   onboardingComplete: boolean
   entitlements: ControlPlaneEntitlements | null
+  appearance: ControlPlaneAppearance | null
+  navbar: NavbarPayload | null
 }
 
 export const ANONYMOUS_CONTROL_PLANE_CONTEXT: ControlPlaneContextValue = {
   user: null,
   orgId: null,
+  organization: null,
   role: null,
   onboardingStatus: null,
   onboardingComplete: false,
   entitlements: null,
+  appearance: null,
+  navbar: null,
 }
 
 /** True when the org's plan grants the named feature flag. */

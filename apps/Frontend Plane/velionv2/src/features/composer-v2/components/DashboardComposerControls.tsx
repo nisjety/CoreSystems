@@ -56,10 +56,10 @@ export function DashboardComposerControls({
               onSuggestionsOpenChange(false);
             }}
             title="Velg AI-modell"
-            className="velion-composer-control flex h-10 items-center gap-2 rounded-[12px] border border-black/[0.07] bg-white/90 px-4 text-[13px] font-medium text-[#333] shadow-[0_8px_20px_rgba(0,0,0,0.05)] backdrop-blur-sm transition-all hover:bg-white active:scale-[0.98] dark:border-[#2A2C31] dark:bg-[#17181C]/90 dark:text-[#F7F8F8] dark:hover:bg-[#23252A]"
+            className="velion-composer-control flex h-10 max-w-[150px] items-center gap-2 rounded-[12px] border border-black/[0.07] bg-white/90 px-3 text-[13px] font-medium text-[#333] shadow-[0_8px_20px_rgba(0,0,0,0.05)] backdrop-blur-sm transition-all hover:bg-white active:scale-[0.98] dark:border-[#2A2C31] dark:bg-[#17181C]/90 dark:text-[#F7F8F8] dark:hover:bg-[#23252A] sm:max-w-none sm:px-4"
           >
             <Zap className="size-4 text-[#12B76A]" />
-            {selectedModel}
+            <span className="min-w-0 truncate whitespace-nowrap">{selectedModel}</span>
             <ChevronDown className={cn("size-4 text-[#777] transition-transform", modelOpen ? "rotate-180" : "")} />
           </button>
 
@@ -96,10 +96,10 @@ export function DashboardComposerControls({
           href={"/agents" as Route}
           onClick={onOpenAgentBuilder}
           title="Opprett agent"
-          className="velion-composer-control flex h-10 items-center gap-2 rounded-[12px] bg-[#2a2a2a] px-4 text-[13px] font-medium text-white shadow-md transition-all hover:bg-[#1a1a1a] active:scale-[0.97]"
+          className="velion-composer-control flex h-10 items-center gap-2 rounded-[12px] bg-[#2a2a2a] px-3 text-[13px] font-medium text-white shadow-md transition-all hover:bg-[#1a1a1a] active:scale-[0.97] sm:px-4"
         >
           <Sparkles className="size-[13px] shrink-0" />
-          Create agent
+          <span className="hidden whitespace-nowrap sm:inline">Create agent</span>
         </Link>
       </div>
 

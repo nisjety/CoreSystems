@@ -10,12 +10,17 @@ import { ArrowLeft, ExternalLink, Globe, Play, Search, SendHorizontal, X } from 
 
 import { streamChat } from "@/features/chat-v2/lib/chat-stream";
 import { LiquidBackdrop } from "@/features/search-v2/components/LiquidBackdrop";
+import { RecentSearches } from "@/features/search-v2/components/RecentSearches";
 import {
   buildGroundingContent,
   dedupeSources,
   type GroundingSource,
   type ThreadTurn,
 } from "@/features/search-v2/lib/answer-thread";
+import {
+  readCachedValue,
+  writeCachedValue,
+} from "@/features/search-v2/lib/search-query-cache";
 
 // ---------------------------------------------------------------------------
 // Motion presets (gentle fade/slide-in with a small stagger). All durations
@@ -70,6 +75,13 @@ type ImageHit = {
   imageUrl: string;
   title: string | null;
 };
+
+const SEARCH_IMAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+const SEARCH_VIDEO_CACHE_TTL_MS = 5 * 60 * 1000;
+const searchImageCache = new Map<
+  string,
+  { expiresAt: number; value: ImageHit[] }
+>();
 
 // Status for the lazily-loaded Bilder (images) vertical. It loads
 // independently of the Info (web) vertical so switching tabs is instant.
@@ -283,6 +295,7 @@ function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => voi
         return (
           <button
             key={tab}
+            type="button"
             role="tab"
             aria-selected={isActive}
             aria-disabled={isDisabled}
@@ -483,6 +496,34 @@ type VideoHit = {
 };
 
 type VideosStatus = "idle" | "loading" | "loaded" | "error";
+const searchVideoCache = new Map<
+  string,
+  { expiresAt: number; value: VideoHit[] }
+>();
+
+type VideosState = {
+  error: string | null;
+  status: VideosStatus;
+  videos: VideoHit[];
+};
+
+type VideosAction =
+  | { type: "loading" }
+  | { type: "loaded"; videos: VideoHit[] }
+  | { type: "error"; message: string };
+
+function videosReducer(state: VideosState, action: VideosAction): VideosState {
+  switch (action.type) {
+    case "loading":
+      return { ...state, error: null, status: "loading" };
+    case "loaded":
+      return { error: null, status: "loaded", videos: action.videos };
+    case "error":
+      return { ...state, error: action.message, status: "error" };
+    default:
+      return state;
+  }
+}
 
 function VideoGridSkeleton() {
   return (
@@ -544,6 +585,7 @@ function VideoCard({ video }: { video: VideoHit }) {
             allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
             allowFullScreen
             referrerPolicy="no-referrer"
+            sandbox="allow-same-origin allow-scripts allow-presentation"
             className="absolute inset-0 h-full w-full"
             onClick={(e) => e.stopPropagation()}
           />
@@ -600,17 +642,28 @@ function VideoCard({ video }: { video: VideoHit }) {
  *  the tab is first viewed for a query. Independent of the reducer-backed Info
  *  / Bilder verticals. */
 function VideosTab({ query }: { query: string }) {
-  const [status, setStatus] = useState<VideosStatus>("idle");
-  const [videos, setVideos] = useState<VideoHit[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loadedQuery, setLoadedQuery] = useState("");
+  const [{ error, status, videos }, dispatchVideos] = useReducer(
+    videosReducer,
+    {
+      error: null,
+      status: "idle",
+      videos: [],
+    },
+  );
+  const loadedQueryRef = useRef("");
 
   useEffect(() => {
     const q = query.trim();
-    if (!q || q === loadedQuery) return;
+    if (!q || q === loadedQueryRef.current) return;
+    const cachedVideos = readCachedValue(searchVideoCache, q);
+    if (cachedVideos) {
+      loadedQueryRef.current = q;
+      dispatchVideos({ type: "loaded", videos: cachedVideos });
+      return;
+    }
+
     const abort = new AbortController();
-    setStatus("loading");
-    setError(null);
+    dispatchVideos({ type: "loading" });
     void (async () => {
       try {
         const res = await fetch("/api/v1/search/videos", {
@@ -624,21 +677,33 @@ function VideosTab({ query }: { query: string }) {
           | { data?: { videos?: VideoHit[] }; error?: { message: string } }
           | null;
         if (!res.ok || !payload?.data) {
-          setError(payload?.error?.message ?? "Videosøk kunne ikke fullføres.");
-          setStatus("error");
+          dispatchVideos({
+            type: "error",
+            message: payload?.error?.message ?? "Videosøk kunne ikke fullføres.",
+          });
           return;
         }
-        setVideos(Array.isArray(payload.data.videos) ? payload.data.videos : []);
-        setLoadedQuery(q);
-        setStatus("loaded");
+        const nextVideos = Array.isArray(payload.data.videos)
+          ? payload.data.videos
+          : [];
+        writeCachedValue(
+          searchVideoCache,
+          q,
+          nextVideos,
+          SEARCH_VIDEO_CACHE_TTL_MS,
+        );
+        loadedQueryRef.current = q;
+        dispatchVideos({ type: "loaded", videos: nextVideos });
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setError("Videosøk kunne ikke fullføres.");
-        setStatus("error");
+        dispatchVideos({
+          type: "error",
+          message: "Videosøk kunne ikke fullføres.",
+        });
       }
     })();
     return () => abort.abort();
-  }, [query, loadedQuery]);
+  }, [query]);
 
   if (status === "loading" || status === "idle") return <VideoGridSkeleton />;
   if (status === "error") {
@@ -756,6 +821,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
   const abortRef = useRef<AbortController | null>(null);
   const followUpAbortRef = useRef<AbortController | null>(null);
   const imagesAbortRef = useRef<AbortController | null>(null);
+  // Convex thread id for the current search, set once turn-0 persists. Lets
+  // follow-up turns append onto the same thread (and the recent list link back).
+  const persistedThreadIdRef = useRef<string | null>(null);
   // Anchor at the end of the thread, scrolled into view as turns/tokens arrive.
   const threadEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -805,6 +873,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
     dispatch({ type: "submitted", query: q.trim() });
     dispatch({ type: "search-started" });
+    persistedThreadIdRef.current = null;
 
     void (async () => {
       try {
@@ -879,6 +948,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
             // in-flight stream. The `citations` SSE event is ignored — the UI
             // already shows source chips derived from resultList above.
             dispatch({ type: "answer-stream-started" });
+            // Accumulate the answer locally (alongside the reducer) so we can
+            // persist the final text once the stream completes.
+            let answerText = "";
             try {
               const sres = await fetch("/api/v1/search/answer/stream", {
                 method: "POST",
@@ -911,7 +983,10 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                     if (event === "delta") {
                       try {
                         const parsed = JSON.parse(dataStr) as { delta?: string };
-                        if (parsed.delta) dispatch({ type: "answer-delta", delta: parsed.delta });
+                        if (parsed.delta) {
+                          answerText += parsed.delta;
+                          dispatch({ type: "answer-delta", delta: parsed.delta });
+                        }
                       } catch {
                         /* ignore a malformed frame */
                       }
@@ -924,6 +999,30 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                 }
               }
               dispatch({ type: "answer-stream-done" });
+              // Persist the completed search to Convex (server-side, best-effort).
+              // The BFF resolves org/user from the session and writes with the
+              // service key; we keep the returned thread id for follow-up turns.
+              if (answerText.trim()) {
+                void fetch("/api/v1/search/persist", {
+                  method: "POST",
+                  credentials: "include",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    query: q.trim(),
+                    answer: answerText,
+                    citations: citationList,
+                  }),
+                })
+                  .then((r) => (r.ok ? r.json() : null))
+                  .then((j) => {
+                    const tid = (j as { data?: { threadId?: unknown } } | null)?.data
+                      ?.threadId;
+                    if (typeof tid === "string") persistedThreadIdRef.current = tid;
+                  })
+                  .catch(() => {
+                    /* best-effort: persistence must never break the search UX */
+                  });
+              }
             } catch (streamErr: unknown) {
               if (!(streamErr instanceof DOMException && streamErr.name === "AbortError")) {
                 dispatch({ type: "answer-stream-done" });
@@ -958,6 +1057,15 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
   const fetchImages = useCallback((q: string) => {
     const trimmed = q.trim();
     if (!trimmed) return;
+    const cachedImages = readCachedValue(searchImageCache, trimmed);
+    if (cachedImages) {
+      dispatch({
+        type: "images-loaded",
+        query: trimmed,
+        images: cachedImages,
+      });
+      return;
+    }
 
     imagesAbortRef.current?.abort();
     const abort = new AbortController();
@@ -988,10 +1096,19 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           return;
         }
 
+        const nextImages = Array.isArray(payload.data.images)
+          ? payload.data.images
+          : [];
+        writeCachedValue(
+          searchImageCache,
+          trimmed,
+          nextImages,
+          SEARCH_IMAGE_CACHE_TTL_MS,
+        );
         dispatch({
           type: "images-loaded",
           query: trimmed,
-          images: Array.isArray(payload.data.images) ? payload.data.images : [],
+          images: nextImages,
         });
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1070,18 +1187,37 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
       setFollowUp("");
       dispatch({ type: "turn-appended", userTurn, assistantTurn });
 
+      // Persist follow-up turns onto the Convex thread (best-effort). Needs the
+      // thread id from turn 0; if it's absent (turn-0 write failed / not signed
+      // in) we skip silently rather than break the chat.
+      const persistTurn = (role: "user" | "assistant", text: string) => {
+        const threadId = persistedThreadIdRef.current;
+        if (!threadId || !text.trim()) return;
+        void fetch("/api/v1/search/persist", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threadId, role, text }),
+        }).catch(() => {
+          /* best-effort: persistence must never break the chat UX */
+        });
+      };
+      persistTurn("user", question);
+
       followUpAbortRef.current?.abort();
       const abort = new AbortController();
       followUpAbortRef.current = abort;
 
       void (async () => {
         try {
+          let assistantText = "";
           for await (const chunk of streamChat({
             content,
             browseWeb: browseFollowUp,
             signal: abort.signal,
           })) {
             if (chunk.type === "delta") {
+              assistantText += chunk.delta;
               dispatch({ type: "turn-delta", id: assistantId, delta: chunk.delta });
             } else if (chunk.type === "error") {
               dispatch({ type: "turn-error", id: assistantId, message: chunk.message });
@@ -1093,6 +1229,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           // Generator can complete without an explicit "done" event; ensure the
           // turn is marked finished so the typing indicator stops.
           dispatch({ type: "turn-done", id: assistantId });
+          persistTurn("assistant", assistantText);
         } catch (err: unknown) {
           if (err instanceof DOMException && err.name === "AbortError") return;
           if (err instanceof Error && err.name === "AbortError") return;
@@ -1299,9 +1436,9 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                   <span className="text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#9A9EA8]">
                     Kilder
                   </span>
-                  {citations.map((citation, idx) => (
+                  {citations.map((citation) => (
                     <a
-                      key={idx}
+                      key={citation.url}
                       href={citation.url}
                       target="_blank"
                       rel="noopener noreferrer"
@@ -1331,8 +1468,8 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                 initial="hidden"
                 animate="show"
               >
-                {results.map((result, idx) => (
-                  <motion.li key={idx} variants={listItem}>
+                {results.map((result) => (
+                  <motion.li key={result.url} variants={listItem}>
                     <a
                       href={result.url}
                       target="_blank"
@@ -1376,6 +1513,13 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                 — sjekk at søkeleverandøren (SearXNG) kjører hvis dette er uventet.
               </p>
             </div>
+          ) : null}
+
+          {/* Recent searches — live from Convex (convex-core searchThreads).
+              Shown on the landing / before results arrive; self-hides when the
+              user has no history. Clicking one re-runs that query. */}
+          {!loading && !answer && results.length === 0 && mode === "search" ? (
+            <RecentSearches onPick={runSearch} />
           ) : null}
 
           {/* ---- Conversational follow-up thread ---- */}

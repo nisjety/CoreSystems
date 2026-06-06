@@ -176,9 +176,18 @@ func (s *Service) hydrateAccountDefaults(ctx context.Context, account Account) (
 		next.QuotaLimits = map[string]float64{}
 	}
 
+	// During an active onboarding trial the effective plan is elevated to Pro
+	// so entitlements (e.g. feature.integrations) unlock connector setup before
+	// the paywall. The elevated defaults take precedence over the org-core seed.
+	entitlementPlan := seedPlan
+	trialing := trialActive(next, time.Now().UTC())
+	if trialing {
+		entitlementPlan = TrialPlan
+	}
+
 	defaultEntitlements := seededEntitlements
-	if len(defaultEntitlements) == 0 {
-		defaultEntitlements = defaultEntitlementsForPlan(seedPlan)
+	if trialing || len(defaultEntitlements) == 0 {
+		defaultEntitlements = defaultEntitlementsForPlan(entitlementPlan)
 	}
 	for key, enabled := range defaultEntitlements {
 		current, exists := next.Entitlements[key]
@@ -188,7 +197,7 @@ func (s *Service) hydrateAccountDefaults(ctx context.Context, account Account) (
 		}
 	}
 
-	defaultQuotas := defaultQuotaLimitsForPlan(seedPlan)
+	defaultQuotas := defaultQuotaLimitsForPlan(entitlementPlan)
 	for key, limit := range defaultQuotas {
 		current, exists := next.QuotaLimits[key]
 		if !exists || planChanged || current != limit {
@@ -320,7 +329,21 @@ func (s *Service) SyncOrganization(ctx context.Context, orgID, orgName string) e
 		account.Metadata["org_name"] = trimmedName
 	}
 
-	return s.UpsertAccount(ctx, account)
+	// Start the 14-day Pro trial exactly once per organization. The stored plan
+	// stays mirrored from org-core; the trial elevates the effective plan +
+	// entitlements until the paywall choice (ApplyPlanChange) or expiry sweep.
+	if started, _ := account.Metadata["trial_started"].(bool); !started {
+		now := time.Now().UTC()
+		ends := now.Add(time.Duration(trialDurationDays()) * 24 * time.Hour)
+		account.SubscriptionState = SubscriptionStateTrialing
+		account.TrialEndsAt = &ends
+		account.Metadata["trial_started"] = true
+		account.Metadata["trial_started_at"] = now.Format(time.RFC3339)
+		account.Metadata["downgrade_to"] = "free"
+	}
+
+	hydrated, _ := s.hydrateAccountDefaults(ctx, account)
+	return s.UpsertAccount(ctx, hydrated)
 }
 
 func (s *Service) ApplyPlanChange(ctx context.Context, orgID, orgName, newPlan string) error {
@@ -335,8 +358,16 @@ func (s *Service) ApplyPlanChange(ctx context.Context, orgID, orgName, newPlan s
 
 	previousPlan := normalizePlan(account.Plan)
 	account.Plan = normalizePlan(newPlan)
+	// A plan choice (the paywall) ends the onboarding trial — settle into the
+	// chosen plan and drop the trial window so the sweep won't touch it.
+	wasTrialing := account.SubscriptionState == SubscriptionStateTrialing
+	account.SubscriptionState = SubscriptionStateActive
+	account.TrialEndsAt = nil
 	if account.Metadata == nil {
 		account.Metadata = map[string]interface{}{}
+	}
+	if wasTrialing {
+		account.Metadata["trial_converted_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
 	if trimmedName := strings.TrimSpace(orgName); trimmedName != "" {
 		account.Metadata["org_name"] = trimmedName
@@ -382,6 +413,55 @@ func (s *Service) DeactivateOrganization(ctx context.Context, orgID, reason stri
 	}
 
 	return s.persistAccount(ctx, account)
+}
+
+// ExpireTrials reverts organizations whose 14-day Pro trial has elapsed back to
+// their base (free) plan: it flips subscription_state trialing→active, clears
+// the trial window (so the next GetAccount hydrate drops entitlements to the
+// base plan), and emits billing.plan.changed{reason: trial_expired}. Intended
+// to be called periodically by a background sweep. Returns the number expired.
+func (s *Service) ExpireTrials(ctx context.Context) (int, error) {
+	now := time.Now().UTC()
+	orgIDs, err := s.repo.ListExpiredTrials(ctx, now, 200)
+	if err != nil {
+		return 0, err
+	}
+
+	expired := 0
+	for _, orgID := range orgIDs {
+		account, err := s.GetAccount(ctx, orgID)
+		if err != nil {
+			continue
+		}
+		account.SubscriptionState = SubscriptionStateActive
+		account.TrialEndsAt = nil
+		if account.Metadata == nil {
+			account.Metadata = map[string]interface{}{}
+		}
+		account.Metadata["trial_expired_at"] = now.Format(time.RFC3339)
+
+		hydrated, _ := s.hydrateAccountDefaults(ctx, account)
+		if err := s.UpsertAccount(ctx, hydrated); err != nil {
+			continue
+		}
+
+		// The effective plan dropped from the trial tier (Pro) to the base plan.
+		if s.publisher != nil {
+			_ = s.publisher.Publish(ctx, "billing.plan.changed", map[string]any{
+				"org_id":        hydrated.OrgID,
+				"previous_plan": TrialPlan,
+				"new_plan":      hydrated.Plan,
+				"reason":        "trial_expired",
+				"timestamp":     now.Format(time.RFC3339),
+			})
+		}
+		if s.sharedPublisher != nil {
+			s.sharedPublisher.PublishPlanChanged(ctx, hydrated.OrgID, TrialPlan, hydrated.Plan)
+		}
+		expired++
+	}
+
+	return expired, nil
 }
 
 func (s *Service) GetAccount(ctx context.Context, orgID string) (Account, error) {

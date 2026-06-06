@@ -30,19 +30,20 @@ services:
       CONVEX_SQLITE_PATH: /data/convex.db
 
       # Service URLs (cross-plane via inter-plane-bus)
-      AI_CORE_URL: ${AI_CORE_URL:-http://ai-core:8000}
-      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core-service:8080}
-      AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-service:3011}
+      AI_CORE_URL: ${AI_CORE_URL:-http://model-gateway:8080}
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-core:3011}
 
       # Auth configuration
-      JWT_SECRET: ${JWT_SECRET:-your-jwt-secret-here}
+      JWT_SECRET: ${JWT_SECRET:-a2db5549b35903f6d9210f0eb2578fec95fc3802e2b7947bb8e5711bc7ae4a55}
       JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
 
       # Logging
       RUST_LOG: ${RUST_LOG:-info}
       CONVEX_LOG_FORMAT: json
       CONVEX_DISABLE_BEACON: "true"
-      NATS_URL: nats://nats:4222
+      NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
     networks:
       - app-net
       - inter-plane-bus
@@ -120,7 +121,7 @@ services:
     environment:
       CONVEX_BACKEND_URL: http://convex-backend:3210
     ports:
-      - "3005:3000"
+      - "${CONVEX_GATEWAY_HOST_PORT:-3006}:3000"
     networks:
       - app-net
     healthcheck:
@@ -170,6 +171,7 @@ services:
     environment:
       # Cross-plane NATS bus and Convex URL — NATS_URL/NATS_TOKEN come from env_file above
       CONVEX_BACKEND_URL: http://convex-backend:3210
+      CONVEX_API_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-${INTERNAL_API_KEY:-change-me-internal-service-secret}}
       NATS_URL: nats://velion-nats:4222    # inter-plane-bus shared bus — all ingestion/org events publish here
       # W4-2 (ui-ux-velion-gap.md §13): Model Plane orchestrator-core
       # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
@@ -396,6 +398,122 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  conversation-core-go:
+    build:
+      context: ./conversation-core/conversation-core-go
+      dockerfile: Dockerfile
+    container_name: conversation-core-go
+    restart: unless-stopped
+    environment:
+      PORT: "3160"
+      SERVICE_NAME: conversation-core-go
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      NATS_URL: nats://nats:4222
+      VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    ports:
+      - "${CONVERSATION_CORE_GO_HOST_PORT:-3160}:3160"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3160/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  conversation-ingest-rs:
+    build:
+      context: ./conversation-core/conversation-ingest-rs
+      dockerfile: Dockerfile
+    container_name: conversation-ingest-rs
+    restart: unless-stopped
+    environment:
+      PORT: "3161"
+      CONVERSATION_CORE_URL: http://conversation-core-go:3160
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      conversation-core-go:
+        condition: service_healthy
+    ports:
+      - "${CONVERSATION_INGEST_RS_HOST_PORT:-3161}:3161"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3161/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  information-core:
+    build:
+      context: ./information-core
+      dockerfile: Dockerfile
+    container_name: information-core
+    restart: unless-stopped
+    environment:
+      PORT: "3190"
+      SERVICE_NAME: information-core
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INFORMATION_CORE_USER_AGENT: ${INFORMATION_CORE_USER_AGENT:-VelionInformationCore/1.0 (ops@velion.local)}
+    ports:
+      - "${INFORMATION_CORE_HOST_PORT:-3190}:3190"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3190/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   notification-core:
     build:

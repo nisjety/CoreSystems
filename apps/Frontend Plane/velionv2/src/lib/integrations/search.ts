@@ -15,8 +15,11 @@ type SearchableColumn = {
   column_name: string;
 };
 
+type SearchScope = "all" | "knowledge";
+
 const userColumns = ["user_id", "userId", "recipient_id", "owner_id", "created_by", "subscriber_id"];
 const textTypes = new Set(["text", "character varying", "character", "jsonb", "json"]);
+const knowledgeTablePattern = /(knowledge|document|source|page|node|chunk|embedding|collection|content)/i;
 
 let pool: Pool | null = null;
 
@@ -68,9 +71,14 @@ function toExcerpt(row: Record<string, unknown>, columns: string[], query: strin
   return fallback.length > 180 ? `${fallback.slice(0, 177)}...` : fallback;
 }
 
-export async function searchSignedInUserDatabase(actor: RequestActor, query: string): Promise<NavbarSearchResult[]> {
+export async function searchSignedInUserDatabase(
+  actor: RequestActor,
+  query: string,
+  options: { scope?: SearchScope } = {},
+): Promise<NavbarSearchResult[]> {
   const db = getPool();
   const trimmed = query.trim();
+  const scope = options.scope ?? "all";
 
   if (!db || trimmed.length < 2) {
     return [];
@@ -116,6 +124,10 @@ export async function searchSignedInUserDatabase(actor: RequestActor, query: str
 
   const searchTasks = Object.entries(grouped).flatMap(([tableKey, columns]) => {
     const [schema, table] = tableKey.split(".");
+    if (scope === "knowledge" && !knowledgeTablePattern.test(table ?? "")) {
+      return [];
+    }
+
     const allColumnNames = columnSets.get(tableKey) ?? new Set<string>();
     const availableUserColumn = userColumns.find((column) => allColumnNames.has(column));
     const allowedUserTable = table === "users" && allColumnNames.has("id");

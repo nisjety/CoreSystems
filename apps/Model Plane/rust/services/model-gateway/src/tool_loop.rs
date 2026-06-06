@@ -49,7 +49,8 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
 /// Parse an MCP tool name `mcp__<server_id>__<tool_name>` into its parts.
 /// Splits on the FIRST `__` after the prefix (tool names may contain `__`).
 fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
-    name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"))
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -87,6 +88,7 @@ pub async fn dispatch_tool(
             if query.trim().is_empty() {
                 return err_outcome(call, "web_search requires a non-empty 'query' argument");
             }
+            let intent = arg_str(&call.arguments_json, "intent");
             let limit = i32::try_from(arg_i64(&call.arguments_json, "limit").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 50);
@@ -97,7 +99,7 @@ pub async fn dispatch_tool(
                     org_id: org_id.to_owned(),
                     query,
                     limit,
-                    intent: String::new(),
+                    intent,
                 },
             )
             .await
@@ -188,8 +190,10 @@ pub async fn dispatch_tool(
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<serde_json::Value>().await {
                         Ok(v) => {
-                            let content =
-                                v.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+                            let content = v
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("");
                             let out = serde_json::json!({
                                 "content": truncate_chars(content, MAX_FETCH_CHARS),
                                 "confidence": v.get("confidence").cloned().unwrap_or(serde_json::Value::Null),
@@ -204,9 +208,10 @@ pub async fn dispatch_tool(
                         Err(e) => err_outcome(call, format!("browser_agent decode failed: {e}")),
                     }
                 }
-                Ok(resp) => {
-                    err_outcome(call, format!("browser_agent returned {}", resp.status().as_u16()))
-                }
+                Ok(resp) => err_outcome(
+                    call,
+                    format!("browser_agent returned {}", resp.status().as_u16()),
+                ),
                 Err(e) => err_outcome(call, format!("browser_agent failed: {e}")),
             }
         }
@@ -467,10 +472,7 @@ mod tests {
             Some(("github", "create_issue"))
         );
         // tool name may itself contain `__` — split on the FIRST separator only.
-        assert_eq!(
-            parse_mcp_tool_name("mcp__srv__a__b"),
-            Some(("srv", "a__b"))
-        );
+        assert_eq!(parse_mcp_tool_name("mcp__srv__a__b"), Some(("srv", "a__b")));
         assert_eq!(parse_mcp_tool_name("web_search"), None);
         assert_eq!(parse_mcp_tool_name("mcp__noseparator"), None);
     }

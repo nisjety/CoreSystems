@@ -51,9 +51,9 @@ func (r *Repository) UpsertAccount(ctx context.Context, account Account) error {
 		INSERT INTO billing_accounts (
 			org_id, plan, subscription_state, credits,
 			products, feature_flags, entitlements, quota_limits,
-			provider_customer_id, metadata, updated_at
+			provider_customer_id, metadata, trial_ends_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, now())
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, now())
 		ON CONFLICT (org_id)
 		DO UPDATE SET
 			plan = EXCLUDED.plan,
@@ -65,6 +65,7 @@ func (r *Repository) UpsertAccount(ctx context.Context, account Account) error {
 			quota_limits = EXCLUDED.quota_limits,
 			provider_customer_id = EXCLUDED.provider_customer_id,
 			metadata = EXCLUDED.metadata,
+			trial_ends_at = EXCLUDED.trial_ends_at,
 			updated_at = now()
 	`
 
@@ -81,6 +82,7 @@ func (r *Repository) UpsertAccount(ctx context.Context, account Account) error {
 		string(quotaLimits),
 		string(providers),
 		string(metadata),
+		account.TrialEndsAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert account: %w", err)
@@ -94,7 +96,7 @@ func (r *Repository) GetAccount(ctx context.Context, orgID string) (Account, err
 		SELECT
 			org_id, plan, subscription_state, credits,
 			products, feature_flags, entitlements, quota_limits,
-			provider_customer_id, metadata, created_at, updated_at
+			provider_customer_id, metadata, trial_ends_at, created_at, updated_at
 		FROM billing_accounts
 		WHERE org_id = $1
 	`
@@ -112,6 +114,7 @@ func (r *Repository) GetAccount(ctx context.Context, orgID string) (Account, err
 		&quotaLimits,
 		&providers,
 		&metadata,
+		&account.TrialEndsAt,
 		&account.CreatedAt,
 		&account.UpdatedAt,
 	); err != nil {
@@ -141,6 +144,40 @@ func (r *Repository) GetAccount(ctx context.Context, orgID string) (Account, err
 	}
 
 	return account, nil
+}
+
+// ListExpiredTrials returns org ids whose trial window has elapsed and that
+// are still in the trialing state — the input to the trial-expiry sweep.
+func (r *Repository) ListExpiredTrials(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	query := `
+		SELECT org_id
+		FROM billing_accounts
+		WHERE subscription_state = 'trialing'
+		  AND trial_ends_at IS NOT NULL
+		  AND trial_ends_at <= $1
+		ORDER BY trial_ends_at ASC
+		LIMIT $2
+	`
+
+	rows, err := r.pool.Query(ctx, query, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list expired trials: %w", err)
+	}
+	defer rows.Close()
+
+	orgIDs := make([]string, 0, limit)
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, fmt.Errorf("scan expired trial: %w", err)
+		}
+		orgIDs = append(orgIDs, orgID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate expired trials: %w", err)
+	}
+
+	return orgIDs, nil
 }
 
 func (r *Repository) SaveUsage(ctx context.Context, event UsageEvent) error {

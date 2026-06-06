@@ -2,9 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   isPaidPlan,
   createOrganization,
+  organizationExists,
   setOrganizationPlan,
   startCheckout,
   completeOnboarding,
+  startWebsiteIngest,
   updateProfile,
   OnboardingServiceError,
 } from "@/features/onboarding-v2/lib/onboarding-service";
@@ -186,6 +188,45 @@ describe("setOrganizationPlan", () => {
 });
 
 // ---------------------------------------------------------------------------
+// organizationExists
+// ---------------------------------------------------------------------------
+describe("organizationExists", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("GETs /api/org/orgs/me and matches the saved org id", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      makeFetchResponse([
+        { id: "org-1", name: "Acme AS", slug: "acme-as", plan: "trial" },
+        { id: "org-2", name: "Beta AS", slug: "beta-as", plan: "free" },
+      ]),
+    );
+
+    await expect(organizationExists("org-1")).resolves.toBe(true);
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/org/orgs/me");
+    expect(init.method).toBe("GET");
+    expect(init.credentials).toBe("include");
+  });
+
+  it("returns false when the org id is not in the membership list", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      makeFetchResponse([{ id: "org-2", name: "Beta AS", slug: "beta-as", plan: "free" }]),
+    );
+
+    await expect(organizationExists("bad-id")).resolves.toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // startCheckout
 // ---------------------------------------------------------------------------
 describe("startCheckout", () => {
@@ -284,5 +325,53 @@ describe("updateProfile", () => {
   it("does not throw when fetch rejects (network error)", async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error("Network failure"));
     await expect(updateProfile({ name: "Alice" })).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// startWebsiteIngest — never throws
+// ---------------------------------------------------------------------------
+describe("startWebsiteIngest", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs to website-ingest with org and URL", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({ accepted: true }, 202));
+
+    const accepted = await startWebsiteIngest({
+      orgId: "org-1",
+      url: "https://example.com",
+      brief: "Support questions",
+    });
+    expect(accepted).toBe(true);
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/onboarding/website-ingest");
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body as string);
+    expect(body.orgId).toBe("org-1");
+    expect(body.url).toBe("https://example.com");
+    expect(body.brief).toBe("Support questions");
+  });
+
+  it("does not throw when fetch rejects", async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("Network failure"));
+    await expect(
+      startWebsiteIngest({ orgId: "org-1", url: "https://example.com" }),
+    ).resolves.toBe(false);
+  });
+
+  it("returns false when website ingest is not accepted", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse({ error: "bad" }, 502));
+
+    await expect(
+      startWebsiteIngest({ orgId: "org-1", url: "https://example.com" }),
+    ).resolves.toBe(false);
   });
 });

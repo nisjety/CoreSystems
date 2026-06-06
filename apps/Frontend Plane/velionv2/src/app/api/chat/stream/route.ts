@@ -2,12 +2,13 @@
  * BFF SSE route — POST /api/chat/stream
  *
  * Authenticates the caller, optionally runs a Quarry web-scrape for
- * grounding, then opens an SSE stream to Model Plane /v1/invoke/stream
- * and re-streams the deltas to the browser verbatim.
+ * web context, injects built-in Quarry search tools when web search is enabled,
+ * then opens an SSE stream to Model Plane /v1/invoke/stream and re-streams
+ * the deltas to the browser verbatim.
  *
  * Ported from velion/src/app/api/chat/stream/route.ts (Wave 11 / v1 ref).
- * Deliberately minimal: no Convex persistence, no tool-loop — plain chat
- * streaming only. Deferred: resume, deep-research, agent tools.
+ * Deliberately minimal: no Convex persistence. Model Plane owns the tool-loop;
+ * this BFF only chooses which tools to expose per request.
  */
 
 import { type NextRequest, NextResponse } from "next/server";
@@ -75,6 +76,12 @@ type ChatStreamRequest = {
   toolDefs?: Array<{ name: string; description?: string; parameters_json?: string }>;
 };
 
+type ModelToolDefinition = {
+  name: string;
+  description: string;
+  parameters_json: string;
+};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // SSE encoding helpers (ported from v1 reasoning.ts)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -97,6 +104,18 @@ function normalizeOptionalString(value: unknown, maxLength: number): string | un
   return trimmed;
 }
 
+function normalizeToolIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((tool): tool is string => typeof tool === "string")
+    .map((tool) => tool.trim())
+    .filter((tool) => tool.length > 0)
+    .slice(0, 16);
+}
+
 // Nudge the model to emit GitHub-flavoured Markdown tables for tabular data so
 // the chat renderer (ChatMarkdown) can display them. Mirrors the existing
 // `[Web context]` content-framing convention. Scoped to velionv2 chat only —
@@ -106,6 +125,96 @@ const RESPONSE_FORMAT_DIRECTIVE = [
   "When the answer contains comparisons, specifications, metrics, schedules, or other tabular data, present it as a GitHub-flavoured Markdown table: a header row, a |---|---| separator row, then one row per record. Keep tables compact and do not wrap them in code fences.",
   "Use normal Markdown (headings, bold, lists, code) for everything else.",
 ].join("\n");
+
+const WEB_TOOL_DIRECTIVE = [
+  "[Web search tools]",
+  "When current or external information matters, use `web_search` to discover relevant sources and `fetch_url` to inspect a promising page before relying on it.",
+  "Prefer specific multi-term web queries that include the entity, the exact topic, and any useful timeframe instead of broad one-word navigational searches.",
+  "Set `intent` on `web_search` when it helps: use `research` for broad multi-source discovery, `factual` for direct verification, and `navigational` when you are trying to find a specific site.",
+  "Cite the strongest sources you actually used, and avoid claiming you verified something unless you searched or fetched it.",
+].join("\n");
+
+const BUILT_IN_WEB_TOOLS: ModelToolDefinition[] = [
+  {
+    name: "web_search",
+    description:
+      "Search the public web through Quarry v2. Use this first to discover relevant current sources before answering.",
+    parameters_json: JSON.stringify({
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The web search query to run.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 10,
+          description: "Maximum number of search results to return.",
+        },
+        intent: {
+          type: "string",
+          enum: ["factual", "research", "navigational"],
+          description:
+            "Optional Quarry router hint. Use research for broad discovery, factual for direct verification, navigational for finding a specific site.",
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    }),
+  },
+  {
+    name: "fetch_url",
+    description:
+      "Fetch and read a specific web page through Quarry v2 after a web_search call identifies a promising source.",
+    parameters_json: JSON.stringify({
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "The absolute URL to fetch and inspect.",
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    }),
+  },
+];
+
+function buildImplicitToolDefs({
+  browseWeb,
+  toolIds,
+}: {
+  browseWeb?: boolean;
+  toolIds: string[];
+}): ModelToolDefinition[] {
+  const wantsWebTools =
+    browseWeb === true ||
+    toolIds.some((toolId) => toolId === "search" || toolId === "research");
+
+  return wantsWebTools ? BUILT_IN_WEB_TOOLS : [];
+}
+
+function mergeToolDefs(
+  implicit: ModelToolDefinition[],
+  explicit: ModelToolDefinition[],
+): ModelToolDefinition[] {
+  if (implicit.length === 0 && explicit.length === 0) {
+    return [];
+  }
+
+  const merged = new Map<string, ModelToolDefinition>();
+
+  for (const tool of implicit) {
+    merged.set(tool.name, tool);
+  }
+
+  for (const tool of explicit) {
+    merged.set(tool.name, tool);
+  }
+
+  return Array.from(merged.values());
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Quarry web-scrape (best-effort, degrades gracefully)
@@ -179,6 +288,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   const { content, browseWeb, url: explicitUrl } = parsed;
   const model = normalizeOptionalString(parsed.model, 120);
   const sessionId = normalizeOptionalString(parsed.sessionId, 160);
+  const toolIds = normalizeToolIds(parsed.tools);
   // Opt-in rich SSE event families (chat-parity §2). Forwarded to Model Plane;
   // the gateway gates rich events on this, the BFF re-streams them verbatim.
   const features = Array.isArray(parsed.features)
@@ -202,7 +312,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   // `tools: string[]` browse toggle — these are name+description+schema specs
   // the model may call. Forward up to 16, name-required. Enabling them turns on
   // the `tools` family so the gateway runs the loop + streams tool events.
-  const toolDefs = Array.isArray(parsed.toolDefs)
+  const explicitToolDefs = Array.isArray(parsed.toolDefs)
     ? parsed.toolDefs
         .filter((t): t is { name: string; description?: string; parameters_json?: string } =>
           Boolean(t) && typeof t === "object" && typeof (t as { name?: unknown }).name === "string")
@@ -213,6 +323,13 @@ export async function POST(request: NextRequest): Promise<Response> {
           parameters_json: typeof t.parameters_json === "string" ? t.parameters_json : "",
         }))
     : [];
+  const toolDefs = mergeToolDefs(
+    buildImplicitToolDefs({ browseWeb, toolIds }),
+    explicitToolDefs,
+  );
+  const hasWebTools = toolDefs.some(
+    (tool) => tool.name === "web_search" || tool.name === "fetch_url",
+  );
   if (toolDefs.length > 0 && !features.includes("tools")) {
     features.push("tools");
   }
@@ -237,6 +354,7 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   const finalContent = [
     RESPONSE_FORMAT_DIRECTIVE,
+    hasWebTools ? WEB_TOOL_DIRECTIVE : null,
     groundingMarkdown ? `[Web context]\n${groundingMarkdown}` : null,
     `[User message]\n${content}`,
   ]

@@ -17,7 +17,6 @@ import {
   Settings,
   User,
   Users,
-  Zap,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -333,10 +332,12 @@ export function CalendarDropdown({
 }
 
 export function ProfileDropdown({
+  planLabel,
   profile,
   onSupport,
   onSignOut,
 }: {
+  planLabel?: string;
   profile: NavbarProfile | null;
   onSupport: () => void;
   onSignOut: () => void;
@@ -349,7 +350,7 @@ export function ProfileDropdown({
       </div>
       <ProfileItem href="/account" icon={User} label="Profile" />
       <ProfileItem href="/settings/members" icon={Users} label="Community" />
-      <ProfileItem href="/settings/billing" icon={CreditCard} label="Subscription" badge="PRO" />
+      <ProfileItem href="/settings/billing" icon={CreditCard} label="Subscription" badge={planLabel} />
       <ProfileItem href="/settings/workspace" icon={Settings} label="Settings" />
       <div className="my-1 h-px bg-[#EBEBEB] dark:bg-[#2A2C31]" />
       <button type="button" onClick={onSupport} className="velion-menu-item">
@@ -511,8 +512,7 @@ function ProfileItem({
       <Icon className="size-[17px] text-[#555555] dark:text-[#AEB4C0]" strokeWidth={1.7} />
       <span className="flex-1">{label}</span>
       {badge ? (
-        <span className="inline-flex items-center gap-0.5 rounded-md bg-[#E9D5FF] px-2 py-0.5 text-[10px] font-bold text-[#7C3AED]">
-          <Zap className="size-2.5 fill-[#7C3AED] stroke-none" />
+        <span className="inline-flex items-center gap-0.5 rounded-md bg-[#F2F2F2] px-2 py-0.5 text-[10px] font-bold text-[#555] dark:bg-[#2A2D35] dark:text-[#D7DBE3]">
           {badge}
         </span>
       ) : null}

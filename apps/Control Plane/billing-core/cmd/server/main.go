@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -124,6 +126,32 @@ func main() {
 		MaxAttempts:  cfg.RetryMaxAttempts,
 		BaseBackoff:  time.Duration(cfg.RetryBackoffSeconds) * time.Second,
 	})
+
+	// Trial-expiry sweep: revert organizations whose 14-day Pro trial elapsed
+	// back to their base plan. Interval via BILLING_TRIAL_SWEEP_SECONDS (default
+	// 3600, floor 60).
+	go func() {
+		intervalSec := 3600
+		if v := strings.TrimSpace(os.Getenv("BILLING_TRIAL_SWEEP_SECONDS")); v != "" {
+			if n, convErr := strconv.Atoi(v); convErr == nil && n >= 60 {
+				intervalSec = n
+			}
+		}
+		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, sweepErr := billingService.ExpireTrials(ctx); sweepErr != nil {
+					log.Printf("billing-core trial sweep error: %v", sweepErr)
+				} else if n > 0 {
+					log.Printf("billing-core expired %d trial(s)", n)
+				}
+			}
+		}
+	}()
 
 	var publisher billing.EventPublisher
 	natsClient, err := nats.NewClient(nats.Config{

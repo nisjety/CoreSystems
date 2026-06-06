@@ -47,11 +47,11 @@ export function registerConnectorRoutes(
     { preHandler: [app.requireInternalOrBearerAuth] },
     async (request: FastifyRequest) => {
       const body = tokenBodySchema.parse(request.body);
+      const providerKeys = providerKeyAliasesForConnector(body.connectorType);
       const connections = await connectionRepository.list({
-        organizationId: body.organizationId,
-        providerKey: body.connectorType
+        organizationId: body.organizationId
       });
-      const connection = connections.find(c => !c.deletedAt);
+      const connection = connections.find(c => providerKeys.includes(c.providerKey) && !c.deletedAt);
       if (!connection) {
         throw new HttpError(404, 'connection_not_found',
           `No active ${body.connectorType} connection for organization ${body.organizationId}`);
@@ -203,4 +203,11 @@ export function registerConnectorRoutes(
       return successResponse({ routing });
     }
   );
+}
+
+function providerKeyAliasesForConnector(connectorType: 'microsoft-graph'): string[] {
+  switch (connectorType) {
+    case 'microsoft-graph':
+      return ['microsoft-graph', 'microsoft'];
+  }
 }

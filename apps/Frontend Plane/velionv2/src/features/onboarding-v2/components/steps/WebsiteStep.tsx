@@ -1,25 +1,35 @@
 "use client";
 
 /**
- * Step 3 — website seed (live crawl). The user pastes a URL; on submit the
+ * Step 2 — website seed (live crawl). The user pastes a URL; on submit the
  * step opens the crawl-preview SSE (BFF composition over quarry-edge), renders
  * each snippet as a falling card, persists server-normalized branding signals
- * to wizard state (the frame shows the brand pill), and advances to Connect.
+ * to wizard state (the frame shows the brand pill), and leaves the user in
+ * control of when to continue.
  *
- * Degrades open: a 12s safety timer + a min-snippet grace advance guarantee the
- * user is never stuck on a flaky crawl.
+ * Degrades open: the stream always terminates with evidence, warning, or a
+ * terminal state so the user can continue without being trapped.
  */
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { cn } from "@/lib/utils";
 import {
   streamCrawlPreview,
+  type CrawlProgress,
   type CrawlSnippet,
   type CrawlSnippetKind,
 } from "../../lib/onboarding-api";
-import { formatOnboardingText, useOnboardingCopy } from "../../lib/onboarding-i18n";
-import type { BrandingSignals, OnboardingMachine } from "../../lib/onboarding-machine";
+import { formatOnboardingText, type OnboardingLocale, useOnboardingCopy } from "../../lib/onboarding-i18n";
+import { updateProfile } from "../../lib/onboarding-service";
+import type { BrandingSignals, CrawlEvidence, OnboardingMachine, WebsitePayload } from "../../lib/onboarding-machine";
+import {
+  allOnboardingWebsites,
+  appendCrawlSnippet,
+  createEmptyCrawlEvidence,
+  removeWebsiteFromState,
+  updateCrawlEvidence,
+} from "../../lib/onboarding-evidence";
 import {
   LeftPane,
   PrimaryButton,
@@ -36,58 +46,190 @@ interface FallingCard extends CrawlSnippet {
   durationMs: number;
 }
 
-const SAFE_ADVANCE_AFTER_MS = 12_000;
-const MIN_SNIPPETS_TO_ADVANCE = 4;
+type LiveCrawlProgress = Omit<CrawlProgress, "status"> & { status: CrawlProgress["status"] | "idle" };
 
 export function WebsiteStep({ machine }: { machine: OnboardingMachine }) {
-  const { copy } = useOnboardingCopy();
+  const { locale, copy } = useOnboardingCopy();
   const initial = machine.state.website;
   const [url, setUrl] = useState(initial?.url ?? "");
   const [brief, setBrief] = useState(initial?.agentBrief ?? "");
   const [submitted, setSubmitted] = useState(false);
+  const [activeUrl, setActiveUrl] = useState(initial?.url ?? "");
+  const [activeBrief, setActiveBrief] = useState(initial?.agentBrief ?? "");
+  const [activeBranding, setActiveBranding] = useState<BrandingSignals | undefined>(initial?.branding);
   const [cards, setCards] = useState<FallingCard[]>([]);
   const [doneCount, setDoneCount] = useState<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [crawlEvidence, setCrawlEvidence] = useState<CrawlEvidence | undefined>(initial?.crawlEvidence);
+  const [progress, setProgress] = useState<LiveCrawlProgress>({
+    status: "idle",
+    pages: 0,
+    elements: 0,
+    target: 3,
+  });
 
   const cardsRef = useRef<FallingCard[]>([]);
-  cardsRef.current = cards;
+  const brandingRef = useRef<BrandingSignals | undefined>(initial?.branding);
+  const crawlEvidenceRef = useRef<CrawlEvidence | undefined>(initial?.crawlEvidence);
+  const suppressStoredHydrationRef = useRef(false);
+  useEffect(() => {
+    cardsRef.current = cards;
+  }, [cards]);
+  useEffect(() => {
+    brandingRef.current = activeBranding;
+  }, [activeBranding]);
+
+  useEffect(() => {
+    if (submitted || suppressStoredHydrationRef.current || !initial?.url) return;
+
+    const evidence = initial.crawlEvidence;
+    setUrl(initial.url);
+    setBrief(initial.agentBrief ?? "");
+    setActiveUrl(initial.url);
+    setActiveBrief(initial.agentBrief ?? "");
+    setActiveBranding(initial.branding);
+    brandingRef.current = initial.branding;
+    crawlEvidenceRef.current = evidence;
+    setCrawlEvidence(evidence);
+    setCards((evidence?.snippets ?? []).map((snippet, index) => toFallingCard(snippet, index)));
+    setDoneCount(isTerminalEvidence(evidence?.status) ? evidence?.pages ?? null : null);
+    setProgress({
+      status: evidence?.status ?? "idle",
+      pages: evidence?.pages ?? 0,
+      elements: evidence?.elements ?? 0,
+      target: Math.max(3, evidence?.pages ?? evidence?.snippets.length ?? 0),
+      latestUrl: evidence?.latestUrl,
+      latestTitle: evidence?.latestTitle,
+    });
+  }, [initial?.agentBrief, initial?.branding, initial?.crawlEvidence, initial?.url, submitted]);
 
   useEffect(() => {
     if (!submitted || !url.trim()) return undefined;
 
     const controller = new AbortController();
-    let advanced = false;
-    const advanceOnce = () => {
-      if (advanced) return;
-      advanced = true;
-      window.setTimeout(() => machine.goTo("connect"), 700);
+    const websiteUrl = activeUrl || url.trim();
+    const websiteBrief = activeBrief;
+    const persistWebsite = (next: Partial<WebsitePayload>) => {
+      const branding = next.branding ?? brandingRef.current;
+      machine.addWebsite({
+        url: websiteUrl,
+        agentBrief: websiteBrief,
+        ...(branding ? { branding } : {}),
+        ...next,
+      });
+    };
+    const updateEvidence = (updater: (current: CrawlEvidence | undefined) => CrawlEvidence) => {
+      const next = updater(crawlEvidenceRef.current);
+      crawlEvidenceRef.current = next;
+      setCrawlEvidence(next);
+      persistWebsite({ crawlEvidence: next });
     };
 
-    const safetyTimer = window.setTimeout(advanceOnce, SAFE_ADVANCE_AFTER_MS);
-
     void streamCrawlPreview(
-      { url: url.trim(), brief: brief.trim() || undefined, maxPages: 8 },
+      { url: websiteUrl, brief: websiteBrief || undefined, maxPages: 3 },
       {
-        onSnippet: (snippet) =>
-          setCards((prev) => [...prev, toFallingCard(snippet, prev.length)]),
+        onStarted: (started) => {
+          setProgress((prev) => ({
+            ...prev,
+            status: "starting",
+            jobId: started.jobId ?? prev.jobId,
+            target: started.target ?? prev.target,
+          }));
+          if (started.jobId) {
+            persistWebsite({
+              url: started.url ?? websiteUrl,
+              agentBrief: websiteBrief,
+              crawlJobId: started.jobId,
+            });
+          }
+          updateEvidence((current) =>
+            updateCrawlEvidence(current, {
+              status: "starting",
+              pages: 0,
+              elements: 0,
+              seedStatus: "pending",
+            }),
+          );
+        },
+        onSnippet: (snippet) => {
+          setCards((prev) => {
+            if (prev.some((card) => card.kind === snippet.kind && card.url === snippet.url)) {
+              return prev;
+            }
+            return [...prev, toFallingCard(snippet, prev.length)].slice(-24);
+          });
+          updateEvidence((current) => appendCrawlSnippet(current, snippet));
+        },
+        onProgress: (nextProgress) => {
+          setProgress((prev) => ({
+            ...prev,
+            ...nextProgress,
+            pages: Math.max(prev.pages, nextProgress.pages),
+            elements: Math.max(prev.elements, nextProgress.elements),
+            target: nextProgress.target ?? prev.target,
+            jobId: nextProgress.jobId ?? prev.jobId,
+          }));
+          if (nextProgress.jobId) {
+            persistWebsite({
+              crawlJobId: nextProgress.jobId,
+            });
+          }
+          updateEvidence((current) =>
+            updateCrawlEvidence(current, {
+              status: nextProgress.status,
+              pages: nextProgress.pages,
+              elements: nextProgress.elements,
+              latestUrl: nextProgress.latestUrl,
+              latestTitle: nextProgress.latestTitle,
+            }),
+          );
+        },
         onBranding: (payload) => {
           const branding = payload as BrandingSignals | null;
           if (!branding) return;
-          const current = machine.state.website;
-          machine.setWebsite({
-            url: current?.url ?? url.trim(),
-            agentBrief: current?.agentBrief ?? brief.trim(),
-            crawlJobId: current?.crawlJobId,
-            branding: { ...current?.branding, ...branding },
-          });
+          const next = mergeBrandingSignals(brandingRef.current, branding);
+          brandingRef.current = next;
+          setActiveBranding(next);
+          persistWebsite({ branding: next });
         },
         onWarning: (w) => {
           const friendly = friendlyWarning(w.code, w.message, copy.website.warnings);
           if (friendly) setWarning(friendly);
+          if (friendly) {
+            updateEvidence((current) => updateCrawlEvidence(current, { warnings: [friendly] }));
+          }
         },
         onDone: (done) => {
-          setDoneCount(typeof done.count === "number" ? done.count : null);
-          advanceOnce();
+          setDoneCount(
+            typeof done.pages === "number"
+              ? done.pages
+              : typeof done.count === "number"
+                ? done.count
+                : null,
+          );
+          setProgress((prev) => ({
+            ...prev,
+            status:
+              done.status === "failed" || done.status === "cancelled"
+                ? (done.status as LiveCrawlProgress["status"])
+                : "completed",
+            pages: Math.max(prev.pages, typeof done.pages === "number" ? done.pages : prev.pages),
+            elements: Math.max(
+              prev.elements,
+              typeof done.elements === "number" ? done.elements : prev.elements,
+            ),
+          }));
+          updateEvidence((current) =>
+            updateCrawlEvidence(current, {
+              status:
+                done.status === "failed" || done.status === "cancelled"
+                  ? done.status
+                  : "completed",
+              pages: typeof done.pages === "number" ? done.pages : current?.pages,
+              elements: typeof done.elements === "number" ? done.elements : current?.elements,
+              seedStatus: "pending",
+            }),
+          );
         },
       },
       controller.signal,
@@ -95,14 +237,11 @@ export function WebsiteStep({ machine }: { machine: OnboardingMachine }) {
       .catch((err) => {
         if ((err as { name?: string }).name === "AbortError") return;
         setWarning(copy.website.warnings.unavailable);
+        updateEvidence((current) => updateCrawlEvidence(current, { status: "failed", warnings: [copy.website.warnings.unavailable] }));
       })
-      .finally(() => {
-        if (cardsRef.current.length >= MIN_SNIPPETS_TO_ADVANCE) advanceOnce();
-        else window.setTimeout(advanceOnce, 2_500);
-      });
+      .finally(() => undefined);
 
     return () => {
-      window.clearTimeout(safetyTimer);
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -111,14 +250,69 @@ export function WebsiteStep({ machine }: { machine: OnboardingMachine }) {
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!url.trim() || submitted) return;
-    machine.setWebsite({ url: url.trim(), agentBrief: brief.trim() });
+    suppressStoredHydrationRef.current = false;
+    const websiteUrl = url.trim();
+    const agentBrief = brief.trim();
+    setActiveUrl(websiteUrl);
+    setActiveBrief(agentBrief);
+    setActiveBranding(undefined);
+    brandingRef.current = undefined;
+    const initialEvidence = createEmptyCrawlEvidence();
+    crawlEvidenceRef.current = initialEvidence;
+    setCrawlEvidence(initialEvidence);
+    setCards([]);
+    setDoneCount(null);
+    setWarning(null);
+    setProgress({ status: "starting", pages: 0, elements: 0, target: 3 });
+    machine.addWebsite({ url: websiteUrl, agentBrief, crawlEvidence: initialEvidence });
+    void updateProfile({
+      name: machine.state.organization?.name,
+      website: websiteUrl,
+      brief: agentBrief || undefined,
+    });
     setSubmitted(true);
   };
 
   const fillPct = useMemo(() => {
-    const target = doneCount ?? 8;
-    return Math.min(100, Math.round((cards.length / Math.max(1, target)) * 100));
-  }, [cards.length, doneCount]);
+    const target = progress.target ?? doneCount ?? 3;
+    const current = Math.max(progress.pages, cards.length);
+    return Math.min(100, Math.round((current / Math.max(1, target)) * 100));
+  }, [cards.length, doneCount, progress.pages, progress.target]);
+  const websites = allOnboardingWebsites(machine.state);
+  const running = submitted && (progress.status === "starting" || progress.status === "running");
+  const hasCrawlSignal =
+    Boolean(crawlEvidence && crawlEvidence.status !== "idle") ||
+    Boolean(crawlEvidence?.snippets.length) ||
+    Boolean(crawlEvidence?.warnings.length) ||
+    websites.some((site) => Boolean(site.crawlEvidence && site.crawlEvidence.status !== "idle"));
+  const showingStoredCrawl = !submitted && hasCrawlSignal;
+  const showingPostCrawlActions = submitted || showingStoredCrawl;
+  const canContinue =
+    hasCrawlSignal ||
+    ["completed", "failed", "cancelled"].includes(progress.status) ||
+    Boolean(crawlEvidence && crawlEvidence.snippets.length > 0);
+
+  const addAnotherWebsite = () => {
+    suppressStoredHydrationRef.current = true;
+    setSubmitted(false);
+    setUrl("");
+    setBrief("");
+    setActiveUrl("");
+    setActiveBrief("");
+    setActiveBranding(undefined);
+    setCards([]);
+    setDoneCount(null);
+    setWarning(null);
+    crawlEvidenceRef.current = undefined;
+    setCrawlEvidence(undefined);
+    setProgress({ status: "idle", pages: 0, elements: 0, target: 3 });
+  };
+
+  const removeWebsite = (targetUrl: string) => {
+    const nextState = removeWebsiteFromState(machine.state, targetUrl);
+    machine.removeWebsite(targetUrl);
+    if (!nextState.website) addAnotherWebsite();
+  };
 
   return (
     <>
@@ -141,7 +335,7 @@ export function WebsiteStep({ machine }: { machine: OnboardingMachine }) {
                 required
                 type="text"
                 inputMode="url"
-                disabled={submitted}
+                disabled={submitted || showingStoredCrawl}
                 value={url.replace(/^https?:\/\//, "")}
                 onChange={(e) =>
                   setUrl(e.target.value.replace(/^https?:\/\//, "").replace(/\s+/g, ""))
@@ -158,7 +352,7 @@ export function WebsiteStep({ machine }: { machine: OnboardingMachine }) {
             </span>
             <textarea
               rows={2}
-              disabled={submitted}
+              disabled={submitted || showingStoredCrawl}
               value={brief}
               onChange={(e) => setBrief(e.target.value)}
               placeholder={copy.website.briefPlaceholder}
@@ -166,26 +360,56 @@ export function WebsiteStep({ machine }: { machine: OnboardingMachine }) {
             />
           </label>
 
-          {!submitted ? (
+          {!showingPostCrawlActions ? (
             <div className="flex items-center gap-4">
               <PrimaryButton type="submit" disabled={!url.trim()}>
                 {copy.website.continue}
               </PrimaryButton>
-              <SkipLink onClick={() => machine.goTo("connect")}>{copy.website.skip}</SkipLink>
+              <SkipLink onClick={() => machine.goTo("organization")}>{copy.website.skip}</SkipLink>
             </div>
           ) : (
             <div className="flex flex-col gap-2">
-              <p className="font-inter text-[12px] text-[#6B6660]">
-                {formatOnboardingText(copy.website.fetching, { url })}
-              </p>
+              {submitted && (
+                <p className="font-inter text-[12px] text-[#6B6660]">
+                  {formatOnboardingText(copy.website.fetching, { url })}
+                </p>
+              )}
               {warning && <p className="font-inter text-[11px] text-[#B07C2E]">{warning}</p>}
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                <PrimaryButton onClick={() => machine.goTo("organization")} disabled={!canContinue}>
+                  {copy.website.continue}
+                </PrimaryButton>
+                <Link
+                  href="/ingestions"
+                  className="font-inter text-[11px] uppercase tracking-[0.18em] text-[#6B6660] transition-colors hover:text-[#111111]"
+                >
+                  Open Ingestions
+                </Link>
+                <button
+                  type="button"
+                  onClick={addAnotherWebsite}
+                  disabled={running}
+                  className="font-inter text-[11px] uppercase tracking-[0.18em] text-[#A09890] transition-colors hover:text-[#111111] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  {websiteActionCopy(locale).addWebsite}
+                </button>
+                <SkipLink onClick={() => machine.goTo("organization")}>{copy.website.skip}</SkipLink>
+              </div>
             </div>
           )}
         </form>
       </LeftPane>
 
       <RightPane>
-        <SnippetDropFolder cards={cards} fillPct={fillPct} />
+        <SnippetDropFolder
+          cards={cards}
+          fillPct={fillPct}
+          progress={progress}
+          evidence={crawlEvidence}
+          websites={websites}
+          locale={locale}
+          onRemove={removeWebsite}
+        />
       </RightPane>
     </>
   );
@@ -198,6 +422,23 @@ function toFallingCard(snippet: CrawlSnippet, index: number): FallingCard {
     xOffsetPct: ((seed % 56) - 28) / 1,
     delayMs: (index % 3) * 220 + Math.floor((seed >> 8) % 250),
     durationMs: 1_600 + Math.floor((seed >> 16) % 1_000),
+  };
+}
+
+function isTerminalEvidence(status: CrawlEvidence["status"] | undefined): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function mergeBrandingSignals(
+  current: BrandingSignals | undefined,
+  incoming: BrandingSignals,
+): BrandingSignals {
+  const palette = Array.from(new Set([...(current?.palette ?? []), ...(incoming.palette ?? [])]));
+  return {
+    ...current,
+    ...incoming,
+    themeColor: incoming.themeColor ?? current?.themeColor,
+    palette: palette.length > 0 ? palette : undefined,
   };
 }
 
@@ -226,6 +467,8 @@ function friendlyWarning(
     case "private_address":
       return warnings.privateAddress;
     case "control_unreachable":
+    case "auth_unavailable":
+    case "unauthorized":
       return warnings.unavailable;
     case "crawl_failed":
       return warnings.crawlFailed;
@@ -238,7 +481,23 @@ function friendlyWarning(
   }
 }
 
-function SnippetDropFolder({ cards, fillPct }: { cards: FallingCard[]; fillPct: number }) {
+function SnippetDropFolder({
+  cards,
+  fillPct,
+  progress,
+  evidence,
+  websites,
+  locale,
+  onRemove,
+}: {
+  cards: FallingCard[];
+  fillPct: number;
+  progress: LiveCrawlProgress;
+  evidence: CrawlEvidence | undefined;
+  websites: WebsitePayload[];
+  locale: OnboardingLocale;
+  onRemove: (url: string) => void;
+}) {
   return (
     <div className="relative flex size-full items-end justify-center px-10 pb-10">
       <div className="pointer-events-none absolute inset-x-0 top-0 h-[58%] overflow-hidden">
@@ -246,7 +505,18 @@ function SnippetDropFolder({ cards, fillPct }: { cards: FallingCard[]; fillPct: 
           <SnippetCard key={card.id} card={card} />
         ))}
       </div>
-      <FolderCard count={cards.length} fillPct={fillPct} />
+      <FolderCard
+        count={cards.length}
+        fillPct={fillPct}
+        progress={progress}
+        recentCards={cards.slice(-4).reverse()}
+      />
+      <WebsiteEvidencePanel
+        evidence={evidence}
+        websites={websites}
+        locale={locale}
+        onRemove={onRemove}
+      />
       <style>{`
         @keyframes velion-snippet-drop {
           0% { transform: translate(var(--vx, -50%), -20%) rotate(var(--vrot, 0deg)); opacity: 0; }
@@ -258,6 +528,75 @@ function SnippetDropFolder({ cards, fillPct }: { cards: FallingCard[]; fillPct: 
         }
       `}</style>
     </div>
+  );
+}
+
+function WebsiteEvidencePanel({
+  evidence,
+  websites,
+  locale,
+  onRemove,
+}: {
+  evidence: CrawlEvidence | undefined;
+  websites: WebsitePayload[];
+  locale: OnboardingLocale;
+  onRemove: (url: string) => void;
+}) {
+  const copy = websiteActionCopy(locale);
+  const contentTypes = evidence?.contentTypes.length ? evidence.contentTypes : inferredContentTypes(websites);
+  return (
+    <aside className="absolute right-5 top-5 w-[min(19rem,calc(100%-2.5rem))] rounded-xl border border-[#E5DFD3] bg-white/90 p-4 shadow-[0_18px_36px_rgba(31,27,23,0.12)] backdrop-blur">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-inter text-[9px] font-semibold uppercase tracking-[0.16em] text-[#A09890]">{copy.readOnly}</p>
+          <h3 className="mt-1 font-inter text-[14px] font-semibold leading-5 text-[#1F1B17]">{copy.title}</h3>
+        </div>
+        <span className="rounded-full bg-[#F5F1EC] px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] text-[#6B6660]">
+          {copy.status[evidence?.status ?? "idle"]}
+        </span>
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <Metric label={copy.pages} value={String(evidence?.pages ?? 0)} />
+        <Metric label={copy.elements} value={String(evidence?.elements ?? 0)} />
+        <Metric label={copy.sources} value={String(websites.length)} />
+      </div>
+      {contentTypes.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {contentTypes.slice(0, 5).map((type) => (
+            <span key={type} className="rounded-full bg-[#F0EFED] px-2 py-1 font-inter text-[10px] text-[#4E4A45]">
+              {typeLabel(type)}
+            </span>
+          ))}
+        </div>
+      )}
+      {websites.length > 0 && (
+        <div className="mt-3 border-t border-[#F1ECDF] pt-3">
+          <p className="font-inter text-[10px] uppercase tracking-[0.16em] text-[#A09890]">{copy.websites}</p>
+          <div className="mt-2 flex max-h-32 flex-col gap-1.5 overflow-y-auto">
+            {websites.map((site) => (
+              <div key={site.url} className="flex min-w-0 items-center justify-between gap-2 rounded-md bg-[#F7F4ED] px-2.5 py-2">
+                <span className="min-w-0">
+                  <span className="block truncate font-inter text-[11px] font-medium text-[#1F1B17]">{websiteHost(site.url)}</span>
+                  <span className="block truncate font-inter text-[9px] uppercase tracking-[0.12em] text-[#A09890]">
+                    {copy.sourceStatus[site.crawlEvidence?.seedStatus ?? "pending"]}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRemove(site.url)}
+                  className="shrink-0 font-inter text-[9px] font-semibold uppercase tracking-[0.12em] text-[#A09890] transition-colors hover:text-[#B42318]"
+                >
+                  {copy.remove}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <p className="mt-3 border-t border-[#F1ECDF] pt-3 font-inter text-[10.5px] leading-4 text-[#6B6660]">
+        {copy.knowledgeHint}
+      </p>
+    </aside>
   );
 }
 
@@ -354,22 +693,80 @@ function fileExt(contentType: string | undefined): string {
   return "FILE";
 }
 
-function FolderCard({ count, fillPct }: { count: number; fillPct: number }) {
-  const { copy } = useOnboardingCopy();
+function FolderCard({
+  count,
+  fillPct,
+  progress,
+  recentCards,
+}: {
+  count: number;
+  fillPct: number;
+  progress: LiveCrawlProgress;
+  recentCards: FallingCard[];
+}) {
+  const { copy, formatNumber } = useOnboardingCopy();
+  const liveCopy = copy.website.live;
+  const statusLabel = liveCopy.status[progress.status];
+  const itemCount = Math.max(progress.pages, count);
   return (
-    <div className="relative w-[18rem] rounded-2xl border border-[#E5DFD3] bg-white shadow-[0_8px_24px_rgba(31,27,23,0.10)]">
+    <div className="relative w-[20rem] rounded-2xl border border-[#E5DFD3] bg-white shadow-[0_8px_24px_rgba(31,27,23,0.10)]">
       <div className="absolute -top-3 left-6 h-3 w-20 rounded-t-md border border-b-0 border-[#E5DFD3] bg-white" />
       <div className="px-5 pb-4 pt-6">
-        <p className="font-inter text-[11px] uppercase tracking-[0.16em] text-[#A09890]">
-          {copy.website.folder.title}
-        </p>
+        <div className="flex items-start justify-between gap-3">
+          <p className="font-inter text-[11px] uppercase tracking-[0.16em] text-[#A09890]">
+            {copy.website.folder.title}
+          </p>
+          <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-[#F5F1EC] px-2 font-inter text-[10px] font-semibold uppercase tracking-[0.12em] text-[#6B6660]">
+            <span
+              className={`size-1.5 rounded-full ${
+                progress.status === "running" ? "bg-[#10B981]" : "bg-[#A09890]"
+              }`}
+            />
+            {statusLabel}
+          </span>
+        </div>
         <p
           className="mt-2 text-[20px] font-normal leading-[1.05] text-[#1F1B17]"
           style={{ fontFamily: "var(--font-geist-sans), var(--font-inter), Arial, sans-serif" }}
         >
-          {formatOnboardingText(copy.website.folder.gathered, { count })}
+          {formatOnboardingText(copy.website.folder.gathered, { count: itemCount })}
         </p>
         <p className="mt-1 font-inter text-[11px] text-[#6B6660]">{copy.website.folder.description}</p>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <Metric label={liveCopy.items} value={formatNumber(itemCount)} />
+          <Metric label={liveCopy.elements} value={formatNumber(progress.elements)} />
+        </div>
+        <div className="mt-4">
+          <p className="font-inter text-[10px] uppercase tracking-[0.16em] text-[#A09890]">
+            {liveCopy.recent}
+          </p>
+          <ul className="mt-2 min-h-[7.25rem] overflow-hidden border-y border-[#F1ECDF]">
+            {recentCards.length > 0 ? (
+              recentCards.map((card) => (
+                <li
+                  key={`${card.kind}:${card.url}`}
+                  className="flex h-9 items-center justify-between gap-3 border-t border-[#F1ECDF] first:border-t-0"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-inter text-[11px] text-[#1F1B17]">
+                      {card.title}
+                    </span>
+                    <span className="block truncate font-inter text-[9px] uppercase tracking-[0.12em] text-[#A09890]">
+                      {card.source === "live" ? liveCopy.live : liveCopy.seed}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-inter text-[10px] tabular-nums text-[#6B6660]">
+                    {formatNumber(card.elementCount ?? 0)}
+                  </span>
+                </li>
+              ))
+            ) : (
+              <li className="flex h-[7.25rem] items-center font-inter text-[11px] text-[#A09890]">
+                {liveCopy.empty}
+              </li>
+            )}
+          </ul>
+        </div>
       </div>
       <div className="border-t border-[#F1ECDF] px-5 py-3">
         <div className="flex items-center justify-between">
@@ -387,4 +784,97 @@ function FolderCard({ count, fillPct }: { count: number; fillPct: number }) {
       </div>
     </div>
   );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-[#F1ECDF] px-3 py-2">
+      <p className="font-inter text-[9px] uppercase tracking-[0.14em] text-[#A09890]">{label}</p>
+      <p className="mt-1 font-inter text-[16px] tabular-nums text-[#1F1B17]">{value}</p>
+    </div>
+  );
+}
+
+function websiteActionCopy(locale: OnboardingLocale) {
+  if (locale === "nb") {
+    return {
+      addWebsite: "Legg til nettside",
+      remove: "Fjern",
+      readOnly: "Kun innsyn",
+      title: "Dette fant Velion",
+      pages: "Sider",
+      elements: "Elementer",
+      sources: "Kilder",
+      websites: "Nettsider",
+      knowledgeHint: "Du kan redigere, fjerne og auditere kildene fra Knowledge etter onboarding.",
+      status: {
+        idle: "klar",
+        starting: "starter",
+        running: "crawler",
+        completed: "ferdig",
+        failed: "feilet",
+        cancelled: "stoppet",
+      },
+      sourceStatus: {
+        pending: "venter på datagraf",
+        ready: "klar i datagraf",
+        failed: "ikke lagt til",
+        removed: "fjernet",
+      },
+    } as const;
+  }
+  return {
+    addWebsite: "Add website",
+    remove: "Remove",
+    readOnly: "Read only",
+    title: "What Velion found",
+    pages: "Pages",
+    elements: "Elements",
+    sources: "Sources",
+    websites: "Websites",
+    knowledgeHint: "You can edit, remove and audit sources from Knowledge after onboarding.",
+    status: {
+      idle: "ready",
+      starting: "starting",
+      running: "crawling",
+      completed: "done",
+      failed: "failed",
+      cancelled: "stopped",
+    },
+    sourceStatus: {
+      pending: "pending graph",
+      ready: "ready in graph",
+      failed: "not added",
+      removed: "removed",
+    },
+  } as const;
+}
+
+function inferredContentTypes(websites: WebsitePayload[]): string[] {
+  const types = new Set<string>();
+  for (const site of websites) {
+    for (const snippet of site.crawlEvidence?.snippets ?? []) {
+      if (snippet.contentType) types.add(snippet.contentType);
+      else types.add(snippet.kind);
+    }
+  }
+  return Array.from(types).slice(0, 5);
+}
+
+function typeLabel(type: string): string {
+  const lower = type.toLowerCase();
+  if (lower.includes("html") || lower === "text") return "page";
+  if (lower.includes("image")) return "image";
+  if (lower.includes("pdf")) return "pdf";
+  if (lower.includes("json")) return "data";
+  if (lower === "link") return "link";
+  return lower.split(/[;/]/)[0].replace(/^application\//, "");
+}
+
+function websiteHost(value: string): string {
+  try {
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`).host.replace(/^www\./i, "");
+  } catch {
+    return value.replace(/^https?:\/\//i, "").split(/[/?#]/)[0] || value;
+  }
 }

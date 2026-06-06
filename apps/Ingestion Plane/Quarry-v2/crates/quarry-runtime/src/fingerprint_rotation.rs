@@ -98,10 +98,8 @@ mod tests {
 
     #[test]
     fn rotates_round_robin_then_exhausts() {
-        let r = FingerprintRotator::new(
-            vec!["chrome".into(), "firefox".into(), "safari".into()],
-            2,
-        );
+        let r =
+            FingerprintRotator::new(vec!["chrome".into(), "firefox".into(), "safari".into()], 2);
         assert_eq!(r.current(), "chrome");
         assert_eq!(r.on_block().as_deref(), Some("firefox"));
         assert_eq!(r.on_block().as_deref(), Some("safari"));

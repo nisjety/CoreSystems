@@ -1,4 +1,4 @@
-import { getCurrentAuthUser } from "@/lib/auth/onboarding-access";
+import { getCurrentAuthUser } from "@/lib/auth/current-auth-user";
 
 export type RequestActor = {
   userId: string;

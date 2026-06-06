@@ -1,7 +1,16 @@
 "use client";
 
 import { Check, ChevronDown, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import {
   VelionButton,
   VelionIconButton,
@@ -23,6 +32,7 @@ import {
   type WorkspaceSettingsSectionId,
   type SectionDetail,
 } from "@/features/settings-v2/lib/settings-sections";
+import { apiGet, apiSend } from "@/lib/api/client-envelope";
 
 export type { WorkspaceSettingsSectionId };
 export { workspaceSettingsSectionIds, workspaceSettingsSections, isWorkspaceSettingsSection, getWorkspaceSettingsSection };
@@ -38,11 +48,63 @@ type LiveMember = { userId: string; name?: string; email: string; role: string; 
 
 // memberRows removed — members are fetched live from /api/org/orgs/{orgId}/members
 
-const integrationRows = [
-  { name: "Intercom", detail: "Customer conversations", status: "Connect" },
-  { name: "Zendesk", detail: "Tickets and customer profile sync", status: "Connected" },
-  { name: "Gorgias", detail: "Commerce helpdesk sync", status: "Connect" },
-  { name: "Slack", detail: "Internal escalations", status: "Connected" },
+type IntegrationSettingsProvider = {
+  key: string;
+  label: string;
+  category: string;
+  configured: boolean;
+  status: string;
+  missingConfig: string[];
+  directOAuthReady: boolean;
+  capabilities: Array<{ key: string; sensitive?: boolean }>;
+};
+
+type IntegrationSettingsConnection = {
+  id: string;
+  providerKey: string;
+  providerLabel: string;
+  displayName: string;
+  status: string;
+  capabilities: string[];
+  scopeCount: number;
+  syncStatus: string;
+  latestSyncJob?: { status: string; updatedAt?: string };
+};
+
+type IntegrationSettingsSummary = {
+  metrics: {
+    connected: number;
+    failed: number;
+    readyProviders: number;
+    syncing: number;
+    totalProviders: number;
+  };
+  providers: IntegrationSettingsProvider[];
+  connections: IntegrationSettingsConnection[];
+};
+
+type ConnectSessionResult = {
+  authMode?: "direct-oauth";
+  connectUrl: string;
+  expiresAt?: string;
+  providerConfigKey?: string;
+  sessionToken?: string;
+};
+
+type IntegrationSettingsRow = {
+  action: "admin" | "connect" | "loading" | "missing" | "connected";
+  connection?: IntegrationSettingsConnection;
+  detail: string;
+  name: string;
+  provider: IntegrationSettingsProvider;
+  status: string;
+};
+
+const fallbackIntegrationRows = [
+  { name: "Microsoft 365", detail: "SharePoint, OneDrive, Outlook, Teams", status: "Loading", action: "loading" as const },
+  { name: "Google Workspace", detail: "Drive, Gmail, Calendar", status: "Loading", action: "loading" as const },
+  { name: "Slack", detail: "Workspace metadata and channels", status: "Loading", action: "loading" as const },
+  { name: "GitHub", detail: "Repositories, README, issues", status: "Loading", action: "loading" as const },
 ];
 
 const securityToggles = [
@@ -675,22 +737,155 @@ function OrgSecuritySection() {
 }
 
 function IntegrationsSection() {
+  const [summary, setSummary] = useState<IntegrationSettingsSummary | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<Record<string, string>>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  const eventSourcesRef = useRef<EventSource[]>([]);
+
+  const refresh = useCallback(() => {
+    const controller = new AbortController();
+    apiGet<IntegrationSettingsSummary>("/api/v1/integrations", { signal: controller.signal })
+      .then((payload) => {
+        setSummary(payload);
+        setLoadFailed(false);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setLoadFailed(true);
+      });
+
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    return refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    return () => {
+      for (const source of eventSourcesRef.current) source.close();
+      eventSourcesRef.current = [];
+    };
+  }, []);
+
+  const rows = buildIntegrationRows(summary);
+  const runAction = async (row: IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number], action: "connect" | "disconnect" | "reconnect" | "sync") => {
+    if (!("provider" in row)) return;
+    const busyKey = `${row.provider.key}:${action}`;
+    setActionBusy(busyKey);
+    setNotice(null);
+    try {
+      if (action === "connect") {
+        const session = await apiSend<ConnectSessionResult>(
+          `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
+          { bundles: ["knowledge"] },
+        );
+        await runSettingsOAuth(session);
+        setNotice(`${row.name} connected.`);
+      } else if (action === "reconnect" && row.connection) {
+        const session = await apiSend<ConnectSessionResult>(
+          `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}/reconnect-session`,
+          {},
+        );
+        await runSettingsOAuth(session);
+        setNotice(`${row.name} reconnected.`);
+      } else if (action === "disconnect" && row.connection) {
+        await apiSend<{ disconnected: boolean }>(
+          `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}`,
+          {},
+          "DELETE",
+        );
+        setNotice(`${row.name} disconnected.`);
+      } else if (action === "sync" && row.connection) {
+        const result = await apiSend<{ syncJob?: { id?: string; status?: string } }>(
+          "/api/v1/integrations/sync-jobs",
+          { connectionId: row.connection.id, reason: "settings_user_requested", mode: "incremental" },
+        );
+        const jobId = result.syncJob?.id;
+        setSyncProgress((prev) => ({
+          ...prev,
+          [row.connection!.id]: result.syncJob?.status ?? "queued",
+        }));
+        if (jobId) watchSyncProgress(row.connection.id, jobId, setSyncProgress, eventSourcesRef, refresh);
+      }
+      refresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Integration action failed.");
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   return (
     <>
       <SectionHeader title="Workspace integrations" description="Connect shared systems used by the workspace." />
+      {summary ? (
+        <div className="mb-4 grid gap-3 sm:grid-cols-3">
+          <Metric
+            label="Connected"
+            value={String(summary.metrics.connected)}
+            detail={`${summary.metrics.readyProviders} providers configured`}
+          />
+          <Metric
+            label="Syncing"
+            value={String(summary.metrics.syncing)}
+            detail="Live sync jobs visible from integration-corev2"
+          />
+          <Metric
+            label="Attention"
+            value={String(summary.metrics.failed)}
+            detail="Sources needing reconnect or review"
+          />
+        </div>
+      ) : null}
       <div className="divide-y divide-[#E8E8EA] overflow-hidden rounded-[18px] border border-[#E1E2E4] bg-white/42 dark:divide-white/10 dark:border-white/10 dark:bg-white/5">
-        {integrationRows.map((integration) => (
-          <div key={integration.name} className="flex items-center justify-between gap-4 px-5 py-4">
-            <div className="min-w-0">
-              <p className="text-[13px] font-medium text-[#111111] dark:text-white">{integration.name}</p>
-              <p className="mt-1 truncate text-[12px] text-[#737780] dark:text-[#A9ADB6]">{integration.detail}</p>
+        {rows.map((integration) => {
+          const rowSyncProgress =
+            "connection" in integration && integration.connection
+              ? syncProgress[integration.connection.id]
+              : undefined;
+          return (
+            <div key={integration.name} className="flex items-center justify-between gap-4 px-5 py-4">
+              <div className="min-w-0">
+                <p className="text-[13px] font-medium text-[#111111] dark:text-white">{integration.name}</p>
+                <p className="mt-1 truncate text-[12px] text-[#737780] dark:text-[#A9ADB6]">
+                  {rowSyncProgress ? `${integration.detail} · ${rowSyncProgress}` : integration.detail}
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                <span
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 text-[11px] font-medium",
+                    integration.status === "Connected" ? "border-[#1E7A45]/20 text-[#1E7A45]" : "",
+                    integration.status === "Missing config" ? "border-[#B45309]/20 text-[#B45309]" : "",
+                    integration.status === "Ready" ? "border-[#4256D6]/20 text-[#4256D6]" : "",
+                  )}
+                >
+                  {integration.status}
+                </span>
+                {"provider" in integration ? (
+                  <IntegrationRowActions
+                    busyKey={actionBusy}
+                    row={integration}
+                    onAction={runAction}
+                  />
+                ) : null}
+              </div>
             </div>
-            <VelionButton size="sm" radius="sm" className="shrink-0 px-3 text-[12px]">
-              {integration.status}
-            </VelionButton>
-          </div>
-        ))}
+          );
+        })}
       </div>
+      <p className="mt-3 text-[12px] leading-5 text-[#737780] dark:text-[#A9ADB6]">
+        Source contents and graph edits are managed later in Knowledge, where changes can be reviewed and audited.
+        {loadFailed ? " Integration state could not be refreshed from the local services." : ""}
+      </p>
+      {notice ? (
+        <p className="mt-2 text-[12px] leading-5 text-[#5E635B] dark:text-[#C8CED8]" role="status">
+          {notice}
+        </p>
+      ) : null}
       <FeaturePanel
         title="Webhook delivery"
         description="Delivery health for shared workspace automations."
@@ -710,6 +905,214 @@ function IntegrationsSection() {
       </FeaturePanel>
     </>
   );
+}
+
+function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Array<IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number]> {
+  if (!summary) return fallbackIntegrationRows;
+
+  const connectionsByProvider = new Map(summary.connections.map((connection) => [connection.providerKey, connection]));
+  return summary.providers.map((provider) => {
+    const connection = connectionsByProvider.get(provider.key);
+    if (connection) {
+      return {
+        name: provider.label,
+        detail: [
+          connection.displayName,
+          connection.capabilities.length > 0 ? `${connection.capabilities.length} capabilities` : null,
+          connection.scopeCount > 0 ? `${connection.scopeCount} scopes` : null,
+          connection.latestSyncJob?.status ? `sync ${connection.latestSyncJob.status}` : null,
+        ].filter(Boolean).join(" · "),
+        status: "Connected",
+        action: "connected",
+        connection,
+        provider,
+      };
+    }
+
+    if (!provider.configured) {
+      return {
+        name: provider.label,
+        detail: provider.missingConfig.length > 0
+          ? `Missing ${provider.missingConfig.slice(0, 2).join(", ")}`
+          : "Provider credentials are not configured",
+        status: "Missing config",
+        action: "missing",
+        provider,
+      };
+    }
+
+    if (!provider.directOAuthReady) {
+      return {
+        name: provider.label,
+        detail: `${provider.category} adapter is configured for admin setup`,
+        status: "Admin setup",
+        action: "admin",
+        provider,
+      };
+    }
+
+    return {
+      name: provider.label,
+      detail: `${provider.category} source · ${provider.capabilities.length} capabilities`,
+      status: "Ready",
+      action: "connect",
+      provider,
+    };
+  });
+}
+
+function IntegrationRowActions({
+  busyKey,
+  onAction,
+  row,
+}: {
+  busyKey: string | null;
+  onAction: (row: IntegrationSettingsRow, action: "connect" | "disconnect" | "reconnect" | "sync") => void;
+  row: IntegrationSettingsRow;
+}) {
+  const busy = busyKey?.startsWith(`${row.provider.key}:`) ?? false;
+  if (row.action === "missing" || row.action === "admin") {
+    return null;
+  }
+  if (row.action === "connect") {
+    return (
+      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "connect")} className="px-3 text-[12px]">
+        {busy ? "Opening" : "Connect"}
+      </VelionButton>
+    );
+  }
+  return (
+    <>
+      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "sync")} className="px-3 text-[12px]">
+        Sync
+      </VelionButton>
+      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "reconnect")} className="px-3 text-[12px]">
+        Reconnect
+      </VelionButton>
+      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "disconnect")} className="px-3 text-[12px] text-[#B42318]">
+        Disconnect
+      </VelionButton>
+    </>
+  );
+}
+
+function runSettingsOAuth(session: ConnectSessionResult): Promise<void> {
+  if (session.authMode !== "direct-oauth" || !session.connectUrl || !session.sessionToken) {
+    return Promise.reject(new Error("Integration service returned an incomplete connect session."));
+  }
+  const authWindow = openSettingsOAuthWindow();
+  if (!authWindow) {
+    return Promise.reject(new Error("The provider sign-in window was blocked by the browser."));
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      window.clearInterval(closePoll);
+      window.removeEventListener("message", onMessage);
+      callback();
+    };
+    const onMessage = (event: MessageEvent) => {
+      const payload = event.data;
+      if (!payload || typeof payload !== "object") return;
+      const record = payload as Record<string, unknown>;
+      if (record.type !== "velion.integration.connected") return;
+      if (record.sessionToken !== session.sessionToken) return;
+      if (record.status === "success") {
+        settle(resolve);
+        return;
+      }
+      settle(() => reject(new Error(typeof record.message === "string" ? record.message : "Provider authorization failed.")));
+    };
+    window.addEventListener("message", onMessage);
+    const timeout = window.setTimeout(() => {
+      settle(() => reject(new Error("Provider authorization timed out.")));
+    }, 120_000);
+    const closePoll = window.setInterval(() => {
+      if (!authWindow.closed) return;
+      settle(() => reject(new Error("Provider authorization was closed before it finished.")));
+    }, 500);
+    try {
+      authWindow.location.href = session.connectUrl;
+    } catch {
+      settle(() => reject(new Error("Provider authorization was closed before it finished.")));
+    }
+  });
+}
+
+function openSettingsOAuthWindow(): Window | null {
+  const width = Math.min(540, window.screen.width);
+  const height = Math.min(720, window.screen.height);
+  const left = Math.max(window.screen.width / 2 - width / 2, 0);
+  const top = Math.max(window.screen.height / 2 - height / 2, 0);
+  return window.open(
+    "",
+    "_blank",
+    [
+      `left=${left}`,
+      `top=${top}`,
+      `width=${width}`,
+      `height=${height}`,
+      "scrollbars=yes",
+      "resizable=yes",
+      "status=no",
+      "toolbar=no",
+      "location=no",
+      "menubar=no",
+    ].join(","),
+  );
+}
+
+function watchSyncProgress(
+  connectionId: string,
+  jobId: string,
+  setSyncProgress: Dispatch<SetStateAction<Record<string, string>>>,
+  eventSourcesRef: MutableRefObject<EventSource[]>,
+  onTerminal?: () => void,
+) {
+  const source = new EventSource(`/api/v1/integrations/sync-jobs/${encodeURIComponent(jobId)}/events`);
+  eventSourcesRef.current = [...eventSourcesRef.current, source];
+  const close = () => {
+    source.close();
+    eventSourcesRef.current = eventSourcesRef.current.filter((item) => item !== source);
+  };
+  const update = (event: MessageEvent) => {
+    const status = syncStatusFromEvent(event);
+    if (!status) return;
+    setSyncProgress((prev) => ({ ...prev, [connectionId]: status }));
+    if (["completed", "failed", "cancelled"].includes(status)) {
+      close();
+      onTerminal?.();
+    }
+  };
+  source.addEventListener("sync.queued", update);
+  source.addEventListener("sync.running", update);
+  source.addEventListener("sync.waiting_provider", update);
+  source.addEventListener("sync.handoff_data_plane", update);
+  source.addEventListener("sync.completed", update);
+  source.addEventListener("sync.failed", update);
+  source.addEventListener("sync.cancelled", update);
+  source.addEventListener("sync.snapshot", update);
+  source.onerror = () => {
+    close();
+  };
+}
+
+function syncStatusFromEvent(event: MessageEvent): string | null {
+  try {
+    const payload = JSON.parse(String(event.data)) as {
+      type?: string;
+      syncJob?: { status?: unknown };
+    };
+    if (payload.syncJob && typeof payload.syncJob.status === "string") return payload.syncJob.status;
+    if (typeof payload.type === "string") return payload.type.replace(/^sync\./, "");
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function FeaturePanel({

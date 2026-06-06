@@ -69,23 +69,24 @@ Requirements:
 
 This is the most common reason ingestion "does nothing". The token broker
 returns `404 connection_not_found` until the **organization** has completed the
-Microsoft OAuth consent flow. finspo cannot create this — it must already exist.
+Microsoft OAuth consent flow through `integration-corev2`. finspo cannot create
+this — it must already exist.
 
 How to create one (no velionv2 UI required):
 - `scripts/connect-microsoft.sh` — drives integration-core's
-  `connect-session` endpoint, prints the Nango consent URL.
+  `connect-session` endpoint, prints the Microsoft consent URL.
 - Or velion v1's existing integrations page.
-- Or the Nango Connect UI directly (`:3009` in the standard stack).
+- Or the Velion v2 onboarding/integrations page.
 
 ### Required Graph scopes
 
-The connection's OAuth scopes determine what finspo can do. Seeded defaults
-(`integration-core/scripts/seed-nango-providers.ts`, overridable via
-`MICROSOFT_SCOPES`):
+The connection's OAuth scopes determine what finspo can do. `integration-corev2`
+uses capability bundles instead of Nango provider seeds. The default onboarding
+and knowledge bundles request:
 
 ```
-offline_access, User.Read, Files.Read.All, Sites.Read.All,
-Team.ReadBasic.All, Channel.ReadBasic.All, Chat.Read
+openid, profile, email, offline_access, User.Read, Files.Read.All,
+Sites.Read.All, Team.ReadBasic.All, Channel.ReadBasic.All
 ```
 
 | finspo capability | Graph call | Scope needed | In default seed? |
@@ -97,10 +98,10 @@ Team.ReadBasic.All, Channel.ReadBasic.All, Chat.Read
 | **Execution: archive** | `PATCH /drives/{id}/items/{id}` | **`Files.ReadWrite.All`** | ❌ — must add |
 
 > Read-only ingest + governance reporting works out of the box. **Execution
-> (Phase 5) requires write scopes** that are not in the default seed — add
-> `Files.ReadWrite.All` to `MICROSOFT_SCOPES` and re-consent before enabling
-> execution, or every execute attempt will 403 (captured in the proposal's
-> `failure_reason`, so it fails safe).
+> (Phase 5) requires write scopes** that are not in the default bundle — request
+> the `sharepoint.write` capability and re-consent before enabling execution, or
+> every execute attempt will 403 (captured in the proposal's `failure_reason`,
+> so it fails safe).
 
 > The default flow uses **delegated** (user-context) tokens: finspo sees only
 > what the connecting user can access. Org-wide governance across all

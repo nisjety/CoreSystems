@@ -23,6 +23,15 @@ function extraCookieNames(): string[] {
 }
 
 export function proxy(request: NextRequest) {
+  const playwrightAuth =
+    process.env.NODE_ENV !== "production" &&
+    process.env.PLAYWRIGHT_TEST_AUTH === "1" &&
+    Boolean(request.headers.get("x-playwright-auth-user-id")?.trim())
+
+  if (playwrightAuth) {
+    return NextResponse.next()
+  }
+
   const extra = extraCookieNames()
   const looksAuthenticated = request.cookies
     .getAll()

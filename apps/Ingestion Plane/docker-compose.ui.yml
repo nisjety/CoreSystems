@@ -21,6 +21,7 @@ services:
       - ingestion-net
 
   connector-runtime-engine:
+    profiles: ["legacy-nango"]
     environment:
       NANGO_PUBLIC_CONNECT_URL: ${CONNECTOR_RUNTIME_CONNECT_URL:-http://localhost:3009}
       NANGO_CONNECT_UI_PORT: ${CONNECTOR_RUNTIME_CONNECT_PORT:-3009}

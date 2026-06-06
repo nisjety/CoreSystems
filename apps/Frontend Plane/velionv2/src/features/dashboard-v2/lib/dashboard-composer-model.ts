@@ -31,6 +31,9 @@ export type DashboardComposerModel = "GPT-4o Mini" | "GPT-4.1" | "Claude Sonnet"
 export type DashboardComposerProps = {
   browseWeb: boolean;
   deepSearch: boolean;
+  /** Image-generation intent toggle. Optional — when `onImageModeChange` is
+   *  omitted the "Bilde" pill is hidden (e.g. the dashboard-home composer). */
+  imageMode?: boolean;
   files: ComposerFile[];
   historyOpen: boolean;
   message: string;
@@ -44,6 +47,7 @@ export type DashboardComposerProps = {
   voiceMode: boolean;
   onBrowseWebChange: (active: boolean) => void;
   onDeepSearchChange: (active: boolean) => void;
+  onImageModeChange?: (active: boolean) => void;
   onFilesChange: (files: ComposerFile[]) => void;
   onHistoryOpenChange: (open: boolean) => void;
   onMessageChange: (message: string) => void;

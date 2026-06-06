@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import {
   ArrowUp,
   AudioWaveform,
   CirclePlus,
   Globe2,
+  ImagePlus,
   Lightbulb,
   Mic,
   Telescope,
@@ -23,6 +25,8 @@ import { cn } from "@/lib/utils";
 export function DashboardComposer({
   browseWeb,
   deepSearch,
+  imageMode,
+  onImageModeChange,
   files,
   historyOpen,
   message,
@@ -66,6 +70,7 @@ export function DashboardComposer({
     setAutocomplete,
     setAutocompleteIndex,
     addFiles,
+    addExternalFiles,
     removeFile,
     updateSettings,
     openHistoryPanel,
@@ -98,8 +103,46 @@ export function DashboardComposer({
     onSuggestionsOpenChange,
   });
 
+  const [dragActive, setDragActive] = useState(false);
+
   return (
-    <div ref={composerRootRef} className="relative w-full">
+    <div
+      ref={composerRootRef}
+      className={cn("relative w-full rounded-2xl", dragActive && "ring-2 ring-[#C07B33]/40")}
+      onDragOver={(event) => {
+        if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) {
+          event.preventDefault();
+          setDragActive(true);
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setDragActive(false);
+        }
+      }}
+      onDrop={(event) => {
+        const dropped = Array.from(event.dataTransfer?.files ?? []);
+        if (dropped.length > 0) {
+          event.preventDefault();
+          addExternalFiles(dropped);
+        }
+        setDragActive(false);
+      }}
+      onPaste={(event) => {
+        const images = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+          file.type.startsWith("image/"),
+        );
+        if (images.length > 0) {
+          event.preventDefault();
+          addExternalFiles(images);
+        }
+      }}
+    >
+      {dragActive ? (
+        <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-2xl border-2 border-dashed border-[#C07B33] bg-[#FBF0E4]/70 text-[13px] font-semibold text-[#C07B33] backdrop-blur-sm dark:bg-[#2A2014]/70">
+          Slipp for å legge ved
+        </div>
+      ) : null}
       <DashboardComposerControls
         historyOpen={historyOpen}
         historyTriggerRef={historyTriggerRef}
@@ -243,6 +286,25 @@ export function DashboardComposer({
                   Search
                 </button>
               </TopLayerTooltip>
+              {onImageModeChange ? (
+                <TopLayerTooltip label="Generer bilde" placement="top">
+                  <button
+                    type="button"
+                    aria-pressed={Boolean(imageMode)}
+                    onClick={() => onImageModeChange(!imageMode)}
+                    className={cn(
+                      "flex items-center gap-1.5 rounded-lg px-3 py-[7px] text-[13px] font-semibold transition-colors",
+                      imageMode
+                        ? "bg-[#FBF0E4] text-[#C07B33] dark:bg-[#2A2014] dark:text-[#E29A4D]"
+                        : "text-[#777] hover:bg-[#FBF0E4]/60 hover:text-[#C07B33] dark:text-[#AEB4C0]",
+                    )}
+                    aria-label="Generer bilde"
+                  >
+                    <ImagePlus className="size-4" />
+                    Bilde
+                  </button>
+                </TopLayerTooltip>
+              ) : null}
             </div>
 
             <div className="flex items-center justify-end gap-1.5">
@@ -298,12 +360,14 @@ export function DashboardComposer({
           onSettingsChange={updateSettings}
         />
       ) : null}
-      <RealtimeVoiceModal
-        language={settings.voiceLang}
-        model={selectedModel}
-        open={voiceMode}
-        onClose={() => onVoiceModeChange(false)}
-      />
+      {voiceMode ? (
+        <RealtimeVoiceModal
+          language={settings.voiceLang}
+          model={selectedModel}
+          onClose={() => onVoiceModeChange(false)}
+          onTranscript={(text) => onMessageChange(message.trim() ? `${message.trim()} ${text}` : text)}
+        />
+      ) : null}
     </div>
   );
 }

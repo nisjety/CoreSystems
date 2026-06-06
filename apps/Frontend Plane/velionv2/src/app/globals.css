@@ -11,9 +11,24 @@
 	--velion-bg-mist: #e8d8c8;
 	--velion-bg-white: #f7f4ee;
 	--velion-page-background:
-		radial-gradient(ellipse at 50% 112%, rgba(238, 122, 80, 0.12) 0%, rgba(238, 122, 80, 0.065) 23%, rgba(247, 244, 238, 0) 56%),
-		radial-gradient(ellipse at 84% 92%, rgba(247, 200, 168, 0.2) 0%, rgba(247, 200, 168, 0.095) 28%, rgba(247, 244, 238, 0) 55%),
-		radial-gradient(ellipse at 10% 95%, rgba(232, 216, 200, 0.28) 0%, rgba(232, 216, 200, 0.13) 30%, rgba(247, 244, 238, 0) 58%),
+		radial-gradient(
+			ellipse at 50% 112%,
+			rgba(238, 122, 80, 0.12) 0%,
+			rgba(238, 122, 80, 0.065) 23%,
+			rgba(247, 244, 238, 0) 56%
+		),
+		radial-gradient(
+			ellipse at 84% 92%,
+			rgba(247, 200, 168, 0.2) 0%,
+			rgba(247, 200, 168, 0.095) 28%,
+			rgba(247, 244, 238, 0) 55%
+		),
+		radial-gradient(
+			ellipse at 10% 95%,
+			rgba(232, 216, 200, 0.28) 0%,
+			rgba(232, 216, 200, 0.13) 30%,
+			rgba(247, 244, 238, 0) 58%
+		),
 		linear-gradient(
 			180deg,
 			#fffdf9 0%,
@@ -38,6 +53,7 @@
 	--velion-accent: #ee7a50;
 	--velion-accent-strong: #dd7a1f;
 	--velion-accent-soft: #f6af6e;
+	--velion-sidebar-accent: var(--velion-accent);
 	--velion-surface: #ffffff;
 	--velion-surface-soft: #f7f7f8;
 	--velion-surface-warm: #faf8f5;
@@ -113,7 +129,8 @@
 	--color-linear-border: var(--linear-border);
 	--color-linear-accent: var(--linear-accent);
 	--font-sans:
-		var(--font-inter), var(--font-geist-sans), "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+		var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
+		"Geist Fallback", ui-sans-serif, system-ui, sans-serif;
 	--font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
 }
 
@@ -123,7 +140,9 @@ body {
 	overflow-x: hidden;
 	background: var(--velion-page-background);
 	color: var(--foreground);
-	font-family: var(--font-inter), var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+	font-family:
+		var(--font-inter), var(--font-geist-sans), ui-sans-serif, system-ui,
+		sans-serif;
 }
 
 .velion-global-background {
@@ -163,9 +182,99 @@ button:disabled {
 
 .velion-sidebar-type {
 	font-family:
-		var(--font-inter),
-		var(--font-geist-sans),
-		var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
+		var(--font-inter), var(--font-geist-sans),
+		var(
+			--font-sans,
+			"Inter",
+			"Geist",
+			"Geist Fallback",
+			ui-sans-serif,
+			system-ui,
+			sans-serif
+		);
+}
+
+.velion-sidebar-themed {
+	border-right: 1px solid
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 20%,
+			#e5e7eb
+		);
+	background: linear-gradient(
+		to right,
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 18%,
+			#f7f7f8
+		),
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 11%,
+			#f7f7f8
+		)
+	);
+}
+
+.velion-sidebar-themed::before {
+	content: none;
+}
+
+.velion-sidebar-mini-active {
+	background: rgba(255, 255, 255, 0.64);
+	color: #1c1c1e;
+	box-shadow:
+		0 1px 2px rgba(15, 16, 20, 0.05),
+		inset 0 0 0 1px rgba(15, 16, 20, 0.05);
+}
+
+.velion-sidebar-mini-active::before {
+	content: none;
+}
+
+.velion-sidebar-panel-active {
+	background: rgba(255, 255, 255, 0.58);
+	box-shadow: inset 2px 0 0 rgba(28, 28, 30, 0.42);
+}
+
+.velion-sidebar-tab-active {
+	border-color: #1c1c1e;
+}
+
+.dark .velion-sidebar-themed {
+	border-right-color: color-mix(
+		in oklab,
+		var(--velion-sidebar-accent, var(--velion-accent)) 22%,
+		#2a2c31
+	);
+	background: linear-gradient(
+		to right,
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 18%,
+			#101114
+		),
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 10%,
+			#101114
+		)
+	);
+}
+
+.dark .velion-sidebar-mini-active {
+	background: rgba(255, 255, 255, 0.1);
+	color: #ffffff;
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.dark .velion-sidebar-panel-active {
+	background: rgba(255, 255, 255, 0.08);
+	box-shadow: inset 2px 0 0 rgba(255, 255, 255, 0.5);
+}
+
+.dark .velion-sidebar-tab-active {
+	border-color: #ffffff;
 }
 
 .velion-sidebar-title {
@@ -269,7 +378,7 @@ button:disabled {
 
 .velion-sidebar-search-input:focus {
 	border-color: #b9c2d2;
-	box-shadow: 0 0 0 2px color-mix(in oklab, var(--velion-accent-strong) 20%, transparent);
+	box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.1);
 }
 
 .dark .velion-sidebar-search-input {
@@ -455,7 +564,11 @@ button:disabled {
 }
 
 .velion-ui-focus:focus-visible {
-	outline-color: color-mix(in oklab, var(--velion-accent-strong) 72%, transparent);
+	outline-color: color-mix(
+		in oklab,
+		var(--velion-accent-strong) 72%,
+		transparent
+	);
 }
 
 .velion-button {
@@ -712,7 +825,8 @@ button:disabled {
 
 .velion-field-compact:focus,
 .velion-textarea-compact:focus {
-	box-shadow: 0 0 0 2px color-mix(in oklab, var(--velion-text) 10%, transparent);
+	box-shadow: 0 0 0 2px
+		color-mix(in oklab, var(--velion-text) 10%, transparent);
 }
 
 .dark .velion-field-compact,
@@ -927,8 +1041,13 @@ button:disabled {
 
 .velion-input:focus,
 .velion-textarea:focus {
-	border-color: color-mix(in oklab, var(--velion-accent-strong) 56%, var(--velion-border-soft));
-	box-shadow: 0 0 0 3px color-mix(in oklab, var(--velion-accent-strong) 12%, transparent);
+	border-color: color-mix(
+		in oklab,
+		var(--velion-accent-strong) 56%,
+		var(--velion-border-soft)
+	);
+	box-shadow: 0 0 0 3px
+		color-mix(in oklab, var(--velion-accent-strong) 12%, transparent);
 }
 
 .dark .velion-input,
@@ -1065,7 +1184,8 @@ button:disabled {
 .velion-settings-field:focus {
 	border-color: color-mix(in oklab, var(--velion-accent-strong) 58%, #dcdddf);
 	background: #ffffff;
-	box-shadow: 0 0 0 4px color-mix(in oklab, var(--velion-accent-strong) 10%, transparent);
+	box-shadow: 0 0 0 4px
+		color-mix(in oklab, var(--velion-accent-strong) 10%, transparent);
 }
 
 .dark .velion-settings-field {
@@ -1079,7 +1199,11 @@ button:disabled {
 }
 
 .dark .velion-settings-field:focus {
-	border-color: color-mix(in oklab, var(--velion-accent-soft) 58%, var(--velion-dark-border));
+	border-color: color-mix(
+		in oklab,
+		var(--velion-accent-soft) 58%,
+		var(--velion-dark-border)
+	);
 	background: rgba(255, 255, 255, 0.08);
 }
 
@@ -1143,7 +1267,46 @@ button:disabled {
 
 .dashboard-navbar-bg {
 	isolation: isolate;
-	background-color: var(--linear-sidebar-bg);
+	border-bottom: 1px solid
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 16%,
+			#e5e7eb
+		);
+	background: linear-gradient(
+		to right,
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 16%,
+			#f7f7f8
+		),
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 9%,
+			#f7f7f8
+		)
+	);
+}
+
+.dark .dashboard-navbar-bg {
+	border-bottom-color: color-mix(
+		in oklab,
+		var(--velion-sidebar-accent, var(--velion-accent)) 20%,
+		#2a2c31
+	);
+	background: linear-gradient(
+		to right,
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 16%,
+			#1e2027
+		),
+		color-mix(
+			in oklab,
+			var(--velion-sidebar-accent, var(--velion-accent)) 9%,
+			#1e2027
+		)
+	);
 }
 
 .dashboard-main-panel {
@@ -1151,8 +1314,7 @@ button:disabled {
 	border-left: 1px solid rgba(224, 225, 229, 0.95);
 	border-top-left-radius: 24px;
 	background-clip: padding-box;
-	box-shadow:
-		inset 10px 10px 18px rgba(255, 255, 255, 0.34);
+	box-shadow: inset 10px 10px 18px rgba(255, 255, 255, 0.34);
 }
 
 .dark .dashboard-main-panel {
@@ -1162,12 +1324,17 @@ button:disabled {
 }
 
 .velion-home-stage {
+	--velion-home-center-gap-offset: clamp(29px, 3.9vh, 37px);
 	z-index: 0;
-	padding-top: 1vh;
-	padding-bottom: 16px;
+	padding-top: 0;
+	padding-bottom: 0;
 }
 
 .velion-home-tabs {
+	position: absolute;
+	top: 0;
+	right: 0;
+	left: 0;
 	padding-top: 12px;
 	padding-bottom: 6px;
 }
@@ -1181,9 +1348,25 @@ button:disabled {
 	font-size: 12.5px;
 }
 
+.velion-home-bands {
+	position: absolute;
+	inset: 0;
+	display: grid;
+	height: 100%;
+	grid-template-rows: 31% 25.5% minmax(0, 1fr);
+}
+
+.velion-home-band {
+	display: flex;
+	min-height: 0;
+	align-items: center;
+	justify-content: center;
+}
+
 .velion-home-header {
-	padding-top: 44px;
-	padding-bottom: 22px;
+	align-items: flex-end;
+	padding-top: 42px;
+	padding-bottom: var(--velion-home-center-gap-offset);
 }
 
 .velion-home-plan {
@@ -1198,24 +1381,32 @@ button:disabled {
 
 .velion-home-title {
 	max-width: 760px;
-	margin-bottom: 44px;
+	margin-bottom: 0;
 	font-size: 48px;
 }
 
 .velion-home-composer-section {
-	padding-top: 30px;
+	padding-top: 0;
 }
 
 .velion-home-composer {
-	max-width: 760px;
+	max-width: 820px;
+}
+
+.velion-home-composer.velion-home-composer-expanded {
+	max-width: 1180px;
 }
 
 .velion-home-cards {
+	flex-direction: column;
+	justify-content: flex-start;
 	max-width: 1120px;
-	margin-top: 28px;
+	margin-top: 0;
+	padding-top: var(--velion-home-center-gap-offset);
 }
 
 .velion-home-card-grid {
+	width: 100%;
 	gap: 18px;
 }
 
@@ -1296,6 +1487,407 @@ button:disabled {
 	transform: scale(0.84);
 }
 
+.velion-search-expanded-shell {
+	animation: velionSearchExpandIn 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+	transform-origin: 50% 0%;
+}
+
+.velion-chat-page {
+	font-family:
+		var(--font-geist-sans), var(--font-inter),
+		var(--font-sans, "Geist", "Inter", ui-sans-serif, system-ui, sans-serif);
+	font-feature-settings:
+		"kern" 1,
+		"liga" 1,
+		"calt" 1;
+	letter-spacing: 0;
+}
+
+.velion-chat-launch-out {
+	animation: velionChatLaunchOut 300ms cubic-bezier(0.65, 0, 0.35, 1) both;
+	transform-origin: 50% 100%;
+	z-index: 5;
+}
+
+.velion-chat-launch-out .velion-composer-shell {
+	animation: velionChatComposerLaunchShell 300ms cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+
+.velion-chat-launch-out .velion-composer-control {
+	animation: velionChatLaunchControlsOut 180ms ease-out both;
+}
+
+/* Home → chat hand-off: the whole landing recedes cohesively as one unit
+   while the composer glides down toward where the chat dock will appear.
+   Fading the entire stage guarantees a clean end state even if the /chat
+   route is slow to load — never a half-empty "broken" frame. */
+.velion-home-launching {
+	animation: velionHomeStageLaunchOut 300ms cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+
+/* The post-submit receipt pill must not pop in mid-transition. */
+.velion-home-launching .velion-composer-turn-receipt {
+	display: none;
+}
+
+@keyframes velionHomeStageLaunchOut {
+	0% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+		filter: blur(0);
+	}
+
+	55% {
+		opacity: 1;
+	}
+
+	100% {
+		opacity: 0;
+		transform: translateY(20px) scale(0.985);
+		filter: blur(2px);
+	}
+}
+
+.velion-chat-page-launch .velion-chat-thread {
+	animation: velionChatThreadLaunchIn 620ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+.velion-chat-page-launch .velion-chat-message:first-of-type {
+	animation: velionChatUserBubbleLand 520ms cubic-bezier(0.19, 1, 0.22, 1) both;
+	transform-origin: 80% 0%;
+}
+
+.velion-chat-page-launch .velion-chat-message:nth-of-type(2) {
+	animation: velionChatAssistantLand 620ms cubic-bezier(0.19, 1, 0.22, 1) 100ms both;
+	transform-origin: 16% 0%;
+}
+
+.velion-chat-page-launch .velion-chat-composer-dock {
+	animation: velionChatComposerDockLaunchIn 520ms cubic-bezier(0.19, 1, 0.22, 1) 140ms both;
+}
+
+.velion-chat-launch-wash {
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	pointer-events: none;
+	background:
+		radial-gradient(ellipse at 50% 82%, rgba(238, 122, 80, 0.12), transparent 46%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.48), rgba(255, 255, 255, 0));
+	animation: velionChatLaunchWash 760ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+.dark .velion-chat-launch-wash {
+	background:
+		radial-gradient(ellipse at 50% 82%, rgba(94, 106, 210, 0.18), transparent 46%),
+		linear-gradient(180deg, rgba(16, 17, 20, 0.44), rgba(16, 17, 20, 0));
+}
+
+.velion-chat-thread {
+	animation: velionChatThreadIn 320ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+.velion-chat-message {
+	animation: velionChatMessageIn 380ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+.velion-chat-message:nth-of-type(2) {
+	animation-delay: 70ms;
+}
+
+.velion-chat-message:nth-of-type(3) {
+	animation-delay: 120ms;
+}
+
+.velion-chat-bubble {
+	font-weight: 430;
+}
+
+.velion-chat-prose pre code {
+	border: 0;
+	background: transparent;
+	padding: 0;
+	color: inherit;
+}
+
+/* Streaming caret — blinks at the end of the response while tokens arrive. */
+.velion-chat-streaming .velion-chat-prose > :last-child::after {
+	content: "";
+	display: inline-block;
+	width: 7px;
+	height: 1.05em;
+	margin-left: 3px;
+	vertical-align: -0.16em;
+	border-radius: 1.5px;
+	background: #c07b33;
+	animation: velionCaretBlink 1s steps(1) infinite;
+}
+
+@keyframes velionCaretBlink {
+	0%,
+	50% {
+		opacity: 1;
+	}
+
+	50.01%,
+	100% {
+		opacity: 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-chat-streaming .velion-chat-prose > :last-child::after {
+		animation: none;
+	}
+}
+
+.velion-voice-pulse {
+	animation: velionVoicePulse 1.4s ease-in-out infinite;
+}
+
+@keyframes velionVoicePulse {
+	0%,
+	100% {
+		box-shadow: 0 0 0 0 rgba(192, 123, 51, 0.35);
+	}
+
+	50% {
+		box-shadow: 0 0 0 8px rgba(192, 123, 51, 0);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-voice-pulse {
+		animation: none;
+	}
+}
+
+.velion-thinking-dots {
+	display: inline-flex;
+	gap: 4px;
+}
+
+.velion-thinking-dots span {
+	width: 5px;
+	height: 5px;
+	border-radius: 9999px;
+	background: currentColor;
+	opacity: 0.4;
+	animation: velionThinkingDot 1s ease-in-out infinite;
+}
+
+.velion-thinking-dots span:nth-child(2) {
+	animation-delay: 0.15s;
+}
+
+.velion-thinking-dots span:nth-child(3) {
+	animation-delay: 0.3s;
+}
+
+@keyframes velionThinkingDot {
+	0%,
+	100% {
+		opacity: 0.3;
+		transform: translateY(0);
+	}
+
+	50% {
+		opacity: 0.9;
+		transform: translateY(-2px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-thinking-dots span {
+		animation: none;
+		opacity: 0.6;
+	}
+}
+
+.velion-chat-composer-dock {
+	box-shadow: 0 -18px 48px rgba(252, 252, 253, 0.94);
+	animation: velionChatComposerDockIn 360ms cubic-bezier(0.19, 1, 0.22, 1)
+		both;
+}
+
+.dark .velion-chat-composer-dock {
+	box-shadow: 0 -18px 48px rgba(16, 17, 20, 0.94);
+}
+
+@keyframes velionSearchExpandIn {
+	from {
+		opacity: 0.78;
+		transform: translateY(18px) scaleX(0.52) scaleY(0.9);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0) scaleX(1) scaleY(1);
+	}
+}
+
+@keyframes velionChatLaunchOut {
+	0% {
+		transform: translateY(0) scale(1);
+	}
+
+	100% {
+		transform: translateY(52px) scale(0.97);
+	}
+}
+
+@keyframes velionChatComposerLaunchShell {
+	0% {
+		transform: translateY(0) scale(1);
+		box-shadow:
+			0 20px 60px rgba(20, 21, 24, 0.08),
+			0 0 0 1px rgba(0, 0, 0, 0.03);
+	}
+
+	100% {
+		transform: translateY(44px) scaleX(0.95) scaleY(0.92);
+		box-shadow:
+			0 10px 30px rgba(20, 21, 24, 0.05),
+			0 0 0 1px rgba(0, 0, 0, 0.02);
+	}
+}
+
+@keyframes velionChatLaunchControlsOut {
+	0% {
+		opacity: 1;
+		transform: translateY(0);
+	}
+
+	100% {
+		opacity: 0;
+		transform: translateY(10px);
+	}
+}
+
+@keyframes velionChatLaunchWash {
+	0% {
+		opacity: 0;
+		transform: scaleY(0.7);
+	}
+
+	45% {
+		opacity: 1;
+	}
+
+	100% {
+		opacity: 0;
+		transform: scaleY(1.08);
+	}
+}
+
+@keyframes velionChatThreadLaunchIn {
+	0% {
+		opacity: 0.36;
+		transform: translateY(34px) scale(0.982);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+}
+
+@keyframes velionChatUserBubbleLand {
+	0% {
+		opacity: 0;
+		transform: translateY(-18px) translateX(42px) scale(0.86);
+		filter: blur(6px);
+	}
+
+	60% {
+		opacity: 1;
+		filter: blur(0);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) translateX(0) scale(1);
+		filter: blur(0);
+	}
+}
+
+@keyframes velionChatAssistantLand {
+	0% {
+		opacity: 0;
+		transform: translateY(24px) translateX(-18px);
+		filter: blur(5px);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) translateX(0);
+		filter: blur(0);
+	}
+}
+
+@keyframes velionChatThreadIn {
+	0% {
+		opacity: 0.72;
+		transform: translateY(18px);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@keyframes velionChatMessageIn {
+	0% {
+		opacity: 0;
+		transform: translateY(16px) scale(0.99);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+}
+
+@keyframes velionChatComposerDockIn {
+	0% {
+		opacity: 0;
+		transform: translateY(22px) scale(0.985);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+}
+
+@keyframes velionChatComposerDockLaunchIn {
+	0% {
+		opacity: 0;
+		transform: translateY(38px) scaleX(0.92) scaleY(0.86);
+		filter: blur(3px);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) scaleX(1) scaleY(1);
+		filter: blur(0);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-chat-launch-out,
+	.velion-chat-launch-out .velion-composer-shell,
+	.velion-chat-launch-out .velion-composer-control,
+	.velion-home-launching,
+	.velion-chat-thread,
+	.velion-chat-message,
+	.velion-chat-composer-dock,
+	.velion-chat-launch-wash {
+		animation: none;
+	}
+}
+
 @media (min-width: 640px) {
 	.velion-home-title {
 		font-size: 62px;
@@ -1304,7 +1896,7 @@ button:disabled {
 
 @media (max-height: 900px) and (min-width: 1024px) {
 	.velion-home-stage {
-		padding-bottom: 10px;
+		padding-bottom: 0;
 	}
 
 	.velion-home-tabs {
@@ -1313,8 +1905,8 @@ button:disabled {
 	}
 
 	.velion-home-header {
-		padding-top: 24px;
-		padding-bottom: 10px;
+		padding-top: 34px;
+		padding-bottom: 0;
 	}
 
 	.velion-home-plan {
@@ -1322,21 +1914,26 @@ button:disabled {
 	}
 
 	.velion-home-title {
-		margin-bottom: 31px;
+		margin-bottom: 0;
 		font-size: clamp(45px, 6.2vh, 52px);
 	}
 
 	.velion-home-composer-section {
-		padding-top: 18px;
+		padding-top: 0;
 	}
 
 	.velion-home-composer {
-		max-width: 680px;
+		max-width: 760px;
+	}
+
+	.velion-home-composer.velion-home-composer-expanded {
+		max-width: 1180px;
 	}
 
 	.velion-home-cards {
 		max-width: 960px;
-		margin-top: 19px;
+		margin-top: 0;
+		padding-top: var(--velion-home-center-gap-offset);
 	}
 
 	.velion-home-card-grid {
@@ -1407,8 +2004,8 @@ button:disabled {
 	}
 
 	.velion-home-header {
-		padding-top: 20px;
-		padding-bottom: 8px;
+		padding-top: 30px;
+		padding-bottom: 0;
 	}
 
 	.velion-home-plan {
@@ -1417,16 +2014,16 @@ button:disabled {
 
 	.velion-home-title {
 		max-width: 620px;
-		margin-bottom: 22px;
+		margin-bottom: 0;
 		font-size: 42px;
 	}
 
 	.velion-home-composer-section {
-		padding-top: 12px;
+		padding-top: 0;
 	}
 
 	.velion-home-composer {
-		max-width: 620px;
+		max-width: 700px;
 	}
 
 	.velion-composer-control {
@@ -1448,7 +2045,8 @@ button:disabled {
 
 	.velion-home-cards {
 		max-width: 830px;
-		margin-top: 16px;
+		margin-top: 0;
+		padding-top: var(--velion-home-center-gap-offset);
 	}
 
 	.velion-home-card-grid {
@@ -1495,9 +2093,21 @@ button:disabled {
 	pointer-events: none;
 	opacity: 0.26;
 	background-image:
-		radial-gradient(circle at 18% 22%, rgba(0, 0, 0, 0.16) 0 0.6px, transparent 0.8px),
-		radial-gradient(circle at 78% 42%, rgba(255, 255, 255, 0.92) 0 0.7px, transparent 0.9px),
-		radial-gradient(circle at 44% 72%, rgba(0, 0, 0, 0.1) 0 0.5px, transparent 0.8px);
+		radial-gradient(
+			circle at 18% 22%,
+			rgba(0, 0, 0, 0.16) 0 0.6px,
+			transparent 0.8px
+		),
+		radial-gradient(
+			circle at 78% 42%,
+			rgba(255, 255, 255, 0.92) 0 0.7px,
+			transparent 0.9px
+		),
+		radial-gradient(
+			circle at 44% 72%,
+			rgba(0, 0, 0, 0.1) 0 0.5px,
+			transparent 0.8px
+		);
 	background-size:
 		3px 3px,
 		4px 4px,
@@ -1508,9 +2118,16 @@ button:disabled {
 
 .font-inter {
 	font-family:
-		var(--font-inter),
-		var(--font-geist-sans),
-		var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
+		var(--font-inter), var(--font-geist-sans),
+		var(
+			--font-sans,
+			"Inter",
+			"Geist",
+			"Geist Fallback",
+			ui-sans-serif,
+			system-ui,
+			sans-serif
+		);
 }
 
 .dashboard-home-grid {
@@ -1643,9 +2260,16 @@ button:disabled {
 	box-shadow: 0 20px 80px rgb(17 17 17 / 15%);
 	color: #111111;
 	font-family:
-		var(--font-inter),
-		var(--font-geist-sans),
-		var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
+		var(--font-inter), var(--font-geist-sans),
+		var(
+			--font-sans,
+			"Inter",
+			"Geist",
+			"Geist Fallback",
+			ui-sans-serif,
+			system-ui,
+			sans-serif
+		);
 }
 
 .dark .velion-popover {
@@ -2004,8 +2628,14 @@ button:disabled {
 }
 
 .velion-paywall-active-ring {
-	background:
-		linear-gradient(120deg, #a7e5d3, #f4c5a8, #c8b8e0, #a8c8e8, #a7e5d3);
+	background: linear-gradient(
+		120deg,
+		#a7e5d3,
+		#f4c5a8,
+		#c8b8e0,
+		#a8c8e8,
+		#a7e5d3
+	);
 	background-size: 260% 260%;
 	animation: velion-elevenlabs-ring 8s ease-in-out infinite;
 }
@@ -2093,26 +2723,53 @@ button:disabled {
 
 .velion-liquid-base {
 	background:
-		radial-gradient(ellipse 120% 80% at 50% -10%, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0) 60%),
-		linear-gradient(180deg, var(--velion-bg-white) 0%, #f8f5ef 52%, var(--velion-bg-cream) 100%);
+		radial-gradient(
+			ellipse 120% 80% at 50% -10%,
+			rgba(255, 255, 255, 0.92) 0%,
+			rgba(255, 255, 255, 0) 60%
+		),
+		linear-gradient(
+			180deg,
+			var(--velion-bg-white) 0%,
+			#f8f5ef 52%,
+			var(--velion-bg-cream) 100%
+		);
 }
 
 .dark .velion-liquid-base {
 	background:
-		radial-gradient(ellipse 120% 80% at 50% -10%, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0) 60%),
+		radial-gradient(
+			ellipse 120% 80% at 50% -10%,
+			rgba(255, 255, 255, 0.06) 0%,
+			rgba(255, 255, 255, 0) 60%
+		),
 		linear-gradient(180deg, #1c1e24 0%, #1b1d23 50%, #191b21 100%);
 }
 
 /* Answer variant gets a slightly warmer cream → apricot wash. */
 .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-base {
 	background:
-		radial-gradient(ellipse 120% 90% at 50% -10%, rgba(255, 255, 255, 0.94) 0%, rgba(255, 255, 255, 0) 55%),
-		linear-gradient(170deg, #fffdf9 0%, #fdf6ee 42%, #fbf0e4 72%, #f9ecdf 100%);
+		radial-gradient(
+			ellipse 120% 90% at 50% -10%,
+			rgba(255, 255, 255, 0.94) 0%,
+			rgba(255, 255, 255, 0) 55%
+		),
+		linear-gradient(
+			170deg,
+			#fffdf9 0%,
+			#fdf6ee 42%,
+			#fbf0e4 72%,
+			#f9ecdf 100%
+		);
 }
 
 .dark .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-base {
 	background:
-		radial-gradient(ellipse 120% 90% at 50% -10%, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0) 55%),
+		radial-gradient(
+			ellipse 120% 90% at 50% -10%,
+			rgba(255, 255, 255, 0.07) 0%,
+			rgba(255, 255, 255, 0) 55%
+		),
 		linear-gradient(170deg, #1d1f25 0%, #211c26 48%, #231d29 100%);
 }
 
@@ -2136,7 +2793,11 @@ button:disabled {
 	left: -8%;
 	width: 52%;
 	height: 52%;
-	background: radial-gradient(circle at 50% 50%, rgba(238, 122, 80, 0.32), rgba(238, 122, 80, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(238, 122, 80, 0.32),
+		rgba(238, 122, 80, 0) 70%
+	);
 }
 
 .velion-liquid-blob-2 {
@@ -2144,7 +2805,11 @@ button:disabled {
 	right: -12%;
 	width: 56%;
 	height: 56%;
-	background: radial-gradient(circle at 50% 50%, rgba(247, 200, 168, 0.5), rgba(247, 200, 168, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(247, 200, 168, 0.5),
+		rgba(247, 200, 168, 0) 70%
+	);
 }
 
 .velion-liquid-blob-3 {
@@ -2152,32 +2817,60 @@ button:disabled {
 	left: 22%;
 	width: 50%;
 	height: 50%;
-	background: radial-gradient(circle at 50% 50%, rgba(246, 175, 110, 0.38), rgba(246, 175, 110, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(246, 175, 110, 0.38),
+		rgba(246, 175, 110, 0) 70%
+	);
 }
 
 /* Answer variant leans a touch warmer than idle: stronger coral + apricot. */
 .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-blob-1 {
-	background: radial-gradient(circle at 50% 50%, rgba(238, 122, 80, 0.42), rgba(238, 122, 80, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(238, 122, 80, 0.42),
+		rgba(238, 122, 80, 0) 70%
+	);
 }
 
 .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-blob-2 {
-	background: radial-gradient(circle at 50% 50%, rgba(247, 200, 168, 0.58), rgba(247, 200, 168, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(247, 200, 168, 0.58),
+		rgba(247, 200, 168, 0) 70%
+	);
 }
 
 .velion-liquid-backdrop[data-variant="answer"] .velion-liquid-blob-3 {
-	background: radial-gradient(circle at 50% 50%, rgba(246, 175, 110, 0.46), rgba(246, 175, 110, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(246, 175, 110, 0.46),
+		rgba(246, 175, 110, 0) 70%
+	);
 }
 
 .dark .velion-liquid-blob-1 {
-	background: radial-gradient(circle at 50% 50%, rgba(221, 122, 31, 0.4), rgba(221, 122, 31, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(221, 122, 31, 0.4),
+		rgba(221, 122, 31, 0) 70%
+	);
 }
 
 .dark .velion-liquid-blob-2 {
-	background: radial-gradient(circle at 50% 50%, rgba(238, 122, 80, 0.34), rgba(238, 122, 80, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(238, 122, 80, 0.34),
+		rgba(238, 122, 80, 0) 70%
+	);
 }
 
 .dark .velion-liquid-blob-3 {
-	background: radial-gradient(circle at 50% 50%, rgba(246, 175, 110, 0.3), rgba(246, 175, 110, 0) 70%);
+	background: radial-gradient(
+		circle at 50% 50%,
+		rgba(246, 175, 110, 0.3),
+		rgba(246, 175, 110, 0) 70%
+	);
 }
 
 .velion-liquid-blob-1.is-animated {

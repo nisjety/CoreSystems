@@ -25,9 +25,22 @@ func truncateRunes(s string, max int) string {
 	return string(r[:max])
 }
 
+func isReplaceableAvatar(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "example.com/avatar") || strings.Contains(lower, "placeholder") {
+		return true
+	}
+	return strings.HasPrefix(lower, "data:image/") && (!strings.Contains(lower, ";base64,") || len(trimmed) < 800)
+}
+
 const (
 	userCacheTTL    = 5 * time.Minute
 	userIDKeyPrefix = "user:id:"
+	maxAvatarBytes  = 2 * 1024 * 1024
 )
 
 // SharedPublisher is satisfied by *nats.SharedPublisher.
@@ -162,8 +175,9 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 		return nil, fmt.Errorf("user ID is required")
 	}
 
-	// Sanitize incoming fields to match DB column sizes:
-	// email: 255, name: 255, avatar: 500
+	// Sanitize incoming fields to match DB column sizes. Avatar is TEXT and
+	// may be a provider data URL; never truncate it because that corrupts the
+	// image payload. Drop only unreasonable payloads.
 	if email != "" {
 		email = truncateRunes(email, 255)
 	}
@@ -171,7 +185,10 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 		name = truncateRunes(name, 255)
 	}
 	if avatar != "" {
-		avatar = truncateRunes(avatar, 500)
+		avatar = strings.TrimSpace(avatar)
+		if len(avatar) > maxAvatarBytes {
+			avatar = ""
+		}
 	}
 
 	// Use cache-aware GetUser for the initial lookup
@@ -197,10 +214,7 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 		}
 
 		if avatar != "" {
-			hasPlaceholderAvatar := strings.TrimSpace(user.Avatar) == "" ||
-				strings.Contains(strings.ToLower(user.Avatar), "example.com/avatar") ||
-				strings.Contains(strings.ToLower(user.Avatar), "placeholder")
-			if hasPlaceholderAvatar && user.Avatar != avatar {
+			if isReplaceableAvatar(user.Avatar) && user.Avatar != avatar {
 				updateParams.Avatar = &avatar
 				needsUpdate = true
 			}
@@ -218,6 +232,50 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 		}
 
 		return user, nil
+	}
+
+	if email != "" {
+		existingByEmail, emailErr := s.repo.GetByEmail(ctx, email)
+		if emailErr == nil {
+			user = existingByEmail
+			if existingByEmail.ID != id {
+				reassigned, reassignErr := s.repo.ReassignID(ctx, existingByEmail.ID, id)
+				if reassignErr == nil {
+					user = reassigned
+					if s.cache != nil {
+						_ = s.cache.Del(ctx, userIDKeyPrefix+existingByEmail.ID)
+						_ = s.cache.Del(ctx, userIDKeyPrefix+id)
+						_ = s.cache.Del(ctx, "user:email:"+email)
+					}
+				}
+			}
+
+			updateParams := UpdateUserParams{ID: user.ID}
+			needsUpdate := false
+			if name != "" {
+				hasPlaceholderName := strings.TrimSpace(user.Name) == "" || user.Name == "User"
+				if hasPlaceholderName && user.Name != name {
+					updateParams.Name = &name
+					needsUpdate = true
+				}
+			}
+			if avatar != "" {
+				if isReplaceableAvatar(user.Avatar) && user.Avatar != avatar {
+					updateParams.Avatar = &avatar
+					needsUpdate = true
+				}
+			}
+			if needsUpdate {
+				if updatedUser, updateErr := s.repo.Update(ctx, updateParams); updateErr == nil {
+					user = updatedUser
+					if s.cache != nil {
+						_ = s.cache.Del(ctx, userIDKeyPrefix+user.ID)
+					}
+				}
+			}
+
+			return user, nil
+		}
 	}
 
 	// User doesn't exist, create minimal profile

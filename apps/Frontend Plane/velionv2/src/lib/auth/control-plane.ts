@@ -125,6 +125,26 @@ export function buildControlPlaneAuthUrl(pathname: string, search = "") {
   return upstream;
 }
 
+export function buildControlPlaneAuthServiceUrl(pathname: string, search = "") {
+  const baseUrl = getControlPlaneAuthUrl();
+  if (!baseUrl) {
+    throw new ControlPlaneAuthError(
+      503,
+      "control_plane_auth_not_configured",
+      "CONTROL_PLANE_AUTH_URL or AUTH_CORE_URL must be configured.",
+    );
+  }
+
+  const upstream = new URL(baseUrl);
+  const basePath = upstream.pathname.replace(/\/+$/, "");
+  upstream.pathname = basePath.endsWith(AUTH_ROUTE_PREFIX)
+    ? `${basePath.slice(0, -AUTH_ROUTE_PREFIX.length)}${pathname.startsWith("/") ? pathname : `/${pathname}`}`
+    : `${basePath}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
+  upstream.search = search;
+
+  return upstream;
+}
+
 function forwardedHeaders(requestHeaders: HeaderReader) {
   const headers = new Headers();
   const passThroughHeaders = [
@@ -222,9 +242,10 @@ function responseHeadersForProxy(upstreamResponse: Response, requestHeaders: Hea
   return headers;
 }
 
-export async function proxyControlPlaneAuthRequest(request: Request) {
-  const requestUrl = new URL(request.url);
-  const upstreamUrl = buildControlPlaneAuthUrl(requestUrl.pathname, requestUrl.search);
+async function proxyControlPlaneRequest(
+  request: Request,
+  upstreamUrl: URL,
+) {
   const body =
     request.method === "GET" || request.method === "HEAD"
       ? undefined
@@ -252,6 +273,21 @@ export async function proxyControlPlaneAuthRequest(request: Request) {
     status: upstreamResponse.status,
     statusText: upstreamResponse.statusText,
   });
+}
+
+export async function proxyControlPlaneAuthRequest(request: Request) {
+  const requestUrl = new URL(request.url);
+  const upstreamUrl = buildControlPlaneAuthUrl(requestUrl.pathname, requestUrl.search);
+  return proxyControlPlaneRequest(request, upstreamUrl);
+}
+
+export async function proxyControlPlaneAuthServiceRequest(
+  request: Request,
+  pathname: string,
+  search = "",
+) {
+  const upstreamUrl = buildControlPlaneAuthServiceUrl(pathname, search);
+  return proxyControlPlaneRequest(request, upstreamUrl);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

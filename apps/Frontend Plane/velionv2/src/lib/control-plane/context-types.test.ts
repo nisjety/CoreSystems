@@ -17,6 +17,10 @@ describe("ANONYMOUS_CONTROL_PLANE_CONTEXT", () => {
     expect(ANONYMOUS_CONTROL_PLANE_CONTEXT.orgId).toBeNull();
   });
 
+  it("has null organization", () => {
+    expect(ANONYMOUS_CONTROL_PLANE_CONTEXT.organization).toBeNull();
+  });
+
   it("has null role", () => {
     expect(ANONYMOUS_CONTROL_PLANE_CONTEXT.role).toBeNull();
   });
@@ -32,6 +36,14 @@ describe("ANONYMOUS_CONTROL_PLANE_CONTEXT", () => {
   it("has null entitlements", () => {
     expect(ANONYMOUS_CONTROL_PLANE_CONTEXT.entitlements).toBeNull();
   });
+
+  it("has null appearance", () => {
+    expect(ANONYMOUS_CONTROL_PLANE_CONTEXT.appearance).toBeNull();
+  });
+
+  it("has null navbar", () => {
+    expect(ANONYMOUS_CONTROL_PLANE_CONTEXT.navbar).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -41,6 +53,11 @@ describe("hasFeature", () => {
   const baseCtx: ControlPlaneContextValue = {
     user: { id: "user-1" },
     orgId: "org-1",
+    organization: {
+      id: "org-1",
+      name: "Acme AS",
+      plan: "pro",
+    },
     role: "admin",
     onboardingStatus: "complete",
     onboardingComplete: true,
@@ -51,6 +68,11 @@ describe("hasFeature", () => {
       quotas: { documents: 1000 },
       credits: 100,
     },
+    appearance: {
+      theme: "system",
+      colorScheme: null,
+    },
+    navbar: null,
   };
 
   it("returns true for a granted feature flag", () => {

@@ -18,7 +18,10 @@ pub struct AgentScratchpad {
 
 impl AgentScratchpad {
     pub fn new(cap: usize) -> Self {
-        Self { notes: VecDeque::new(), cap: cap.max(1) }
+        Self {
+            notes: VecDeque::new(),
+            cap: cap.max(1),
+        }
     }
 
     /// Append a note; secrets are redacted before storage.
@@ -67,7 +70,9 @@ pub fn redact_sensitive(text: &str) -> String {
 }
 
 fn split_trailing_punct(tok: &str) -> (&str, &str) {
-    let idx = tok.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '!' | '?')).len();
+    let idx = tok
+        .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '!' | '?'))
+        .len();
     tok.split_at(idx)
 }
 
@@ -82,15 +87,20 @@ fn looks_like_email(t: &str) -> bool {
 
 fn looks_like_secret(t: &str) -> bool {
     t.len() >= 24
-        && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+' | '/' | '.'))
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+' | '/' | '.'))
         && t.chars().any(|c| c.is_ascii_alphabetic())
         && t.chars().any(|c| c.is_ascii_digit())
 }
 
 fn looks_like_card(t: &str) -> bool {
     let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
-    let non_sep = t.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
-    non_sep && (13..=19).contains(&digits.len()) && digits.len() == t.chars().filter(|c| *c != '-').count()
+    let non_sep = t
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
+    non_sep
+        && (13..=19).contains(&digits.len())
+        && digits.len() == t.chars().filter(|c| *c != '-').count()
 }
 
 #[cfg(test)]
@@ -109,7 +119,10 @@ mod tests {
 
     #[test]
     fn redacts_email() {
-        assert_eq!(redact_sensitive("mail me at bob@example.com please"), "mail me at [redacted-email] please");
+        assert_eq!(
+            redact_sensitive("mail me at bob@example.com please"),
+            "mail me at [redacted-email] please"
+        );
     }
 
     #[test]
@@ -121,12 +134,18 @@ mod tests {
 
     #[test]
     fn redacts_card_number() {
-        assert_eq!(redact_sensitive("card 4111-1111-1111-1111 ok"), "card [redacted-number] ok");
+        assert_eq!(
+            redact_sensitive("card 4111-1111-1111-1111 ok"),
+            "card [redacted-number] ok"
+        );
     }
 
     #[test]
     fn leaves_normal_text() {
-        assert_eq!(redact_sensitive("the quick brown fox"), "the quick brown fox");
+        assert_eq!(
+            redact_sensitive("the quick brown fox"),
+            "the quick brown fox"
+        );
     }
 
     #[test]

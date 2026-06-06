@@ -14,6 +14,7 @@ import {
   type ChatStreamChunk,
   type ChatTiming,
 } from "@/features/chat-v2/lib/chat-stream";
+import type { ChatKnowledgeGrounding } from "@/features/chat-v2/lib/chat-grounding";
 
 const STORAGE_KEY = "velion:v2:chat:sessions";
 const LAUNCH_MOTION_KEY = "velion:v2:chat:launch-motion";
@@ -46,6 +47,10 @@ export type ChatMessage = {
   citations?: Citation[];
   costUsd?: number;
   confidence?: number;
+  toolCalls?: ChatToolCall[];
+  artifacts?: ChatArtifact[];
+  files?: GeneratedFile[];
+  grounding?: ChatKnowledgeGrounding;
 };
 
 export type Citation = {
@@ -53,6 +58,31 @@ export type Citation = {
   title: string;
   url: string;
   snippet: string;
+};
+
+export type ChatToolCall = {
+  id: string;
+  name: string;
+  args?: unknown;
+  status?: string;
+  output?: string;
+  error?: string;
+};
+
+export type ChatArtifact = {
+  id: string;
+  kind: string;
+  title: string;
+  content: string;
+  version: number;
+};
+
+export type GeneratedFile = {
+  id: string;
+  name: string;
+  mime: string;
+  url: string;
+  size: number;
 };
 
 export type AgentTaskStep = {
@@ -158,6 +188,11 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
     const waitingMessage = cancelSession?.messages.find(
       (message) => message.role === "assistant" && message.status === "waiting",
     );
+    if (waitingMessage) {
+      // Drain buffered tokens (and cancel the pending flush) before we freeze
+      // the partial, so the kept content has the tail and no late rAF re-adds.
+      flushAssistantDelta(activeTaskSessionId, waitingMessage.id);
+    }
     if (waitingMessage?.requestId) {
       void cancelChat(waitingMessage.requestId);
     }
@@ -536,6 +571,102 @@ function startAssistantStream({
   });
 }
 
+type StreamAttachment = { kind?: string; url?: string; data_base64?: string; mime_type?: string };
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Read picked image attachments (object/data URLs) into base64 for the gateway
+ * vision path. Non-images and unreadable entries are skipped so the text turn
+ * still streams. Runs only in the browser (called from runAssistantStream).
+ */
+async function toStreamAttachments(attachments: ComposerAttachment[]): Promise<StreamAttachment[]> {
+  const out: StreamAttachment[] = [];
+  for (const attachment of attachments) {
+    if (!attachment.url || !attachment.type.startsWith("image/")) {
+      continue;
+    }
+    try {
+      let dataUrl = attachment.url;
+      if (!dataUrl.startsWith("data:")) {
+        const response = await fetch(dataUrl);
+        dataUrl = await blobToDataUrl(await response.blob());
+      }
+      const commaIndex = dataUrl.indexOf(",");
+      if (commaIndex < 0) {
+        continue;
+      }
+      const mime = dataUrl.slice(5, commaIndex).split(";")[0] || attachment.type;
+      const base64 = dataUrl.slice(commaIndex + 1);
+      if (base64) {
+        out.push({ kind: "image", data_base64: base64, mime_type: mime });
+      }
+    } catch {
+      // Unreadable attachment — skip; the text turn still streams.
+    }
+  }
+  return out;
+}
+
+const HISTORY_MAX_TURNS = 8;
+const HISTORY_MAX_CONTENT = 600;
+
+/**
+ * Build a compact conversation context prefix (most-recent N turns from this
+ * session, excluding placeholder/in-flight messages and the assistant message
+ * we're currently generating). Mirrors v1 reasoning-plane's
+ * `buildConversationContext` so follow-up turns ("kan den være som et blåbære
+ * i uke 7?") keep the prior context. Returns "" when there's no history.
+ */
+function buildConversationContext({
+  sessionId,
+  assistantMessageId,
+}: {
+  sessionId: string;
+  assistantMessageId: string;
+}): string {
+  const session = chatStoreState.sessions.find((entry) => entry.id === sessionId);
+  if (!session) {
+    return "";
+  }
+
+  const prior: Array<{ role: MessageRole; content: string }> = [];
+  for (const message of session.messages) {
+    if (message.id === assistantMessageId) continue;
+    if (message.status === "waiting" || message.status === "error") continue;
+    const trimmed = message.content.trim();
+    if (!trimmed || isAssistantPlaceholder(trimmed)) continue;
+    prior.push({ role: message.role, content: trimmed });
+  }
+
+  const recent = prior.slice(-HISTORY_MAX_TURNS);
+  if (recent.length === 0) {
+    return "";
+  }
+
+  const lines = recent.map((message) => {
+    const speaker = message.role === "assistant" ? "Assistant" : "User";
+    const body = message.content.length > HISTORY_MAX_CONTENT
+      ? `${message.content.slice(0, HISTORY_MAX_CONTENT)}…`
+      : message.content;
+    return `${speaker}: ${body}`;
+  });
+
+  return [
+    "[Conversation context]",
+    ...lines,
+    "",
+    "Answer the latest user request while keeping the prior conversation in mind when it is relevant.",
+  ].join("\n");
+}
+
 async function runAssistantStream({
   assistantMessageId,
   controller,
@@ -549,17 +680,31 @@ async function runAssistantStream({
 }) {
   let completed = false;
 
+  // Multimodal input (chat-parity §2): read picked image attachments to base64
+  // so the gateway routes the turn through vision; `/image` intent → image-gen.
+  const attachments = await toStreamAttachments(payload.attachments);
+  const generateImage = payload.tools.includes("image") || undefined;
+
+  // Inject prior conversation context so follow-up turns aren't answered cold
+  // ("kan den være som et blåbære i uke 7?" → needs the prior pregnancy turn).
+  // The gateway's session-core persistence isn't yet wired for unary turns;
+  // prefixing here keeps context intact regardless and is harmless when it is.
+  const contextBlock = buildConversationContext({ sessionId, assistantMessageId });
+  const finalContent = contextBlock ? `${contextBlock}\n\n${payload.text}` : payload.text;
+
   try {
     for await (const chunk of streamChat({
       browseWeb: payload.tools.includes("search"),
-      content: payload.text,
+      content: finalContent,
       // Opt into the rich event families the chat UI renders (chat-parity §2):
       // real usage (insight chip), citations (Sources), reasoning (thinking).
-      features: ["usage", "citations", "reasoning", "steps"],
+      features: ["usage", "citations", "reasoning", "steps", "tools", "artifacts"],
       model: payload.model,
       sessionId,
       signal: controller.signal,
       tools: payload.tools,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      generateImage,
     })) {
       if (controller.signal.aborted) {
         return;
@@ -616,6 +761,12 @@ function applyStreamChunk({
         sessionId,
       });
       return false;
+    case "grounding":
+      updateAssistantMessage(sessionId, assistantMessageId, (message) => ({
+        ...message,
+        grounding: chunk.grounding,
+      }));
+      return false;
     case "done":
       if (chunk.timing) {
         // Latency breakdown for the just-finished turn — see where slow chats
@@ -671,7 +822,75 @@ function applyStreamChunk({
     case "step_update":
       upsertTaskStep({ sessionId, step: chunk });
       return false;
+    case "artifact":
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        artifacts: upsertById(m.artifacts, {
+          id: chunk.id,
+          kind: chunk.kind,
+          title: chunk.title,
+          content: chunk.content,
+          version: chunk.version,
+        }),
+      }));
+      return false;
+    case "tool_call":
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        toolCalls: upsertById(m.toolCalls, {
+          id: chunk.id,
+          name: chunk.name,
+          args: chunk.args,
+          status: "running",
+        }),
+      }));
+      return false;
+    case "tool_result":
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        toolCalls: (m.toolCalls ?? []).map((call) =>
+          call.id === chunk.id
+            ? { ...call, status: chunk.status, output: chunk.output, error: chunk.error }
+            : call,
+        ),
+      }));
+      return false;
+    case "attachment":
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => ({
+        ...m,
+        files: upsertById(m.files, {
+          id: chunk.id,
+          name: chunk.name,
+          mime: chunk.mime,
+          url: chunk.url,
+          size: chunk.size,
+        }),
+      }));
+      return false;
+    case "stopped":
+      // Terminal server-side stop ack — finalize the waiting message, keep partial.
+      flushAssistantDelta(sessionId, assistantMessageId);
+      updateAssistantMessage(sessionId, assistantMessageId, (m) => {
+        if (m.status !== "waiting") {
+          return m;
+        }
+        const partial = isAssistantPlaceholder(m.content) ? "" : m.content.trim();
+        return { ...m, content: partial, status: "stopped" };
+      });
+      return true;
   }
+}
+
+/** Insert-or-replace an item by `id` in an optional array (immutable). */
+function upsertById<T extends { id: string }>(list: T[] | undefined, item: T): T[] {
+  const existing = list ?? [];
+  const index = existing.findIndex((entry) => entry.id === item.id);
+  if (index < 0) {
+    return [...existing, item];
+  }
+  const next = existing.slice();
+  next[index] = { ...next[index], ...item };
+  return next;
 }
 
 function coerceTaskStepStatus(value: string): TaskStepStatus {
@@ -763,18 +982,34 @@ function markAssistantStreamConnected(sessionId: string) {
   }));
 }
 
-function appendAssistantDelta({
-  assistantMessageId,
-  delta,
-  requestId,
-  sessionId,
-}: {
-  assistantMessageId: string;
-  delta: string;
-  requestId?: string;
-  sessionId: string;
-}) {
-  if (!delta) {
+// Streaming deltas arrive token-by-token (often many per frame). Each store
+// write forces a synchronous useSyncExternalStore re-render, so writing per
+// token overflows React's nested-update limit ("Maximum update depth") under a
+// fast burst. Coalesce tokens into ONE store update per animation frame: buffer
+// the text, schedule a single flush, and reconcile on the next frame. Terminal
+// events (done/error/stopped) MUST call flushAssistantDelta first so no buffered
+// tail is lost and no late flush races the finalized message.
+type PendingDelta = { text: string; requestId?: string; frame: number | null };
+const pendingDeltas = new Map<string, PendingDelta>();
+
+function deltaKey(sessionId: string, assistantMessageId: string) {
+  return `${sessionId}:${assistantMessageId}`;
+}
+
+function flushAssistantDelta(sessionId: string, assistantMessageId: string) {
+  const key = deltaKey(sessionId, assistantMessageId);
+  const pending = pendingDeltas.get(key);
+  if (!pending) {
+    return;
+  }
+
+  if (pending.frame !== null && typeof cancelAnimationFrame !== "undefined") {
+    cancelAnimationFrame(pending.frame);
+  }
+  pendingDeltas.delete(key);
+
+  const { text, requestId } = pending;
+  if (!text) {
     return;
   }
 
@@ -791,13 +1026,44 @@ function appendAssistantDelta({
 
       return {
         ...message,
-        content: `${previousContent}${delta}`,
+        content: `${previousContent}${text}`,
         requestId: requestId ?? message.requestId,
         status: "waiting",
       };
     }),
     updatedAt: new Date().toISOString(),
   }));
+}
+
+function appendAssistantDelta({
+  assistantMessageId,
+  delta,
+  requestId,
+  sessionId,
+}: {
+  assistantMessageId: string;
+  delta: string;
+  requestId?: string;
+  sessionId: string;
+}) {
+  if (!delta) {
+    return;
+  }
+
+  const key = deltaKey(sessionId, assistantMessageId);
+  const pending = pendingDeltas.get(key) ?? { text: "", requestId, frame: null };
+  pending.text += delta;
+  if (requestId) {
+    pending.requestId = requestId;
+  }
+
+  if (pending.frame === null) {
+    pending.frame = typeof requestAnimationFrame !== "undefined"
+      ? requestAnimationFrame(() => flushAssistantDelta(sessionId, assistantMessageId))
+      : (setTimeout(() => flushAssistantDelta(sessionId, assistantMessageId), 16) as unknown as number);
+  }
+
+  pendingDeltas.set(key, pending);
 }
 
 function finishAssistantStream({
@@ -815,6 +1081,9 @@ function finishAssistantStream({
   timing?: ChatTiming;
   sessionId: string;
 }) {
+  // Drain any tokens still buffered for coalescing so the finalized content
+  // includes the tail and no late rAF flush races this terminal write.
+  flushAssistantDelta(sessionId, assistantMessageId);
   const finishedAt = new Date().toISOString();
 
   updateChatSession(sessionId, (session) => {
@@ -871,7 +1140,16 @@ function failAssistantStream({
   message: string;
   sessionId: string;
 }) {
+  // Cancel/drain any buffered tokens so a late flush can't re-add content
+  // after the error message has replaced it.
+  flushAssistantDelta(sessionId, assistantMessageId);
   const failedAt = new Date().toISOString();
+  // Surface the REAL failure reason (was hidden in the agent-activity card,
+  // which is removed). Keep the generic line only when no detail is available.
+  const detail = message.trim();
+  const content = detail && detail !== "Model Plane stream failed."
+    ? detail
+    : MODEL_STREAM_ERROR_CONTENT;
 
   updateChatSession(sessionId, (session) => ({
     ...session,
@@ -879,7 +1157,7 @@ function failAssistantStream({
       chatMessage.id === assistantMessageId
         ? {
             ...chatMessage,
-            content: MODEL_STREAM_ERROR_CONTENT,
+            content,
             status: "error",
           }
         : chatMessage
@@ -974,7 +1252,7 @@ function isAbortError(error: unknown) {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function isAssistantPlaceholder(content: string) {
+export function isAssistantPlaceholder(content: string) {
   return content === WAITING_ASSISTANT_CONTENT ||
     content === "Regeneration queued for the live Velion agent stream.";
 }

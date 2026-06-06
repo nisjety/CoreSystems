@@ -30,6 +30,7 @@ func (p *HttpAccessTokenProvider) AccessToken(ctx context.Context, organizationI
 	body, err := json.Marshal(map[string]string{
 		"organizationId": organizationID,
 		"connectorType":  "microsoft-graph",
+		"consumer":       "finspo-core",
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal token request: %w", err)

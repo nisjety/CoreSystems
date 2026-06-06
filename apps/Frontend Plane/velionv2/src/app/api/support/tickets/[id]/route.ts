@@ -1,6 +1,12 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
-import { jsonOrNull, notConfiguredResponse, ZAMMAD_URL, zammadConfigured, zammadHeaders } from "@/app/api/support/_lib/zammad";
+
+import { supportRouteError } from "@/app/api/support/_lib/errors";
+import { getSupportTicket, patchSupportTicket } from "@/lib/integrations/conversation-core";
+import { requireRequestActor } from "@/lib/integrations/request-actor";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const updateTicketSchema = z.object({
   state_id: z.number().optional(),
@@ -14,23 +20,21 @@ export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  if (!zammadConfigured()) return notConfiguredResponse();
   const { id } = await params;
 
-  const response = await fetch(`${ZAMMAD_URL}/api/v1/tickets/${encodeURIComponent(id)}?expand=true`, {
-    headers: zammadHeaders(),
-    cache: "no-store",
-  });
-  const payload = await jsonOrNull<unknown>(response);
-
-  return Response.json(payload ?? { error: "ticket_fetch_failed" }, { status: response.status });
+  try {
+    const actor = await requireRequestActor();
+    const ticket = await getSupportTicket(actor, id);
+    return Response.json(ticket);
+  } catch (error) {
+    return supportRouteError(error, "ticket_fetch_failed", "Support ticket could not be loaded.");
+  }
 }
 
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  if (!zammadConfigured()) return notConfiguredResponse();
   const [{ id }, raw] = await Promise.all([
     params,
     request.json().catch(() => null),
@@ -41,13 +45,11 @@ export async function PATCH(
     return Response.json({ error: parsed.error.flatten() }, { status: 422 });
   }
 
-  const response = await fetch(`${ZAMMAD_URL}/api/v1/tickets/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    headers: zammadHeaders(),
-    cache: "no-store",
-    body: JSON.stringify(parsed.data),
-  });
-  const payload = await jsonOrNull<unknown>(response);
-
-  return Response.json(payload ?? { error: "ticket_update_failed" }, { status: response.status });
+  try {
+    const actor = await requireRequestActor();
+    const ticket = await patchSupportTicket(actor, id, parsed.data);
+    return Response.json(ticket);
+  } catch (error) {
+    return supportRouteError(error, "ticket_update_failed", "Support ticket could not be updated.");
+  }
 }

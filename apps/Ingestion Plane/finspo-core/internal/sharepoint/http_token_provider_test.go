@@ -17,6 +17,13 @@ func serveTokenBroker(t *testing.T, statusCode int, accessToken string) *httptes
 		if r.Header.Get("X-Internal-API-Key") == "" {
 			t.Error("X-Internal-API-Key header missing")
 		}
+		var requestBody map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode token request: %v", err)
+		}
+		if requestBody["consumer"] != "finspo-core" {
+			t.Errorf("consumer = %q, want finspo-core", requestBody["consumer"])
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)

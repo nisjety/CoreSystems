@@ -59,7 +59,7 @@ export function GlobalSearchDialog({ onClose }: { onClose: () => void }) {
   }, [query]);
 
   return (
-    <VelionModal label="Global search" size="search">
+    <VelionModal label="Knowledge search" size="search">
         <div className="velion-modal-header">
           <Search className="size-4 text-[#989286]" />
           <input
@@ -68,8 +68,8 @@ export function GlobalSearchDialog({ onClose }: { onClose: () => void }) {
             onChange={(event) => {
               dispatchSearch({ type: "queryChanged", query: event.target.value });
             }}
-            placeholder="Search across the whole system"
-            aria-label="Search across the whole system"
+            placeholder="Search the knowledge base"
+            aria-label="Search the knowledge base"
             className="min-w-0 flex-1 bg-transparent text-[15px] text-[#111111] placeholder:text-[#9A9387] focus:outline-none dark:text-white"
           />
           <VelionModalClose onClick={onClose} aria-label="Close global search">
@@ -79,7 +79,7 @@ export function GlobalSearchDialog({ onClose }: { onClose: () => void }) {
         <div className="max-h-[420px] overflow-y-auto p-2">
           {loading ? <EmptyPanel text="Searching…" /> : null}
           {error ? <EmptyPanel text={error} /> : null}
-          {!loading && !error && query.length >= 2 && results.length === 0 ? <EmptyPanel text="No matching signed-in user records." /> : null}
+          {!loading && !error && query.length >= 2 && results.length === 0 ? <EmptyPanel text="No matching knowledge records." /> : null}
           {results.map((result) => (
             <Link key={result.id} href={result.href as Route} onClick={onClose} className="block rounded-[14px] p-3 transition-colors hover:bg-[#F7F7F8] dark:hover:bg-[#191A1F]">
               <div className="flex items-center justify-between gap-4">

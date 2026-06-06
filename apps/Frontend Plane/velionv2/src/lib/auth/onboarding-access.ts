@@ -1,38 +1,26 @@
 import type { Route } from "next";
-import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import {
-  getControlPlaneCurrentUser,
-  isControlPlaneAuthConfigured,
-} from "@/lib/auth/control-plane";
-import { getAuthDatabasePool, hasAuthDatabaseConfig } from "@/lib/auth/database";
-import type { RequestActor } from "@/lib/integrations/request-actor";
+import { hasAuthDatabaseConfig } from "@/lib/auth/database";
+import { getCurrentAuthUser, type AuthenticatedUser } from "@/lib/auth/current-auth-user";
+import { markLocalOnboardingComplete } from "@/lib/auth/onboarding-completions";
+import { getRequestAuthState } from "@/lib/auth/request-auth-state";
 import { fetchUserCoreJson, UserCoreError } from "@/lib/integrations/user-core";
 
-type BetterAuthUser = {
-  id: string;
+export type { UserCoreSessionContext } from "@/lib/auth/request-auth-state";
+export { isCompletedOnboardingContext } from "@/lib/auth/request-auth-state";
+
+type RequestActor = {
+  userId: string;
   email?: string;
-  image?: string | null;
   name?: string;
-};
-
-type AuthenticatedUser = BetterAuthUser & {
+  avatar?: string;
   cookieHeader?: string;
-};
-
-export type UserCoreSessionContext = {
-  userId?: string;
-  orgId?: string | null;
-  role?: string | null;
-  onboardingStatus?: string | null;
-  onboarding_complete?: boolean;
-  onboardingComplete?: boolean;
 };
 
 export type AuthGateState = {
   onboardingComplete: boolean;
   onboardingStatus: string | null;
-  source: "anonymous" | "local-fallback" | "unknown" | "user-core";
+  source: "anonymous" | "control-session" | "local-fallback" | "unknown" | "user-core";
   user: AuthenticatedUser | null;
 };
 
@@ -44,22 +32,6 @@ export class AuthGateError extends Error {
   ) {
     super(message);
   }
-}
-
-let onboardingTableReady: Promise<void> | null = null;
-
-export function isCompletedOnboardingContext(context: UserCoreSessionContext | null | undefined) {
-  return context?.onboardingStatus === "COMPLETED" ||
-    context?.onboarding_complete === true ||
-    context?.onboardingComplete === true;
-}
-
-function hasAuthoritativeOnboardingContext(context: UserCoreSessionContext | null | undefined) {
-  return Boolean(
-    context?.onboardingStatus ||
-      typeof context?.onboarding_complete === "boolean" ||
-      typeof context?.onboardingComplete === "boolean",
-  );
 }
 
 function loginRedirect(callbackUrl: string) {
@@ -76,141 +48,14 @@ function toRequestActor(user: AuthenticatedUser): RequestActor {
   };
 }
 
-async function ensureOnboardingCompletionTable() {
-  onboardingTableReady ??= getAuthDatabasePool().query(`
-    CREATE TABLE IF NOT EXISTS velion_onboarding_completions (
-      user_id TEXT PRIMARY KEY,
-      completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `).then(() => undefined);
-
-  return onboardingTableReady;
-}
-
-async function readLocalOnboardingComplete(userId: string) {
-  if (!hasAuthDatabaseConfig()) {
-    return false;
-  }
-
-  await ensureOnboardingCompletionTable();
-  const result = await getAuthDatabasePool().query<{ completed_at: Date }>(
-    "SELECT completed_at FROM velion_onboarding_completions WHERE user_id = $1 LIMIT 1",
-    [userId],
-  );
-
-  return (result.rowCount ?? 0) > 0;
-}
-
-async function markLocalOnboardingComplete(userId: string) {
-  await ensureOnboardingCompletionTable();
-  await getAuthDatabasePool().query(
-    `
-      INSERT INTO velion_onboarding_completions (user_id, completed_at, updated_at)
-      VALUES ($1, NOW(), NOW())
-      ON CONFLICT (user_id)
-      DO UPDATE SET updated_at = NOW()
-    `,
-    [userId],
-  );
-}
-
-export async function getCurrentAuthUser(): Promise<AuthenticatedUser | null> {
-  const headerList = await headers();
-
-  if (isControlPlaneAuthConfigured()) {
-    try {
-      const user = await getControlPlaneCurrentUser(headerList);
-      if (!user) {
-        return null;
-      }
-
-      return {
-        id: user.id,
-        email: user.email,
-        image: user.image,
-        name: user.name,
-        cookieHeader: headerList.get("cookie") ?? undefined,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  if (!hasAuthDatabaseConfig()) {
-    return null;
-  }
-
-  try {
-    const { auth } = await import("@/lib/auth/auth");
-    const session = await auth.api.getSession({ headers: headerList });
-    const user = session?.user as BetterAuthUser | undefined;
-
-    if (!user?.id) {
-      return null;
-    }
-
-    return {
-      id: user.id,
-      email: user.email,
-      image: user.image,
-      name: user.name,
-      cookieHeader: headerList.get("cookie") ?? undefined,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function readUserCoreOnboardingContext(user: AuthenticatedUser) {
-  return fetchUserCoreJson<UserCoreSessionContext>(
-    toRequestActor(user),
-    "/api/v1/me/session-context",
-  );
-}
-
 export async function getAuthGateState(): Promise<AuthGateState> {
-  const user = await getCurrentAuthUser();
-
-  if (!user) {
-    return {
-      user: null,
-      onboardingComplete: false,
-      onboardingStatus: null,
-      source: "anonymous",
-    };
-  }
-
-  try {
-    const context = await readUserCoreOnboardingContext(user);
-
-    if (hasAuthoritativeOnboardingContext(context)) {
-      const localComplete = isCompletedOnboardingContext(context)
-        ? false
-        : await readLocalOnboardingComplete(user.id);
-
-      return {
-        user,
-        onboardingComplete: isCompletedOnboardingContext(context) || localComplete,
-        onboardingStatus: isCompletedOnboardingContext(context) || localComplete
-          ? "COMPLETED"
-          : context.onboardingStatus ?? null,
-        source: localComplete ? "local-fallback" : "user-core",
-      };
-    }
-  } catch (error) {
-    if (!(error instanceof UserCoreError) || ![401, 403, 502, 503].includes(error.status)) {
-      throw error;
-    }
-  }
-
-  const onboardingComplete = await readLocalOnboardingComplete(user.id);
+  const state = await getRequestAuthState();
 
   return {
-    user,
-    onboardingComplete,
-    onboardingStatus: onboardingComplete ? "COMPLETED" : null,
-    source: onboardingComplete ? "local-fallback" : "unknown",
+    user: state.user,
+    onboardingComplete: state.onboardingComplete,
+    onboardingStatus: state.onboardingStatus,
+    source: state.source,
   };
 }
 
@@ -252,7 +97,7 @@ export async function redirectAuthenticatedUserFromAuth() {
   redirect((gate.onboardingComplete ? "/dashboard" : "/onboarding") as Route);
 }
 
-export async function markCurrentUserOnboardingComplete() {
+export async function markCurrentUserOnboardingComplete(payload?: Record<string, unknown>) {
   const user = await getCurrentAuthUser();
 
   if (!user) {
@@ -262,7 +107,7 @@ export async function markCurrentUserOnboardingComplete() {
   try {
     await fetchUserCoreJson(toRequestActor(user), "/api/v1/users/onboarding/complete", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(payload ?? {}),
     });
 
     if (hasAuthDatabaseConfig()) {

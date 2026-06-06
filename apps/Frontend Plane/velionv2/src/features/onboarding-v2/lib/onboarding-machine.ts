@@ -13,8 +13,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export const ONBOARDING_STEPS = [
   "post-signin",
-  "organization",
   "website",
+  "organization",
   "connect",
   "social-proof",
   "paywall",
@@ -68,17 +68,72 @@ export interface BrandingSignals {
   bodyBackground?: string;
 }
 
+export type CrawlEvidenceStatus =
+  | "idle"
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type CrawlEvidenceSnippetKind = "text" | "image" | "file" | "link";
+
+export interface CrawlEvidenceSnippet {
+  id: string;
+  kind: CrawlEvidenceSnippetKind;
+  title: string;
+  excerpt?: string;
+  url: string;
+  contentType?: string;
+  source?: "seed" | "live";
+  elementCount?: number;
+}
+
+export interface CrawlEvidence {
+  status: CrawlEvidenceStatus;
+  pages: number;
+  elements: number;
+  latestUrl?: string;
+  latestTitle?: string;
+  snippets: CrawlEvidenceSnippet[];
+  contentTypes: string[];
+  warnings: string[];
+  lastUpdatedAt: string;
+  seedStatus?: "pending" | "ready" | "failed" | "removed";
+}
+
 export interface WebsitePayload {
   url: string;
   agentBrief: string;
   crawlJobId?: string;
   branding?: BrandingSignals;
+  crawlEvidence?: CrawlEvidence;
+}
+
+export interface SafeConnectorMetadata {
+  status: "pending" | "ready" | "failed" | "removed";
+  workspaceName?: string;
+  entityCounts?: Record<string, number>;
+  sampleEntities?: string[];
+  scopes?: string[];
+  discoveredAt?: string;
+  sensitivity: "safe_metadata_only";
+  cleanupStatus?: "idle" | "requested" | "completed" | "failed";
+  seedDocumentId?: string;
 }
 
 export interface ConnectorPick {
   id: string;
   label: string;
   authedAt?: string;
+  metadata?: SafeConnectorMetadata;
+}
+
+export interface OnboardingBrandTheme {
+  mode: "velion" | "brand";
+  primaryColor: string;
+  selectedAt: string;
+  saveStatus?: "idle" | "saving" | "saved" | "failed";
 }
 
 export interface PlanRecommendation {
@@ -88,15 +143,37 @@ export interface PlanRecommendation {
   reason: string;
   /** Quick sales-engineer summary rendered on the paywall. */
   summary?: string;
+  /** Concrete signals Velion used when making the recommendation. */
+  proofPoints?: string[];
+  /** Short scope bullets derived from the website, integrations and graph. */
+  scopeSignals?: string[];
+  /** Likely first improvements Velion can make for this organization. */
+  opportunities?: string[];
+  /** Rough, non-guaranteed launch outcomes shown as a proof of concept. */
+  expectedOutcomes?: Array<{ label: string; value: string; detail?: string }>;
+  proofOfConcept?: {
+    companyIdentity?: string[];
+    learnedSignals?: string[];
+    likelyIntents?: string[];
+    nextActions?: string[];
+    operationalImpact?: Array<{ label: string; value: string; detail?: string }>;
+    recommendationFit?: string[];
+  };
   /** When the recommendation was last computed (ISO). */
   generatedAt: string;
+  /** Where the copy came from. Used so the UI can avoid presenting fallback text as model output. */
+  source?: "model" | "local";
+  modelVersion?: string;
+  confidence?: number;
 }
 
 export interface OnboardingState {
   step: OnboardingStep;
   organization?: OrganizationPayload;
   website?: WebsitePayload;
+  additionalWebsites?: WebsitePayload[];
   connectors: ConnectorPick[];
+  brandTheme?: OnboardingBrandTheme;
   recommendation?: PlanRecommendation;
   /** Set true once `post-signin` intro has played through once. */
   introPlayed: boolean;
@@ -131,6 +208,19 @@ function readStored(): OnboardingState | null {
       parsed.organization && typeof parsed.organization === "object"
         ? parsed.organization
         : undefined;
+    const website =
+      parsed.website && typeof parsed.website === "object" ? parsed.website : undefined;
+
+    if (parsed.step === "organization" && !organization?.id && !website?.url) {
+      return {
+        ...createInitialState(),
+        ...parsed,
+        website,
+        organization,
+        step: "website",
+        connectors: Array.isArray(parsed.connectors) ? parsed.connectors : [],
+      };
+    }
 
     // Steps after `organization` need the control-plane org id; if it is
     // missing from an older record, resume at the org step.
@@ -138,6 +228,7 @@ function readStored(): OnboardingState | null {
       return {
         ...createInitialState(),
         ...parsed,
+        website,
         organization,
         step: "organization",
         connectors: Array.isArray(parsed.connectors) ? parsed.connectors : [],
@@ -147,6 +238,7 @@ function readStored(): OnboardingState | null {
     return {
       ...createInitialState(),
       ...parsed,
+      website,
       organization,
       connectors: Array.isArray(parsed.connectors) ? parsed.connectors : [],
     };
@@ -174,10 +266,15 @@ export interface OnboardingMachine {
   goTo: (step: OnboardingStep) => void;
   next: () => void;
   back: () => void;
+  invalidateOrganization: () => void;
   setOrganization: (org: OrganizationPayload) => void;
   setWebsite: (website: WebsitePayload) => void;
+  addWebsite: (website: WebsitePayload) => void;
+  removeWebsite: (url: string) => void;
   addConnector: (connector: ConnectorPick) => void;
   removeConnector: (id: string) => void;
+  updateConnectorMetadata: (id: string, metadata: SafeConnectorMetadata) => void;
+  setBrandTheme: (theme: OnboardingBrandTheme) => void;
   setRecommendation: (rec: PlanRecommendation) => void;
   markIntroPlayed: () => void;
   reset: () => void;
@@ -233,6 +330,21 @@ export function useOnboardingMachine(): OnboardingMachine {
     });
   }, [persist]);
 
+  const invalidateOrganization = useCallback(() => {
+    persist((prev) => ({
+      ...prev,
+      step: "organization",
+      organization: prev.organization
+        ? {
+            ...prev.organization,
+            id: undefined,
+            plan: undefined,
+          }
+        : prev.organization,
+      connectors: [],
+    }));
+  }, [persist]);
+
   const setOrganization = useCallback(
     (org: OrganizationPayload) => persist((prev) => ({ ...prev, organization: org })),
     [persist],
@@ -240,6 +352,41 @@ export function useOnboardingMachine(): OnboardingMachine {
 
   const setWebsite = useCallback(
     (website: WebsitePayload) => persist((prev) => ({ ...prev, website })),
+    [persist],
+  );
+
+  const addWebsite = useCallback(
+    (website: WebsitePayload) =>
+      persist((prev) => {
+        const same = (a?: string, b?: string) => normalizeUrlForCompare(a) === normalizeUrlForCompare(b);
+        if (!prev.website) return { ...prev, website };
+        if (same(prev.website.url, website.url)) return { ...prev, website: { ...prev.website, ...website } };
+        const additional = prev.additionalWebsites ?? [];
+        const exists = additional.some((item) => same(item.url, website.url));
+        return {
+          ...prev,
+          additionalWebsites: exists
+            ? additional.map((item) => (same(item.url, website.url) ? { ...item, ...website } : item))
+            : [...additional, website],
+        };
+      }),
+    [persist],
+  );
+
+  const removeWebsite = useCallback(
+    (url: string) =>
+      persist((prev) => {
+        const key = normalizeUrlForCompare(url);
+        if (!key) return prev;
+        const additional = prev.additionalWebsites ?? [];
+        const primaryKey = normalizeUrlForCompare(prev.website?.url);
+        if (primaryKey === key) {
+          const [nextPrimary, ...rest] = additional;
+          return { ...prev, website: nextPrimary, additionalWebsites: rest.length > 0 ? rest : undefined };
+        }
+        const nextAdditional = additional.filter((item) => normalizeUrlForCompare(item.url) !== key);
+        return { ...prev, additionalWebsites: nextAdditional.length > 0 ? nextAdditional : undefined };
+      }),
     [persist],
   );
 
@@ -269,6 +416,22 @@ export function useOnboardingMachine(): OnboardingMachine {
     [persist],
   );
 
+  const updateConnectorMetadata = useCallback(
+    (id: string, metadata: SafeConnectorMetadata) =>
+      persist((prev) => ({
+        ...prev,
+        connectors: prev.connectors.map((connector) =>
+          connector.id === id ? { ...connector, metadata } : connector,
+        ),
+      })),
+    [persist],
+  );
+
+  const setBrandTheme = useCallback(
+    (theme: OnboardingBrandTheme) => persist((prev) => ({ ...prev, brandTheme: theme })),
+    [persist],
+  );
+
   const setRecommendation = useCallback(
     (rec: PlanRecommendation) => persist((prev) => ({ ...prev, recommendation: rec })),
     [persist],
@@ -295,14 +458,29 @@ export function useOnboardingMachine(): OnboardingMachine {
     goTo,
     next,
     back,
+    invalidateOrganization,
     setOrganization,
     setWebsite,
+    addWebsite,
+    removeWebsite,
     addConnector,
     removeConnector,
+    updateConnectorMetadata,
+    setBrandTheme,
     setRecommendation,
     markIntroPlayed,
     reset,
   };
+}
+
+function normalizeUrlForCompare(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`);
+    return `${parsed.protocol}//${parsed.hostname.replace(/^www\./i, "").toLowerCase()}${parsed.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return value.trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "").toLowerCase();
+  }
 }
 
 /** Derive V1's org "size" enum from a BRREG employee count. */

@@ -1,26 +1,18 @@
-import { jsonOrNull, notConfiguredResponse, ZAMMAD_URL, zammadConfigured, zammadHeaders } from "@/app/api/support/_lib/zammad";
+import { supportRouteError } from "@/app/api/support/_lib/errors";
+import { listSupportAgents } from "@/lib/integrations/conversation-core";
+import { RequestActorError, requireRequestActor } from "@/lib/integrations/request-actor";
 
-type ZammadUser = {
-  id: number;
-  firstname: string;
-  lastname: string;
-  email: string;
-};
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
-  if (!zammadConfigured()) return notConfiguredResponse();
-
-  const response = await fetch(`${ZAMMAD_URL}/api/v1/users?role=Agent`, {
-    headers: zammadHeaders(),
-    cache: "no-store",
-  });
-  const payload = await jsonOrNull<ZammadUser[]>(response);
-
-  if (!response.ok) {
-    return Response.json(payload ?? { error: "agents_fetch_failed" }, { status: response.status });
+  try {
+    const actor = await requireRequestActor();
+    return Response.json(listSupportAgents(actor));
+  } catch (error) {
+    if (!(error instanceof RequestActorError)) {
+      return Response.json([]);
+    }
+    return supportRouteError(error, "agents_fetch_failed", "Support agents could not be loaded.");
   }
-
-  return Response.json(
-    (payload ?? []).map(({ id, firstname, lastname, email }) => ({ id, firstname, lastname, email })),
-  );
 }

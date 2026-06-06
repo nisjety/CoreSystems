@@ -442,13 +442,18 @@ impl SearXNGImages {
             .query(&[("categories", "images")])
             .send()
             .await
-            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("searxng-images: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, format!("searxng-images: {e}"))
+            })?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(status.as_u16(), "searxng-images"));
         }
         let body: SearXNGImageResponse = resp.json().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, format!("searxng-images decode: {e}"))
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("searxng-images decode: {e}"),
+            )
         })?;
         Ok(map_image_results(body, limit))
     }

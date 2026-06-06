@@ -49,6 +49,10 @@ pub enum ChatEvent {
         url: String,
         snippet: String,
     },
+    /// Structured internal grounding payload rendered by the chat UI.
+    Grounding {
+        grounding: crate::retrieval::Grounding,
+    },
     /// A canvas/doc/image artifact (side panel).
     Artifact {
         id: String,
@@ -93,7 +97,7 @@ impl ChatEvent {
             ChatEvent::ReasoningDelta { .. } => Some("reasoning"),
             ChatEvent::StepUpdate { .. } => Some("steps"),
             ChatEvent::ToolCall { .. } | ChatEvent::ToolResult { .. } => Some("tools"),
-            ChatEvent::Citation { .. } => Some("citations"),
+            ChatEvent::Citation { .. } | ChatEvent::Grounding { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. } => Some("usage"),
             // terminal control events — always allowed
@@ -122,6 +126,7 @@ impl ChatEvent {
             ChatEvent::ToolCall { .. } => "tool_call",
             ChatEvent::ToolResult { .. } => "tool_result",
             ChatEvent::Citation { .. } => "citation",
+            ChatEvent::Grounding { .. } => "grounding",
             ChatEvent::Artifact { .. } => "artifact",
             ChatEvent::Attachment { .. } => "attachment",
             ChatEvent::Usage { .. } => "usage",
@@ -164,6 +169,9 @@ impl ChatEvent {
             } => {
                 json!({ "id": id, "title": title, "url": url, "snippet": snippet })
             }
+            ChatEvent::Grounding { grounding } => {
+                serde_json::to_value(grounding).unwrap_or_else(|_| json!({}))
+            }
             ChatEvent::Artifact {
                 id,
                 kind,
@@ -196,7 +204,11 @@ impl ChatEvent {
                 "confidence": confidence,
             }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
-            ChatEvent::Error { code, message, retryable } => json!({
+            ChatEvent::Error {
+                code,
+                message,
+                retryable,
+            } => json!({
                 "code": code,
                 "message": message,
                 "retryable": retryable,
@@ -367,6 +379,54 @@ mod tests {
         };
         assert_eq!(cite.name(), "citation");
         assert_eq!(cite.payload("r")["url"], "https://x");
+
+        let grounding = ChatEvent::Grounding {
+            grounding: crate::retrieval::Grounding {
+                mode: "hybrid".into(),
+                query: "refund policy".into(),
+                trace_id: Some("trace-1".into()),
+                low_confidence: false,
+                fact_count: 1,
+                source_count: 1,
+                facts: vec![crate::retrieval::GroundingFact {
+                    knowledge_id: "kid-1".into(),
+                    document_id: "doc-1".into(),
+                    text: "Refunds are accepted within 30 days.".into(),
+                    score: 0.93,
+                    source_title: "Refund policy".into(),
+                    source_type: "policy".into(),
+                    provider: "Notion".into(),
+                    chunk_index: 0,
+                }],
+                sources: vec![crate::retrieval::GroundingSource {
+                    id: "doc-1".into(),
+                    kind: "knowledge".into(),
+                    title: "Refund policy".into(),
+                    snippet: "Refunds are accepted within 30 days.".into(),
+                    provider: "Notion".into(),
+                    source_type: "policy".into(),
+                    document_id: "doc-1".into(),
+                    href: "/knowledge".into(),
+                    score: 0.93,
+                }],
+                graph: Some(crate::retrieval::GroundingGraph {
+                    trace_id: Some("graph-1".into()),
+                    community_summaries: vec!["Refund policy connects with return workflow.".into()],
+                    edge_count: 0,
+                    nodes: vec![crate::retrieval::GroundingGraphNode {
+                        id: "node-1".into(),
+                        label: "Refund policy".into(),
+                        kind: "policy".into(),
+                    }],
+                }),
+                context_block: String::new(),
+                citations: Vec::new(),
+            },
+        };
+        assert_eq!(grounding.family(), Some("citations"));
+        assert_eq!(grounding.name(), "grounding");
+        assert_eq!(grounding.payload("r")["mode"], "hybrid");
+        assert_eq!(grounding.payload("r")["graph"]["traceId"], "graph-1");
 
         // attachment maps mime -> "type" (matches the brief's payload).
         let att = ChatEvent::Attachment {

@@ -52,8 +52,29 @@ services:
       AUTH_CORE_URL: http://auth-core:3011
       AUTH_CORE_PUBLIC_URL: http://localhost:3011
       USER_CORE_URL: http://user-core:3012
+      ORG_CORE_URL: http://org-core:8080
+      BILLING_CORE_URL: http://billing-core:3014
+      SESSION_CORE_URL: http://session-core:3017
+      INTEGRATION_INTERNAL_API_KEY: ${INTEGRATION_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTEGRATION_CORE_URL: http://integration-api:3026
+      GRAPH_INDEX_URL: http://dpv2-graph-index:9203
+      DATA_PLANE_DOCUMENTS_URL: http://dpv2-documents-api:8010
+      MODEL_PLANE_URL: http://model-gateway:8080
+      MODEL_PLANE_AI_URL: http://model-gateway:8080
+      NOTIFICATION_CORE_URL: http://notification-core:3140
+      INFORMATION_CORE_URL: http://information-core:3190
+      QUARRY_EDGE_URL: http://quarry-edge:8082
+      QUARRY_CONTROL_URL: http://quarry-control:8081
       NEXT_PUBLIC_APP_URL: http://localhost:3000
       NEXT_PUBLIC_AUTH_BASE_URL: http://localhost:3000
+      # Convex (Application Plane convex-core). Server-side BFF routes reach the
+      # self-hosted backend in-network via `convex-backend:3210` (shared
+      # inter-plane-bus); the browser real-time client uses the host-published
+      # port. CONVEX_INTERNAL_SERVICE_KEY must match the convex-core deployment
+      # env (it gates the search-history mutations via assertServiceKey).
+      CONVEX_API_URL: ${CONVEX_API_URL:-http://convex-backend:3210}
+      CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-change-me-internal-service-secret}
+      NEXT_PUBLIC_CONVEX_URL: ${NEXT_PUBLIC_CONVEX_URL:-http://localhost:3210}
     command:
       [
         "sh",
@@ -65,21 +86,30 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./src:/app/src
       - ./public:/app/public
-      - ./package.json:/app/package.json:ro
-      - ./pnpm-lock.yaml:/app/pnpm-lock.yaml:ro
+      # NOTE: package.json + pnpm-lock.yaml are deliberately NOT bind-mounted.
+      # They are baked into the image (Dockerfile.dev) alongside the matching
+      # node_modules, so they stay perfectly consistent. Single-file bind mounts
+      # of these caused Docker Desktop's virtiofs layer to pin a stale inode
+      # after a host rewrite (git checkout / editor atomic-rename), which fed a
+      # CORRUPT package.json to tailwind/postcss (CssSyntaxError at EOF) even
+      # though `docker exec cat` showed the valid file. To change dependencies,
+      # rebuild the image: `docker compose -f docker-compose.yml build frontend`.
       - ./next.config.ts:/app/next.config.ts:ro
       - ./tsconfig.json:/app/tsconfig.json:ro
       - ./next-env.d.ts:/app/next-env.d.ts
       - ./postcss.config.mjs:/app/postcss.config.mjs:ro
       - ./eslint.config.mjs:/app/eslint.config.mjs:ro
       - velionv2_node_modules:/app/node_modules
+      # Persist the Next/Turbopack build cache across restarts. Previously a
+      # 1 GiB tmpfs that was wiped on every restart -> every route cold-recompiled
+      # (3-7s each), saturating the dev server and causing ERR_CONNECTION_RESET +
+      # dropped HMR sockets. A named volume keeps the cache warm and removes the cap.
+      - velionv2_next_cache:/app/.next
     networks:
       - inter-plane-bus
     depends_on:
       nats:
         condition: service_healthy
-    tmpfs:
-      - /app/.next:size=1024m
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q --timeout=5 --tries=1 -O /dev/null http://127.0.0.1:3000 || exit 1"]
@@ -95,4 +125,5 @@ networks:
 
 volumes:
   velionv2_node_modules:
+  velionv2_next_cache:
   velion-nats-data:

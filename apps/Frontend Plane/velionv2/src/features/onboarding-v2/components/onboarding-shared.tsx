@@ -190,6 +190,7 @@ function OnboardingStepDots({
               aria-label={formatOnboardingText(copy.shared.goToStep, { step: label })}
               aria-current={active ? "step" : undefined}
               title={tooltip}
+              style={active ? { backgroundColor: "var(--onboarding-accent, #191716)" } : undefined}
               className={cn(
                 "h-2 rounded-full transition-all hover:bg-[#777169] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#191716]/35",
                 active ? "w-6 bg-[#191716]" : "w-2 bg-[#C9C9C9]",
@@ -233,27 +234,52 @@ function ActionTooltip({
 export function RightPane({
   children,
   showIcons = true,
+  showScanner = true,
 }: {
   children: React.ReactNode;
   showIcons?: boolean;
+  showScanner?: boolean;
 }) {
   return (
     <div className="relative hidden min-h-[560px] overflow-hidden rounded-r-[24px] md:block lg:min-h-[600px] xl:min-h-[640px]">
-      <div className="absolute inset-0 bg-[#F4EFE5]" />
+      <div
+        className="absolute inset-0"
+        style={{
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--onboarding-accent, #111111) 7%, #F4EFE5), #F4EFE5 58%)",
+        }}
+      />
       <div className="relative z-10 h-full min-h-[560px] lg:min-h-[600px] xl:min-h-[640px]">{children}</div>
 
-      <div className="pointer-events-none absolute bottom-8 left-5 top-8 z-20">
-        <div className="absolute inset-y-0 left-0 w-px bg-[#FF2E63]/90" />
-        <div className="absolute inset-y-0 -left-[3px] w-[8px] bg-[#FF3B5C]/35 blur-[7px]" />
-        <div className="scanner-dot absolute -left-[4px] top-0 h-[20px] w-[9px] rounded-lg bg-gradient-to-b from-[#FF3B5C]/15 via-[#FF3B5C]/40 to-[#FF3B5C]/15 shadow-[0_0_8px_rgba(255,59,92,0.5),0_0_16px_rgba(255,59,92,0.3),0_0_32px_rgba(255,59,92,0.15)]" />
-      </div>
+      {showScanner && (
+        <div className="pointer-events-none absolute bottom-8 left-5 top-8 z-20">
+          <div className="absolute inset-y-0 left-0 w-px" style={{ backgroundColor: "var(--onboarding-accent, #FF2E63)" }} />
+          <div
+            className="absolute inset-y-0 -left-[3px] w-[8px] blur-[7px]"
+            style={{ backgroundColor: "color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 35%, transparent)" }}
+          />
+          <div
+            className="scanner-dot absolute -left-[4px] top-0 h-[20px] w-[9px] rounded-lg"
+            style={{
+              background:
+                "linear-gradient(to bottom, color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 15%, transparent), color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 60%, transparent), color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 15%, transparent))",
+              boxShadow:
+                "0 0 8px color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 55%, transparent), 0 0 18px color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 34%, transparent), 0 0 34px color-mix(in srgb, var(--onboarding-accent, #FF3B5C) 20%, transparent)",
+            }}
+          />
+        </div>
+      )}
 
       {showIcons && (
         <div className="absolute left-4 top-1/2 z-30 -translate-y-1/2 xl:left-5">
           <div className="flex flex-col items-center gap-10 text-white/90 lg:gap-11 xl:gap-12">
             <ShieldCheck strokeWidth={1.4} className="size-4 text-[#10B981] xl:size-5" />
             <Lock strokeWidth={1.4} className="size-4 xl:size-5" />
-            <Fingerprint strokeWidth={1.4} className="size-4 text-[#FF2E63]/80 xl:size-5" />
+            <Fingerprint
+              strokeWidth={1.4}
+              className="size-4 xl:size-5"
+              style={{ color: "color-mix(in srgb, var(--onboarding-accent, #FF2E63) 82%, white)" }}
+            />
           </div>
         </div>
       )}
@@ -301,7 +327,8 @@ export function PrimaryButton({
       type={type}
       disabled={disabled}
       onClick={onClick}
-      className="inline-flex w-fit items-center justify-center rounded-md bg-[#111111] px-5 py-3 font-inter text-[11px] uppercase tracking-[0.22em] text-white transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
+      className="inline-flex w-fit items-center justify-center rounded-md px-5 py-3 font-inter text-[11px] uppercase tracking-[0.22em] text-white transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
+      style={{ backgroundColor: "var(--onboarding-accent, #111111)" }}
     >
       {children}
     </button>

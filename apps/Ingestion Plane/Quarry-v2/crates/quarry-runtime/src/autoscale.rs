@@ -17,7 +17,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// work is globally capped (and backs off together under overload).
 pub fn global_autoscale() -> Arc<AutoscaledPool> {
     static GLOBAL: OnceLock<Arc<AutoscaledPool>> = OnceLock::new();
-    GLOBAL.get_or_init(|| Arc::new(AutoscaledPool::from_parallelism())).clone()
+    GLOBAL
+        .get_or_init(|| Arc::new(AutoscaledPool::from_parallelism()))
+        .clone()
 }
 
 /// Compute the next concurrency target. Multiplicative decrease (halve) on
@@ -57,14 +59,20 @@ impl AutoscaledPool {
     /// Default sizing from CPU parallelism: start at `cores`, floor 1, ceiling
     /// `cores * 4` (I/O-bound crawl work tolerates oversubscription).
     pub fn from_parallelism() -> Self {
-        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Self::new(cores, 1, cores * 4)
     }
 
     /// Acquire one global slot; the returned permit releases on drop.
     pub async fn acquire(&self) -> OwnedSemaphorePermit {
         // unwrap: the semaphore is never closed for the pool's lifetime.
-        self.sem.clone().acquire_owned().await.expect("autoscale semaphore closed")
+        self.sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("autoscale semaphore closed")
     }
 
     pub fn target(&self) -> usize {
@@ -151,7 +159,7 @@ mod tests {
     async fn overload_shrinks_available_ceiling() {
         let p = AutoscaledPool::new(8, 1, 16);
         p.record_overload(); // 8 -> 4
-        // 4 permits forgotten from the 8 available.
+                             // 4 permits forgotten from the 8 available.
         assert_eq!(p.available(), 4);
     }
 }

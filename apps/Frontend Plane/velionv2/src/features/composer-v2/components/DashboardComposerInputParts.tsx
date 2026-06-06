@@ -176,7 +176,7 @@ export function AutocompleteDropdown({
 
 export function TurnReceipt({ turn }: { turn: ComposerTurn }) {
   return (
-    <div className="velion-fade-up mt-3 rounded-[18px] border border-black/[0.05] bg-white/80 p-3 text-[12px] text-[#666] shadow-[0_10px_28px_rgba(0,0,0,0.04)] backdrop-blur-sm dark:border-[#2A2C31] dark:bg-[#141516]/85 dark:text-[#AEB4C0]">
+    <div className="velion-composer-turn-receipt velion-fade-up mt-3 rounded-[18px] border border-black/[0.05] bg-white/80 p-3 text-[12px] text-[#666] shadow-[0_10px_28px_rgba(0,0,0,0.04)] backdrop-blur-sm dark:border-[#2A2C31] dark:bg-[#141516]/85 dark:text-[#AEB4C0]">
       <div className="flex items-start gap-2">
         <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-[#111111] text-white">
           <ArrowUp className="size-3.5" />

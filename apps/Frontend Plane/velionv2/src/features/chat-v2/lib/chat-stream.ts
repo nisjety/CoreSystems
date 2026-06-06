@@ -8,6 +8,8 @@
  *   }
  */
 
+import type { ChatKnowledgeGrounding } from "@/features/chat-v2/lib/chat-grounding";
+
 export type ChatStreamOptions = {
   content: string;
   model?: string;
@@ -35,6 +37,7 @@ export type ChatStreamOptions = {
 
 export type ChatTiming = {
   authMs?: number;
+  groundingMs?: number;
   mintMs?: number;
   scrapeMs?: number;
   upstreamConnectMs?: number;
@@ -44,6 +47,7 @@ export type ChatTiming = {
 
 export type ChatStreamChunk =
   | { type: "connected" }
+  | { type: "grounding"; grounding: ChatKnowledgeGrounding }
   | { type: "delta"; delta: string; requestId?: string }
   | { type: "reasoning_delta"; delta: string }
   | { type: "citation"; id: string; title: string; url: string; snippet: string }
@@ -147,6 +151,14 @@ export async function* streamChat(
 
         if (eventName === "connected") {
           yield { type: "connected" };
+          continue;
+        }
+
+        if (eventName === "grounding") {
+          yield {
+            type: "grounding",
+            grounding: data as unknown as ChatKnowledgeGrounding,
+          };
           continue;
         }
 

@@ -16,9 +16,11 @@ export interface CreateConnectSessionResponse {
   sessionToken: string;
   connectUrl: string;
   expiresAt: string;
+  providerConfigKey: string;
   provider: {
     key: string;
     label: string;
+    configKey: string;
   };
 }
 
@@ -47,17 +49,24 @@ export class ConnectSessionService {
       }
     });
 
-    return this.toResponse(provider.key, provider.label, session);
+    return this.toResponse(provider.key, provider.label, provider.nangoIntegrationId, session);
   }
 
-  private toResponse(providerKey: string, providerLabel: string, session: ConnectSessionResult): CreateConnectSessionResponse {
+  private toResponse(
+    providerKey: string,
+    providerLabel: string,
+    providerConfigKey: string,
+    session: ConnectSessionResult
+  ): CreateConnectSessionResponse {
     return {
       sessionToken: session.token,
       connectUrl: session.connectLink,
       expiresAt: session.expiresAt,
+      providerConfigKey,
       provider: {
         key: providerKey,
-        label: providerLabel
+        label: providerLabel,
+        configKey: providerConfigKey
       }
     };
   }

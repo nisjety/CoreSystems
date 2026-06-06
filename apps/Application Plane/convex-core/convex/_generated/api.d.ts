@@ -13,6 +13,7 @@ import type * as agents from "../agents.js";
 import type * as ai from "../ai.js";
 import type * as authz from "../authz.js";
 import type * as controlSessions from "../controlSessions.js";
+import type * as conversationProjection from "../conversationProjection.js";
 import type * as conversations from "../conversations.js";
 import type * as http from "../http.js";
 import type * as ingest from "../ingest.js";
@@ -22,6 +23,7 @@ import type * as nats from "../nats.js";
 import type * as organizations from "../organizations.js";
 import type * as plannerDocuments from "../plannerDocuments.js";
 import type * as projects from "../projects.js";
+import type * as searches from "../searches.js";
 import type * as users from "../users.js";
 
 import type {
@@ -36,6 +38,7 @@ declare const fullApi: ApiFromModules<{
   ai: typeof ai;
   authz: typeof authz;
   controlSessions: typeof controlSessions;
+  conversationProjection: typeof conversationProjection;
   conversations: typeof conversations;
   http: typeof http;
   ingest: typeof ingest;
@@ -45,6 +48,7 @@ declare const fullApi: ApiFromModules<{
   organizations: typeof organizations;
   plannerDocuments: typeof plannerDocuments;
   projects: typeof projects;
+  searches: typeof searches;
   users: typeof users;
 }>;
 

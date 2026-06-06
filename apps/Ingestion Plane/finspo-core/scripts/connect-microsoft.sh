@@ -9,13 +9,13 @@ set -Eeuo pipefail
 #   1. POSTs /api/v1/providers/<provider>/connect-session to integration-api
 #      using the internal API key (bypasses org-scope; the 'pro' plan guard
 #      still applies — see notes below).
-#   2. Prints the Nango `connectUrl` you open in a browser to complete the
+#   2. Prints the Velion `connectUrl` you open in a browser to complete the
 #      Microsoft OAuth consent.
 #   3. Optionally polls /api/v1/connections until the connection goes active.
 #
-# After consent, Nango fires its `on_auth_creation` webhook to integration-core,
-# which records the active connection. finspo's token broker
-# (POST /internal/connectors/token) then resolves a Graph token for the org.
+# After consent, integration-corev2 records the active connection. finspo's
+# token broker (POST /internal/connectors/token) then resolves a Graph token
+# for the org.
 #
 # Required env:
 #   INTERNAL_API_KEY   integration-core internal API key (x-internal-api-key)
@@ -113,7 +113,7 @@ if [[ "$status" != "201" && "$status" != "200" ]]; then
   case "$status" in
     401) err "auth failed — check INTERNAL_API_KEY matches integration-core's internal key" ;;
     402|403) err "the 'pro' plan guard rejected this org. Either upgrade org '$ORG_ID' to a 'pro' entitlement in billing/org-core, or connect via velion v1's integrations UI (which runs as the logged-in user)." ;;
-    404) err "provider '$PROVIDER' not registered. Confirm MICROSOFT_CLIENT_ID/SECRET are set and the nango-seed one-shot ran." ;;
+    404) err "provider '$PROVIDER' not registered. Confirm AZURE_CLIENT_ID/AZURE_CLIENT_SECRET are set on integration-corev2." ;;
   esac
   exit 1
 fi
@@ -169,5 +169,5 @@ while (( SECONDS < deadline )); do
 done
 
 err "Timed out after ${POLL_TIMEOUT_SECONDS}s waiting for an active connection."
-err "Complete the consent in the browser, then re-run with POLL=1, or check integration-api logs for the nango webhook."
+err "Complete the consent in the browser, then re-run with POLL=1, or check integration-api logs for the OAuth callback."
 exit 1

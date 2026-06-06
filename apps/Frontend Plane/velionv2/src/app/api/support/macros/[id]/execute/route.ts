@@ -1,16 +1,21 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
-import { jsonOrNull, notConfiguredResponse, ZAMMAD_URL, zammadConfigured, zammadHeaders } from "@/app/api/support/_lib/zammad";
+
+import { supportRouteError } from "@/app/api/support/_lib/errors";
+import { executeSupportMacro } from "@/lib/integrations/conversation-core";
+import { requireRequestActor } from "@/lib/integrations/request-actor";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const executeSchema = z.object({
-  ticketId: z.number(),
+  ticketId: z.union([z.number(), z.string().min(1)]),
 });
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  if (!zammadConfigured()) return notConfiguredResponse();
   const [{ id }, raw] = await Promise.all([
     params,
     request.json().catch(() => null),
@@ -21,13 +26,11 @@ export async function POST(
     return Response.json({ error: parsed.error.flatten() }, { status: 422 });
   }
 
-  const response = await fetch(`${ZAMMAD_URL}/api/v1/macros/${encodeURIComponent(id)}/execute`, {
-    method: "POST",
-    headers: zammadHeaders(),
-    cache: "no-store",
-    body: JSON.stringify({ ticket_id: parsed.data.ticketId }),
-  });
-  const payload = await jsonOrNull<unknown>(response);
-
-  return Response.json(payload ?? { ok: response.ok }, { status: response.status });
+  try {
+    const actor = await requireRequestActor();
+    const result = await executeSupportMacro(actor, id, String(parsed.data.ticketId));
+    return Response.json(result);
+  } catch (error) {
+    return supportRouteError(error, "macro_execute_failed", "Support macro could not be executed.");
+  }
 }

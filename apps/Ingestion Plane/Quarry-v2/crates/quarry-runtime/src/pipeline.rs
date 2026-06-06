@@ -23,9 +23,9 @@ use quarry_transform::{
 use serde_json::json;
 
 use crate::artifact_store::ArtifactStore;
+use crate::autoscale::AutoscaledPool;
 use crate::driver::{Driver, FetchHints, RenderHints};
 use crate::events::EventSink;
-use crate::autoscale::AutoscaledPool;
 use crate::host_scheduler::{BadKind, HostScheduler};
 use crate::ingest_client::DataPlaneIngest;
 use crate::local_index::{LocalDocument, TantivyLocalIndex};

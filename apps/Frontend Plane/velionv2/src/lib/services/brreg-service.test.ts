@@ -204,6 +204,33 @@ describe("brregService.searchByName", () => {
     expect(result).toEqual([entity]);
   });
 
+  it("returns an empty array when upstream results are null", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(
+      makeFetchResponse({ results: null, count: 0 }),
+    );
+
+    const result = await brregService.searchByName("Acme");
+    expect(result).toEqual([]);
+  });
+
+  it("returns an empty array when upstream results are missing", async () => {
+    const mockFetch = vi.mocked(fetch);
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({ count: 0 }));
+
+    const result = await brregService.searchByName("Acme");
+    expect(result).toEqual([]);
+  });
+
+  it("accepts a direct array response for compatibility", async () => {
+    const mockFetch = vi.mocked(fetch);
+    const entity = { organisasjonsnummer: "123456789", navn: "Acme AS" };
+    mockFetch.mockResolvedValueOnce(makeFetchResponse([entity]));
+
+    const result = await brregService.searchByName("Acme");
+    expect(result).toEqual([entity]);
+  });
+
   it("throws when response is not ok", async () => {
     const mockFetch = vi.mocked(fetch);
     mockFetch.mockResolvedValueOnce(

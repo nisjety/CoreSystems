@@ -211,6 +211,23 @@ export function useDashboardComposerController({
     event.currentTarget.value = "";
   };
 
+  const addExternalFiles = (incoming: File[]) => {
+    if (incoming.length === 0) {
+      return;
+    }
+    const created = incoming.map((file) => ({
+      id: `${file.name}-${file.size}-${file.lastModified}`,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      url: URL.createObjectURL(file),
+    }));
+    onFilesChange([
+      ...files,
+      ...created.filter((file) => !files.some((current) => current.id === file.id)),
+    ]);
+  };
+
   const removeFile = (fileId: string) => {
     const file = files.find((current) => current.id === fileId);
 
@@ -652,6 +669,7 @@ export function useDashboardComposerController({
     setAutocomplete,
     setAutocompleteIndex,
     addFiles,
+    addExternalFiles,
     removeFile,
     updateSettings,
     openHistoryPanel,

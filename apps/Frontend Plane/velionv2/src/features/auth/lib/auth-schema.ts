@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export type AuthMode = "signin" | "signup";
+export type AuthMode = "signin" | "signup" | "forgot" | "reset" | "sso";
 
 export const signInSchema = z.object({
   email: z.string().trim().email("Enter a valid email address").max(254),
@@ -19,8 +19,41 @@ export const signUpSchema = z.object(signUpShape).refine((value) => value.passwo
   message: "Passwords must match",
 });
 
+export const forgotSchema = z.object({
+  email: signInSchema.shape.email,
+});
+
+export const resetSchema = z
+  .object({
+    password: z.string().min(12, "Password must be at least 12 characters"),
+    confirmPassword: z.string().min(12, "Confirm your password"),
+  })
+  .refine((value) => value.password === value.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords must match",
+  });
+
+export const ssoSchema = z
+  .object({
+    email: z.string().trim().email().max(254).optional().or(z.literal("")),
+    domain: z
+      .string()
+      .trim()
+      .max(253)
+      .regex(/^([a-z0-9-]+\.)+[a-z]{2,}$/i, "Enter a valid domain")
+      .optional()
+      .or(z.literal("")),
+  })
+  .refine((value) => Boolean(value.email?.trim()) || Boolean(value.domain?.trim()), {
+    path: ["email"],
+    message: "Enter a work email or domain",
+  });
+
 export type SignInInput = z.infer<typeof signInSchema>;
 export type SignUpInput = z.infer<typeof signUpSchema>;
+export type ForgotInput = z.infer<typeof forgotSchema>;
+export type ResetInput = z.infer<typeof resetSchema>;
+export type SsoInput = z.infer<typeof ssoSchema>;
 
 export type PasswordStrengthKey =
   | "minLength"

@@ -24,7 +24,7 @@ services:
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
       # searxng must share a network with quarry-edge (inter-plane-bus).
       QUARRY_EDGE__SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
-      QUARRY_EDGE__BRAVE_SEARCH_KEY: ${BRAVE_SEARCH_KEY:-}
+      QUARRY_EDGE__BRAVE_SEARCH_KEY: ${BRAVE_API_KEY:-${BRAVE_SEARCH_KEY:-}}
       # Accept any non-empty Bearer in dev so the orchestrator's calls
       # to /v1/internal/run_page succeed without a real auth-core JWT.
       # The Rust binary refuses to start when this is `1` AND
@@ -257,9 +257,15 @@ services:
       BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
       AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:3015}
       FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
+      FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}}
+      FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
       DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
+      DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_INTERNAL_API_KEY:-${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}}
+      DATA_PLANE_INTERNAL_API_KEY_HEADER: ${DATA_PLANE_INTERNAL_API_KEY_HEADER:-X-Internal-Api-Key}
       DATA_PLANE_GRAPH_INDEX_URL: ${DATA_PLANE_GRAPH_INDEX_URL:-${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}}
+      INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       NATS_ENABLED: ${NATS_ENABLED:-false}
       NATS_URL: ${NATS_URL:-nats://velion-nats:4222}
       NATS_USERNAME: ${NATS_USERNAME:-}
@@ -295,6 +301,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      integration-webhook-normalizer:
+        condition: service_healthy
     ports:
       - "3026:3026"
     networks:
@@ -311,6 +319,83 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+
+  integration-finspo-worker:
+    build:
+      context: ./integration-corev2
+      dockerfile: Dockerfile
+    container_name: integration-finspo-worker
+    entrypoint: ["/app/finspo-worker"]
+    restart: unless-stopped
+    env_file:
+      - ./integration-core/.env
+    environment:
+      SERVICE_NAME: integration-finspo-worker
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
+      FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
+      FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}}
+      FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
+      # config.Load still initializes the shared vault even though this worker
+      # never decrypts provider tokens.
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.20"
+        reservations:
+          memory: 32M
+    depends_on:
+      integration-api:
+        condition: service_healthy
+      finspo-api:
+        condition: service_healthy
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  integration-webhook-normalizer:
+    build:
+      context: ./integration-corev2/services/webhook-normalizer-rs
+      dockerfile: Dockerfile
+    container_name: integration-webhook-normalizer
+    restart: unless-stopped
+    environment:
+      PORT: "3036"
+      RUST_LOG: ${RUST_LOG:-info}
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+          cpus: "0.20"
+        reservations:
+          memory: 32M
+    ports:
+      - "3036:3036"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3036/health || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ==================== FINSPO-CORE (SharePoint Manager) ====================
   finspo-api:

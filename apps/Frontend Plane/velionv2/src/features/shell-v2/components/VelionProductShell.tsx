@@ -16,7 +16,6 @@ import {
   Search,
   Sparkles,
   Sun,
-  UserRound,
 } from "lucide-react";
 import { authClient } from "@/lib/auth/auth-client";
 import type { ControlPlaneContextValue } from "@/lib/control-plane/context-types";
@@ -73,6 +72,8 @@ function getNavbarLabels(activeRoute: VelionRoute) {
       return { moduleLabel: "Chat", tabLabel: "Oppgaver" };
     case "/inbox":
       return { moduleLabel: "Inbox", tabLabel: "Your inbox" };
+    case "/ingestions":
+      return { moduleLabel: "Ingestions", tabLabel: "Workspace" };
     case "/agents":
       return { moduleLabel: "Agenter", tabLabel: "Studio" };
     case "/knowledge":
@@ -120,6 +121,48 @@ function firstInitial(...values: Array<string | null | undefined>) {
   return (first?.trim().charAt(0) || fallbackWorkspaceIdentity.initial).toUpperCase();
 }
 
+function normalizeIdentityName(value: string | null | undefined) {
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\b(as|asa|ab|sa|ba|llc|inc|ltd)\b/g, "")
+    .replace(/[^a-z0-9æøå]+/g, "");
+}
+
+function sameIdentityName(first: string | null | undefined, second: string | null | undefined) {
+  const normalizedFirst = normalizeIdentityName(first);
+  const normalizedSecond = normalizeIdentityName(second);
+  return normalizedFirst.length > 0 && normalizedFirst === normalizedSecond;
+}
+
+function displayNameFromEmail(email: string | null | undefined) {
+  const local = email?.split("@")[0]?.trim();
+  if (!local) return null;
+  return local
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function resolvePersonalName(userName: string | null, organizationName: string | null | undefined, userEmail: string | null) {
+  const trimmed = userName?.trim();
+  if (trimmed && !sameIdentityName(trimmed, organizationName)) {
+    return trimmed;
+  }
+  return displayNameFromEmail(userEmail);
+}
+
+function faviconUrlForDomain(domain: string | null | undefined) {
+  const cleanDomain = domain
+    ?.trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .split("/")[0];
+  if (!cleanDomain) return null;
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(cleanDomain)}&sz=64`;
+}
+
 function safeAccentColor(...values: Array<string | null | undefined>) {
   const found = values.find((value) => value && HEX_COLOR.test(value));
   return found?.toLowerCase() ?? null;
@@ -134,31 +177,21 @@ function resolveWorkspaceIdentity(
   const userEmail = profile?.email ?? context.user?.email ?? null;
   const userAvatar = profile?.avatar ?? context.user?.image ?? null;
   const plan = context.entitlements?.plan ?? organization?.plan ?? "free";
-  const name = organization?.name ?? userName ?? fallbackWorkspaceIdentity.name;
+  const personalName = resolvePersonalName(userName, organization?.name, userEmail);
+  const name = organization?.name ?? personalName ?? fallbackWorkspaceIdentity.name;
 
   return {
     accentColor: safeAccentColor(context.appearance?.colorScheme, organization?.accentColor),
     domain: organization?.primaryDomain ?? null,
-    initial: firstInitial(organization?.name, userName, userEmail),
-    logoUrl: organization?.logoUrl ?? null,
+    initial: firstInitial(organization?.name, personalName, userEmail),
+    logoUrl: organization?.logoUrl ?? faviconUrlForDomain(organization?.primaryDomain),
     name: cleanOrganizationName(name),
     plan: formatPlanLabel(plan),
     role: context.role,
     userAvatar,
     userEmail,
-    userName,
+    userName: personalName,
   };
-}
-
-function useWorkspaceAccent(accentColor: string | null | undefined) {
-  useEffect(() => {
-    if (!accentColor || !HEX_COLOR.test(accentColor)) {
-      return;
-    }
-
-    const root = document.documentElement;
-    root.style.setProperty("--velion-accent", accentColor);
-  }, [accentColor]);
 }
 
 export function VelionProductShell({
@@ -176,13 +209,17 @@ export function VelionProductShell({
 }) {
   const [sidebarExpanded, setSidebarExpanded] = useState(defaultSidebarExpanded);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [profile, setProfile] = useState<NavbarProfile | null>(null);
   const controlPlane = useControlPlaneContext();
+  const initialNavbar = controlPlane.navbar;
+  const [profile, setProfile] = useState<NavbarProfile | null>(initialNavbar?.profile ?? null);
   const { setTheme } = useTheme();
   const workspace = resolveWorkspaceIdentity(controlPlane, profile);
   const effectiveSidebarExpanded = lockSidebarCollapsed ? false : sidebarExpanded;
   const sidebarWidth = effectiveSidebarExpanded ? expandedSidebarWidth : SIDEBAR_MINIMIZED_WIDTH;
-  useWorkspaceAccent(workspace.accentColor);
+  const sidebarAccentColor =
+    workspace.accentColor && HEX_COLOR.test(workspace.accentColor)
+      ? workspace.accentColor
+      : undefined;
 
   // Apply the server-side theme preference only when the user has no explicit
   // local override stored in localStorage (key "theme").
@@ -206,6 +243,7 @@ export function VelionProductShell({
       style={{
         ["--dashboard-navbar-height" as string]: "56px",
         ["--dashboard-rail-width" as string]: `${sidebarWidth}px`,
+        ["--velion-sidebar-accent" as string]: sidebarAccentColor,
       }}
     >
       <TopNavbar
@@ -251,9 +289,11 @@ function TopNavbar({
   const { back, forward, push } = useRouter();
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
+  const { navbar: initialNavbar } = useControlPlaneContext();
   const headerRef = useRef<HTMLElement>(null);
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
   const { calendar, notifications, setCalendar, setNotifications } = useNavbarData({
+    initialData: initialNavbar,
     onProfileChange,
     onThemeChange: setTheme,
   });
@@ -269,7 +309,7 @@ function TopNavbar({
   const unreadMessageCount = notifications.messages.filter((message) => !message.read).length;
   const unreadNotificationCount = notifications.notifications.filter((notification) => !notification.read).length;
   const profileAvatar = workspace.userAvatar ?? profile?.avatar;
-  const profileInitial = firstInitial(profile?.name, workspace.userName, workspace.userEmail);
+  const profileInitial = firstInitial(workspace.userName, workspace.userEmail, profile?.name);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -341,7 +381,7 @@ function TopNavbar({
 
   return (
     <>
-      <header ref={headerRef} className="dashboard-navbar-bg fixed inset-x-0 top-0 z-[var(--velion-z-navbar)] bg-[#F7F7F8]/95 backdrop-blur transition-colors dark:bg-[#1E2027]/88">
+      <header ref={headerRef} className="dashboard-navbar-bg fixed inset-x-0 top-0 z-[var(--velion-z-navbar)] backdrop-blur transition-colors">
         <div className="flex h-14 items-center justify-between gap-4 pl-3 pr-5">
           <div className="flex min-w-0 items-center gap-3">
             <TopLayerTooltip label="Home">
@@ -349,14 +389,13 @@ function TopNavbar({
                 href={"/dashboard" as Route}
                 aria-label="Go to home"
                 title="Go to home"
-                className="hidden size-9 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-black/[0.05] bg-white text-[var(--velion-accent)] shadow-sm transition-colors hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--velion-accent)] dark:border-white/[0.08] dark:bg-[#202229] dark:hover:bg-white/10 md:flex"
+                className="hidden size-9 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-black/[0.05] bg-white text-[#1C1C1E] shadow-sm transition-colors hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#111111]/20 dark:border-white/[0.08] dark:bg-[#202229] dark:text-white dark:hover:bg-white/10 dark:focus-visible:ring-white/25 md:flex"
               >
                 {workspace.logoUrl ? (
-                  <img
+                  <SafeImage
                     src={workspace.logoUrl}
-                    alt=""
-                    referrerPolicy="no-referrer"
-                    className="size-full object-cover"
+                    imgClassName="size-full object-contain p-1.5"
+                    fallback={<span className="text-[11px] font-semibold">{workspace.initial}</span>}
                   />
                 ) : (
                   <span className="text-[11px] font-semibold">{workspace.initial}</span>
@@ -462,11 +501,10 @@ function TopNavbar({
                 />
                 <span className="flex size-[26px] items-center justify-center rounded-full bg-[linear-gradient(135deg,#F2DFC2,#E6B783)] text-[10px] font-bold text-[#4A341A]">
                   {profileAvatar ? (
-                    <img
+                    <SafeImage
                       src={profileAvatar}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                      className="size-full rounded-full object-cover"
+                      imgClassName="size-full rounded-full object-cover"
+                      fallback={profileInitial}
                     />
                   ) : (
                     profileInitial
@@ -525,23 +563,23 @@ function WorkspaceSwitcher({
   const [active, setActive] = useState<ActiveWorkspace>("org");
 
   return (
-    <div className="fixed left-[150px] top-12 z-[var(--velion-z-popover)] w-[340px] overflow-hidden rounded-[18px] border border-black/[0.08] bg-white/96 p-2 shadow-[0_22px_70px_rgba(15,16,20,0.18)] backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#232630]/96">
+    <div className="fixed left-[132px] top-12 z-[var(--velion-z-popover)] w-[286px] overflow-hidden rounded-[14px] border border-black/[0.08] bg-white/96 p-1.5 shadow-[0_18px_52px_rgba(15,16,20,0.16)] backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#232630]/96">
       {/* Organization workspace */}
       <button
         type="button"
         aria-pressed={active === "org"}
         onClick={() => { setActive("org"); onClose(); }}
-        className="flex w-full items-center gap-3 rounded-[14px] bg-[#F7F7F8] px-3 py-3 text-left transition-colors hover:bg-[#EFEFEF] dark:bg-white/[0.06] dark:hover:bg-white/[0.10]"
+        className="flex w-full items-center gap-2.5 rounded-[11px] bg-[#F7F7F8] px-2.5 py-2.5 text-left transition-colors hover:bg-[#EFEFEF] dark:bg-white/[0.06] dark:hover:bg-white/[0.10]"
       >
         <WorkspaceMark workspace={workspace} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-semibold text-[#111111] dark:text-white">{workspace.name}</p>
-          <p className="mt-0.5 truncate text-[12px] text-[#777] dark:text-[#B8BEC8]">
+          <p className="mt-0.5 truncate text-[11px] text-[#777] dark:text-[#B8BEC8]">
             Organization workspace · {workspace.plan}
           </p>
         </div>
         {active === "org" ? (
-          <Check className="size-4 shrink-0 text-[var(--velion-accent)]" aria-hidden="true" />
+          <Check className="size-3.5 shrink-0 text-[#191716] dark:text-white" aria-hidden="true" />
         ) : null}
       </button>
 
@@ -550,30 +588,28 @@ function WorkspaceSwitcher({
         type="button"
         aria-pressed={active === "personal"}
         onClick={() => { setActive("personal"); onClose(); }}
-        className="mt-1 flex w-full items-center gap-3 rounded-[14px] border border-black/[0.06] px-3 py-3 text-left transition-colors hover:bg-[#F7F7F8] dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
+        className="mt-1 flex w-full items-center gap-2.5 rounded-[11px] border border-black/[0.06] px-2.5 py-2.5 text-left transition-colors hover:bg-[#F7F7F8] dark:border-white/[0.08] dark:hover:bg-white/[0.06]"
       >
-        <span className="grid size-9 shrink-0 place-items-center rounded-[12px] bg-[#F2F3F5] text-[#4B5563] dark:bg-[#2A2D35] dark:text-[#D7DBE3]">
-          <UserRound className="size-4" />
-        </span>
+        <UserWorkspaceMark workspace={workspace} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-semibold text-[#111111] dark:text-white">
             {workspace.userName ?? "Personal workspace"}
           </p>
-          <p className="mt-0.5 truncate text-[12px] text-[#777] dark:text-[#B8BEC8]">
+          <p className="mt-0.5 truncate text-[11px] text-[#777] dark:text-[#B8BEC8]">
             {workspace.userEmail ?? "Signed in"}
           </p>
         </div>
         {active === "personal" ? (
-          <Check className="size-4 shrink-0 text-[var(--velion-accent)]" aria-hidden="true" />
+          <Check className="size-3.5 shrink-0 text-[#191716] dark:text-white" aria-hidden="true" />
         ) : null}
       </button>
 
       <Link
         href={"/settings/workspace" as Route}
         onClick={onClose}
-        className="mt-2 flex items-center gap-2 rounded-[12px] px-3 py-2 text-[12px] font-medium text-[#555] transition-colors hover:bg-black/[0.04] dark:text-[#D0D6E0] dark:hover:bg-white/[0.08]"
+        className="mt-1.5 flex items-center gap-2 rounded-[10px] px-2.5 py-2 text-[11.5px] font-medium text-[#555] transition-colors hover:bg-black/[0.04] dark:text-[#D0D6E0] dark:hover:bg-white/[0.08]"
       >
-        <Building2 className="size-4" />
+        <Building2 className="size-3.5" />
         Manage workspaces and members
       </Link>
     </div>
@@ -583,18 +619,65 @@ function WorkspaceSwitcher({
 function WorkspaceMark({ workspace }: { workspace: WorkspaceIdentity }) {
   if (workspace.logoUrl) {
     return (
-      <span className="size-10 shrink-0 overflow-hidden rounded-[13px] bg-white shadow-sm ring-1 ring-black/[0.06] dark:bg-[#17191F] dark:ring-white/[0.08]">
-        <img src={workspace.logoUrl} alt="" referrerPolicy="no-referrer" className="size-full object-cover" />
+      <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-[10px] bg-white shadow-sm ring-1 ring-black/[0.06] dark:bg-[#17191F] dark:ring-white/[0.08]">
+        <SafeImage
+          src={workspace.logoUrl}
+          imgClassName="size-full object-contain p-1.5"
+          fallback={<WorkspaceInitialMark workspace={workspace} />}
+        />
       </span>
     );
   }
 
+  return <WorkspaceInitialMark workspace={workspace} />;
+}
+
+function WorkspaceInitialMark({ workspace }: { workspace: WorkspaceIdentity }) {
   return (
     <span
-      className="grid size-10 shrink-0 place-items-center rounded-[13px] text-[13px] font-semibold text-white shadow-sm"
-      style={{ backgroundColor: workspace.accentColor ?? "var(--velion-accent)" }}
+      className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-[#1C1C1E] text-[12px] font-semibold text-white shadow-sm dark:bg-white dark:text-[#111111]"
     >
       {workspace.initial}
     </span>
+  );
+}
+
+function UserWorkspaceMark({ workspace }: { workspace: WorkspaceIdentity }) {
+  const initial = firstInitial(workspace.userName, workspace.userEmail);
+  return (
+    <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-[10px] bg-[#F2F3F5] text-[11px] font-semibold text-[#4B5563] dark:bg-[#2A2D35] dark:text-[#D7DBE3]">
+      <SafeImage
+        src={workspace.userAvatar}
+        imgClassName="size-full object-cover"
+        fallback={initial}
+      />
+    </span>
+  );
+}
+
+function SafeImage({
+  src,
+  imgClassName,
+  fallback,
+}: {
+  src?: string | null;
+  imgClassName: string;
+  fallback: React.ReactNode;
+}) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+
+  if (!src || failedSrc === src) {
+    return <>{fallback}</>;
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt=""
+      referrerPolicy="no-referrer"
+      className={imgClassName}
+      onError={() => setFailedSrc(src)}
+    />
   );
 }

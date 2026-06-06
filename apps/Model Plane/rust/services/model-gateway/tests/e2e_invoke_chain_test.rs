@@ -25,9 +25,10 @@ use mp_contracts::model_plane::v1::{
     ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse, GeneratedImage,
     GetContextAssemblyRequest, GetContextAssemblyResponse, GetVideoGenerationJobRequest,
     GetVideoGenerationJobResponse, InferChunk, InferRequest, InferResponse, LanguageAnalysisResult,
-    ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse,
-    ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ModelInfo,
-    ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SpeechVoiceInfo,
+    ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest,
+    ListConversationResponse, ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest,
+    ListSpeechVoicesResponse, ListTranslationLanguagesRequest, ListTranslationLanguagesResponse,
+    ModelInfo, ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SpeechVoiceInfo,
     StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
     StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
     TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse,
@@ -620,6 +621,24 @@ impl SessionCore for MockSessionCore {
     ) -> Result<Response<SaveCheckpointResponse>, Status> {
         Err(Status::unimplemented(
             "save_checkpoint not needed in this test",
+        ))
+    }
+
+    async fn list_agent_skills(
+        &self,
+        _: TReq<ListAgentSkillsRequest>,
+    ) -> Result<Response<ListAgentSkillsResponse>, Status> {
+        Err(Status::unimplemented(
+            "list_agent_skills not needed in this test",
+        ))
+    }
+
+    async fn list_conversation(
+        &self,
+        _: TReq<ListConversationRequest>,
+    ) -> Result<Response<ListConversationResponse>, Status> {
+        Err(Status::unimplemented(
+            "list_conversation not needed in this test",
         ))
     }
 

@@ -110,12 +110,20 @@ func (s *Server) checkEntitlement(c *gin.Context) {
 		status = http.StatusPaymentRequired
 	}
 
+	// Report the *effective* plan (elevated to Pro during an active trial) as
+	// `plan` so tier-based gates (e.g. integration-core requires "pro") pass
+	// pre-paywall; `base_plan` preserves the org-mirrored stored plan.
+	effectivePlan := billing.EffectivePlan(account, time.Now().UTC())
 	c.JSON(status, gin.H{
-		"org_id":   orgID,
-		"feature":  feature,
-		"allowed":  allowed,
-		"plan":     account.Plan,
-		"required": !allowed,
+		"org_id":         orgID,
+		"feature":        feature,
+		"allowed":        allowed,
+		"plan":           effectivePlan,
+		"base_plan":      account.Plan,
+		"effective_plan": effectivePlan,
+		"trialing":       account.SubscriptionState == billing.SubscriptionStateTrialing && account.TrialEndsAt != nil,
+		"trial_ends_at":  account.TrialEndsAt,
+		"required":       !allowed,
 	})
 }
 

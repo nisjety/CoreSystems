@@ -56,7 +56,7 @@ export function Breadcrumb({
         className="group inline-flex min-w-0 items-center gap-2 rounded-[10px] px-1.5 py-1 transition-colors hover:bg-black/[0.04] hover:text-[#111111] dark:hover:bg-white/[0.08] dark:hover:text-white"
       >
         <span className="truncate font-medium text-[#2A2D35] group-hover:text-[#111111] dark:text-[#F2F4F8] dark:group-hover:text-white">{workspace.name}</span>
-        <span className="shrink-0 rounded-full border border-[#DDE0E7] bg-white px-2 py-0.5 text-[12px] font-medium leading-none text-[var(--velion-accent)] dark:border-[#3A3D46] dark:bg-[#202229]">
+        <span className="shrink-0 rounded-full border border-[#DDE0E7] bg-white px-2 py-0.5 text-[12px] font-medium leading-none text-[#4B5563] dark:border-[#3A3D46] dark:bg-[#202229] dark:text-[#D0D6E0]">
           {workspace.plan}
         </span>
       </button>

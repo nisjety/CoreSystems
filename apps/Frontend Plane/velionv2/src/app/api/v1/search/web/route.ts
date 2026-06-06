@@ -105,6 +105,8 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
+    const limit =
+      typeof body?.limit === "number" ? Math.max(1, Math.min(body.limit, 50)) : 8;
 
     const token = await mintAudienceToken(request, getQuarryAudience());
 
@@ -167,13 +169,15 @@ export async function POST(request: NextRequest) {
       headers: quarryHeaders,
       body: JSON.stringify({
         query,
-        limit: typeof body?.limit === "number" ? body.limit : 8,
+        limit,
         // Default on (dashboard summary). The /search page opts out
         // (includeAnswer:false) and streams the answer client-side instead.
         include_answer: body?.includeAnswer === false ? false : true,
         safe_search: true,
       }),
-      signal: AbortSignal.timeout(15000),
+      // Give Quarry enough time to widen from free providers into Brave and
+      // still synthesize an answer when the dashboard asks for one.
+      signal: AbortSignal.timeout(25_000),
     });
 
     if (!upstream.ok) {
@@ -207,12 +211,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const results = Array.isArray(data.results) ? data.results : [];
+    const answer = typeof data.answer === "string" && data.answer.trim() ? data.answer : null;
+    const citations = Array.isArray(data.citations) ? data.citations : [];
+
     return NextResponse.json(
       ok({
         mode: "search" as const,
-        results: Array.isArray(data.results) ? data.results : [],
-        answer: typeof data.answer === "string" ? data.answer : null,
-        citations: Array.isArray(data.citations) ? data.citations : [],
+        results,
+        answer,
+        citations,
       }),
     );
   } catch (error) {

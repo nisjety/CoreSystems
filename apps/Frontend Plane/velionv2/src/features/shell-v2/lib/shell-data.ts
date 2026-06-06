@@ -3,6 +3,7 @@ export type VelionRoute =
   | "/search"
   | "/chat"
   | "/inbox"
+  | "/ingestions"
   | "/knowledge"
   | "/agents"
   | "/account"

@@ -136,20 +136,21 @@ impl VectorIndex for DataPlaneVectorIndex {
         if let Some(key) = &self.api_key {
             req = req.header("x-internal-key", key);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| QuarryError::new(ErrorCode::UpstreamBlocked, format!("retrieve request failed: {e}")))?;
+        let resp = req.send().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::UpstreamBlocked,
+                format!("retrieve request failed: {e}"),
+            )
+        })?;
         if !resp.status().is_success() {
             return Err(QuarryError::new(
                 ErrorCode::UpstreamBlocked,
                 format!("retrieve returned status {}", resp.status()),
             ));
         }
-        let parsed: RetrieveResponseBody = resp
-            .json()
-            .await
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("retrieve decode failed: {e}")))?;
+        let parsed: RetrieveResponseBody = resp.json().await.map_err(|e| {
+            QuarryError::new(ErrorCode::Internal, format!("retrieve decode failed: {e}"))
+        })?;
         Ok(map_candidates(parsed))
     }
 }

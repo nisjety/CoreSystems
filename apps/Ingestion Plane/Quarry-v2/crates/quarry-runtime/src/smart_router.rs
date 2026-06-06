@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
@@ -413,6 +414,8 @@ impl SmartSearchRouter {
         opts: &SearchOptions,
     ) -> QuarryResult<Vec<SearchResult>> {
         let mut combined: Vec<SearchResult> = Vec::new();
+        let target_results = self.target_results(opts);
+        let mut eager_paid_backups = false;
 
         // 1. Hit Tantivy first (synchronous, microseconds).
         if let Some(t) = &self.tantivy {
@@ -423,35 +426,34 @@ impl SmartSearchRouter {
 
         // 2. Widen only if local corpus didn't meet the threshold.
         if combined.len() < self.config.min_local_results {
-            let mut futures = Vec::new();
+            eager_paid_backups =
+                combined.is_empty() && should_eagerly_run_paid_backups(query, opts);
+            let mut providers: Vec<(&'static str, Arc<dyn SearchProvider>)> = Vec::new();
             if let Some(s) = self.stract.clone() {
-                let h = self.clone_health();
-                let cfg = self.config.clone();
-                let q = query.to_string();
-                let o = opts.clone();
-                futures.push(tokio::spawn(async move {
-                    run_one(&h, "stract", &s, &q, &o, &cfg).await
-                }));
+                providers.push(("stract", s));
             }
             if let Some(s) = self.searxng.clone() {
-                let h = self.clone_health();
-                let cfg = self.config.clone();
-                let q = query.to_string();
-                let o = opts.clone();
-                futures.push(tokio::spawn(async move {
-                    run_one(&h, "searxng", &s, &q, &o, &cfg).await
-                }));
+                providers.push(("searxng", s));
             }
-            let outputs = futures::future::join_all(futures).await;
-            for out in outputs {
-                if let Ok(Some(rs)) = out {
-                    combined = merge_dedupe(combined, rs);
+            // Broad "head" queries from humans and LLMs are often terse
+            // entity lookups ("OpenAI", "Stripe API"). If the local corpus
+            // is empty, start the paid backup tier immediately instead of
+            // waiting for a slow free provider to time out first.
+            if eager_paid_backups {
+                if let Some(s) = self.serper.clone() {
+                    providers.insert(0, ("serper", s));
+                }
+                if let Some(b) = self.brave.clone() {
+                    providers.insert(0, ("brave", b));
                 }
             }
+            combined = self
+                .collect_parallel(query, opts, combined, target_results, providers)
+                .await;
         }
 
         // 3. Paid backup only when free chain returned <min_total_results.
-        if combined.len() < self.config.min_total_results {
+        if !eager_paid_backups && combined.len() < self.config.min_total_results {
             if let Some(b) = &self.brave {
                 if let Some(rs) = self.run_provider("brave", b, query, opts).await {
                     combined = merge_dedupe(combined, rs);
@@ -523,6 +525,66 @@ impl SmartSearchRouter {
 
     fn clone_health(&self) -> Arc<HashMap<&'static str, HealthState>> {
         self.health.clone()
+    }
+
+    fn target_results(&self, opts: &SearchOptions) -> usize {
+        opts.limit
+            .max(self.config.min_local_results as u32)
+            .max(self.config.min_total_results as u32)
+            .max(1) as usize
+    }
+
+    async fn collect_parallel(
+        &self,
+        query: &str,
+        opts: &SearchOptions,
+        mut combined: Vec<SearchResult>,
+        target_results: usize,
+        providers: Vec<(&'static str, Arc<dyn SearchProvider>)>,
+    ) -> Vec<SearchResult> {
+        if providers.is_empty() || combined.len() >= target_results {
+            return combined;
+        }
+
+        let mut joins = JoinSet::new();
+        let provider_count = providers.len();
+        let mut resolved: Vec<Option<Option<Vec<SearchResult>>>> = vec![None; provider_count];
+        for (idx, (name, provider)) in providers.into_iter().enumerate() {
+            let health = self.clone_health();
+            let config = self.config.clone();
+            let q = query.to_string();
+            let o = opts.clone();
+            joins.spawn(async move {
+                (
+                    idx,
+                    run_one(&health, name, &provider, &q, &o, &config).await,
+                )
+            });
+        }
+
+        let mut next_to_merge = 0usize;
+        while let Some(out) = joins.join_next().await {
+            if let Ok((idx, results)) = out {
+                resolved[idx] = Some(results);
+                while next_to_merge < provider_count {
+                    let Some(slot) = resolved[next_to_merge].take() else {
+                        break;
+                    };
+                    if let Some(results) = slot {
+                        combined = merge_dedupe(combined, results);
+                    }
+                    next_to_merge += 1;
+                    if combined.len() >= target_results {
+                        joins.abort_all();
+                        break;
+                    }
+                }
+            }
+        }
+
+        while joins.join_next().await.is_some() {}
+
+        combined
     }
 
     /// Research / Comparative path: unconditionally fan out to **every**
@@ -663,6 +725,32 @@ fn merge_dedupe(mut base: Vec<SearchResult>, extra: Vec<SearchResult>) -> Vec<Se
         }
     }
     base
+}
+
+fn should_eagerly_run_paid_backups(query: &str, opts: &SearchOptions) -> bool {
+    let q = query.trim();
+    if q.is_empty()
+        || opts.exact_match
+        || opts.topic.is_some()
+        || opts.time_range.is_some()
+        || q.contains("://")
+        || q.contains('/')
+        || q.contains('.')
+    {
+        return false;
+    }
+
+    let terms: Vec<&str> = q.split_whitespace().collect();
+    if terms.is_empty() || terms.len() > 2 {
+        return false;
+    }
+
+    terms.iter().all(|term| {
+        term.len() >= 2
+            && term
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '&' | '+'))
+    })
 }
 
 #[async_trait]
@@ -934,6 +1022,19 @@ mod tests {
             .any(|r| r.url == "https://c/" && r.provider == "stract"));
     }
 
+    #[test]
+    fn eager_paid_backup_heuristic_is_narrow() {
+        let opts = SearchOptions::default();
+        assert!(should_eagerly_run_paid_backups("OpenAI", &opts));
+        assert!(should_eagerly_run_paid_backups("stripe api", &opts));
+        assert!(!should_eagerly_run_paid_backups(
+            "how does tokio work",
+            &opts
+        ));
+        assert!(!should_eagerly_run_paid_backups("github.com", &opts));
+        assert!(!should_eagerly_run_paid_backups("\"exact match\"", &opts));
+    }
+
     // ---- Router behavior --------------------------------------------------
 
     /// Test SearchProvider that returns a canned list.
@@ -966,6 +1067,22 @@ mod tests {
         }
         fn name(&self) -> &str {
             "failing"
+        }
+    }
+
+    struct Pending;
+
+    #[async_trait]
+    impl SearchProvider for Pending {
+        async fn search(
+            &self,
+            _query: &str,
+            _opts: &SearchOptions,
+        ) -> QuarryResult<Vec<SearchResult>> {
+            futures::future::pending::<QuarryResult<Vec<SearchResult>>>().await
+        }
+        fn name(&self) -> &str {
+            "pending"
         }
     }
 
@@ -1033,6 +1150,58 @@ mod tests {
         assert_eq!(results.len(), 3);
         assert!(results.iter().any(|r| r.url == "https://a/"));
         assert!(results.iter().any(|r| r.url == "https://b/"));
+    }
+
+    #[tokio::test]
+    async fn default_path_returns_as_soon_as_parallel_remote_target_is_met() {
+        let router = SmartSearchRouter::builder()
+            .with_stract(Arc::new(Canned(vec![r("https://fast/", "stract")])))
+            .with_searxng(Arc::new(Pending))
+            .with_config(RouterConfig {
+                min_local_results: 1,
+                min_total_results: 1,
+                cache_ttl_s: 0,
+                provider_timeout_s: 30,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let mut opts = SearchOptions::default();
+        opts.limit = 1;
+        let results =
+            tokio::time::timeout(Duration::from_millis(100), router.search("OpenAI", &opts))
+                .await
+                .expect("search should not wait for the slow sibling provider")
+                .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].provider, "stract");
+    }
+
+    #[tokio::test]
+    async fn short_head_queries_can_return_from_brave_without_waiting_for_free_timeout() {
+        let router = SmartSearchRouter::builder()
+            .with_searxng(Arc::new(Pending))
+            .with_brave(Arc::new(Canned(vec![r("https://paid/", "brave")])))
+            .with_config(RouterConfig {
+                min_local_results: 1,
+                min_total_results: 1,
+                cache_ttl_s: 0,
+                provider_timeout_s: 30,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let mut opts = SearchOptions::default();
+        opts.limit = 1;
+        let results =
+            tokio::time::timeout(Duration::from_millis(100), router.search("OpenAI", &opts))
+                .await
+                .expect(
+                    "head query should not serialize a paid fallback behind a slow free provider",
+                )
+                .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].provider, "brave");
     }
 
     #[tokio::test]

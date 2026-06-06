@@ -38,7 +38,11 @@ pub fn rrf_fuse(
     let mut bump = |url: &str, rank: usize, title: &Option<String>, snippet: &Option<String>| {
         let e = acc.entry(url.to_string()).or_insert_with(|| {
             order.push(url.to_string());
-            Acc { score: 0.0, title: None, snippet: None }
+            Acc {
+                score: 0.0,
+                title: None,
+                snippet: None,
+            }
         });
         e.score += 1.0 / (k + rank as f32);
         if e.title.is_none() {

@@ -615,17 +615,19 @@ services:
       - ./apps/Application Plane/convex-core/.env.local
     environment:
       - CONVEX_INSTANCE_NAME=coresystem-local
-      - CONVEX_INSTANCE_SECRET=dev-secret-change-in-production-use-generate-script
+      - CONVEX_INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      - INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
       - CONVEX_STORAGE_TYPE=sqlite
       - CONVEX_SQLITE_PATH=/data/convex.db
-      - AI_CORE_URL=http://mp-model-gateway:8080
-      - MODEL_GATEWAY_URL=http://mp-model-gateway:8080
-      - ORG_CORE_URL=http://org-core-service:8080
-      - AUTH_SERVER_URL=http://auth-service:3011
-      - JWT_SECRET=dev-jwt-secret-change-in-production
+      - AI_CORE_URL=${AI_CORE_URL:-http://mp-model-gateway:8080}
+      - MODEL_GATEWAY_URL=${MODEL_GATEWAY_URL:-http://mp-model-gateway:8080}
+      - ORG_CORE_URL=${ORG_CORE_URL:-http://org-core:8080}
+      - AUTH_SERVER_URL=${AUTH_SERVER_URL:-http://auth-core:3011}
+      - JWT_SECRET=${JWT_SECRET:-a2db5549b35903f6d9210f0eb2578fec95fc3802e2b7947bb8e5711bc7ae4a55}
       - JWT_ISSUER=auth.coresystem.local
       - RUST_LOG=info
       - CONVEX_LOG_FORMAT=json
+      - CONVEX_DISABLE_BEACON=true
     ports:
       - "3210:3210"   # Backend API
       - "3211:3211"   # HTTP Actions/WebSocket
@@ -860,7 +862,7 @@ services:
       - QUARRY_EDGE__LOCAL_INDEX_DIR=${QUARRY_LOCAL_INDEX_DIR:-/app/data/local_index}
       - QUARRY_EDGE__STRACT_URL=${STRACT_URL:-http://stract:3000}
       - QUARRY_EDGE__SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
-      - QUARRY_EDGE__BRAVE_SEARCH_KEY=${BRAVE_SEARCH_KEY:-}
+      - QUARRY_EDGE__BRAVE_SEARCH_KEY=${BRAVE_API_KEY:-${BRAVE_SEARCH_KEY:-}}
       - QUARRY_EDGE__SERPER_KEY=${SERPER_KEY:-}
       # Cycle 19 / cluster #20 — LLM-backed intent classifier.
       # When `true` AND model_plane_url is set, the router consults the LLM

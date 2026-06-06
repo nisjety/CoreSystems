@@ -3,38 +3,35 @@ export type DashboardCard = {
   category: string;
   title: string;
   description: string;
-  image: string;
+  image?: string;
   href: string;
   prompt: string;
 };
 
 export const dashboardCards: DashboardCard[] = [
   {
-    id: "search",
-    category: "Søk",
-    title: "Søk i selskapets kunnskap",
-    description: "Søk på tvers av nettsider, dokumenter og kanaler i én felles søkemotor.",
-    image: "/imagens/arched-corridor-1.jpeg",
-    href: "/knowledge",
-    prompt: "Søk i selskapets kunnskap og finn relevant informasjon.",
+    id: "weather",
+    category: "Weather",
+    title: "Lokalt værbilde",
+    description: "Få rask status på temperatur, vind og nedbør direkte på Velion-flaten.",
+    href: "/dashboard",
+    prompt: "Oppsummer værbildet og hva teamet bør være obs på i dag.",
   },
   {
-    id: "chat",
-    category: "Chat",
-    title: "Chat med organisasjons-AI",
-    description: "Still spørsmål og få svar med kildehenvisninger direkte fra selskapsinnholdet.",
-    image: "/imagens/arched-hallway-symmetry.jpeg",
-    href: "/chat",
-    prompt: "Hva kan du hjelpe meg med i dag?",
+    id: "traffic",
+    category: "Traffic",
+    title: "Trafikk rundt Oslo",
+    description: "Se operative målepunkter, fart og belastning på nøkkelstrekninger.",
+    href: "/dashboard",
+    prompt: "Gi meg en kort trafikkstatus og eventuelle flaskehalser i området.",
   },
   {
-    id: "knowledge",
-    category: "Kunnskapsbase",
-    title: "Oversikt over indeksert innhold",
-    description: "Se hva AI-en vet om selskapet — statusoversikt over alle koblede kilder.",
-    image: "/imagens/arched-interior-modern.png",
-    href: "/knowledge",
-    prompt: "Gi meg en oversikt over hva som er indeksert i kunnskapsbasen.",
+    id: "news",
+    category: "News",
+    title: "Norske nyheter",
+    description: "Følg de ferskeste sakene fra utvalgte norske kilder uten å forlate dashboardet.",
+    href: "/dashboard",
+    prompt: "Oppsummer de viktigste nyhetene akkurat nå i korte trekk.",
   },
   {
     id: "sources",

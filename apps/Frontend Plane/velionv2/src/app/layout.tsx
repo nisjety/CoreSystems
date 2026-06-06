@@ -10,11 +10,13 @@ const inter = Inter({
 });
 
 const geistSans = Geist({
+  preload: false,
   variable: "--font-geist-sans",
   subsets: ["latin"],
 });
 
 const geistMono = Geist_Mono({
+  preload: false,
   variable: "--font-geist-mono",
   subsets: ["latin"],
 });

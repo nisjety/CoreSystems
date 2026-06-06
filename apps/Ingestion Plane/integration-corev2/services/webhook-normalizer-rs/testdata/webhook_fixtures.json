@@ -1,0 +1,21 @@
+[
+  {
+    "name": "github_push_with_payload_delivery",
+    "providerKey": "github",
+    "headers": {
+      "X-GitHub-Event": "push",
+      "X-GitHub-Delivery": "delivery-header",
+      "X-Hub-Signature-256": "sha256=abc123",
+      "X-Org-ID": "org-header"
+    },
+    "body": "{\"deliveryId\":\"delivery-1\",\"organizationId\":\"org-body\",\"repository\":{\"name\":\"demo\"}}",
+    "expected": {
+      "schemaVersion": 1,
+      "providerKey": "github",
+      "eventType": "push",
+      "organizationId": "org-header",
+      "replayKey": "delivery-1",
+      "eventId": "wh_github_2f19a462c6072d607a2154145f02980d"
+    }
+  }
+]

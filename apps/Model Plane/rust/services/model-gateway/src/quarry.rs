@@ -309,29 +309,39 @@ impl Client {
                 status,
             });
         }
-        let env: serde_json::Map<String, Value> = serde_json::from_str(&raw)?;
-        // The edge wraps the result list under `data.results`.
-        let results = env
-            .get("data")
-            .and_then(Value::as_object)
-            .and_then(|d| d.get("results"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(results.iter().map(project_search_result).collect())
+        let payload: Value = serde_json::from_str(&raw)?;
+        Ok(extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect())
     }
+}
+
+fn extract_search_results(payload: &Value) -> Vec<Value> {
+    payload
+        .get("data")
+        .and_then(Value::as_object)
+        .and_then(|data| data.get("results"))
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| payload.get("results").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
 }
 
 // reason: provider scores are small; i64/f64→f32 loses no meaningful precision
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn project_search_result(v: &Value) -> SearchResult {
     let obj = v.as_object().cloned().unwrap_or_default();
+    let source = string_field(&obj, "source");
     SearchResult {
         url: string_field(&obj, "url"),
         title: string_field(&obj, "title"),
         snippet: string_field(&obj, "snippet"),
-        source: string_field(&obj, "source"),
+        source: if source.is_empty() {
+            string_field(&obj, "provider")
+        } else {
+            source
+        },
         // Score may be float or int depending on provider; coerce both.
         score: obj
             .get("score")
@@ -489,5 +499,57 @@ mod tests {
         });
         let r = project("https://example.com", &data);
         assert_eq!(r.text, "# hello"); // text falls back to markdown
+    }
+
+    #[test]
+    fn extract_search_results_accepts_bare_search_responses() {
+        let payload = serde_json::json!({
+            "query": "OpenAI",
+            "provider": "smart_router",
+            "results": [{
+                "url": "https://openai.com/",
+                "title": "OpenAI",
+                "snippet": "Research and deployment.",
+                "provider": "brave",
+                "rank": 1
+            }],
+            "count": 1
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://openai.com/");
+        assert_eq!(results[0].title, "OpenAI");
+        assert_eq!(results[0].snippet, "Research and deployment.");
+        assert_eq!(results[0].source, "brave");
+    }
+
+    #[test]
+    fn extract_search_results_accepts_enveloped_search_responses() {
+        let payload = serde_json::json!({
+            "data": {
+                "results": [{
+                    "url": "https://example.com/docs",
+                    "title": "Docs",
+                    "snippet": "Reference docs.",
+                    "source": "searxng",
+                    "score": 0.82
+                }]
+            }
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://example.com/docs");
+        assert_eq!(results[0].source, "searxng");
+        assert!((results[0].score - 0.82).abs() < f32::EPSILON);
     }
 }

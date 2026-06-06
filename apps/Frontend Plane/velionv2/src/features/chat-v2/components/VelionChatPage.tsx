@@ -32,8 +32,14 @@ import type { ComposerSubmitPayload } from "@/features/chat-v2/components/Velion
 import { VelionIconButton } from "@/components/ui/velion-ui";
 import { ChatMarkdown } from "@/features/chat-v2/components/ChatMarkdown";
 import { EmptyChatPromptChips } from "@/features/chat-v2/components/EmptyChatPromptChips";
+import type {
+  ChatGroundingGraph,
+  ChatGroundingSource,
+  ChatKnowledgeGrounding,
+} from "@/features/chat-v2/lib/chat-grounding";
 import {
   consumeChatLaunchMotion,
+  isAssistantPlaceholder,
   useVelionChatWorkspace,
   type AgentTaskStep,
   type ChatArtifact,
@@ -63,22 +69,20 @@ export function VelionChatPage() {
   const hasActiveMessages = Boolean(activeSession?.messages.length);
   const [launchMotion, setLaunchMotion] = useState(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
-  const [tab, setTab] = useState<ChatTab>("chat");
-  const [tabSession, setTabSession] = useState(activeSessionId);
+  const [tabState, setTabState] = useState<{ sessionId: string | null; value: ChatTab }>({
+    sessionId: activeSessionId ?? null,
+    value: "chat",
+  });
   const autoFollowRef = useRef(true);
 
   const messages = activeSession?.messages ?? [];
   const taskSteps = activeSession?.taskSteps ?? [];
-  const citations = collectCitations(messages);
+  const evidenceSources = collectEvidenceSources(messages);
+  const latestGrounding = collectLatestGrounding(messages);
   const artifacts = collectArtifacts(messages);
   const agentScreen = selectLatestImageArtifact(messages);
+  const tab = tabState.sessionId === (activeSessionId ?? null) ? tabState.value : "chat";
 
-  // Reset to the thread when the active session changes — render-time state
-  // adjustment (React's "store previous value" pattern), no effect needed.
-  if (activeSessionId !== tabSession) {
-    setTabSession(activeSessionId);
-    setTab("chat");
-  }
   const isStreaming = messages.some((message) => message.status === "waiting");
   // Grows as deltas append → drives the streaming auto-follow effect.
   const streamSignal = messages.length > 0 ? messages[messages.length - 1].content.length : 0;
@@ -90,7 +94,9 @@ export function VelionChatPage() {
     }
     list.scrollTo({ top: list.scrollHeight, behavior });
     autoFollowRef.current = true;
-    setShowScrollDown(false);
+    // Functional updater returns the same value when already false → React
+    // bails, so this can never feed an update loop.
+    setShowScrollDown((value) => (value ? false : value));
   }, []);
 
   const handleScroll = () => {
@@ -142,6 +148,16 @@ export function VelionChatPage() {
     };
   }, [activeSessionId, hasActiveMessages]);
 
+  const handleTabChange = useCallback(
+    (value: ChatTab) => {
+      setTabState({
+        sessionId: activeSessionId ?? null,
+        value,
+      });
+    },
+    [activeSessionId],
+  );
+
   return (
     <div
       className={cn(
@@ -161,8 +177,8 @@ export function VelionChatPage() {
         {hasActiveMessages ? (
           <ChatTabs
             active={tab}
-            onChange={setTab}
-            sourceCount={citations.length}
+            onChange={handleTabChange}
+            sourceCount={evidenceSources.length}
             stepCount={taskSteps.length}
             artifactCount={artifacts.length}
           />
@@ -195,9 +211,6 @@ export function VelionChatPage() {
                     </Fragment>
                   );
                 })}
-                {activeSession?.taskSteps.length ? (
-                  <TaskStreamCard steps={activeSession.taskSteps} onStopTask={chat.stopTask} />
-                ) : null}
               </div>
             </div>
           </div>
@@ -207,7 +220,7 @@ export function VelionChatPage() {
             onSubmit={chat.submit}
           />
         ) : tab === "sources" ? (
-          <SourcesPanel citations={citations} />
+          <SourcesPanel grounding={latestGrounding} sources={evidenceSources} />
         ) : tab === "artifacts" ? (
           <ArtifactsPanel artifacts={artifacts} />
         ) : (
@@ -253,6 +266,10 @@ export function VelionChatPage() {
 
 type ChatTab = "chat" | "sources" | "steps" | "artifacts";
 
+type EvidenceSource =
+  | (Citation & { kind: "web" })
+  | ChatGroundingSource;
+
 function collectArtifacts(messages: ChatMessage[]): ChatArtifact[] {
   const byId = new Map<string, ChatArtifact>();
   for (const message of messages) {
@@ -267,20 +284,42 @@ function collectArtifacts(messages: ChatMessage[]): ChatArtifact[] {
   return [...byId.values()];
 }
 
-function collectCitations(messages: ChatMessage[]): Citation[] {
+function collectEvidenceSources(messages: ChatMessage[]): EvidenceSource[] {
   const seen = new Set<string>();
-  const result: Citation[] = [];
+  const result: EvidenceSource[] = [];
+
   for (const message of messages) {
-    for (const citation of message.citations ?? []) {
-      const key = citation.url || citation.id;
+    for (const source of message.grounding?.sources ?? []) {
+      const key = `knowledge:${source.documentId || source.id}`;
       if (!key || seen.has(key)) {
         continue;
       }
       seen.add(key);
-      result.push(citation);
+      result.push(source);
+    }
+
+    for (const citation of message.citations ?? []) {
+      const key = `web:${citation.url || citation.id}`;
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      result.push({ ...citation, kind: "web" });
     }
   }
+
   return result;
+}
+
+function collectLatestGrounding(messages: ChatMessage[]): ChatKnowledgeGrounding | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const grounding = messages[index]?.grounding;
+    if (grounding) {
+      return grounding;
+    }
+  }
+
+  return null;
 }
 
 function hostname(url: string): string {
@@ -364,13 +403,19 @@ function EmptyPanel({
   );
 }
 
-function SourcesPanel({ citations }: { citations: Citation[] }) {
-  if (citations.length === 0) {
+function SourcesPanel({
+  grounding,
+  sources,
+}: {
+  grounding: ChatKnowledgeGrounding | null;
+  sources: EvidenceSource[];
+}) {
+  if (sources.length === 0 && !grounding) {
     return (
       <EmptyPanel
         icon={<Link2 className="size-5" />}
         title="Ingen kilder ennå"
-        subtitle="Kilder fra websøk dukker opp her når Velion bruker dem i svaret."
+        subtitle="Interne kunnskapskilder og websøk dukker opp her når Velion bruker dem i svaret."
       />
     );
   }
@@ -378,31 +423,168 @@ function SourcesPanel({ citations }: { citations: Citation[] }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
       <div className="mx-auto w-full max-w-[760px] space-y-2.5">
-        {citations.map((citation, index) => (
-          <a
-            key={citation.id || citation.url || index}
-            href={citation.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block rounded-[14px] border border-[#ECECEF] bg-white p-4 transition hover:border-[#E0E0E4] hover:shadow-[0_8px_24px_rgba(20,21,24,0.05)] dark:border-[#2A2C32] dark:bg-[#15161A] dark:hover:border-[#3A3D45]"
-          >
-            <div className="flex items-center gap-2 text-[12px] text-[#8A8F98] dark:text-[#8B929F]">
-              <span className="grid size-5 shrink-0 place-items-center rounded-md bg-[#F0F1F4] text-[10px] font-semibold text-[#6E737C] dark:bg-[#1C1E24] dark:text-[#AEB4C0]">
-                {index + 1}
-              </span>
-              <span className="truncate">{hostname(citation.url)}</span>
-            </div>
-            <p className="mt-1.5 text-[14px] font-semibold leading-snug text-[#202126] dark:text-white">
-              {citation.title || citation.url}
-            </p>
-            {citation.snippet ? (
-              <p className="mt-1 line-clamp-2 text-[13px] leading-[1.5] text-[#6E737C] dark:text-[#AEB4C0]">
-                {citation.snippet}
+        {grounding ? <GroundingOverviewCard grounding={grounding} /> : null}
+        {sources.map((source, index) => (
+          source.kind === "knowledge" ? (
+            <article
+              key={source.id}
+              className="rounded-[14px] border border-[#ECECEF] bg-white p-4 dark:border-[#2A2C32] dark:bg-[#15161A]"
+            >
+              <div className="flex items-center gap-2 text-[12px] text-[#8A8F98] dark:text-[#8B929F]">
+                <span className="grid size-5 shrink-0 place-items-center rounded-md bg-[#F0F1F4] text-[10px] font-semibold text-[#6E737C] dark:bg-[#1C1E24] dark:text-[#AEB4C0]">
+                  {index + 1}
+                </span>
+                <span className="truncate">{source.provider} · {source.sourceType}</span>
+                <span className="ml-auto rounded-full bg-[#F6EFE6] px-2 py-0.5 text-[10px] font-semibold text-[#B96E1D] dark:bg-[#2A2014] dark:text-[#E29A4D]">
+                  Score {source.score.toFixed(2)}
+                </span>
+              </div>
+              <p className="mt-1.5 text-[14px] font-semibold leading-snug text-[#202126] dark:text-white">
+                {source.title}
               </p>
-            ) : null}
-          </a>
+              <p className="mt-1 line-clamp-3 text-[13px] leading-[1.5] text-[#6E737C] dark:text-[#AEB4C0]">
+                {source.snippet}
+              </p>
+              <div className="mt-3">
+                <a
+                  href={source.href}
+                  className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-[#C07B33] hover:text-[#A6631A] dark:text-[#E29A4D]"
+                >
+                  Open knowledge
+                  <ChevronRight className="size-3.5" />
+                </a>
+              </div>
+            </article>
+          ) : (
+            <a
+              key={source.id || source.url || index}
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block rounded-[14px] border border-[#ECECEF] bg-white p-4 transition hover:border-[#E0E0E4] hover:shadow-[0_8px_24px_rgba(20,21,24,0.05)] dark:border-[#2A2C32] dark:bg-[#15161A] dark:hover:border-[#3A3D45]"
+            >
+              <div className="flex items-center gap-2 text-[12px] text-[#8A8F98] dark:text-[#8B929F]">
+                <span className="grid size-5 shrink-0 place-items-center rounded-md bg-[#F0F1F4] text-[10px] font-semibold text-[#6E737C] dark:bg-[#1C1E24] dark:text-[#AEB4C0]">
+                  {index + 1}
+                </span>
+                <span className="truncate">{hostname(source.url)}</span>
+              </div>
+              <p className="mt-1.5 text-[14px] font-semibold leading-snug text-[#202126] dark:text-white">
+                {source.title || source.url}
+              </p>
+              {source.snippet ? (
+                <p className="mt-1 line-clamp-2 text-[13px] leading-[1.5] text-[#6E737C] dark:text-[#AEB4C0]">
+                  {source.snippet}
+                </p>
+              ) : null}
+            </a>
+          )
         ))}
       </div>
+    </div>
+  );
+}
+
+function GroundingOverviewCard({ grounding }: { grounding: ChatKnowledgeGrounding }) {
+  return (
+    <section className="rounded-[14px] border border-[#ECE7D8] bg-[#FCF8F1] p-4 dark:border-[#3A3123] dark:bg-[#19150F]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-[#F6EFE6] px-2.5 py-1 text-[11px] font-semibold text-[#B96E1D] dark:bg-[#2A2014] dark:text-[#E29A4D]">
+          <Sparkles className="size-3.5" />
+          Internal knowledge grounding
+        </span>
+        {grounding.lowConfidence ? (
+          <span className="rounded-full bg-[#F9E6E2] px-2.5 py-1 text-[11px] font-semibold text-[#A2483B] dark:bg-[#2B1C1A] dark:text-[#E0897C]">
+            Low confidence
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <GroundingMetric label="Sources" value={String(grounding.sourceCount)} />
+        <GroundingMetric label="Facts" value={String(grounding.factCount)} />
+        <GroundingMetric label="Graph nodes" value={String(grounding.graph?.nodes.length ?? 0)} />
+      </div>
+      {grounding.graph ? <GroundingGraphSummary graph={grounding.graph} traceId={grounding.traceId} /> : grounding.traceId ? (
+        <p className="mt-3 text-[12px] text-[#8A8F98] dark:text-[#8B929F]">Trace {grounding.traceId}</p>
+      ) : null}
+    </section>
+  );
+}
+
+function GroundingInlineSummary({ grounding }: { grounding: ChatKnowledgeGrounding }) {
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+      <span className="inline-flex items-center gap-1 rounded-full bg-[#F6EFE6] px-2 py-1 text-[10.5px] font-semibold text-[#B96E1D] dark:bg-[#2A2014] dark:text-[#E29A4D]">
+        <Sparkles className="size-3" />
+        {grounding.sourceCount} internal source{grounding.sourceCount === 1 ? "" : "s"}
+      </span>
+      <span className="rounded-full bg-[#F4F5F7] px-2 py-1 text-[10.5px] font-semibold text-[#6E737C] dark:bg-white/8 dark:text-[#C4CAD3]">
+        {grounding.factCount} fact{grounding.factCount === 1 ? "" : "s"}
+      </span>
+      {grounding.graph?.nodes.length ? (
+        <span className="rounded-full bg-[#F4F5F7] px-2 py-1 text-[10.5px] font-semibold text-[#6E737C] dark:bg-white/8 dark:text-[#C4CAD3]">
+          {grounding.graph.nodes.length} graph node{grounding.graph.nodes.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
+      {grounding.lowConfidence ? (
+        <span className="rounded-full bg-[#F9E6E2] px-2 py-1 text-[10.5px] font-semibold text-[#A2483B] dark:bg-[#2B1C1A] dark:text-[#E0897C]">
+          Low confidence
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function GroundingMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[10px] border border-[#EADFCC] bg-white/70 px-3 py-2 dark:border-[#3A3123] dark:bg-white/[0.04]">
+      <p className="text-[11px] font-medium text-[#8A8F98] dark:text-[#8B929F]">{label}</p>
+      <p className="mt-1 text-[14px] font-semibold text-[#202126] dark:text-white">{value}</p>
+    </div>
+  );
+}
+
+function GroundingGraphSummary({
+  compact = false,
+  graph,
+  traceId,
+}: {
+  compact?: boolean;
+  graph: ChatGroundingGraph;
+  traceId?: string;
+}) {
+  return (
+    <div className={cn(
+      "mt-3 rounded-[10px] border border-[#EADFCC] bg-white/70 px-3 py-2 dark:border-[#3A3123] dark:bg-white/[0.04]",
+      compact && "mt-0 border-0 bg-transparent px-0 py-0 dark:bg-transparent",
+    )}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold text-[#202126] dark:text-white">Graph evidence</span>
+        {traceId ? (
+          <span className="text-[11px] text-[#8A8F98] dark:text-[#8B929F]">Trace {traceId}</span>
+        ) : null}
+      </div>
+      {graph.communitySummaries.length > 0 ? (
+        <div className="mt-2 space-y-1">
+          {graph.communitySummaries.map((summary, index) => (
+            <p key={`${graph.traceId ?? "graph"}-${index}`} className="text-[12px] leading-[1.45] text-[#6E737C] dark:text-[#AEB4C0]">
+              {summary}
+            </p>
+          ))}
+        </div>
+      ) : null}
+      {graph.nodes.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {graph.nodes.map((node) => (
+            <span
+              key={node.id}
+              className="rounded-full bg-[#F4F5F7] px-2 py-1 text-[10.5px] font-semibold text-[#6E737C] dark:bg-white/8 dark:text-[#C4CAD3]"
+            >
+              {node.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -854,11 +1036,15 @@ function ReasoningTrace({ text, streaming }: { text: string; streaming: boolean 
  */
 function ReasoningPopover({ message }: { message: ChatMessage }) {
   const [open, setOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("general");
   const ref = useRef<HTMLDivElement>(null);
 
   const model = message.modelUsed ?? message.model;
   const { inputTokens, outputTokens, latencyMs, ttftMs, confidence, costUsd, reasoning, citations } =
     message;
+  const groundingSources = message.grounding?.sources ?? [];
+  const groundingGraph = message.grounding?.graph;
+  const toolCalls = message.toolCalls ?? [];
   const hasMetrics =
     Boolean(model) ||
     inputTokens != null ||
@@ -867,7 +1053,10 @@ function ReasoningPopover({ message }: { message: ChatMessage }) {
     confidence != null ||
     costUsd != null ||
     Boolean(reasoning) ||
-    Boolean(citations?.length);
+    groundingSources.length > 0 ||
+    Boolean(groundingGraph) ||
+    Boolean(citations?.length) ||
+    toolCalls.length > 0;
 
   useEffect(() => {
     if (!open) {
@@ -897,12 +1086,20 @@ function ReasoningPopover({ message }: { message: ChatMessage }) {
 
   const rows: Array<{ label: string; value: string }> = [];
   if (model) rows.push({ label: "Modell", value: prettyModel(model) });
-  if (inputTokens != null) rows.push({ label: "Input", value: `${inputTokens} tokens` });
-  if (outputTokens != null) rows.push({ label: "Output", value: `${outputTokens} tokens` });
+  if (inputTokens) rows.push({ label: "Input", value: `${inputTokens} tokens` });
+  if (outputTokens) rows.push({ label: "Output", value: `${outputTokens} tokens` });
   if (ttftMs != null && ttftMs > 0) rows.push({ label: "Første token", value: formatLatency(ttftMs) });
   if (latencyMs != null && latencyMs > 0) rows.push({ label: "Total tid", value: formatLatency(latencyMs) });
   if (confidence != null) rows.push({ label: "Sikkerhet", value: `${Math.round(confidence * 100)}%` });
   if (costUsd != null && costUsd > 0) rows.push({ label: "Kostnad", value: `$${costUsd.toFixed(4)}` });
+
+  const tabs: Array<{ id: string; label: string }> = [
+    { id: "general", label: "Oversikt" },
+    ...(reasoning ? [{ id: "insight", label: "Innsikt" }] : []),
+    ...(toolCalls.length > 0 ? [{ id: "tools", label: "Verktøy" }] : []),
+    ...(groundingSources.length > 0 || citations && citations.length > 0 || groundingGraph ? [{ id: "sources", label: "Kilder" }] : []),
+  ];
+  const currentTab = tabs.some((tabItem) => tabItem.id === activeTab) ? activeTab : "general";
 
   return (
     <div ref={ref} className="relative ml-auto">
@@ -915,13 +1112,13 @@ function ReasoningPopover({ message }: { message: ChatMessage }) {
       >
         <Sparkles className="size-3 text-[#C07B33]" strokeWidth={2} />
         {model ? <span className="text-[#6E737C] dark:text-[#AEB4C0]">{prettyModel(model)}</span> : null}
-        {outputTokens != null ? (
+        {outputTokens ? (
           <span className="text-[#B4B8C0] dark:text-[#5F6671]">· {outputTokens} tokens</span>
         ) : null}
       </button>
 
       {open ? (
-        <div className="absolute bottom-full right-0 z-30 mb-2 w-60 rounded-[14px] border border-[#ECECEF] bg-white p-3 shadow-[0_18px_44px_rgba(20,21,24,0.12)] dark:border-[#2A2C32] dark:bg-[#15161A]">
+        <div className="absolute bottom-full right-0 z-30 mb-2 w-80 rounded-[14px] border border-[#ECECEF] bg-white p-3 shadow-[0_18px_44px_rgba(20,21,24,0.12)] dark:border-[#2A2C32] dark:bg-[#15161A]">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-[13px] font-semibold text-[#26282f] dark:text-white">Reasoning</span>
             <button
@@ -933,42 +1130,96 @@ function ReasoningPopover({ message }: { message: ChatMessage }) {
               <X className="size-3.5" />
             </button>
           </div>
-          <dl className="space-y-1.5">
-            {rows.map((row) => (
-              <div key={row.label} className="flex items-center justify-between gap-3 text-[12px]">
-                <dt className="text-[#8A8F98] dark:text-[#8B929F]">{row.label}</dt>
-                <dd className="font-medium text-[#3A3D45] dark:text-[#E2E6EC]">{row.value}</dd>
-              </div>
-            ))}
-          </dl>
-          {reasoning ? (
-            <div className="mt-3 border-t border-[#ECECEF] pt-2 dark:border-[#2A2C32]">
-              <p className="mb-1 text-[11px] font-semibold text-[#8A8F98] dark:text-[#8B929F]">Tenkte</p>
-              <p className="max-h-40 overflow-y-auto whitespace-pre-wrap text-[11.5px] leading-[1.5] text-[#6E737C] dark:text-[#AEB4C0]">
-                {reasoning}
-              </p>
+
+          {tabs.length > 1 ? (
+            <div className="mb-2.5 flex items-center gap-1 border-b border-[#ECECEF] dark:border-[#2A2C32]">
+              {tabs.map((tabItem) => (
+                <button
+                  key={tabItem.id}
+                  type="button"
+                  onClick={() => setActiveTab(tabItem.id)}
+                  className={cn(
+                    "-mb-px border-b-2 px-2 py-1.5 text-[11.5px] font-medium transition",
+                    currentTab === tabItem.id
+                      ? "border-[#C07B33] text-[#26282f] dark:text-white"
+                      : "border-transparent text-[#9AA0A9] hover:text-[#6E737C] dark:text-[#7A808B] dark:hover:text-[#C4CAD3]",
+                  )}
+                >
+                  {tabItem.label}
+                </button>
+              ))}
             </div>
           ) : null}
-          {citations && citations.length > 0 ? (
-            <div className="mt-3 border-t border-[#ECECEF] pt-2 dark:border-[#2A2C32]">
-              <p className="mb-1 text-[11px] font-semibold text-[#8A8F98] dark:text-[#8B929F]">
-                Kilder ({citations.length})
-              </p>
-              <ul className="space-y-1">
-                {citations.map((citation) => (
-                  <li key={citation.id}>
-                    <a
-                      href={citation.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title={citation.snippet || citation.title}
-                      className="block truncate text-[11.5px] font-medium text-[#C07B33] hover:underline dark:text-[#E29A4D]"
+
+          {currentTab === "general" ? (
+            <dl className="space-y-1.5">
+              {rows.map((row) => (
+                <div key={row.label} className="flex items-center justify-between gap-3 text-[12px]">
+                  <dt className="text-[#8A8F98] dark:text-[#8B929F]">{row.label}</dt>
+                  <dd className="font-medium text-[#3A3D45] dark:text-[#E2E6EC]">{row.value}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+
+          {currentTab === "insight" && reasoning ? (
+            <p className="max-h-48 overflow-y-auto whitespace-pre-wrap text-[12px] leading-[1.55] text-[#6E737C] dark:text-[#AEB4C0]">
+              {reasoning}
+            </p>
+          ) : null}
+
+          {currentTab === "tools" ? (
+            <div className="space-y-1.5">
+              {toolCalls.map((call) => {
+                const failed = Boolean(call.error) || call.status === "error";
+                const running = !call.status || call.status === "running";
+                return (
+                  <div key={call.id} className="flex items-center gap-2 text-[12px]">
+                    <Wrench className="size-3.5 shrink-0 text-[#8A8F98]" />
+                    <span className="truncate font-medium text-[#3A3D45] dark:text-[#D6DAE2]">{call.name}</span>
+                    <span
+                      className={cn(
+                        "ml-auto text-[11px] font-medium",
+                        failed
+                          ? "text-[#A2483B] dark:text-[#E0897C]"
+                          : running
+                            ? "text-[#8A8F98]"
+                            : "text-[#3E9E6E] dark:text-[#6FC79A]",
+                      )}
                     >
-                      {citation.title || citation.url}
-                    </a>
-                  </li>
-                ))}
-              </ul>
+                      {failed ? "feilet" : running ? "kjører …" : "fullført"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {currentTab === "sources" ? (
+            <div className="space-y-2">
+              {groundingGraph ? (
+                <GroundingGraphSummary compact graph={groundingGraph} traceId={message.grounding?.traceId} />
+              ) : null}
+              {groundingSources.map((source) => (
+                <div key={source.id} className="rounded-[10px] border border-[#ECECEF] bg-[#FBFBFA] px-2.5 py-2 dark:border-[#2A2C32] dark:bg-[#17181C]">
+                  <p className="truncate text-[11.5px] font-semibold text-[#26282f] dark:text-white">{source.title}</p>
+                  <p className="mt-0.5 text-[11px] text-[#8A8F98] dark:text-[#8B929F]">
+                    {source.provider} · {source.sourceType} · score {source.score.toFixed(2)}
+                  </p>
+                </div>
+              ))}
+              {citations?.map((citation) => (
+                <a
+                  key={citation.id}
+                  href={citation.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={citation.snippet || citation.title}
+                  className="block truncate text-[11.5px] font-medium text-[#C07B33] hover:underline dark:text-[#E29A4D]"
+                >
+                  {citation.title || citation.url}
+                </a>
+              ))}
             </div>
           ) : null}
         </div>
@@ -1010,19 +1261,48 @@ function AttachmentChips({
   return (
     <div className="mt-2.5 flex flex-wrap gap-2">
       {attachments.map((attachment) => (
-        <span
-          key={attachment.id}
-          className={cn(
-            "rounded-full px-2.5 py-1 text-[11px] font-medium ring-1",
-            tone === "assistant"
-              ? "bg-[#F4F5F7] text-[#5C606B] ring-[#E7E8EC] dark:bg-white/8 dark:text-[#C4CAD3] dark:ring-white/10"
-              : "bg-white/70 text-[#5C606B] ring-black/5 dark:bg-white/10 dark:text-[#C4CAD3] dark:ring-white/10",
-          )}
-        >
-          {attachment.name}
-        </span>
+        <AttachmentItem key={attachment.id} attachment={attachment} tone={tone} />
       ))}
     </div>
+  );
+}
+
+function AttachmentItem({
+  attachment,
+  tone,
+}: {
+  attachment: ChatMessage["attachments"][number];
+  tone: "assistant" | "user";
+}) {
+  const [failed, setFailed] = useState(false);
+  const url = attachment.url;
+  const isImage = Boolean(url) && attachment.type.startsWith("image/") && !failed;
+
+  if (isImage && url) {
+    return (
+      <span className="block overflow-hidden rounded-[12px] border border-black/[0.06] dark:border-white/10">
+        {/* eslint-disable-next-line @next/next/no-img-element -- object/data URL, not a remote asset */}
+        <img
+          src={url}
+          alt={attachment.name}
+          className="h-24 w-24 object-cover"
+          onError={() => setFailed(true)}
+        />
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={cn(
+        "rounded-full px-2.5 py-1 text-[11px] font-medium ring-1",
+        tone === "assistant"
+          ? "bg-[#F4F5F7] text-[#5C606B] ring-[#E7E8EC] dark:bg-white/8 dark:text-[#C4CAD3] dark:ring-white/10"
+          : "bg-white/70 text-[#5C606B] ring-black/5 dark:bg-white/10 dark:text-[#C4CAD3] dark:ring-white/10",
+      )}
+    >
+      {attachment.name}
+    </span>
   );
 }
 
@@ -1192,13 +1472,15 @@ function MessageBlock({
           {message.reasoning ? (
             <ReasoningTrace text={message.reasoning} streaming={waiting} />
           ) : null}
-          {waiting && !message.content && !message.reasoning ? (
+          {waiting && (!message.content || isAssistantPlaceholder(message.content)) && !message.reasoning ? (
             <ThinkingDots />
           ) : errored ? (
             <ErrorNotice message={message.content} onRetry={onRegenerate} />
           ) : (
             <div className={cn(waiting && "velion-chat-streaming")}>
-              {message.content ? <ChatMarkdown content={message.content} /> : null}
+              {message.content && !isAssistantPlaceholder(message.content) ? (
+                <ChatMarkdown content={message.content} />
+              ) : null}
               {stopped ? (
                 <span className="mt-1 inline-flex items-center gap-1 text-[11.5px] font-medium text-[#A8ADB5] dark:text-[#6F7682]">
                   <Square className="size-3" />
@@ -1207,6 +1489,7 @@ function MessageBlock({
               ) : null}
             </div>
           )}
+          {message.grounding ? <GroundingInlineSummary grounding={message.grounding} /> : null}
           <ToolChips tools={message.tools} />
           <AttachmentChips attachments={message.attachments} tone="assistant" />
           {message.toolCalls?.length ? <ToolCallList calls={message.toolCalls} /> : null}
@@ -1374,42 +1657,6 @@ function MessageAction({
         {children}
       </button>
     </TopLayerTooltip>
-  );
-}
-
-function TaskStreamCard({
-  steps,
-  onStopTask,
-}: {
-  steps: AgentTaskStep[];
-  onStopTask: () => void;
-}) {
-  const activeTask = steps.some((step) => step.status === "active" || step.status === "waiting");
-
-  return (
-    <section className="velion-chat-task-card hidden max-w-[680px] rounded-[16px] border border-[#EEEEF1] bg-[#FBFBFA] p-4 dark:border-[#26282E] dark:bg-[#15161A] md:ml-8 md:block" aria-label="Agent activity">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-[13px] font-semibold text-[#26282f] dark:text-white">Agent activity</p>
-          <p className="text-[11px] font-medium text-[#8A8D96] dark:text-[#7A808B]">Live task status</p>
-        </div>
-        <button
-          type="button"
-          onClick={onStopTask}
-          disabled={!activeTask}
-          className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[#E2E3E9] bg-white px-3 text-[11px] font-semibold text-[#6F757E] transition hover:text-[#26282f] disabled:opacity-45 dark:border-[#2A2C31] dark:bg-[#17181C] dark:text-[#AEB4C0] dark:hover:text-white"
-        >
-          <Square className="size-3" />
-          Stop
-        </button>
-      </div>
-
-      <div className="mt-4 space-y-3">
-        {steps.map((step, index) => (
-          <TaskStep key={step.id} isLast={index === steps.length - 1} step={step} />
-        ))}
-      </div>
-    </section>
   );
 }
 

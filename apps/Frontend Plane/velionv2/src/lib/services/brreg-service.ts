@@ -42,11 +42,24 @@ export interface BrregEnhet {
 }
 
 interface BrregSearchResponse {
-  results: BrregEnhet[]
-  count: number
+  results?: BrregEnhet[] | null
+  count?: number
 }
 
 const ORG_PROXY_BASE = "/api/org/api/v1"
+
+function normalizeSearchResults(data: unknown): BrregEnhet[] {
+  if (Array.isArray(data)) {
+    return data as BrregEnhet[]
+  }
+
+  if (data && typeof data === "object") {
+    const results = (data as BrregSearchResponse).results
+    return Array.isArray(results) ? results : []
+  }
+
+  return []
+}
 
 export const brregService = {
   /**
@@ -59,8 +72,8 @@ export const brregService = {
       const err = await res.json().catch(() => ({ error: "Unknown error" }))
       throw new Error(err.error ?? `Brreg search failed (${res.status})`)
     }
-    const data: BrregSearchResponse = await res.json()
-    return data.results
+    const data = await res.json()
+    return normalizeSearchResults(data)
   },
 
   /**

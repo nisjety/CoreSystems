@@ -78,7 +78,7 @@ export function VelionSidebar({
   return (
     <aside
       className={cn(
-        "fixed bottom-0 left-0 top-14 z-[var(--velion-z-sidebar)] hidden overflow-hidden bg-[#F7F7F8] transition-[width,background-color] duration-300 ease-out dark:bg-[#101114] md:block",
+        "velion-sidebar-themed fixed bottom-0 left-0 top-14 z-[var(--velion-z-sidebar)] hidden overflow-hidden transition-[width,background-color] duration-300 ease-out md:block",
         sidebarType.root,
       )}
       style={{ width: expanded ? expandedWidth : SIDEBAR_MINIMIZED_WIDTH }}
@@ -233,7 +233,7 @@ function ExpandedSidebarPanel({
               className={cn(
                 "pb-2.5 transition-colors",
                 activeTabId === tab.id
-                  ? "border-b-2 border-[#1C1C1E] text-[#1C1C1E] dark:border-white dark:text-white"
+                  ? "velion-sidebar-tab-active border-b-2 text-[#1C1C1E] dark:text-white"
                   : "text-[#9B9EA8] hover:text-[#4A4C54] dark:hover:text-[#D0D6E0]",
               )}
             >
@@ -552,7 +552,7 @@ function SidebarPanelLink({
           className={cn(
             "group flex h-9 w-full items-center gap-2.5 rounded-[9px] px-2 text-left transition-colors duration-150",
             active
-              ? "bg-[#F0F1F5] text-[#1C1C1E] dark:bg-[#23252A] dark:text-white"
+              ? "velion-sidebar-panel-active text-[#1C1C1E] dark:text-white"
               : "text-[#3A3C44] hover:bg-[#F6F7F9] hover:text-[#1C1C1E] dark:text-[#D0D6E0] dark:hover:bg-[#191A1F] dark:hover:text-white",
           )}
           aria-expanded={expanded}
@@ -576,7 +576,7 @@ function SidebarPanelLink({
                     "flex w-full items-center rounded-[7px] py-[6px] pl-4 pr-2 text-left transition-colors",
                     subActive ? sidebarType.row : sidebarType.rowNormal,
                     subActive
-                      ? "bg-[#F0F1F5] text-[#1C1C1E] dark:bg-[#23252A] dark:text-white"
+                      ? "velion-sidebar-panel-active text-[#1C1C1E] dark:text-white"
                       : "text-[#4A4C54] hover:bg-[#F4F5F8] hover:text-[#1C1C1E] dark:text-[#AEB4C0] dark:hover:bg-[#191A1F] dark:hover:text-white",
                   )}
                 >
@@ -597,7 +597,7 @@ function SidebarPanelLink({
       className={cn(
         "group flex h-9 w-full items-center gap-2.5 rounded-[9px] px-2 text-left transition-colors duration-150",
         active
-          ? "bg-[#F0F1F5] text-[#1C1C1E] dark:bg-[#23252A] dark:text-white"
+          ? "velion-sidebar-panel-active text-[#1C1C1E] dark:text-white"
           : "text-[#3A3C44] hover:bg-[#F6F7F9] hover:text-[#1C1C1E] dark:text-[#D0D6E0] dark:hover:bg-[#191A1F] dark:hover:text-white",
       )}
     >
@@ -642,7 +642,7 @@ function MiniSectionLink({
         className={cn(
           MINI_NAV_BUTTON_CLASS,
           active
-            ? "text-[#1C1C1E] dark:text-white"
+            ? "velion-sidebar-mini-active"
             : "text-[#9B9EA8] hover:bg-[#EBEBEB] hover:text-[#3A3C44] dark:text-[#8A8F98] dark:hover:bg-[#191A1F] dark:hover:text-white",
         )}
       >
@@ -672,7 +672,7 @@ function MiniAccountLink({
         className={cn(
           MINI_NAV_BUTTON_CLASS,
           active
-            ? "text-[#1C1C1E] dark:text-white"
+            ? "velion-sidebar-mini-active"
             : "text-[#9B9EA8] hover:bg-[#EBEBEB] hover:text-[#3A3C44] dark:text-[#8A8F98] dark:hover:bg-[#191A1F] dark:hover:text-white",
         )}
       >
@@ -703,7 +703,7 @@ function MiniActionButton({
         className={cn(
           MINI_NAV_BUTTON_CLASS,
           active
-            ? "text-[#1C1C1E] dark:text-white"
+            ? "velion-sidebar-mini-active"
             : "text-[#9B9EA8] hover:bg-[#EBEBEB] hover:text-[#3A3C44] dark:text-[#8A8F98] dark:hover:bg-[#191A1F] dark:hover:text-white",
         )}
       >

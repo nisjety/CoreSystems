@@ -215,7 +215,12 @@ impl AnswerPipeline {
             } else {
                 md.clone()
             };
-            combined.push_str(&format!("\n\n[Source {} — {}]\n{}", i + 1, result.url, trimmed));
+            combined.push_str(&format!(
+                "\n\n[Source {} — {}]\n{}",
+                i + 1,
+                result.url,
+                trimmed
+            ));
             sources_used += 1;
         }
 

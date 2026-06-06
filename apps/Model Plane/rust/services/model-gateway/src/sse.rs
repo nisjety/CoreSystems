@@ -14,8 +14,7 @@ use chrono::Utc;
 use futures::Stream;
 use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, ChatMessage, InferRequest,
-    OrchestrationEvent, PlanState, StreamRunEventsRequest, SubagentRole, TodoState,
-    ToolDefinition,
+    OrchestrationEvent, PlanState, StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -240,10 +239,10 @@ pub async fn invoke_stream_sse(
     } else {
         None
     };
-    let (context_block, citations) = match grounding {
-        Some(g) => (g.context_block, g.citations),
-        None => (String::new(), Vec::new()),
-    };
+    let context_block = grounding
+        .as_ref()
+        .map(|payload| payload.context_block.clone())
+        .unwrap_or_default();
 
     // chat-parity safety (pii_filter): opt-in redaction of PII from the user
     // message before it reaches an external provider. Retrieval above used the
@@ -356,7 +355,7 @@ pub async fn invoke_stream_sse(
                 model,
                 start,
                 features,
-                citations,
+                grounding,
                 tool_events,
                 idem_guard,
             );
@@ -376,10 +375,21 @@ pub async fn invoke_stream_sse(
         // client disconnect) — which releases the key for a later regenerate.
         let _idem_guard = idem_guard;
 
+        if let Some(payload) = grounding.clone() {
+            let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
+            if event.should_emit(&features) {
+                let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+            }
+        }
+
         // chat-parity §8: emit retrieved sources up front (gated on the
         // `citations` family) so the UI can render the Sources panel before
         // the answer streams in.
-        for c in citations {
+        for c in grounding
+            .as_ref()
+            .map(|payload| payload.citations.clone())
+            .unwrap_or_default()
+        {
             let cite = crate::sse_events::ChatEvent::Citation {
                 id: c.id,
                 title: c.title,
@@ -780,7 +790,7 @@ fn infer_fallback_stream(
     model: String,
     start: std::time::Instant,
     features: Vec<String>,
-    citations: Vec<crate::retrieval::GroundingCitation>,
+    grounding: Option<crate::retrieval::Grounding>,
     tool_events: Vec<crate::sse_events::ChatEvent>,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
@@ -790,9 +800,20 @@ fn infer_fallback_stream(
         // lifetime; released on task end (Drop), mirroring the streaming path.
         let _idem_guard = idem_guard;
 
+        if let Some(payload) = grounding.clone() {
+            let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
+            if event.should_emit(&features) {
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            }
+        }
+
         // chat-parity §8: surface retrieved sources before the answer (gated on
         // the `citations` family), mirroring the streaming path.
-        for c in citations {
+        for c in grounding
+            .as_ref()
+            .map(|payload| payload.citations.clone())
+            .unwrap_or_default()
+        {
             let cite = crate::sse_events::ChatEvent::Citation {
                 id: c.id,
                 title: c.title,
@@ -1199,26 +1220,27 @@ fn agentic_run_stream(
     tokio::spawn(async move {
         let _idem_guard = idem_guard;
         let _ = tx
-            .send(Ok(Event::default().event("connected").data("{\"ok\":true}")))
+            .send(Ok(Event::default()
+                .event("connected")
+                .data("{\"ok\":true}")))
             .await;
 
         // 1. Spawn the run (session-core StartRun; also persists the user turn).
-        let run = match crate::session_flow::prepare_run(
-            &state, None, None, &org_id, &user_id, &content,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let err = crate::sse_events::ChatEvent::Error {
-                    code: "agentic_run_start_failed".to_owned(),
-                    message: e.to_string(),
-                    retryable: true,
-                };
-                let _ = tx.send(Ok(err.to_sse(&request_id))).await;
-                return;
-            }
-        };
+        let run =
+            match crate::session_flow::prepare_run(&state, None, None, &org_id, &user_id, &content)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = crate::sse_events::ChatEvent::Error {
+                        code: "agentic_run_start_failed".to_owned(),
+                        message: e.to_string(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(err.to_sse(&request_id))).await;
+                    return;
+                }
+            };
 
         // 2. Stream the run's orchestration events as step_update, bounded by an
         //    idle timeout (stop once the run goes quiet / ends / errors).
@@ -1382,7 +1404,9 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
 /// renders in the chat timeline. A derived view of `mp.v1.orchestration.*` —
 /// the raw event still carries the resume id. Returns `None` for events that
 /// don't correspond to a visible step.
-fn orchestration_event_to_step_update(event: &OrchestrationEvent) -> Option<crate::sse_events::ChatEvent> {
+fn orchestration_event_to_step_update(
+    event: &OrchestrationEvent,
+) -> Option<crate::sse_events::ChatEvent> {
     use orchestration_event::Event;
     let (id, title, detail, status) = match event.event.as_ref()? {
         Event::PlanTransitioned(p) => {
@@ -1577,17 +1601,21 @@ mod tests {
         use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
         use orchestration_event::PlanTransitioned;
         let ev = OrchestrationEvent {
-            event: Some(orchestration_event::Event::PlanTransitioned(PlanTransitioned {
-                plan_id: "plan-1".to_owned(),
-                run_id: "run-1".to_owned(),
-                from: 0,
-                to: 1,
-                ..Default::default()
-            })),
+            event: Some(orchestration_event::Event::PlanTransitioned(
+                PlanTransitioned {
+                    plan_id: "plan-1".to_owned(),
+                    run_id: "run-1".to_owned(),
+                    from: 0,
+                    to: 1,
+                    ..Default::default()
+                },
+            )),
             ..Default::default()
         };
         match orchestration_event_to_step_update(&ev) {
-            Some(crate::sse_events::ChatEvent::StepUpdate { id, title, detail, .. }) => {
+            Some(crate::sse_events::ChatEvent::StepUpdate {
+                id, title, detail, ..
+            }) => {
                 assert_eq!(id, "plan-1");
                 assert_eq!(title, "Plan");
                 assert!(detail.contains('→'));

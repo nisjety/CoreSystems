@@ -1,14 +1,23 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { fail, ok } from "@/lib/api/envelope";
 import {
   AuthGateError,
   getAuthGateState,
   markCurrentUserOnboardingComplete,
 } from "@/lib/auth/onboarding-access";
+import { sendOnboardingCompletedNotification } from "@/lib/integrations/notification-core";
+import { RequestActorError, requireRequestActor } from "@/lib/integrations/request-actor";
 import { UserCoreError } from "@/lib/integrations/user-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type CompletionMetadata = {
+  selected_theme?: unknown;
+  websites?: unknown;
+  connectors?: unknown;
+  recommendation?: unknown;
+};
 
 function isSameOriginRequest(request: Request) {
   const origin = request.headers.get("origin");
@@ -59,10 +68,22 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await markCurrentUserOnboardingComplete();
+    const actor = await requireRequestActor();
+    const body = (await request.json().catch(() => null)) as
+      | { orgId?: string; plan?: string; source?: string; metadata?: CompletionMetadata }
+      | null;
+    const result = await markCurrentUserOnboardingComplete(body?.metadata ? { metadata: body.metadata } : undefined);
+    after(() =>
+      sendOnboardingCompletedNotification(actor, {
+        orgId: body?.orgId,
+        plan: body?.plan,
+        source: body?.source,
+        metadata: body?.metadata,
+      }).catch(() => undefined),
+    );
     return NextResponse.json(ok(result), { status: 200 });
   } catch (error) {
-    if (error instanceof AuthGateError) {
+    if (error instanceof AuthGateError || error instanceof RequestActorError) {
       return NextResponse.json(fail({ code: error.code, message: error.message }), { status: error.status });
     }
 

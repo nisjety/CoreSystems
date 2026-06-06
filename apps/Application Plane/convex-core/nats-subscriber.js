@@ -129,6 +129,11 @@ class ConvexNatsSubscriber {
         this.handleImportCompleted.bind(this)
       );
 
+      await this.subscribeToTopic(
+        "velion.application.conversation.>",
+        this.handleConversationEvent.bind(this)
+      );
+
       // Quarry crawl job events
       await this.subscribeToTopic(
         "velion.ingestion.crawl.started",
@@ -474,6 +479,16 @@ class ConvexNatsSubscriber {
       });
     } catch (error) {
       console.error("[Convex NATS] Error handling agent run event:", error);
+    }
+  }
+
+  async handleConversationEvent(payload) {
+    const conversationId = payload?.conversation_id || payload?.data?.conversation?.id || "";
+    console.log("[Convex NATS] Processing conversation event:", payload?.type, conversationId);
+    try {
+      await this.callConvexMutation("nats:onConversationEvent", payload || {});
+    } catch (error) {
+      console.error("[Convex NATS] Error handling conversation event:", error);
     }
   }
 

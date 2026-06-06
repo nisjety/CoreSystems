@@ -279,7 +279,10 @@ mod tests {
 
     impl BlockDriver {
         fn new(kind: DriverKind) -> Self {
-            Self { kind, calls: AtomicU32::new(0) }
+            Self {
+                kind,
+                calls: AtomicU32::new(0),
+            }
         }
     }
 
@@ -310,7 +313,10 @@ mod tests {
         drivers.insert(DriverKind::Static, primary.clone());
         drivers.insert(DriverKind::Tls, fallback.clone());
         let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
@@ -324,7 +330,10 @@ mod tests {
         drivers.insert(DriverKind::Static, primary.clone());
         drivers.insert(DriverKind::Tls, fallback.clone());
         let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Tls], drivers);
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.status, 403); // exhausted rotation → surface the block
     }
 

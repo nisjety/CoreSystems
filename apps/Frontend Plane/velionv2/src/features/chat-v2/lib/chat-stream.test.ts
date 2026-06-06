@@ -134,6 +134,75 @@ describe("streamChat", () => {
     ]);
   });
 
+  it("parses internal grounding events separately from citations and text deltas", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response([
+        "event: grounding",
+        'data: {"mode":"retrieve","query":"refund policy","traceId":"trace-1","lowConfidence":false,"factCount":2,"sourceCount":1,"facts":[{"knowledgeId":"kid-1","documentId":"doc-1","text":"Refunds are accepted within 30 days.","score":0.93,"sourceTitle":"Refund policy","sourceType":"policy","provider":"Notion","chunkIndex":0}],"sources":[{"id":"doc-1","kind":"knowledge","title":"Refund policy","snippet":"Refunds are accepted within 30 days.","provider":"Notion","sourceType":"policy","documentId":"doc-1","href":"/knowledge","score":0.93}],"graph":{"traceId":"graph-1","communitySummaries":["Refund policy connects with return workflow."],"edgeCount":2,"nodes":[{"id":"node-1","label":"Refund policy","kind":"policy"}]}}',
+        "",
+        "event: message",
+        'data: {"delta":"Answer","requestId":"r1"}',
+        "",
+        "event: done",
+        'data: {"done":true,"modelUsed":"gpt-4o","inputTokens":12,"outputTokens":34}',
+        "",
+        "",
+      ].join("\n")),
+    );
+
+    const chunks = [];
+    for await (const chunk of streamChat({ content: "Hi", features: ["citations"] })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      {
+        type: "grounding",
+        grounding: {
+          mode: "retrieve",
+          query: "refund policy",
+          traceId: "trace-1",
+          lowConfidence: false,
+          factCount: 2,
+          sourceCount: 1,
+          facts: [
+            {
+              knowledgeId: "kid-1",
+              documentId: "doc-1",
+              text: "Refunds are accepted within 30 days.",
+              score: 0.93,
+              sourceTitle: "Refund policy",
+              sourceType: "policy",
+              provider: "Notion",
+              chunkIndex: 0,
+            },
+          ],
+          sources: [
+            {
+              id: "doc-1",
+              kind: "knowledge",
+              title: "Refund policy",
+              snippet: "Refunds are accepted within 30 days.",
+              provider: "Notion",
+              sourceType: "policy",
+              documentId: "doc-1",
+              href: "/knowledge",
+              score: 0.93,
+            },
+          ],
+          graph: {
+            traceId: "graph-1",
+            communitySummaries: ["Refund policy connects with return workflow."],
+            edgeCount: 2,
+            nodes: [{ id: "node-1", label: "Refund policy", kind: "policy" }],
+          },
+        },
+      },
+      { type: "delta", delta: "Answer", requestId: "r1" },
+      { type: "done", inputTokens: 12, modelUsed: "gpt-4o", outputTokens: 34 },
+    ]);
+  });
+
   it("surfaces structured error code + retryable when present", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response([

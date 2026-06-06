@@ -24,6 +24,15 @@ export type CreatedOrganization = {
   verificationStatus?: string
 }
 
+type OrganizationBranding = {
+  appleTouchIcon?: string
+  favicon?: string
+  logoCandidate?: string
+  palette?: string[]
+  siteName?: string
+  themeColor?: string
+}
+
 type RawOrgResponse = {
   id: string
   name: string
@@ -40,6 +49,21 @@ const FREE_PLANS: ReadonlySet<OnboardingPlanId> = new Set<OnboardingPlanId>([
   "trial",
 ])
 
+function brandingMetadata(branding?: OrganizationBranding) {
+  if (!branding) return undefined
+
+  return {
+    onboarding_branding: {
+      site_name: branding.siteName,
+      theme_color: branding.themeColor,
+      favicon: branding.favicon,
+      logo_candidate: branding.logoCandidate,
+      apple_touch_icon: branding.appleTouchIcon,
+      palette: branding.palette?.slice(0, 8),
+    },
+  }
+}
+
 export function isPaidPlan(plan: OnboardingPlanId): boolean {
   return !FREE_PLANS.has(plan)
 }
@@ -53,6 +77,19 @@ export class OnboardingServiceError extends Error {
   }
 }
 
+async function readServiceError(response: Response): Promise<OnboardingServiceError> {
+  const body = (await response.json().catch(() => null)) as
+    | { error?: { message?: string } | string }
+    | null
+  const rawMessage =
+    typeof body?.error === "object" ? body?.error?.message : body?.error
+
+  return new OnboardingServiceError(
+    response.status,
+    rawMessage ?? `Request failed (${response.status})`,
+  )
+}
+
 async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const response = await fetch(url, {
     credentials: "include",
@@ -61,15 +98,7 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   })
 
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as
-      | { error?: { message?: string } | string }
-      | null
-    const rawMessage =
-      typeof body?.error === "object" ? body?.error?.message : body?.error
-    throw new OnboardingServiceError(
-      response.status,
-      rawMessage ?? `Request failed (${response.status})`,
-    )
+    throw await readServiceError(response)
   }
 
   return response.json() as Promise<T>
@@ -96,6 +125,7 @@ export async function createOrganization(input: {
   plan?: OnboardingPlanId
   orgNumber?: string
   brregData?: BrregEnhet | null
+  branding?: OrganizationBranding
 }): Promise<CreatedOrganization> {
   const raw = await requestJson<RawOrgResponse>("/api/org/orgs", {
     method: "POST",
@@ -105,9 +135,19 @@ export async function createOrganization(input: {
       plan: input.plan ?? "free",
       org_number: input.orgNumber,
       brreg_data: input.brregData ?? undefined,
+      metadata: brandingMetadata(input.branding),
     }),
   })
   return toCreatedOrganization(raw)
+}
+
+export async function organizationExists(orgId: string): Promise<boolean> {
+  const raw = await requestJson<RawOrgResponse[]>("/api/org/orgs/me", {
+    method: "GET",
+    cache: "no-store",
+  })
+
+  return raw.some((organization) => organization.id === orgId)
 }
 
 /** Set a non-checkout plan (free/trial) directly; publishes plan.changed. */
@@ -160,6 +200,29 @@ export async function updateProfile(input: {
       },
     }),
   }).catch(() => undefined)
+}
+
+/** Best-effort committed website ingest once an org exists. */
+export async function startWebsiteIngest(input: {
+  orgId: string
+  url: string
+  brief?: string
+}): Promise<boolean> {
+  try {
+    const response = await fetch("/api/onboarding/website-ingest", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        orgId: input.orgId,
+        url: input.url,
+        brief: input.brief,
+      }),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
 }
 
 /** Capstone: mark onboarding complete in user-core (with local fallback). */

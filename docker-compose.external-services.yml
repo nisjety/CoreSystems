@@ -77,9 +77,11 @@ services:
       start_period: 60s
 
   # ==============================================
-  # Nango - API Connector Platform (API Only)
+  # Nango - legacy API connector platform. Use only with
+  # `--profile legacy-nango`; active Velion services use integration-corev2.
   # ==============================================
   nango-postgres:
+    profiles: ["legacy-nango"]
     image: postgres:15-alpine
     container_name: nango-postgres
     environment:
@@ -98,6 +100,7 @@ services:
       retries: 5
 
   nango:
+    profiles: ["legacy-nango"]
     image: nangohq/nango:latest
     container_name: nango-api
     environment:

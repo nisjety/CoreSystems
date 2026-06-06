@@ -391,7 +391,8 @@ pub async fn run(
                 if n > 0 {
                     info!(
                         jobs_polled = n,
-                        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        elapsed_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         "finetune poller tick"
                     );
                 }

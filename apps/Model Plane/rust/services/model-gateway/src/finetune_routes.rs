@@ -320,7 +320,9 @@ fn hyperparameters_for_azure(raw: Option<&Value>) -> Option<AzureHyperparameters
             .get("batch_size")
             .and_then(serde_json::Value::as_i64)
             .and_then(|n| i32::try_from(n).ok()),
-        learning_rate_multiplier: obj.get("learning_rate_multiplier").and_then(serde_json::Value::as_f64),
+        learning_rate_multiplier: obj
+            .get("learning_rate_multiplier")
+            .and_then(serde_json::Value::as_f64),
     })
 }
 
@@ -1052,7 +1054,9 @@ async fn read_text(field: axum::extract::multipart::Field<'_>) -> Result<String,
 ///
 /// Returns a `400 BAD_REQUEST` on a multipart parse/read error, or `413 PAYLOAD_TOO_LARGE`
 /// if the `file` part exceeds `FINETUNE_MAX_JSONL_BYTES`.
-async fn parse_multipart_fields(mut multipart: Multipart) -> Result<MultipartFields, HttpJsonError> {
+async fn parse_multipart_fields(
+    mut multipart: Multipart,
+) -> Result<MultipartFields, HttpJsonError> {
     let max_bytes = max_jsonl_bytes();
     let mut fields = MultipartFields::default();
 

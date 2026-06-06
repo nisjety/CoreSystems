@@ -1,38 +1,33 @@
 import { NextRequest } from "next/server";
-import { jsonOrNull, notConfiguredResponse, ZAMMAD_URL, zammadConfigured, zammadHeaders } from "@/app/api/support/_lib/zammad";
 
-type ZammadArticle = {
-  internal?: boolean;
-  body?: string;
-  from?: string;
-};
+import { supportRouteError } from "@/app/api/support/_lib/errors";
+import { listSupportArticles } from "@/lib/integrations/conversation-core";
+import { requireRequestActor } from "@/lib/integrations/request-actor";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  if (!zammadConfigured()) return notConfiguredResponse();
   const { id } = await params;
 
-  const response = await fetch(`${ZAMMAD_URL}/api/v1/ticket_articles/by_ticket/${encodeURIComponent(id)}`, {
-    headers: zammadHeaders(),
-    cache: "no-store",
-  });
-  const articles = await jsonOrNull<ZammadArticle[]>(response);
+  try {
+    const actor = await requireRequestActor();
+    const articles = await listSupportArticles(actor, id);
+    const latestCustomerMessage = articles.filter((article) => !article.internal).at(-1)?.body ?? "your message";
 
-  if (!response.ok) {
-    return Response.json(articles ?? { error: "articles_fetch_failed" }, { status: response.status });
+    return Response.json({
+      options: [
+        `Thanks for the context. I am checking ${stripHtml(latestCustomerMessage).slice(0, 80) || "this"} and will come back with the next step.`,
+        "I can help with that. I will verify the account and order details before making any changes.",
+        "Thanks for flagging this. I will keep this thread updated as soon as I have a confirmed answer.",
+      ],
+    });
+  } catch (error) {
+    return supportRouteError(error, "quick_replies_failed", "Quick replies could not be generated.");
   }
-
-  const latestCustomerMessage = (articles ?? []).filter((article) => !article.internal).at(-1)?.body ?? "your message";
-
-  return Response.json({
-    options: [
-      `Thanks for the context. I am checking ${stripHtml(latestCustomerMessage).slice(0, 80) || "this"} and will come back with the next step.`,
-      "I can help with that. I will verify the account and order details before making any changes.",
-      "Thanks for flagging this. I will keep this thread updated as soon as I have a confirmed answer.",
-    ],
-  });
 }
 
 function stripHtml(value: string) {

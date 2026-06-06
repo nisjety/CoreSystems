@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildControlPlaneAuthUrl,
+  buildControlPlaneAuthServiceUrl,
   extractControlPlaneAuthUser,
   isControlPlaneAuthConfigured,
   proxyControlPlaneAuthRequest,
@@ -36,6 +37,14 @@ describe("control plane auth integration", () => {
 
     expect(buildControlPlaneAuthUrl("/api/auth/get-session").toString()).toBe(
       "http://auth-core:3011/api/auth/get-session",
+    );
+  });
+
+  it("builds non-Better-Auth service URLs from an auth-core base URL", () => {
+    vi.stubEnv("AUTH_CORE_URL", "http://localhost:3011/api/auth");
+
+    expect(buildControlPlaneAuthServiceUrl("/api/convex-auth/token").toString()).toBe(
+      "http://localhost:3011/api/convex-auth/token",
     );
   });
 

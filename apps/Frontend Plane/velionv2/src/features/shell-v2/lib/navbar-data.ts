@@ -1,62 +1,29 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import { apiGet, apiSend } from "@/lib/api/client-envelope";
+import {
+  emptyCalendar,
+  emptyNotifications,
+  type CalendarEvent,
+  type CalendarNote,
+  type CalendarState,
+  type NavbarPayload,
+  type NavbarProfile,
+  type NotificationPayload,
+  type ThemePayload,
+} from "@/features/shell-v2/lib/navbar-types";
 
-export type NavbarProfile = {
-  id: string;
-  name: string;
-  email?: string;
-  avatar?: string;
-  status: string;
-};
-
-export type NavbarNotification = {
-  id: string;
-  title: string;
-  body: string;
-  href?: string;
-  createdAt?: string;
-  read: boolean;
-  seen: boolean;
-  archived: boolean;
-  feed?: string;
-  source: "notification" | "message";
-};
-
-export type NotificationPayload = {
-  configured: boolean;
-  unreadCount: number;
-  notifications: NavbarNotification[];
-  messages: NavbarNotification[];
-};
-
-export type CalendarEvent = {
-  id: string;
-  title: string;
-  start: string;
-  end: string;
-  type: string;
-  status: string;
-  createdAt: string;
-};
-
-export type CalendarNote = {
-  id: string;
-  text: string;
-  date: string;
-  createdAt: string;
-};
-
-export type CalendarState = {
-  events: CalendarEvent[];
-  notes: CalendarNote[];
-};
-
-export type ThemePayload = {
-  configured?: boolean;
-  theme: "light" | "dark" | "system";
-};
+export type {
+  CalendarEvent,
+  CalendarNote,
+  CalendarState,
+  NavbarNotification,
+  NavbarPayload,
+  NavbarProfile,
+  NotificationPayload,
+  ThemePayload,
+} from "@/features/shell-v2/lib/navbar-types";
 
 export type SearchResult = {
   id: string;
@@ -66,38 +33,29 @@ export type SearchResult = {
   source: string;
 };
 
-type NavbarPayload = {
-  calendar: CalendarState;
-  notifications: NotificationPayload;
-  profile: NavbarProfile | null;
-  theme: ThemePayload | null;
-};
-
 type UseNavbarDataOptions = {
+  initialData?: NavbarPayload | null;
   onProfileChange: (profile: NavbarProfile) => void;
   onThemeChange: (theme: ThemePayload["theme"]) => void;
 };
 
-const emptyNotifications: NotificationPayload = {
-  configured: false,
-  unreadCount: 0,
-  notifications: [],
-  messages: [],
-};
+let pendingNavbarLoad: Promise<NavbarPayload> | null = null;
 
-const emptyCalendar: CalendarState = {
-  events: [],
-  notes: [],
-};
-
-export function useNavbarData({ onProfileChange, onThemeChange }: UseNavbarDataOptions) {
-  const [notifications, setNotifications] = useState<NotificationPayload>(emptyNotifications);
-  const [calendar, setCalendar] = useState<CalendarState>(emptyCalendar);
+export function useNavbarData({ initialData, onProfileChange, onThemeChange }: UseNavbarDataOptions) {
+  const [notifications, setNotifications] = useState<NotificationPayload>(initialData?.notifications ?? emptyNotifications);
+  const [calendar, setCalendar] = useState<CalendarState>(initialData?.calendar ?? emptyCalendar);
 
   useEffect(() => {
     let cancelled = false;
     let refreshTimer: number | undefined;
-    let controller: AbortController | null = null;
+
+    if (initialData?.profile) {
+      onProfileChange(initialData.profile);
+    }
+
+    if (initialData?.theme?.configured !== false && initialData?.theme?.theme) {
+      onThemeChange(initialData.theme.theme);
+    }
 
     const scheduleRefresh = () => {
       if (cancelled) {
@@ -113,8 +71,10 @@ export function useNavbarData({ onProfileChange, onThemeChange }: UseNavbarDataO
         onProfileChange(payload.profile);
       }
 
-      setNotifications(payload.notifications);
-      setCalendar(payload.calendar);
+      startTransition(() => {
+        setNotifications(payload.notifications);
+        setCalendar(payload.calendar);
+      });
 
       if (payload.theme?.configured !== false && payload.theme?.theme) {
         onThemeChange(payload.theme.theme);
@@ -122,11 +82,8 @@ export function useNavbarData({ onProfileChange, onThemeChange }: UseNavbarDataO
     };
 
     async function loadNavbarData() {
-      controller?.abort();
-      controller = new AbortController();
-
       try {
-        const payload = await getNavbarData(controller.signal);
+        const payload = await getNavbarData();
         if (!cancelled) {
           applyPayload(payload);
         }
@@ -148,11 +105,10 @@ export function useNavbarData({ onProfileChange, onThemeChange }: UseNavbarDataO
 
     return () => {
       cancelled = true;
-      controller?.abort();
       window.clearTimeout(refreshTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [onProfileChange, onThemeChange]);
+  }, [initialData, onProfileChange, onThemeChange]);
 
   return {
     calendar,
@@ -162,24 +118,17 @@ export function useNavbarData({ onProfileChange, onThemeChange }: UseNavbarDataO
   };
 }
 
-async function getNavbarData(signal?: AbortSignal): Promise<NavbarPayload> {
-  const [profileResult, notificationResult, calendarResult, themeResult] = await Promise.allSettled([
-    apiGet<NavbarProfile | null>("/api/v1/navbar/profile", { signal }),
-    apiGet<NotificationPayload>("/api/v1/navbar/notifications", { signal }),
-    apiGet<CalendarState>("/api/v1/navbar/calendar", { signal }),
-    apiGet<ThemePayload>("/api/v1/navbar/theme", { signal }),
-  ]);
+async function getNavbarData(): Promise<NavbarPayload> {
+  pendingNavbarLoad ??= apiGet<NavbarPayload>("/api/v1/navbar")
+    .finally(() => {
+      pendingNavbarLoad = null;
+    });
 
-  return {
-    profile: profileResult.status === "fulfilled" ? profileResult.value : null,
-    notifications: notificationResult.status === "fulfilled" ? notificationResult.value : emptyNotifications,
-    calendar: calendarResult.status === "fulfilled" ? calendarResult.value : emptyCalendar,
-    theme: themeResult.status === "fulfilled" ? themeResult.value : null,
-  };
+  return pendingNavbarLoad;
 }
 
-export function saveNavbarTheme(theme: ThemePayload["theme"]) {
-  return apiSend("/api/v1/navbar/theme", { theme }, "PUT");
+export function saveNavbarTheme(theme: ThemePayload["theme"], colorScheme?: string | null) {
+  return apiSend("/api/v1/navbar/theme", { colorScheme, theme }, "PUT");
 }
 
 export function markNavbarNotificationRead(notificationId: string) {
@@ -213,7 +162,7 @@ export function submitNavbarSupportRequest(input: {
 
 export function searchNavbar(query: string, signal?: AbortSignal) {
   return apiGet<{ results: SearchResult[] }>(
-    `/api/v1/navbar/search?q=${encodeURIComponent(query)}`,
+    `/api/v1/navbar/search?q=${encodeURIComponent(query)}&scope=knowledge`,
     { signal },
   );
 }

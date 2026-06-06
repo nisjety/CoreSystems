@@ -31,6 +31,7 @@ export function BrregSearch({ initialQuery = "", onSelect, onManualEntry }: Brre
   const [isError, setIsError] = useState(false);
   const debouncedQuery = useDebounce(query, 300);
   const listRef = useRef<HTMLUListElement>(null);
+  const safeResults = Array.isArray(results) ? results : [];
 
   useEffect(() => {
     const trimmed = debouncedQuery.trim();
@@ -121,10 +122,10 @@ export function BrregSearch({ initialQuery = "", onSelect, onManualEntry }: Brre
             {isError && (
               <li className="px-3 py-2 text-[13px] text-[#9A3412]">{COPY.unreachable}</li>
             )}
-            {!isFetching && !isError && results.length === 0 && (
+            {!isFetching && !isError && safeResults.length === 0 && (
               <li className="px-3 py-2 text-[13px] text-[#A09890]">{COPY.empty}</li>
             )}
-            {results.map((enhet) => (
+            {safeResults.map((enhet) => (
               <li key={enhet.organisasjonsnummer}>
                 <button
                   type="button"

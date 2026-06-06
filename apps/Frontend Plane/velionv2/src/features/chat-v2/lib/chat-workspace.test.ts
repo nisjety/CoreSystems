@@ -74,13 +74,17 @@ describe("launchChatSessionFromComposer", () => {
         },
       ],
     });
-    expect(streamChatMock).toHaveBeenCalledWith(expect.objectContaining({
-      browseWeb: true,
-      content: "Help me compare these support tickets",
-      model: "gpt-4o-mini",
-      sessionId: session.id,
-      tools: ["search"],
-    }));
+    await vi.waitFor(() => {
+      expect(streamChatMock).toHaveBeenCalledTimes(1);
+      expect(streamChatMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+        browseWeb: true,
+        model: "gpt-4o-mini",
+        sessionId: session.id,
+        tools: ["search"],
+        features: ["usage", "citations", "reasoning", "steps", "tools", "artifacts"],
+      }));
+      expect(String(streamChatMock.mock.calls[0]?.[0]?.content)).toContain("Help me compare these support tickets");
+    });
 
     await vi.waitFor(() => {
       const nextStored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
@@ -175,7 +179,7 @@ describe("launchChatSessionFromComposer", () => {
     await vi.waitFor(() => {
       const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
       expect(stored[0].messages[1]).toMatchObject({
-        content: "I couldn't connect to the Model Plane stream. Try again in a moment.",
+        content: "upstream unavailable",
         role: "assistant",
         status: "error",
       });
@@ -183,6 +187,82 @@ describe("launchChatSessionFromComposer", () => {
         detail: "upstream unavailable",
         status: "error",
         title: "Model gateway",
+      });
+    });
+  });
+
+  it("stores internal grounding evidence on the assistant message", async () => {
+    streamChatMock.mockImplementation(async function* () {
+      yield { type: "connected" };
+      yield {
+        type: "grounding",
+        grounding: {
+          mode: "retrieve",
+          query: "refund policy",
+          traceId: "trace-1",
+          lowConfidence: false,
+          factCount: 2,
+          sourceCount: 1,
+          facts: [
+            {
+              knowledgeId: "kid-1",
+              documentId: "doc-1",
+              text: "Refunds are accepted within 30 days.",
+              score: 0.93,
+              sourceTitle: "Refund policy",
+              sourceType: "policy",
+              provider: "Notion",
+              chunkIndex: 0,
+            },
+          ],
+          sources: [
+            {
+              id: "doc-1",
+              kind: "knowledge",
+              title: "Refund policy",
+              snippet: "Refunds are accepted within 30 days.",
+              provider: "Notion",
+              sourceType: "policy",
+              documentId: "doc-1",
+              href: "/knowledge",
+              score: 0.93,
+            },
+          ],
+          graph: {
+            traceId: "graph-1",
+            communitySummaries: ["Refund policy connects with return workflow."],
+            edgeCount: 2,
+            nodes: [{ id: "node-1", label: "Refund policy", kind: "policy" }],
+          },
+        },
+      };
+      yield { type: "delta", delta: "Policy answer", requestId: "req-2" };
+      yield { type: "done", inputTokens: 4, modelUsed: "gpt-4o-mini", outputTokens: 6 };
+    });
+
+    const { launchChatSessionFromComposer } = await import("./chat-workspace");
+
+    launchChatSessionFromComposer({
+      text: "What is the refund policy?",
+      tools: [],
+      attachments: [],
+    });
+
+    await vi.waitFor(() => {
+      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+      expect(stored[0].messages[1].grounding).toMatchObject({
+        traceId: "trace-1",
+        sourceCount: 1,
+        factCount: 2,
+        sources: [
+          expect.objectContaining({
+            kind: "knowledge",
+            title: "Refund policy",
+          }),
+        ],
+        graph: expect.objectContaining({
+          edgeCount: 2,
+        }),
       });
     });
   });

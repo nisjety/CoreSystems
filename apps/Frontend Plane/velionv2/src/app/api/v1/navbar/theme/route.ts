@@ -9,6 +9,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const themeSchema = z.object({
+  colorScheme: z.string().optional().nullable(),
   theme: z.enum(["light", "dark", "system"]),
 });
 
@@ -23,14 +24,18 @@ function normalizeTheme(theme: AppearanceSettings["theme"]) {
   return theme === "auto" ? "system" : theme ?? "system";
 }
 
+function normalizeColorScheme(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
 export async function GET() {
   try {
     const actor = await requireRequestActor();
     const settings = await fetchUserCoreJson<AppearanceSettings>(actor, "/api/v1/settings/appearance");
-    return NextResponse.json(ok({ theme: normalizeTheme(settings.theme) }));
+    return NextResponse.json(ok({ colorScheme: normalizeColorScheme(settings.colorScheme), theme: normalizeTheme(settings.theme) }));
   } catch (error) {
     if (isReadIntegrationUnavailable(error)) {
-      return NextResponse.json(ok({ configured: false, theme: "system" }));
+      return NextResponse.json(ok({ configured: false, colorScheme: null, theme: "system" }));
     }
 
     if (error instanceof RequestActorError || error instanceof UserCoreError) {
@@ -56,19 +61,26 @@ export async function PUT(request: Request) {
   try {
     const actor = await requireRequestActor();
     const themeForUserCore = parsed.data.theme === "system" ? "auto" : parsed.data.theme;
+    const current = await fetchUserCoreJson<AppearanceSettings>(actor, "/api/v1/settings/appearance").catch(() => ({
+      colorScheme: "blue",
+      compactMode: false,
+      fontSize: "medium",
+      theme: "auto",
+    }));
+    const colorScheme = normalizeColorScheme(parsed.data.colorScheme) ?? normalizeColorScheme(current.colorScheme) ?? "blue";
     await fetchUserCoreJson<AppearanceSettings>(actor, "/api/v1/settings/appearance", {
       method: "PUT",
       body: JSON.stringify({
         theme: themeForUserCore,
-        colorScheme: "blue",
-        fontSize: "medium",
-        compactMode: false,
+        colorScheme,
+        fontSize: current.fontSize ?? "medium",
+        compactMode: current.compactMode ?? false,
       }),
     });
-    return NextResponse.json(ok({ theme: parsed.data.theme }));
+    return NextResponse.json(ok({ colorScheme, theme: parsed.data.theme }));
   } catch (error) {
     if (isReadIntegrationUnavailable(error)) {
-      return NextResponse.json(ok({ configured: false, persisted: false, theme: parsed.data.theme }));
+      return NextResponse.json(ok({ configured: false, persisted: false, colorScheme: parsed.data.colorScheme ?? null, theme: parsed.data.theme }));
     }
 
     if (error instanceof RequestActorError || error instanceof UserCoreError) {

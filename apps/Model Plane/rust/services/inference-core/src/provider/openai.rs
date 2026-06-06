@@ -200,6 +200,13 @@ fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
         "stream": stream,
     });
 
+    if stream {
+        // Ask OpenAI/Azure to emit a trailing usage-only chunk so streamed turns
+        // report real token counts (otherwise usage is omitted from streams and
+        // the gateway's `usage`/`done` events carry 0). Parsed in infer_stream.
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+    }
+
     if is_reasoning_model(&req.model) {
         body["max_completion_tokens"] = serde_json::json!(req.max_tokens);
     } else {
@@ -419,6 +426,12 @@ impl ProviderRouter for OpenAiProvider {
         tokio::spawn(async move {
             let mut bytes_stream = response.bytes_stream();
             let mut buffer = String::new();
+            // Captured from the trailing usage-only chunk (include_usage=true).
+            // We must NOT terminate on `finish_reason` — that chunk arrives
+            // first; the usage chunk (empty choices) comes after it, then [DONE].
+            let mut input_tokens = 0i32;
+            let mut output_tokens = 0i32;
+            let mut model_used = model.clone();
 
             while let Some(chunk_result) = bytes_stream.next().await {
                 let bytes = match chunk_result {
@@ -437,54 +450,68 @@ impl ProviderRouter for OpenAiProvider {
 
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
-                            let final_chunk = InferChunk {
-                                request_id: request_id.clone(),
-                                delta: String::new(),
-                                done: true,
-                                model_used: model.clone(),
-                                input_tokens: 0,
-                                output_tokens: 0,
-                            };
-                            let _ = tx.send(final_chunk).await;
+                            let _ = tx
+                                .send(InferChunk {
+                                    request_id: request_id.clone(),
+                                    delta: String::new(),
+                                    done: true,
+                                    model_used: model_used.clone(),
+                                    input_tokens,
+                                    output_tokens,
+                                })
+                                .await;
                             return;
                         }
 
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(usage) = json["usage"].as_object() {
+                                if let Some(p) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                                    input_tokens = to_i32_or_max(p);
+                                }
+                                if let Some(c) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                                    output_tokens = to_i32_or_max(c);
+                                }
+                            }
+                            if let Some(m) = json["model"].as_str() {
+                                model_used = m.to_owned();
+                            }
                             let delta = json["choices"][0]["delta"]["content"]
                                 .as_str()
                                 .unwrap_or("")
                                 .to_owned();
-                            let finish = json["choices"][0]["finish_reason"].as_str().unwrap_or("");
-                            let done = finish == "stop" || finish == "length";
-
-                            let chunk = InferChunk {
-                                request_id: request_id.clone(),
-                                delta,
-                                done,
-                                model_used: json["model"].as_str().unwrap_or(&model).to_owned(),
-                                input_tokens: 0,
-                                output_tokens: 0,
-                            };
-                            if tx.send(chunk).await.is_err() {
-                                return;
-                            }
-                            if done {
-                                return;
+                            // Stream content as it arrives (done=false). The
+                            // terminal `done` (with real token counts) is emitted
+                            // only on [DONE] / stream end so the usage chunk is read.
+                            if !delta.is_empty() {
+                                let chunk = InferChunk {
+                                    request_id: request_id.clone(),
+                                    delta,
+                                    done: false,
+                                    model_used: model_used.clone(),
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                };
+                                if tx.send(chunk).await.is_err() {
+                                    return;
+                                }
                             }
                         }
                     }
                 }
             }
 
-            let final_chunk = InferChunk {
-                request_id,
-                delta: String::new(),
-                done: true,
-                model_used: model,
-                input_tokens: 0,
-                output_tokens: 0,
-            };
-            let _ = tx.send(final_chunk).await;
+            // Stream ended without an explicit [DONE] — still emit a terminal
+            // done carrying whatever usage we captured.
+            let _ = tx
+                .send(InferChunk {
+                    request_id,
+                    delta: String::new(),
+                    done: true,
+                    model_used,
+                    input_tokens,
+                    output_tokens,
+                })
+                .await;
         });
 
         Ok(rx)

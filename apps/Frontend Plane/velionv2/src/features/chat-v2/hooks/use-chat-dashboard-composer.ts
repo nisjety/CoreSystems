@@ -18,6 +18,7 @@ const chatComposerTimeFormat = new Intl.DateTimeFormat("nb-NO", {
 type ChatComposerState = {
   browseWeb: boolean;
   deepSearch: boolean;
+  imageMode: boolean;
   files: ComposerFile[];
   historyOpen: boolean;
   message: string;
@@ -34,6 +35,7 @@ type ChatComposerState = {
 type ChatComposerAction =
   | { type: "browseWeb"; value: boolean }
   | { type: "deepSearch"; value: boolean }
+  | { type: "imageMode"; value: boolean }
   | { type: "files"; value: ComposerFile[] }
   | { type: "historyOpen"; value: boolean }
   | { type: "message"; value: string }
@@ -56,6 +58,7 @@ function getInitialChatComposerState(initialValue: string): ChatComposerState {
   return {
     browseWeb: true,
     deepSearch: false,
+    imageMode: false,
     files: [],
     historyOpen: false,
     message: initialValue,
@@ -79,6 +82,8 @@ function chatComposerReducer(
       return { ...state, browseWeb: action.value };
     case "deepSearch":
       return { ...state, deepSearch: action.value };
+    case "imageMode":
+      return { ...state, imageMode: action.value };
     case "files":
       return { ...state, files: action.value };
     case "historyOpen":
@@ -150,19 +155,26 @@ export function useChatDashboardComposer({
       createdAtIso: now.toISOString(),
     };
 
+    const tools = getComposerTools({
+      browseWeb: state.browseWeb,
+      deepSearch: state.deepSearch,
+      message: body,
+      responseMode: state.responseMode,
+    });
+    if (state.imageMode && !tools.includes("image")) {
+      tools.push("image");
+    }
+
     onSubmit({
       text: submittedText,
-      tools: getComposerTools({
-        browseWeb: state.browseWeb,
-        deepSearch: state.deepSearch,
-        message: body,
-        responseMode: state.responseMode,
-      }),
+      model: getGatewayModelForComposerModel(state.selectedModel),
+      tools,
       attachments: state.files.map((file) => ({
         id: file.id,
         name: file.name,
         size: file.size,
         type: file.type || "application/octet-stream",
+        url: file.url,
       })),
     });
     dispatch({ type: "submit", value: nextTurn });
@@ -171,6 +183,7 @@ export function useChatDashboardComposer({
   return {
     browseWeb: state.browseWeb,
     deepSearch: state.deepSearch,
+    imageMode: state.imageMode,
     files: state.files,
     historyOpen: state.historyOpen,
     message: state.message,
@@ -184,6 +197,7 @@ export function useChatDashboardComposer({
     voiceMode: state.voiceMode,
     onBrowseWebChange: (value) => dispatch({ type: "browseWeb", value }),
     onDeepSearchChange: (value) => dispatch({ type: "deepSearch", value }),
+    onImageModeChange: (value) => dispatch({ type: "imageMode", value }),
     onFilesChange: (value) => dispatch({ type: "files", value }),
     onHistoryOpenChange: (value) => dispatch({ type: "historyOpen", value }),
     onMessageChange: (value) => dispatch({ type: "message", value }),
@@ -199,7 +213,7 @@ export function useChatDashboardComposer({
   };
 }
 
-function getComposerTools({
+export function getComposerTools({
   browseWeb,
   deepSearch,
   message,
@@ -226,4 +240,16 @@ function getComposerTools({
   }
 
   return [...new Set(tools)];
+}
+
+export function getGatewayModelForComposerModel(model: DashboardComposerModel) {
+  switch (model) {
+    case "GPT-4o Mini":
+      return "gpt-4o-mini";
+    case "Claude Sonnet":
+      return "claude-sonnet-4-20250514";
+    case "GPT-4.1":
+    case "Velion Reasoner":
+      return undefined;
+  }
 }

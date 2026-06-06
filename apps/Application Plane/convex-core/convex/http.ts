@@ -283,6 +283,9 @@ export const natsWebhook = httpAction(async (ctx, request) => {
       case "onAgentRunEvent":
         await ctx.runAction(internal.nats.onAgentRunEvent, body as any);
         break;
+      case "onConversationEvent":
+        await ctx.runMutation(internal.conversationProjection.applyEvent, { event: body as any });
+        break;
       default:
         return new Response(JSON.stringify({ error: `Unknown NATS handler: ${handler}` }), {
           status: 400,

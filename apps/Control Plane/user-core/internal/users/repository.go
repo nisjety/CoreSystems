@@ -166,6 +166,42 @@ func (r *Repository) GetByEmail(ctx context.Context, email string) (*User, error
 	return user, nil
 }
 
+// ReassignID changes a user-core row to the canonical auth-service user ID.
+// It is used during local cutovers when a stale user-core row exists for the
+// same email under an older generated ID.
+func (r *Repository) ReassignID(ctx context.Context, currentID, nextID string) (*User, error) {
+	query := `
+		UPDATE users
+		SET id = $2,
+		    updated_at = NOW()
+		WHERE id = $1
+		RETURNING id, email, name, password_hash, avatar, status, email_verified, onboarding_complete, created_at, updated_at, last_login_at
+	`
+
+	user := &User{}
+	err := r.db.Pool.QueryRow(ctx, query, currentID, nextID).Scan(
+		&user.ID,
+		&user.Email,
+		&user.Name,
+		&user.PasswordHash,
+		&user.Avatar,
+		&user.Status,
+		&user.EmailVerified,
+		&user.OnboardingComplete,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+		&user.LastLoginAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("failed to reassign user ID: %w", err)
+	}
+
+	return user, nil
+}
+
 // Update updates a user
 func (r *Repository) Update(ctx context.Context, params UpdateUserParams) (*User, error) {
 	query := `
@@ -441,22 +477,27 @@ func (r *Repository) GetSettings(ctx context.Context, userID, category string) (
 // UpsertSettings inserts or merges settings for a user + category using JSONB || operator.
 // Partial updates are safe: only the supplied keys are overwritten.
 func (r *Repository) UpsertSettings(ctx context.Context, params UpsertSettingsParams) (*UserSettings, error) {
+	id, err := generateUserSettingsID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate user settings id: %w", err)
+	}
+
 	raw, err := json.Marshal(params.Settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
 	query := `
-		INSERT INTO user_settings (user_id, category, settings)
-		VALUES ($1, $2, $3::jsonb)
+		INSERT INTO user_settings (id, user_id, category, settings)
+		VALUES ($1, $2, $3, $4::jsonb)
 		ON CONFLICT (user_id, category) DO UPDATE SET
-			settings   = user_settings.settings || $3::jsonb,
+			settings   = user_settings.settings || EXCLUDED.settings,
 			updated_at = NOW()
 		RETURNING id, user_id, category, settings, created_at, updated_at
 	`
 	us := &UserSettings{}
 	var returned []byte
-	err = r.db.Pool.QueryRow(ctx, query, params.UserID, params.Category, raw).Scan(
+	err = r.db.Pool.QueryRow(ctx, query, id, params.UserID, params.Category, raw).Scan(
 		&us.ID, &us.UserID, &us.Category, &returned, &us.CreatedAt, &us.UpdatedAt,
 	)
 	if err != nil {
@@ -466,6 +507,14 @@ func (r *Repository) UpsertSettings(ctx context.Context, params UpsertSettingsPa
 		return nil, fmt.Errorf("failed to unmarshal upserted settings (%s): %w", params.Category, err)
 	}
 	return us, nil
+}
+
+func generateUserSettingsID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return "uset_" + hex.EncodeToString(bytes), nil
 }
 
 // ============================================

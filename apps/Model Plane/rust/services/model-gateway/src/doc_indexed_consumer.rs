@@ -211,10 +211,12 @@ impl DocReadyRegistry {
 /// Best-effort and self-contained: if `NATS_URL` is unset or the bus is
 /// unreachable it logs and returns, never breaking the gateway. Spawn once at
 /// startup (see `main.rs`). The producer publishes via core NATS (not
-/// JetStream), so a core subscription with at-most-once delivery is the right
+/// `JetStream`), so a core subscription with at-most-once delivery is the right
 /// fit — a missed `indexed` signal only costs an [`await_ready`] timeout, after
 /// which the caller proceeds with the context it already has.
 pub async fn run(registry: DocReadyRegistry) {
+    use futures::StreamExt as _;
+
     let Ok(url) = std::env::var("NATS_URL") else {
         info!("NATS_URL unset; doc-indexed readiness consumer disabled");
         return;
@@ -237,7 +239,6 @@ pub async fn run(registry: DocReadyRegistry) {
         subject = DOC_INDEXED_SUBJECT,
         "doc-indexed readiness consumer started"
     );
-    use futures::StreamExt as _;
     while let Some(msg) = sub.next().await {
         match parse_indexed(&msg.payload) {
             Some(ev) => {
@@ -250,7 +251,7 @@ pub async fn run(registry: DocReadyRegistry) {
                 );
             }
             None => {
-                warn!(subject = %msg.subject, "doc-indexed consumer: undecodable/empty event")
+                warn!(subject = %msg.subject, "doc-indexed consumer: undecodable/empty event");
             }
         }
     }
@@ -261,6 +262,8 @@ pub async fn run(registry: DocReadyRegistry) {
 mod tests {
     use super::*;
 
+    // Takes an owned Value so call sites can pass `json!(…)` literals directly.
+    #[allow(clippy::needless_pass_by_value)]
     fn payload(json: serde_json::Value) -> Vec<u8> {
         serde_json::to_vec(&json).expect("valid json")
     }

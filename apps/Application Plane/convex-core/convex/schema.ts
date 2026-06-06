@@ -509,4 +509,135 @@ export default defineSchema({
   })
     .index("by_org", ["orgId"])
     .index("by_org_and_status", ["orgId", "status"]),
+
+  // First-party Application Plane conversation-core projection.
+  // These tables are separate from the existing AI chat `conversations` /
+  // `messages` tables because conversation-core is the durable support inbox
+  // truth while Convex only powers live UI projection.
+  conversationProjectionEvents: defineTable({
+    eventId: v.string(),
+    type: v.string(),
+    externalOrgId: v.string(),
+    conversationId: v.optional(v.string()),
+    messageId: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_event_id", ["eventId"])
+    .index("by_conversation", ["conversationId"])
+    .index("by_org", ["externalOrgId"]),
+
+  conversationInboxItems: defineTable({
+    externalOrgId: v.string(),
+    conversationId: v.string(),
+    inboxId: v.string(),
+    title: v.string(),
+    status: v.string(),
+    priority: v.string(),
+    channel: v.string(),
+    provider: v.optional(v.string()),
+    providerThreadId: v.optional(v.string()),
+    assigneeUserId: v.optional(v.string()),
+    assigneeName: v.optional(v.string()),
+    contactName: v.optional(v.string()),
+    contactEmail: v.optional(v.string()),
+    tags: v.array(v.string()),
+    lastMessagePreview: v.optional(v.string()),
+    lastMessageAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org", ["externalOrgId"])
+    .index("by_conversation", ["conversationId"])
+    .index("by_org_and_status", ["externalOrgId", "status"])
+    .index("by_org_and_updated", ["externalOrgId", "updatedAt"]),
+
+  conversationProjectedMessages: defineTable({
+    externalOrgId: v.string(),
+    conversationId: v.string(),
+    messageId: v.string(),
+    direction: v.string(),
+    senderType: v.string(),
+    senderName: v.optional(v.string()),
+    senderEmail: v.optional(v.string()),
+    bodyText: v.string(),
+    bodyHtml: v.optional(v.string()),
+    internal: v.boolean(),
+    provider: v.optional(v.string()),
+    occurredAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_conversation", ["conversationId"])
+    .index("by_message", ["messageId"])
+    .index("by_conversation_and_occurred", ["conversationId", "occurredAt"]),
+
+  conversationPresence: defineTable({
+    externalOrgId: v.string(),
+    conversationId: v.string(),
+    externalUserId: v.string(),
+    status: v.union(v.literal("online"), v.literal("typing"), v.literal("away"), v.literal("offline")),
+    updatedAt: v.number(),
+  })
+    .index("by_conversation", ["conversationId"])
+    .index("by_user", ["externalUserId"]),
+
+  conversationAiActions: defineTable({
+    externalOrgId: v.string(),
+    conversationId: v.string(),
+    aiActionId: v.string(),
+    kind: v.string(),
+    status: v.string(),
+    payload: v.optional(v.any()),
+    updatedAt: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_conversation", ["conversationId"])
+    .index("by_ai_action", ["aiActionId"]),
+
+  // velionv2 search-v2 history — persisted AI answer-search threads + follow-up
+  // turns. External-ID scoped (Better Auth org/user ids) like `projects` /
+  // `controlSessions` so reads need no join through organizations/users and a
+  // browser can subscribe to its own rows reactively. Writes come from the
+  // velionv2 BFF via the service-key mutations below (search authority stays
+  // server-side); reads are public arg-scoped queries for `useQuery`.
+  searchThreads: defineTable({
+    externalOrgId: v.string(),
+    externalUserId: v.string(),
+    // The originating query (turn 0) and its synthesized grounded answer.
+    query: v.string(),
+    answer: v.string(),
+    citations: v.array(
+      v.object({
+        url: v.string(),
+        title: v.optional(v.union(v.string(), v.null())),
+      }),
+    ),
+    status: v.union(v.literal("active"), v.literal("deleted")),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_org", ["externalOrgId"])
+    .index("by_user", ["externalUserId"])
+    .index("by_org_and_user", ["externalOrgId", "externalUserId"])
+    .index("by_user_and_updated", ["externalUserId", "updatedAt"]),
+
+  searchTurns: defineTable({
+    threadId: v.id("searchThreads"),
+    // Denormalized external ids so turn-level reads can scope without a thread
+    // lookup, mirroring how `messages` carries enough to authorize in one hop.
+    externalOrgId: v.string(),
+    externalUserId: v.string(),
+    role: v.union(v.literal("user"), v.literal("assistant")),
+    text: v.string(),
+    citations: v.optional(
+      v.array(
+        v.object({
+          url: v.string(),
+          title: v.optional(v.union(v.string(), v.null())),
+        }),
+      ),
+    ),
+    createdAt: v.number(),
+  })
+    .index("by_thread", ["threadId"])
+    .index("by_thread_and_created", ["threadId", "createdAt"]),
 });
