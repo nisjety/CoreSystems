@@ -1,8 +1,0 @@
-server:
-  port: 8090
-cache:
-  backend: disk
-  path: /var/lib/quarry/cache
-scraper:
-  maxConcurrentPages: 20
-  enableStealth: true

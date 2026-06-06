@@ -1,8 +1,0 @@
-server:
-  port: 8090
-cache:
-  backend: memory
-  path: ./data/cache
-scraper:
-  maxConcurrentPages: 10
-  enableStealth: true

@@ -16,19 +16,25 @@ import type { NextRequest } from "next/server"
 const SESSION_COOKIE_HINT = /sess|sid|auth|idknuten|velion/i
 
 function extraCookieNames(): string[] {
-  return (process.env.AUTH_SESSION_COOKIE_NAMES ?? "")
+  const rawCookieNames = process.env.AUTH_SESSION_COOKIE_NAMES || ""
+
+  return rawCookieNames
     .split(",")
     .map((value) => value.trim())
-    .filter(Boolean)
+    .filter((value) => value.length > 0)
+}
+
+function isPlaywrightAuthenticated(request: NextRequest) {
+  if (process.env.NODE_ENV === "production" || process.env.PLAYWRIGHT_TEST_AUTH !== "1") {
+    return false
+  }
+
+  const userId = request.headers.get("x-playwright-auth-user-id")
+  return Boolean(userId && userId.trim())
 }
 
 export function proxy(request: NextRequest) {
-  const playwrightAuth =
-    process.env.NODE_ENV !== "production" &&
-    process.env.PLAYWRIGHT_TEST_AUTH === "1" &&
-    Boolean(request.headers.get("x-playwright-auth-user-id")?.trim())
-
-  if (playwrightAuth) {
+  if (isPlaywrightAuthenticated(request)) {
     return NextResponse.next()
   }
 
