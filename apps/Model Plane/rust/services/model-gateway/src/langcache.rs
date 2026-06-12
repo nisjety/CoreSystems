@@ -1,15 +1,24 @@
-//! Redis `LangCache` semantic-cache client for the model-gateway.
+//! Semantic-response cache for the model-gateway, behind one `SemanticCache`
+//! seam with two interchangeable backends selected from the environment:
 //!
-//! `LangCache` is a managed REST service that generates embeddings server-side,
-//! so this client only ships prompt/response text plus scoping attributes
-//! (`org_id` + `model`) — `org_id` keeps one tenant from reading another's
-//! cached responses. The client is process-global and env-configured: when
-//! `LANGCACHE_URL` / `LANGCACHE_CACHE_ID` / `LANGCACHE_API_KEY` are unset the
-//! gateway runs without a cache (every `Invoke` hits inference-core), matching
-//! the dev-friendly "disabled when unconfigured" pattern used elsewhere.
+//!   - **Managed Redis `LangCache`** (`LANGCACHE_URL` / `LANGCACHE_CACHE_ID` /
+//!     `LANGCACHE_API_KEY`): a hosted REST service that generates embeddings
+//!     server-side and matches *semantically* above a similarity threshold, so
+//!     this client only ships prompt/response text plus scoping attributes
+//!     (`org_id` + `model`).
+//!   - **Local Dragonfly exact-match** (`SEMANTIC_CACHE_URL`): a boundary-safe
+//!     KV cache keyed by the *exact* `(org_id, model, prompt)`. No embeddings and
+//!     no cross-plane calls, so it honors the gateway's "does NOT embed a second
+//!     vector store" invariant; the vector-similarity tier is owned by Data Plane
+//!     v2 and layered on separately. A byte-identical prompt from the same
+//!     org + model hits; anything else misses — strictly stricter (and so safer)
+//!     than the semantic backend.
 //!
-//! The cache is strictly best-effort: any transport/parse error degrades to a
-//! miss so inference still runs.
+//! `org_id` scoping keeps one tenant from reading another's cached responses.
+//! Selection precedence: managed LangCache → local Dragonfly → disabled (every
+//! `Invoke` hits inference-core), matching the dev-friendly "disabled when
+//! unconfigured" pattern used elsewhere. Both backends are strictly best-effort:
+//! any transport/parse error degrades to a miss so inference still runs.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -20,12 +29,148 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_THRESHOLD: f64 = 0.9;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-static GLOBAL: OnceLock<Option<LangCacheClient>> = OnceLock::new();
+/// Default TTL for locally-cached responses (1 hour).
+const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
+/// Key namespace for the local Dragonfly response cache.
+const CACHE_KEY_PREFIX: &str = "mp:gw:cache:";
 
-/// Returns the process-global client, lazily initialized from the environment.
-/// `None` means no cache is configured — callers proceed straight to inference.
-pub fn global() -> Option<&'static LangCacheClient> {
-    GLOBAL.get_or_init(LangCacheClient::from_env).as_ref()
+static GLOBAL: OnceLock<Option<SemanticCache>> = OnceLock::new();
+
+/// Returns the process-global semantic cache, lazily initialized from the
+/// environment. `None` means no cache is configured — callers proceed straight
+/// to inference.
+pub fn global() -> Option<&'static SemanticCache> {
+    GLOBAL.get_or_init(SemanticCache::from_env).as_ref()
+}
+
+/// The active cache backend behind one `lookup`/`store` seam. Selection
+/// precedence (first match wins): managed Redis `LangCache` → local Dragonfly
+/// exact-match → disabled.
+pub enum SemanticCache {
+    /// Hosted Redis LangCache (server-side embeddings + similarity threshold).
+    Managed(LangCacheClient),
+    /// Local Dragonfly exact-match KV (no embeddings, no cross-plane calls).
+    Local(DragonflyCache),
+}
+
+impl SemanticCache {
+    fn from_env() -> Option<Self> {
+        if let Some(client) = LangCacheClient::from_env() {
+            return Some(Self::Managed(client));
+        }
+        if let Some(cache) = DragonflyCache::from_env() {
+            return Some(Self::Local(cache));
+        }
+        None
+    }
+
+    /// Look up a cached response for `prompt`, scoped to org + model. A miss or
+    /// any error yields `None` so the caller falls through to inference.
+    pub async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+        match self {
+            Self::Managed(c) => c.lookup(prompt, org_id, model).await,
+            Self::Local(c) => c.lookup(prompt, org_id, model).await,
+        }
+    }
+
+    /// Store a prompt/response pair for future hits. Best-effort; never panics.
+    pub async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+        match self {
+            Self::Managed(c) => c.store(prompt, org_id, model, response).await,
+            Self::Local(c) => c.store(prompt, org_id, model, response).await,
+        }
+    }
+}
+
+/// Local exact-match response cache backed by Dragonfly (Redis-wire protocol).
+///
+/// Keyed by the *exact* `(org_id, model, prompt)`. Enabled by `SEMANTIC_CACHE_URL`
+/// (e.g. `redis://mp-dragonfly:6379`); TTL via `SEMANTIC_CACHE_TTL_SECS` (default
+/// `3600`). The connection is established lazily on first use, mirroring
+/// `stream_buffer.rs`'s `ConnectionManager` pattern.
+pub struct DragonflyCache {
+    client: redis::Client,
+    conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
+    ttl_secs: u64,
+}
+
+impl DragonflyCache {
+    /// Build from the environment. Returns `None` when `SEMANTIC_CACHE_URL` is
+    /// unset/empty or not a valid Redis URL. Reusing the gateway's Dragonfly is
+    /// opt-in (point `SEMANTIC_CACHE_URL` at the same instance as `REDIS_URL`) so
+    /// a stream-buffer-only deployment never silently starts caching responses.
+    pub fn from_env() -> Option<Self> {
+        let url = non_empty_env("SEMANTIC_CACHE_URL")?;
+        let client = redis::Client::open(url).ok()?;
+        let ttl_secs = std::env::var("SEMANTIC_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|t| *t > 0)
+            .unwrap_or(DEFAULT_CACHE_TTL_SECS);
+        tracing::info!(
+            ttl_secs,
+            "semantic cache enabled (local Dragonfly exact-match)"
+        );
+        Some(Self {
+            client,
+            conn: tokio::sync::OnceCell::new(),
+            ttl_secs,
+        })
+    }
+
+    /// Lazily-established multiplexed connection; a connect failure degrades to a
+    /// cache miss rather than propagating.
+    async fn manager(&self) -> Option<redis::aio::ConnectionManager> {
+        self.conn
+            .get_or_try_init(|| redis::aio::ConnectionManager::new(self.client.clone()))
+            .await
+            .map_err(|error| tracing::debug!(%error, "semantic cache connect failed"))
+            .ok()
+            .cloned()
+    }
+
+    /// Cache key: `org_id` + `model` are exact path segments (so they never
+    /// collide across tenants/models); only the (potentially large) prompt is
+    /// hashed, with its byte length appended as a cheap second discriminator
+    /// against the already-negligible 64-bit hash-collision chance.
+    fn key(prompt: &str, org_id: &str, model: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        prompt.hash(&mut hasher);
+        let digest = hasher.finish();
+        format!(
+            "{CACHE_KEY_PREFIX}{org_id}:{model}:{digest:016x}:{}",
+            prompt.len()
+        )
+    }
+
+    async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+        use redis::AsyncCommands;
+        let mut conn = self.manager().await?;
+        let key = Self::key(prompt, org_id, model);
+        match conn.get::<_, Option<String>>(&key).await {
+            Ok(value) => value.filter(|v| !v.is_empty()),
+            Err(error) => {
+                tracing::debug!(%error, "semantic cache get failed");
+                None
+            }
+        }
+    }
+
+    async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+        if response.is_empty() {
+            return;
+        }
+        use redis::AsyncCommands;
+        let Some(mut conn) = self.manager().await else {
+            return;
+        };
+        let key = Self::key(prompt, org_id, model);
+        let result: redis::RedisResult<()> = conn.set_ex(&key, response, self.ttl_secs).await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "semantic cache set failed");
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -212,6 +357,32 @@ mod tests {
     #[test]
     fn empty_response_body_is_none() {
         assert!(parse_entries(b"   ").is_none());
+    }
+
+    #[test]
+    fn cache_key_is_scoped_stable_and_collision_guarded() {
+        let key = DragonflyCache::key("hello", "org-1", "m");
+        assert_eq!(key, DragonflyCache::key("hello", "org-1", "m"), "stable");
+        assert!(
+            key.starts_with("mp:gw:cache:org-1:m:"),
+            "namespaced by org + model"
+        );
+        assert_ne!(
+            key,
+            DragonflyCache::key("hello", "org-2", "m"),
+            "org-scoped"
+        );
+        assert_ne!(
+            key,
+            DragonflyCache::key("hello", "org-1", "m2"),
+            "model-scoped"
+        );
+        assert_ne!(
+            key,
+            DragonflyCache::key("HELLO", "org-1", "m"),
+            "prompt is case-sensitive"
+        );
+        assert!(key.ends_with(":5"), "byte-length discriminator appended");
     }
 
     #[tokio::test]

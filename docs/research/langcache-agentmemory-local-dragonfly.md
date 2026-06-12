@@ -108,6 +108,29 @@ work reliably. **Treat Agent-Memory-on-Dragonfly as unsupported.**
 already runs. Neither AI service needs Redis Cloud to stay local — but neither
 runs purely on Dragonfly either. Keep the substrate split explicit.
 
-**Status:** research only. No code changed by this finding. The LangCache
-local-backend build and the Qdrant-backed agent memory are follow-up
-implementation tasks if/when we decide to drop the Redis Cloud dependencies.
+## 4. Status — implemented 2026-06-13
+
+The **local** paths are now wired (the chosen pragmatic increment, not the full
+semantic tier):
+
+- **LangCache → local Dragonfly exact-match.** The model-gateway `SemanticCache`
+  seam (`apps/Model Plane/rust/services/model-gateway/src/langcache.rs`) now
+  dispatches **managed LangCache → local Dragonfly → disabled**. The local
+  backend keys an *exact* `(org_id, model, prompt)` match in Dragonfly (KV, TTL
+  via `SEMANTIC_CACHE_TTL_SECS`, default 1h), enabled by `SEMANTIC_CACHE_URL`
+  (wired to `dragonfly`/`mp-dragonfly` in both Model Plane composes, ON by
+  default, overridable to empty). No embeddings and no cross-plane calls, so it
+  honors the gateway's "no second vector store" invariant. `cargo check` +
+  `cargo test --lib langcache` green (7/7).
+  - **Deferred:** the *semantic* (vector-similarity) cache tier — owned by Data
+    Plane v2 (embed + ANN over a cache collection), layered behind the same seam.
+- **Agent Memory → local agent-memory-server + Redis Stack.** The Model Plane
+  deploy compose now runs `agent-memory-server` on a dedicated local
+  `redis-stack` (RediSearch vector index); `letta-bridge` points
+  `AGENT_MEMORY_URL` at it — the existing Go client already speaks the protocol,
+  so **no Go change**. Fully local (no Redis Cloud); embeddings/generation via
+  LiteLLM (OpenAI by default; Azure et al. supported).
+
+**Decision rule (unchanged):** Dragonfly owns KV / cache / session / queue;
+vector search belongs to **Qdrant** (LangCache semantic tier) or the
+agent-memory-server's Redis-Stack index. Keep the substrate split explicit.

@@ -48,10 +48,18 @@ services:
       interval: 10s
       retries: 3
 
-  redis:
-    image: redis:7-alpine
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: model-plane-dragonfly
+    command:
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
     ports:
       - "6391:6379"
+    volumes:
+      - mp-dragonfly-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -203,6 +211,14 @@ services:
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://host.docker.internal:8082}
       QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-dev-token}
       QUARRY_EDGE_TIMEOUT_SECS: ${QUARRY_EDGE_TIMEOUT_SECS:-30}
+      # Local semantic-response cache (Dragonfly exact-match). Default ON,
+      # pointing at the Model Plane Dragonfly; set empty to disable. If the
+      # managed Redis LangCache (LANGCACHE_URL/_CACHE_ID/_API_KEY) is configured
+      # it takes precedence. Exact (org+model+prompt) match only — no embeddings
+      # and no cross-plane calls; the vector-similarity tier is owned by Data
+      # Plane v2 and layered on separately.
+      SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://dragonfly:6379}
+      SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
     extra_hosts:
       # Required so QUARRY_EDGE_URL=host.docker.internal resolves on
       # Linux. No-op on Mac (Docker Desktop maps it automatically).
@@ -215,6 +231,8 @@ services:
           - model-gateway
     depends_on:
       nats:
+        condition: service_healthy
+      dragonfly:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
@@ -417,12 +435,12 @@ services:
       - "9097:9097"   # gRPC
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://dragonfly:6379
       NATS_URL: nats://nats:4222
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      dragonfly:
         condition: service_healthy
 
   sandbox-manager:
@@ -433,12 +451,12 @@ services:
       - "8086:8086"   # HTTP health
       - "9094:9094"   # gRPC
     environment:
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://dragonfly:6379
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-minioadmin}
     depends_on:
-      redis:
+      dragonfly:
         condition: service_healthy
 
   browser-broker:
@@ -460,6 +478,58 @@ services:
       LETTA_URL: ${LETTA_URL:-${LETTA_SERVER_URL:-http://localhost:8283}}
       LETTA_SERVER_URL: ${LETTA_SERVER_URL:-${LETTA_URL:-http://localhost:8283}}
       SESSION_CORE_ADDR: session-core:9091
+      # Long-term agent memory → local agent-memory-server (Redis Stack vector
+      # backend). Unset AGENT_MEMORY_URL to fall back to the in-memory store.
+      AGENT_MEMORY_URL: ${AGENT_MEMORY_URL:-http://agent-memory-server:8000}
+      AGENT_MEMORY_TOKEN: ${AGENT_MEMORY_TOKEN:-}
+    depends_on:
+      agent-memory-server:
+        condition: service_healthy
+
+  # Long-term agent-memory backend: agent-memory-server (REST, LiteLLM) on a
+  # dedicated local Redis Stack (RediSearch vector index). letta-bridge points
+  # AGENT_MEMORY_URL here. Fully local — no Redis Cloud. Embeddings + generation
+  # via OpenAI by default (set OPENAI_API_KEY); LiteLLM also supports Azure et al.
+  agent-memory-redis:
+    image: redis/redis-stack-server:7.4.0-v3
+    container_name: model-plane-agent-memory-redis
+    command: ["redis-stack-server", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - mp-agent-memory-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  agent-memory-server:
+    image: redislabs/agent-memory-server:latest
+    container_name: model-plane-agent-memory-server
+    command: ["agent-memory", "api", "--host", "0.0.0.0", "--port", "8000", "--task-backend=asyncio"]
+    environment:
+      REDIS_URL: redis://agent-memory-redis:6379
+      PORT: "8000"
+      AUTH_MODE: ${AGENT_MEMORY_AUTH_MODE:-disabled}
+      DISABLE_AUTH: ${AGENT_MEMORY_DISABLE_AUTH:-true}
+      # LiteLLM model + provider config. OpenAI by default; for Azure/others set
+      # litellm-style model names (e.g. azure/<deployment>) plus the matching
+      # provider env (AZURE_API_KEY / AZURE_API_BASE / AZURE_API_VERSION).
+      GENERATION_MODEL: ${AGENT_MEMORY_GENERATION_MODEL:-gpt-4o-mini}
+      FAST_MODEL: ${AGENT_MEMORY_FAST_MODEL:-gpt-4o-mini}
+      EMBEDDING_MODEL: ${AGENT_MEMORY_EMBEDDING_MODEL:-text-embedding-3-small}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      ENABLE_TOPIC_EXTRACTION: ${AGENT_MEMORY_TOPIC_EXTRACTION:-true}
+      LOG_LEVEL: ${AGENT_MEMORY_LOG_LEVEL:-INFO}
+    ports:
+      - "8100:8000"   # REST (host-exposed for debugging)
+    depends_on:
+      agent-memory-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost',8000),3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   cost-core:
     build:
@@ -510,6 +580,8 @@ volumes:
   mp-postgres-data:
   mp-minio-data:
   mp-temporal-postgres-data:
+  mp-dragonfly-data:
+  mp-agent-memory-redis-data:
 
 networks:
   default:

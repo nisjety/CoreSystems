@@ -360,6 +360,10 @@ services:
       RATE_LIMIT_RPM: ${MP_RATE_LIMIT_RPM:-100}
       JWT_AUDIENCE: ${MP_JWT_AUDIENCE:-mp-gateway}
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-local}
+      # Local semantic-response cache (Dragonfly exact-match) → mp-dragonfly.
+      # Empty to disable; managed LANGCACHE_URL (if set) takes precedence.
+      SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://mp-dragonfly:6379}
+      SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
     networks:
       - aquatiq-local
     healthcheck:
