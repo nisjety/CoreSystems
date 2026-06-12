@@ -110,7 +110,7 @@
 | Component | Port | Constraint |
 |-----------|------|------------|
 | PostgreSQL 16 | :5432 | 🚫 Direct access forbidden from L3–L6 |
-| Redis 7 | :6379 | 🚫 Direct access forbidden from L3–L6 |
+| Dragonfly | :6379 | 🚫 Direct access forbidden from L3–L6 |
 | Qdrant v1.9.0 | :6333/:6334 | 🚫 Direct access forbidden from L3–L6; only retrieval-service and embedding-worker may connect |
 
 ---
@@ -199,7 +199,7 @@
 | Component | Port | Constraint |
 |-----------|------|------------|
 | reasoning-v2-postgres | :55433 | 🚫 Access restricted to Model Plane v2 services only |
-| Redis | :6390 | 🚫 Access restricted to Model Plane v2 services only |
+| Dragonfly | :6390 | 🚫 Access restricted to Model Plane v2 services only |
 | NATS | :4227/:8227 | ✅ Used for cross-plane event transport (billing events to L1) |
 | MinIO | :9000/:9001 | 🚫 Artifacts local to Model Plane v2 only |
 
@@ -276,7 +276,7 @@
 | Component | Port | Constraint |
 |-----------|------|------------|
 | application-postgres | :9540→5432 | 🚫 Access restricted to Application Plane services only |
-| application-redis | :6480→6379 | 🚫 Access restricted to Application Plane services only |
+| application-dragonfly | :6480→6379 | 🚫 Access restricted to Application Plane services only |
 
 ---
 

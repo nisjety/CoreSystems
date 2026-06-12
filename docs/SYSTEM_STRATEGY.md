@@ -45,7 +45,7 @@ Instead of JSON, we use **TOON (Token-Oriented Object Notation)** - a custom for
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │           Infrastructure (Aquatiq Root Container)                │
-│  PostgreSQL │ Redis │ NATS │ Qdrant │ Prometheus │ Grafana      │
+│  PostgreSQL │ Dragonfly │ NATS │ Qdrant │ Prometheus │ Grafana      │
 └─────────────────────────────────────────────────────────────────┘
                          │
                          ▼
@@ -205,7 +205,7 @@ HybridOrchestrator         # Letta + LangGraph + LangChain
 #### Supporting Services
 ```python
 TranslationService         # Azure Translator (100+ languages)
-CacheService              # Redis caching layer
+CacheService              # Dragonfly caching layer
 NATSService               # Event streaming (policy updates)
 OrgPolicyClient           # Fetch org-specific policies
 TemplateManager           # Prompt template management
@@ -595,7 +595,7 @@ if response.stop_reason == "tool_use":
 **Framework**: Custom (net/http + gRPC)  
 **Database**: PostgreSQL  
 **Vector Store**: Qdrant  
-**Cache**: Multi-tier (Ristretto + Redis)
+**Cache**: Multi-tier (Ristretto + Dragonfly)
 
 ### 2.2 Core Responsibilities
 
@@ -610,7 +610,7 @@ type RAGService struct {
 
 // Retrieve relevant documents
 func (s *RAGService) Retrieve(ctx context.Context, req *RAGRequest) (*RAGResponse, error) {
-    // Check cache first (L1: Ristretto, L2: Redis)
+    // Check cache first (L1: Ristretto, L2: Dragonfly)
     cacheKey := s.cacheKey(req.Query, req.OrgID)
     if cached, found := s.cache.Get(cacheKey); found {
         return cached.(*RAGResponse), nil
@@ -638,7 +638,7 @@ func (s *RAGService) Retrieve(ctx context.Context, req *RAGRequest) (*RAGRespons
 #### Multi-Tier Caching (NEW!)
 ```go
 // L1: Ristretto (in-memory, 100MB)
-// L2: Redis (distributed, 120s TTL)
+// L2: Dragonfly (distributed, 120s TTL)
 type MultiTierCache struct {
     l1 *ristretto.Cache  // 100MB, 60s TTL
     l2 *redis.Client     // Distributed, 120s TTL
@@ -746,8 +746,8 @@ services:
   postgres:
     image: postgres:16
   
-  redis:
-    image: redis:7-alpine
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
   
   qdrant:
     image: qdrant/qdrant:latest
@@ -901,7 +901,7 @@ GDPR_AUDIT_LOG_ENABLED=true
 - AI-core: Python (8040, 50851)
 - User-service: Go (8081)
 - Postgres: 5432
-- Redis: 6379
+- Dragonfly: 6379
 - Qdrant: 6333
 - NATS: 4222
 - Letta: 8283

@@ -4,7 +4,7 @@
 
 The multi-tier cache system provides a high-performance caching layer that combines:
 1. **Local cache** (in-memory using Ristretto) - Sub-microsecond access
-2. **Redis cache** (distributed) - 1-2ms access, persistent across restarts
+2. **Dragonfly cache** (distributed) - 1-2ms access, persistent across restarts
 
 ## Architecture
 
@@ -22,7 +22,7 @@ The multi-tier cache system provides a high-performance caching layer that combi
 │  ├─ Hit: Return immediately (<1µs)             │
 │  └─ Miss: Go to step 2                         │
 │                                                 │
-│  Step 2: Check Redis                           │
+│  Step 2: Check Dragonfly                           │
 │  ├─ Hit: Populate local cache, return (~1ms)  │
 │  └─ Miss: Return nil                           │
 │                                                 │
@@ -30,7 +30,7 @@ The multi-tier cache system provides a high-performance caching layer that combi
          │                    │
          ▼                    ▼
 ┌──────────────┐    ┌──────────────┐
-│   Ristretto  │    │    Redis     │
+│   Ristretto  │    │   Dragonfly  │
 │  (In-Memory) │    │ (Distributed)│
 │              │    │              │
 │  - 100MB max │    │  - Persistent│
@@ -41,13 +41,13 @@ The multi-tier cache system provides a high-performance caching layer that combi
 
 ## Performance Comparison
 
-### Before (Redis only)
+### Before (Dragonfly only)
 ```
-Request → Redis → Response
+Request → Dragonfly → Response
           1-2ms
 
 Total: ~2ms per request
-Redis queries: 100,000/day
+Dragonfly queries: 100,000/day
 ```
 
 ### After (Multi-tier)
@@ -55,11 +55,11 @@ Redis queries: 100,000/day
 Request → Local Cache (99% hit rate) → Response
           <0.001ms
 
-Request → Redis (1% miss rate) → Local Cache → Response
+Request → Dragonfly (1% miss rate) → Local Cache → Response
           1-2ms
 
 Avg: ~0.02ms per request (100x faster!)
-Redis queries: 1,000/day (99% reduction!)
+Dragonfly queries: 1,000/day (99% reduction!)
 ```
 
 ## Installation
@@ -90,7 +90,7 @@ type Config struct {
 			LocalBufferItems int64        `env:"CACHE_LOCAL_BUFFER_ITEMS" envDefault:"64"`
 			LocalTTL         time.Duration `env:"CACHE_LOCAL_TTL" envDefault:"1m"`
 			
-			// Redis cache
+			// Dragonfly cache
 			RedisAddr     string        `env:"REDIS_ADDR" envDefault:"localhost:6379"`
 			RedisPassword string        `env:"REDIS_PASSWORD"`
 			RedisDB       int           `env:"REDIS_DB" envDefault:"0"`
@@ -115,7 +115,7 @@ CACHE_LOCAL_NUM_COUNTERS=100000  # 10x max entries
 CACHE_LOCAL_BUFFER_ITEMS=64       # Recommended value
 CACHE_LOCAL_TTL=1m                # Keep in memory for 1 minute
 
-# Redis cache
+# Dragonfly cache
 REDIS_ADDR=localhost:6379
 REDIS_PASSWORD=
 REDIS_DB=0
@@ -167,7 +167,7 @@ func main() {
 	
 	// Get a value
 	val, err := c.Get(ctx, "user:123")
-	// First call: fetches from Redis (~1ms)
+	// First call: fetches from Dragonfly (~1ms)
 	// Second call: fetches from local cache (<0.001ms)
 	
 	// Set JSON
@@ -226,7 +226,7 @@ func (s *serviceImpl) Retrieve(ctx context.Context, req *RetrieveRequest) (*Retr
 	// Generate cache key
 	cacheKey := cache.GenerateCacheKey("rag", req.OrgID, req.Query)
 	
-	// Check cache (local first, then Redis)
+	// Check cache (local first, then Dragonfly)
 	var cached RetrieveResponse
 	if err := s.cache.GetJSON(ctx, cacheKey, &cached); err == nil && cached.Documents != nil {
 		s.logger.Debug().Str("key", cacheKey).Msg("Cache hit")
@@ -367,20 +367,20 @@ func (s *serviceImpl) RegisterMetrics(registry *prometheus.Registry) {
 }
 ```
 
-### 4. Graceful Degradation (Redis Down)
+### 4. Graceful Degradation (Dragonfly Down)
 
 ```go
 func (s *serviceImpl) Retrieve(ctx context.Context, req *RetrieveRequest) (*RetrieveResponse, error) {
 	cacheKey := cache.GenerateCacheKey("rag", req.OrgID, req.Query)
 	
-	// Try cache (will fall back to Redis if local miss)
+	// Try cache (will fall back to Dragonfly if local miss)
 	var cached RetrieveResponse
 	err := s.cache.GetJSON(ctx, cacheKey, &cached)
 	if err == nil && cached.Documents != nil {
 		return &cached, nil
 	}
 	
-	// If Redis is down, log but continue
+	// If Dragonfly is down, log but continue
 	if err != nil && !errors.Is(err, redis.Nil) {
 		s.logger.Warn().Err(err).Msg("Cache error, continuing without cache")
 	}
@@ -391,7 +391,7 @@ func (s *serviceImpl) Retrieve(ctx context.Context, req *RetrieveRequest) (*Retr
 		return nil, err
 	}
 	
-	// Try to cache (ignore errors if Redis is down)
+	// Try to cache (ignore errors if Dragonfly is down)
 	if err := s.cache.SetJSON(ctx, cacheKey, response); err != nil {
 		s.logger.Warn().Err(err).Msg("Failed to cache response")
 	}
@@ -453,9 +453,9 @@ CACHE_REDIS_TTL=24h  # Keep in Redis for 24 hours
 - Sub-microsecond latency for cached data
 
 ### 2. Cost Reduction
-- **99% reduction** in Redis queries
-- Lower Redis memory usage
-- Reduced Redis I/O and network traffic
+- **99% reduction** in Dragonfly queries
+- Lower Dragonfly memory usage
+- Reduced Dragonfly I/O and network traffic
 
 ### 3. Scalability
 - Handle 10x more requests with same infrastructure
@@ -463,9 +463,9 @@ CACHE_REDIS_TTL=24h  # Keep in Redis for 24 hours
 - Lower latency even under load
 
 ### 4. Resilience
-- Graceful degradation if Redis is down
+- Graceful degradation if Dragonfly is down
 - Local cache keeps serving hot data
-- Automatic recovery when Redis returns
+- Automatic recovery when Dragonfly returns
 
 ## Monitoring
 
@@ -517,13 +517,13 @@ cache_local_evictions_total
 
 ### Week 2: Measure Impact
 1. Compare latency (before/after)
-2. Measure Redis load reduction
+2. Measure Dragonfly load reduction
 3. Tune cache sizes if needed
 
 ### Expected Results
 - ✅ 90-99% local cache hit rate
 - ✅ 10-100x latency improvement
-- ✅ 90-99% Redis query reduction
+- ✅ 90-99% Dragonfly query reduction
 - ✅ Better resource utilization
 
 ## Troubleshooting
@@ -587,7 +587,7 @@ func (s *serviceImpl) UpdateData(ctx context.Context, key string) error {
 
 The multi-tier cache provides:
 - ✅ 100x performance improvement for hot data
-- ✅ 99% Redis load reduction
+- ✅ 99% Dragonfly load reduction
 - ✅ Better resource utilization
 - ✅ Graceful degradation
 - ✅ Simple drop-in replacement

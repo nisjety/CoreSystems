@@ -2,7 +2,7 @@
 
 This guide covers the deployment of two major optimizations:
 
-1. **Multi-tier cache** (Ristretto + Redis) - 100x faster performance
+1. **Multi-tier cache** (Ristretto + Dragonfly) - 100x faster performance
 2. **Linear review ticketing** - $55k savings, zero maintenance
 
 ---
@@ -25,15 +25,15 @@ CACHE_ENABLED=true
 CACHE_LOCAL_MAX_COST_MB=100      # 100MB local cache
 CACHE_LOCAL_TTL_SECONDS=60       # 1 minute local TTL
 CACHE_LOCAL_BUFFER_SIZE=64       # Ristretto buffer
-CACHE_TTL_SECONDS=3600           # 1 hour Redis TTL
+CACHE_TTL_SECONDS=3600           # 1 hour Dragonfly TTL
 REDIS_URL=redis://localhost:6379/0
 ```
 
 **Performance:**
 - Local cache: <0.001ms (sub-microsecond)
-- Redis fallback: 1-2ms
+- Dragonfly fallback: 1-2ms
 - Expected hit rate: >95% for hot data
-- Redis query reduction: 99%
+- Dragonfly query reduction: 99%
 
 **Status:** ✅ Code compiled, Docker image built successfully
 
@@ -101,7 +101,7 @@ docker compose -f backend/docker-compose.yml up -d --build org-core
 docker logs org-core-service --tail 50 | grep -i "cache"
 
 # Should see:
-# "Multi-tier cache enabled (Ristretto + Redis)"
+# "Multi-tier cache enabled (Ristretto + Dragonfly)"
 # "local_max_mb=100 local_ttl=1m redis_ttl=1h"
 ```
 
@@ -308,7 +308,7 @@ curl http://localhost:9091/metrics | grep cache
 **4.3 Performance validation:**
 
 ```bash
-# Before: Redis-only cache
+# Before: Dragonfly-only cache
 # Average query time: 1-2ms
 
 # After: Multi-tier cache
@@ -327,9 +327,9 @@ docker logs org-core-service | grep "cache_latency"
 
 **Metrics to Track:**
 - Local cache hit rate: Target >95%
-- Redis query reduction: Target >90%
-- P50 latency: <0.001ms (local), <2ms (Redis)
-- P99 latency: <0.01ms (local), <5ms (Redis)
+- Dragonfly query reduction: Target >90%
+- P50 latency: <0.001ms (local), <2ms (Dragonfly)
+- P99 latency: <0.01ms (local), <5ms (Dragonfly)
 
 **If hit rate is low (<90%):**
 1. Increase `CACHE_LOCAL_MAX_COST_MB` (e.g., 200MB)
@@ -374,14 +374,14 @@ docker stats org-core-service
 # Update .env.local: CACHE_LOCAL_MAX_COST_MB=50
 ```
 
-**Problem: Redis connection errors**
+**Problem: Dragonfly connection errors**
 ```bash
-# Check Redis connectivity
+# Check Dragonfly connectivity
 docker exec org-core-service redis-cli -h redis ping
 
 # Should respond: PONG
 
-# If not, check Redis container
+# If not, check Dragonfly container
 docker logs redis
 docker compose -f backend/docker-compose.yml restart redis
 ```
@@ -420,9 +420,9 @@ curl https://api.linear.app/graphql \
 ### Before Optimization
 
 ```
-Cache Layer:      Redis only
+Cache Layer:      Dragonfly only
 Cache Latency:    1-2ms per query
-Redis Load:       10,000 queries/minute
+Dragonfly Load:       10,000 queries/minute
 Review System:    Custom in-memory (479 lines)
 Data Persistence: None (data loss risk)
 Maintenance:      37 hours/month
@@ -431,9 +431,9 @@ Maintenance:      37 hours/month
 ### After Optimization
 
 ```
-Cache Layer:      Ristretto + Redis (multi-tier)
-Cache Latency:    <0.001ms (local), 1-2ms (Redis fallback)
-Redis Load:       100 queries/minute (99% reduction!)
+Cache Layer:      Ristretto + Dragonfly (multi-tier)
+Cache Latency:    <0.001ms (local), 1-2ms (Dragonfly fallback)
+Dragonfly Load:       100 queries/minute (99% reduction!)
 Review System:    Linear (free tier)
 Data Persistence: PostgreSQL (Linear backend)
 Maintenance:      2 hours/month (95% reduction!)

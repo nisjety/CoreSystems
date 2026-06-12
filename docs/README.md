@@ -35,7 +35,7 @@
 5. **[Multi-Tier Cache Implementation](./MULTI_TIER_CACHE_GUIDE.md)**
    - **Status**: ✅ Implemented
    - **Performance**: 100x faster for hot data
-   - **Impact**: 99% Redis query reduction
+   - **Impact**: 99% Dragonfly query reduction
 
 6. **[Optimization Summary](./OPTIMIZATION_SUMMARY.md)**
    - **Overview**: Complete summary of all decisions
@@ -63,7 +63,7 @@
 ### Multi-Tier Caching ✅
 - **File**: `backend/Org-core/internal/cache/multi_tier.go` (369 lines)
 - **Dependency**: `github.com/dgraph-io/ristretto v0.2.0` ✅ Installed
-- **Performance**: 100x faster for hot data, 99% Redis query reduction
+- **Performance**: 100x faster for hot data, 99% Dragonfly query reduction
 - **Guide**: [MULTI_TIER_CACHE_GUIDE.md](./MULTI_TIER_CACHE_GUIDE.md)
 
 ---
@@ -101,7 +101,7 @@
 LangGraph:        $0/mo  (already installed)
 Custom Rate Limit: $0/mo  (with enhanced cache)
 Linear:           $0/mo  (free tier, <10 users)
-Multi-Tier Cache: $0/mo  (just uses existing Redis)
+Multi-Tier Cache: $0/mo  (just uses existing Dragonfly)
 ─────────────────────────
 Total:            $0/mo
 ```
@@ -129,7 +129,7 @@ Total:            $160-310/mo (all services)
 
 ### Before Optimization
 ```
-Cache:         Redis only (~1-2ms)
+Cache:         Dragonfly only (~1-2ms)
 Workflows:     Custom Go (maintenance burden)
 Ticketing:     Custom (479 lines, in-memory)
 Rate Limiting: Custom (258 lines, basic)
@@ -138,9 +138,9 @@ Audit:         Basic stdout logging
 
 ### After Optimization
 ```
-Cache:         Multi-tier (<0.001ms local, 1-2ms Redis)
+Cache:         Multi-tier (<0.001ms local, 1-2ms Dragonfly)
                → 100x faster for hot data
-               → 99% Redis query reduction
+               → 99% Dragonfly query reduction
 
 Workflows:     LangGraph (AI-native, battle-tested)
                → Zero infrastructure
@@ -249,7 +249,7 @@ backend/Org-core/internal/cache/
 
 ### 💡 Enhance These
 - Rate limiter → Add local cache (done!)
-- Redis cache → Add memory tier (done!)
+- Dragonfly cache → Add memory tier (done!)
 
 ---
 
@@ -339,7 +339,7 @@ Use this framework for future "build vs buy" decisions:
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
 | **Cache Latency** | 1-2ms | <0.001ms | 100-1000x |
-| **Redis Queries** | 100k/day | 1k/day | 99% reduction |
+| **Dragonfly Queries** | 100k/day | 1k/day | 99% reduction |
 | **Development Time** | 470 hours | 22 hours | 95% saved |
 | **Maintenance** | 37 hrs/mo | 2 hrs/mo | 95% saved |
 | **Cost** | $5,000/mo | $0-310/mo | 94% saved |

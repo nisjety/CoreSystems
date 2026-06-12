@@ -214,7 +214,7 @@ services:
   # Go control    : orchestrator-core, capability-core, sandbox-manager,
   #                 browser-broker, letta-bridge, cost-core, task-core, bridge-core
   # MP infra      : mp-postgres, mp-temporal-postgres, mp-nats, mp-minio,
-  #                 mp-redis, mp-temporal, mp-temporal-ui, mp-otel-collector
+  #                 mp-dragonfly, mp-temporal, mp-temporal-ui, mp-otel-collector
   #
   # Mirrors apps/Model Plane/deploy/docker-compose.yml but lives on the shared
   # aquatiq-local network so the frontend, org-core, convex, the Data Plane,
@@ -289,9 +289,9 @@ services:
       retries: 3
     restart: unless-stopped
 
-  mp-redis:
-    image: redis:7-alpine
-    container_name: mp-redis
+  mp-dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: mp-dragonfly
     networks:
       - aquatiq-local
     healthcheck:
@@ -486,13 +486,13 @@ services:
       dockerfile: services/capability-core/Dockerfile
     container_name: mp-capability-core
     environment:
-      REDIS_URL: redis://mp-redis:6379
+      REDIS_URL: redis://mp-dragonfly:6379
       DATABASE_URL: postgres://postgres:postgres@mp-postgres:5432/session_core?sslmode=disable
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
     depends_on:
       mp-postgres:
         condition: service_healthy
-      mp-redis:
+      mp-dragonfly:
         condition: service_healthy
     networks:
       - aquatiq-local
@@ -504,12 +504,12 @@ services:
       dockerfile: services/sandbox-manager/Dockerfile
     container_name: mp-sandbox-manager
     environment:
-      REDIS_URL: redis://mp-redis:6379
+      REDIS_URL: redis://mp-dragonfly:6379
       MINIO_ENDPOINT: mp-minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
     depends_on:
-      mp-redis:
+      mp-dragonfly:
         condition: service_healthy
     networks:
       - aquatiq-local
@@ -671,7 +671,7 @@ services:
     environment:
       # Using internal SQLite - PostgreSQL requires pgvector extension
       # - LETTA_PG_URI=postgresql://aquatiq:8rSqS08wB+mCg3ncw+Ag+9dyxGGozcXncvgpjZtALY0=@aquatiq-postgres-local:5432/letta_db
-      - LETTA_REDIS_URL=redis://controlplane-redis:6379/5
+      - LETTA_REDIS_URL=redis://:${DRAGONFLY_PASSWORD:-change-me-dragonfly-password}@controlplane-dragonfly:6379/5
       - LETTA_SERVER_PORT=8283
       - LETTA_SERVER_HOST=0.0.0.0
     ports:
@@ -838,7 +838,7 @@ services:
       - QUARRY_EDGE__CONTROL_BASE_URL=http://quarry-control:8081
       - QUARRY_EDGE__CONTROL_API_KEY=${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
       - QUARRY_EDGE__RUNTIME_AUTH_TOKEN=${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
-      - QUARRY_EDGE__REDIS_URL=${QUARRY_EDGE_REDIS_URL:-redis://:change-me-redis-password@${REDIS_HOST:-controlplane-redis}:${REDIS_PORT:-6379}/6}
+      - QUARRY_EDGE__REDIS_URL=${QUARRY_EDGE_REDIS_URL:-redis://:${DRAGONFLY_PASSWORD:-change-me-dragonfly-password}@${REDIS_HOST:-controlplane-dragonfly}:${REDIS_PORT:-6379}/6}
       - QUARRY_EDGE__ARTIFACT_BACKEND=${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
       - QUARRY_EDGE__ARTIFACT_ROOT=/app/data/artifacts
       - QUARRY_EDGE__S3_BUCKET=${QUARRY_S3_BUCKET:-}
@@ -967,7 +967,7 @@ services:
   # apps/Data Plane/docker-compose.yml. Owns:
   #   Hot path (Rust): retrieval-engine, index-engine, embedding-engine, graph-index
   #   Control (Go):    documents-api, wiki-store, data-orchestrator, data-quality
-  #   Infra:           dpv2-postgres, dpv2-redis, dpv2-qdrant, dpv2-nats
+  #   Infra:           dpv2-postgres, dpv2-dragonfly, dpv2-qdrant, dpv2-nats
   #
   # All services join `aquatiq-local` so frontend, Model Plane, and Quarry can
   # reach them via container DNS (documents-api:8010, retrieval-engine:8004,
@@ -1022,9 +1022,9 @@ services:
       timeout: 5s
       retries: 10
 
-  dpv2-redis:
-    image: redis:7-alpine
-    container_name: dpv2-redis
+  dpv2-dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: dpv2-dragonfly
     restart: unless-stopped
     init: true
     ports:
@@ -1032,8 +1032,11 @@ services:
     networks:
       - aquatiq-local
     volumes:
-      - dpv2-redis-data:/data
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+      - dpv2-dragonfly-data:/data
+    # Dragonfly flags ported from redis-server: snapshots to /data on shutdown
+    # (Dragonfly uses point-in-time snapshots, not AOF — no --appendonly); 96mb
+    # cap; Dragonfly does not evict by default (≈ redis noeviction).
+    command: ["--maxmemory=96mb", "--dir=/data"]
     deploy:
       resources:
         limits:
@@ -1104,7 +1107,7 @@ services:
     environment:
       DATABASE_URL: postgres://${DPV2_POSTGRES_USER:-dataplane}:${DPV2_POSTGRES_PASSWORD:-dataplane}@dpv2-postgres:5432/${DPV2_POSTGRES_DB:-dataplane}
       QDRANT_URL: http://dpv2-qdrant:6334
-      REDIS_URL: redis://dpv2-redis:6379
+      REDIS_URL: redis://dpv2-dragonfly:6379
       NATS_URL: nats://dpv2-nats:4222
       HTTP_PORT: "8004"
       GRPC_PORT: "50052"
@@ -1129,7 +1132,7 @@ services:
         condition: service_healthy
       dpv2-qdrant:
         condition: service_started
-      dpv2-redis:
+      dpv2-dragonfly:
         condition: service_healthy
       dpv2-nats:
         condition: service_healthy
@@ -1568,7 +1571,7 @@ volumes:
   # Data Plane v2 volumes
   dpv2-postgres-data:
     driver: local
-  dpv2-redis-data:
+  dpv2-dragonfly-data:
     driver: local
   dpv2-qdrant-data:
     driver: local

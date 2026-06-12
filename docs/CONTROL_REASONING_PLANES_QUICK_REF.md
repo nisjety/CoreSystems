@@ -183,14 +183,14 @@ Agent Reasoning:
 
 ### agent-service Dependencies:
 - **NATS** (event bus)
-- **Redis** (memory cache)
+- **Dragonfly** (memory cache)
 - **PostgreSQL** (agent persistence)
 - **Letta** (optional - agent memory)
 - **Data Plane:** rag-service, document-service, embedding-service
 - **Reasoning Plane:** rerank-service, synthesis-service
 
 ### rerank-service Dependencies:
-- **Redis** (result caching)
+- **Dragonfly** (result caching)
 - **Cohere API** (optional - commercial reranking)
 - **GPU** (optional - for local cross-encoders)
 
@@ -317,7 +317,7 @@ All services follow:
 - ✅ **API-First:** RESTful APIs with clear contracts
 - ✅ **Stateless:** No persistent storage in reasoning plane
 - ✅ **Event-Driven:** NATS events for coordination
-- ✅ **Caching:** Redis for performance optimization
+- ✅ **Caching:** Dragonfly for performance optimization
 - ✅ **Observability:** Structured logging + Prometheus metrics
 - ✅ **Containerized:** Docker ready for deployment
 - ✅ **Documented:** Complete API docs and examples

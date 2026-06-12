@@ -113,13 +113,13 @@ DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@aquatiq-postgres-local:5432/ai
 
 ---
 
-### 6. Redis URLs
+### 6. Dragonfly URLs
 
 **Pattern:** `redis://:<password>@<host>:<port>/<db_num>`
 
 **Correct:**
 ```env
-# Redis password should come from env var
+# Dragonfly password should come from env var
 REDIS_PASSWORD=redis  # or use ${REDIS_PASSWORD}
 
 # Service-specific DB numbers
@@ -203,7 +203,7 @@ NATS_TOKEN=your-nats-token
 DB_PASSWORD=secure-password-here
 DB_USER=aquatiq
 
-# Redis
+# Dragonfly
 REDIS_PASSWORD=secure-redis-password
 
 # NATS
@@ -234,7 +234,7 @@ Phase 5 is complete when:
 1. ✅ All internal service URLs use service names (no localhost)
 2. ✅ All secrets loaded from environment variables (no hardcoded)
 3. ✅ Port assignments follow standard pattern
-4. ✅ Database/Redis URLs use consistent patterns
+4. ✅ Database/Dragonfly URLs use consistent patterns
 5. ✅ `.env.example` created with all required variables
 6. ✅ docker-compose up works with fresh `.env` file
 7. ✅ No config-related errors in service startup logs

@@ -94,11 +94,11 @@
 |---|---------|------|------------|
 | 4 | convex-core | Chat, UI state, real-time sync | Self-hosted Convex |
 | 5 | product-bff | API aggregation, transformations | Node.js GraphQL/REST |
-| 6 | session-orchestrator | Session lifecycle, multi-tab state | Redis + Node.js |
+| 6 | session-orchestrator | Session lifecycle, multi-tab state | Dragonfly + Node.js |
 | 7 | feature-composer | Feature flags, A/B tests | LaunchDarkly/custom |
 | 8 | realtime-streaming-layer | WebSocket mux, SSE | Socket.IO |
 | 9 | notification-service | Multi-channel delivery | Bull + SendGrid |
-| 10 | usage-projections | Quota forecasting, dashboards | Redis + TimescaleDB |
+| 10 | usage-projections | Quota forecasting, dashboards | Dragonfly + TimescaleDB |
 
 **Principle:** "Product experience" - Real-time, reactive, UI-optimized
 
