@@ -6,6 +6,7 @@ use redis::AsyncCommands;
 
 pub mod invalidator;
 pub mod org_version;
+pub mod semantic;
 
 const EMBED_PREFIX: &str = "dpv2:embed:";
 const RETRIEVAL_PREFIX: &str = "dpv2:ret:";
@@ -18,10 +19,10 @@ pub struct CacheLayer {
 }
 
 impl CacheLayer {
-    pub async fn connect(redis_url: &str) -> anyhow::Result<Self> {
-        let client = redis::Client::open(redis_url)?;
+    pub async fn connect(cache_url: &str) -> anyhow::Result<Self> {
+        let client = redis::Client::open(cache_url)?;
         let conn = ConnectionManager::new(client).await?;
-        tracing::info!("redis cache connected");
+        tracing::info!("redis-compatible cache connected");
         Ok(Self { conn })
     }
 
@@ -72,7 +73,8 @@ impl CacheLayer {
     }
 
     /// Invalidate all retrieval-result cache entries for an org_id by deleting
-    /// keys matching `dpv2:ret:{org_id}:*`. Uses SCAN to avoid blocking Redis.
+    /// keys matching `dpv2:ret:{org_id}:*`. Uses SCAN to avoid blocking the
+    /// Redis-compatible cache backend.
     pub async fn invalidate_org_retrieval(&self, org_id: &str) -> usize {
         let pattern = format!("{RETRIEVAL_PREFIX}{org_id}:*");
         let mut conn = self.conn.clone();

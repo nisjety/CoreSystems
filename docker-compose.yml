@@ -364,6 +364,11 @@ services:
       # Empty to disable; managed LANGCACHE_URL (if set) takes precedence.
       SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://mp-dragonfly:6379}
       SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
+      # Semantic (vector) cache tier via Data Plane v2 (opt-in). When enabled the
+      # gateway calls DPv2 /v1/cache/semantic/* instead of local exact-match.
+      SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
+      DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
+      DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
     networks:
       - aquatiq-local
     healthcheck:
@@ -1115,6 +1120,10 @@ services:
       NATS_URL: nats://dpv2-nats:4222
       HTTP_PORT: "8004"
       GRPC_PORT: "50052"
+      # Semantic response cache (vector tier for the Model Plane gateway). Opt-in:
+      # SEMANTIC_CACHE_ENABLED=true serves /v1/cache/semantic/* backed by this
+      # service's embeddings + Qdrant. Off by default.
+      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-false}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}

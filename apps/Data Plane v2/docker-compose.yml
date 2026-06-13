@@ -44,9 +44,9 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    container_name: dpv2-redis
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: dpv2-dragonfly
     restart: unless-stopped
     init: true
     ports:
@@ -55,12 +55,12 @@ services:
       - dpv2-net
       - inter-plane-bus
     volumes:
-      - dpv2_redis:/data
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+      - dpv2_dragonfly:/data
+    command: ["--cache_mode=true", "--maxmemory=256mb", "--proactor_threads=1", "--dir=/data"]
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 384M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -208,10 +208,14 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
       QDRANT_URL: http://qdrant:6334
-      REDIS_URL: redis://redis:6379
+      DRAGONFLY_URL: redis://dragonfly:6379
       NATS_URL: nats://nats:4222
       HTTP_PORT: "8004"
       GRPC_PORT: "50052"
+      # Semantic response cache (vector tier for the Model Plane gateway). Opt-in:
+      # SEMANTIC_CACHE_ENABLED=true serves /v1/cache/semantic/* via this service's
+      # embeddings + Qdrant. Off by default.
+      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-false}
       # Query embedding: azure_openai (direct Azure HTTP — verified 200/3072)
       # instead of model_plane (gRPC → inference-core). inference-core embedding
       # works standalone (grpcurl OK), but the dpv2→inference-core gRPC hop
@@ -252,7 +256,7 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
-      redis:
+      dragonfly:
         condition: service_healthy
       nats:
         condition: service_healthy
@@ -592,7 +596,7 @@ networks:
 
 volumes:
   dpv2_postgres:
-  dpv2_redis:
+  dpv2_dragonfly:
   dpv2_qdrant:
   dpv2_nats:
   dpv2_minio:

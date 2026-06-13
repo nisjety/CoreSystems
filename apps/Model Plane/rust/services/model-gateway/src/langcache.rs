@@ -49,6 +49,8 @@ pub fn global() -> Option<&'static SemanticCache> {
 pub enum SemanticCache {
     /// Hosted Redis LangCache (server-side embeddings + similarity threshold).
     Managed(LangCacheClient),
+    /// Data-Plane-v2-owned semantic (vector-similarity) cache, reached over HTTP.
+    DataPlane(DataPlaneCache),
     /// Local Dragonfly exact-match KV (no embeddings, no cross-plane calls).
     Local(DragonflyCache),
 }
@@ -57,6 +59,9 @@ impl SemanticCache {
     fn from_env() -> Option<Self> {
         if let Some(client) = LangCacheClient::from_env() {
             return Some(Self::Managed(client));
+        }
+        if let Some(cache) = DataPlaneCache::from_env() {
+            return Some(Self::DataPlane(cache));
         }
         if let Some(cache) = DragonflyCache::from_env() {
             return Some(Self::Local(cache));
@@ -69,6 +74,7 @@ impl SemanticCache {
     pub async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
         match self {
             Self::Managed(c) => c.lookup(prompt, org_id, model).await,
+            Self::DataPlane(c) => c.lookup(prompt, org_id, model).await,
             Self::Local(c) => c.lookup(prompt, org_id, model).await,
         }
     }
@@ -77,6 +83,7 @@ impl SemanticCache {
     pub async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
         match self {
             Self::Managed(c) => c.store(prompt, org_id, model, response).await,
+            Self::DataPlane(c) => c.store(prompt, org_id, model, response).await,
             Self::Local(c) => c.store(prompt, org_id, model, response).await,
         }
     }
@@ -169,6 +176,100 @@ impl DragonflyCache {
         let result: redis::RedisResult<()> = conn.set_ex(&key, response, self.ttl_secs).await;
         if let Err(error) = result {
             tracing::debug!(%error, "semantic cache set failed");
+        }
+    }
+}
+
+/// Data-Plane-v2-owned semantic (vector-similarity) cache. The gateway cannot
+/// host a vector store (see `retrieval.rs`), so the semantic tier lives in Data
+/// Plane v2 (embeddings + Qdrant) and the gateway calls it over HTTP. Enabled by
+/// `SEMANTIC_CACHE_DATAPLANE_ENABLED=true`; reuses the Data Plane retrieval HTTP
+/// base (`DATAPLANE_RETRIEVAL_HTTP_URL`) + `DATAPLANE_INTERNAL_KEY` the gateway
+/// already uses for graph grounding. Best-effort: any error degrades to a miss.
+pub struct DataPlaneCache {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: Option<String>,
+}
+
+impl DataPlaneCache {
+    /// Build from the environment. Returns `None` unless
+    /// `SEMANTIC_CACHE_DATAPLANE_ENABLED` is truthy, so the slower vector tier is
+    /// strictly opt-in (the gateway otherwise uses the Dragonfly exact-match).
+    pub fn from_env() -> Option<Self> {
+        if !env_flag("SEMANTIC_CACHE_DATAPLANE_ENABLED") {
+            return None;
+        }
+        let base_url = std::env::var("DATAPLANE_RETRIEVAL_HTTP_URL")
+            .or_else(|_| std::env::var("DATA_PLANE_RETRIEVAL_URL"))
+            .unwrap_or_else(|_| "http://dpv2-retrieval-engine:8004".to_owned())
+            .trim_end_matches('/')
+            .to_owned();
+        let http = reqwest::Client::builder()
+            .timeout(DEFAULT_TIMEOUT)
+            .build()
+            .ok()?;
+        tracing::info!("semantic cache enabled (Data Plane v2 vector tier)");
+        Some(Self {
+            http,
+            base_url,
+            api_key: non_empty_env("DATAPLANE_INTERNAL_KEY"),
+        })
+    }
+
+    async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+        let url = format!("{}/v1/cache/semantic/search", self.base_url);
+        let payload = serde_json::json!({ "org_id": org_id, "model": model, "prompt": prompt });
+        let bytes = serde_json::to_vec(&payload).ok()?;
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .body(bytes);
+        if let Some(key) = &self.api_key {
+            request = request.header("x-api-key", key);
+        }
+        let resp = request.send().await.ok()?;
+        if !resp.status().is_success() {
+            tracing::debug!(status = %resp.status(), "semantic cache (data plane) search non-success");
+            return None;
+        }
+        let raw = resp.bytes().await.ok()?;
+        let body: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        if body.get("hit").and_then(serde_json::Value::as_bool) != Some(true) {
+            return None;
+        }
+        body.get("response")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
+    async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+        if response.is_empty() {
+            return;
+        }
+        let url = format!("{}/v1/cache/semantic/store", self.base_url);
+        let payload = serde_json::json!({
+            "org_id": org_id,
+            "model": model,
+            "prompt": prompt,
+            "response": response,
+        });
+        let Ok(bytes) = serde_json::to_vec(&payload) else {
+            return;
+        };
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(bytes);
+        if let Some(key) = &self.api_key {
+            request = request.header("x-api-key", key);
+        }
+        if let Err(error) = request.send().await {
+            tracing::debug!(%error, "semantic cache (data plane) store failed");
         }
     }
 }
@@ -308,6 +409,19 @@ impl LangCacheClient {
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// True when `key` is set to a truthy value (`1`/`true`/`yes`/`on`, any case).
+fn env_flag(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Parse a search response that may be a bare JSON array of entries or a

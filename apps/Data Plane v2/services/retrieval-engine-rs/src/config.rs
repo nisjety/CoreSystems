@@ -61,6 +61,17 @@ pub struct Config {
     #[serde(default = "default_collection")]
     pub qdrant_collection: String,
 
+    // Semantic *response* cache (Data-Plane-v2-owned vector tier for the
+    // model-gateway SemanticCache seam). Opt-in via SEMANTIC_CACHE_ENABLED=true.
+    #[serde(default)]
+    pub semantic_cache_enabled: bool,
+    #[serde(default = "default_semantic_cache_collection")]
+    pub semantic_cache_collection: String,
+    #[serde(default = "default_semantic_cache_min_score")]
+    pub semantic_cache_min_score: f32,
+    #[serde(default = "default_semantic_cache_ttl_secs")]
+    pub semantic_cache_ttl_secs: u64,
+
     #[serde(default = "default_sparse_search_backend")]
     pub sparse_search_backend: String,
     #[serde(default = "default_quickwit_url")]
@@ -95,6 +106,9 @@ fn default_grpc_port() -> u16 {
     50052
 }
 fn default_redis_url() -> String {
+    if let Ok(url) = std::env::var("DRAGONFLY_URL").or_else(|_| std::env::var("CACHE_URL")) {
+        return url;
+    }
     "redis://localhost:6379".into()
 }
 fn default_embedding_deployment() -> String {
@@ -147,6 +161,15 @@ fn default_w_wiki() -> f32 {
 }
 fn default_collection() -> String {
     "dataplane_knowledge".into()
+}
+fn default_semantic_cache_collection() -> String {
+    "semantic_response_cache".into()
+}
+fn default_semantic_cache_min_score() -> f32 {
+    0.95
+}
+fn default_semantic_cache_ttl_secs() -> u64 {
+    86_400
 }
 fn default_sparse_search_backend() -> String {
     "postgres".into()

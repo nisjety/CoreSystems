@@ -110,20 +110,28 @@ runs purely on Dragonfly either. Keep the substrate split explicit.
 
 ## 4. Status — implemented 2026-06-13
 
-The **local** paths are now wired (the chosen pragmatic increment, not the full
-semantic tier):
+Both the local exact-match tier **and** the Data-Plane-owned semantic tier are
+now wired:
 
-- **LangCache → local Dragonfly exact-match.** The model-gateway `SemanticCache`
-  seam (`apps/Model Plane/rust/services/model-gateway/src/langcache.rs`) now
-  dispatches **managed LangCache → local Dragonfly → disabled**. The local
-  backend keys an *exact* `(org_id, model, prompt)` match in Dragonfly (KV, TTL
-  via `SEMANTIC_CACHE_TTL_SECS`, default 1h), enabled by `SEMANTIC_CACHE_URL`
-  (wired to `dragonfly`/`mp-dragonfly` in both Model Plane composes, ON by
-  default, overridable to empty). No embeddings and no cross-plane calls, so it
-  honors the gateway's "no second vector store" invariant. `cargo check` +
-  `cargo test --lib langcache` green (7/7).
-  - **Deferred:** the *semantic* (vector-similarity) cache tier — owned by Data
-    Plane v2 (embed + ANN over a cache collection), layered behind the same seam.
+- **Gateway `SemanticCache` seam**
+  (`apps/Model Plane/rust/services/model-gateway/src/langcache.rs`) dispatches
+  **managed LangCache → Data Plane semantic → local Dragonfly exact-match →
+  disabled**. The exact-match backend keys `(org_id, model, prompt)` in Dragonfly
+  (KV, TTL via `SEMANTIC_CACHE_TTL_SECS`), enabled by `SEMANTIC_CACHE_URL` (ON by
+  default). The semantic backend (`SEMANTIC_CACHE_DATAPLANE_ENABLED=true`, opt-in)
+  calls Data Plane v2 over HTTP (reusing `DATAPLANE_RETRIEVAL_HTTP_URL` +
+  `DATAPLANE_INTERNAL_KEY`) — so the gateway still hosts no vector store.
+- **Semantic tier owned by Data Plane v2.**
+  `retrieval-engine-rs/src/cache/semantic.rs` adds `search`/`store`: embed the
+  prompt via the engine's `EmbeddingClient`, ANN over a dedicated
+  `semantic_response_cache` Qdrant collection filtered by org + model +
+  embedding-namespace, gated by `SEMANTIC_CACHE_MIN_SCORE` (cosine, default 0.95)
+  with an in-process TTL (`SEMANTIC_CACHE_TTL_SECS`, default 1 day); the response
+  rides in the point payload, idempotent upsert via a deterministic point id.
+  Exposed as authed `POST /v1/cache/semantic/{search,store}`; opt-in via
+  `SEMANTIC_CACHE_ENABLED=true`. Both crates `cargo check` + `--lib` tests green.
+  - **Deferred (pruning):** Qdrant has no native point TTL, so stale points
+    accumulate until overwritten; a periodic prune job is a follow-up.
 - **Agent Memory → local agent-memory-server + Redis Stack.** The Model Plane
   deploy compose now runs `agent-memory-server` on a dedicated local
   `redis-stack` (RediSearch vector index); `letta-bridge` points

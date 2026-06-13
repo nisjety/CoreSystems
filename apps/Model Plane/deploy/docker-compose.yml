@@ -219,6 +219,14 @@ services:
       # Plane v2 and layered on separately.
       SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://dragonfly:6379}
       SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
+      # Semantic (vector) cache tier — owned by Data Plane v2 (embeddings +
+      # Qdrant). Opt-in: when SEMANTIC_CACHE_DATAPLANE_ENABLED=true the gateway
+      # calls DPv2 /v1/cache/semantic/* (HTTP) INSTEAD of local Dragonfly
+      # exact-match. Off by default → exact-match stays the local tier.
+      # DATAPLANE_INTERNAL_KEY (above) authorizes the call; the HTTP base reuses
+      # the same retrieval-engine the graph-grounding path already targets.
+      SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
+      DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
     extra_hosts:
       # Required so QUARRY_EDGE_URL=host.docker.internal resolves on
       # Linux. No-op on Mac (Docker Desktop maps it automatically).
@@ -510,14 +518,25 @@ services:
       PORT: "8000"
       AUTH_MODE: ${AGENT_MEMORY_AUTH_MODE:-disabled}
       DISABLE_AUTH: ${AGENT_MEMORY_DISABLE_AUTH:-true}
-      # LiteLLM model + provider config. OpenAI by default; for Azure/others set
-      # litellm-style model names (e.g. azure/<deployment>) plus the matching
-      # provider env (AZURE_API_KEY / AZURE_API_BASE / AZURE_API_VERSION).
+      # LiteLLM model + provider config, wired to the Model Plane's existing
+      # provider creds (sourced from apps/Model Plane/deploy/.env). Pick one:
+      #   • OpenAI: set OPENAI_API_KEY — models default to gpt-4o-mini /
+      #     text-embedding-3-small below.
+      #   • Azure OpenAI (what the rest of Model Plane uses): set
+      #     AGENT_MEMORY_GENERATION_MODEL=azure/<chat-deployment> and
+      #     AGENT_MEMORY_EMBEDDING_MODEL=azure/<embedding-deployment>; the
+      #     AZURE_* creds below are mapped from the Model Plane AZURE_OPENAI_* vars.
       GENERATION_MODEL: ${AGENT_MEMORY_GENERATION_MODEL:-gpt-4o-mini}
       FAST_MODEL: ${AGENT_MEMORY_FAST_MODEL:-gpt-4o-mini}
       EMBEDDING_MODEL: ${AGENT_MEMORY_EMBEDDING_MODEL:-text-embedding-3-small}
+      # OpenAI path
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      # Azure path — LiteLLM reads AZURE_API_*; map from the Model Plane's
+      # AZURE_OPENAI_* (same vars inference-core/model-gateway already consume).
+      AZURE_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_API_BASE: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-08-01-preview}
       ENABLE_TOPIC_EXTRACTION: ${AGENT_MEMORY_TOPIC_EXTRACTION:-true}
       LOG_LEVEL: ${AGENT_MEMORY_LOG_LEVEL:-INFO}
     ports:

@@ -301,6 +301,9 @@ fn router_inner(
         .route("/v1/knowledge/wiki", post(retrieve_wiki))
         .route("/v1/knowledge/sources", post(retrieve_sources))
         .route("/v1/knowledge/freshness", post(retrieve_freshness))
+        // Semantic response cache — Model Plane gateway SemanticCache seam.
+        .route("/v1/cache/semantic/search", post(semantic_cache_search))
+        .route("/v1/cache/semantic/store", post(semantic_cache_store))
         // §16.5.1 — per-org rate limit applied AFTER auth_middleware runs,
         // so the limiter key resolves against the authenticated org_id.
         // `route_layer` order: bottom layer runs innermost, so we put rate
@@ -370,6 +373,64 @@ async fn get_trace(
         )
             .into_response()),
     }
+}
+
+/// Semantic response cache — the Model Plane gateway calls these behind its
+/// `SemanticCache` seam (the gateway cannot host a vector store itself). Both
+/// are best-effort from the caller's side: a miss/error just reruns inference.
+#[derive(serde::Deserialize)]
+struct SemanticCacheSearchRequest {
+    org_id: String,
+    model: String,
+    prompt: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SemanticCacheStoreRequest {
+    org_id: String,
+    model: String,
+    prompt: String,
+    response: String,
+}
+
+async fn semantic_cache_search(
+    State(pipeline): State<AppState>,
+    Json(req): Json<SemanticCacheSearchRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let hit = crate::cache::semantic::search(
+        &pipeline.qdrant,
+        &pipeline.embedder,
+        &pipeline.config,
+        &req.org_id,
+        &req.model,
+        &req.prompt,
+    )
+    .await?;
+    Ok(match hit {
+        Some(h) => Json(serde_json::json!({
+            "hit": true,
+            "response": h.response,
+            "score": h.score,
+        })),
+        None => Json(serde_json::json!({ "hit": false })),
+    })
+}
+
+async fn semantic_cache_store(
+    State(pipeline): State<AppState>,
+    Json(req): Json<SemanticCacheStoreRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    crate::cache::semantic::store(
+        &pipeline.qdrant,
+        &pipeline.embedder,
+        &pipeline.config,
+        &req.org_id,
+        &req.model,
+        &req.prompt,
+        &req.response,
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "stored": true })))
 }
 
 // D5: Graph expansion retrieval
@@ -1039,12 +1100,12 @@ async fn readyz(State(pipeline): State<AppState>) -> impl IntoResponse {
 
     let qdrant_ok = pipeline.qdrant.health_check().await.is_ok();
 
-    let redis_ok = match &pipeline.cache {
+    let cache_ok = match &pipeline.cache {
         Some(cache) => cache.health_check().await,
         None => true,
     };
 
-    let all_ok = pg_ok && qdrant_ok && redis_ok;
+    let all_ok = pg_ok && qdrant_ok && cache_ok;
     let status = if all_ok {
         StatusCode::OK
     } else {
@@ -1057,7 +1118,7 @@ async fn readyz(State(pipeline): State<AppState>) -> impl IntoResponse {
             "status": if all_ok { "ready" } else { "not_ready" },
             "service": "retrieval-engine-rs",
             "sparse_backend": pipeline.sparse_backend.name(),
-            "checks": { "postgres": pg_ok, "qdrant": qdrant_ok, "redis": redis_ok }
+            "checks": { "postgres": pg_ok, "qdrant": qdrant_ok, "cache": cache_ok }
         })),
     )
 }
