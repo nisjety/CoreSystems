@@ -364,8 +364,9 @@ services:
       # Empty to disable; managed LANGCACHE_URL (if set) takes precedence.
       SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://mp-dragonfly:6379}
       SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
-      # Semantic (vector) cache tier via Data Plane v2 (opt-in). When enabled the
-      # gateway calls DPv2 /v1/cache/semantic/* instead of local exact-match.
+      # Semantic (vector) cache tier via Data Plane v2 (opt-in). With both this
+      # and SEMANTIC_CACHE_URL set, the gateway layers them: exact-match first,
+      # DPv2 semantic fallback (which warms the exact tier).
       SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
       DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
       DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}

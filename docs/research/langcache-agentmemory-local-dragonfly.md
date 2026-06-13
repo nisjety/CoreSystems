@@ -114,13 +114,15 @@ Both the local exact-match tier **and** the Data-Plane-owned semantic tier are
 now wired:
 
 - **Gateway `SemanticCache` seam**
-  (`apps/Model Plane/rust/services/model-gateway/src/langcache.rs`) dispatches
-  **managed LangCache → Data Plane semantic → local Dragonfly exact-match →
-  disabled**. The exact-match backend keys `(org_id, model, prompt)` in Dragonfly
-  (KV, TTL via `SEMANTIC_CACHE_TTL_SECS`), enabled by `SEMANTIC_CACHE_URL` (ON by
-  default). The semantic backend (`SEMANTIC_CACHE_DATAPLANE_ENABLED=true`, opt-in)
-  calls Data Plane v2 over HTTP (reusing `DATAPLANE_RETRIEVAL_HTTP_URL` +
-  `DATAPLANE_INTERNAL_KEY`) — so the gateway still hosts no vector store.
+  (`apps/Model Plane/rust/services/model-gateway/src/langcache.rs`). Hosted
+  LangCache wins outright when configured; otherwise the gateway composes the two
+  local tiers. With both `SEMANTIC_CACHE_URL` (Dragonfly exact-match, ON by
+  default) and `SEMANTIC_CACHE_DATAPLANE_ENABLED=true` set, it **layers** them: a
+  fast Dragonfly exact `(org_id, model, prompt)` KV hit first, then a Data Plane
+  v2 semantic fallback over HTTP (`DATAPLANE_RETRIEVAL_HTTP_URL` +
+  `DATAPLANE_INTERNAL_KEY`); a semantic hit is **written through** to the exact
+  tier so a repeat of that exact prompt stays local, and writes populate both
+  tiers. Either tier alone is used solo. The gateway still hosts no vector store.
 - **Semantic tier owned by Data Plane v2.**
   `retrieval-engine-rs/src/cache/semantic.rs` adds `search`/`store`: embed the
   prompt via the engine's `EmbeddingClient`, ANN over a dedicated
@@ -130,8 +132,10 @@ now wired:
   rides in the point payload, idempotent upsert via a deterministic point id.
   Exposed as authed `POST /v1/cache/semantic/{search,store}`; opt-in via
   `SEMANTIC_CACHE_ENABLED=true`. Both crates `cargo check` + `--lib` tests green.
-  - **Deferred (pruning):** Qdrant has no native point TTL, so stale points
-    accumulate until overwritten; a periodic prune job is a follow-up.
+  - **Pruning:** Qdrant has no native point TTL, so authed
+    `POST /v1/cache/semantic/prune` deletes points older than `older_than_secs`
+    (default `SEMANTIC_CACHE_TTL_SECS`) via a `created_at` range filter — point a
+    cron at it to keep the collection bounded.
 - **Agent Memory → local agent-memory-server + Redis Stack.** The Model Plane
   deploy compose now runs `agent-memory-server` on a dedicated local
   `redis-stack` (RediSearch vector index); `letta-bridge` points

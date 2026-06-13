@@ -18,9 +18,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use qdrant_client::qdrant::{
-    value::Kind as QdrantKind, Condition, CreateCollectionBuilder, Distance, FieldCondition,
-    Filter, Match, PointStruct, SearchPointsBuilder, UpsertPointsBuilder, Value as QdrantValue,
-    VectorParamsBuilder,
+    value::Kind as QdrantKind, Condition, CountPointsBuilder, CreateCollectionBuilder,
+    DeletePointsBuilder, Distance, FieldCondition, Filter, Match, PointStruct, Range,
+    SearchPointsBuilder, UpsertPointsBuilder, Value as QdrantValue, VectorParamsBuilder,
 };
 use qdrant_client::Qdrant;
 
@@ -218,6 +218,53 @@ pub async fn store(
         .await
         .context("semantic-cache upsert")?;
     Ok(())
+}
+
+/// Delete cache points whose `created_at` is older than `older_than_secs`.
+/// Returns how many were removed (0 when the collection does not exist). Qdrant
+/// has no native per-point TTL, so a periodic caller (a cron hitting the admin
+/// endpoint) keeps the collection from growing unbounded.
+pub async fn prune(qdrant: &Qdrant, cfg: &Config, older_than_secs: i64) -> anyhow::Result<u64> {
+    let collection = &cfg.semantic_cache_collection;
+    if !qdrant.collection_exists(collection).await? {
+        return Ok(0);
+    }
+    let cutoff = now_secs().saturating_sub(older_than_secs.max(0));
+    let filter = Filter {
+        must: vec![Condition::from(FieldCondition {
+            key: "created_at".to_string(),
+            range: Some(Range {
+                lt: Some(cutoff as f64),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+    // `delete_points` reports no count, so count the matches against the same
+    // filter first (exact), then delete.
+    let pruned = qdrant
+        .count(
+            CountPointsBuilder::new(collection)
+                .filter(filter.clone())
+                .exact(true),
+        )
+        .await
+        .context("count stale semantic-cache points")?
+        .result
+        .map_or(0, |r| r.count);
+    qdrant
+        .delete_points(
+            DeletePointsBuilder::new(collection)
+                .points(filter)
+                .wait(true),
+        )
+        .await
+        .context("prune stale semantic-cache points")?;
+    if pruned > 0 {
+        tracing::info!(collection, pruned, cutoff, "semantic-cache pruned");
+    }
+    Ok(pruned)
 }
 
 #[cfg(test)]

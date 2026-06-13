@@ -220,11 +220,12 @@ services:
       SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://dragonfly:6379}
       SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
       # Semantic (vector) cache tier — owned by Data Plane v2 (embeddings +
-      # Qdrant). Opt-in: when SEMANTIC_CACHE_DATAPLANE_ENABLED=true the gateway
-      # calls DPv2 /v1/cache/semantic/* (HTTP) INSTEAD of local Dragonfly
-      # exact-match. Off by default → exact-match stays the local tier.
-      # DATAPLANE_INTERNAL_KEY (above) authorizes the call; the HTTP base reuses
-      # the same retrieval-engine the graph-grounding path already targets.
+      # Qdrant). With this AND SEMANTIC_CACHE_URL set (default), the gateway
+      # LAYERS them: a fast Dragonfly exact-match hit first, then a DPv2
+      # /v1/cache/semantic/* (HTTP) fallback that also warms the exact tier.
+      # Off by default → exact-match only. DATAPLANE_INTERNAL_KEY (above)
+      # authorizes the call; the HTTP base reuses the same retrieval-engine the
+      # graph-grounding path already targets.
       SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
       DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
     extra_hosts:

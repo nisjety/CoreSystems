@@ -53,20 +53,29 @@ pub enum SemanticCache {
     DataPlane(DataPlaneCache),
     /// Local Dragonfly exact-match KV (no embeddings, no cross-plane calls).
     Local(DragonflyCache),
+    /// Both local tiers layered: a fast Dragonfly exact-match in front of the
+    /// Data Plane v2 semantic fallback. Reads hit exact first, then semantic
+    /// (warming exact on the way back); writes populate both.
+    Layered {
+        exact: DragonflyCache,
+        semantic: DataPlaneCache,
+    },
 }
 
 impl SemanticCache {
     fn from_env() -> Option<Self> {
+        // Hosted Redis LangCache wins outright when configured.
         if let Some(client) = LangCacheClient::from_env() {
             return Some(Self::Managed(client));
         }
-        if let Some(cache) = DataPlaneCache::from_env() {
-            return Some(Self::DataPlane(cache));
+        // Otherwise compose the local tiers: a fast Dragonfly exact-match in
+        // front of the Data Plane v2 semantic fallback. Either alone is used solo.
+        match (DragonflyCache::from_env(), DataPlaneCache::from_env()) {
+            (Some(exact), Some(semantic)) => Some(Self::Layered { exact, semantic }),
+            (Some(exact), None) => Some(Self::Local(exact)),
+            (None, Some(semantic)) => Some(Self::DataPlane(semantic)),
+            (None, None) => None,
         }
-        if let Some(cache) = DragonflyCache::from_env() {
-            return Some(Self::Local(cache));
-        }
-        None
     }
 
     /// Look up a cached response for `prompt`, scoped to org + model. A miss or
@@ -76,6 +85,17 @@ impl SemanticCache {
             Self::Managed(c) => c.lookup(prompt, org_id, model).await,
             Self::DataPlane(c) => c.lookup(prompt, org_id, model).await,
             Self::Local(c) => c.lookup(prompt, org_id, model).await,
+            Self::Layered { exact, semantic } => {
+                // Fast path: a local Dragonfly exact-match hit.
+                if let Some(hit) = exact.lookup(prompt, org_id, model).await {
+                    return Some(hit);
+                }
+                // Fallback: a semantic (vector) hit from Data Plane v2. Warm the
+                // exact tier so a repeat of this exact prompt stays a local hit.
+                let hit = semantic.lookup(prompt, org_id, model).await?;
+                exact.store(prompt, org_id, model, &hit).await;
+                Some(hit)
+            }
         }
     }
 
@@ -85,6 +105,11 @@ impl SemanticCache {
             Self::Managed(c) => c.store(prompt, org_id, model, response).await,
             Self::DataPlane(c) => c.store(prompt, org_id, model, response).await,
             Self::Local(c) => c.store(prompt, org_id, model, response).await,
+            Self::Layered { exact, semantic } => {
+                // Populate both tiers so future exact AND near-duplicate prompts hit.
+                exact.store(prompt, org_id, model, response).await;
+                semantic.store(prompt, org_id, model, response).await;
+            }
         }
     }
 }

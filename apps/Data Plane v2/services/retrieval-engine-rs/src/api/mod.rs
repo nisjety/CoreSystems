@@ -304,6 +304,7 @@ fn router_inner(
         // Semantic response cache — Model Plane gateway SemanticCache seam.
         .route("/v1/cache/semantic/search", post(semantic_cache_search))
         .route("/v1/cache/semantic/store", post(semantic_cache_store))
+        .route("/v1/cache/semantic/prune", post(semantic_cache_prune))
         // §16.5.1 — per-org rate limit applied AFTER auth_middleware runs,
         // so the limiter key resolves against the authenticated org_id.
         // `route_layer` order: bottom layer runs innermost, so we put rate
@@ -431,6 +432,30 @@ async fn semantic_cache_store(
     )
     .await?;
     Ok(Json(serde_json::json!({ "stored": true })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SemanticCachePruneRequest {
+    /// Delete entries older than this many seconds. Defaults to the configured
+    /// `SEMANTIC_CACHE_TTL_SECS`. A cron can POST this on a schedule.
+    #[serde(default)]
+    older_than_secs: Option<i64>,
+}
+
+async fn semantic_cache_prune(
+    State(pipeline): State<AppState>,
+    body: Option<Json<SemanticCachePruneRequest>>,
+) -> Result<impl IntoResponse, AppError> {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let older_than = req
+        .older_than_secs
+        .unwrap_or(pipeline.config.semantic_cache_ttl_secs as i64)
+        .max(0);
+    let pruned =
+        crate::cache::semantic::prune(&pipeline.qdrant, &pipeline.config, older_than).await?;
+    Ok(Json(
+        serde_json::json!({ "pruned": pruned, "older_than_secs": older_than }),
+    ))
 }
 
 // D5: Graph expansion retrieval
