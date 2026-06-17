@@ -150,7 +150,7 @@ POST_BUILD_HOOKS=(
   ""
   "ensure_finspo_database"
   ""
-  ""
+  "seed_dev_account"
   "wait_for_convex_gateway_ready"
   ""
 )
@@ -684,6 +684,66 @@ SELECT 'CREATE DATABASE finspo
                  TEMPLATE = template0'
  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'finspo')\gexec
 SQL
+}
+
+# seed_dev_account — idempotently create a real Better Auth login (default
+# local@velion.dev) so password login works even with dev-auth-bypass off.
+#
+# Uses Better Auth's own POST /api/auth/sign-up/email (so the password is
+# hashed in the correct, version-safe format) against the running auth-core,
+# then promotes the user to superadmin and marks the email verified via SQL so
+# the login is immediately usable. Tolerant by design — it never fails the
+# build (warns + continues). Overridable:
+#   SEED_DEV_ACCOUNT=0       skip seeding entirely
+#   SEED_DEV_EMAIL / SEED_DEV_PASSWORD / SEED_DEV_NAME
+#   SEED_AUTH_URL            (default http://localhost:3011)
+#   SEED_PG_CONTAINER        (default controlplane-postgres)
+seed_dev_account() {
+  if [[ "${SEED_DEV_ACCOUNT:-1}" == "0" ]]; then
+    log "Dev account seed disabled (SEED_DEV_ACCOUNT=0)"
+    return 0
+  fi
+
+  local email="${SEED_DEV_EMAIL:-local@velion.dev}"
+  local password="${SEED_DEV_PASSWORD:-VelionLocal!2026}"
+  local name="${SEED_DEV_NAME:-Velion Local}"
+  local auth_url="${SEED_AUTH_URL:-http://localhost:3011}"
+  local pg="${SEED_PG_CONTAINER:-controlplane-postgres}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[seed] dry-run: would seed %s via %s\n' "$email" "$auth_url"
+    return 0
+  fi
+
+  log "Seeding dev login $email (idempotent)"
+
+  # Wait until auth-core answers at all (any HTTP status = up). Max ~60s.
+  local attempts=0
+  while [[ "$(curl -s -o /dev/null -w '%{http_code}' "$auth_url/api/auth/ok" 2>/dev/null || echo 000)" == "000" ]]; do
+    attempts=$((attempts + 1))
+    if (( attempts >= 30 )); then
+      printf '[seed] WARN: auth-core unreachable at %s after %d tries; skipping dev seed\n' "$auth_url" "$attempts" >&2
+      return 0
+    fi
+    sleep 2
+  done
+
+  # Create the account. A non-2xx almost always means it already exists —
+  # idempotent, so log and continue either way.
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$auth_url/api/auth/sign-up/email" \
+    -H 'content-type: application/json' \
+    -d "{\"email\":\"$email\",\"password\":\"$password\",\"name\":\"$name\"}" 2>/dev/null || echo 000)"
+  case "$code" in
+    2*) printf '[seed] created %s\n' "$email" ;;
+    *)  printf '[seed] signup HTTP %s for %s (likely already exists); continuing\n' "$code" "$email" ;;
+  esac
+
+  # Promote to superadmin + mark verified so the login is usable immediately.
+  if ! docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U aquatiq -d auth_service -c \
+      "UPDATE \"user\" SET role='superadmin', email_verified=true WHERE email='$email';" >/dev/null 2>&1; then
+    printf '[seed] WARN: could not promote %s to superadmin (continuing)\n' "$email" >&2
+  fi
 }
 
 # prune_all — tear down every plane's compose project, prune any
