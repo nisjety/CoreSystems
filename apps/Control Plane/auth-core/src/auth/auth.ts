@@ -14,6 +14,7 @@ import {
 } from 'better-auth/plugins';
 import { apiKey } from '@better-auth/api-key';
 import { passkey } from '@better-auth/passkey';
+import { ac, roles } from './permissions';
 import { sso } from '@better-auth/sso';
 import { db } from '../db';
 import * as schema from '../db/schema';
@@ -1000,6 +1001,10 @@ export const auth: any = betterAuth({
     ...(process.env.ADMIN_ENABLED === 'true'
       ? [
           admin({
+            // Access-control roles — Better Auth >= 1.6 requires every
+            // `adminRoles` entry (incl. `superadmin`) to be a defined role.
+            ac,
+            roles,
             adminUserIds: process.env.ADMIN_USER_IDS
               ? process.env.ADMIN_USER_IDS.split(',').map((id) => id.trim())
               : [],

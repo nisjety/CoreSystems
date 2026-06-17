@@ -1,4 +1,7 @@
-FROM rust:1.85-bookworm AS build
+# rust:1 = latest stable 1.x (matches the other planes' base + satisfies deps
+# like icu_*/idna_adapter that now require rustc >= 1.86; the old 1.85 pin
+# broke `cargo build --release` here with "rustc 1.85.1 is not supported").
+FROM rust:1-bookworm AS build
 
 WORKDIR /src
 COPY Cargo.toml ./

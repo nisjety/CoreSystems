@@ -45,7 +45,26 @@ function slaDeadlineMs(event: ZammadTicketEvent): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-// ─── Consumer bootstrap ───────────────────────────────────────────────────────
+// ─── Stream + consumer bootstrap ───────────────────────────────────────────────
+
+/**
+ * Creates the VELION_SUPPORT JetStream stream if it doesn't exist. The durable
+ * consumer binds to it (filter `velion.support.>`), so the stream must exist
+ * first — otherwise `consumers.add` fails with "stream not found" (404), which
+ * crash-loops the worker. Idempotent — safe to call on every startup.
+ */
+async function ensureStream(jsm: JetStreamManager): Promise<void> {
+  try {
+    await jsm.streams.info(STREAM);
+    // Stream already exists — nothing to do.
+  } catch {
+    await jsm.streams.add({
+      name: STREAM,
+      subjects: ['velion.support.>'],
+    });
+    console.log(`[nats-bridge] Created JetStream stream "${STREAM}".`);
+  }
+}
 
 /**
  * Creates the durable pull consumer on VELION_SUPPORT if it doesn't exist.
@@ -120,6 +139,7 @@ export async function startNatsBridge(
   const jsm: JetStreamManager = await nc.jetstreamManager();
   const js: JetStreamClient = nc.jetstream();
 
+  await ensureStream(jsm);
   await ensureConsumer(jsm);
 
   const consumer = await js.consumers.get(STREAM, CONSUMER);
