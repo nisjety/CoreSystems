@@ -103,11 +103,11 @@ func Load() (*Config, error) {
 			MinConnections: getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
 		},
 		Redis: RedisConfig{
-			Host:     getEnv("REDIS_HOST", "localhost"),
-			Port:     getEnv("REDIS_PORT", "6379"),
-			Password: getEnv("REDIS_PASSWORD", ""),
-			DB:       getEnvAsInt("REDIS_DB", 0),
-			Enabled:  getEnvAsBool("REDIS_ENABLED", false),
+			Host:     getEnv("DRAGONFLY_HOST", getEnv("CACHE_HOST", getEnv("REDIS_HOST", "localhost"))),
+			Port:     getEnv("DRAGONFLY_PORT", getEnv("CACHE_PORT", getEnv("REDIS_PORT", "6379"))),
+			Password: getEnv("DRAGONFLY_PASSWORD", getEnv("CACHE_PASSWORD", getEnv("REDIS_PASSWORD", ""))),
+			DB:       getEnvAsInt("DRAGONFLY_DB", getEnvAsInt("CACHE_DB", getEnvAsInt("REDIS_DB", 0))),
+			Enabled:  getEnvAsBool("DRAGONFLY_ENABLED", getEnvAsBool("CACHE_ENABLED", getEnvAsBool("REDIS_ENABLED", false))),
 		},
 		NATS: NATSConfig{
 			URL:         getEnv("NATS_URL", "nats://localhost:4222"),

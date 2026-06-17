@@ -73,7 +73,7 @@ COPY --from=builder /build/target/release/retrieval-engine /usr/local/bin/retrie
 
 EXPOSE 8004 50052
 
-# Health check is intentionally HTTP-only; readyz checks Postgres + Qdrant + Redis.
+# Health check is intentionally HTTP-only; readyz checks Postgres + Qdrant + cache.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=5 \
     CMD curl -sf http://127.0.0.1:8004/readyz || exit 1
 

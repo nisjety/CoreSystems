@@ -3,16 +3,25 @@ import { z } from 'zod';
 import { auth } from './auth';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import {
   publishOrganizationCreated,
   publishOrganizationMemberAdded,
 } from './organization-hooks';
 import { redisSecondaryStorage } from '../db/redis';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 
 const _BEARER_CACHE_TTL = 90; // seconds
 function _bearerCacheKey(token: string): string {
   return `bearer:val:${createHash('sha256').update(token).digest('hex')}`;
+}
+
+function hashBearerToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function generateBearerToken(): string {
+  return `velion_bt_${randomBytes(32).toString('base64url')}`;
 }
 
 // Context helpers and types
@@ -38,6 +47,140 @@ function forwardSetCookie(
   if (!ctx?.setHeader || !sourceHeaders) return;
   const setCookie = sourceHeaders.get('set-cookie');
   if (setCookie) ctx.setHeader('set-cookie', setCookie);
+}
+
+type SessionUser = {
+  id: string;
+  email?: string;
+  name?: string | null;
+  role?: string | string[] | null;
+};
+
+type AuthSession = {
+  user: SessionUser;
+  session?: unknown;
+};
+
+type AdminAuthorization = {
+  headers: Headers;
+  internal: boolean;
+  session?: AuthSession;
+};
+
+function configuredInternalSecret(): string | undefined {
+  return (
+    process.env.INTERNAL_SERVICE_SECRET ||
+    process.env.INTERNAL_API_KEY ||
+    ''
+  ).trim();
+}
+
+function hasInternalServiceSecret(headers: Headers | undefined): boolean {
+  const expectedSecret = configuredInternalSecret();
+  const providedSecret = headers?.get('x-internal-service-secret')?.trim();
+  return Boolean(
+    expectedSecret && providedSecret && providedSecret === expectedSecret,
+  );
+}
+
+function adminRoleNames(): Set<string> {
+  const roles = (process.env.ADMIN_ROLES || 'admin,superadmin')
+    .split(',')
+    .map((role) => role.trim())
+    .filter(Boolean);
+  return new Set(roles.length > 0 ? roles : ['admin']);
+}
+
+function userRoleSet(role: unknown): Set<string> {
+  if (Array.isArray(role)) {
+    return new Set(role.map((value) => String(value).trim()).filter(Boolean));
+  }
+  if (typeof role === 'string') {
+    return new Set(
+      role
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+  }
+  return new Set();
+}
+
+function isAdminSession(session: AuthSession | null | undefined): boolean {
+  if (!session?.user) return false;
+  const adminRoles = adminRoleNames();
+  for (const role of userRoleSet(session.user.role)) {
+    if (adminRoles.has(role)) return true;
+  }
+  const adminUserIds = (process.env.ADMIN_USER_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+  return adminUserIds.includes(session.user.id);
+}
+
+async function getAuthenticatedSession(
+  headers: Headers | undefined,
+): Promise<AuthSession | null> {
+  return (await auth.api.getSession({
+    headers: headers ?? new Headers(),
+  })) as AuthSession | null;
+}
+
+async function authorizeAdminContext(
+  context: RpcContext | undefined,
+  options: { allowInternal?: boolean } = {},
+): Promise<AdminAuthorization> {
+  const headers = headersFromCtx(context);
+  const allowInternal = options.allowInternal ?? true;
+  if (allowInternal && hasInternalServiceSecret(headers)) {
+    return { headers: headers ?? new Headers(), internal: true };
+  }
+
+  const session = await getAuthenticatedSession(headers);
+  if (!session?.user) {
+    throw new Error('Authentication required for admin operations');
+  }
+  if (!isAdminSession(session)) {
+    throw new Error('Admin role required for this operation');
+  }
+  return { headers: headers ?? new Headers(), internal: false, session };
+}
+
+function getAuthApiMethod(name: string): (...args: any[]) => Promise<any> {
+  const method = (auth.api as Record<string, unknown>)[name];
+  if (typeof method !== 'function') {
+    throw new Error(
+      `${name} is not available. Enable the required Better Auth plugin.`,
+    );
+  }
+  return method.bind(auth.api) as (...args: any[]) => Promise<any>;
+}
+
+function toIsoString(
+  value: Date | string | number | null | undefined,
+): string | undefined {
+  if (!value) return undefined;
+  if (value instanceof Date) return value.toISOString();
+  return new Date(value).toISOString();
+}
+
+function apiKeyScopesFrom(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const permissions = value as Record<string, unknown>;
+  const apiScopes = permissions.api;
+  if (Array.isArray(apiScopes)) {
+    return apiScopes.map((scope) => String(scope));
+  }
+  return Object.values(permissions)
+    .filter(Array.isArray)
+    .flatMap((scopes) => (scopes as unknown[]).map((scope) => String(scope)));
+}
+
+function rateLimitPeriodToMs(period: 'minute' | 'hour' | 'day'): number {
+  if (period === 'minute') return 60_000;
+  if (period === 'hour') return 3_600_000;
+  return 86_400_000;
 }
 
 // Narrowing helpers
@@ -67,6 +210,141 @@ function pickUser(obj: unknown): z.infer<typeof UserOut> | undefined {
   };
 }
 
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function stringListValue(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+    return items.length > 0 ? items : undefined;
+  }
+
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      const items = parsed
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean);
+      return items.length > 0 ? items : undefined;
+    }
+  } catch {
+    // Fall back to delimited strings below.
+  }
+
+  const delimiter = trimmed.includes(',') ? ',' : ' ';
+  const items = trimmed
+    .split(delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : undefined;
+}
+
+function redirectUrisFrom(value: unknown): string[] {
+  return stringListValue(value) ?? [];
+}
+
+function oidcVelionMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  return isRecord(metadata.velion) ? metadata.velion : {};
+}
+
+function oidcMetadataString(
+  metadata: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const velion = oidcVelionMetadata(metadata);
+  return stringValue(velion[key]) ?? stringValue(metadata[key]);
+}
+
+function oidcMetadataStringList(
+  metadata: Record<string, unknown>,
+  key: string,
+  fallback: string[],
+): string[] {
+  const velion = oidcVelionMetadata(metadata);
+  return (
+    stringListValue(velion[key]) ?? stringListValue(metadata[key]) ?? fallback
+  );
+}
+
+function buildOIDCClientMetadata(
+  input: z.infer<typeof CreateOIDCClientSchema>,
+): Record<string, unknown> {
+  const metadata = input.metadata ?? {};
+  const existingVelion = isRecord(metadata.velion) ? metadata.velion : {};
+  return {
+    ...metadata,
+    velion: {
+      ...existingVelion,
+      organizationId: input.organizationId,
+      scopes: input.scopes,
+      grantTypes: input.grantTypes,
+      responseTypes: input.responseTypes,
+      tokenEndpointAuthMethod: input.tokenEndpointAuthMethod,
+    },
+  };
+}
+
+type OAuthApplicationRow = typeof schema.oauthApplication.$inferSelect;
+
+function oidcClientOrganizationId(
+  row: OAuthApplicationRow,
+): string | undefined {
+  return oidcMetadataString(parseJsonRecord(row.metadata), 'organizationId');
+}
+
+function mapOIDCClientListItem(row: OAuthApplicationRow) {
+  const metadata = parseJsonRecord(row.metadata);
+  return {
+    clientId: row.clientId ?? row.id,
+    name: row.name ?? row.clientId ?? 'Unnamed OIDC client',
+    redirectUris: redirectUrisFrom(row.redirectUrls),
+    scopes: oidcMetadataStringList(metadata, 'scopes', [
+      'openid',
+      'profile',
+      'email',
+    ]),
+    organizationId: oidcClientOrganizationId(row),
+    createdAt: toIsoString(row.createdAt) ?? new Date(0).toISOString(),
+  };
+}
+
+function mapOIDCClientDetail(row: OAuthApplicationRow) {
+  const metadata = parseJsonRecord(row.metadata);
+  return {
+    ...mapOIDCClientListItem(row),
+    grantTypes: oidcMetadataStringList(metadata, 'grantTypes', [
+      'authorization_code',
+      'refresh_token',
+    ]),
+    responseTypes: oidcMetadataStringList(metadata, 'responseTypes', ['code']),
+    tokenEndpointAuthMethod:
+      row.authenticationScheme ??
+      oidcMetadataString(metadata, 'tokenEndpointAuthMethod') ??
+      'client_secret_basic',
+    updatedAt: toIsoString(row.updatedAt),
+  };
+}
+
 // Schemas
 const SignInSchema = z.object({
   email: z.string().email(),
@@ -89,6 +367,174 @@ const ConsentSchema = z.object({
   marketing: z.boolean(),
   necessary: z.boolean(),
 });
+
+const DEFAULT_CONSENT: z.infer<typeof ConsentSchema> = {
+  analytics: false,
+  marketing: false,
+  necessary: true,
+};
+
+const CONSENT_SUBJECT_COOKIE = 'velion_consent_subject';
+
+type ConsentSubject = {
+  userId?: string;
+  sessionId?: string;
+};
+
+type PrivacyConsentRow = typeof schema.privacyConsent.$inferSelect;
+
+function normalizeConsent(
+  consent: z.infer<typeof ConsentSchema>,
+): z.infer<typeof ConsentSchema> {
+  return {
+    analytics: consent.analytics,
+    marketing: consent.marketing,
+    necessary: true,
+  };
+}
+
+function cookieValue(
+  headers: Headers | undefined,
+  name: string,
+): string | null {
+  const cookieHeader = headers?.get('cookie');
+  if (!cookieHeader) return null;
+  const cookies = cookieHeader.split(';');
+  for (const cookie of cookies) {
+    const [rawName, ...rawValue] = cookie.trim().split('=');
+    if (rawName === name) return decodeURIComponent(rawValue.join('='));
+  }
+  return null;
+}
+
+function setConsentSubjectCookie(
+  context: RpcContext | undefined,
+  subject: string,
+) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  context?.setHeader?.(
+    'set-cookie',
+    `${CONSENT_SUBJECT_COOKIE}=${encodeURIComponent(
+      subject,
+    )}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly${secure}`,
+  );
+}
+
+async function resolveConsentSubject(
+  context: RpcContext | undefined,
+): Promise<ConsentSubject> {
+  const headers = headersFromCtx(context);
+  const session = await getAuthenticatedSession(headers).catch(() => null);
+  if (session?.user?.id) return { userId: session.user.id };
+
+  const existingSubject = cookieValue(headers, CONSENT_SUBJECT_COOKIE);
+  if (existingSubject) return { sessionId: existingSubject };
+
+  const subject = `anon_${randomBytes(16).toString('base64url')}`;
+  setConsentSubjectCookie(context, subject);
+  return { sessionId: subject };
+}
+
+function privacyConsentWhere(subject: ConsentSubject): SQL | undefined {
+  if (subject.userId) {
+    return eq(schema.privacyConsent.userId, subject.userId);
+  }
+  if (subject.sessionId) {
+    return eq(schema.privacyConsent.sessionId, subject.sessionId);
+  }
+  return undefined;
+}
+
+function consentFromRow(
+  row: PrivacyConsentRow | null | undefined,
+): z.infer<typeof ConsentSchema> {
+  if (!row) return DEFAULT_CONSENT;
+  return normalizeConsent({
+    analytics: Boolean(row.analytics),
+    marketing: Boolean(row.marketing),
+    necessary: Boolean(row.necessary),
+  });
+}
+
+async function readConsent(
+  subject: ConsentSubject,
+): Promise<z.infer<typeof ConsentSchema>> {
+  const where = privacyConsentWhere(subject);
+  if (!where) return DEFAULT_CONSENT;
+  const [row] = await db
+    .select()
+    .from(schema.privacyConsent)
+    .where(where)
+    .limit(1);
+  return consentFromRow(row);
+}
+
+async function persistConsent(
+  subject: ConsentSubject,
+  consent: z.infer<typeof ConsentSchema>,
+): Promise<z.infer<typeof ConsentSchema>> {
+  const normalized = normalizeConsent(consent);
+  const where = privacyConsentWhere(subject);
+  if (!where) return normalized;
+
+  const now = new Date();
+  const [existing] = await db
+    .select({ id: schema.privacyConsent.id })
+    .from(schema.privacyConsent)
+    .where(where)
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(schema.privacyConsent)
+      .set({
+        analytics: normalized.analytics,
+        marketing: normalized.marketing,
+        necessary: normalized.necessary,
+        updatedAt: now,
+      })
+      .where(eq(schema.privacyConsent.id, existing.id));
+    return normalized;
+  }
+
+  await db.insert(schema.privacyConsent).values({
+    id: `pc_${randomBytes(16).toString('base64url')}`,
+    userId: subject.userId,
+    sessionId: subject.sessionId,
+    analytics: normalized.analytics,
+    marketing: normalized.marketing,
+    necessary: normalized.necessary,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return normalized;
+}
+
+async function isPasswordCompromised(password: string): Promise<boolean> {
+  const sha1Hash = createHash('sha1')
+    .update(password)
+    .digest('hex')
+    .toUpperCase();
+  const prefix = sha1Hash.slice(0, 5);
+  const suffix = sha1Hash.slice(5);
+  const response = await fetch(
+    `https://api.pwnedpasswords.com/range/${prefix}`,
+    {
+      headers: {
+        'Add-Padding': 'true',
+        'User-Agent': 'Velion Auth Password Checker',
+      },
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`HIBP range check failed with status ${response.status}`);
+  }
+  const body = await response.text();
+  return body
+    .split('\n')
+    .some((line) => line.split(':')[0]?.trim().toUpperCase() === suffix);
+}
 
 // Enhanced schemas for additional endpoints
 const VerifyEmailTokenSchema = z.object({
@@ -113,7 +559,7 @@ const InviteMemberSchema = z.object({
   organizationId: z.string().min(1),
   email: z.string().email(),
   role: z.enum(['owner', 'admin', 'member']),
-  expiresAt: z.date().optional(),
+  expiresAt: z.coerce.date().optional(),
 });
 
 const SwitchOrganizationSchema = z.object({
@@ -534,13 +980,9 @@ const getConsentProcedure = os
       necessary: z.boolean(),
     }),
   )
-  .handler(() => {
-    // TODO: persist and read consent from DB (scoped by user/session)
-    return {
-      analytics: false,
-      marketing: false,
-      necessary: true,
-    };
+  .handler(async ({ context }) => {
+    const subject = await resolveConsentSubject(context as RpcContext);
+    return readConsent(subject);
   });
 
 const updateConsentProcedure = os
@@ -551,9 +993,10 @@ const updateConsentProcedure = os
       consent: ConsentSchema,
     }),
   )
-  .handler(({ input }) => {
-    // TODO: persist consent to DB
-    return { success: true, consent: input };
+  .handler(async ({ input, context }) => {
+    const subject = await resolveConsentSubject(context as RpcContext);
+    const consent = await persistConsent(subject, input);
+    return { success: true, consent };
   });
 
 const withdrawConsentProcedure = os
@@ -564,11 +1007,12 @@ const withdrawConsentProcedure = os
       consent: ConsentSchema,
     }),
   )
-  .handler(() => {
-    // TODO: persist consent withdrawal to DB
+  .handler(async ({ context }) => {
+    const subject = await resolveConsentSubject(context as RpcContext);
+    const consent = await persistConsent(subject, DEFAULT_CONSENT);
     return {
       success: true,
-      consent: { analytics: false, marketing: false, necessary: true },
+      consent,
     };
   });
 
@@ -711,7 +1155,7 @@ const sendPasswordResetProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
-      await auth.api.forgetPassword({
+      await auth.api.requestPasswordReset({
         body: { email: input.email },
         headers: headers ?? new Headers(),
       });
@@ -739,45 +1183,21 @@ const enableTwoFactorProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
-
-      // Try to use Better Auth 2FA API - if not available, provide placeholder
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/two-factor/enable`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          const data = (await response.json()) as Record<string, unknown>;
-          // Forward any set-cookie headers
-          const setCookie = response.headers.get('set-cookie');
-          if (setCookie && context && 'setHeader' in context) {
-            (context as RpcContext).setHeader?.('set-cookie', setCookie);
-          }
-
-          return {
-            success: true,
-            secret: (data?.secret as string) || '',
-            qrCode: (data?.qrCode as string) || '',
-            backupCodes: (data?.backupCodes as string[]) || [],
-          };
-        }
-      } catch {
-        console.log('2FA API not available');
-      }
-
-      // Return error when 2FA plugin is not configured
+      const enableTwoFactor = getAuthApiMethod('enableTwoFactor');
+      const { headers: respHeaders, response } = await enableTwoFactor({
+        body: input,
+        headers: headers ?? new Headers(),
+        returnHeaders: true,
+      });
+      forwardSetCookie(context as RpcContext, respHeaders);
+      const data = response as unknown;
+      const totpURI = isRecord(data) ? stringValue(data.totpURI) : undefined;
       return {
-        success: false,
-        error:
-          'Two-factor authentication is not configured on this server. Please contact support.',
+        success: true,
+        qrCode: totpURI,
+        backupCodes: isRecord(data)
+          ? (stringListValue(data.backupCodes) ?? [])
+          : [],
       };
     } catch (_error) {
       console.error('Enable 2FA error:', _error);
@@ -799,33 +1219,13 @@ const disableTwoFactorProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
-
-      // Try to use Better Auth 2FA API
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/two-factor/disable`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          return { success: true };
-        }
-      } catch {
-        console.log('2FA disable API not available');
-      }
-
-      // Return error when 2FA plugin is not configured
+      const disableTwoFactor = getAuthApiMethod('disableTwoFactor');
+      const result = (await disableTwoFactor({
+        body: input,
+        headers: headers ?? new Headers(),
+      })) as unknown;
       return {
-        success: false,
-        error:
-          'Two-factor authentication is not configured on this server. Please contact support.',
+        success: isRecord(result) ? Boolean(result.status) : true,
       };
     } catch (_error) {
       console.error('Disable 2FA error:', _error);
@@ -839,8 +1239,9 @@ const disableTwoFactorProcedure = os
 const verifyTwoFactorProcedure = os
   .input(
     z.object({
-      code: z.string().min(6).max(8),
+      code: z.string().min(6).max(64),
       type: z.enum(['totp', 'backup-code']).default('totp'),
+      trustDevice: z.boolean().optional(),
     }),
   )
   .output(
@@ -852,35 +1253,21 @@ const verifyTwoFactorProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
-
-      // Try to use Better Auth 2FA API
-      try {
-        const endpoint =
-          input.type === 'totp' ? 'verify-totp' : 'verify-backup-code';
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/two-factor/${endpoint}`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify({ code: input.code }),
-          },
-        );
-
-        if (response.ok) {
-          return { success: true };
-        }
-      } catch {
-        console.log('2FA verify API not available');
-      }
-
-      // Return error when 2FA plugin is not configured
+      const methodName =
+        input.type === 'totp' ? 'verifyTOTP' : 'verifyBackupCode';
+      const verifyTwoFactor = getAuthApiMethod(methodName);
+      const { headers: respHeaders, response } = await verifyTwoFactor({
+        body: {
+          code: input.code,
+          trustDevice: input.trustDevice,
+        },
+        headers: headers ?? new Headers(),
+        returnHeaders: true,
+      });
+      forwardSetCookie(context as RpcContext, respHeaders);
+      const data = response as unknown;
       return {
-        success: false,
-        error:
-          'Two-factor authentication is not configured on this server. Please contact support.',
+        success: Boolean(isRecord(data) && (data.token || data.user)),
       };
     } catch (_error) {
       console.error('Verify 2FA error:', _error);
@@ -911,36 +1298,19 @@ const sendEmailOtpProcedure = os
     try {
       const headers = headersFromCtx(context as RpcContext);
 
-      // Try to use Better Auth Email OTP API
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/otp/email/send`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          return { success: true };
-        }
-      } catch {
-        console.log('Email OTP API not available');
-      }
-
-      // Return error when Email OTP plugin is not configured
+      const sendVerificationOTP = getAuthApiMethod('sendVerificationOTP');
+      await sendVerificationOTP({
+        body: input,
+        headers: headers ?? new Headers(),
+      });
+      return { success: true };
+    } catch (_error) {
+      console.error('Send email OTP error:', _error);
       return {
         success: false,
         error:
-          'Email OTP is not configured on this server. Please contact support.',
+          _error instanceof Error ? _error.message : 'Failed to send email OTP',
       };
-    } catch (_error) {
-      console.error('Send email OTP error:', _error);
-      return { success: false, error: 'Failed to send email OTP' };
     }
   });
 
@@ -949,6 +1319,9 @@ const verifyEmailOtpProcedure = os
     z.object({
       email: z.string().email(),
       otp: z.string().length(6),
+      type: z
+        .enum(['sign-in', 'email-verification', 'forget-password'])
+        .default('sign-in'),
     }),
   )
   .output(
@@ -963,50 +1336,53 @@ const verifyEmailOtpProcedure = os
     try {
       const headers = headersFromCtx(context as RpcContext);
 
-      // Try to use Better Auth Email OTP API
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/otp/email/verify`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          const data = (await response.json()) as Record<string, unknown>;
-          // Forward any set-cookie headers
-          const setCookie = response.headers.get('set-cookie');
-          if (setCookie && context && 'setHeader' in context) {
-            (context as RpcContext).setHeader?.('set-cookie', setCookie);
-          }
-
-          const user = pickUser(data);
-          return {
-            success: true,
-            user,
-            session: (data?.session as Record<string, unknown>) || null,
-          };
-        }
-      } catch {
-        console.log(
-          'Email OTP verify API not available, using placeholder logic',
-        );
+      if (input.type === 'email-verification') {
+        const verifyEmailOTP = getAuthApiMethod('verifyEmailOTP');
+        const result = (await verifyEmailOTP({
+          body: { email: input.email, otp: input.otp },
+          headers: headers ?? new Headers(),
+        })) as unknown;
+        const user = isRecord(result) ? pickUser(result.user) : undefined;
+        return { success: Boolean(isRecord(result) && result.status), user };
       }
 
-      // Return error when Email OTP plugin is not configured
+      if (input.type === 'forget-password') {
+        const checkVerificationOTP = getAuthApiMethod('checkVerificationOTP');
+        const result = (await checkVerificationOTP({
+          body: {
+            email: input.email,
+            otp: input.otp,
+            type: input.type,
+          },
+          headers: headers ?? new Headers(),
+        })) as unknown;
+        return { success: Boolean(isRecord(result) && result.success) };
+      }
+
+      const signInEmailOTP = getAuthApiMethod('signInEmailOTP');
+      const { headers: respHeaders, response } = await signInEmailOTP({
+        body: { email: input.email, otp: input.otp },
+        headers: headers ?? new Headers(),
+        returnHeaders: true,
+      });
+      forwardSetCookie(context as RpcContext, respHeaders);
+      const data = response as unknown;
+      const user = isRecord(data) ? pickUser(data.user) : undefined;
+      if (!user) {
+        return { success: false, error: 'Invalid or expired OTP' };
+      }
       return {
-        success: false,
-        error:
-          'Email OTP authentication is not configured on this server. Please contact support.',
+        success: true,
+        user,
+        session: isRecord(data) ? data.session : undefined,
       };
     } catch (_error) {
       console.error('Verify email OTP error:', _error);
-      return { success: false, error: 'Invalid or expired OTP' };
+      return {
+        success: false,
+        error:
+          _error instanceof Error ? _error.message : 'Invalid or expired OTP',
+      };
     }
   });
 
@@ -1029,36 +1405,19 @@ const sendPhoneOtpProcedure = os
     try {
       const headers = headersFromCtx(context as RpcContext);
 
-      // Try to use Better Auth Phone OTP API
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/phone-number/send-otp`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          return { success: true };
-        }
-      } catch {
-        console.log('Phone OTP API not available');
-      }
-
-      // Return error when Phone OTP plugin is not configured
+      const sendPhoneNumberOTP = getAuthApiMethod('sendPhoneNumberOTP');
+      await sendPhoneNumberOTP({
+        body: input,
+        headers: headers ?? new Headers(),
+      });
+      return { success: true };
+    } catch (_error) {
+      console.error('Send phone OTP error:', _error);
       return {
         success: false,
         error:
-          'Phone OTP is not configured on this server. Please contact support.',
+          _error instanceof Error ? _error.message : 'Failed to send SMS OTP',
       };
-    } catch (_error) {
-      console.error('Send phone OTP error:', _error);
-      return { success: false, error: 'Failed to send SMS OTP' };
     }
   });
 
@@ -1082,43 +1441,34 @@ const verifyPhoneOtpProcedure = os
     try {
       const headers = headersFromCtx(context as RpcContext);
 
-      // Try to use Better Auth Phone OTP API
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/phone-number/verify-otp`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          const data = (await response.json()) as Record<string, unknown>;
-          const user = pickUser(data);
-          return {
-            success: true,
-            user,
-          };
-        }
-      } catch {
-        console.log(
-          'Phone OTP verify API not available, using placeholder logic',
-        );
+      const verifyPhoneNumber = getAuthApiMethod('verifyPhoneNumber');
+      const { headers: respHeaders, response } = await verifyPhoneNumber({
+        body: {
+          phoneNumber: input.phoneNumber,
+          code: input.otp,
+        },
+        headers: headers ?? new Headers(),
+        returnHeaders: true,
+      });
+      forwardSetCookie(context as RpcContext, respHeaders);
+      const data = response as unknown;
+      const user = isRecord(data) ? pickUser(data.user) : undefined;
+      if (!isRecord(data) || !data.status) {
+        return { success: false, error: 'Invalid or expired SMS OTP' };
       }
-
-      // Return error when Phone OTP plugin is not configured
       return {
-        success: false,
-        error:
-          'Phone OTP authentication is not configured on this server. Please contact support.',
+        success: true,
+        user,
       };
     } catch (_error) {
       console.error('Verify phone OTP error:', _error);
-      return { success: false, error: 'Invalid or expired SMS OTP' };
+      return {
+        success: false,
+        error:
+          _error instanceof Error
+            ? _error.message
+            : 'Invalid or expired SMS OTP',
+      };
     }
   });
 
@@ -1140,61 +1490,27 @@ const createPasskeyProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
-
-      // Try to use Better Auth Passkey API
-      try {
-        const response = await fetch(
-          `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/auth/passkey/generate-creation-options`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Cookie: headers?.get('cookie') || '',
-            },
-            body: JSON.stringify(input),
-          },
-        );
-
-        if (response.ok) {
-          const data = (await response.json()) as Record<string, unknown>;
-          return {
-            success: true,
-            options: data,
-          };
-        }
-      } catch {
-        console.log(
-          'Passkey creation API not available, using placeholder logic',
-        );
+      const session = await getAuthenticatedSession(headers);
+      if (!session?.user) {
+        return {
+          success: false,
+          error: 'Authentication required to create passkey options',
+        };
       }
 
-      // Placeholder implementation
-      const mockOptions = {
-        challenge: Buffer.from(Math.random().toString()).toString('base64'),
-        rp: {
-          name: 'ID-Knuten',
-          id:
-            process.env.NODE_ENV === 'development'
-              ? 'localhost'
-              : 'idknuten.no',
+      const generatePasskeyRegistrationOptions = getAuthApiMethod(
+        'generatePasskeyRegistrationOptions',
+      );
+      const options = await generatePasskeyRegistrationOptions({
+        query: {
+          name: input.name,
         },
-        user: {
-          id: Buffer.from(input.email || 'demo@example.com').toString('base64'),
-          name: input.email || 'demo@example.com',
-          displayName: input.name || 'Demo User',
-        },
-        pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
-        timeout: 60000,
-        attestation: 'none',
-        authenticatorSelection: {
-          authenticatorAttachment: 'platform',
-          userVerification: 'preferred',
-        },
-      };
+        headers: headers ?? new Headers(),
+      });
 
       return {
         success: true,
-        options: mockOptions,
+        options,
       };
     } catch (_error) {
       console.error('Create passkey error:', _error);
@@ -1240,31 +1556,6 @@ const initiateOAuthProcedure = os
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       const socialConfig = (auth.options as any)?.socialProviders?.[provider];
       if (!socialConfig) {
-        // For development, return a provider-appropriate mock OAuth URL
-        if (process.env.NODE_ENV === 'development') {
-          const providerBaseUrls: Record<string, string> = {
-            microsoft:
-              'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-            google: 'https://accounts.google.com/o/oauth2/v2/auth',
-            github: 'https://github.com/login/oauth/authorize',
-            apple: 'https://appleid.apple.com/auth/authorize',
-            vipps:
-              'https://api.vipps.no/access-management-1.0/access/oauth2/auth',
-            okta: 'https://mock-okta.okta.com/oauth2/default/v1/authorize',
-          };
-          const baseUrl =
-            providerBaseUrls[provider] ??
-            `https://mock-${provider}.example.com/oauth/authorize`;
-          const mockOAuthUrl = `${baseUrl}?client_id=mock-${provider}-id&response_type=code&scope=openid%20profile%20email&redirect_uri=${encodeURIComponent(callbackURL)}&state=DEV_MOCK_STATE`;
-          console.warn(
-            `⚠️  [DEV MODE] ${provider} credentials not configured, using mock OAuth URL for testing`,
-          );
-          return {
-            success: true,
-            url: mockOAuthUrl,
-          };
-        }
-
         console.error(
           `❌ OAuth provider ${provider} is not configured. Please set the required environment variables.`,
         );
@@ -1349,7 +1640,7 @@ const checkPasswordStrengthProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(({ input }) => {
+  .handler(async ({ input }) => {
     try {
       const password = input.password;
       const feedback: string[] = [];
@@ -1372,19 +1663,11 @@ const checkPasswordStrengthProcedure = os
       else
         feedback.push('Password should contain at least one special character');
 
-      // TODO: Add actual HIBP API call here when plugin is available
       let isCompromised = false;
-
-      // Placeholder HIBP check - flag common passwords
-      const commonPasswords = [
-        'password',
-        '123456',
-        'qwerty',
-        'abc123',
-        'password123',
-      ];
-      if (commonPasswords.includes(password.toLowerCase())) {
-        isCompromised = true;
+      if (process.env.HIBP_ENABLED !== 'false') {
+        isCompromised = await isPasswordCompromised(password);
+      }
+      if (isCompromised) {
         feedback.push('This password has been found in data breaches');
       }
 
@@ -1400,8 +1683,11 @@ const checkPasswordStrengthProcedure = os
         isStrong: false,
         isCompromised: false,
         score: 0,
-        feedback: [],
-        error: 'Failed to check password strength',
+        feedback: ['Unable to complete the password breach check'],
+        error:
+          _error instanceof Error
+            ? _error.message
+            : 'Failed to check password strength',
       };
     }
   });
@@ -1760,23 +2046,80 @@ const createOIDCClientProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try OIDC Provider client creation API placeholder
-      // For now, providing fallback until OIDC Provider API is verified
-      throw new Error(
-        'OIDC Provider client creation API endpoint verification needed',
-      );
-    } catch {
-      console.warn('OIDC Provider client creation API not available');
-    }
+      const authorization = await authorizeAdminContext(context as RpcContext);
+      if (input.responseTypes.includes('id_token')) {
+        return {
+          success: false,
+          error:
+            'The configured Better Auth OIDC provider supports code and token response types, not id_token implicit response type.',
+        };
+      }
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'OIDC Provider client creation not available - plugin not configured',
-    };
+      const registerOAuthApplication = getAuthApiMethod(
+        'registerOAuthApplication',
+      );
+      const registration = (await registerOAuthApplication({
+        body: {
+          redirect_uris: input.redirectUris,
+          token_endpoint_auth_method: input.tokenEndpointAuthMethod,
+          grant_types: input.grantTypes,
+          response_types: input.responseTypes,
+          client_name: input.name,
+          scope: input.scopes.join(' '),
+          metadata: buildOIDCClientMetadata(input),
+        },
+        headers: authorization.headers,
+      })) as Record<string, unknown>;
+
+      const clientId = String(registration.client_id ?? '');
+      const clientSecret = String(registration.client_secret ?? '');
+      if (!clientId || !clientSecret) {
+        return {
+          success: false,
+          error: 'OIDC Provider did not return a usable client credential',
+        };
+      }
+
+      return {
+        success: true,
+        client: {
+          clientId,
+          clientSecret,
+          name: String(registration.client_name ?? input.name),
+          redirectUris:
+            stringListValue(registration.redirect_uris) ?? input.redirectUris,
+          scopes:
+            stringListValue(registration.scope) ??
+            stringListValue((registration.metadata as any)?.scopes) ??
+            input.scopes,
+          grantTypes:
+            stringListValue(registration.grant_types) ?? input.grantTypes,
+          responseTypes:
+            stringListValue(registration.response_types) ?? input.responseTypes,
+          tokenEndpointAuthMethod: String(
+            registration.token_endpoint_auth_method ??
+              input.tokenEndpointAuthMethod,
+          ),
+          organizationId: input.organizationId,
+          createdAt: registration.client_id_issued_at
+            ? new Date(
+                Number(registration.client_id_issued_at) * 1000,
+              ).toISOString()
+            : new Date().toISOString(),
+        },
+      };
+    } catch (error) {
+      console.error('OIDC Provider client creation failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'OIDC Provider client creation failed',
+      };
+    }
   });
 
 const listOIDCClientsProcedure = os
@@ -1801,22 +2144,52 @@ const listOIDCClientsProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try OIDC Provider client listing API placeholder
-      throw new Error(
-        'OIDC Provider client listing API endpoint verification needed',
-      );
-    } catch {
-      console.warn('OIDC Provider client listing API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'OIDC Provider client listing not available - plugin not configured',
-    };
+      if (input.organizationId) {
+        const allClients = await db
+          .select()
+          .from(schema.oauthApplication)
+          .orderBy(desc(schema.oauthApplication.createdAt));
+        const filtered = allClients.filter(
+          (client) => oidcClientOrganizationId(client) === input.organizationId,
+        );
+        return {
+          success: true,
+          clients: filtered
+            .slice(input.offset, input.offset + input.limit)
+            .map(mapOIDCClientListItem),
+          total: filtered.length,
+        };
+      }
+
+      const [totalRow] = await db
+        .select({ value: count() })
+        .from(schema.oauthApplication);
+      const clients = await db
+        .select()
+        .from(schema.oauthApplication)
+        .orderBy(desc(schema.oauthApplication.createdAt))
+        .limit(input.limit)
+        .offset(input.offset);
+
+      return {
+        success: true,
+        clients: clients.map(mapOIDCClientListItem),
+        total: totalRow?.value ?? clients.length,
+      };
+    } catch (error) {
+      console.error('OIDC Provider client listing failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'OIDC Provider client listing failed',
+      };
+    }
   });
 
 const getOIDCClientProcedure = os
@@ -1842,21 +2215,33 @@ const getOIDCClientProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try OIDC Provider get client API placeholder
-      throw new Error(
-        'OIDC Provider get client API endpoint verification needed',
-      );
-    } catch {
-      console.warn('OIDC Provider get client API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
+      const [client] = await db
+        .select()
+        .from(schema.oauthApplication)
+        .where(eq(schema.oauthApplication.clientId, input.clientId))
+        .limit(1);
 
-    // Fallback response
-    return {
-      success: false,
-      error: 'OIDC Provider get client not available - plugin not configured',
-    };
+      if (!client) {
+        return { success: false, error: 'OIDC client not found' };
+      }
+
+      return {
+        success: true,
+        client: mapOIDCClientDetail(client),
+      };
+    } catch (error) {
+      console.error('OIDC Provider get client failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'OIDC Provider get client failed',
+      };
+    }
   });
 
 const deleteOIDCClientProcedure = os
@@ -1867,22 +2252,34 @@ const deleteOIDCClientProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try OIDC Provider delete client API placeholder
-      throw new Error(
-        'OIDC Provider delete client API endpoint verification needed',
-      );
-    } catch {
-      console.warn('OIDC Provider delete client API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
+      const [client] = await db
+        .select({ id: schema.oauthApplication.id })
+        .from(schema.oauthApplication)
+        .where(eq(schema.oauthApplication.clientId, input.clientId))
+        .limit(1);
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'OIDC Provider delete client not available - plugin not configured',
-    };
+      if (!client) {
+        return { success: false, error: 'OIDC client not found' };
+      }
+
+      await db
+        .delete(schema.oauthApplication)
+        .where(eq(schema.oauthApplication.clientId, input.clientId));
+
+      return { success: true };
+    } catch (error) {
+      console.error('OIDC Provider delete client failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'OIDC Provider delete client failed',
+      };
+    }
   });
 
 const generateClientSecretProcedure = os
@@ -1900,22 +2297,47 @@ const generateClientSecretProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try OIDC Provider generate secret API placeholder
-      throw new Error(
-        'OIDC Provider generate secret API endpoint verification needed',
-      );
-    } catch {
-      console.warn('OIDC Provider generate secret API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
+      const [client] = await db
+        .select({ id: schema.oauthApplication.id })
+        .from(schema.oauthApplication)
+        .where(eq(schema.oauthApplication.clientId, input.clientId))
+        .limit(1);
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'OIDC Provider generate secret not available - plugin not configured',
-    };
+      if (!client) {
+        return { success: false, error: 'OIDC client not found' };
+      }
+
+      const createdAt = new Date();
+      const clientSecret = randomBytes(32).toString('base64url');
+      await db
+        .update(schema.oauthApplication)
+        .set({
+          clientSecret,
+          updatedAt: createdAt,
+        })
+        .where(eq(schema.oauthApplication.clientId, input.clientId));
+
+      return {
+        success: true,
+        secret: {
+          secretId: `${input.clientId}:${createdAt.getTime()}`,
+          clientSecret,
+          createdAt: createdAt.toISOString(),
+        },
+      };
+    } catch (error) {
+      console.error('OIDC Provider client secret generation failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'OIDC Provider client secret generation failed',
+      };
+    }
   });
 
 // Sprint 3: API Keys & Bearer Authentication Procedures
@@ -1947,13 +2369,8 @@ const createAPIKeyProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      // For Sprint 3 API Key functionality, we need to check if user is authenticated first
       const headers = headersFromCtx(context as RpcContext);
-
-      // Check if user is authenticated by getting their session
-      const session = await auth.api.getSession({
-        headers: headers ?? new Headers(),
-      });
+      const session = await getAuthenticatedSession(headers);
 
       if (!session || !session.user) {
         return {
@@ -1962,60 +2379,82 @@ const createAPIKeyProcedure = os
         };
       }
 
-      // For Sprint 3, we'll use internal HTTP call to the Better Auth API Key endpoint
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
-      const cookieHeader = headers?.get('cookie') || '';
+      const createApiKey = getAuthApiMethod('createApiKey');
+      const expiresIn = input.expiresAt
+        ? Math.max(
+            60,
+            Math.floor((input.expiresAt.getTime() - Date.now()) / 1000),
+          )
+        : undefined;
+      const rateLimit = input.rateLimit
+        ? {
+            rateLimitEnabled: true,
+            rateLimitTimeWindow: rateLimitPeriodToMs(input.rateLimit.period),
+            rateLimitMax: input.rateLimit.requests,
+          }
+        : {};
 
-      const createKeyResponse = await fetch(
-        `${authUrl}/api/auth/create-api-key`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: cookieHeader,
+      const apiKeyData = await createApiKey({
+        body: {
+          configId: 'org-keys',
+          name: input.name,
+          organizationId: input.organizationId,
+          expiresIn,
+          metadata: {
+            description: input.description,
+            scopes: input.scopes,
+            organizationId: input.organizationId,
           },
-          body: JSON.stringify({
-            name: input.name,
-            ...(input.description && {
-              metadata: { description: input.description },
-            }),
-            ...(input.expiresAt && {
-              expiresIn: Math.floor(
-                (new Date(input.expiresAt).getTime() - Date.now()) / 1000,
-              ),
-            }),
-          }),
+          permissions: {
+            api: input.scopes,
+          },
+          ...rateLimit,
         },
-      );
+        headers: headers ?? new Headers(),
+      });
 
-      if (!createKeyResponse.ok) {
-        const errorText = await createKeyResponse.text();
-        throw new Error(`API Key creation failed: ${errorText}`);
-      }
-
-      const apiKeyData = (await createKeyResponse.json()) as {
+      const created = apiKeyData as {
         id?: string;
-        name?: string;
+        name?: string | null;
         key?: string;
-        apiKey?: string;
-        createdAt?: string;
+        createdAt?: Date | string;
+        expiresAt?: Date | string | null;
+        permissions?: unknown;
+        metadata?: { description?: string; scopes?: string[] } | null;
+        rateLimitMax?: number | null;
+        rateLimitTimeWindow?: number | null;
       };
+
+      if (!created.key) {
+        throw new Error('API key creation did not return a key');
+      }
 
       return {
         success: true,
         apiKey: {
-          id: apiKeyData.id || `key_${Date.now()}`,
-          name: apiKeyData.name || input.name,
-          key:
-            apiKeyData.key ||
-            apiKeyData.apiKey ||
-            `sk_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          id: created.id ?? '',
+          name: created.name || input.name,
+          key: created.key,
           organizationId: input.organizationId,
-          scopes: input.scopes,
-          description: input.description,
-          createdAt: apiKeyData.createdAt || new Date().toISOString(),
-          expiresAt: input.expiresAt?.toISOString(),
-          rateLimit: input.rateLimit,
+          scopes:
+            apiKeyScopesFrom(created.permissions).length > 0
+              ? apiKeyScopesFrom(created.permissions)
+              : input.scopes,
+          description: created.metadata?.description ?? input.description,
+          createdAt: toIsoString(created.createdAt) ?? new Date().toISOString(),
+          expiresAt: toIsoString(created.expiresAt),
+          rateLimit:
+            created.rateLimitMax && created.rateLimitTimeWindow
+              ? {
+                  requests: created.rateLimitMax,
+                  period:
+                    created.rateLimitTimeWindow <= 60_000
+                      ? 'minute'
+                      : created.rateLimitTimeWindow <= 3_600_000
+                        ? 'hour'
+                        : 'day',
+                }
+              : input.rateLimit,
         },
       };
     } catch (error) {
@@ -2058,19 +2497,102 @@ const listAPIKeysProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try API Key listing placeholder
-      throw new Error('API Key listing API endpoint verification needed');
-    } catch {
-      console.warn('API Key listing API not available');
-    }
+      const headers = headersFromCtx(context as RpcContext);
+      const session = await getAuthenticatedSession(headers);
 
-    // Fallback response
-    return {
-      success: false,
-      error: 'API Key listing not available - requires custom implementation',
-    };
+      if (!session || !session.user) {
+        return {
+          success: false,
+          error: 'Authentication required to list API keys',
+        };
+      }
+
+      const listApiKeys = getAuthApiMethod('listApiKeys');
+      const configId = input.organizationId ? 'org-keys' : 'user-keys';
+      const result = (await listApiKeys({
+        query: {
+          configId,
+          organizationId: input.organizationId,
+          limit: input.limit,
+          offset: input.offset,
+          sortBy: 'createdAt',
+          sortDirection: 'desc',
+        },
+        headers: headers ?? new Headers(),
+      })) as {
+        apiKeys?: Array<{
+          id: string;
+          name?: string | null;
+          referenceId?: string;
+          permissions?: unknown;
+          metadata?: { description?: string; scopes?: string[] } | null;
+          rateLimitMax?: number | null;
+          rateLimitTimeWindow?: number | null;
+          expiresAt?: Date | string | null;
+          createdAt?: Date | string;
+          lastRequest?: Date | string | null;
+        }>;
+        total?: number;
+      };
+
+      const apiKeys = (result.apiKeys ?? [])
+        .filter(
+          (key) =>
+            input.includeExpired ||
+            !key.expiresAt ||
+            new Date(key.expiresAt) > new Date(),
+        )
+        .map((key) => {
+          const scopes = apiKeyScopesFrom(key.permissions);
+          return {
+            id: key.id,
+            name: key.name || 'API key',
+            description: key.metadata?.description,
+            organizationId:
+              input.organizationId ||
+              (configId === 'org-keys' ? key.referenceId || '' : ''),
+            scopes:
+              scopes.length > 0
+                ? scopes
+                : Array.isArray(key.metadata?.scopes)
+                  ? key.metadata.scopes
+                  : [],
+            rateLimit:
+              key.rateLimitMax && key.rateLimitTimeWindow
+                ? {
+                    requests: key.rateLimitMax,
+                    period:
+                      key.rateLimitTimeWindow <= 60_000
+                        ? 'minute'
+                        : key.rateLimitTimeWindow <= 3_600_000
+                          ? 'hour'
+                          : 'day',
+                  }
+                : undefined,
+            expiresAt: toIsoString(key.expiresAt),
+            createdAt: toIsoString(key.createdAt) ?? new Date().toISOString(),
+            lastUsed: toIsoString(key.lastRequest),
+            isExpired: Boolean(
+              key.expiresAt && new Date(key.expiresAt) <= new Date(),
+            ),
+          };
+        });
+
+      return {
+        success: true,
+        apiKeys,
+        total: result.total ?? apiKeys.length,
+      };
+    } catch (error) {
+      console.error('❌ API Key listing failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to list API keys',
+      };
+    }
   });
 
 const deleteAPIKeyProcedure = os
@@ -2081,19 +2603,45 @@ const deleteAPIKeyProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try API Key deletion placeholder
-      throw new Error('API Key deletion API endpoint verification needed');
-    } catch {
-      console.warn('API Key deletion API not available');
-    }
+      const headers = headersFromCtx(context as RpcContext);
+      const session = await getAuthenticatedSession(headers);
 
-    // Fallback response
-    return {
-      success: false,
-      error: 'API Key deletion not available - requires custom implementation',
-    };
+      if (!session || !session.user) {
+        return {
+          success: false,
+          error: 'Authentication required to delete API key',
+        };
+      }
+
+      const deleteApiKey = getAuthApiMethod('deleteApiKey');
+      let lastError: unknown;
+      for (const configId of ['org-keys', 'user-keys']) {
+        try {
+          await deleteApiKey({
+            body: {
+              configId,
+              keyId: input.keyId,
+            },
+            headers: headers ?? new Headers(),
+          });
+          return { success: true };
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('API key deletion failed');
+    } catch (error) {
+      console.error('❌ API Key deletion failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to delete API key',
+      };
+    }
   });
 
 const rotateAPIKeyProcedure = os
@@ -2112,17 +2660,10 @@ const rotateAPIKeyProcedure = os
     }),
   )
   .handler(() => {
-    try {
-      // Try API Key rotation placeholder
-      throw new Error('API Key rotation API endpoint verification needed');
-    } catch {
-      console.warn('API Key rotation API not available');
-    }
-
-    // Fallback response
     return {
       success: false,
-      error: 'API Key rotation not available - requires custom implementation',
+      error:
+        'API key rotation is not supported by Better Auth for existing key IDs. Create a replacement key, then delete the old key.',
     };
   });
 
@@ -2151,21 +2692,75 @@ const validateAPIKeyProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input }) => {
     try {
-      // Try API Key validation placeholder
-      throw new Error('API Key validation API endpoint verification needed');
-    } catch {
-      console.warn('API Key validation API not available');
-    }
+      const verifyApiKey = getAuthApiMethod('verifyApiKey');
+      const result = (await verifyApiKey({
+        body: {
+          key: input.apiKey,
+          permissions: input.scope ? { api: [input.scope] } : undefined,
+        },
+      })) as {
+        valid?: boolean;
+        error?: { message?: string } | null;
+        key?: {
+          id: string;
+          configId?: string;
+          referenceId?: string;
+          permissions?: unknown;
+          expiresAt?: Date | string | null;
+          rateLimitMax?: number | null;
+          rateLimitTimeWindow?: number | null;
+          remaining?: number | null;
+        } | null;
+      };
 
-    // Fallback response
-    return {
-      success: false,
-      valid: false,
-      error:
-        'API Key validation not available - requires custom implementation',
-    };
+      if (!result.valid || !result.key) {
+        return {
+          success: true,
+          valid: false,
+          error: result.error?.message,
+        };
+      }
+
+      return {
+        success: true,
+        valid: true,
+        keyInfo: {
+          id: result.key.id,
+          organizationId:
+            result.key.configId === 'org-keys'
+              ? result.key.referenceId || ''
+              : '',
+          scopes: apiKeyScopesFrom(result.key.permissions),
+          rateLimit:
+            result.key.rateLimitMax && result.key.rateLimitTimeWindow
+              ? {
+                  requests: result.key.rateLimitMax,
+                  period:
+                    result.key.rateLimitTimeWindow <= 60_000
+                      ? 'minute'
+                      : result.key.rateLimitTimeWindow <= 3_600_000
+                        ? 'hour'
+                        : 'day',
+                  remaining: result.key.remaining ?? result.key.rateLimitMax,
+                  resetAt: new Date(
+                    Date.now() + result.key.rateLimitTimeWindow,
+                  ).toISOString(),
+                }
+              : undefined,
+          expiresAt: toIsoString(result.key.expiresAt),
+        },
+      };
+    } catch (error) {
+      console.error('❌ API Key validation failed:', error);
+      return {
+        success: false,
+        valid: false,
+        error:
+          error instanceof Error ? error.message : 'API key validation failed',
+      };
+    }
   });
 
 // Sprint 3: Bearer Token Authentication Procedures
@@ -2231,36 +2826,100 @@ const validateBearerTokenProcedure = os
         // Redis unavailable — fall through to HTTP validation
       }
 
-      // For Sprint 3, we'll use internal HTTP call to validate Bearer token
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
+      const tokenHash = hashBearerToken(bearerToken);
+      const [persistedToken] = await db
+        .select()
+        .from(schema.bearerToken)
+        .where(eq(schema.bearerToken.token, tokenHash))
+        .limit(1);
 
-      const validateResponse = await fetch(`${authUrl}/api/auth/get-session`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${bearerToken}`,
-        },
-      });
+      if (persistedToken) {
+        if (persistedToken.expiresAt <= new Date()) {
+          await db
+            .delete(schema.bearerToken)
+            .where(eq(schema.bearerToken.id, persistedToken.id));
+          return {
+            success: false,
+            valid: false,
+            error: 'Bearer token expired',
+          };
+        }
 
-      if (!validateResponse.ok) {
+        const [tokenUser] = await db
+          .select()
+          .from(schema.user)
+          .where(eq(schema.user.id, persistedToken.userId))
+          .limit(1);
+
+        if (!tokenUser) {
+          return {
+            success: false,
+            valid: false,
+            error: 'Bearer token user not found',
+          };
+        }
+
+        const persistedSession = {
+          user: {
+            id: tokenUser.id,
+            email: tokenUser.email,
+            name: tokenUser.name || null,
+          },
+          session: {
+            token: bearerToken,
+            expiresAt: persistedToken.expiresAt.toISOString(),
+          },
+        };
+
+        try {
+          await redisSecondaryStorage.set(
+            cacheKey,
+            JSON.stringify(persistedSession),
+            Math.min(
+              _BEARER_CACHE_TTL,
+              Math.max(
+                1,
+                Math.floor(
+                  (persistedToken.expiresAt.getTime() - Date.now()) / 1000,
+                ),
+              ),
+            ),
+          );
+        } catch (_cacheErr) {
+          // Redis write failure is non-fatal
+        }
+
+        return {
+          success: true,
+          valid: true,
+          session: {
+            user: persistedSession.user,
+            token: bearerToken,
+            expiresAt: persistedSession.session.expiresAt,
+            scopes: ['read'],
+          },
+        };
+      }
+
+      const sessionHeaders = new Headers();
+      sessionHeaders.set('authorization', `Bearer ${bearerToken}`);
+      const sessionData = (await auth.api.getSession({
+        headers: sessionHeaders,
+      })) as {
+        user?: { id: string; email: string; name?: string | null };
+        session?: { token?: string; expiresAt: Date | string };
+      } | null;
+
+      if (!sessionData?.user || !sessionData.session) {
         return {
           success: false,
           valid: false,
           error: 'Invalid bearer token',
         };
       }
-
-      const sessionData = (await validateResponse.json()) as {
-        user?: { id: string; email: string; name?: string };
-        session?: { token: string; expiresAt: string };
-      };
-
-      if (!sessionData.user || !sessionData.session) {
-        return {
-          success: false,
-          valid: false,
-          error: 'Invalid session data',
-        };
+      const sessionExpiresAt = toIsoString(sessionData.session.expiresAt);
+      if (!sessionExpiresAt) {
+        throw new Error('Invalid session expiration');
       }
 
       // --- cache write: store for TTL seconds ---
@@ -2273,7 +2932,10 @@ const validateBearerTokenProcedure = os
               email: sessionData.user.email,
               name: sessionData.user.name || null,
             },
-            session: sessionData.session,
+            session: {
+              token: sessionData.session.token || bearerToken,
+              expiresAt: sessionExpiresAt,
+            },
           }),
           _BEARER_CACHE_TTL,
         );
@@ -2291,7 +2953,7 @@ const validateBearerTokenProcedure = os
             name: sessionData.user.name || null,
           },
           token: bearerToken,
-          expiresAt: sessionData.session.expiresAt,
+          expiresAt: sessionExpiresAt,
           scopes: ['read'], // Default scope for Sprint 3
         },
       };
@@ -2342,15 +3004,25 @@ const createBearerTokenProcedure = os
         };
       }
 
-      // Create bearer token (not persisted to database)
-      const tokenId = `bt_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-      const bearerToken = `bearer_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      const bearerToken = generateBearerToken();
       const expiresAt = input.expiresIn
         ? new Date(Date.now() + input.expiresIn * 1000).toISOString()
         : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // Default 24 hours
+      const now = new Date();
+      const [createdToken] = await db
+        .insert(schema.bearerToken)
+        .values({
+          id: `bt_${randomBytes(16).toString('hex')}`,
+          token: hashBearerToken(bearerToken),
+          userId: session.user.id,
+          expiresAt: new Date(expiresAt),
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
 
       console.log('✅ Bearer token created:', {
-        id: tokenId,
+        id: createdToken.id,
         userId: session.user.id,
         expiresAt,
         scopes: input.scopes,
@@ -2359,11 +3031,11 @@ const createBearerTokenProcedure = os
       return {
         success: true,
         token: {
-          id: tokenId,
+          id: createdToken.id,
           token: bearerToken,
           expiresAt,
           scopes: input.scopes || ['read'],
-          createdAt: new Date().toISOString(),
+          createdAt: createdToken.createdAt.toISOString(),
         },
       };
     } catch (_error) {
@@ -2403,12 +3075,21 @@ const revokeBearerTokenProcedure = os
         };
       }
 
-      // Simulate token revocation (not persisted to database)
-      console.log('✅ Bearer token revoked:', {
-        token: input.token,
-        userId: session.user.id,
-        revokedAt: new Date().toISOString(),
-      });
+      const tokenHash = hashBearerToken(input.token);
+      await db
+        .delete(schema.bearerToken)
+        .where(
+          and(
+            eq(schema.bearerToken.token, tokenHash),
+            eq(schema.bearerToken.userId, session.user.id),
+          ),
+        );
+
+      try {
+        await redisSecondaryStorage.delete(_bearerCacheKey(input.token));
+      } catch (_cacheErr) {
+        // Redis delete failure is non-fatal
+      }
 
       return {
         success: true,
@@ -2464,11 +3145,31 @@ const listBearerTokensProcedure = os
         };
       }
 
-      // Return error since bearer token persistence is not implemented
+      const rows = await db
+        .select()
+        .from(schema.bearerToken)
+        .where(eq(schema.bearerToken.userId, session.user.id))
+        .orderBy(desc(schema.bearerToken.createdAt))
+        .limit(input.limit)
+        .offset(input.offset);
+
+      const now = new Date();
+      const tokens = rows
+        .filter((token) => input.includeExpired || token.expiresAt > now)
+        .map((token) => ({
+          id: token.id,
+          token: `${token.token.slice(0, 12)}...`,
+          expiresAt: token.expiresAt.toISOString(),
+          scopes: ['read'],
+          createdAt: token.createdAt.toISOString(),
+          lastUsed: null,
+          isActive: token.expiresAt > now,
+        }));
+
       return {
-        success: false,
-        error:
-          'Bearer token listing is not implemented. This feature requires database persistence.',
+        success: true,
+        tokens,
+        total: tokens.length,
       };
     } catch (error) {
       console.error('❌ Bearer token listing failed:', error);
@@ -2510,112 +3211,64 @@ const adminListUsersProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      console.log('🔍 [adminListUsers] Starting admin list users request');
-      const headers = headersFromCtx(context as RpcContext);
-
-      // Check internal service authentication OR user session with admin role
-      const internalServiceSecret = headers?.get('x-internal-service-secret');
-      const expectedSecret =
-        process.env.INTERNAL_SERVICE_SECRET || process.env.INTERNAL_API_KEY;
-      const isInternalService =
-        internalServiceSecret &&
-        expectedSecret &&
-        internalServiceSecret === expectedSecret;
-
-      if (!isInternalService) {
-        // For external requests, check session authentication and admin role
-        const session = await auth.api.getSession({
-          headers: headers ?? new Headers(),
-        });
-
-        if (!session || !session.user) {
-          console.log('❌ [adminListUsers] No authenticated session');
-          return {
-            success: false,
-            error: 'Authentication required for admin operations',
-          };
-        }
-
-        // Check if user has admin role
-        const user = session.user as { role?: string };
-        if (user.role !== 'admin' && user.role !== 'superadmin') {
-          console.log('❌ [adminListUsers] User lacks admin role:', user.role);
-          return {
-            success: false,
-            error: 'Admin role required for this operation',
-          };
-        }
-      } else {
-        console.log(
-          '✅ [adminListUsers] Internal service authenticated - bypassing session check',
-        );
-      }
-
-      // Build query with filters - using direct query for simplicity
+      await authorizeAdminContext(context as RpcContext);
       const { limit = 20, offset = 0, search, role } = input;
-
-      console.log(
-        `🔍 [adminListUsers] Input params: limit=${limit}, offset=${offset}, role=${role}, search=${search}`,
-      );
-
-      // Query all users directly from the user table
-      const allUsers = await db.select().from(schema.user);
-
-      // Apply filters in memory
-      let filteredUsers = allUsers;
-
-      // Filter by role if provided
+      const conditions: SQL[] = [];
       if (role) {
-        console.log(`🔍 [adminListUsers] Filtering by role: ${role}`);
-        filteredUsers = filteredUsers.filter((user) => user.role === role);
-        console.log(
-          `🔍 [adminListUsers] After role filter: ${filteredUsers.length} users`,
-        );
+        conditions.push(eq(schema.user.role, role));
       }
-
-      // Filter by search if provided
       if (search) {
-        const searchLower = search.toLowerCase();
-        filteredUsers = filteredUsers.filter(
-          (user) =>
-            user.email.toLowerCase().includes(searchLower) ||
-            (user.name && user.name.toLowerCase().includes(searchLower)),
+        conditions.push(
+          or(
+            ilike(schema.user.email, `%${search}%`),
+            ilike(schema.user.name, `%${search}%`),
+          )!,
         );
       }
 
-      // Get total count
-      const total = filteredUsers.length;
+      const whereClause =
+        conditions.length > 0 ? and(...conditions) : undefined;
+      const orderColumn =
+        input.sortBy === 'email' ? schema.user.email : schema.user.createdAt;
+      const orderBy =
+        input.sortOrder === 'asc' ? asc(orderColumn) : desc(orderColumn);
+      const [totalRow] = whereClause
+        ? await db
+            .select({ value: count() })
+            .from(schema.user)
+            .where(whereClause)
+        : await db.select({ value: count() }).from(schema.user);
 
-      // Sort by createdAt descending (most recent first)
-      filteredUsers.sort(
-        (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
-      );
+      let usersQuery = db.select().from(schema.user).$dynamic();
+      if (whereClause) {
+        usersQuery = usersQuery.where(whereClause);
+      }
+      const paginatedUsers = await usersQuery
+        .orderBy(orderBy)
+        .limit(limit)
+        .offset(offset);
 
-      // Apply pagination
-      const paginatedUsers = filteredUsers.slice(offset, offset + limit);
-
-      // Map users to output format
       const mappedUsers = paginatedUsers.map((user) => ({
         id: user.id,
         name: user.name || null,
         email: user.email,
         emailVerified: user.emailVerified || false,
         image: user.image || null,
-        role: user.role || 'user', // Include role field
-        status: 'active' as const, // Default status - can be enhanced later
+        role: user.role || 'user',
+        status: user.banned
+          ? ('suspended' as const)
+          : user.emailVerified
+            ? ('active' as const)
+            : ('pending' as const),
         lastLogin: user.updatedAt ? user.updatedAt.toISOString() : null,
         createdAt: user.createdAt.toISOString(),
-        organizationCount: 0, // TODO: Add organization count when org plugin is fully implemented
+        organizationCount: 0,
       }));
-
-      console.log(
-        `✅ [adminListUsers] Successfully retrieved ${mappedUsers.length} users (total: ${total})`,
-      );
 
       return {
         success: true,
         users: mappedUsers,
-        total,
+        total: totalRow?.value ?? mappedUsers.length,
       };
     } catch (error) {
       console.error('❌ [adminListUsers] Admin list users failed:', error);
@@ -2655,20 +3308,78 @@ const adminGetUserProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try Admin get user placeholder
-      throw new Error('Admin get user API endpoint verification needed');
-    } catch {
-      console.warn('Admin get user API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'Admin get user not available - requires admin role and custom implementation',
-    };
+      const [user] = await db
+        .select()
+        .from(schema.user)
+        .where(eq(schema.user.id, input.userId))
+        .limit(1);
+
+      if (!user) {
+        return {
+          success: false,
+          error: 'User not found',
+        };
+      }
+
+      const memberships = await db
+        .select({
+          id: schema.organization.id,
+          name: schema.organization.name,
+          role: schema.member.role,
+        })
+        .from(schema.member)
+        .innerJoin(
+          schema.organization,
+          eq(schema.member.organizationId, schema.organization.id),
+        )
+        .where(eq(schema.member.userId, user.id));
+
+      return {
+        success: true,
+        user: {
+          id: user.id,
+          name: user.name || null,
+          email: user.email,
+          emailVerified: user.emailVerified || false,
+          image: user.image || null,
+          status: user.banned
+            ? ('suspended' as const)
+            : user.emailVerified
+              ? ('active' as const)
+              : ('pending' as const),
+          lastLogin: user.updatedAt ? user.updatedAt.toISOString() : null,
+          createdAt: user.createdAt.toISOString(),
+          updatedAt: user.updatedAt.toISOString(),
+          metadata: {
+            phoneNumber: user.phoneNumber,
+            phoneNumberVerified: user.phoneNumberVerified,
+            twoFactorEnabled: user.twoFactorEnabled,
+            role: user.role || 'user',
+            banned: user.banned,
+            banReason: user.banReason,
+            banExpires: user.banExpires?.toISOString(),
+          },
+          organizations: memberships.map((membership) => ({
+            id: membership.id,
+            name: membership.name,
+            role:
+              membership.role === 'owner' || membership.role === 'admin'
+                ? membership.role
+                : 'member',
+          })),
+        },
+      };
+    } catch (error) {
+      console.error('❌ Admin get user failed:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get user',
+      };
+    }
   });
 
 // const adminSuspendUserProcedure = os
@@ -2717,22 +3428,77 @@ const adminListOrganizationsProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try Admin organization listing placeholder
-      throw new Error(
-        'Admin organization listing API endpoint verification needed',
-      );
-    } catch {
-      console.warn('Admin organization listing API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
+      let organizationsQuery = db.select().from(schema.organization).$dynamic();
+      if (input.search) {
+        organizationsQuery = organizationsQuery.where(
+          ilike(schema.organization.name, `%${input.search}%`),
+        );
+      }
+      const orderColumn =
+        input.sortBy === 'name'
+          ? schema.organization.name
+          : schema.organization.createdAt;
+      const organizations = await organizationsQuery
+        .orderBy(
+          input.sortOrder === 'asc' ? asc(orderColumn) : desc(orderColumn),
+        )
+        .limit(input.limit)
+        .offset(input.offset);
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'Admin organization listing not available - requires admin role and custom implementation',
-    };
+      const mappedOrganizations = await Promise.all(
+        organizations.map(async (organization) => {
+          const [memberCountRow] = await db
+            .select({ value: count() })
+            .from(schema.member)
+            .where(eq(schema.member.organizationId, organization.id));
+          const [ownerMember] = await db
+            .select({
+              userId: schema.member.userId,
+              email: schema.user.email,
+            })
+            .from(schema.member)
+            .innerJoin(schema.user, eq(schema.member.userId, schema.user.id))
+            .where(
+              and(
+                eq(schema.member.organizationId, organization.id),
+                eq(schema.member.role, 'owner'),
+              ),
+            )
+            .limit(1);
+
+          return {
+            id: organization.id,
+            name: organization.name,
+            slug: organization.slug || '',
+            memberCount: memberCountRow?.value ?? 0,
+            createdAt: organization.createdAt.toISOString(),
+            ownerId: ownerMember?.userId ?? '',
+            ownerEmail: ownerMember?.email ?? '',
+          };
+        }),
+      );
+
+      const [totalRow] = await db
+        .select({ value: count() })
+        .from(schema.organization);
+      return {
+        success: true,
+        organizations: mappedOrganizations,
+        total: totalRow?.value ?? mappedOrganizations.length,
+      };
+    } catch (error) {
+      console.error('❌ Admin organization listing failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to list organizations',
+      };
+    }
   });
 
 const adminGetSystemStatsProcedure = os
@@ -2764,20 +3530,55 @@ const adminGetSystemStatsProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ context }) => {
     try {
-      // Try Admin system stats placeholder
-      throw new Error('Admin system stats API endpoint verification needed');
-    } catch {
-      console.warn('Admin system stats API not available');
-    }
+      await authorizeAdminContext(context as RpcContext);
+      const [userCount] = await db.select({ value: count() }).from(schema.user);
+      const [organizationCount] = await db
+        .select({ value: count() })
+        .from(schema.organization);
+      const [apiKeyCount] = await db
+        .select({ value: count() })
+        .from(schema.apikey);
+      const [oidcClientCount] = await db
+        .select({ value: count() })
+        .from(schema.oauthApplication);
+      const activeUsersRow = await db
+        .select({ value: count() })
+        .from(schema.user)
+        .where(eq(schema.user.banned, false));
 
-    // Fallback response
-    return {
-      success: false,
-      error:
-        'Admin system stats not available - requires admin role and custom implementation',
-    };
+      const memoryUsage = process.memoryUsage();
+      return {
+        success: true,
+        stats: {
+          totalUsers: userCount?.value ?? 0,
+          totalOrganizations: organizationCount?.value ?? 0,
+          totalAPIKeys: apiKeyCount?.value ?? 0,
+          totalOIDCClients: oidcClientCount?.value ?? 0,
+          activeUsers: activeUsersRow[0]?.value ?? 0,
+          newUsersThisPeriod: 0,
+          newOrganizationsThisPeriod: 0,
+          loginStats: {
+            totalLogins: 0,
+            uniqueLogins: 0,
+            failedLogins: 0,
+          },
+          systemHealth: {
+            uptime: Math.floor(process.uptime()),
+            memoryUsage: memoryUsage.rss,
+            cpuUsage: 0,
+          },
+        },
+      };
+    } catch (error) {
+      console.error('❌ Admin system stats failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to get system stats',
+      };
+    }
   });
 
 // Additional Better Auth Admin Plugin Procedures
@@ -2800,83 +3601,31 @@ const adminCreateUserProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      // For Sprint 3 admin user creation, we need to check admin permissions
-      const headers = headersFromCtx(context as RpcContext);
-
-      console.log('🔍 [adminCreateUser] Headers received:', {
-        cookie: headers?.get('cookie'),
-        hasHeaders: !!headers,
-        internalSecret: headers?.get('x-internal-service-secret')
-          ? 'present'
-          : 'missing',
-      });
-
-      // Check internal service authentication OR user session
-      const internalServiceSecret = headers?.get('x-internal-service-secret');
-      const expectedSecret =
-        process.env.INTERNAL_SERVICE_SECRET || process.env.INTERNAL_API_KEY;
-      const isInternalService =
-        internalServiceSecret &&
-        expectedSecret &&
-        internalServiceSecret === expectedSecret;
-
-      if (!isInternalService) {
-        // For external requests, check session authentication
-        const session = await auth.api.getSession({
-          headers: headers ?? new Headers(),
-        });
-
-        console.log('🔍 [adminCreateUser] Session result:', {
-          hasSession: !!session,
-          hasUser: !!session?.user,
-          userId: session?.user?.id,
-        });
-
-        if (!session || !session.user) {
-          return {
-            success: false,
-            error: 'Authentication required for admin operations',
-          };
-        }
-      } else {
-        console.log(
-          '✅ [adminCreateUser] Internal service authenticated - bypassing session check',
-        );
-      }
-
-      // Create user directly via database with hashed password using Node crypto
-      const crypto = await import('crypto');
-      const salt = crypto.randomBytes(16).toString('hex');
-      const hashedPassword =
-        crypto.scryptSync(input.password, salt, 64).toString('hex') +
-        '.' +
-        salt;
-      const userId = `user_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-      const now = new Date();
-
-      const [newUser] = await db
-        .insert(schema.user)
-        .values({
-          id: userId,
+      const authorization = await authorizeAdminContext(context as RpcContext);
+      const createUser = getAuthApiMethod('createUser');
+      const result = (await createUser({
+        body: {
           email: input.email,
+          password: input.password,
           name: input.name,
-          emailVerified: false,
           role: input.role || 'user',
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning();
+          data: input.data,
+        },
+        ...(authorization.internal ? {} : { headers: authorization.headers }),
+      })) as {
+        user?: {
+          id: string;
+          email: string;
+          name?: string | null;
+          role?: string;
+          createdAt?: Date | string;
+        };
+      };
 
-      // Insert account with hashed password
-      await db.insert(schema.account).values({
-        id: `account_${Date.now()}`,
-        userId: newUser.id,
-        accountId: newUser.email,
-        providerId: 'credential',
-        password: hashedPassword,
-        createdAt: now,
-        updatedAt: now,
-      });
+      const newUser = result.user;
+      if (!newUser) {
+        throw new Error('Better Auth createUser did not return a user');
+      }
 
       return {
         success: true,
@@ -2885,7 +3634,7 @@ const adminCreateUserProcedure = os
           email: newUser.email,
           name: newUser.name || input.name,
           role: newUser.role || 'user',
-          createdAt: newUser.createdAt.toISOString(),
+          createdAt: toIsoString(newUser.createdAt) ?? new Date().toISOString(),
         },
       };
     } catch (error) {
@@ -2907,44 +3656,17 @@ const adminSetRoleProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      // For Sprint 3 admin set role, we need to check admin permissions
-      const headers = headersFromCtx(context as RpcContext);
-
-      // Check if user is authenticated and has admin role
-      const session = await auth.api.getSession({
-        headers: headers ?? new Headers(),
+      const authorization = await authorizeAdminContext(context as RpcContext, {
+        allowInternal: false,
       });
-
-      if (!session || !session.user) {
-        return {
-          success: false,
-          error: 'Authentication required for admin operations',
-        };
-      }
-
-      // For Sprint 3, we'll use internal HTTP call to the Better Auth admin endpoint
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
-      const cookieHeader = headers?.get('cookie') || '';
-
-      const setRoleResponse = await fetch(
-        `${authUrl}/api/auth/admin/set-role`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: cookieHeader,
-          },
-          body: JSON.stringify({
-            userId: input.userId,
-            role: input.role,
-          }),
+      const setRole = getAuthApiMethod('setRole');
+      await setRole({
+        body: {
+          userId: input.userId,
+          role: input.role,
         },
-      );
-
-      if (!setRoleResponse.ok) {
-        const errorText = await setRoleResponse.text();
-        throw new Error(`Admin set role failed: ${errorText}`);
-      }
+        headers: authorization.headers,
+      });
 
       return { success: true };
     } catch (error) {
@@ -2967,45 +3689,18 @@ const adminBanUserProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      // For Sprint 3 admin ban user, we need to check admin permissions
-      const headers = headersFromCtx(context as RpcContext);
-
-      // Check if user is authenticated and has admin role
-      const session = await auth.api.getSession({
-        headers: headers ?? new Headers(),
+      const authorization = await authorizeAdminContext(context as RpcContext, {
+        allowInternal: false,
       });
-
-      if (!session || !session.user) {
-        return {
-          success: false,
-          error: 'Authentication required for admin operations',
-        };
-      }
-
-      // For Sprint 3, we'll use internal HTTP call to the Better Auth admin endpoint
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
-      const cookieHeader = headers?.get('cookie') || '';
-
-      const banUserResponse = await fetch(
-        `${authUrl}/api/auth/admin/ban-user`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: cookieHeader,
-          },
-          body: JSON.stringify({
-            userId: input.userId,
-            banReason: input.banReason,
-            banExpiresIn: input.banExpiresIn,
-          }),
+      const banUser = getAuthApiMethod('banUser');
+      await banUser({
+        body: {
+          userId: input.userId,
+          banReason: input.banReason,
+          banExpiresIn: input.banExpiresIn,
         },
-      );
-
-      if (!banUserResponse.ok) {
-        const errorText = await banUserResponse.text();
-        throw new Error(`Admin ban user failed: ${errorText}`);
-      }
+        headers: authorization.headers,
+      });
 
       return { success: true };
     } catch (error) {
@@ -3027,41 +3722,16 @@ const adminUnbanUserProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      const headers = headersFromCtx(context as RpcContext);
-
-      // Check if user is authenticated and has admin role
-      const session = await auth.api.getSession({
-        headers: headers ?? new Headers(),
+      const authorization = await authorizeAdminContext(context as RpcContext, {
+        allowInternal: false,
       });
-
-      if (!session || !session.user) {
-        return {
-          success: false,
-          error: 'Authentication required for admin operations',
-        };
-      }
-
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
-      const cookieHeader = headers?.get('cookie') || '';
-
-      const unbanUserResponse = await fetch(
-        `${authUrl}/api/auth/admin/unban-user`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: cookieHeader,
-          },
-          body: JSON.stringify({
-            userId: input.userId,
-          }),
+      const unbanUser = getAuthApiMethod('unbanUser');
+      await unbanUser({
+        body: {
+          userId: input.userId,
         },
-      );
-
-      if (!unbanUserResponse.ok) {
-        const errorText = await unbanUserResponse.text();
-        throw new Error(`Admin unban user failed: ${errorText}`);
-      }
+        headers: authorization.headers,
+      });
 
       return { success: true };
     } catch (error) {
@@ -3084,63 +3754,24 @@ const adminUpdateUserProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      const headers = headersFromCtx(context as RpcContext);
+      const authorization = await authorizeAdminContext(context as RpcContext, {
+        allowInternal: false,
+      });
+      const data: Record<string, any> = {};
+      if (input.name !== undefined) data.name = input.name;
+      if (input.email !== undefined) data.email = input.email;
+      if (input.image !== undefined) data.image = input.image;
 
-      // Check internal service authentication OR user session with admin role
-      const internalServiceSecret = headers?.get('x-internal-service-secret');
-      const expectedSecret =
-        process.env.INTERNAL_SERVICE_SECRET || process.env.INTERNAL_API_KEY;
-      const isInternalService =
-        internalServiceSecret &&
-        expectedSecret &&
-        internalServiceSecret === expectedSecret;
-
-      if (!isInternalService) {
-        // For external requests, check session authentication and admin role
-        const session = await auth.api.getSession({
-          headers: headers ?? new Headers(),
-        });
-
-        if (!session || !session.user) {
-          return {
-            success: false,
-            error: 'Authentication required for admin operations',
-          };
-        }
-
-        // Check if user has admin role
-        const user = session.user as { role?: string };
-        if (user.role !== 'admin' && user.role !== 'superadmin') {
-          return {
-            success: false,
-            error: 'Admin role required for this operation',
-          };
-        }
-      }
-
-      // Use Better Auth's native admin API to update user
-      const updateData: Record<string, any> = { userId: input.userId };
-      if (input.name !== undefined) updateData.name = input.name;
-      if (input.email !== undefined) updateData.email = input.email;
-      if (input.image !== undefined) updateData.image = input.image;
-
-      const result = await auth.api.updateUser({
-        body: updateData,
-        headers: headers ?? new Headers(),
-        returnHeaders: true,
+      const adminUpdateUser = getAuthApiMethod('adminUpdateUser');
+      const result = await adminUpdateUser({
+        body: {
+          userId: input.userId,
+          data,
+        },
+        headers: authorization.headers,
       });
 
-      if (
-        !result.response ||
-        typeof result.response !== 'object' ||
-        !('user' in result.response)
-      ) {
-        throw new Error(
-          'Update user failed: Invalid response from Better Auth',
-        );
-      }
-
-      return { success: true, user: (result.response as any).user };
+      return { success: true, user: (result as any).user };
     } catch (error) {
       console.error('❌ Admin update user failed:', error);
       return {
@@ -3174,45 +3805,16 @@ const adminListUserSessionsProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      // For Sprint 3 admin list user sessions, we need to check admin permissions
-      const headers = headersFromCtx(context as RpcContext);
-
-      // Check if user is authenticated and has admin role
-      const session = await auth.api.getSession({
-        headers: headers ?? new Headers(),
+      const authorization = await authorizeAdminContext(context as RpcContext, {
+        allowInternal: false,
       });
-
-      if (!session || !session.user) {
-        return {
-          success: false,
-          error: 'Authentication required for admin operations',
-        };
-      }
-
-      // For Sprint 3, we'll use internal HTTP call to the Better Auth admin endpoint
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
-      const cookieHeader = headers?.get('cookie') || '';
-
-      const sessionsResponse = await fetch(
-        `${authUrl}/api/auth/admin/list-user-sessions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: cookieHeader,
-          },
-          body: JSON.stringify({
-            userId: input.userId,
-          }),
+      const listUserSessions = getAuthApiMethod('listUserSessions');
+      const sessionsData = (await listUserSessions({
+        body: {
+          userId: input.userId,
         },
-      );
-
-      if (!sessionsResponse.ok) {
-        const errorText = await sessionsResponse.text();
-        throw new Error(`Admin list user sessions failed: ${errorText}`);
-      }
-
-      const sessionsData = (await sessionsResponse.json()) as {
+        headers: authorization.headers,
+      })) as {
         sessions?: Array<{
           id: string;
           token: string;
@@ -3251,43 +3853,16 @@ const adminRemoveUserProcedure = os
   )
   .handler(async ({ input, context }) => {
     try {
-      // For Sprint 3 admin remove user, we need to check admin permissions
-      const headers = headersFromCtx(context as RpcContext);
-
-      // Check if user is authenticated and has admin role
-      const session = await auth.api.getSession({
-        headers: headers ?? new Headers(),
+      const authorization = await authorizeAdminContext(context as RpcContext, {
+        allowInternal: false,
       });
-
-      if (!session || !session.user) {
-        return {
-          success: false,
-          error: 'Authentication required for admin operations',
-        };
-      }
-
-      // For Sprint 3, we'll use internal HTTP call to the Better Auth admin endpoint
-      const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3000';
-      const cookieHeader = headers?.get('cookie') || '';
-
-      const removeUserResponse = await fetch(
-        `${authUrl}/api/auth/admin/remove-user`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: cookieHeader,
-          },
-          body: JSON.stringify({
-            userId: input.userId,
-          }),
+      const removeUser = getAuthApiMethod('removeUser');
+      await removeUser({
+        body: {
+          userId: input.userId,
         },
-      );
-
-      if (!removeUserResponse.ok) {
-        const errorText = await removeUserResponse.text();
-        throw new Error(`Admin remove user failed: ${errorText}`);
-      }
+        headers: authorization.headers,
+      });
 
       return { success: true };
     } catch (_error) {
@@ -3333,23 +3908,59 @@ const listDeviceSessionsProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ context }) => {
     try {
-      // Try Better Auth multi-session API
+      const headers = headersFromCtx(context as RpcContext);
+      const listDeviceSessions = getAuthApiMethod('listDeviceSessions');
+      const sessions = (await listDeviceSessions({
+        headers: headers ?? new Headers(),
+      })) as Array<{
+        session: {
+          id: string;
+          token: string;
+          userId: string;
+          expiresAt: Date | string;
+          createdAt: Date | string;
+          updatedAt: Date | string;
+          userAgent?: string | null;
+          ipAddress?: string | null;
+        };
+      }>;
 
-      throw new Error(
-        'Multi-session listDeviceSessions API endpoint verification needed',
-      );
-    } catch {
-      console.warn('Multi-session API not available');
+      const currentSession = await getAuthenticatedSession(headers);
+      const mappedSessions = sessions.map((entry) => ({
+        id: entry.session.id,
+        userId: entry.session.userId,
+        expiresAt:
+          toIsoString(entry.session.expiresAt) ?? new Date().toISOString(),
+        ipAddress: entry.session.ipAddress || undefined,
+        userAgent: entry.session.userAgent || undefined,
+        deviceInfo: {
+          browser: entry.session.userAgent || undefined,
+        },
+        createdAt:
+          toIsoString(entry.session.createdAt) ?? new Date().toISOString(),
+        lastSeenAt:
+          toIsoString(entry.session.updatedAt) ?? new Date().toISOString(),
+        isCurrent:
+          typeof (currentSession?.session as any)?.token === 'string' &&
+          (currentSession?.session as any).token === entry.session.token,
+      }));
+
+      return {
+        success: true,
+        sessions: mappedSessions,
+      };
+    } catch (error) {
+      console.error('❌ Multi-session list devices failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to list device sessions',
+      };
     }
-
-    // Return error when multi-session management is not configured
-    return {
-      success: false,
-      error:
-        'Multi-session management is not configured on this server. Please contact support.',
-    };
   });
 
 // Revoke Device Session
@@ -3365,23 +3976,28 @@ const revokeDeviceSessionProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(({ input }) => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try Better Auth multi-session revoke API
+      const headers = headersFromCtx(context as RpcContext);
+      const revokeDeviceSession = getAuthApiMethod('revokeDeviceSession');
+      await revokeDeviceSession({
+        body: {
+          sessionToken: input.sessionToken,
+        },
+        headers: headers ?? new Headers(),
+      });
 
-      throw new Error(
-        'Multi-session revokeDeviceSession API endpoint verification needed',
-      );
-    } catch {
-      console.warn('Multi-session revoke API not available');
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Multi-session revoke device failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to revoke device session',
+      };
     }
-
-    // Return error when multi-session management is not configured
-    return {
-      success: false,
-      error:
-        'Multi-session management is not configured on this server. Please contact support.',
-    };
   });
 
 // Revoke All Sessions
@@ -3394,23 +4010,23 @@ const revokeAllSessionsProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ context }) => {
     try {
-      // Try Better Auth session revocation API
+      const headers = headersFromCtx(context as RpcContext);
+      const revokeSessions = getAuthApiMethod('revokeSessions');
+      await revokeSessions({
+        headers: headers ?? new Headers(),
+      });
 
-      throw new Error(
-        'Session revokeSessions API endpoint verification needed',
-      );
-    } catch {
-      console.warn('Session revocation API not available');
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Revoke all sessions failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to revoke sessions',
+      };
     }
-
-    // Return error when session management is not configured
-    return {
-      success: false,
-      error:
-        'Session management is not configured on this server. Please contact support.',
-    };
   });
 
 // Revoke Other Sessions (keep current)
@@ -3423,23 +4039,25 @@ const revokeOtherSessionsProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(() => {
+  .handler(async ({ context }) => {
     try {
-      // Try Better Auth session revocation API
+      const headers = headersFromCtx(context as RpcContext);
+      const revokeOtherSessions = getAuthApiMethod('revokeOtherSessions');
+      await revokeOtherSessions({
+        headers: headers ?? new Headers(),
+      });
 
-      throw new Error(
-        'Session revokeOtherSessions API endpoint verification needed',
-      );
-    } catch {
-      console.warn('Session revocation API not available');
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Revoke other sessions failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to revoke other sessions',
+      };
     }
-
-    // Return error when session management is not configured
-    return {
-      success: false,
-      error:
-        'Session management is not configured on this server. Please contact support.',
-    };
   });
 
 // Set Active Session
@@ -3455,23 +4073,28 @@ const setActiveSessionProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(({ input }) => {
+  .handler(async ({ input, context }) => {
     try {
-      // Try Better Auth multi-session setActiveSession API
+      const headers = headersFromCtx(context as RpcContext);
+      const setActiveSession = getAuthApiMethod('setActiveSession');
+      await setActiveSession({
+        body: {
+          sessionToken: input.sessionToken,
+        },
+        headers: headers ?? new Headers(),
+      });
 
-      throw new Error(
-        'Multi-session setActiveSession API endpoint verification needed',
-      );
-    } catch {
-      console.warn('Multi-session setActive API not available');
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Multi-session set active failed:', error);
+      return {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to set active session',
+      };
     }
-
-    // Return error when multi-session management is not configured
-    return {
-      success: false,
-      error:
-        'Multi-session management is not configured on this server. Please contact support.',
-    };
   });
 
 // Router

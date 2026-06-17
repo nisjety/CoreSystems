@@ -41,11 +41,48 @@ pub struct InferenceConfig {
     /// `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`).
     pub azure_openai_embedding_deployments: Vec<String>,
 
+    /// Azure AI Foundry Anthropic (Claude) resource base endpoint, e.g.
+    /// `https://<resource>.services.ai.azure.com` (from `AZURE_ANTHROPIC_ENDPOINT`).
+    /// When set with a key, Claude requests route here instead of
+    /// `api.anthropic.com` — the fix for the direct API's exhausted credit.
+    pub azure_anthropic_endpoint: Option<String>,
+
+    /// Azure AI Foundry Anthropic API key (from `AZURE_ANTHROPIC_API_KEY`).
+    pub azure_anthropic_api_key: Option<String>,
+
+    /// Deployed Claude deployment-name catalog on the Azure Foundry resource
+    /// (from `AZURE_ANTHROPIC_DEPLOYMENTS`). Used for `list_models`.
+    pub azure_anthropic_deployments: Vec<String>,
+
     /// Maximum retries per provider before falling back.
     pub max_retries_per_provider: u32,
 
     /// Prompt cache TTL in seconds.
     pub cache_ttl_secs: u64,
+
+    /// Master switch for the Velion intent layer (from `VELION_INTENT_ENABLED`,
+    /// default on). When off, `velion-*` model ids fall through to the legacy
+    /// per-provider default resolution.
+    pub velion_intent_enabled: bool,
+
+    /// cost-core base URL for the intent layer's budget check (from
+    /// `COST_CORE_URL`). `None` disables the budget gate (posture is always
+    /// `Unknown`, so routing uses the healthy ladder).
+    pub cost_core_url: Option<String>,
+
+    /// Monthly USD budget cap used as the denominator for the budget posture
+    /// (from `VELION_INTENT_BUDGET_USD`, default 50.0). Seeds the bootstrap
+    /// `RoutingPolicy::budget_cap_usd`; a session-core policy overrides it.
+    pub velion_intent_budget_usd: f64,
+
+    /// session-core base URL for the runtime `RoutingPolicy` store (from
+    /// `SESSION_CORE_URL` or the compose `SESSION_CORE_ADDR`). `None` disables
+    /// the runtime policy store — the chain runs on `RoutingPolicy::default`.
+    pub session_core_url: Option<String>,
+
+    /// How often inference-core re-polls session-core for the live policy, in
+    /// seconds (from `ROUTER_POLICY_REFRESH_SECS`, default 60).
+    pub router_policy_refresh_secs: u64,
 }
 
 impl InferenceConfig {
@@ -72,6 +109,35 @@ impl InferenceConfig {
             .parse()
             .context("INFERENCE_CACHE_TTL_SECS must be a valid u64")?;
 
+        // Velion intent layer — on unless explicitly disabled with a falsey value.
+        let velion_intent_enabled = std::env::var("VELION_INTENT_ENABLED")
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
+
+        let cost_core_url = std::env::var("COST_CORE_URL")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+
+        let velion_intent_budget_usd: f64 = std::env::var("VELION_INTENT_BUDGET_USD")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(50.0);
+
+        // Accept either env name: deployments wire `SESSION_CORE_ADDR` (compose)
+        // while `SESSION_CORE_URL` is the documented primary — same precedence
+        // as execution-core.
+        let session_core_url = std::env::var("SESSION_CORE_URL")
+            .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+
+        let router_policy_refresh_secs: u64 = std::env::var("ROUTER_POLICY_REFRESH_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(60);
+
         Ok(Self {
             provider_order,
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
@@ -94,8 +160,24 @@ impl InferenceConfig {
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENTS",
                 "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
             ),
+            azure_anthropic_endpoint: std::env::var("AZURE_ANTHROPIC_ENDPOINT").ok(),
+            azure_anthropic_api_key: std::env::var("AZURE_ANTHROPIC_API_KEY").ok(),
+            azure_anthropic_deployments: csv_env(
+                "AZURE_ANTHROPIC_DEPLOYMENTS",
+                &[
+                    "claude-haiku-4-5",
+                    "claude-sonnet-4-5",
+                    "claude-sonnet-4-6",
+                    "claude-opus-4-8",
+                ],
+            ),
             max_retries_per_provider: max_retries,
             cache_ttl_secs: cache_ttl,
+            velion_intent_enabled,
+            cost_core_url,
+            velion_intent_budget_usd,
+            session_core_url,
+            router_policy_refresh_secs,
         })
     }
 }

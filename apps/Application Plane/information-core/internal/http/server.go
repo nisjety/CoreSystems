@@ -54,6 +54,7 @@ func newRouter(handler *Handler, internalAPIKey string) *gin.Engine {
 	api.GET("/weather/oslo", handler.WeatherOslo)
 	api.GET("/traffic", handler.Traffic)
 	api.GET("/news", handler.News)
+	api.GET("/shipping/track", handler.Shipping)
 
 	return router
 }

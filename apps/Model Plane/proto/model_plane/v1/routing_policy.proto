@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// RoutingPolicy — runtime-tunable configuration for the Velion intent layer
+// (the "model router"). The intent layer in inference-core resolves the
+// velion-budget / velion-balance / velion-genius modes to a concrete model
+// from request complexity + budget posture; this service makes that policy
+// editable at runtime instead of compile-time constants.
+//
+// session-core owns the durable store (a JSONB singleton row). The full policy
+// travels as an opaque JSON string in `config_json` — the canonical schema is
+// owned by inference-core's RoutingPolicy struct (snake_case). An empty/`{}`
+// config means "use the built-in defaults" (the values hard-coded today), so a
+// fresh deployment behaves identically until an admin edits the policy.
+//
+// Read path: inference-core polls GetPolicy on a refresh tick (fail-soft to
+// defaults). Write path: the Velion BFF gateway calls SetPolicy on an admin
+// PUT. The gateway's read for the admin UI hits inference-core's effective-view
+// endpoint, not this service, so the UI shows what routing is actually using.
+service RoutingPolicy {
+  // Fetch the current policy (singleton). Returns the seeded empty config until
+  // the first SetPolicy write.
+  rpc GetPolicy(GetRoutingPolicyRequest) returns (RoutingPolicyMessage);
+
+  // Replace the policy. `config_json` must be valid JSON (validated like
+  // finetune hyperparameters). `version` is server-incremented; `updated_at`
+  // is server-stamped.
+  rpc SetPolicy(SetRoutingPolicyRequest) returns (RoutingPolicyMessage);
+}
+
+message RoutingPolicyMessage {
+  // The full RoutingPolicy as a JSON string (schema owned by inference-core).
+  string config_json = 1;
+  // Monotonic version, incremented on every SetPolicy.
+  int64 version = 2;
+  // Identity (user/system id) that last wrote the policy.
+  string updated_by = 3;
+  // Unix seconds of the last write.
+  int64 updated_at = 4;
+}
+
+message GetRoutingPolicyRequest {}
+
+message SetRoutingPolicyRequest {
+  string config_json = 1;
+  string updated_by = 2;
+}

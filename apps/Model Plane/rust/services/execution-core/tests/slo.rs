@@ -34,7 +34,9 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         "noop", // unrecognized tool name → tool_bridge returns a default stub output
         "payload",
         "permissive",
-        "", // empty hook context → not blocked
+        "",   // empty hook context → not blocked
+        "",   // empty org id → noop tool path does not use it
+        None, // no browser event sink → noop tool path does not use it
     )
     .await
 }

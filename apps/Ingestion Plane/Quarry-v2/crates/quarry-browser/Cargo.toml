@@ -19,7 +19,10 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 anyhow = "1"
 bytes = "1"
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false, optional = true }
+# 0.9 reorganized features: tokio runtime is built-in, and rustls/native-tls/fetcher
+# only exist for the optional Chrome downloader (which we don't use — the image
+# ships Chromium). Core CDP driver only → no fetcher, no zip backend needed.
+chromiumoxide = { version = "0.9", default-features = false, optional = true }
 futures = { version = "0.3", optional = true }
 
 [dev-dependencies]

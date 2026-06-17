@@ -581,7 +581,9 @@ impl RetrievalPipeline {
         .await
         {
             Ok(rows) => live.extend(rows.into_iter().map(|(id,)| id)),
-            Err(e) => tracing::warn!(error = %e, "wiki live-gate lookup failed; wiki candidates may be dropped"),
+            Err(e) => {
+                tracing::warn!(error = %e, "wiki live-gate lookup failed; wiki candidates may be dropped")
+            }
         }
 
         if live.len() == doc_ids.len() {

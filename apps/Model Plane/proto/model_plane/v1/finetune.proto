@@ -73,6 +73,11 @@ message FinetuneJob {
   double estimated_cost_usd = 16;
   double actual_cost_usd = 17;
   string created_by = 18;             // user_id from JWT claims
+
+  // Hosting SKU tier of the deployment. `developer` ($0/hr, auto-deletes in
+  // 24h) on auto-deploy; `production` (paid Standard hosting) after an explicit
+  // operator promote. Defaults to `developer`.
+  string deployment_tier = 19;        // developer | production
 }
 
 message CreateFinetuneJobRequest {
@@ -144,4 +149,8 @@ message UpdateFinetuneJobStatusRequest {
   // When true the server stamps completed_at = now() and persists. Set on
   // any terminal state (succeeded/failed/cancelled).
   bool set_completed = 8;
+  // New deployment tier (developer | production). Empty = leave unchanged.
+  // The promote route sets this alongside deployment_name when an operator
+  // provisions a paid production deployment.
+  string deployment_tier = 9;
 }

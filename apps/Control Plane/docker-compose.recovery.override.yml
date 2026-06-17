@@ -5,8 +5,8 @@ services:
   controlplane-postgres:
     container_name: controlplane-postgres-recovery
 
-  controlplane-redis:
-    container_name: controlplane-redis-recovery
+  controlplane-dragonfly:
+    container_name: controlplane-dragonfly-recovery
 
   controlplane-nats:
     container_name: controlplane-nats-recovery

@@ -15,7 +15,9 @@ use mp_contracts::model_plane::v1::{
     SubagentRole as ProtoSubagentRole, TodoState as ProtoTodoState,
 };
 use orchestration_event::{
-    ApprovalStateChanged as PbApprovalStateChanged, Event as ProtoEvent,
+    ApprovalStateChanged as PbApprovalStateChanged,
+    BrowserActionDispatched as PbBrowserActionDispatched,
+    BrowserObservationReceived as PbBrowserObservationReceived, Event as ProtoEvent,
     PlanTransitioned as PbPlanTransitioned, RunPausedForApproval as PbRunPausedForApproval,
     RunResumedAfterApproval as PbRunResumedAfterApproval, SubagentAttached as PbSubagentAttached,
     SubagentStopped as PbSubagentStopped, TodoTransitioned as PbTodoTransitioned,
@@ -295,6 +297,42 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     approval_id,
                 }),
             ),
+            OrchestrationEvent::BrowserActionDispatched {
+                run_id,
+                plan_id,
+                action_id,
+                action_type,
+                url,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserActionDispatched(PbBrowserActionDispatched {
+                    run_id,
+                    plan_id,
+                    action_id,
+                    action_type,
+                    url,
+                }),
+            ),
+            OrchestrationEvent::BrowserObservationReceived {
+                run_id,
+                plan_id,
+                action_id,
+                status,
+                page_url,
+                page_title,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserObservationReceived(PbBrowserObservationReceived {
+                    run_id,
+                    plan_id,
+                    action_id,
+                    status,
+                    page_url,
+                    page_title,
+                }),
+            ),
         }
     }
 }
@@ -351,6 +389,25 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 approval_id: p.approval_id,
                 at,
             },
+            ProtoEvent::BrowserActionDispatched(p) => OrchestrationEvent::BrowserActionDispatched {
+                run_id: p.run_id,
+                plan_id: p.plan_id,
+                action_id: p.action_id,
+                action_type: p.action_type,
+                url: p.url,
+                at,
+            },
+            ProtoEvent::BrowserObservationReceived(p) => {
+                OrchestrationEvent::BrowserObservationReceived {
+                    run_id: p.run_id,
+                    plan_id: p.plan_id,
+                    action_id: p.action_id,
+                    status: p.status,
+                    page_url: p.page_url,
+                    page_title: p.page_title,
+                    at,
+                }
+            }
         })
     }
 }
@@ -387,6 +444,31 @@ mod tests {
             thread_id: "thread-1".into(),
             from: TodoState::Pending,
             to: TodoState::InProgress,
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_browser_action_dispatched() {
+        round_trip(&OrchestrationEvent::BrowserActionDispatched {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            action_id: "act_0001".into(),
+            action_type: "goto".into(),
+            url: "https://example.com".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_browser_observation_received() {
+        round_trip(&OrchestrationEvent::BrowserObservationReceived {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            action_id: "act_0001".into(),
+            status: "success".into(),
+            page_url: "https://example.com/landing".into(),
+            page_title: "Example Domain".into(),
             at: fixture_at(),
         });
     }

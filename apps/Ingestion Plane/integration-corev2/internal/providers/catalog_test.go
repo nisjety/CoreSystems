@@ -68,6 +68,41 @@ func TestCatalogIncludesAdminAndInboundProviders(t *testing.T) {
 	}
 }
 
+func TestCatalogIncludesSocialProvidersWithStagedOAuthReadiness(t *testing.T) {
+	for _, want := range []string{"linkedin", "x", "instagram", "facebook", "snapchat"} {
+		provider, ok := Find(want)
+		if !ok {
+			t.Fatalf("catalog missing social provider %q", want)
+		}
+		if provider.Category != "social" {
+			t.Fatalf("%s category = %q, want social", want, provider.Category)
+		}
+		if !provider.DirectOAuthReady {
+			t.Fatalf("%s should be direct OAuth ready once credentials are configured", want)
+		}
+		if _, ok := FindOAuth(want); !ok {
+			t.Fatalf("%s should be available through OAuth connect sessions", want)
+		}
+	}
+	snapchat, _ := Find("snapchat")
+	if slices.Contains(ResolveCapabilities(snapchat, nil, []string{"ads"}), "social.post.write") {
+		t.Fatalf("snapchat ads bundle should not imply organic post publishing")
+	}
+	tiktok, ok := Find("tiktok")
+	if !ok {
+		t.Fatalf("catalog missing social provider %q", "tiktok")
+	}
+	if tiktok.Category != "social" {
+		t.Fatalf("tiktok category = %q, want social", tiktok.Category)
+	}
+	if tiktok.DirectOAuthReady {
+		t.Fatalf("tiktok should stay catalog-only until its provider-specific token flow lands")
+	}
+	if _, ok := FindOAuth("tiktok"); ok {
+		t.Fatalf("tiktok should not be available through OAuth connect sessions yet")
+	}
+}
+
 func TestProviderReadinessMarksMissingCredentials(t *testing.T) {
 	catalog := WithReadiness(Catalog(), map[string][]string{
 		"stripe": {"STRIPE_CLIENT_ID"},

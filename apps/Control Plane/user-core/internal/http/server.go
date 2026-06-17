@@ -337,43 +337,49 @@ func isAllowedOrigin(origin string) bool {
 
 var bearerHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
-// resolveUserIDFromBearer validates a Bearer token with the auth-service and returns
-// the associated user ID. Returns an empty string if the token is invalid/expired.
-func resolveUserIDFromBearer(ctx context.Context, token, authServiceURL string) string {
+type bearerIdentity struct {
+	userID string
+	role   string
+}
+
+// resolveIdentityFromBearer validates a Bearer token with the auth-service and returns
+// the associated user identity. Returns empty fields if the token is invalid/expired.
+func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string) bearerIdentity {
 	reqURL := authServiceURL + "/api/auth/get-session"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		log.Warn().Err(err).Msg("resolveUserIDFromBearer: failed to build request")
-		return ""
+		return bearerIdentity{}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := bearerHTTPClient.Do(req)
 	if err != nil {
 		log.Warn().Err(err).Msg("resolveUserIDFromBearer: auth-service request failed")
-		return ""
+		return bearerIdentity{}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return bearerIdentity{}
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ""
+		return bearerIdentity{}
 	}
 
 	// Better Auth get-session response: { "session": {...}, "user": { "id": "...", ... } }
 	var payload struct {
 		User *struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Role string `json:"role"`
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.User == nil {
-		return ""
+		return bearerIdentity{}
 	}
-	return payload.User.ID
+	return bearerIdentity{userID: payload.User.ID, role: payload.User.Role}
 }
 
 func authContextMiddleware() gin.HandlerFunc {
@@ -424,10 +430,13 @@ func authContextMiddleware() gin.HandlerFunc {
 				if authURL == "" {
 					authURL = "http://auth-service:3011"
 				}
-				if userID := resolveUserIDFromBearer(c.Request.Context(), bearer, authURL); userID != "" {
+				if identity := resolveIdentityFromBearer(c.Request.Context(), bearer, authURL); identity.userID != "" {
 					// G9: never log raw user_id at info; debug only.
 					log.Debug().Str("auth_method", "bearer").Msg("Auth middleware: resolved user from Bearer")
-					c.Set("user_id", userID)
+					c.Set("user_id", identity.userID)
+					if strings.TrimSpace(identity.role) != "" {
+						c.Set("user_role", identity.role)
+					}
 					c.Next()
 					return
 				}
@@ -457,6 +466,17 @@ func authContextMiddleware() gin.HandlerFunc {
 		name := strings.TrimSpace(c.GetHeader("X-User-Name"))
 		if name != "" {
 			c.Set("user_name", name)
+		}
+
+		role := strings.TrimSpace(c.GetHeader("X-User-Role"))
+		if role == "" {
+			role = strings.TrimSpace(c.GetHeader("X-Auth-Role"))
+		}
+		if role == "" {
+			role = strings.TrimSpace(c.GetHeader("X-User-Roles"))
+		}
+		if role != "" {
+			c.Set("user_role", role)
 		}
 
 		c.Next()

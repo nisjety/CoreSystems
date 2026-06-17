@@ -61,6 +61,7 @@ func (s *Server) setupRoutes() {
 	v1.GET("/orgs/:orgId/quotas/:metric", s.getQuotaStatus)
 	v1.POST("/orgs/:orgId/invoices", s.createInvoice)
 	v1.POST("/orgs/:orgId/checkout-session", s.createCheckoutSession)
+	v1.POST("/orgs/:orgId/checkout-session/confirm", s.confirmCheckoutSession)
 }
 
 func internalAuthMiddleware() gin.HandlerFunc {

@@ -1,13 +1,17 @@
 //! Sequential fallback chain — tries providers in order with bounded retries.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use super::policy_client::PolicyClient;
+use super::routing_policy::RoutingPolicy;
 use super::{
-    anthropic::AnthropicProvider, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk,
-    InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter,
+    anthropic::AnthropicProvider, intent, openai::OpenAiProvider, EmbedRequest, EmbedResponse,
+    InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter,
 };
 use crate::cache::PromptCache;
 use crate::config::InferenceConfig;
@@ -61,10 +65,78 @@ pub struct FallbackChain {
     providers: Vec<(String, BoxedProvider)>,
     max_retries: u32,
     cache: Arc<PromptCache>,
+    /// The live Velion routing policy. Seeded from [`RoutingPolicy::default`] and
+    /// hot-swapped by the refresh loop / the HTTP PUT write-through. When
+    /// `policy.enabled` is false the intent layer is bypassed.
+    policy: Arc<ArcSwap<RoutingPolicy>>,
+    /// Client for session-core's `RoutingPolicy` store. Drives the refresh loop
+    /// and the write path; `None` when `SESSION_CORE_URL`/`_ADDR` is unset (the
+    /// chain then runs forever on the default policy).
+    policy_client: Option<Arc<PolicyClient>>,
+    /// Best-effort budget signal for the intent layer. `None` disables the gate.
+    budget: Option<Arc<intent::BudgetClient>>,
+}
+
+/// True when the caller didn't pin a model — empty or a "let the gateway pick"
+/// sentinel. Such requests resolve to the per-provider default so "Velion Auto"
+/// works against whatever provider is actually configured.
+fn is_unspecified_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    // Empty / "default", plus any Velion intent id. The intent layer normally
+    // rewrites a `velion-*` id to a concrete model before the provider loop;
+    // treating it as unspecified here is the safety net for when the intent
+    // layer is disabled — the id resolves to the provider default instead of
+    // being sent verbatim (which would 404 the deployment).
+    m.is_empty() || m == "default" || intent::parse_mode(model).is_some()
+}
+
+/// True for an Anthropic-family model id (the only models the Anthropic-shaped
+/// providers can serve). Used to keep `claude-*` requests off the OpenAI/Azure
+/// chat-completions surface (which would 404 the deployment) and vice-versa.
+fn is_anthropic_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("claude")
+}
+
+/// The Azure `model-router` deployment — Azure auto-routes it to the cheapest
+/// capable model. Used as the smart default for unspecified requests when the
+/// Azure `OpenAI` provider is serving them.
+const AZURE_MODEL_ROUTER: &str = "model-router";
+
+/// Default chat model for a registered provider, used when the request leaves
+/// the model unspecified ("Velion Auto").
+///
+/// * `azure-openai` → `model-router` (Azure's cost-optimizing auto-router).
+/// * `azure-anthropic` → cheapest Claude deployment (Haiku).
+/// * `anthropic` (direct) → first-party Claude default.
+/// * `openai` (direct) → `OpenAI` chat default.
+fn default_model_for(provider_name: &str) -> &'static str {
+    match provider_name {
+        "azure-openai" => AZURE_MODEL_ROUTER,
+        "azure-anthropic" => super::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL,
+        "anthropic" => super::anthropic::DEFAULT_ANTHROPIC_MODEL,
+        _ => super::openai::DEFAULT_OPENAI_MODEL,
+    }
+}
+
+/// Whether a registered provider can serve the requested model. Anthropic-shaped
+/// providers serve only `claude-*`; `OpenAI`-shaped providers serve everything
+/// else. An unspecified model is served by any provider (it resolves to that
+/// provider's default). This stops the chain wasting an attempt — and emitting a
+/// spurious 404 — by sending a Claude model to the `OpenAI` surface or an
+/// `OpenAI` model to the Anthropic surface.
+fn provider_serves_model(provider_name: &str, model: &str) -> bool {
+    if is_unspecified_model(model) {
+        return true;
+    }
+    let anthropic_provider = matches!(provider_name, "anthropic" | "azure-anthropic");
+    anthropic_provider == is_anthropic_model(model)
 }
 
 impl FallbackChain {
     /// Build a fallback chain from configuration.
+    // Linear provider-registration table plus the intent/budget wiring; reads
+    // top-to-bottom and isn't worth fragmenting across helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn from_config(cfg: &InferenceConfig) -> Self {
         let mut providers: Vec<(String, BoxedProvider)> = Vec::new();
         let has_explicit_azure = cfg
@@ -92,11 +164,34 @@ impl FallbackChain {
                         }
                     }
                 }
-                "anthropic" => {
-                    if let Some(key) = &cfg.anthropic_api_key {
-                        if let Ok(p) = AnthropicProvider::new(key.clone()) {
-                            providers.push(("anthropic".to_owned(), Arc::new(p)));
-                            info!(provider = "anthropic", "provider registered");
+                "anthropic" | "azure-anthropic" => {
+                    // Prefer the Azure AI Foundry Claude resource when configured
+                    // — the direct api.anthropic.com path is out of credit (400
+                    // "credit balance too low"), so Azure Foundry is the working
+                    // surface. Fall through to the direct provider only when
+                    // Azure Anthropic is not configured.
+                    let mut registered_azure_anthropic = false;
+                    if let (Some(endpoint), Some(key)) = (
+                        &cfg.azure_anthropic_endpoint,
+                        &cfg.azure_anthropic_api_key,
+                    ) {
+                        if let Ok(p) = AnthropicProvider::new_azure(
+                            key.clone(),
+                            endpoint.clone(),
+                            cfg.azure_anthropic_deployments.clone(),
+                        ) {
+                            providers.push(("azure-anthropic".to_owned(), Arc::new(p)));
+                            info!(provider = "azure-anthropic", "provider registered");
+                            registered_azure_anthropic = true;
+                        }
+                    }
+
+                    if !registered_azure_anthropic {
+                        if let Some(key) = &cfg.anthropic_api_key {
+                            if let Ok(p) = AnthropicProvider::new(key.clone()) {
+                                providers.push(("anthropic".to_owned(), Arc::new(p)));
+                                info!(provider = "anthropic", "provider registered");
+                            }
                         }
                     }
                 }
@@ -143,21 +238,132 @@ impl FallbackChain {
             }
         }
 
+        let budget = cfg
+            .cost_core_url
+            .as_deref()
+            .and_then(intent::BudgetClient::new)
+            .map(Arc::new);
+
+        // Seed the live policy from the compile-time default, then let the
+        // bootstrap env config (velion_intent_enabled / budget_usd) override the
+        // seed so the static knobs still work without a session-core store.
+        let seed = RoutingPolicy {
+            enabled: cfg.velion_intent_enabled,
+            budget_cap_usd: cfg.velion_intent_budget_usd,
+            ..RoutingPolicy::default()
+        };
+        let policy = Arc::new(ArcSwap::from_pointee(seed));
+
+        // When session-core is reachable, build the policy client and start a
+        // periodic refresh loop. A successful fetch hot-swaps the live policy;
+        // an empty/unreachable store leaves the seed in place (fail-soft).
+        let policy_client = cfg.session_core_url.as_deref().and_then(PolicyClient::from_url).map(Arc::new);
+        if let Some(client) = policy_client.clone() {
+            let policy_handle = policy.clone();
+            let refresh = Duration::from_secs(cfg.router_policy_refresh_secs.max(1));
+            tokio::spawn(async move {
+                loop {
+                    if let Some(fetched) = client.fetch().await {
+                        policy_handle.store(Arc::new(fetched));
+                    }
+                    tokio::time::sleep(refresh).await;
+                }
+            });
+        }
+
+        if cfg.velion_intent_enabled {
+            info!(
+                budget_gate = budget.is_some(),
+                policy_store = policy_client.is_some(),
+                "velion intent layer enabled"
+            );
+        }
+
         Self {
             providers,
             max_retries: cfg.max_retries_per_provider,
             cache: Arc::new(PromptCache::new(cfg.cache_ttl_secs)),
+            policy,
+            policy_client,
+            budget,
         }
     }
 
-    /// Create a fallback chain for testing with explicit providers.
+    /// Create a fallback chain for testing with explicit providers. The intent
+    /// layer is off by default here (the seed policy has `enabled = false`) so
+    /// chain tests exercise raw model routing; enable it explicitly with
+    /// [`FallbackChain::with_intent_enabled`].
     #[allow(dead_code)]
     pub fn new_with_providers(providers: Vec<(String, BoxedProvider)>, max_retries: u32) -> Self {
+        let seed = RoutingPolicy {
+            enabled: false,
+            ..RoutingPolicy::default()
+        };
         Self {
             providers,
             max_retries,
             cache: Arc::new(PromptCache::new(300)),
+            policy: Arc::new(ArcSwap::from_pointee(seed)),
+            policy_client: None,
+            budget: None,
         }
+    }
+
+    /// Toggle the Velion intent layer by flipping `enabled` on the live policy
+    /// (test/builder helper).
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_intent_enabled(self, on: bool) -> Self {
+        let mut policy = RoutingPolicy::clone(&self.policy.load_full());
+        policy.enabled = on;
+        self.policy.store(Arc::new(policy));
+        self
+    }
+
+    /// Handle to the live policy (read by the HTTP GET and updated by the PUT
+    /// write-through).
+    #[must_use]
+    pub fn policy_handle(&self) -> Arc<ArcSwap<RoutingPolicy>> {
+        self.policy.clone()
+    }
+
+    /// The session-core policy client, when configured. `None` when
+    /// `SESSION_CORE_URL`/`_ADDR` is unset — the HTTP PUT then returns 503.
+    #[must_use]
+    pub fn policy_client(&self) -> Option<Arc<PolicyClient>> {
+        self.policy_client.clone()
+    }
+
+    /// Resolve a Velion intent model id (`velion-budget`/`-balance`/`-genius`)
+    /// to a concrete model, returning a rewritten request. Returns `None` when
+    /// the intent layer is off or the model is a pinned id (pass through).
+    async fn resolve_intent(&self, req: &InferRequest) -> Option<InferRequest> {
+        let policy = self.policy.load();
+        if !policy.enabled {
+            return None;
+        }
+        let decision = intent::resolve(
+            &policy,
+            &req.model,
+            &req.messages,
+            &req.tools,
+            &req.tool_choice,
+            &req.org_id,
+            &req.user_id,
+            self.budget.as_deref(),
+        )
+        .await?;
+        info!(
+            request_id = %req.request_id,
+            mode = decision.mode.as_str(),
+            complexity = decision.complexity.as_str(),
+            posture = ?decision.posture,
+            resolved_model = %decision.model,
+            "velion intent resolved"
+        );
+        let mut rewritten = req.clone();
+        rewritten.model = decision.model;
+        Some(rewritten)
     }
 
     #[allow(dead_code)]
@@ -173,6 +379,8 @@ impl FallbackChain {
             || hint == name
             || (hint == "openai" && name == "azure-openai")
             || (hint == "azure" && name == "azure-openai")
+            || (hint == "anthropic" && name == "azure-anthropic")
+            || (hint == "claude" && (name == "anthropic" || name == "azure-anthropic"))
     }
 
     /// Perform unary inference with fallback and caching.
@@ -181,6 +389,12 @@ impl FallbackChain {
     ///
     /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
     pub async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        // Velion intent layer: resolve a `velion-*` mode to a concrete model
+        // (complexity + budget) before anything else. A pinned model or a
+        // disabled intent layer leaves `req` untouched.
+        let intent_req = self.resolve_intent(req).await;
+        let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+
         // Check cache first
         if let Some(cached) = self.cache.get(req) {
             info!(request_id = %req.request_id, "cache hit");
@@ -193,6 +407,25 @@ impl FallbackChain {
             if !Self::provider_matches(name, &req.provider_hint) {
                 continue;
             }
+            // Skip providers that cannot serve the requested model family — a
+            // `claude-*` model must not hit the OpenAI surface (it would 404 the
+            // deployment) and vice-versa. Unspecified models pass (they resolve
+            // to the provider's default below).
+            if !provider_serves_model(name, &req.model) {
+                continue;
+            }
+            // "Velion Auto" / unspecified model → resolve to this provider's
+            // default so an unpinned request works against whatever provider is
+            // configured. Specified models pass through unchanged.
+            let resolved_req;
+            let call_req: &InferRequest = if is_unspecified_model(&req.model) {
+                let mut r = req.clone();
+                default_model_for(name).clone_into(&mut r.model);
+                resolved_req = r;
+                &resolved_req
+            } else {
+                req
+            };
             for attempt in 1..=self.max_retries {
                 total_attempts += 1;
                 let span = tracing::info_span!(
@@ -203,7 +436,7 @@ impl FallbackChain {
                 );
                 let _enter = span.enter();
 
-                match provider.infer_dyn(req).await {
+                match provider.infer_dyn(call_req).await {
                     Ok(response) => {
                         self.cache.put(req, &response);
                         info!(
@@ -249,12 +482,29 @@ impl FallbackChain {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        // Velion intent layer — same resolution as the unary path.
+        let intent_req = self.resolve_intent(req).await;
+        let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+
         let mut total_attempts: u32 = 0;
 
         for (name, provider) in &self.providers {
             if !Self::provider_matches(name, &req.provider_hint) {
                 continue;
             }
+            if !provider_serves_model(name, &req.model) {
+                continue;
+            }
+            // "Velion Auto" / unspecified model → resolve to this provider's default.
+            let resolved_req;
+            let call_req: &InferRequest = if is_unspecified_model(&req.model) {
+                let mut r = req.clone();
+                default_model_for(name).clone_into(&mut r.model);
+                resolved_req = r;
+                &resolved_req
+            } else {
+                req
+            };
             for attempt in 1..=self.max_retries {
                 total_attempts += 1;
                 let span = tracing::info_span!(
@@ -265,7 +515,7 @@ impl FallbackChain {
                 );
                 let _enter = span.enter();
 
-                match provider.infer_stream_dyn(req).await {
+                match provider.infer_stream_dyn(call_req).await {
                     Ok(rx) => {
                         info!(
                             provider = %name,
@@ -380,5 +630,189 @@ impl FallbackChain {
             .flat_map(|(_, provider)| provider.list_models_dyn())
             .filter(|model| modality.is_empty() || model.modality == modality)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn detects_unspecified_models() {
+        for m in ["", "   ", "default", "AUTO", "Velion", "velion-auto"] {
+            assert!(is_unspecified_model(m), "{m:?} should be unspecified");
+        }
+        for m in ["claude-sonnet-4-20250514", "gpt-4o-mini"] {
+            assert!(!is_unspecified_model(m), "{m:?} should be specified");
+        }
+    }
+
+    #[test]
+    fn per_provider_defaults() {
+        assert_eq!(
+            default_model_for("anthropic"),
+            crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL
+        );
+        assert_eq!(
+            default_model_for("openai"),
+            crate::provider::openai::DEFAULT_OPENAI_MODEL
+        );
+        // Azure OpenAI defaults to the cost-optimizing model-router, not a fixed
+        // chat model.
+        assert_eq!(default_model_for("azure-openai"), AZURE_MODEL_ROUTER);
+        assert_eq!(default_model_for("azure-openai"), "model-router");
+        // Azure Anthropic defaults to the cheapest Claude deployment.
+        assert_eq!(
+            default_model_for("azure-anthropic"),
+            crate::provider::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL
+        );
+    }
+
+    #[test]
+    fn model_family_gating() {
+        // Claude models only on the Anthropic-shaped providers.
+        assert!(provider_serves_model("anthropic", "claude-haiku-4-5"));
+        assert!(provider_serves_model("azure-anthropic", "claude-opus-4-8"));
+        assert!(!provider_serves_model("azure-openai", "claude-haiku-4-5"));
+        assert!(!provider_serves_model("openai", "claude-sonnet-4-6"));
+
+        // Non-Claude models only on the OpenAI-shaped providers.
+        assert!(provider_serves_model("azure-openai", "gpt-4o-mini"));
+        assert!(provider_serves_model("azure-openai", "model-router"));
+        assert!(provider_serves_model("openai", "deepseek-v3-2"));
+        assert!(!provider_serves_model("anthropic", "gpt-4o-mini"));
+        assert!(!provider_serves_model("azure-anthropic", "model-router"));
+
+        // Unspecified models pass on every provider (resolve to its default).
+        for p in ["anthropic", "azure-anthropic", "openai", "azure-openai"] {
+            assert!(provider_serves_model(p, ""));
+            assert!(provider_serves_model(p, "velion-auto"));
+        }
+    }
+
+    #[test]
+    fn anthropic_hint_matches_azure_anthropic() {
+        assert!(FallbackChain::provider_matches("azure-anthropic", "anthropic"));
+        assert!(FallbackChain::provider_matches("azure-anthropic", "claude"));
+        assert!(FallbackChain::provider_matches("anthropic", "claude"));
+        assert!(FallbackChain::provider_matches("azure-openai", "azure"));
+        // A claude hint must not match the OpenAI surface.
+        assert!(!FallbackChain::provider_matches("azure-openai", "claude"));
+    }
+
+    /// Records the model it was invoked with so tests can assert resolution.
+    struct RecordingProvider {
+        seen_model: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for RecordingProvider {
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            *self.seen_model.lock().unwrap() = Some(req.model.clone());
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: req.model.clone(),
+                stop_reason: "stop".to_owned(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    fn chain_with(seen: Arc<Mutex<Option<String>>>) -> FallbackChain {
+        let provider: BoxedProvider = Arc::new(RecordingProvider { seen_model: seen });
+        FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
+    }
+
+    #[tokio::test]
+    async fn resolves_unspecified_model_to_provider_default() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let req = InferRequest {
+            request_id: "r1".to_owned(),
+            model: String::new(),
+            ..Default::default()
+        };
+        let resp = chain.infer(&req).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL)
+        );
+        // model_used reflects the resolved model, not the empty request.
+        assert_eq!(resp.model_used, crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL);
+    }
+
+    #[tokio::test]
+    async fn preserves_explicitly_pinned_model() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let req = InferRequest {
+            request_id: "r2".to_owned(),
+            model: "claude-opus-4-20250514".to_owned(),
+            ..Default::default()
+        };
+        chain.infer(&req).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some("claude-opus-4-20250514")
+        );
+    }
+
+    #[tokio::test]
+    async fn velion_mode_resolves_to_concrete_model_through_the_chain() {
+        // Provider registered as azure-openai (serves non-claude models); intent
+        // layer on, no budget client → Unknown posture. velion-budget + a trivial
+        // prompt → Budget/Simple → gpt-4o-mini reaches the provider.
+        let seen = Arc::new(Mutex::new(None));
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+        });
+        let chain = FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
+            .with_intent_enabled(true);
+        let req = InferRequest {
+            request_id: "r3".to_owned(),
+            model: "velion-budget".to_owned(),
+            messages: vec![crate::provider::ChatMessage {
+                role: "user".to_owned(),
+                content: "hi".to_owned(),
+                name: String::new(),
+            }],
+            ..Default::default()
+        };
+        chain.infer(&req).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[tokio::test]
+    async fn intent_disabled_falls_back_to_provider_default() {
+        // With the intent layer off, a leaked velion-* id is still treated as
+        // unspecified (is_unspecified_model), so it resolves to the provider
+        // default — model-router for azure-openai — rather than being sent
+        // verbatim (which would 404 the deployment).
+        let seen = Arc::new(Mutex::new(None));
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+        });
+        // new_with_providers defaults intent_enabled = false.
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        let req = InferRequest {
+            request_id: "r4".to_owned(),
+            model: "velion-genius".to_owned(),
+            ..Default::default()
+        };
+        chain.infer(&req).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(AZURE_MODEL_ROUTER));
     }
 }

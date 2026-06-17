@@ -59,10 +59,30 @@ class Settings(BaseSettings):
     allowed_file_types_raw: str = Field(
         default="pdf,docx,txt,md,csv,json,html,htm", alias="ALLOWED_FILE_TYPES"
     )
+    document_processor_order_raw: str = Field(
+        default="local", alias="DOCUMENT_PROCESSOR_ORDER"
+    )
+    tika_enabled: bool = Field(default=False, alias="TIKA_ENABLED")
+    tika_url: str = Field(default="http://tika:9998", alias="TIKA_URL")
+    tika_timeout_s: float = Field(default=20.0, alias="TIKA_TIMEOUT_S")
+    gotenberg_url: str = Field(
+        default="http://gotenberg:3000", alias="GOTENBERG_URL"
+    )
+    stirling_pdf_url: str = Field(
+        default="http://stirling-pdf:8080", alias="STIRLING_PDF_URL"
+    )
 
     @property
     def allowed_file_types(self) -> List[str]:
         return [item.strip().lower() for item in self.allowed_file_types_raw.split(",") if item.strip()]
+
+    @property
+    def document_processor_order(self) -> List[str]:
+        return [
+            item.strip().lower()
+            for item in self.document_processor_order_raw.split(",")
+            if item.strip()
+        ]
 
 
 @lru_cache

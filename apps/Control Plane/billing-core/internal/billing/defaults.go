@@ -108,6 +108,15 @@ func billablePlan(plan string) string {
 	}
 }
 
+func checkoutStatusActivatesPlan(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "succeeded", "processing":
+		return true
+	default:
+		return false
+	}
+}
+
 func copyBoolMap(input map[string]bool) map[string]bool {
 	out := make(map[string]bool, len(input))
 	for key, value := range input {

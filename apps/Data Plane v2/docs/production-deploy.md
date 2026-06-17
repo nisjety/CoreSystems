@@ -6,7 +6,7 @@
 
 ## Topology
 
-DPv2 is a single Postgres + Qdrant + Redis + NATS dependency stack with
+DPv2 is a single Postgres + Qdrant + Dragonfly + NATS dependency stack with
 six service binaries on top. Production sizing assumes ~10 RPS sustained
 peak retrieval per region; scale numbers below scale linearly past that.
 
@@ -27,7 +27,8 @@ Dependencies:
   pool sized via `PG_MAX_CONNECTIONS` (default 20 per replica).
 - **Qdrant 1.17** — single-node OK up to ~5 M points; cluster past that.
   Persistent volume on SSD.
-- **Redis 7** — 2 GiB cache tier. `maxmemory-policy allkeys-lru`.
+- **Dragonfly 1.37+** — 2 GiB Redis-compatible cache tier. Run in cache mode
+  so memory pressure evicts cache entries instead of failing retrieval writes.
 - **NATS JetStream 2.x** — 3-node cluster; file-backed streams.
 - **Prometheus + Grafana** — scrape `/metrics` on each service.
 
@@ -40,7 +41,7 @@ commit values.
 |---|---|---|
 | `DATABASE_URL` | Postgres DSN with TLS | yearly |
 | `QDRANT_URL` / `QDRANT_API_KEY` | Qdrant gRPC + API key | quarterly |
-| `REDIS_URL` | Redis with TLS | quarterly |
+| `DRAGONFLY_URL` / `CACHE_URL` / `REDIS_URL` | Redis-compatible Dragonfly URI with TLS. `REDIS_URL` remains accepted for compatibility. | quarterly |
 | `DPV2_NATS_URL` | NATS cluster URL | quarterly |
 | `MODEL_PLANE_AI_CORE_GRPC_URL` | Legacy env name for current Model Plane `inference-core` gRPC endpoint | n/a |
 | `MODEL_PLANE_EMBEDDING_PROVIDER` | Provider hint passed to `InferenceCore.CreateEmbedding` (`azure_openai` by default) | n/a |
@@ -102,6 +103,6 @@ commit values.
   RTO 30 min.
 - **Qdrant**: snapshot every 6 hours; rebuild from `knowledge_units` if
   the snapshot is stale (reindex script in `data-orchestrator-go`).
-- **Redis**: ephemeral; service degrades gracefully.
+- **Dragonfly cache**: ephemeral; service degrades gracefully.
 - **NATS**: stream replicated 3x; lost messages re-emitted from
   `documents_outbox` (§16.2.6).

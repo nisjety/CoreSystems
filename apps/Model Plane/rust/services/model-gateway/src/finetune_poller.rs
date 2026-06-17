@@ -28,7 +28,7 @@ use serde_json::json;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
-use crate::finetune_azure::{AzureFinetuneClient, AzureJobStatus};
+use crate::finetune_azure::{AzureFinetuneClient, AzureJobStatus, DeploymentTier};
 use crate::finetune_routes::{
     azure_status_is_terminal, map_azure_status_to_local, publish_finetune_event,
 };
@@ -195,6 +195,9 @@ async fn apply_update_status(
             deployment_name: String::new(),
             actual_cost_usd: 0.0,
             set_completed: terminal,
+            // Empty = leave the persisted tier unchanged; a status-only
+            // transition never touches the deployment SKU.
+            deployment_tier: String::new(),
         })
         .await
     {
@@ -233,8 +236,13 @@ async fn apply_deploy_then_update(
     // Provision deployment first — if it fails the status flip
     // doesn't happen and the next tick retries. Operators can
     // inspect via Azure portal or the gateway log.
+    //
+    // Auto-deploys always land on the **Developer** tier: $0/hr hosting that
+    // auto-deletes after 24h, so a fine-tune candidate can never silently rack
+    // up the hourly hosting charge. Promoting to the paid production tier is an
+    // explicit, separate operator action (POST /v1/finetune/jobs/:id/deploy).
     if let Err(e) = azure
-        .create_deployment(deployment_name, fine_tuned_model)
+        .create_deployment(deployment_name, fine_tuned_model, DeploymentTier::Developer)
         .await
     {
         warn!(
@@ -256,6 +264,8 @@ async fn apply_deploy_then_update(
             deployment_name: deployment_name.to_owned(),
             actual_cost_usd: 0.0,
             set_completed: true,
+            // Auto-deploys always land on the free Developer tier.
+            deployment_tier: DeploymentTier::Developer.as_str().to_owned(),
         })
         .await
     {
@@ -443,6 +453,7 @@ mod tests {
             azure_job_id: "ftjob-1".into(),
             fine_tuned_model: fine_tuned.to_owned(),
             deployment_name: deployment.to_owned(),
+            deployment_tier: "developer".to_owned(),
             status: status.to_owned(),
             error_message: err.to_owned(),
             created_at: None,

@@ -100,7 +100,10 @@ pub(crate) fn merge_and_scope(
 }
 
 fn clamp_limit(limit: Option<u32>) -> usize {
-    limit.map(|l| l as usize).unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
+    limit
+        .map(|l| l as usize)
+        .unwrap_or(DEFAULT_LIMIT)
+        .clamp(1, MAX_LIMIT)
 }
 
 async fn fetch_text(state: &AppState, url: &Url) -> Option<String> {
@@ -158,7 +161,11 @@ pub async fn map(
             .into_response();
     }
 
-    let origin = format!("{}://{}", base.scheme(), base.host_str().unwrap_or_default());
+    let origin = format!(
+        "{}://{}",
+        base.scheme(),
+        base.host_str().unwrap_or_default()
+    );
 
     // Best-effort robots for allow-filtering (never fatal).
     let robots = match Url::parse(&format!("{origin}/robots.txt")) {
@@ -178,7 +185,10 @@ pub async fn map(
                 if let Ok(nu) = Url::parse(&nested) {
                     if let Some(nx) = fetch_text(&state, &nu).await {
                         candidates.extend(
-                            quarry_transform::sitemap::parse(&nx).urls.into_iter().map(|e| e.loc),
+                            quarry_transform::sitemap::parse(&nx)
+                                .urls
+                                .into_iter()
+                                .map(|e| e.loc),
                         );
                     }
                 }
@@ -229,7 +239,9 @@ pub async fn map(
             match ranker.rank(term, &urls).await {
                 Ok(mut ranked_urls) => {
                     ranked_urls.sort_by(|a, b| {
-                        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     });
                     let links = ranked_urls
                         .into_iter()
@@ -324,10 +336,10 @@ mod tests {
             false,
             vec![
                 "https://a.com/x".into(),
-                "https://a.com/x".into(), // dup
-                "https://b.com/y".into(), // external
+                "https://a.com/x".into(),      // dup
+                "https://b.com/y".into(),      // external
                 "https://docs.a.com/z".into(), // subdomain, flag off
-                "ftp://a.com/bad".into(), // non-http
+                "ftp://a.com/bad".into(),      // non-http
             ],
         );
         assert_eq!(got, vec!["https://a.com/x".to_string()]);

@@ -1,9 +1,14 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SearchPanel } from "@/features/dashboard-v2/components/VelionHome";
+
+type SearchPanelSnapshotState = ComponentProps<
+	typeof SearchPanel
+>["initialSnapshot"];
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
 	return new Response(JSON.stringify(body), {
@@ -14,9 +19,16 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
 
 function SearchPanelHarness() {
 	const [expanded, setExpanded] = useState(false);
+	const [snapshot, setSnapshot] =
+		useState<SearchPanelSnapshotState>(null);
 
 	return (
-		<SearchPanel expanded={expanded} onExpandedChange={setExpanded} />
+		<SearchPanel
+			expanded={expanded}
+			initialSnapshot={snapshot}
+			onExpandedChange={setExpanded}
+			onSnapshotChange={setSnapshot}
+		/>
 	);
 }
 
@@ -81,7 +93,7 @@ describe("SearchPanel", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("expands into full Quarry results when the user pauses typing without pressing Enter", async () => {
+	it("shows preview results while typing without auto-expanding", async () => {
 		const user = userEvent.setup();
 		render(<SearchPanelHarness />);
 
@@ -92,14 +104,6 @@ describe("SearchPanel", () => {
 			"7 uker embryo",
 		);
 
-		await waitFor(
-			() =>
-				expect(
-					screen.getByPlaceholderText("Skriv et nytt søk..."),
-				).toBeVisible(),
-			{ timeout: 2500 },
-		);
-		expect(screen.getByRole("button", { name: /kompakt/i })).toBeVisible();
 		await waitFor(() =>
 			expect(
 				screen.getAllByText(
@@ -107,6 +111,48 @@ describe("SearchPanel", () => {
 				).length,
 			).toBeGreaterThan(0),
 		);
+		expect(
+			screen.getByPlaceholderText("Ask anything…"),
+		).toBeVisible();
+		expect(
+			screen.queryByRole("button", { name: /kompakt/i }),
+		).not.toBeInTheDocument();
+		expect(
+			screen.getByRole("button", { name: /se mer/i }),
+		).toBeVisible();
+	});
+
+	it("expands into the full search shell when the user presses Enter", async () => {
+		const user = userEvent.setup();
+		render(<SearchPanelHarness />);
+
+		await user.type(
+			screen.getByRole("combobox", {
+				name: "Søk i selskapets kunnskap",
+			}),
+			"7 uker embryo",
+		);
+
+		await waitFor(() =>
+			expect(
+				screen.getByRole("button", { name: /se mer/i }),
+			).toBeVisible(),
+		);
+		await user.keyboard("{Enter}");
+
+		await waitFor(
+			() =>
+				expect(
+					screen.getByPlaceholderText("Skriv et nytt søk..."),
+				).toBeVisible(),
+			{ timeout: 2500 },
+		);
+		expect(
+			screen.getByRole("button", { name: /kompakt/i }),
+		).toBeVisible();
+		expect(
+			screen.getByDisplayValue("7 uker embryo"),
+		).toBeVisible();
 	});
 
 	it("returns to compact mode when the expanded query is cleared", async () => {
@@ -119,6 +165,13 @@ describe("SearchPanel", () => {
 			}),
 			"7 uker embryo",
 		);
+
+		await waitFor(() =>
+			expect(
+				screen.getByRole("button", { name: /se mer/i }),
+			).toBeVisible(),
+		);
+		await user.keyboard("{Enter}");
 
 		const expandedInput = await screen.findByPlaceholderText(
 			"Skriv et nytt søk...",

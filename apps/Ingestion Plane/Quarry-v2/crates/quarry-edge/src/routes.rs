@@ -19,6 +19,7 @@ use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::{RequestKind, RunKind};
 use quarry_core::output::NormalizedOutput;
+use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::zdr::ZdrMode;
 use quarry_runtime::driver::RenderHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
@@ -123,10 +124,15 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/audio", post(crate::audio_routes::audio))
         .route("/v1/search", post(crate::search_routes::search))
         .route("/v1/search/images", post(crate::search_routes::images))
+        .route("/v1/search/similar", post(crate::search_routes::similar))
+        .route("/v1/search/suggest", post(crate::search_routes::suggest))
         .route("/v1/map", post(crate::map_routes::map))
         .route("/v1/extract", post(crate::extract_routes::extract))
         .route("/v1/answer", post(crate::answer_routes::answer))
-        .route("/v1/answer/stream", post(crate::answer_routes::answer_stream))
+        .route(
+            "/v1/answer/stream",
+            post(crate::answer_routes::answer_stream),
+        )
         // Cycle 22 / cluster #4 part 1 — resource list endpoints.
         // /v1/artifacts is served locally; the rest forward to control plane.
         .route("/v1/artifacts", get(crate::resource_routes::list_artifacts))
@@ -238,6 +244,8 @@ pub struct ScrapeRequest {
     #[serde(default)]
     pub zdr: Option<bool>,
     #[serde(default)]
+    pub privacy: Option<PrivacyPolicy>,
+    #[serde(default)]
     pub signals: Option<DriverSignals>,
     #[serde(default)]
     pub ingest: Option<bool>,
@@ -286,6 +294,7 @@ async fn scrape(
 ) -> Result<Json<Envelope<NormalizedOutput>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
     // on the wire for backwards-compat but its value is never trusted.
@@ -325,6 +334,7 @@ async fn scrape(
         zdr,
         ingest: ingest_client,
         org_id: Some(org_id.clone()),
+        privacy: privacy.clone(),
         cancel_token: None,
         local_index: state.local_index.clone(),
         policy: quarry_runtime::RunPolicy::default(),
@@ -364,6 +374,9 @@ async fn scrape(
                         "url": out.url.final_url,
                         "status": out.status,
                         "zdr": zdr.is_active(),
+                        "purpose_id": privacy.purpose_id,
+                        "privacy_classification": privacy.privacy_classification,
+                        "allow_third_party_processing": privacy.allow_third_party_processing,
                         "fingerprint": out.fingerprint,
                     }),
                 ))
@@ -528,6 +541,8 @@ pub struct InternalRunPage {
     #[serde(default)]
     pub zdr: Option<bool>,
     #[serde(default)]
+    pub privacy: Option<PrivacyPolicy>,
+    #[serde(default)]
     pub signals: Option<DriverSignals>,
     #[serde(default)]
     pub ingest: Option<bool>,
@@ -566,6 +581,7 @@ async fn internal_run_page(
 ) -> Result<Json<InternalRunPageResult>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Same tenant enforcement as the public /v1/scrape: ignore client
     // org_id, use the verified JWT claim. /v1/internal/run_page is
     // typically called by the orchestrator on behalf of a tenant, so the
@@ -598,6 +614,7 @@ async fn internal_run_page(
         zdr,
         ingest: ingest_client,
         org_id: Some(org_id),
+        privacy,
         cancel_token: None,
         local_index: state.local_index.clone(),
         policy: quarry_runtime::RunPolicy::default(),
@@ -674,6 +691,7 @@ async fn scrape_stream(
     Json(req): Json<ScrapeRequest>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant enforcement: claim wins over any client-supplied org_id.
     let _ = &req.org_id;
     let org_id = claims.org_id.clone();
@@ -712,6 +730,7 @@ async fn scrape_stream(
             zdr,
             ingest: ingest_client,
             org_id: Some(org_id.clone()),
+            privacy: privacy.clone(),
             cancel_token: None,
             local_index: state.local_index.clone(),
             policy: quarry_runtime::RunPolicy::default(),
@@ -787,6 +806,10 @@ async fn scrape_stream(
         yield Ok(Event::default().data("done"));
     };
     Sse::new(stream)
+}
+
+fn effective_privacy(privacy: Option<PrivacyPolicy>, zdr: ZdrMode) -> PrivacyPolicy {
+    privacy.unwrap_or_default().with_zdr(zdr)
 }
 
 #[cfg(test)]
@@ -885,6 +908,7 @@ mod tests {
             ingest: None,
             profiles: Arc::new(quarry_browser::session::InMemoryProfileStore::new()),
             search: None,
+            vector_index: None,
             searxng_url: None,
             model_plane_url: None,
             model_plane_token: None,

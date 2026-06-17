@@ -54,6 +54,15 @@ service OrchestrationCoreService {
   // Stream orchestration events for a run. Server-streaming over gRPC;
   // SSE-compatible at the gateway (/v1/runs/{id}/events).
   rpc StreamRunEvents(StreamRunEventsRequest) returns (stream OrchestrationEvent);
+
+  // Publish a caller-supplied orchestration event into the run's broadcast
+  // (and bounded replay buffer) without owning the durable record behind it.
+  // Used by execution-core to surface live worker progress — e.g. the browser
+  // agent's dispatched actions and received observations — on the run-event
+  // stream. The server assigns the monotonic event_id and timestamp; callers
+  // leave them empty. Best-effort from the caller's perspective: a failure
+  // here must never fail the underlying work.
+  rpc RecordOrchestrationEvent(RecordOrchestrationEventRequest) returns (RecordOrchestrationEventResponse);
 }
 
 // --- Enums ---
@@ -581,7 +590,8 @@ message OrchestrationEvent {
   // line and as the `after_event_id` resume cursor. Sorts in emission order.
   string event_id = 2;
 
-  // Event payload. Tags 10-16 align with the 7-variant Rust enum order.
+  // Event payload. Tags 10-16 align with the original 7-variant Rust enum
+  // order; tags 17-18 are additive browser-agent progress events (B4).
   oneof event {
     PlanTransitioned plan_transitioned = 10;
     TodoTransitioned todo_transitioned = 11;
@@ -590,6 +600,8 @@ message OrchestrationEvent {
     SubagentStopped subagent_stopped = 14;
     RunPausedForApproval run_paused_for_approval = 15;
     RunResumedAfterApproval run_resumed_after_approval = 16;
+    BrowserActionDispatched browser_action_dispatched = 17;
+    BrowserObservationReceived browser_observation_received = 18;
   }
 
   message PlanTransitioned {
@@ -634,4 +646,47 @@ message OrchestrationEvent {
     string run_id = 1;
     string approval_id = 2;
   }
+
+  // The browser agent dispatched an action to the browser executor (Quarry).
+  // Surfaced live so the UI run-event stream shows browser progress (B4).
+  message BrowserActionDispatched {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Browser-agent plan id driving this session.
+    string plan_id = 2;
+    // Per-action id (e.g. `act_0001`).
+    string action_id = 3;
+    // Action type slug: goto|click|type|extract|observe|scroll|wait.
+    string action_type = 4;
+    // Target URL for navigations. Empty for non-goto actions.
+    string url = 5;
+  }
+
+  // The browser agent received an observation back from the executor (B4).
+  message BrowserObservationReceived {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Browser-agent plan id driving this session.
+    string plan_id = 2;
+    // Id of the action that produced this observation.
+    string action_id = 3;
+    // Observation status slug: success|failed|timeout|blocked.
+    string status = 4;
+    // Page URL after the action settled. Empty when unavailable.
+    string page_url = 5;
+    // Page title after the action settled. Empty when unavailable.
+    string page_title = 6;
+  }
+}
+
+// --- RecordOrchestrationEvent ---
+
+message RecordOrchestrationEventRequest {
+  // The event to publish. The server assigns `event_id` and `at` when empty.
+  OrchestrationEvent event = 1;
+}
+
+message RecordOrchestrationEventResponse {
+  // Server-assigned monotonic id of the published event (ULID).
+  string event_id = 1;
 }

@@ -204,11 +204,13 @@ export const oauthApplication = pgTable('oauth_application', {
   clientId: text('client_id').unique(),
   clientSecret: text('client_secret'),
   name: text('name'),
-  redirectURLs: text('redirect_u_r_ls'),
+  icon: text('icon'),
+  redirectUrls: text('redirect_ur_ls'),
   metadata: text('metadata'),
+  authenticationScheme: text('authentication_scheme'),
   type: text('type'),
-  disabled: boolean('disabled'),
-  userId: text('user_id'),
+  disabled: boolean('disabled').default(false),
+  userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at'),
   updatedAt: timestamp('updated_at'),
 });
@@ -238,6 +240,21 @@ export const oauthConsent = pgTable('oauth_consent', {
   updatedAt: timestamp('updated_at'),
 });
 
+// Product privacy/cookie consent preferences
+export const privacyConsent = pgTable('privacy_consent', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
+  sessionId: text('session_id'),
+  analytics: boolean('analytics').default(false).notNull(),
+  marketing: boolean('marketing').default(false).notNull(),
+  necessary: boolean('necessary').default(true).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at')
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
+
 // API Key table for API Key plugin
 export const apikey = pgTable('apikey', {
   id: text('id').primaryKey(),
@@ -245,9 +262,9 @@ export const apikey = pgTable('apikey', {
   start: text('start'),
   prefix: text('prefix'),
   key: text('key').notNull(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => user.id, { onDelete: 'cascade' }),
+  configId: text('config_id').notNull().default('user-keys'),
+  referenceId: text('reference_id').notNull(),
+  userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
   refillInterval: integer('refill_interval'),
   refillAmount: integer('refill_amount'),
   lastRefillAt: timestamp('last_refill_at'),

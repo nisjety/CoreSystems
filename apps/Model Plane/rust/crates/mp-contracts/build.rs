@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/execution.proto",
         "model_plane/v1/orchestration.proto",
         "model_plane/v1/finetune.proto",
+        "model_plane/v1/routing_policy.proto",
     ];
 
     let dp_protos = &[

@@ -52,7 +52,7 @@ async fn browser_agent_drives_real_quarry_loop() {
     };
 
     let (status, observations, summary) =
-        run_browser_agent_loop(config, Some(&client), planner.as_ref()).await;
+        run_browser_agent_loop(config, Some(&client), planner.as_ref(), None).await;
 
     eprintln!(
         "E2E result: status={} observations={} summary={summary}",

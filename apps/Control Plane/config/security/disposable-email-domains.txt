@@ -1,0 +1,9 @@
+# Seeded disposable domain blocklist.
+# Refresh from https://github.com/disposable-email-domains/disposable-email-domains
+# with scripts/sync-disposable-email-domains.py.
+10minutemail.com
+guerrillamail.com
+mailinator.com
+tempmail.com
+throwawaymail.com
+yopmail.com

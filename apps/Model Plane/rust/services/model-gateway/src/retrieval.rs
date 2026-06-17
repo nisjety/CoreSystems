@@ -50,13 +50,14 @@ const GRAPH_TIMEOUT: Duration = Duration::from_millis(2_500);
 const CONVERSATION_CONTEXT_MARKER: &str =
     "Answer the latest user request while keeping the prior conversation in mind when it is relevant.";
 
-/// True when the request opted into RAG grounding. `citations` is included
-/// because surfacing sources implies retrieving them.
+/// True when the request opted into internal RAG grounding.
+///
+/// `citations` is intentionally not enough: web search also emits citations,
+/// and asking for source events must not silently pull internal Data Plane
+/// documents into a web-search turn.
 #[must_use]
 pub fn wants_grounding(features: &[String]) -> bool {
-    features
-        .iter()
-        .any(|f| f == "rag" || f == "knowledge" || f == "citations")
+    features.iter().any(|f| f == "rag" || f == "knowledge")
 }
 
 /// A single retrieved source, ready to emit as a `ChatEvent::Citation`.
@@ -727,7 +728,7 @@ mod tests {
     fn wants_grounding_matches_rag_family_flags() {
         assert!(wants_grounding(&["rag".to_owned()]));
         assert!(wants_grounding(&["knowledge".to_owned()]));
-        assert!(wants_grounding(&["citations".to_owned()]));
+        assert!(!wants_grounding(&["citations".to_owned()]));
         assert!(!wants_grounding(&["usage".to_owned()]));
         assert!(!wants_grounding(&[]));
     }

@@ -38,9 +38,40 @@ type orgCoreMembersResponse struct {
 	Members []orgCoreMember `json:"members"`
 }
 
-func (s *Server) resolvePrimaryMembershipFromOrgCore(
+func (s *Server) ensureCanonicalCurrentUser(c *gin.Context) (*users.User, string, bool) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return nil, "", false
+	}
+
+	user, err := s.userService.GetOrCreateUser(
+		c.Request.Context(),
+		userID,
+		c.GetHeader("X-User-Email"),
+		c.GetHeader("X-User-Name"),
+		c.GetHeader("X-User-Avatar"),
+	)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID).Msg("failed to resolve current user")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve current user"})
+		return nil, "", false
+	}
+
+	return user, userID, true
+}
+
+// resolveMembershipFromOrgCore resolves the authoritative org membership from
+// org-core. When `preferOrgID` is set and the user is a member of that org, it
+// resolves the role for THAT org (so the session context reflects the active
+// organization); otherwise it falls back to the user's primary org
+// (`organizations[0]`). A requested org the user does not belong to is ignored —
+// org-core's `/orgs/me` is the membership allow-list, so no role is granted for
+// a non-member org.
+func (s *Server) resolveMembershipFromOrgCore(
 	ctx context.Context,
 	userID string,
+	preferOrgID string,
 ) (string, string, error) {
 	if strings.TrimSpace(s.orgService) == "" || userID == "" {
 		return "", "", nil
@@ -81,7 +112,17 @@ func (s *Server) resolvePrimaryMembershipFromOrgCore(
 		return "", "", nil
 	}
 
-	orgID := organizations[0].ID
+	// Default to the primary org; switch to the requested org only when the user
+	// is actually a member of it (present in the /orgs/me allow-list).
+	orgID := strings.TrimSpace(organizations[0].ID)
+	if prefer := strings.TrimSpace(preferOrgID); prefer != "" {
+		for _, org := range organizations {
+			if strings.TrimSpace(org.ID) == prefer {
+				orgID = prefer
+				break
+			}
+		}
+	}
 	role := "member"
 
 	memberReq, err := http.NewRequestWithContext(
@@ -234,29 +275,31 @@ func (s *Server) getCurrentUserProfile(c *gin.Context) {
 // getSessionContext returns user/org/role/onboarding status for post-login routing.
 // GET /api/v1/me/session-context
 func (s *Server) getSessionContext(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	user, userID, ok := s.ensureCanonicalCurrentUser(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 
-	// Forward edge-gate hints so the service can auto-provision the user row
-	// on first sign-in (matches the `getCurrentUserProfile` contract). Without
-	// these, the very first call after social sign-in 500s with "user not
-	// found" — velion's session-core proxy then maps that to 502 and
-	// OnboardingGuard force-restarts the wizard.
-	email := c.GetHeader("X-User-Email")
-	name := c.GetHeader("X-User-Name")
-	avatar := c.GetHeader("X-User-Avatar")
+	// The gateway forwards the session's active organization via X-Org-Id so the
+	// role/onboarding status reflect the org the user is currently acting as,
+	// rather than always the primary membership.
+	requestedOrg := strings.TrimSpace(c.GetHeader("X-Org-Id"))
 
-	ctxData, err := s.userService.GetSessionContext(c.Request.Context(), userID, email, name, avatar)
+	ctxData, err := s.userService.GetSessionContext(
+		c.Request.Context(),
+		userID,
+		c.GetHeader("X-User-Email"),
+		c.GetHeader("X-User-Name"),
+		c.GetHeader("X-User-Avatar"),
+		requestedOrg,
+	)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to build session context")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build session context"})
 		return
 	}
 
-	orgID, role, resolveErr := s.resolvePrimaryMembershipFromOrgCore(c.Request.Context(), userID)
+	orgID, role, resolveErr := s.resolveMembershipFromOrgCore(c.Request.Context(), userID, requestedOrg)
 	if resolveErr != nil {
 		log.Warn().Err(resolveErr).Str("user_id", userID).Msg("org-core fallback failed for session context")
 	} else if orgID != "" && (ctxData.OrgID != orgID || ctxData.Role != role) {
@@ -267,14 +310,14 @@ func (s *Server) getSessionContext(c *gin.Context) {
 		}
 
 		if _, ensureErr := s.userService.EnsureMembership(c.Request.Context(), users.EnsureMembershipParams{
-			UserID: userID,
+			UserID: user.ID,
 			OrgID:  orgID,
 			Role:   role,
 			Status: "active",
 		}); ensureErr != nil {
 			log.Warn().
 				Err(ensureErr).
-				Str("user_id", userID).
+				Str("user_id", user.ID).
 				Str("org_id", orgID).
 				Msg("failed to backfill org membership in user-core")
 		}
@@ -345,8 +388,16 @@ func (s *Server) updateCurrentUserProfile(c *gin.Context) {
 		}
 	}
 
-	// Ensure base user exists (auto-provision from headers/session) before update
-	if _, err := s.userService.GetOrCreateUser(c.Request.Context(), userIDStr, c.GetHeader("X-User-Email"), c.GetHeader("X-User-Name"), c.GetHeader("X-User-Avatar")); err != nil {
+	// Resolve the canonical local user row before issuing writes. The auth user
+	// id can differ from the historical local user id for the same email.
+	currentUser, err := s.userService.GetOrCreateUser(
+		c.Request.Context(),
+		userIDStr,
+		c.GetHeader("X-User-Email"),
+		c.GetHeader("X-User-Name"),
+		c.GetHeader("X-User-Avatar"),
+	)
+	if err != nil {
 		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get or create user before update")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to update user profile",
@@ -356,7 +407,7 @@ func (s *Server) updateCurrentUserProfile(c *gin.Context) {
 
 	// Update base user fields
 	user, err := s.userService.UpdateUser(c.Request.Context(), users.UpdateUserParams{
-		ID:     userIDStr,
+		ID:     currentUser.ID,
 		Name:   nameToUpdate,
 		Avatar: req.Avatar,
 	})
@@ -388,7 +439,7 @@ func (s *Server) updateCurrentUserProfile(c *gin.Context) {
 	hasProfileChanges := req.PhoneNumber != nil || req.OfficeLocation != nil || req.Timezone != nil || len(metadata) > 0
 	if hasProfileChanges {
 		if _, err := s.userService.UpdateUserProfile(c.Request.Context(), users.UpdateProfileParams{
-			UserID:   userIDStr,
+			UserID:   currentUser.ID,
 			Phone:    req.PhoneNumber,
 			Location: req.OfficeLocation,
 			Timezone: req.Timezone,
@@ -473,7 +524,13 @@ func mapUserStatusToPresence(status users.UserStatus) string {
 // getUserByID retrieves a user by ID (admin only)
 // GET /api/v1/users/:id
 func (s *Server) getUserByID(c *gin.Context) {
-	// TODO: Add admin role check here
+	if !isAdminRequest(c) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "admin role required",
+		})
+		return
+	}
+
 	userID := c.Param("id")
 	if userID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -542,11 +599,11 @@ func (s *Server) getUserByEmail(c *gin.Context) {
 // markOnboardingComplete marks the user's onboarding as complete
 // POST /api/v1/users/onboarding/complete?email=...
 func (s *Server) markOnboardingComplete(c *gin.Context) {
-	if userID, exists := c.Get("user_id"); exists {
-		if userIDStr, ok := userID.(string); ok && userIDStr != "" {
-			err := s.userService.MarkOnboardingCompleteByID(c.Request.Context(), userIDStr)
+	if currentUser, _, ok := s.ensureCanonicalCurrentUser(c); ok {
+		if currentUser.ID != "" {
+			err := s.userService.MarkOnboardingCompleteByID(c.Request.Context(), currentUser.ID)
 			if err != nil {
-				log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to mark onboarding complete")
+				log.Error().Err(err).Str("user_id", currentUser.ID).Msg("Failed to mark onboarding complete")
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error": "Failed to mark onboarding complete",
 				})
@@ -592,14 +649,13 @@ func (s *Server) markOnboardingComplete(c *gin.Context) {
 // Returns { step, state } for the authenticated user; empty step means
 // "no in-flight wizard."
 func (s *Server) getOnboardingState(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	currentUser, _, ok := s.ensureCanonicalCurrentUser(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	view, err := s.userService.GetOnboardingState(c.Request.Context(), userID)
+	view, err := s.userService.GetOnboardingState(c.Request.Context(), currentUser.ID)
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID).Msg("get onboarding state")
+		log.Error().Err(err).Str("user_id", currentUser.ID).Msg("get onboarding state")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read onboarding state"})
 		return
 	}
@@ -609,9 +665,8 @@ func (s *Server) getOnboardingState(c *gin.Context) {
 // putOnboardingState handles PUT /api/v1/users/me/onboarding-state.
 // Body: { step: string, state?: object }. Empty step clears the column.
 func (s *Server) putOnboardingState(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	currentUser, _, ok := s.ensureCanonicalCurrentUser(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var in users.OnboardingStateView
@@ -619,8 +674,8 @@ func (s *Server) putOnboardingState(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
 		return
 	}
-	if err := s.userService.UpsertOnboardingState(c.Request.Context(), userID, in); err != nil {
-		log.Error().Err(err).Str("user_id", userID).Msg("upsert onboarding state")
+	if err := s.userService.UpsertOnboardingState(c.Request.Context(), currentUser.ID, in); err != nil {
+		log.Error().Err(err).Str("user_id", currentUser.ID).Msg("upsert onboarding state")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to write onboarding state"})
 		return
 	}
@@ -991,6 +1046,24 @@ func getUserIDFromContext(c *gin.Context) (string, bool) {
 	}
 	id, ok := userID.(string)
 	return id, ok
+}
+
+func isAdminRequest(c *gin.Context) bool {
+	role, exists := c.Get("user_role")
+	if !exists {
+		return false
+	}
+	roleStr, ok := role.(string)
+	if !ok {
+		return false
+	}
+	for _, value := range strings.Split(roleStr, ",") {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "admin", "superadmin":
+			return true
+		}
+	}
+	return false
 }
 
 // GET /api/v1/settings/appearance

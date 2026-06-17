@@ -906,7 +906,14 @@ func (s *Service) publishProviderLinked(ctx context.Context, userID, email, prov
 // cascade — dashboard ↔ OnboardingGuard ↔ session-core proxy — collapses
 // into a 500/502/onboarding-restart loop. Mirrors the auto-provision contract
 // already used by `getCurrentUserProfile`.
-func (s *Service) GetSessionContext(ctx context.Context, userID, email, name, avatar string) (*SessionContext, error) {
+//
+// `orgID` scopes the returned role/orgId to a specific organization — the org
+// the caller is currently acting as (the session's active organization,
+// forwarded by the gateway via `X-Org-Id`). When set and the user is an active
+// member of that org, the role reflects THAT membership; otherwise it falls
+// back to the user's primary membership so multi-org users who switched to a
+// non-primary org no longer see their primary-org role.
+func (s *Service) GetSessionContext(ctx context.Context, userID, email, name, avatar, orgID string) (*SessionContext, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user ID is required")
 	}
@@ -925,7 +932,7 @@ func (s *Service) GetSessionContext(ctx context.Context, userID, email, name, av
 		ctxOut.OnboardingStatus = "COMPLETED"
 	}
 
-	membership, err := s.repo.GetPrimaryUserOrgMembership(ctx, userID)
+	membership, err := s.resolveSessionMembership(ctx, user.ID, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -937,4 +944,23 @@ func (s *Service) GetSessionContext(ctx context.Context, userID, email, name, av
 	ctxOut.OrgID = membership.OrgID
 	ctxOut.Role = membership.Role
 	return ctxOut, nil
+}
+
+// resolveSessionMembership picks the membership the session context should
+// reflect: the requested `orgID`'s membership when the user is an active member
+// of it, otherwise the primary membership. Falling back to primary (rather than
+// nil) when the requested org is absent from the local table keeps onboarding
+// status sensible for users mid-switch — the HTTP layer's org-core resolution is
+// the authoritative correction that backfills the active org's membership.
+func (s *Service) resolveSessionMembership(ctx context.Context, userID, orgID string) (*UserOrgMembership, error) {
+	if trimmed := strings.TrimSpace(orgID); trimmed != "" {
+		membership, err := s.repo.GetUserOrgMembership(ctx, userID, trimmed)
+		if err != nil {
+			return nil, err
+		}
+		if membership != nil {
+			return membership, nil
+		}
+	}
+	return s.repo.GetPrimaryUserOrgMembership(ctx, userID)
 }

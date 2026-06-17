@@ -9,17 +9,18 @@ import {
   multiSession,
   genericOAuth,
   haveIBeenPwned,
-  apiKey,
   bearer,
   admin,
 } from 'better-auth/plugins';
-import { passkey } from 'better-auth/plugins/passkey';
+import { apiKey } from '@better-auth/api-key';
+import { passkey } from '@better-auth/passkey';
 import { sso } from '@better-auth/sso';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { Resend } from 'resend';
 import { redisSecondaryStorage } from '../db/redis';
 import { createCipheriv, randomBytes } from 'crypto';
+import { importPKCS8, SignJWT } from 'jose';
 import * as dotenv from 'dotenv';
 import {
   generateEmailVerificationTemplate,
@@ -35,6 +36,31 @@ import { organizationEventsPlugin } from './organization-events.plugin';
 
 // Ensure environment variables are loaded
 dotenv.config();
+
+const isProductionLike = process.env.NODE_ENV === 'production';
+
+function envFlag(name: string, defaultValue = false): boolean {
+  const value = process.env[name];
+  if (value === undefined) return defaultValue;
+  return value === 'true';
+}
+
+function requireProductionConfig(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value && isProductionLike) {
+    throw new Error(`${name} is required in production`);
+  }
+  return value ?? '';
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+if (isProductionLike && process.env.RATE_LIMIT_ENABLED === 'false') {
+  throw new Error('RATE_LIMIT_ENABLED=false is not allowed in production');
+}
 
 function splitEnvList(value?: string): string[] {
   return (value ?? '')
@@ -61,6 +87,7 @@ const trustedOrigins = uniqueOrigins([
   'http://127.0.0.1:3000',
   'http://localhost:3107',
   'http://127.0.0.1:3107',
+  process.env.APPLE_CLIENT_ID ? 'https://appleid.apple.com' : undefined,
   process.env.BETTER_AUTH_URL || 'http://localhost:3011',
   process.env.FRONTEND_URL || 'http://localhost:3000',
   process.env.NEXT_PUBLIC_APP_URL,
@@ -132,43 +159,57 @@ interface MockResendService {
   };
 }
 
-// Initialize Resend - handle missing API key gracefully
-let resend: Resend | MockResendService;
-try {
-  if (process.env.RESEND_API_KEY) {
-    resend = new Resend(process.env.RESEND_API_KEY);
-  } else {
-    console.warn('⚠️ RESEND_API_KEY not set, using mock resend');
-    // Create a mock resend for development
-    resend = {
-      emails: {
-        send: async (data: unknown) => {
-          console.log('📧 [MOCK EMAIL]', data);
-          await Promise.resolve(); // Fix: Add await expression
-          return { data: { id: 'mock-email-id' }, error: null };
-        },
-      },
-    };
-  }
-} catch (error) {
-  console.error('❌ Failed to initialize Resend:', error);
-  // Create a mock resend for development
-  resend = {
+function createMockResendService(): MockResendService {
+  return {
     emails: {
-      send: async (data: unknown) => {
-        console.log('📧 [MOCK EMAIL]', data);
-        await Promise.resolve(); // Fix: Add await expression
+      send: async () => {
+        console.log('📧 [MOCK EMAIL] Email send skipped in development');
+        await Promise.resolve();
         return { data: { id: 'mock-email-id' }, error: null };
       },
     },
   };
 }
 
-// Initialize Twilio Verify service - wrapped in try/catch to handle potential errors
+function emailFlowsEnabled(): boolean {
+  return (
+    envFlag('EMAIL_PASSWORD_ENABLED') ||
+    envFlag('EMAIL_OTP_ENABLED') ||
+    envFlag('ORGANIZATION_ENABLED') ||
+    envFlag('REQUIRE_2FA_ON_FIRST_SIGNIN') ||
+    envFlag('REQUIRE_2FA_ON_NEW_IP')
+  );
+}
+
+// Initialize Resend. Production email flows must fail closed if delivery is not configured.
+let resend: Resend | MockResendService;
+try {
+  if (process.env.RESEND_API_KEY) {
+    resend = new Resend(process.env.RESEND_API_KEY);
+  } else if (isProductionLike && emailFlowsEnabled()) {
+    throw new Error(
+      'RESEND_API_KEY is required in production when email auth flows are enabled',
+    );
+  } else {
+    console.warn('⚠️ RESEND_API_KEY not set, using mock resend');
+    resend = createMockResendService();
+  }
+} catch (error) {
+  console.error('❌ Failed to initialize Resend:', error);
+  if (isProductionLike && emailFlowsEnabled()) {
+    throw error;
+  }
+  resend = createMockResendService();
+}
+
+// Initialize Twilio Verify service. Phone auth must not approve all OTPs in production.
 let smsService: SmsServiceInterface;
 try {
   smsService = new TwilioVerifyService();
-} catch {
+} catch (error) {
+  if (isProductionLike && envFlag('PHONE_AUTH_ENABLED')) {
+    throw error;
+  }
   console.warn(
     '⚠️ Failed to initialize Twilio Verify service, using mock service',
   );
@@ -197,9 +238,21 @@ try {
 // Simple AES-256-GCM token encryption for provider tokens
 const TOKEN_ENC_KEY_B64 = process.env.TOKEN_ENCRYPTION_KEY;
 function encryptToken(token: string): string {
-  if (!TOKEN_ENC_KEY_B64) return token;
+  if (!TOKEN_ENC_KEY_B64) {
+    if (isProductionLike) {
+      throw new Error('TOKEN_ENCRYPTION_KEY is required in production');
+    }
+    return token;
+  }
   const key = Buffer.from(TOKEN_ENC_KEY_B64, 'base64');
-  if (key.length !== 32) return token;
+  if (key.length !== 32) {
+    if (isProductionLike) {
+      throw new Error(
+        'TOKEN_ENCRYPTION_KEY must be a 32-byte base64 value in production',
+      );
+    }
+    return token;
+  }
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const enc = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
@@ -208,7 +261,77 @@ function encryptToken(token: string): string {
   return `${iv.toString('base64')}.${tag.toString('base64')}.${enc.toString('base64')}`;
 }
 
-export const auth: ReturnType<typeof betterAuth> = betterAuth({
+function configuredTrustedProviders(): string[] {
+  const providers = new Set<string>();
+  if (process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) {
+    providers.add('microsoft');
+  }
+  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    providers.add('google');
+  }
+  if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+    providers.add('github');
+  }
+  if (process.env.APPLE_CLIENT_ID) {
+    providers.add('apple');
+  }
+  if (process.env.VIPPS_CLIENT_ID && process.env.VIPPS_CLIENT_SECRET) {
+    providers.add('vipps');
+  }
+  if (
+    process.env.OKTA_CLIENT_ID &&
+    process.env.OKTA_CLIENT_SECRET &&
+    process.env.OKTA_DOMAIN
+  ) {
+    providers.add('okta');
+  }
+  return Array.from(providers);
+}
+
+function normalizePrivateKey(value: string): string {
+  return value.replace(/\\n/g, '\n');
+}
+
+async function generateAppleClientSecret(): Promise<string> {
+  const clientId = requireProductionConfig('APPLE_CLIENT_ID');
+  const teamId = requireProductionConfig('APPLE_TEAM_ID');
+  const keyId = requireProductionConfig('APPLE_KEY_ID');
+  const privateKey = requireProductionConfig('APPLE_PRIVATE_KEY');
+
+  if (!clientId || !teamId || !keyId || !privateKey) {
+    throw new Error(
+      'APPLE_CLIENT_ID, APPLE_TEAM_ID, APPLE_KEY_ID and APPLE_PRIVATE_KEY are required when Apple auth is enabled',
+    );
+  }
+
+  const key = await importPKCS8(normalizePrivateKey(privateKey), 'ES256');
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({})
+    .setProtectedHeader({ alg: 'ES256', kid: keyId })
+    .setIssuer(teamId)
+    .setSubject(clientId)
+    .setAudience('https://appleid.apple.com')
+    .setIssuedAt(now)
+    .setExpirationTime(now + 180 * 24 * 60 * 60)
+    .sign(key);
+}
+
+async function appleSocialProviderConfig() {
+  const clientId = requireProductionConfig('APPLE_CLIENT_ID');
+  const configuredClientSecret = process.env.APPLE_CLIENT_SECRET?.trim();
+  const clientSecret =
+    configuredClientSecret && configuredClientSecret.length > 0
+      ? configuredClientSecret
+      : await generateAppleClientSecret();
+
+  return {
+    clientId,
+    clientSecret,
+    appBundleIdentifier: process.env.APPLE_APP_BUNDLE_IDENTIFIER,
+  };
+}
+
+export const auth: any = betterAuth({
   database: drizzleAdapter(db, {
     provider: 'pg',
     schema,
@@ -221,7 +344,7 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
 
   // Rate limiting configuration with IP detection
   rateLimit: {
-    enabled: process.env.RATE_LIMIT_ENABLED === 'true',
+    enabled: process.env.RATE_LIMIT_ENABLED !== 'false',
     window: 60, // 60 seconds
     max: 100, // 100 requests per window
     storage: 'secondary-storage', // Use Redis (already wired) — avoids rate_limit table write on every request
@@ -231,20 +354,20 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
         max: 3,
       },
       '/two-factor/verify-totp': {
-        window: parseInt(process.env.RATE_LIMIT_2FA_VERIFY_WINDOW || '300'),
-        max: parseInt(process.env.RATE_LIMIT_2FA_VERIFY_MAX || '5'),
+        window: parsePositiveInt(process.env.RATE_LIMIT_2FA_VERIFY_WINDOW, 300),
+        max: parsePositiveInt(process.env.RATE_LIMIT_2FA_VERIFY_MAX, 5),
       },
       '/two-factor/verify-otp': {
-        window: parseInt(process.env.RATE_LIMIT_2FA_VERIFY_WINDOW || '300'),
-        max: parseInt(process.env.RATE_LIMIT_2FA_VERIFY_MAX || '5'),
+        window: parsePositiveInt(process.env.RATE_LIMIT_2FA_VERIFY_WINDOW, 300),
+        max: parsePositiveInt(process.env.RATE_LIMIT_2FA_VERIFY_MAX, 5),
       },
       '/two-factor/send-otp': {
-        window: parseInt(process.env.RATE_LIMIT_OTP_SEND_WINDOW || '60'),
-        max: parseInt(process.env.RATE_LIMIT_OTP_SEND_MAX || '2'),
+        window: parsePositiveInt(process.env.RATE_LIMIT_OTP_SEND_WINDOW, 60),
+        max: parsePositiveInt(process.env.RATE_LIMIT_OTP_SEND_MAX, 2),
       },
       '/phone-number/send-otp': {
-        window: parseInt(process.env.RATE_LIMIT_OTP_SEND_WINDOW || '60'),
-        max: parseInt(process.env.RATE_LIMIT_OTP_SEND_MAX || '2'),
+        window: parsePositiveInt(process.env.RATE_LIMIT_OTP_SEND_WINDOW, 60),
+        max: parsePositiveInt(process.env.RATE_LIMIT_OTP_SEND_MAX, 2),
       },
     },
   },
@@ -527,12 +650,12 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
 
   // Session settings for security and responsiveness - Extended persistence
   session: {
-    expiresIn: parseInt(process.env.SESSION_EXPIRES_IN || '604800'), // 1 week default (604800 seconds)
-    updateAge: parseInt(process.env.SESSION_UPDATE_AGE || '3600'), // Update session every 1 hour (3600 seconds)
-    freshAge: parseInt(process.env.SESSION_FRESH_AGE || '300'), // 5 minutes for sensitive operations
+    expiresIn: parsePositiveInt(process.env.SESSION_EXPIRES_IN, 604800), // 1 week default
+    updateAge: parsePositiveInt(process.env.SESSION_UPDATE_AGE, 3600),
+    freshAge: parsePositiveInt(process.env.SESSION_FRESH_AGE, 300),
     cookieCache: {
       enabled: process.env.SESSION_COOKIE_CACHE_ENABLED !== 'false', // ON by default; set SESSION_COOKIE_CACHE_ENABLED=false to disable
-      maxAge: parseInt(process.env.SESSION_COOKIE_CACHE_MAX_AGE || '1800'), // 30 minutes cache
+      maxAge: parsePositiveInt(process.env.SESSION_COOKIE_CACHE_MAX_AGE, 300),
     },
     // Store session ID in Redis for better state management
     storeSessionId: true,
@@ -550,16 +673,8 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
       // update user info (name, avatar) from linked provider by default
       updateUserInfoOnLink:
         process.env.ACCOUNT_LINKING_UPDATE_USER_INFO !== 'false',
-      // trusted providers: same-email OAuth sign-in auto-links to existing account
-      // includes all configured social + genericOAuth providers
-      trustedProviders: [
-        'microsoft',
-        'google',
-        'github',
-        'apple',
-        'vipps',
-        'okta',
-      ],
+      // Only configured providers are trusted for same-email account linking.
+      trustedProviders: configuredTrustedProviders(),
     },
   },
 
@@ -569,7 +684,7 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
 
     // Multi-session plugin for device session management (Sprint 4)
     multiSession({
-      maximumSessions: parseInt(process.env.MAX_SESSIONS_PER_USER || '10'),
+      maximumSessions: parsePositiveInt(process.env.MAX_SESSIONS_PER_USER, 10),
     }),
 
     // Sprint 2: Generic OAuth for external IDPs (Vipps, Okta)
@@ -678,15 +793,20 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
           organization({
             allowUserToCreateOrganization:
               process.env.ALLOW_USER_CREATE_ORG === 'true',
-            organizationLimit: parseInt(process.env.ORG_LIMIT_PER_USER || '5'),
+            organizationLimit: parsePositiveInt(
+              process.env.ORG_LIMIT_PER_USER,
+              5,
+            ),
             creatorRole: (process.env.ORG_CREATOR_ROLE || 'owner') as
               | 'admin'
               | 'owner',
-            membershipLimit: parseInt(
-              process.env.ORG_MEMBERSHIP_LIMIT || '100',
+            membershipLimit: parsePositiveInt(
+              process.env.ORG_MEMBERSHIP_LIMIT,
+              100,
             ),
-            invitationExpiresIn: parseInt(
-              process.env.ORG_INVITATION_EXPIRES_IN || '172800',
+            invitationExpiresIn: parsePositiveInt(
+              process.env.ORG_INVITATION_EXPIRES_IN,
+              172800,
             ), // 48 hours
             requireEmailVerificationOnInvitation:
               process.env.ORG_REQUIRE_EMAIL_VERIFICATION === 'true',
@@ -824,27 +944,52 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
     // Sprint 3: API Key plugin for programmatic access
     ...(process.env.API_KEY_ENABLED === 'true'
       ? [
-          apiKey({
-            enableMetadata: true,
-            defaultKeyLength: parseInt(
-              process.env.API_KEY_DEFAULT_LENGTH || '32',
-            ),
-            apiKeyHeaders: ['x-api-key', 'authorization'],
-            // Optional: Custom key generation
-            ...(process.env.API_KEY_CUSTOM_GENERATOR === 'true' && {
-              customKeyGenerator: ({ length, prefix }) => {
-                const chars =
-                  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-                let result = prefix ? `${prefix}_` : '';
-                for (let i = 0; i < length; i++) {
-                  result += chars.charAt(
-                    Math.floor(Math.random() * chars.length),
-                  );
-                }
-                return result;
+          apiKey([
+            {
+              configId: 'user-keys',
+              references: 'user',
+              enableMetadata: true,
+              defaultPrefix: process.env.API_KEY_USER_PREFIX || 'user_',
+              defaultKeyLength: parsePositiveInt(
+                process.env.API_KEY_DEFAULT_LENGTH,
+                64,
+              ),
+              apiKeyHeaders: ['x-api-key'],
+              rateLimit: {
+                enabled: process.env.API_KEY_RATE_LIMIT_ENABLED !== 'false',
+                timeWindow: parsePositiveInt(
+                  process.env.API_KEY_RATE_LIMIT_WINDOW_MS,
+                  86_400_000,
+                ),
+                maxRequests: parsePositiveInt(
+                  process.env.API_KEY_RATE_LIMIT_MAX,
+                  1_000,
+                ),
               },
-            }),
-          }),
+            },
+            {
+              configId: 'org-keys',
+              references: 'organization',
+              enableMetadata: true,
+              defaultPrefix: process.env.API_KEY_ORG_PREFIX || 'org_',
+              defaultKeyLength: parsePositiveInt(
+                process.env.API_KEY_DEFAULT_LENGTH,
+                64,
+              ),
+              apiKeyHeaders: ['x-api-key'],
+              rateLimit: {
+                enabled: process.env.API_KEY_RATE_LIMIT_ENABLED !== 'false',
+                timeWindow: parsePositiveInt(
+                  process.env.API_KEY_RATE_LIMIT_WINDOW_MS,
+                  86_400_000,
+                ),
+                maxRequests: parsePositiveInt(
+                  process.env.API_KEY_RATE_LIMIT_MAX,
+                  1_000,
+                ),
+              },
+            },
+          ]),
         ]
       : []),
 
@@ -887,10 +1032,11 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
     ...(process.env.EMAIL_OTP_ENABLED === 'true'
       ? [
           emailOTP({
-            otpLength: parseInt(process.env.EMAIL_OTP_LENGTH || '6'),
-            expiresIn: parseInt(process.env.EMAIL_OTP_EXPIRES_IN || '300'),
-            allowedAttempts: parseInt(
-              process.env.EMAIL_OTP_ALLOWED_ATTEMPTS || '3',
+            otpLength: parsePositiveInt(process.env.EMAIL_OTP_LENGTH, 6),
+            expiresIn: parsePositiveInt(process.env.EMAIL_OTP_EXPIRES_IN, 300),
+            allowedAttempts: parsePositiveInt(
+              process.env.EMAIL_OTP_ALLOWED_ATTEMPTS,
+              3,
             ),
             sendVerificationOnSignUp:
               process.env.EMAIL_OTP_SEND_ON_SIGNUP === 'true',
@@ -915,7 +1061,7 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
                 companyName,
                 supportEmail,
                 expiresInMinutes: Math.floor(
-                  parseInt(process.env.EMAIL_OTP_EXPIRES_IN || '300') / 60,
+                  parsePositiveInt(process.env.EMAIL_OTP_EXPIRES_IN, 300) / 60,
                 ),
               });
 
@@ -932,19 +1078,18 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
       : []),
 
     // Two-Factor Authentication Plugin
-    ...(process.env.REQUIRE_2FA_ON_FIRST_SIGNIN === 'true' ||
-    process.env.REQUIRE_2FA_ON_NEW_IP === 'true'
+    ...(process.env.TWO_FACTOR_ENABLED !== 'false'
       ? [
           twoFactor({
             issuer: process.env.TOTP_ISSUER || 'ID-Knuten', // App name for TOTP authenticator apps
             skipVerificationOnEnable: false, // Require verification when enabling 2FA
             totpOptions: {
-              digits: parseInt(process.env.TOTP_DIGITS || '6') as 6 | 8, // 6-digit TOTP codes
-              period: parseInt(process.env.TOTP_PERIOD || '30'), // 30-second time window
+              digits: parsePositiveInt(process.env.TOTP_DIGITS, 6) as 6 | 8,
+              period: parsePositiveInt(process.env.TOTP_PERIOD, 30),
             },
             otpOptions: {
               period: Math.floor(
-                parseInt(process.env.OTP_EXPIRES_IN || '300') / 60,
+                parsePositiveInt(process.env.OTP_EXPIRES_IN, 300) / 60,
               ), // Convert seconds to minutes
               async sendOTP({ user, otp }) {
                 console.log('🔐 Sending 2FA OTP to:', user.email);
@@ -960,7 +1105,7 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
                   companyName,
                   supportEmail,
                   expiresInMinutes: Math.floor(
-                    parseInt(process.env.OTP_EXPIRES_IN || '300') / 60,
+                    parsePositiveInt(process.env.OTP_EXPIRES_IN, 300) / 60,
                   ),
                 });
 
@@ -974,8 +1119,8 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
               },
             },
             backupCodeOptions: {
-              amount: parseInt(process.env.BACKUP_CODES_AMOUNT || '10'), // Generate backup codes
-              length: parseInt(process.env.BACKUP_CODES_LENGTH || '10'), // Each code length
+              amount: parsePositiveInt(process.env.BACKUP_CODES_AMOUNT, 10),
+              length: parsePositiveInt(process.env.BACKUP_CODES_LENGTH, 10),
             },
           }),
         ]
@@ -985,10 +1130,11 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
     ...(process.env.PHONE_AUTH_ENABLED === 'true'
       ? [
           phoneNumber({
-            otpLength: parseInt(process.env.OTP_LENGTH || '6'), // SMS OTP length
-            expiresIn: parseInt(process.env.OTP_EXPIRES_IN || '300'), // OTP expiry in seconds
-            allowedAttempts: parseInt(
-              process.env.PHONE_OTP_ALLOWED_ATTEMPTS || '3',
+            otpLength: parsePositiveInt(process.env.OTP_LENGTH, 6),
+            expiresIn: parsePositiveInt(process.env.OTP_EXPIRES_IN, 300),
+            allowedAttempts: parsePositiveInt(
+              process.env.PHONE_OTP_ALLOWED_ATTEMPTS,
+              3,
             ), // 3 attempts before OTP is invalidated
             requireVerification:
               process.env.PHONE_REQUIRE_VERIFICATION === 'true', // Allow unverified phone logins initially
@@ -1127,6 +1273,11 @@ export const auth: ReturnType<typeof betterAuth> = betterAuth({
               'User.Read',
             ],
           },
+        }
+      : {}),
+    ...(process.env.APPLE_CLIENT_ID
+      ? {
+          apple: appleSocialProviderConfig,
         }
       : {}),
   },

@@ -86,7 +86,7 @@ DATA PLANE v2 — L2
 Infrastructure:
   PostgreSQL 16     :5442  canonical document/chunk/wiki/graph metadata
   Qdrant 1.13.2     :6345  vector collections through retrieval/embedding engines
-  Redis 7           :6389  caching layer (96MB, AOF)
+  Dragonfly 1.37    :6389  Redis-compatible caching layer (256MB, cache mode)
   NATS 2 JetStream  :4232  async event bus (replaced Redis Streams from v1)
 ```
 
@@ -471,7 +471,7 @@ Delivered:
 Not yet delivered:
 
 - [ ] Eval gates in CI pipeline.
-- [ ] Runbooks for Qdrant/Postgres/Redis/NATS failure scenarios.
+- [ ] Runbooks for Qdrant/Postgres/Dragonfly/NATS failure scenarios.
 
 ### Phase D7 — Agentic context engine completion
 
@@ -627,7 +627,7 @@ The 29 numbered gaps are CLOSED, but adjacent items in earlier sections remain N
 | gRPC retry+backoff on outbound (embed/rerank) | **DONE** | exponential backoff, 5xx/429 retry, fail fast on 4xx |
 | Tower middleware (timeout/concurrency/load-shed) | **DONE** | gRPC server, configurable via env |
 | OTel trace propagation through gRPC metadata | **DONE** | extracts traceparent + x-trace-id, records on span |
-| Redis cache (embeddings + retrieval results) | **DONE** | TTL-based, graceful degradation, readyz-checked |
+| Dragonfly cache (embeddings + retrieval results) | **DONE** | Redis-compatible TTL-based cache, graceful degradation, readyz-checked |
 | Graceful shutdown (SIGTERM drain) | **DONE** | both Axum HTTP and Tonic gRPC |
 | Integration tests for gRPC server | **DONE** | 10 tests, requires TEST_DATABASE_URL |
 | Smoke test script (HTTP + gRPC) | **DONE** | `./scripts/smoke-test.sh` |
@@ -771,7 +771,7 @@ These edge cases were surfaced during the v2.2 audit. Each one is either accepte
 | **Embedding API rate limit** | Retry+backoff handles 429; under sustained pressure the request just takes longer. No circuit breaker on outbound. | ACCEPTED for v2. v2.3: add `tower::limit::RateLimit` on embedder client. |
 | **Bulk ingest of >500 docs** | Capped at 500; clients chunk. Returns `400` with clear message. | **CLOSED**. |
 | **Pathological retrieval input** | Query length capped at 8 KiB; `filters.document_ids` capped at 1000. | **CLOSED**. |
-| **Redis memory full** | docker-compose configures 96 MiB AOF; eviction policy is Redis default (`noeviction` → returns OOM). Cache failure degrades gracefully (service runs without cache). | OPEN. Set `maxmemory-policy allkeys-lru` in Redis config; document tradeoff. |
+| **Cache memory full** | docker-compose now uses Dragonfly cache mode with a 256 MiB local cap. Cache failure still degrades gracefully. | **CLOSED** for local compose. Production should size Dragonfly separately and keep cache-mode eviction enabled. |
 | **Orphan Qdrant vectors growing unbounded** | Soft-deleted docs leave vectors in Qdrant indefinitely until admin runs `POST /v1/admin/cleanup/orphans`. | **PARTIALLY CLOSED**. v2.3: schedule the cleanup as a daily orchestrator job. |
 
 ### 14.3 Data integrity
@@ -1003,7 +1003,7 @@ follow-up. `cargo check --workspace` green.
 | 5 | **§16.2.6 BulkIngest not transactional** | New `documents_outbox` table for the outbox pattern + comment-block on `BulkIngest` documenting the new flow. The repo.Create→outbox.Insert in one tx is the natural follow-up shape. | migration, `services/documents-api-go/internal/handler/documents.go` |
 | 6 | **§16.3.8 wiki_block_embeddings write-through missing** | New `services/wiki-store-go/internal/events/publisher.go` with `PublishWikiVersionPublished` event (`dataplane.wiki.version.published`). go.mod adds `nats.go v1.39.1`. Wiring into `CreatePage` / `CreateVersion` + embedding-engine subscriber are the next steps — the publisher contract is locked in. | `services/wiki-store-go/internal/events/publisher.go`, `go.mod` |
 | 7 | **§16.4.1 No end-to-end pipeline test** | New `tests/e2e/README.md` documenting scenarios + `services/retrieval-engine-rs/tests/pipeline_e2e.rs` scaffold (3 `#[tokio::test] #[ignore]` cases: happy_path runnable now, zdr_reject + cache_invalidation as TODO stubs). Gated behind `--ignored` so default `cargo test` doesn't try to hit docker-compose. | `tests/e2e/`, `services/retrieval-engine-rs/tests/pipeline_e2e.rs` |
-| 8 | **§16.4.3 No chaos tests** | `tests/chaos/README.md` (5 numbered scenarios C-01 … C-05) + `tests/chaos/docker-compose.chaos.yml` interposing toxiproxy for NATS / Postgres / Qdrant / Redis. Implementation per-scenario is queued; the design + stack are locked in. | `tests/chaos/` |
+| 8 | **§16.4.3 No chaos tests** | `tests/chaos/README.md` (5 numbered scenarios C-01 … C-05) + `tests/chaos/docker-compose.chaos.yml` interposing toxiproxy for NATS / Postgres / Qdrant / Dragonfly. Implementation per-scenario is queued; the design + stack are locked in. | `tests/chaos/` |
 | 9 | **§16.4.8 No production deployment runbook** | New `docs/production-deploy.md`: topology, replica sizing, required secrets, network policy, autoscaling, rollout strategy, observability alerts (incl. §16.2.7 pool saturation), incident playbook, DR. | `docs/production-deploy.md` |
 
 **Schema changes (one migration).** `20260519200000_wave_3_5_consistency.sql`
@@ -1226,7 +1226,7 @@ Source: `apps/Frontend Plane/velion/build-velion-services.sh` end-to-end run. Da
 | embedding-engine | `dpv2-embedding-engine` | 9202 → 9202 | ✅ healthy |
 | graph-index | `dpv2-graph-index` | 9203 → 9203 | ✅ healthy |
 | postgres | `dpv2-postgres` | 5442 → 5432 (db=dataplane) | ✅ healthy |
-| redis | `dpv2-redis` | 6389 → 6379 | ✅ healthy |
+| dragonfly | `dpv2-dragonfly` | 6389 → 6379 | ✅ healthy |
 | nats | `dpv2-nats` | 4232 → 4222 | ✅ healthy |
 | qdrant | `dpv2-qdrant` | 6345 → 6333, 6346 → 6334 | ✅ healthy |
 

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
@@ -11,11 +9,16 @@ services:
     volumes:
       - quarry_pg:/var/lib/postgresql/data
 
-  redis:
-    image: redis:7
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    command:
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
     # No host port binding — quarry-control reaches it via the compose
-    # network as `redis:6379`. Keeps the stack from clashing with any
-    # redis you already run on the host (e.g. for another project).
+    # network as `dragonfly:6379`.
+    # Keeps the stack from clashing with any cache you already run on the host.
     expose: ["6379"]
 
   temporal:
@@ -36,14 +39,20 @@ services:
     environment:
       QUARRY_EDGE__PORT: "8080"
       QUARRY_EDGE__CONTROL_BASE_URL: "http://quarry-control:8081"
+      # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined
+      # below) so this dev stack does web search self-contained — no reliance
+      # on a searxng started by another plane / the root mega-stack.
+      QUARRY_EDGE__SEARXNG_URL: "http://searxng:8080"
       # Dev-mode: accept any non-empty Authorization: Bearer. Production
       # MUST leave this unset so JWTs are verified against the
       # auth-core JWKS. Required here so the orchestrator's
       # /v1/internal/run_page calls succeed without an auth-core
       # round-trip during onboarding-style flows.
       QUARRY_EDGE_AUTH_DEV_BYPASS: "1"
+      # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
+      QUARRY_BROWSER_NO_SANDBOX: "1"
     ports: ["8080:8080"]
-    depends_on: [quarry-control]
+    depends_on: [quarry-control, searxng]
 
   quarry-control:
     build:
@@ -56,7 +65,7 @@ services:
       # the workflow emits.
       QUARRY_CONTROL_API_KEY: "devsecret"
     ports: ["8081:8081"]
-    depends_on: [postgres, redis]
+    depends_on: [postgres, dragonfly]
 
   quarry-orchestrator:
     build:
@@ -75,6 +84,33 @@ services:
       # on (dev compose default).
       RUNTIME_AUTH_TOKEN: "devsecret"
     depends_on: [temporal, quarry-control]
+
+  # SearXNG — Quarry-v2's web-search backend. quarry-runtime's SmartRouter
+  # calls it (format=json) as the free primary provider. Bundled here so the
+  # Quarry-v2 stack owns its search dependency end-to-end. Reachable on the
+  # compose network as `searxng:8080`; published on 8888 for host debugging.
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: "http://searxng:8080/"
+      # Dragonfly is RESP-compatible — SearXNG's Redis client talks to it
+      # unmodified (db 7). The dev dragonfly has no password (see service
+      # above), so no credentials in the URL.
+      SEARXNG_REDIS_URL: "redis://dragonfly:6379/7"
+      SEARXNG_SECRET: "${SEARXNG_SECRET:-change-me-searxng-secret-32chars!!}"
+    volumes:
+      # Bundled settings enable the JSON output format SmartRouter requires.
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    expose: ["8080"]
+    ports: ["8888:8080"]
+    depends_on: [dragonfly]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 volumes:
   quarry_pg:

@@ -288,7 +288,7 @@ type SearchPanelAction =
 	| { type: "preview-loading"; query: string }
 	| { type: "preview-loaded"; query: string; results: PreviewResult[] }
 	| { type: "preview-cleared" }
-	| { type: "web-search-started" }
+	| { type: "web-search-started"; keepExisting?: boolean }
 	| { type: "web-cleared" }
 	| {
 			type: "web-results-loaded";
@@ -379,11 +379,13 @@ function searchPanelReducer(
 				...state,
 				webLoading: true,
 				webError: null,
-				webMode: null,
-				webResults: [],
-				webAnswer: "",
-				webCitations: [],
-				webFetchedPage: null,
+				webMode: action.keepExisting ? state.webMode : null,
+				webResults: action.keepExisting ? state.webResults : [],
+				webAnswer: action.keepExisting ? state.webAnswer : "",
+				webCitations: action.keepExisting ? state.webCitations : [],
+				webFetchedPage: action.keepExisting
+					? state.webFetchedPage
+					: null,
 			};
 		case "web-cleared":
 			return {
@@ -427,6 +429,37 @@ function safeHostname(url: string): string {
 	}
 }
 
+function buildPreviewResults(payload: WebSearchPayload): PreviewResult[] {
+	if (payload.mode === "fetch" || payload.url) {
+		if (!payload.url) return [];
+		return [
+			{
+				url: payload.url,
+				title: payload.title ?? payload.url,
+				hostname: safeHostname(payload.url),
+				snippet: payload.description ?? payload.excerpt ?? null,
+			},
+		];
+	}
+
+	const results = Array.isArray(payload.results)
+		? payload.results
+				.filter(
+					(result) =>
+						typeof result.url === "string" &&
+						result.url.trim().length > 0,
+				)
+				.slice(0, 6)
+		: [];
+
+	return results.map((result) => ({
+		url: result.url,
+		title: result.title ?? result.url,
+		hostname: safeHostname(result.url),
+		snippet: result.snippet ?? null,
+	}));
+}
+
 const tabs: DashboardTab[] = ["Chat", "Søk", "Kunnskap"];
 const aboveFoldDashboardCardIds = new Set(["weather", "traffic", "news"]);
 
@@ -462,6 +495,9 @@ export function VelionHome() {
 		createInitialVelionHomeState,
 	);
 	const [searchExpanded, setSearchExpanded] = useState(false);
+	const [searchPreviewActive, setSearchPreviewActive] = useState(false);
+	const [searchPanelSnapshot, setSearchPanelSnapshot] =
+		useState<SearchPanelSnapshot | null>(null);
 	const {
 		activeTab,
 		browseWeb,
@@ -490,6 +526,8 @@ export function VelionHome() {
 		controlPlane.entitlements?.plan ?? controlPlane.organization?.plan,
 	);
 	const searchModeExpanded = activeTab === "Søk" && searchExpanded;
+	const searchModePreviewing =
+		activeTab === "Søk" && searchPreviewActive && !searchExpanded;
 	const homeTitle =
 		activeTab === "Søk"
 			? "Søk på nett of i velion"
@@ -503,6 +541,8 @@ export function VelionHome() {
 		dispatch({ type: "active-tab-changed", tab });
 		if (tab !== "Søk") {
 			setSearchExpanded(false);
+			setSearchPanelSnapshot(null);
+			setSearchPreviewActive(false);
 		}
 	};
 
@@ -667,6 +707,9 @@ export function VelionHome() {
 					<SearchPanel
 						expanded={searchModeExpanded}
 						onExpandedChange={setSearchExpanded}
+						initialSnapshot={searchPanelSnapshot}
+						onPreviewActiveChange={setSearchPreviewActive}
+						onSnapshotChange={setSearchPanelSnapshot}
 					/>
 				) : (
 					<KnowledgePanel />
@@ -698,16 +741,42 @@ export function VelionHome() {
 						{composerContent}
 					</section>
 				) : (
-					<div className="velion-home-bands min-h-0 flex-1">
-						<section className="velion-home-header velion-home-band velion-home-band-top velion-fade-up px-4">
+					<div
+						className={cn(
+							"velion-home-bands min-h-0 flex-1",
+							searchModePreviewing
+								? "velion-home-bands-previewing"
+								: "",
+						)}
+					>
+						<section
+							className={cn(
+								"velion-home-header velion-home-band velion-home-band-top velion-fade-up px-4",
+								searchModePreviewing
+									? "items-start pt-8 pb-3"
+									: "",
+							)}
+						>
 							<div className="mx-auto flex w-full max-w-5xl flex-col items-center">
-								<div className="velion-home-plan w-full max-w-[720px]">
+								<div
+									className={cn(
+										"velion-home-plan w-full max-w-[720px]",
+										searchModePreviewing
+											? "opacity-55"
+											: "",
+									)}
+								>
 									<PlanBadge planLabel={planLabel} />
 								</div>
 
 								<h1
 									suppressHydrationWarning
-									className="velion-home-title w-full max-w-[720px] font-[450] leading-none tracking-tight text-[#1A1A1A] transition-colors dark:text-[#F7F8F8]"
+									className={cn(
+										"velion-home-title w-full max-w-[720px] font-[450] leading-none tracking-tight text-[#1A1A1A] transition-all duration-300 dark:text-[#F7F8F8]",
+										searchModePreviewing
+											? "origin-top scale-[0.78] translate-y-[-12px] opacity-50"
+											: "",
+									)}
 								>
 									{homeTitle}
 								</h1>
@@ -718,7 +787,14 @@ export function VelionHome() {
 							{composerContent}
 						</section>
 
-						<section className="velion-home-cards velion-home-band velion-home-band-bottom mx-auto flex min-h-0 w-full max-w-5xl flex-col justify-start px-4">
+						<section
+							className={cn(
+								"velion-home-cards velion-home-band velion-home-band-bottom mx-auto flex min-h-0 w-full max-w-5xl flex-col justify-start px-4 transition-opacity duration-200",
+								searchModePreviewing
+									? "pointer-events-none opacity-0"
+									: "",
+							)}
+						>
 							<div
 								key={cardPage}
 								className="velion-home-card-grid velion-card-page grid grid-cols-1 gap-4 lg:grid-cols-3"
@@ -812,9 +888,22 @@ function PlanBadge({ planLabel }: { planLabel: string }) {
 
 const LIVE_SEARCH_DEBOUNCE_MS = 650;
 
+type SearchPanelSnapshot = {
+	searchState: SearchPanelState;
+	followUpQuery: string;
+	activeResultTab: SearchResultTab;
+	images: ImageHit[];
+	imagesError: string | null;
+	imagesQuery: string;
+	imagesStatus: ImagesStatus;
+};
+
 type SearchPanelProps = {
 	expanded: boolean;
 	onExpandedChange: (expanded: boolean) => void;
+	initialSnapshot?: SearchPanelSnapshot | null;
+	onPreviewActiveChange?: (active: boolean) => void;
+	onSnapshotChange?: (snapshot: SearchPanelSnapshot) => void;
 };
 
 type SearchResultTab = "Info" | "Videos" | "Map" | "Images" | "Shopping";
@@ -823,20 +912,40 @@ type ImagesStatus = "idle" | "loading" | "loaded" | "error";
 export function SearchPanel({
 	expanded,
 	onExpandedChange,
+	initialSnapshot,
+	onPreviewActiveChange,
+	onSnapshotChange,
 }: SearchPanelProps) {
 	const [searchState, dispatchSearch] = useReducer(
 		searchPanelReducer,
-		initialSearchPanelState,
+		initialSnapshot?.searchState ?? initialSearchPanelState,
 	);
-	const [followUpQuery, setFollowUpQuery] = useState("");
-	const [activeResultTab, setActiveResultTab] =
-		useState<SearchResultTab>("Info");
-	const [images, setImages] = useState<ImageHit[]>([]);
-	const [imagesError, setImagesError] = useState<string | null>(null);
-	const [imagesQuery, setImagesQuery] = useState("");
-	const [imagesStatus, setImagesStatus] = useState<ImagesStatus>("idle");
+	const [followUpQuery, setFollowUpQuery] = useState(
+		initialSnapshot?.followUpQuery ?? "",
+	);
+	const [activeResultTab, setActiveResultTab] = useState<SearchResultTab>(
+		initialSnapshot?.activeResultTab ?? "Info",
+	);
+	const [images, setImages] = useState<ImageHit[]>(
+		initialSnapshot?.images ?? [],
+	);
+	const [imagesError, setImagesError] = useState<string | null>(
+		initialSnapshot?.imagesError ?? null,
+	);
+	const [imagesQuery, setImagesQuery] = useState(
+		initialSnapshot?.imagesQuery ?? "",
+	);
+	const [imagesStatus, setImagesStatus] = useState<ImagesStatus>(
+		initialSnapshot?.imagesStatus ?? "idle",
+	);
 	const searchAbortRef = useRef<AbortController | null>(null);
 	const imagesAbortRef = useRef<AbortController | null>(null);
+	const restoredPendingSearchRef = useRef(
+		initialSnapshot?.searchState.webLoading &&
+			initialSnapshot.searchState.submittedQuery
+			? initialSnapshot.searchState.submittedQuery
+			: null,
+	);
 	const {
 		query,
 		suggestions,
@@ -852,12 +961,17 @@ export function SearchPanel({
 		webMode,
 		webResults,
 	} = searchState;
-		const activeQuery = query.trim();
-		const deferredActiveQuery = useDeferredValue(activeQuery);
-		const isTyping = activeQuery.length > 0;
+	const activeQuery = query.trim();
+	const deferredActiveQuery = useDeferredValue(activeQuery);
+	const isTyping = activeQuery.length > 0;
 	const visibleSuggestions =
 		isTyping && suggestionsQuery === activeQuery ? suggestions : [];
 	const showPreview = previewResults.length > 0 && isTyping && !expanded;
+	const previewResultsVisible = previewResults.slice(0, 6);
+	const previewPanelActive =
+		!expanded &&
+		activeQuery.length >= 3 &&
+		(previewLoading || previewResultsVisible.length > 0);
 	const expandedResults: WebSearchResult[] =
 		webMode === "fetch" && webFetchedPage
 			? [
@@ -900,6 +1014,31 @@ export function SearchPanel({
 			imagesAbortRef.current?.abort();
 		};
 	}, []);
+
+	useEffect(() => {
+		onSnapshotChange?.({
+			searchState,
+			followUpQuery,
+			activeResultTab,
+			images,
+			imagesError,
+			imagesQuery,
+			imagesStatus,
+		});
+	}, [
+		activeResultTab,
+		followUpQuery,
+		images,
+		imagesError,
+		imagesQuery,
+		imagesStatus,
+		onSnapshotChange,
+		searchState,
+	]);
+
+	useEffect(() => {
+		onPreviewActiveChange?.(previewPanelActive);
+	}, [onPreviewActiveChange, previewPanelActive]);
 
 	// --- Suggestions fetch (120 ms debounce, existing) ---
 		useEffect(() => {
@@ -963,21 +1102,35 @@ export function SearchPanel({
 		};
 	}, [activeQuery, isTyping]);
 
-	const runSearch = useCallback((q: string) => {
+	const runSearch = useCallback((
+		q: string,
+		options?: {
+			includeAnswer?: boolean;
+			keepExisting?: boolean;
+			limit?: number;
+		},
+	) => {
 		const trimmed = q.trim();
 		if (trimmed.length < 3) {
 			dispatchSearch({ type: "preview-cleared" });
 			dispatchSearch({ type: "web-cleared" });
 			return;
 		}
+		const limit = options?.limit ?? 10;
+		const includeAnswer = options?.includeAnswer ?? false;
+		const keepExisting = options?.keepExisting ?? false;
 
 		searchAbortRef.current?.abort();
 		const controller = new AbortController();
 		searchAbortRef.current = controller;
 
 		dispatchSearch({ type: "submitted", query: trimmed });
-		dispatchSearch({ type: "preview-loading", query: trimmed });
-		dispatchSearch({ type: "web-search-started" });
+		if (keepExisting) {
+			dispatchSearch({ type: "preview-cleared" });
+		} else {
+			dispatchSearch({ type: "preview-loading", query: trimmed });
+		}
+		dispatchSearch({ type: "web-search-started", keepExisting });
 		setImages([]);
 		setImagesError(null);
 		setImagesQuery("");
@@ -985,7 +1138,7 @@ export function SearchPanel({
 
 		apiSend<WebSearchPayload>(
 			"/api/v1/search/web",
-			{ query: trimmed, limit: 8 },
+			{ query: trimmed, limit, includeAnswer },
 			"POST",
 			{ credentials: "include", signal: controller.signal },
 		)
@@ -1001,15 +1154,7 @@ export function SearchPanel({
 						return;
 					}
 
-					const preview: PreviewResult[] = [
-						{
-							url: payload.url,
-							title: payload.title ?? payload.url,
-							hostname: safeHostname(payload.url),
-							snippet:
-								payload.description ?? payload.excerpt ?? null,
-						},
-					];
+					const preview = buildPreviewResults(payload);
 					dispatchSearch({
 						type: "preview-loaded",
 						query: trimmed,
@@ -1036,12 +1181,7 @@ export function SearchPanel({
 							)
 							.slice(0, 8)
 					: [];
-				const preview = results.slice(0, 5).map((result) => ({
-					url: result.url,
-					title: result.title ?? result.url,
-					hostname: safeHostname(result.url),
-					snippet: result.snippet ?? null,
-				}));
+				const preview = buildPreviewResults(payload);
 				const citations = Array.isArray(payload.citations)
 					? payload.citations.filter(
 							(citation) =>
@@ -1086,6 +1226,120 @@ export function SearchPanel({
 				});
 			});
 	}, []);
+
+	const runPreviewSearch = useCallback((q: string) => {
+		const trimmed = q.trim();
+		if (trimmed.length < 3) {
+			dispatchSearch({ type: "preview-cleared" });
+			return;
+		}
+
+		searchAbortRef.current?.abort();
+		const controller = new AbortController();
+		searchAbortRef.current = controller;
+
+		dispatchSearch({ type: "preview-loading", query: trimmed });
+
+		apiSend<WebSearchPayload>(
+			"/api/v1/search/web",
+			{ query: trimmed, limit: 6, includeAnswer: false },
+			"POST",
+			{ credentials: "include", signal: controller.signal },
+		)
+			.then((payload) => {
+				const preview = buildPreviewResults(payload);
+				if (preview.length > 0) {
+					dispatchSearch({
+						type: "preview-loaded",
+						query: trimmed,
+						results: preview,
+					});
+					return;
+				}
+
+				dispatchSearch({ type: "preview-cleared" });
+			})
+			.catch((error: unknown) => {
+				if (
+					error instanceof DOMException &&
+					error.name === "AbortError"
+				)
+					return;
+				dispatchSearch({ type: "preview-cleared" });
+			});
+	}, []);
+
+	useEffect(() => {
+		const restoredQuery = restoredPendingSearchRef.current;
+		if (!restoredQuery) return;
+		runSearch(restoredQuery, {
+			includeAnswer: false,
+			keepExisting: true,
+			limit: 10,
+		});
+	}, [runSearch]);
+
+	const persistExpandedSearchSnapshot = useCallback(
+		(nextQuery: string) => {
+			const trimmed = nextQuery.trim();
+			if (trimmed.length < 3) return;
+			const previewForQuery =
+				searchState.previewQuery === trimmed
+					? searchState.previewResults.slice(0, 6)
+					: [];
+			const existingResults = previewForQuery.map((result) => ({
+				url: result.url,
+				title: result.title,
+				snippet: result.snippet ?? undefined,
+			}));
+
+			const nextSearchState: SearchPanelState = {
+				...searchState,
+				query: trimmed,
+				submittedQuery: trimmed,
+				suggestions: [],
+				suggestionsQuery: "",
+				highlightedIndex: -1,
+				previewResults: previewForQuery,
+				previewQuery: previewForQuery.length ? trimmed : "",
+				previewLoading: false,
+				webMode: existingResults.length ? "search" : null,
+				webResults: existingResults,
+				webAnswer: "",
+				webCitations: [],
+				webFetchedPage: null,
+				webLoading: true,
+				webError: null,
+			};
+
+			onSnapshotChange?.({
+				searchState: nextSearchState,
+				followUpQuery,
+				activeResultTab,
+				images: [],
+				imagesError: null,
+				imagesQuery: "",
+				imagesStatus: "idle",
+			});
+		},
+		[
+			activeResultTab,
+			followUpQuery,
+			onSnapshotChange,
+			searchState,
+		],
+	);
+
+	const expandFromPreview = useCallback(
+		(nextQuery: string) => {
+			const trimmed = nextQuery.trim();
+			if (trimmed.length < 3) return;
+			persistExpandedSearchSnapshot(trimmed);
+			dispatchSearch({ type: "suggestions-cleared" });
+			onExpandedChange(true);
+		},
+		[onExpandedChange, persistExpandedSearchSnapshot],
+	);
 
 		const fetchImages = useCallback((q: string) => {
 			const trimmed = q.trim();
@@ -1167,6 +1421,7 @@ export function SearchPanel({
 			dispatchSearch({ type: "preview-cleared" });
 			dispatchSearch({ type: "web-cleared" });
 			onExpandedChange(false);
+			restoredPendingSearchRef.current = null;
 			return;
 		}
 
@@ -1177,17 +1432,31 @@ export function SearchPanel({
 			return;
 		}
 
+		if (restoredPendingSearchRef.current === deferredActiveQuery) {
+			restoredPendingSearchRef.current = null;
+			return;
+		}
+
+		if (expanded) {
+			return;
+		}
+
 		const timeout = window.setTimeout(() => {
-			onExpandedChange(true);
 			dispatchSearch({ type: "suggestions-cleared" });
-			runSearch(deferredActiveQuery);
+			runPreviewSearch(deferredActiveQuery);
 		}, LIVE_SEARCH_DEBOUNCE_MS);
 
 		return () => {
 			window.clearTimeout(timeout);
 			searchAbortRef.current?.abort();
 		};
-	}, [deferredActiveQuery, isTyping, onExpandedChange, runSearch]);
+	}, [
+		deferredActiveQuery,
+		expanded,
+		isTyping,
+		onExpandedChange,
+		runPreviewSearch,
+	]);
 
 	useEffect(() => {
 		if (!expanded || activeQuery.length < 3) return;
@@ -1204,11 +1473,12 @@ export function SearchPanel({
 		const highlighted =
 			highlightedIndex >= 0 ? visibleSuggestions[highlightedIndex] : null;
 		const nextQuery = highlighted?.text ?? query;
-		if (nextQuery.trim().length >= 3) {
-			onExpandedChange(true);
-			dispatchSearch({ type: "suggestions-cleared" });
+		const trimmed = nextQuery.trim();
+		if (trimmed.length >= 3 && !expanded) {
+			expandFromPreview(trimmed);
+			return;
 		}
-		runSearch(nextQuery);
+		runSearch(nextQuery, { includeAnswer: false, limit: 10 });
 	};
 
 	const submitFollowUp = (event: React.FormEvent) => {
@@ -1218,7 +1488,7 @@ export function SearchPanel({
 		dispatchSearch({ type: "query-changed", query: nextQuery });
 		setFollowUpQuery("");
 		onExpandedChange(true);
-		runSearch(nextQuery);
+		runSearch(nextQuery, { includeAnswer: false, limit: 10 });
 	};
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1248,9 +1518,15 @@ export function SearchPanel({
 			event.preventDefault();
 			const suggestion = visibleSuggestions[highlightedIndex];
 			if (suggestion) {
-				onExpandedChange(true);
 				dispatchSearch({ type: "suggestions-cleared" });
-				runSearch(suggestion.text);
+				if (!expanded) {
+					expandFromPreview(suggestion.text);
+					return;
+				}
+				runSearch(suggestion.text, {
+					includeAnswer: false,
+					limit: 10,
+				});
 			}
 		}
 	};
@@ -1344,7 +1620,7 @@ export function SearchPanel({
 
 				<div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden xl:grid-cols-[minmax(0,1fr)_340px]">
 					<div className="min-h-0 overflow-y-auto p-4 lg:p-5">
-						{webLoading ? (
+						{webLoading && expandedResults.length === 0 ? (
 							<div className="flex items-center gap-2 rounded-[18px] bg-white/58 px-4 py-3 text-[13px] font-medium text-[#6F6860] dark:bg-white/[0.04] dark:text-[#AEB4C0]">
 								<Loader2
 									className="size-4 animate-spin"
@@ -1352,7 +1628,7 @@ export function SearchPanel({
 								/>
 								Thinking...
 							</div>
-						) : webError ? (
+						) : webError && expandedResults.length === 0 ? (
 							<div className="rounded-[18px] bg-[#FFF7F5] p-4 text-[13px] font-medium text-[#A53E2E] dark:bg-[#281817] dark:text-[#FFB8AE]">
 								{webError}
 							</div>
@@ -1381,6 +1657,22 @@ export function SearchPanel({
 							/>
 						) : (
 							<div className="space-y-3">
+								{webLoading ? (
+									<div className="flex items-center gap-2 rounded-[18px] bg-white/58 px-4 py-3 text-[13px] font-medium text-[#6F6860] dark:bg-white/[0.04] dark:text-[#AEB4C0]">
+										<Loader2
+											className="size-4 animate-spin"
+											aria-hidden="true"
+										/>
+										Laster flere treff…
+									</div>
+								) : null}
+
+								{webError ? (
+									<div className="rounded-[18px] bg-[#FFF7F5] p-4 text-[13px] font-medium text-[#A53E2E] dark:bg-[#281817] dark:text-[#FFB8AE]">
+										{webError}
+									</div>
+								) : null}
+
 								{activeResultTab === "Info" && webAnswer ? (
 									<section className="rounded-[22px] bg-white/58 p-4 dark:bg-white/[0.04]">
 										<p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#9A9188] dark:text-[#737780]">
@@ -1558,11 +1850,18 @@ export function SearchPanel({
 										// Prevent blur from firing before click
 										e.preventDefault();
 										dispatchSearch({
-											type: "query-changed",
-											query: suggestion.text,
+											type: "suggestions-cleared",
 										});
-										onExpandedChange(true);
-										runSearch(suggestion.text);
+										if (!expanded) {
+											expandFromPreview(
+												suggestion.text,
+											);
+											return;
+										}
+										runSearch(suggestion.text, {
+											includeAnswer: false,
+											limit: 10,
+										});
 									}}
 									onMouseEnter={() =>
 										dispatchSearch({
@@ -1598,37 +1897,51 @@ export function SearchPanel({
 
 				{/* Inline preview cards */}
 				{showPreview ? (
-					<div className="velion-fade-up ml-[52px] mt-3 space-y-2">
-						{previewResults.map((result) => (
-							<a
-								key={result.url}
-								href={result.url}
-								target="_blank"
-								rel="noopener noreferrer"
-								className="velion-glass-soft flex min-w-0 flex-col gap-0.5 rounded-[18px] px-4 py-3 transition hover:shadow-[0_12px_30px_rgba(76,60,92,0.14)]"
-							>
-								<span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-[#AAA198] dark:text-[#5A5E66]">
-									<span className="truncate">
-										{result.hostname}
-									</span>
-									<ExternalLink
-										className="size-3 shrink-0"
-										aria-hidden="true"
-									/>
-								</span>
-								<span className="truncate text-[13px] font-semibold text-[#1A1A1A] dark:text-white">
-									{result.title}
-								</span>
-								{result.snippet ? (
-									<span className="line-clamp-1 text-[12px] leading-relaxed text-[#7A756F] dark:text-[#8A8E96]">
-										{result.snippet}
-									</span>
-								) : null}
-							</a>
-						))}
-						<p className="px-1 pt-0.5 text-[12px] font-medium text-[#9A9188] dark:text-[#737780]">
-							Oppdateres automatisk når du stopper å skrive.
-						</p>
+					<div className="velion-fade-up ml-[52px] mt-3">
+						<div className="rounded-[24px] border border-black/[0.06] bg-white px-3 py-3 shadow-[0_16px_42px_rgba(20,21,24,0.08)] dark:border-white/[0.07] dark:bg-[#1A1D24] dark:shadow-[0_18px_42px_rgba(0,0,0,0.36)]">
+							<div className="max-h-[274px] space-y-2 overflow-y-auto overscroll-contain pr-1">
+								{previewResultsVisible.map((result) => (
+									<a
+										key={result.url}
+										href={result.url}
+										target="_blank"
+										rel="noopener noreferrer"
+										className="flex min-h-[86px] min-w-0 flex-col gap-0.5 rounded-[18px] border border-black/[0.05] bg-[#F5F4F1] px-4 py-3 transition hover:bg-[#EFEBE5] dark:border-white/[0.06] dark:bg-[#20242C] dark:hover:bg-[#252A33]"
+									>
+										<span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-[#8C837A] dark:text-[#7F8794]">
+											<span className="truncate">
+												{result.hostname}
+											</span>
+											<ExternalLink
+												className="size-3 shrink-0"
+												aria-hidden="true"
+											/>
+										</span>
+										<span className="line-clamp-2 text-[14px] font-semibold leading-snug text-[#17191F] dark:text-white">
+											{result.title}
+										</span>
+										{result.snippet ? (
+											<span className="line-clamp-2 text-[12px] leading-relaxed text-[#666059] dark:text-[#A8AFBA]">
+												{result.snippet}
+											</span>
+										) : null}
+									</a>
+								))}
+							</div>
+							<div className="mt-3 flex items-center justify-between gap-3 px-1">
+								<p className="text-[12px] font-medium text-[#8A8177] dark:text-[#818896]">
+									Viser {Math.min(previewResultsVisible.length, 3)} av{" "}
+									{previewResultsVisible.length} forhåndstreff.
+								</p>
+								<button
+									type="button"
+									onClick={() => expandFromPreview(activeQuery)}
+									className="rounded-full bg-[#111111] px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-[#2A2A2A] dark:bg-white dark:text-[#111111] dark:hover:bg-[#E7E8EB]"
+								>
+									Se mer
+								</button>
+							</div>
+						</div>
 					</div>
 				) : webError && !expanded ? (
 					<div className="ml-[52px] mt-3 rounded-[16px] border border-[#F1C9C2] bg-[#FFF7F5] px-4 py-3 text-[12px] font-medium text-[#A53E2E] dark:border-[#6E332D] dark:bg-[#281817] dark:text-[#FFB8AE]">

@@ -46,11 +46,11 @@ func Load() (*Config, error) {
 		UserServiceURL:  getEnv("USER_SERVICE_URL", "http://user-service:3012"),
 		ServiceName:     getEnv("SERVICE_NAME", "org-core"),
 		Redis: RedisConfig{
-			Host:     getEnv("REDIS_HOST", "aquatiq-redis-local"),
-			Port:     getEnv("REDIS_PORT", "6379"),
-			Password: getEnv("REDIS_PASSWORD", ""),
-			DB:       getEnvInt("REDIS_DB", 3),
-			Enabled:  getEnvBool("REDIS_ENABLED", false),
+			Host:     getEnv("DRAGONFLY_HOST", getEnv("CACHE_HOST", getEnv("REDIS_HOST", "controlplane-dragonfly"))),
+			Port:     getEnv("DRAGONFLY_PORT", getEnv("CACHE_PORT", getEnv("REDIS_PORT", "6379"))),
+			Password: getEnv("DRAGONFLY_PASSWORD", getEnv("CACHE_PASSWORD", getEnv("REDIS_PASSWORD", ""))),
+			DB:       getEnvInt("DRAGONFLY_DB", getEnvInt("CACHE_DB", getEnvInt("REDIS_DB", 3))),
+			Enabled:  getEnvBool("DRAGONFLY_ENABLED", getEnvBool("CACHE_ENABLED", getEnvBool("REDIS_ENABLED", false))),
 		},
 	}
 

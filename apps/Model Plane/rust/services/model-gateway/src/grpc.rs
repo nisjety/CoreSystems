@@ -730,6 +730,14 @@ impl ModelGateway for GatewayService {
                 approval,
             )
             .await;
+            // Close the human-in-the-loop loop: a granted approval resumes the
+            // run on execution-core (flips AwaitingApproval → Running) so the
+            // agent proceeds without manual intervention. Best-effort.
+            approvals::resume_run_if_approved(
+                &mut self.state.execution_client.clone(),
+                approval,
+            )
+            .await;
         }
         Ok(Response::new(resp))
     }

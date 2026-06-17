@@ -31,6 +31,7 @@
 //! 5. **Brave is paid backup only** — never invoked until the free chain
 //!    (Tantivy + Stract + SearXNG) returns < min_results.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -42,6 +43,7 @@ use tokio::task::JoinSet;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
+use crate::autoprompt::QueryRewriter;
 use crate::intent_classifier::IntentClassifier;
 use crate::serp::{SearchOptions, SearchProvider, SearchResult};
 
@@ -188,6 +190,10 @@ pub struct SmartSearchRouter {
     /// that consults the LLM only on rule-default queries and caches
     /// answers across requests.
     intent_classifier: Option<Arc<dyn IntentClassifier>>,
+    /// Optional LLM query rewriter (autoprompt). When set, `Research`/
+    /// `Comparative` queries are rewritten into a tighter web-search query
+    /// before fan-out. `None` → queries dispatch verbatim.
+    query_rewriter: Option<Arc<dyn QueryRewriter>>,
     config: RouterConfig,
     health: Arc<HashMap<&'static str, HealthState>>,
     cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
@@ -201,6 +207,7 @@ pub struct SmartSearchRouterBuilder {
     brave: Option<Arc<dyn SearchProvider>>,
     serper: Option<Arc<dyn SearchProvider>>,
     intent_classifier: Option<Arc<dyn IntentClassifier>>,
+    query_rewriter: Option<Arc<dyn QueryRewriter>>,
     config: RouterConfig,
 }
 
@@ -213,6 +220,7 @@ impl SmartSearchRouterBuilder {
             brave: None,
             serper: None,
             intent_classifier: None,
+            query_rewriter: None,
             config: RouterConfig::default(),
         }
     }
@@ -252,6 +260,15 @@ impl SmartSearchRouterBuilder {
         self
     }
 
+    /// Plug in an LLM query rewriter (autoprompt). When set, `Research` and
+    /// `Comparative` queries are rewritten into a tighter web-search query
+    /// before fan-out. The rewriter is degrade-safe — any failure leaves the
+    /// original query untouched.
+    pub fn with_query_rewriter(mut self, r: Arc<dyn QueryRewriter>) -> Self {
+        self.query_rewriter = Some(r);
+        self
+    }
+
     pub fn build(self) -> QuarryResult<SmartSearchRouter> {
         // At least one provider must be configured, else /v1/search would
         // always return empty.
@@ -277,6 +294,7 @@ impl SmartSearchRouterBuilder {
             brave: self.brave,
             serper: self.serper,
             intent_classifier: self.intent_classifier,
+            query_rewriter: self.query_rewriter,
             config: self.config,
             health: Arc::new(health),
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -330,6 +348,18 @@ impl SmartSearchRouter {
         hasher.update(&opts.limit.to_le_bytes());
         hasher.update(b"|");
         hasher.update(&[opts.safe_search as u8]);
+        hasher.update(b"|");
+        // Result-affecting filters MUST participate or two requests differing
+        // only by topic/recency/phrase/domain would collide on one cache entry.
+        hasher.update(opts.topic.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"|");
+        hasher.update(opts.time_range.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"|");
+        hasher.update(&[opts.exact_match as u8]);
+        hasher.update(b"|");
+        hasher.update(opts.include_domains.join(",").as_bytes());
+        hasher.update(b"|");
+        hasher.update(opts.exclude_domains.join(",").as_bytes());
         hasher.update(b"|");
         // Tenant partitioning: org_id MUST participate in the cache key
         // or two tenants searching the same terms would share results
@@ -774,8 +804,23 @@ impl SearchProvider for SmartSearchRouter {
         let results = match intent {
             QueryIntent::Fresh => self.fresh_path(q, opts).await?,
             // Research / Comparative always fan out to every free engine
-            // — depth over efficiency.
-            QueryIntent::Research | QueryIntent::Comparative => self.widen_path(q, opts).await?,
+            // — depth over efficiency. Autoprompt (when wired) rewrites the
+            // verbose question into a tighter query first; the cache key above
+            // stays on the original query so repeats still hit cache without
+            // re-invoking the rewriter.
+            QueryIntent::Research | QueryIntent::Comparative => {
+                let dispatch: Cow<'_, str> = match &self.query_rewriter {
+                    Some(rw) => {
+                        let rewritten = rw.rewrite(q).await;
+                        if rewritten != q {
+                            tracing::debug!(original = q, rewritten = %rewritten, "autoprompt: query rewritten");
+                        }
+                        Cow::Owned(rewritten)
+                    }
+                    None => Cow::Borrowed(q),
+                };
+                self.widen_path(dispatch.as_ref(), opts).await?
+            }
             // Local biases the per-call options towards the user's
             // country before falling into the standard default topology.
             // If the caller didn't supply a country, leave None — the
@@ -1000,6 +1045,7 @@ mod tests {
             snippet: None,
             rank: 1,
             provider: provider.into(),
+            ..Default::default()
         }
     }
 

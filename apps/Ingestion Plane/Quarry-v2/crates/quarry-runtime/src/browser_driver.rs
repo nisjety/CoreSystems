@@ -40,6 +40,7 @@ const DEFAULT_WAIT_FOR_TIMEOUT_MS: u32 = 5_000;
 pub struct BrowserDriverAdapter {
     inner: Arc<dyn BrowserDriverTrait + Send + Sync>,
     pool: Arc<RuntimeLeasePool>,
+    managed_processor_id: Option<String>,
 }
 
 impl BrowserDriverAdapter {
@@ -47,7 +48,23 @@ impl BrowserDriverAdapter {
         inner: Arc<dyn BrowserDriverTrait + Send + Sync>,
         pool: Arc<RuntimeLeasePool>,
     ) -> Self {
-        Self { inner, pool }
+        Self {
+            inner,
+            pool,
+            managed_processor_id: None,
+        }
+    }
+
+    pub fn managed_provider(
+        inner: Arc<dyn BrowserDriverTrait + Send + Sync>,
+        pool: Arc<RuntimeLeasePool>,
+        processor_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            pool,
+            managed_processor_id: Some(processor_id.into()),
+        }
     }
 }
 
@@ -77,6 +94,11 @@ impl BrowserDriverAdapter {
     /// navigation has no clean way to send conditional headers and the
     /// caller falls back to a full render.
     async fn do_fetch(&self, url: &Url, hints: &FetchHints) -> QuarryResult<FetchResponse> {
+        if let Some(processor_id) = self.managed_processor_id.as_deref() {
+            hints
+                .privacy
+                .guard_third_party_processing("browser", processor_id)?;
+        }
         let key = url.host_str().unwrap_or("default").to_string();
         let mut guard = self
             .pool
@@ -368,5 +390,41 @@ mod tests {
             last,
             Some((".ready".to_string(), DEFAULT_WAIT_FOR_TIMEOUT_MS))
         );
+    }
+
+    #[tokio::test]
+    async fn managed_browser_provider_requires_processor_approval() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter = BrowserDriverAdapter::managed_provider(mock.clone(), pool, "browserbase");
+        let url = Url::parse("https://example.com/").unwrap();
+
+        let err = adapter
+            .fetch_conditional(&url, &FetchHints::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, quarry_core::error::ErrorCode::Forbidden);
+        assert_eq!(mock.acquire_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn managed_browser_provider_allows_matching_processor_policy() {
+        let mock = Arc::new(MockBrowserDriver::new(b"x"));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter = BrowserDriverAdapter::managed_provider(mock.clone(), pool, "browserbase");
+        let url = Url::parse("https://example.com/").unwrap();
+        let hints = FetchHints {
+            privacy: quarry_core::privacy::PrivacyPolicy {
+                allow_third_party_processing: true,
+                processor_id: Some("browserbase".into()),
+                ..quarry_core::privacy::PrivacyPolicy::default()
+            },
+            ..FetchHints::default()
+        };
+
+        adapter.fetch_conditional(&url, &hints).await.unwrap();
+
+        assert_eq!(mock.acquire_count.load(Ordering::SeqCst), 1);
     }
 }

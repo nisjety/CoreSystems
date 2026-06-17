@@ -39,6 +39,7 @@ import {
   type DataPlaneDocumentSummary,
   type IntegrationConnectionSummary,
 } from "@/lib/integrations/integration-corev2";
+import { loadKnowledgeDiagnostics } from "@/lib/knowledge/knowledge-diagnostics";
 
 type GraphEntity = {
   entity_id?: unknown;
@@ -264,8 +265,16 @@ export async function loadKnowledgeWorkspace(request: NextRequest): Promise<Live
     loadIntegrationSummary(request, { includeDiscovery: true, includeGraph: true }),
     loadDataPlaneDocumentSummaries(request),
   ]);
+  const indexedCount = countIndexedDocuments(documents);
 
   if (!orgId) {
+    const diagnostics = await loadKnowledgeDiagnostics({
+      documentCount: documents.length,
+      graphAvailable: false,
+      graphEdgeCount: 0,
+      graphNodeCount: 0,
+      indexedCount,
+    });
     return {
       generatedAt: summary.generatedAt,
       orgId: summary.orgId,
@@ -273,13 +282,13 @@ export async function loadKnowledgeWorkspace(request: NextRequest): Promise<Live
       dataPlane: {
         available: false,
         documentCount: documents.length,
-        indexedCount: countIndexedDocuments(documents),
+        indexedCount,
       },
       graph: EMPTY_GRAPH,
       metrics: summary.metrics,
       metricCards: buildMetricCards({
         dataPlaneCount: documents.length,
-        indexedCount: countIndexedDocuments(documents),
+        indexedCount,
         duplicateGroups: 0,
         graph: EMPTY_GRAPH,
         recommendationCount: 0,
@@ -291,6 +300,7 @@ export async function loadKnowledgeWorkspace(request: NextRequest): Promise<Live
       files: buildFiles(documents),
       sources: [],
       webSources: [],
+      diagnostics,
       finspo: {
         available: false,
         duplicateGroups: 0,
@@ -316,18 +326,25 @@ export async function loadKnowledgeWorkspace(request: NextRequest): Promise<Live
     collectGraphSourceRefs(graphSnapshot),
   );
   const graph = buildGraph(graphSnapshot, graphRefLookups);
+  const diagnosticsPromise = loadKnowledgeDiagnostics({
+    documentCount: documents.length,
+    graphAvailable: graph.available,
+    graphEdgeCount: graph.edgeCount,
+    graphNodeCount: graph.nodeCount,
+    indexedCount,
+  });
 
   const sortedDocuments = sortDocumentsByRecency(documents);
   const selectedDocuments = sortedDocuments.slice(0, KNOWLEDGE_SOURCE_LIMIT);
-  const [documentChunks, freshness] = await Promise.all([
+  const [documentChunks, freshness, diagnostics] = await Promise.all([
     loadDocumentChunkPreviews(request, session, orgId, selectedDocuments),
     loadFreshnessRows(request, session, orgId, selectedDocuments.map((document) => document.id)),
+    diagnosticsPromise,
   ]);
 
   const relatedLabelsByDocument = buildRelatedLabelsByDocument(graph);
   const sources = buildKnowledgeSources(selectedDocuments, documentChunks, freshness, relatedLabelsByDocument);
   const webSources = buildWebSources(quarrySources);
-  const indexedCount = countIndexedDocuments(documents);
 
   return {
     generatedAt: summary.generatedAt,
@@ -354,6 +371,7 @@ export async function loadKnowledgeWorkspace(request: NextRequest): Promise<Live
     files: buildFiles(documents),
     sources,
     webSources,
+    diagnostics,
     finspo: {
       available:
         finspoData.sources.length > 0 ||

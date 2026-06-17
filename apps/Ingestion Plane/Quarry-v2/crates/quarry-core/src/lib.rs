@@ -22,6 +22,7 @@ pub mod output_profile;
 pub mod pagination;
 pub mod policy;
 pub mod presets;
+pub mod privacy;
 pub mod resources;
 pub mod zdr;
 

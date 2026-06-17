@@ -133,6 +133,27 @@ export type LiveKnowledgeWebSource = {
   url: string;
 };
 
+export type LiveKnowledgeDiagnosticTone = "bad" | "good" | "neutral" | "warn";
+
+export type LiveKnowledgeDiagnosticItem = {
+  id: string;
+  label: string;
+  status: string;
+  tone: LiveKnowledgeDiagnosticTone;
+  detail: string;
+  meta?: string;
+};
+
+export type LiveKnowledgeDiagnostics = {
+  available: boolean;
+  sparseBackend: string | null;
+  vectorCollections: string[];
+  quickwitIndexes: string[];
+  services: LiveKnowledgeDiagnosticItem[];
+  storage: LiveKnowledgeDiagnosticItem[];
+  capabilities: LiveKnowledgeDiagnosticItem[];
+};
+
 export type LiveKnowledgePayload = {
   generatedAt: string;
   orgId: string | null;
@@ -150,5 +171,6 @@ export type LiveKnowledgePayload = {
   files: LiveKnowledgeFile[];
   sources: LiveKnowledgeSource[];
   webSources: LiveKnowledgeWebSource[];
+  diagnostics: LiveKnowledgeDiagnostics;
   finspo: LiveKnowledgeFinspo;
 };

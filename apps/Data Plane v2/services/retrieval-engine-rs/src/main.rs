@@ -69,14 +69,15 @@ async fn main() -> anyhow::Result<()> {
         .filter(|k| !k.is_empty())
         .map(|key| RerankClient::new(key, &cfg.reranker_model));
 
-    // Redis cache (optional — degrades gracefully if unavailable)
-    let redis_cache = match CacheLayer::connect(&cfg.redis_url).await {
+    // Redis-compatible cache (Dragonfly in compose; optional and degraded to
+    // no-op if unavailable).
+    let cache_layer = match CacheLayer::connect(&cfg.redis_url).await {
         Ok(cache) => {
-            tracing::info!("redis cache enabled");
+            tracing::info!("cache layer enabled");
             Some(cache)
         }
         Err(e) => {
-            tracing::warn!("redis cache unavailable, running without cache: {e}");
+            tracing::warn!("cache layer unavailable, running without cache: {e}");
             None
         }
     };
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     {
         Ok(nats_url) => match async_nats::connect(&nats_url).await {
             Ok(nats) => {
-                if let Some(cache) = redis_cache.as_ref() {
+                if let Some(cache) = cache_layer.as_ref() {
                     cache::invalidator::spawn_invalidator(nats.clone(), cache.clone());
                 }
                 Some(nats)
@@ -167,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
         qdrant,
         embedder,
         reranker,
-        cache: redis_cache,
+        cache: cache_layer,
         config: cfg.clone(),
         policy,
         nats: nats_client,

@@ -22,6 +22,8 @@ use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use crate::letta_adapter::LettaMemoryAdapter;
+
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
 const STEP_COMPLETED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.StepCompleted";
 const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
@@ -84,6 +86,7 @@ pub struct SessionService {
     retrieval_client: Option<RetrievalServiceClient<Channel>>,
     graph_client: Option<GraphServiceClient<Channel>>,
     knowledge_client: Option<KnowledgeServiceClient<Channel>>,
+    letta_memory: Option<LettaMemoryAdapter>,
 }
 
 /// Insert the `THREAD_CREATED` event row for a freshly created thread, within
@@ -171,10 +174,12 @@ async fn create_thread_inner(
 /// small. Inserts the message row and its `MESSAGE_APPENDED` event in one tx.
 async fn append_message_inner(
     pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
     req: pb::AppendMessageRequest,
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
     let msg_id = new_ulid();
     let now = Utc::now();
+    let mut letta_sync: Option<(String, Vec<crate::dreaming::DreamMemoryCandidate>)> = None;
 
     let mut tx = pool
         .begin()
@@ -227,9 +232,53 @@ async fn append_message_inner(
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
+    let candidates =
+        crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id);
+    if !candidates.is_empty() {
+        let (org_id, user_id): (String, String) =
+            sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
+                .bind(&req.thread_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        let saved = crate::dreaming::persist_candidates(
+            &mut tx,
+            &org_id,
+            &user_id,
+            &req.thread_id,
+            &msg_id,
+            &candidates,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        crate::dreaming::record_dream_run(
+            &mut tx,
+            &org_id,
+            &req.thread_id,
+            "append_message",
+            i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+            saved,
+            Some(&msg_id),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        info!(
+            thread_id = %req.thread_id,
+            memories_found = candidates.len(),
+            memories_saved = saved,
+            "dream memory extraction completed"
+        );
+        letta_sync = Some((org_id, candidates));
+    }
+
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+
+    if let Some((org_id, candidates)) = letta_sync {
+        crate::dreaming::sync_candidates_to_letta(letta, &org_id, &req.thread_id, &candidates)
+            .await;
+    }
 
     Ok(Response::new(pb::AppendMessageResponse { sequence }))
 }
@@ -300,6 +349,25 @@ async fn start_run_inner(
 
     info!(run_id = %run_id, "run started");
 
+    // Durable plan record for this run so the orchestration read path
+    // (ListPlans / GetPlan) and the plan UI show real agent progress. Keyed
+    // deterministically (`plan_{run_id}`) so complete_step can append steps
+    // without a lookup. Best-effort — a plan-write hiccup must not fail the run.
+    if let Err(error) = crate::orchestration_store::create_plan(
+        pool,
+        &format!("plan_{run_id}"),
+        &req.thread_id,
+        Some(&run_id),
+        &req.goal,
+        &req.org_id,
+        &req.user_id,
+        &serde_json::json!({ "source": "run_start" }),
+    )
+    .await
+    {
+        tracing::warn!(error = %error, run_id = %run_id, "durable plan create failed (best-effort)");
+    }
+
     Ok(Response::new(pb::StartRunResponse {
         run_id,
         created_at: Some(prost_types::Timestamp {
@@ -330,10 +398,18 @@ async fn record_run_terminal(
         &terminal_resource,
         &format!("{}:terminal", &req.run_id),
     );
+    // `complete_step` is called per step and emits a run-terminal event keyed
+    // `{run_id}:terminal`. A multi-step run therefore re-emits the same key on
+    // every "completed"/"failed" step; without ON CONFLICT the 2nd step would
+    // hit the unique idempotency index and fail the whole call, breaking
+    // multi-step runs. The per-step STEP_COMPLETED event is keyed `{run}:{step}`
+    // (unique per step) so it is unaffected. (Run-completion-once semantics —
+    // marking terminal only at true run end — is a separate refinement.)
     sqlx::query(
         "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
          SELECT $1, $2, $3, $4, now(), r.org_id, r.user_id, $3, $5, $8, $6, $7, 'session-core', 1
-         FROM runs r WHERE r.id = $3",
+         FROM runs r WHERE r.id = $3
+         ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING",
     )
     .bind(new_ulid())
     .bind(terminal_event_type)
@@ -405,6 +481,47 @@ async fn complete_step_inner(
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+
+    // Mirror the step into the run's durable plan as a plan_step so the plan UI
+    // reflects real execution progress. Best-effort + keyed to the run's plan
+    // (`plan_{run_id}`, created at run start); a missing plan or write hiccup is
+    // logged, never fails step completion.
+    {
+        let pstep_id = format!("pstep_{}", new_ulid());
+        let payload = serde_json::json!({
+            "step_id": req.step_id,
+            "status": req.status,
+            "output": req.output.chars().take(500).collect::<String>(),
+            "error": req.error,
+        });
+        let mapped = match req.status.as_str() {
+            "completed" => "done",
+            "failed" => "failed",
+            "awaiting_approval" => "awaiting_approval",
+            _ => "running",
+        };
+        match crate::orchestration_store::append_plan_step(
+            pool,
+            &pstep_id,
+            &format!("plan_{}", req.run_id),
+            "tool_execution",
+            &payload,
+            &serde_json::json!({}),
+        )
+        .await
+        {
+            Ok(_) => {
+                if let Err(error) =
+                    crate::orchestration_store::update_step_status(pool, &pstep_id, mapped).await
+                {
+                    tracing::warn!(error = %error, "plan_step status update failed (best-effort)");
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, run_id = %req.run_id, "plan_step append skipped (no plan for run?)");
+            }
+        }
+    }
 
     let step_index =
         u32::try_from(row.0).map_err(|_| Status::internal("step index out of range"))?;
@@ -531,6 +648,94 @@ async fn load_thread_messages(
     Ok(msgs)
 }
 
+fn semantic_memory_query(thread_messages: &[(String, String)]) -> String {
+    thread_messages
+        .iter()
+        .rev()
+        .take(6)
+        .rev()
+        .map(|(role, content)| format!("{role}: {content}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn append_letta_memory_rows(
+    svc: &SessionService,
+    org_id: Option<&str>,
+    thread_id: &str,
+    thread_messages: &[(String, String)],
+    memory_rows: &mut Vec<(String, String)>,
+) {
+    let (Some(letta), Some(org_id)) = (svc.letta_memory.as_ref(), org_id) else {
+        return;
+    };
+
+    let query = semantic_memory_query(thread_messages);
+    let entries = letta.search(org_id, thread_id, &query, &[], 8).await;
+    for entry in entries {
+        let content = entry.content.trim();
+        if content.is_empty()
+            || memory_rows
+                .iter()
+                .any(|(_, existing)| existing.trim() == content)
+        {
+            continue;
+        }
+        let topic = if entry.topic.trim().is_empty() {
+            "MEMORY"
+        } else {
+            entry.topic.trim()
+        };
+        memory_rows.push(("MEMORY".to_owned(), format!("letta/{topic}: {content}")));
+    }
+}
+
+async fn load_context_memory_rows(
+    svc: &SessionService,
+    thread_id: &str,
+    user_id: Option<&str>,
+    thread_messages: &[(String, String)],
+) -> Result<Vec<(String, String)>, Status> {
+    let thread_org_id: Option<String> =
+        sqlx::query_scalar("SELECT org_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(&svc.pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+    let mut rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT topic, content
+         FROM memory_index
+         WHERE thread_id = $1
+         ORDER BY updated_at DESC
+         LIMIT $2",
+    )
+    .bind(thread_id)
+    .bind(CONTEXT_MEMORY_LIMIT)
+    .fetch_all(&svc.pool)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let mut agent_rows = crate::dreaming::load_agent_memory_context_rows(
+        &svc.pool,
+        thread_id,
+        user_id,
+        crate::dreaming::AGENT_MEMORY_CONTEXT_LIMIT,
+    )
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    rows.append(&mut agent_rows);
+    append_letta_memory_rows(
+        svc,
+        thread_org_id.as_deref(),
+        thread_id,
+        thread_messages,
+        &mut rows,
+    )
+    .await;
+    Ok(rows)
+}
+
 /// Core of `SessionCore::get_context_assembly`. Loads run metadata, recent
 /// messages, and memory buckets; fans out to retrieval/knowledge/graph; then
 /// assembles the budgeted context segments.
@@ -565,20 +770,8 @@ async fn get_context_assembly_inner(
     };
 
     let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
-
-    let memory_rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT topic, content
-         FROM memory_index
-         WHERE thread_id = $1
-         ORDER BY updated_at DESC
-         LIMIT $2",
-    )
-    .bind(&thread_id)
-    .bind(CONTEXT_MEMORY_LIMIT)
-    .fetch_all(&svc.pool)
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
-
+    let memory_rows =
+        load_context_memory_rows(svc, &thread_id, user_id.as_deref(), &thread_messages).await?;
     let memory = bucket_memory_segments(memory_rows);
 
     let evidence = svc
@@ -652,7 +845,9 @@ impl SessionCore for SessionService {
         request: Request<pb::AppendMessageRequest>,
     ) -> Result<Response<pb::AppendMessageResponse>, Status> {
         let started = Instant::now();
-        let result = append_message_inner(&self.pool, request.into_inner()).await;
+        let result =
+            append_message_inner(&self.pool, self.letta_memory.as_ref(), request.into_inner())
+                .await;
         record_metrics("append_message", started, result.is_ok());
         result
     }
@@ -937,23 +1132,24 @@ impl SessionCore for SessionService {
         &self,
         request: Request<pb::ListAgentSkillsRequest>,
     ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
+        type Row = (
+            String,
+            String,
+            String,
+            String,
+            sqlx::types::Json<Vec<String>>,
+            sqlx::types::Json<Vec<String>>,
+            sqlx::types::Json<Vec<String>>,
+            bool,
+            String,
+        );
+
         let started = Instant::now();
         let result: Result<Response<pb::ListAgentSkillsResponse>, Status> = async {
             let req = request.into_inner();
             if req.org_id.is_empty() {
                 return Err(Status::invalid_argument("org_id is required"));
             }
-            type Row = (
-                String,
-                String,
-                String,
-                String,
-                sqlx::types::Json<Vec<String>>,
-                sqlx::types::Json<Vec<String>>,
-                sqlx::types::Json<Vec<String>>,
-                bool,
-                String,
-            );
             let rows: Vec<Row> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin
@@ -1560,6 +1756,7 @@ fn event_type_to_i32(s: &str) -> i32 {
 pub async fn serve(
     pool: PgPool,
     events_tx: tokio::sync::broadcast::Sender<mp_contracts::model_plane::v1::OrchestrationEvent>,
+    letta_memory: Option<LettaMemoryAdapter>,
 ) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9091".parse()?;
     info!("gRPC listening on :9091");
@@ -1620,6 +1817,12 @@ pub async fn serve(
     // Wave 7 — fine-tuning job state machine. Owns the `finetune_jobs` table
     // in this same Postgres. Provider HTTP (Azure OpenAI) lives in the gateway.
     let finetune = crate::finetune_grpc::FinetuneJobsService::new(pool.clone()).into_server();
+    let memory =
+        crate::memory_grpc::MemoryGrpc::new(pool.clone(), letta_memory.clone()).into_server();
+    // Velion intent layer ("model router") runtime policy. Owns the singleton
+    // `routing_policy` JSONB row in this same Postgres; the BFF writes and
+    // inference-core polls it.
+    let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone()).into_server();
 
     tonic::transport::Server::builder()
         .add_service(SessionCoreServer::new(SessionService {
@@ -1627,9 +1830,12 @@ pub async fn serve(
             retrieval_client,
             graph_client,
             knowledge_client,
+            letta_memory,
         }))
         .add_service(orchestration)
         .add_service(finetune)
+        .add_service(memory)
+        .add_service(routing)
         .serve(addr)
         .await?;
 
@@ -1638,7 +1844,9 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble_segments, AssemblyInputs};
+    use super::{assemble_segments, pb, AssemblyInputs};
+    use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+    use tonic::Request;
 
     fn base() -> AssemblyInputs {
         AssemblyInputs {
@@ -2064,6 +2272,7 @@ mod tests {
             retrieval_client: None,
             graph_client: None,
             knowledge_client: None,
+            letta_memory: None,
         };
 
         assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
@@ -2208,6 +2417,7 @@ mod tests {
             retrieval_client: None,
             graph_client: None,
             knowledge_client: None,
+            letta_memory: None,
         };
         let addr: std::net::SocketAddr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()

@@ -62,7 +62,7 @@ type QuotaStatus struct {
 	Utilization float64 `json:"utilization"`
 }
 
-type StripeCustomerInput struct {
+type CustomerInput struct {
 	OrgID              string
 	OrganizationName   string
 	BillingEmail       string
@@ -70,7 +70,7 @@ type StripeCustomerInput struct {
 	Metadata           map[string]string
 }
 
-type StripeCheckoutParams struct {
+type CheckoutParams struct {
 	OrgID        string
 	Plan         string
 	CustomerID   string
@@ -81,8 +81,33 @@ type StripeCheckoutParams struct {
 }
 
 type CheckoutSession struct {
-	ID  string `json:"id"`
-	URL string `json:"url"`
+	ID             string `json:"id"`
+	URL            string `json:"url,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	PaymentID      string `json:"payment_id,omitempty"`
+	ClientSecret   string `json:"client_secret,omitempty"`
+	PublishableKey string `json:"publishable_key,omitempty"`
+	ClientURL      string `json:"client_url,omitempty"`
+	BackendURL     string `json:"backend_url,omitempty"`
+	Status         string `json:"status,omitempty"`
+	AmountCents    int64  `json:"amount_cents,omitempty"`
+	Currency       string `json:"currency,omitempty"`
+}
+
+type CheckoutLookupParams struct {
+	PaymentID    string
+	ClientSecret string
+}
+
+type CheckoutStatus struct {
+	Provider     string `json:"provider,omitempty"`
+	PaymentID    string `json:"payment_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	Status       string `json:"status"`
+	OrgID        string `json:"org_id,omitempty"`
+	Plan         string `json:"plan,omitempty"`
+	AmountCents  int64  `json:"amount_cents,omitempty"`
+	Currency     string `json:"currency,omitempty"`
 }
 
 type Invoice struct {

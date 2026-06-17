@@ -8,8 +8,10 @@ use url::Url;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
+use serde_json::json;
 
 use crate::driver::{Driver, FetchHints};
+use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
 
 #[derive(Debug, Clone)]
@@ -32,7 +34,7 @@ pub struct StaticDriver {
     /// driver construction; reqwest's connection pool inside the
     /// client handles per-request reuse.
     proxy_clients: HashMap<String, reqwest::Client>,
-    pool: ProxyPool,
+    egress: EgressBroker,
 }
 
 impl StaticDriver {
@@ -46,6 +48,20 @@ impl StaticDriver {
         timeout: Duration,
         user_agent: &str,
         pool: ProxyPool,
+    ) -> QuarryResult<Self> {
+        let processor_id = if pool.is_empty() {
+            None
+        } else {
+            Some("quarry_proxy_pool".to_string())
+        };
+        Self::with_proxy_pool_and_processor(timeout, user_agent, pool, processor_id)
+    }
+
+    pub fn with_proxy_pool_and_processor(
+        timeout: Duration,
+        user_agent: &str,
+        pool: ProxyPool,
+        proxy_processor_id: Option<String>,
     ) -> QuarryResult<Self> {
         let client = build_client(timeout, user_agent, None)?;
         let mut proxy_clients = HashMap::with_capacity(pool.len());
@@ -62,23 +78,20 @@ impl StaticDriver {
         Ok(Self {
             client,
             proxy_clients,
-            pool,
+            egress: EgressBroker::new(pool, proxy_processor_id),
         })
     }
 
-    /// Pick the client that should service this (org, host) tuple.
-    /// Falls back to the direct-egress client when:
-    ///   - the pool is empty
-    ///   - the pool entry's client was somehow evicted (cannot
-    ///     currently happen)
-    fn pick_client(&self, hints: &FetchHints, url: &Url) -> &reqwest::Client {
-        let host = url.host_str().unwrap_or("");
-        if let Some(entry) = self.pool.pick(&hints.org_id, host) {
-            if let Some(c) = self.proxy_clients.get(&entry.uri) {
-                return c;
-            }
+    fn client_for_decision(&self, decision: &EgressDecision) -> QuarryResult<&reqwest::Client> {
+        match &decision.identity {
+            EgressIdentity::Direct => Ok(&self.client),
+            EgressIdentity::Proxy { uri, .. } => self.proxy_clients.get(uri).ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("egress proxy client missing for configured proxy: {uri}"),
+                )
+            }),
         }
-        &self.client
     }
 
     /// Shared fetch path used by both `fetch` and `fetch_conditional`.
@@ -88,8 +101,74 @@ impl StaticDriver {
     /// we propagate that status up to the caller (which can short-
     /// circuit by re-using the previously stored artifact).
     async fn do_fetch(&self, url: &Url, hints: &FetchHints) -> QuarryResult<FetchResponse> {
+        let host = url.host_str().unwrap_or("").to_string();
+        let plan = self.egress.plan(hints, url)?;
+        let mut attempts = Vec::with_capacity(plan.len());
+        for (idx, decision) in plan.iter().enumerate() {
+            let client = self.client_for_decision(decision)?;
+            match self.send_once(client, url, hints).await {
+                Ok(resp) => {
+                    self.egress
+                        .mark_http_status(&host, &decision.identity, resp.status);
+                    if crate::fingerprint_rotation::is_block_status(resp.status)
+                        && matches!(decision.identity, EgressIdentity::Proxy { .. })
+                    {
+                        attempts.push(attempt_record(
+                            decision,
+                            Some(resp.status),
+                            None,
+                            "block_status",
+                        ));
+                        if idx + 1 < plan.len() {
+                            tracing::warn!(
+                                host = %host,
+                                status = resp.status,
+                                attempt = idx,
+                                egress = decision.identity.label(),
+                                "egress blocked; rotating to next approved proxy"
+                            );
+                            continue;
+                        }
+                        return Err(blocked_error(resp.status, attempts));
+                    }
+                    return Ok(resp);
+                }
+                Err(err) => {
+                    self.egress.mark_transport_error(&host, &decision.identity);
+                    attempts.push(attempt_record(
+                        decision,
+                        None,
+                        Some(&err),
+                        "transport_error",
+                    ));
+                    if is_retryable_egress_error(err.code) && idx + 1 < plan.len() {
+                        tracing::warn!(
+                            host = %host,
+                            error = %err,
+                            attempt = idx,
+                            egress = decision.identity.label(),
+                            "egress transport failed; rotating to next approved proxy"
+                        );
+                        continue;
+                    }
+                    return Err(err.with_details(json!({ "egress_attempts": attempts })));
+                }
+            }
+        }
+
+        Err(QuarryError::new(
+            ErrorCode::UpstreamBlocked,
+            "no egress identities available",
+        ))
+    }
+
+    async fn send_once(
+        &self,
+        client: &reqwest::Client,
+        url: &Url,
+        hints: &FetchHints,
+    ) -> QuarryResult<FetchResponse> {
         let start = std::time::Instant::now();
-        let client = self.pick_client(hints, url);
         let mut req = client.get(url.clone());
         if let Some(etag) = hints.if_none_match.as_deref() {
             // ETag values arrive with quotes already in place per
@@ -140,6 +219,164 @@ impl StaticDriver {
             body,
             duration_ms: start.elapsed().as_millis() as u64,
         })
+    }
+}
+
+fn is_retryable_egress_error(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Timeout
+            | ErrorCode::UpstreamBlocked
+            | ErrorCode::DriverFailed
+            | ErrorCode::RateLimited
+    )
+}
+
+fn attempt_record(
+    decision: &EgressDecision,
+    status: Option<u16>,
+    error: Option<&QuarryError>,
+    reason: &str,
+) -> serde_json::Value {
+    let (egress, proxy_uri, processor_id) = match &decision.identity {
+        EgressIdentity::Direct => ("direct", None, None),
+        EgressIdentity::Proxy { uri, processor_id } => {
+            ("proxy", Some(uri.as_str()), processor_id.as_deref())
+        }
+    };
+    json!({
+        "attempt": decision.attempt,
+        "egress": egress,
+        "proxy_uri": proxy_uri,
+        "processor_id": processor_id,
+        "reason": reason,
+        "decision_reason": decision.reason,
+        "status": status,
+        "error_code": error.map(|e| format!("{:?}", e.code)),
+        "error": error.map(|e| e.message.clone()),
+    })
+}
+
+fn blocked_error(status: u16, attempts: Vec<serde_json::Value>) -> QuarryError {
+    let code = if status == 429 {
+        ErrorCode::RateLimited
+    } else {
+        ErrorCode::UpstreamBlocked
+    };
+    QuarryError::new(
+        code,
+        format!("all approved egress identities blocked; last status={status}"),
+    )
+    .with_details(json!({ "egress_attempts": attempts }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quarry_core::error::ErrorCode;
+    use quarry_core::privacy::PrivacyPolicy;
+    use wiremock::matchers::any;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn approved_hints_for_org(org_id: String) -> FetchHints {
+        FetchHints {
+            org_id,
+            privacy: PrivacyPolicy {
+                allow_third_party_processing: true,
+                processor_id: Some("quarry_proxy_pool".into()),
+                ..PrivacyPolicy::default()
+            },
+            ..FetchHints::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_pool_denies_default_private_policy_before_network() {
+        let pool = ProxyPool::from_env_string("http://127.0.0.1:9");
+        let driver =
+            StaticDriver::with_proxy_pool(Duration::from_millis(50), "QuarryTest/1.0", pool)
+                .unwrap();
+        let url: Url = "https://example.com/".parse().unwrap();
+
+        let err = driver
+            .fetch_conditional(&url, &FetchHints::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::Forbidden);
+    }
+
+    #[tokio::test]
+    async fn proxy_pool_rotates_to_next_proxy_on_429() {
+        let blocked_proxy = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(429).set_body_string("blocked"))
+            .mount(&blocked_proxy)
+            .await;
+        let ok_proxy = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&ok_proxy)
+            .await;
+
+        let blocked_uri = format!("http://{}", blocked_proxy.address());
+        let ok_uri = format!("http://{}", ok_proxy.address());
+        let pool = ProxyPool::from_env_string(&format!("{blocked_uri};{ok_uri}"));
+        let host = "example.com";
+        let org_id = (0..100)
+            .map(|i| format!("org_{i}"))
+            .find(|org| pool.pick(org, host).is_some_and(|p| p.uri == blocked_uri))
+            .expect("test should find an org that maps to the blocked proxy");
+
+        let driver = StaticDriver::with_proxy_pool_and_processor(
+            Duration::from_secs(5),
+            "QuarryTest/1.0",
+            pool,
+            Some("quarry_proxy_pool".into()),
+        )
+        .unwrap();
+        let url: Url = format!("http://{host}/").parse().unwrap();
+        let hints = approved_hints_for_org(org_id);
+
+        let resp = driver.fetch_conditional(&url, &hints).await.unwrap();
+
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"ok");
+    }
+
+    #[tokio::test]
+    async fn proxy_pool_returns_rate_limited_when_all_approved_proxies_block() {
+        let p1 = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(429).set_body_string("blocked"))
+            .mount(&p1)
+            .await;
+        let p2 = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(429).set_body_string("blocked"))
+            .mount(&p2)
+            .await;
+
+        let pool =
+            ProxyPool::from_env_string(&format!("http://{};http://{}", p1.address(), p2.address()));
+        let driver = StaticDriver::with_proxy_pool_and_processor(
+            Duration::from_secs(5),
+            "QuarryTest/1.0",
+            pool,
+            Some("quarry_proxy_pool".into()),
+        )
+        .unwrap();
+        let url: Url = "http://example.com/".parse().unwrap();
+        let hints = approved_hints_for_org("org_a".into());
+
+        let err = driver.fetch_conditional(&url, &hints).await.unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::RateLimited);
+        assert!(err
+            .details
+            .as_ref()
+            .and_then(|v| v.get("egress_attempts"))
+            .is_some());
     }
 }
 

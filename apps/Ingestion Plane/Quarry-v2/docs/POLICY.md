@@ -58,6 +58,64 @@ pub struct DeterminismStamp {
 
 Consumers can verify the claim by rebuilding the identity from the URL + recorded policy and comparing to `identity_id`.
 
+## Privacy policy metadata
+
+`POST /v1/scrape`, `POST /v1/scrape/stream`, and
+`POST /v1/internal/run_page` accept an optional `privacy` object. If omitted,
+Quarry defaults to `customer_private` with
+`allow_third_party_processing=false`.
+
+```json
+{
+  "zdr": false,
+  "privacy": {
+    "purpose_id": "support",
+    "lawful_basis": "contract",
+    "privacy_classification": "personal",
+    "retention_policy": "30d",
+    "residency": "eu",
+    "allow_third_party_processing": false,
+    "processor_id": null
+  }
+}
+```
+
+Provider gates:
+
+- Direct CoreSystem-owned fetch is allowed by default.
+- `QUARRY_PROXY_POOL` is treated as third-party egress unless
+  `QUARRY_PROXY_FIRST_PARTY=1` is set.
+- Third-party proxy egress requires
+  `privacy.allow_third_party_processing=true` and a matching
+  `privacy.processor_id`. Default processor ID is `quarry_proxy_pool`; override
+  with `QUARRY_PROXY_PROCESSOR_ID`.
+- Browserbase is registered as a managed provider and requires a matching
+  `privacy.processor_id`. Default processor ID is `browserbase`; override with
+  `QUARRY_BROWSERBASE_PROCESSOR_ID`.
+- `zdr=true`, `zdr_ephemeral`, and `credential_or_secret` requests deny
+  third-party providers even when a processor ID is present.
+
+429/block handling:
+
+- Static fetches route through `EgressBroker`, which builds a bounded egress
+  plan for each `(org, host)` request.
+- Proxy ordering is sticky by `(org, host)` first, then rotates through the
+  remaining approved proxy candidates.
+- HTTP `401`, `403`, `407`, `429`, and `503` from a proxy mark that
+  `(host, proxy)` unhealthy for a cooldown and move the request to the next
+  approved proxy, up to the broker attempt limit.
+- Retryable transport errors from a proxy also mark the `(host, proxy)`
+  unhealthy and rotate when another approved candidate exists.
+- If every approved proxy is blocked, Quarry returns `RateLimited` for final
+  `429` responses and `UpstreamBlocked` for other block statuses, with
+  `egress_attempts` in the error details for audit/debugging.
+- Direct-only egress remains direct. Quarry does not call a managed unblocker
+  in GDPR/default mode unless the request explicitly allows the matching
+  processor.
+
+`NormalizedOutput` and `DataPlaneIngestRequest` now carry the effective
+`PrivacyPolicy`, so cached outputs and Data Plane writes remain auditable.
+
 ## Acceptance criterion
 
 > "Same URL + strict preset ⇒ identical fingerprint across 3 runs."

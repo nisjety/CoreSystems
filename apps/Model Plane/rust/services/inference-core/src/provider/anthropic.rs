@@ -1,23 +1,59 @@
-//! Anthropic Claude provider — calls `https://api.anthropic.com/v1/messages` with SSE streaming.
+//! Anthropic Claude provider.
+//!
+//! Two flavors share one Anthropic Messages request/response codec:
+//! * **Direct** — `https://api.anthropic.com/v1/messages` (first-party).
+//! * **Azure Foundry** — the Claude deployments on an Azure AI Foundry
+//!   resource, served at `https://<resource>.services.ai.azure.com/anthropic/v1/messages`.
+//!   Verified live: the body is the *native* Anthropic Messages shape and auth
+//!   is the **same `x-api-key` header** as the direct API (the `api-key` header
+//!   and an `api-version` query param both 401 — do not add them). This is the
+//!   fix for the direct API returning 400 "credit balance too low".
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use super::{InferChunk, InferRequest, InferResponse, ProviderError, ProviderRouter};
+use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Default Claude model used when a request leaves the model unspecified
+/// ("Velion Auto"). The fallback chain substitutes this when Anthropic is the
+/// provider serving an unpinned request, so chat works against an
+/// Anthropic-only deployment with no client- or operator-chosen model.
+pub(crate) const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
+
+/// Default Claude deployment for the Azure Foundry flavor when a request leaves
+/// the model unspecified. Names the cheapest chat-capable Claude deployment so
+/// an unpinned Claude request stays economical.
+pub(crate) const DEFAULT_AZURE_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
+
+/// Which Anthropic Messages endpoint this provider targets.
+#[derive(Clone)]
+enum AnthropicFlavor {
+    /// First-party `api.anthropic.com`.
+    Direct,
+    /// Azure AI Foundry resource. `endpoint` is the resource base
+    /// (e.g. `https://<resource>.services.ai.azure.com`); the Messages route
+    /// `/anthropic/v1/messages` is appended. `models` is the deployed Claude
+    /// catalog used for `list_models`.
+    Azure {
+        endpoint: String,
+        models: Vec<String>,
+    },
+}
 
 /// Anthropic Claude inference provider.
 #[derive(Clone)]
 pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
+    flavor: AnthropicFlavor,
 }
 
 impl AnthropicProvider {
-    /// Create a new Anthropic provider.
+    /// Create a new direct (`api.anthropic.com`) Anthropic provider.
     ///
     /// # Errors
     ///
@@ -33,8 +69,65 @@ impl AnthropicProvider {
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
+            flavor: AnthropicFlavor::Direct,
         })
     }
+
+    /// Create an Azure AI Foundry Anthropic provider.
+    ///
+    /// `endpoint` is the resource base (the `services.ai.azure.com` host —
+    /// `cognitiveservices.azure.com` 401s for the Anthropic route). The Claude
+    /// Messages route and `x-api-key` auth are appended at call time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unavailable`] if `api_key` or `endpoint` is empty.
+    pub fn new_azure(
+        api_key: impl Into<String>,
+        endpoint: impl Into<String>,
+        models: Vec<String>,
+    ) -> Result<Self, ProviderError> {
+        let api_key = api_key.into();
+        if api_key.is_empty() {
+            return Err(ProviderError::Unavailable(
+                "AZURE_ANTHROPIC_API_KEY is empty".to_owned(),
+            ));
+        }
+        let endpoint = endpoint.into();
+        if endpoint.trim().is_empty() {
+            return Err(ProviderError::Unavailable(
+                "AZURE_ANTHROPIC_ENDPOINT is empty".to_owned(),
+            ));
+        }
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key,
+            flavor: AnthropicFlavor::Azure { endpoint, models },
+        })
+    }
+
+    /// The Messages API URL for the active flavor.
+    fn messages_url(&self) -> String {
+        match &self.flavor {
+            AnthropicFlavor::Direct => ANTHROPIC_API_URL.to_owned(),
+            AnthropicFlavor::Azure { endpoint, .. } => {
+                format!("{}/anthropic/v1/messages", endpoint.trim_end_matches('/'))
+            }
+        }
+    }
+
+    /// Provider name reported in logs and `list_models`.
+    fn provider_name(&self) -> &'static str {
+        match &self.flavor {
+            AnthropicFlavor::Direct => "anthropic",
+            AnthropicFlavor::Azure { .. } => "azure-anthropic",
+        }
+    }
+}
+
+/// True for the economy Claude tier (Haiku) so the UI can group cheap models.
+fn is_cheap_claude(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("haiku")
 }
 
 /// Build the Anthropic messages API request body.
@@ -176,12 +269,47 @@ impl ProviderRouter for AnthropicProvider {
         }
     }
 
+    /// Advertise the Claude chat catalog so `/v1/models` is populated (the SPA
+    /// model picker reads this). Direct uses the first-party model ids; Azure
+    /// Foundry uses the deployed Claude deployment names from config.
+    fn list_models(&self) -> Vec<ModelInfo> {
+        let provider = self.provider_name().to_owned();
+        let ids: Vec<String> = match &self.flavor {
+            AnthropicFlavor::Direct => [
+                DEFAULT_ANTHROPIC_MODEL,
+                "claude-opus-4-20250514",
+                "claude-3-5-haiku-20241022",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+            AnthropicFlavor::Azure { models, .. } => models.clone(),
+        };
+        ids.into_iter()
+            .map(|id| {
+                let cheap = is_cheap_claude(&id);
+                ModelInfo {
+                    id,
+                    provider: provider.clone(),
+                    modality: "chat".to_owned(),
+                    streaming: true,
+                    features: vec![
+                        "tools".to_owned(),
+                        "vision".to_owned(),
+                        "reasoning".to_owned(),
+                    ],
+                    cheap,
+                }
+            })
+            .collect()
+    }
+
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
         let body = build_request_body(req);
 
         let response = self
             .client
-            .post(ANTHROPIC_API_URL)
+            .post(self.messages_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
@@ -217,7 +345,7 @@ impl ProviderRouter for AnthropicProvider {
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-        info!(model = %req.model, provider = "anthropic", "infer completed");
+        info!(model = %req.model, provider = self.provider_name(), "infer completed");
         Ok(parse_response(&req.request_id, &json))
     }
 
@@ -230,7 +358,7 @@ impl ProviderRouter for AnthropicProvider {
 
         let response = self
             .client
-            .post(ANTHROPIC_API_URL)
+            .post(self.messages_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
@@ -392,5 +520,64 @@ mod tool_tests {
         assert_eq!(calls[0].id, "tu_1");
         assert_eq!(calls[0].name, "get_weather");
         assert!(calls[0].arguments_json.contains("Oslo"));
+    }
+}
+
+#[cfg(test)]
+mod flavor_tests {
+    use super::{is_cheap_claude, AnthropicProvider, ProviderRouter};
+
+    #[test]
+    fn direct_flavor_uses_first_party_messages_url() {
+        let p = AnthropicProvider::new("k").expect("direct provider");
+        assert_eq!(p.messages_url(), "https://api.anthropic.com/v1/messages");
+        assert_eq!(p.provider_name(), "anthropic");
+    }
+
+    #[test]
+    fn azure_flavor_appends_anthropic_messages_route() {
+        let p = AnthropicProvider::new_azure(
+            "k",
+            "https://cloude-ai-resource.services.ai.azure.com/",
+            vec!["claude-haiku-4-5".to_owned()],
+        )
+        .expect("azure provider");
+        // Trailing slash on the endpoint must not double up.
+        assert_eq!(
+            p.messages_url(),
+            "https://cloude-ai-resource.services.ai.azure.com/anthropic/v1/messages",
+        );
+        assert_eq!(p.provider_name(), "azure-anthropic");
+    }
+
+    #[test]
+    fn azure_list_models_uses_configured_deployments_with_cheap_flag() {
+        let p = AnthropicProvider::new_azure(
+            "k",
+            "https://cloude-ai-resource.services.ai.azure.com",
+            vec!["claude-haiku-4-5".to_owned(), "claude-opus-4-8".to_owned()],
+        )
+        .expect("azure provider");
+        let models = p.list_models();
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|m| m.provider == "azure-anthropic"));
+        let haiku = models.iter().find(|m| m.id == "claude-haiku-4-5").unwrap();
+        assert!(haiku.cheap, "haiku is the economy tier");
+        let opus = models.iter().find(|m| m.id == "claude-opus-4-8").unwrap();
+        assert!(!opus.cheap, "opus is not cheap");
+    }
+
+    #[test]
+    fn empty_azure_key_or_endpoint_is_rejected() {
+        assert!(AnthropicProvider::new_azure("", "https://x", vec![]).is_err());
+        assert!(AnthropicProvider::new_azure("k", "   ", vec![]).is_err());
+    }
+
+    #[test]
+    fn cheap_classifier_matches_only_haiku() {
+        assert!(is_cheap_claude("claude-haiku-4-5"));
+        assert!(is_cheap_claude("claude-3-5-haiku-20241022"));
+        assert!(!is_cheap_claude("claude-opus-4-8"));
+        assert!(!is_cheap_claude("claude-sonnet-4-6"));
     }
 }

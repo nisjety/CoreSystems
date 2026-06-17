@@ -17,7 +17,8 @@ import (
 
 // CapabilitiesHandler provides REST endpoints for the capabilities table.
 type CapabilitiesHandler struct {
-	store *registry.CapabilitiesStore
+	store  *registry.CapabilitiesStore
+	scopes *registry.ScopeStore // optional: enables scope grant/revoke/resolve
 }
 
 // NewCapabilitiesHandler constructs the handler.
@@ -25,9 +26,22 @@ func NewCapabilitiesHandler(store *registry.CapabilitiesStore) *CapabilitiesHand
 	return &CapabilitiesHandler{store: store}
 }
 
+// WithScopeStore attaches the durable scope-grant store, enabling the
+// /scopes, /scopes/grant, /scopes/revoke, and /scopes/resolve endpoints and the
+// /ranked listing. Returns the handler for chaining.
+func (h *CapabilitiesHandler) WithScopeStore(s *registry.ScopeStore) *CapabilitiesHandler {
+	h.scopes = s
+	return h
+}
+
 // Register mounts routes on the provided mux under /api/v1/capabilities.
 func (h *CapabilitiesHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities", h.list)
+	mux.HandleFunc("/api/v1/capabilities/ranked", h.ranked)
+	mux.HandleFunc("/api/v1/capabilities/scopes", h.listScopes)
+	mux.HandleFunc("/api/v1/capabilities/scopes/grant", h.grantScope)
+	mux.HandleFunc("/api/v1/capabilities/scopes/revoke", h.revokeScope)
+	mux.HandleFunc("/api/v1/capabilities/scopes/resolve", h.resolveScope)
 	mux.HandleFunc("/api/v1/capabilities/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[len("/api/v1/capabilities/"):]
 		switch {
@@ -193,6 +207,143 @@ func (h *CapabilitiesHandler) auditLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"entries": entries, "count": len(entries)})
+}
+
+// ranked handles GET /api/v1/capabilities/ranked — capabilities ordered by
+// descending composite score. Filters: ?org_id= ?kind= ?limit=.
+func (h *CapabilitiesHandler) ranked(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	scored, err := h.store.RankedList(r.Context(), q.Get("org_id"), q.Get("kind"), nil, limit)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"capabilities": scored, "count": len(scored)})
+}
+
+// listScopes handles GET /api/v1/capabilities/scopes?capability_id= — active
+// grants for one capability.
+func (h *CapabilitiesHandler) listScopes(w http.ResponseWriter, r *http.Request) {
+	if h.scopes == nil {
+		jsonErr(w, "scope store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	capID := r.URL.Query().Get("capability_id")
+	if capID == "" {
+		jsonErr(w, "capability_id is required", http.StatusBadRequest)
+		return
+	}
+	grants, err := h.scopes.ListForCapability(r.Context(), capID)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"grants": grants, "count": len(grants)})
+}
+
+type scopeGrantRequest struct {
+	CapabilityID string `json:"capability_id"`
+	ScopeKind    string `json:"scope_kind"`  // org | agent | workspace | user | global
+	ScopeValue   string `json:"scope_value"` // specific id, or "*" / "" for all
+}
+
+// grantScope handles POST /api/v1/capabilities/scopes/grant.
+func (h *CapabilitiesHandler) grantScope(w http.ResponseWriter, r *http.Request) {
+	if h.scopes == nil {
+		jsonErr(w, "scope store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req scopeGrantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	actor := r.Header.Get("X-Actor")
+	if actor == "" {
+		actor = "api"
+	}
+	grant, err := h.scopes.Grant(r.Context(), "", req.CapabilityID, req.ScopeKind, req.ScopeValue, actor)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = h.store.AppendAuditLog(r.Context(), "capability_scope", req.CapabilityID, "granted", actor, "", scopeDiff(grant.ScopeKind, grant.ScopeValue))
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, grant)
+}
+
+// revokeScope handles POST /api/v1/capabilities/scopes/revoke.
+func (h *CapabilitiesHandler) revokeScope(w http.ResponseWriter, r *http.Request) {
+	if h.scopes == nil {
+		jsonErr(w, "scope store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req scopeGrantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	actor := r.Header.Get("X-Actor")
+	if actor == "" {
+		actor = "api"
+	}
+	n, err := h.scopes.Revoke(r.Context(), req.CapabilityID, req.ScopeKind, req.ScopeValue)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = h.store.AppendAuditLog(r.Context(), "capability_scope", req.CapabilityID, "revoked", actor, "", scopeDiff(req.ScopeKind, req.ScopeValue))
+	writeJSON(w, map[string]any{"capability_id": req.CapabilityID, "revoked": n})
+}
+
+// resolveScope handles GET /api/v1/capabilities/scopes/resolve?scope_kind=&scope_value=
+// — the capability IDs granted for an (org/agent/...) tuple.
+func (h *CapabilitiesHandler) resolveScope(w http.ResponseWriter, r *http.Request) {
+	if h.scopes == nil {
+		jsonErr(w, "scope store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	kind := q.Get("scope_kind")
+	if kind == "" {
+		jsonErr(w, "scope_kind is required", http.StatusBadRequest)
+		return
+	}
+	ids, err := h.scopes.ResolveForScope(r.Context(), kind, q.Get("scope_value"))
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"capability_ids": ids, "count": len(ids)})
+}
+
+func scopeDiff(kind, value string) []byte {
+	b, _ := json.Marshal(map[string]string{"scope_kind": kind, "scope_value": value})
+	return b
 }
 
 // -- helpers ------------------------------------------------------------------

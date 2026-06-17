@@ -82,6 +82,31 @@ type Config struct {
 	StripeTokenURL             string
 	StripeAPIBaseURL           string
 	StripeWebhookSecret        string
+	LinkedInClientID           string
+	LinkedInClientSecret       string
+	LinkedInAuthorizationURL   string
+	LinkedInTokenURL           string
+	LinkedInAPIBaseURL         string
+	XClientID                  string
+	XClientSecret              string
+	XAuthorizationURL          string
+	XTokenURL                  string
+	XAPIBaseURL                string
+	InstagramClientID          string
+	InstagramClientSecret      string
+	InstagramAuthorizationURL  string
+	InstagramTokenURL          string
+	InstagramAPIBaseURL        string
+	FacebookClientID           string
+	FacebookClientSecret       string
+	FacebookAuthorizationURL   string
+	FacebookTokenURL           string
+	FacebookAPIBaseURL         string
+	SnapchatClientID           string
+	SnapchatClientSecret       string
+	SnapchatAuthorizationURL   string
+	SnapchatTokenURL           string
+	SnapchatAPIBaseURL         string
 	OktaDomain                 string
 	OktaClientID               string
 	OktaClientSecret           string
@@ -136,7 +161,7 @@ func Load() (Config, error) {
 		RateLimitEnabled:           envBool("INTEGRATION_RATE_LIMIT_ENABLED", true),
 		RateLimitMax:               envInt("INTEGRATION_RATE_LIMIT_MAX", 120),
 		RateLimitWindow:            envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
-		TokenLeaseConsumers:        envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,velion-v2-bff"),
+		TokenLeaseConsumers:        envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,velion-v2-bff,velion-v3-gateway,social-publisher"),
 		MicrosoftTenantID:          tenant,
 		MicrosoftClientID:          envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
 		MicrosoftClientSecret:      envOr("AZURE_CLIENT_SECRET", os.Getenv("MICROSOFT_CLIENT_SECRET")),
@@ -175,6 +200,31 @@ func Load() (Config, error) {
 		StripeTokenURL:             envOr("STRIPE_TOKEN_URL", "https://connect.stripe.com/oauth/token"),
 		StripeAPIBaseURL:           envOr("STRIPE_API_BASE_URL", "https://api.stripe.com"),
 		StripeWebhookSecret:        strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+		LinkedInClientID:           strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_ID")),
+		LinkedInClientSecret:       strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_SECRET")),
+		LinkedInAuthorizationURL:   envOr("LINKEDIN_AUTHORIZATION_URL", "https://www.linkedin.com/oauth/v2/authorization"),
+		LinkedInTokenURL:           envOr("LINKEDIN_TOKEN_URL", "https://www.linkedin.com/oauth/v2/accessToken"),
+		LinkedInAPIBaseURL:         envOr("LINKEDIN_API_BASE_URL", "https://api.linkedin.com"),
+		XClientID:                  strings.TrimSpace(os.Getenv("X_CLIENT_ID")),
+		XClientSecret:              strings.TrimSpace(os.Getenv("X_CLIENT_SECRET")),
+		XAuthorizationURL:          envOr("X_AUTHORIZATION_URL", "https://x.com/i/oauth2/authorize"),
+		XTokenURL:                  envOr("X_TOKEN_URL", "https://api.x.com/2/oauth2/token"),
+		XAPIBaseURL:                envOr("X_API_BASE_URL", "https://api.x.com"),
+		InstagramClientID:          strings.TrimSpace(os.Getenv("INSTAGRAM_CLIENT_ID")),
+		InstagramClientSecret:      strings.TrimSpace(os.Getenv("INSTAGRAM_CLIENT_SECRET")),
+		InstagramAuthorizationURL:  envOr("INSTAGRAM_AUTHORIZATION_URL", "https://www.facebook.com/v23.0/dialog/oauth"),
+		InstagramTokenURL:          envOr("INSTAGRAM_TOKEN_URL", "https://graph.facebook.com/v23.0/oauth/access_token"),
+		InstagramAPIBaseURL:        envOr("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v23.0"),
+		FacebookClientID:           strings.TrimSpace(envOr("FACEBOOK_CLIENT_ID", os.Getenv("INSTAGRAM_CLIENT_ID"))),
+		FacebookClientSecret:       strings.TrimSpace(envOr("FACEBOOK_CLIENT_SECRET", os.Getenv("INSTAGRAM_CLIENT_SECRET"))),
+		FacebookAuthorizationURL:   envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v23.0/dialog/oauth"),
+		FacebookTokenURL:           envOr("FACEBOOK_TOKEN_URL", "https://graph.facebook.com/v23.0/oauth/access_token"),
+		FacebookAPIBaseURL:         envOr("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v23.0"),
+		SnapchatClientID:           strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_ID")),
+		SnapchatClientSecret:       strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_SECRET")),
+		SnapchatAuthorizationURL:   envOr("SNAPCHAT_AUTHORIZATION_URL", "https://accounts.snapchat.com/login/oauth2/authorize"),
+		SnapchatTokenURL:           envOr("SNAPCHAT_TOKEN_URL", "https://accounts.snapchat.com/login/oauth2/access_token"),
+		SnapchatAPIBaseURL:         envOr("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1"),
 		OktaDomain:                 strings.TrimRight(strings.TrimSpace(os.Getenv("OKTA_DOMAIN")), "/"),
 		OktaClientID:               strings.TrimSpace(os.Getenv("OKTA_CLIENT_ID")),
 		OktaClientSecret:           strings.TrimSpace(os.Getenv("OKTA_CLIENT_SECRET")),
@@ -286,6 +336,41 @@ func (c Config) ValidateProvider(providerKey string) error {
 		if c.StripeClientSecret == "" {
 			return fmt.Errorf("STRIPE_CLIENT_SECRET is required for Stripe OAuth")
 		}
+	case "linkedin":
+		if c.LinkedInClientID == "" {
+			return fmt.Errorf("LINKEDIN_CLIENT_ID is required for LinkedIn OAuth")
+		}
+		if c.LinkedInClientSecret == "" {
+			return fmt.Errorf("LINKEDIN_CLIENT_SECRET is required for LinkedIn OAuth")
+		}
+	case "x":
+		if c.XClientID == "" {
+			return fmt.Errorf("X_CLIENT_ID is required for X OAuth")
+		}
+		if c.XClientSecret == "" {
+			return fmt.Errorf("X_CLIENT_SECRET is required for X OAuth")
+		}
+	case "instagram":
+		if c.InstagramClientID == "" {
+			return fmt.Errorf("INSTAGRAM_CLIENT_ID is required for Instagram OAuth")
+		}
+		if c.InstagramClientSecret == "" {
+			return fmt.Errorf("INSTAGRAM_CLIENT_SECRET is required for Instagram OAuth")
+		}
+	case "facebook":
+		if c.FacebookClientID == "" {
+			return fmt.Errorf("FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID is required for Facebook OAuth")
+		}
+		if c.FacebookClientSecret == "" {
+			return fmt.Errorf("FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET is required for Facebook OAuth")
+		}
+	case "snapchat":
+		if c.SnapchatClientID == "" {
+			return fmt.Errorf("SNAPCHAT_CLIENT_ID is required for Snapchat OAuth")
+		}
+		if c.SnapchatClientSecret == "" {
+			return fmt.Errorf("SNAPCHAT_CLIENT_SECRET is required for Snapchat OAuth")
+		}
 	case "okta":
 		if c.OktaAPIBaseURL == "" && c.OktaDomain == "" {
 			return fmt.Errorf("OKTA_DOMAIN or OKTA_API_BASE_URL is required for Okta")
@@ -331,6 +416,26 @@ func (c Config) ProviderReadiness() map[string][]string {
 		"stripe": {
 			"STRIPE_CLIENT_ID":     c.StripeClientID,
 			"STRIPE_CLIENT_SECRET": c.StripeClientSecret,
+		},
+		"linkedin": {
+			"LINKEDIN_CLIENT_ID":     c.LinkedInClientID,
+			"LINKEDIN_CLIENT_SECRET": c.LinkedInClientSecret,
+		},
+		"x": {
+			"X_CLIENT_ID":     c.XClientID,
+			"X_CLIENT_SECRET": c.XClientSecret,
+		},
+		"instagram": {
+			"INSTAGRAM_CLIENT_ID":     c.InstagramClientID,
+			"INSTAGRAM_CLIENT_SECRET": c.InstagramClientSecret,
+		},
+		"facebook": {
+			"FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID":         c.FacebookClientID,
+			"FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET": c.FacebookClientSecret,
+		},
+		"snapchat": {
+			"SNAPCHAT_CLIENT_ID":     c.SnapchatClientID,
+			"SNAPCHAT_CLIENT_SECRET": c.SnapchatClientSecret,
 		},
 	}
 	for provider, providerChecks := range checks {

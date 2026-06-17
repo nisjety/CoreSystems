@@ -23,7 +23,7 @@ up: cp-env velion-net
 	@echo "  Data Quality       → http://localhost:8013/health"
 	@echo "  Qdrant Dashboard   → http://localhost:6345/dashboard"
 	@echo "  PostgreSQL         → localhost:5442"
-	@echo "  Redis              → localhost:6389"
+	@echo "  Dragonfly cache    → localhost:6389"
 	@echo "  NATS               → localhost:4232"
 	@echo ""
 

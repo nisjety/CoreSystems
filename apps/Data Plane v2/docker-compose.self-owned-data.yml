@@ -1,0 +1,110 @@
+name: data-plane-v2-self-owned
+
+services:
+  opensanctions-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
+    container_name: dpv2-opensanctions-elasticsearch
+    profiles: ["self-owned-risk"]
+    restart: unless-stopped
+    init: true
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: ${OPENSANCTIONS_ES_JAVA_OPTS:--Xms2g -Xmx2g}
+    ports:
+      - "9208:9200"
+    volumes:
+      - dpv2_opensanctions_elasticsearch:/usr/share/elasticsearch/data
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  opensanctions-yente:
+    image: ghcr.io/opensanctions/yente:latest
+    container_name: dpv2-opensanctions-yente
+    profiles: ["self-owned-risk"]
+    restart: unless-stopped
+    init: true
+    environment:
+      YENTE_INDEX_URL: ${YENTE_INDEX_URL:-http://opensanctions-elasticsearch:9200}
+      YENTE_AUTO_REINDEX: ${YENTE_AUTO_REINDEX:-false}
+      YENTE_UPDATE_TOKEN: ${YENTE_UPDATE_TOKEN:-change-me-local-yente-update-token}
+    ports:
+      - "8040:8000"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      opensanctions-elasticsearch:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()\""]
+      interval: 20s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  nominatim:
+    image: mediagis/nominatim:5.3
+    container_name: dpv2-nominatim
+    profiles: ["self-owned-geo"]
+    restart: unless-stopped
+    init: true
+    environment:
+      PBF_URL: ${NOMINATIM_PBF_URL:-https://download.geofabrik.de/europe/monaco-latest.osm.pbf}
+      REPLICATION_URL: ${NOMINATIM_REPLICATION_URL:-}
+      IMPORT_WIKIPEDIA: ${NOMINATIM_IMPORT_WIKIPEDIA:-false}
+      NOMINATIM_PASSWORD: ${NOMINATIM_PASSWORD:-change-me-nominatim}
+    ports:
+      - "8089:8080"
+    volumes:
+      - dpv2_nominatim:/var/lib/postgresql/16/main
+    shm_size: "1gb"
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "4.0"
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf 'http://127.0.0.1:8080/search?q=Monaco&format=json' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+
+networks:
+  dpv2-net:
+    external: true
+    name: dpv2-net
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
+
+volumes:
+  dpv2_opensanctions_elasticsearch:
+  dpv2_nominatim:

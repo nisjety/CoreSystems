@@ -21,8 +21,8 @@ import (
 )
 
 type API struct {
-	store           *store.Store
-	internalAPIKey  string
+	store          *store.Store
+	internalAPIKey string
 }
 
 func New(s *store.Store, internalAPIKey string) *API {
@@ -50,7 +50,8 @@ func (a *API) healthz(w http.ResponseWriter, _ *http.Request) {
 func (a *API) internalAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.internalAPIKey == "" {
-			next.ServeHTTP(w, r)
+			log.Error().Msg("audit-core internal auth is not configured")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "service auth not configured"})
 			return
 		}
 		provided := r.Header.Get("X-Internal-Api-Key")

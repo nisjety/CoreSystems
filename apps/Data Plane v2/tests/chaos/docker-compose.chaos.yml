@@ -4,7 +4,7 @@
 #
 # Pattern: each backing service is reachable inside the network via
 # `tx-<name>` DNS alias; DPv2 service configs point at tx-postgres,
-# tx-nats, tx-qdrant, tx-redis instead of the direct names.
+# tx-nats, tx-qdrant, tx-dragonfly instead of the direct names.
 
 services:
   toxiproxy:
@@ -15,7 +15,7 @@ services:
       - "15432:15432" # tx-postgres listener
       - "14222:14222" # tx-nats listener
       - "16333:16333" # tx-qdrant listener
-      - "16379:16379" # tx-redis listener
+      - "16379:16379" # tx-dragonfly listener
     networks:
       - aquatiq-local
 

@@ -18,21 +18,22 @@ use mp_contracts::model_plane::v1::{
     AnalyzeDocumentRequest, AnalyzeDocumentResponse, AnalyzeImageRequest, AnalyzeImageResponse,
     AnalyzeLanguageRequest, AnalyzeLanguageResponse, AppendMessageRequest, AppendMessageResponse,
     BatchTranslateTextRequest, BatchTranslateTextResponse, CompactNowRequest, CompactNowResponse,
-    CompleteStepRequest, CompleteStepResponse, CreateEmbeddingRequest, CreateEmbeddingResponse,
-    CreateRealtimeSessionRequest, CreateRealtimeSessionResponse, CreateThreadRequest,
-    CreateThreadResponse, CreateVideoGenerationJobRequest, CreateVideoGenerationJobResponse,
-    DetectTextLanguageRequest, DetectTextLanguageResponse, Event, ExtractImageTextRequest,
-    ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse, GeneratedImage,
-    GetContextAssemblyRequest, GetContextAssemblyResponse, GetVideoGenerationJobRequest,
-    GetVideoGenerationJobResponse, InferChunk, InferRequest, InferResponse, LanguageAnalysisResult,
-    ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest,
-    ListConversationResponse, ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest,
-    ListSpeechVoicesResponse, ListTranslationLanguagesRequest, ListTranslationLanguagesResponse,
-    ModelInfo, ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SpeechVoiceInfo,
-    StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
-    StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
-    TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse,
-    TranslationDetection, TranslationLanguageInfo,
+    CompleteStepRequest, CompleteStepResponse, ContextSegment, CreateEmbeddingRequest,
+    CreateEmbeddingResponse, CreateRealtimeSessionRequest, CreateRealtimeSessionResponse,
+    CreateThreadRequest, CreateThreadResponse, CreateVideoGenerationJobRequest,
+    CreateVideoGenerationJobResponse, DetectTextLanguageRequest, DetectTextLanguageResponse, Event,
+    ExtractImageTextRequest, ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse,
+    GeneratedImage, GetContextAssemblyRequest, GetContextAssemblyResponse,
+    GetVideoGenerationJobRequest, GetVideoGenerationJobResponse, InferChunk, InferRequest,
+    InferResponse, LanguageAnalysisResult, ListAgentSkillsRequest, ListAgentSkillsResponse,
+    ListConversationRequest, ListConversationResponse, ListModelsRequest, ListModelsResponse,
+    ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListTranslationLanguagesRequest,
+    ListTranslationLanguagesResponse, ModelInfo, ReplayThreadRequest, SaveCheckpointRequest,
+    SaveCheckpointResponse, SessionMessage, SpeechVoiceInfo, StartRunRequest, StartRunResponse,
+    StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse,
+    SynthesizeSpeechRequest, SynthesizeSpeechResponse, TranscribeSpeechRequest,
+    TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse, TranslationDetection,
+    TranslationLanguageInfo,
 };
 use mp_events::publisher::InMemoryPublisher;
 use std::pin::Pin;
@@ -40,6 +41,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{
@@ -47,19 +49,49 @@ use tonic::{
     Request as TReq, Response, Status,
 };
 use tower::ServiceExt;
+use wiremock::{
+    matchers::{body_string_contains, method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 type MockStream = Pin<Box<dyn futures::Stream<Item = Result<InferChunk, Status>> + Send>>;
 type MockVideoContentStream = Pin<
     Box<dyn futures::Stream<Item = Result<StreamVideoGenerationContentResponse, Status>> + Send>,
 >;
 type MockReplayStream = Pin<Box<dyn futures::Stream<Item = Result<Event, Status>> + Send>>;
+type CapturedMessages = Arc<Mutex<Vec<Vec<(String, String)>>>>;
 
-struct MockOk;
+#[derive(Default)]
+struct MockOk {
+    captured_messages: Option<CapturedMessages>,
+}
+
+impl MockOk {
+    fn capturing(captured_messages: CapturedMessages) -> Self {
+        Self {
+            captured_messages: Some(captured_messages),
+        }
+    }
+
+    fn capture(&self, request: InferRequest) {
+        if let Some(captured_messages) = &self.captured_messages {
+            captured_messages.lock().unwrap().push(
+                request
+                    .messages
+                    .into_iter()
+                    .map(|message| (message.role, message.content))
+                    .collect(),
+            );
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl InferenceCore for MockOk {
     type InferStreamStream = MockStream;
     type StreamVideoGenerationContentStream = MockVideoContentStream;
-    async fn infer(&self, _: TReq<InferRequest>) -> Result<Response<InferResponse>, Status> {
+    async fn infer(&self, request: TReq<InferRequest>) -> Result<Response<InferResponse>, Status> {
+        self.capture(request.into_inner());
         Ok(Response::new(InferResponse {
             request_id: String::new(),
             content: "hello".into(),
@@ -67,12 +99,14 @@ impl InferenceCore for MockOk {
             stop_reason: "stop".into(),
             input_tokens: 1,
             output_tokens: 1,
+            tool_calls: Vec::new(),
         }))
     }
     async fn infer_stream(
         &self,
-        _: TReq<InferRequest>,
+        request: TReq<InferRequest>,
     ) -> Result<Response<Self::InferStreamStream>, Status> {
+        self.capture(request.into_inner());
         Ok(Response::new(Box::pin(futures::stream::iter(vec![
             Ok(InferChunk {
                 request_id: "req-stream-ok".into(),
@@ -115,6 +149,7 @@ impl InferenceCore for MockOk {
                 provider: "mock".into(),
                 modality: "embedding".into(),
                 streaming: false,
+                features: Vec::new(),
             }],
         }))
     }
@@ -300,6 +335,7 @@ impl InferenceCore for MockOk {
                 confidence: 0.0,
                 summary: String::new(),
                 raw_json: "{}".into(),
+                content_safety_json: String::new(),
             }],
             model_used: "mock-language".into(),
             provider_used: "mock".into(),
@@ -522,14 +558,175 @@ impl InferenceCore for MockDown {
     }
 }
 
+/// Streaming RPC (`InferStream`) is unavailable, but the non-streaming `Infer`
+/// works. This drives the real fallback chain wired in `8ac31cfb`: the endpoint
+/// reveals `Infer`'s real content in chunks and closes with a real `done`,
+/// instead of the bare empty-done stub that masked outages.
+struct MockStreamDown;
+#[tonic::async_trait]
+impl InferenceCore for MockStreamDown {
+    type InferStreamStream = MockStream;
+    type StreamVideoGenerationContentStream = MockVideoContentStream;
+
+    async fn infer(&self, _: TReq<InferRequest>) -> Result<Response<InferResponse>, Status> {
+        Ok(Response::new(InferResponse {
+            request_id: String::new(),
+            content: "hello".into(),
+            model_used: "mock".into(),
+            stop_reason: "stop".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            tool_calls: Vec::new(),
+        }))
+    }
+
+    async fn infer_stream(
+        &self,
+        _: TReq<InferRequest>,
+    ) -> Result<Response<Self::InferStreamStream>, Status> {
+        Err(Status::unavailable("stream down"))
+    }
+
+    async fn create_embedding(
+        &self,
+        _: TReq<CreateEmbeddingRequest>,
+    ) -> Result<Response<CreateEmbeddingResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn list_models(
+        &self,
+        _: TReq<ListModelsRequest>,
+    ) -> Result<Response<ListModelsResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn synthesize_speech(
+        &self,
+        _: TReq<SynthesizeSpeechRequest>,
+    ) -> Result<Response<SynthesizeSpeechResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn transcribe_speech(
+        &self,
+        _: TReq<TranscribeSpeechRequest>,
+    ) -> Result<Response<TranscribeSpeechResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn list_speech_voices(
+        &self,
+        _: TReq<ListSpeechVoicesRequest>,
+    ) -> Result<Response<ListSpeechVoicesResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn translate_text(
+        &self,
+        _: TReq<TranslateTextRequest>,
+    ) -> Result<Response<TranslateTextResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn batch_translate_text(
+        &self,
+        _: TReq<BatchTranslateTextRequest>,
+    ) -> Result<Response<BatchTranslateTextResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn detect_text_language(
+        &self,
+        _: TReq<DetectTextLanguageRequest>,
+    ) -> Result<Response<DetectTextLanguageResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn list_translation_languages(
+        &self,
+        _: TReq<ListTranslationLanguagesRequest>,
+    ) -> Result<Response<ListTranslationLanguagesResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn generate_image(
+        &self,
+        _: TReq<GenerateImageRequest>,
+    ) -> Result<Response<GenerateImageResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn analyze_image(
+        &self,
+        _: TReq<AnalyzeImageRequest>,
+    ) -> Result<Response<AnalyzeImageResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn extract_image_text(
+        &self,
+        _: TReq<ExtractImageTextRequest>,
+    ) -> Result<Response<ExtractImageTextResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn analyze_document(
+        &self,
+        _: TReq<AnalyzeDocumentRequest>,
+    ) -> Result<Response<AnalyzeDocumentResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn analyze_language(
+        &self,
+        _: TReq<AnalyzeLanguageRequest>,
+    ) -> Result<Response<AnalyzeLanguageResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn create_realtime_session(
+        &self,
+        _: TReq<CreateRealtimeSessionRequest>,
+    ) -> Result<Response<CreateRealtimeSessionResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn create_video_generation_job(
+        &self,
+        _: TReq<CreateVideoGenerationJobRequest>,
+    ) -> Result<Response<CreateVideoGenerationJobResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn get_video_generation_job(
+        &self,
+        _: TReq<GetVideoGenerationJobRequest>,
+    ) -> Result<Response<GetVideoGenerationJobResponse>, Status> {
+        Err(Status::unavailable("down"))
+    }
+
+    async fn stream_video_generation_content(
+        &self,
+        _: TReq<StreamVideoGenerationContentRequest>,
+    ) -> Result<Response<Self::StreamVideoGenerationContentStream>, Status> {
+        Err(Status::unavailable("down"))
+    }
+}
+
 #[derive(Clone)]
 struct MockSessionHandles {
     create_thread_count: Arc<AtomicUsize>,
     append_message_count: Arc<AtomicUsize>,
     start_run_count: Arc<AtomicUsize>,
+    context_assembly_count: Arc<AtomicUsize>,
     /// (role, `thread_id`) per `append_message` call
     append_captures: Arc<Mutex<Vec<(String, String)>>>,
+    conversation: Arc<Mutex<Vec<(String, String, String)>>>,
+    context_assembly_requests: Arc<Mutex<Vec<(String, String, u32)>>>,
+    context_segments: Arc<Mutex<Option<Vec<ContextSegment>>>>,
     start_run_thread_id: Arc<Mutex<Option<String>>>,
+    append_missing_thread_once: Arc<Mutex<Option<String>>>,
 }
 
 struct MockSessionCore {
@@ -542,8 +739,13 @@ impl MockSessionCore {
             create_thread_count: Arc::new(AtomicUsize::new(0)),
             append_message_count: Arc::new(AtomicUsize::new(0)),
             start_run_count: Arc::new(AtomicUsize::new(0)),
+            context_assembly_count: Arc::new(AtomicUsize::new(0)),
             append_captures: Arc::new(Mutex::new(Vec::new())),
+            conversation: Arc::new(Mutex::new(Vec::new())),
+            context_assembly_requests: Arc::new(Mutex::new(Vec::new())),
+            context_segments: Arc::new(Mutex::new(None)),
             start_run_thread_id: Arc::new(Mutex::new(None)),
+            append_missing_thread_once: Arc::new(Mutex::new(None)),
         };
         (
             Self {
@@ -585,11 +787,25 @@ impl SessionCore for MockSessionCore {
             .append_message_count
             .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
+        {
+            let mut missing = self.handles.append_missing_thread_once.lock().unwrap();
+            if missing.as_deref() == Some(req.thread_id.as_str()) {
+                *missing = None;
+                return Err(Status::internal(
+                    r#"insert or update on table "messages" violates foreign key constraint"#,
+                ));
+            }
+        }
         self.handles
             .append_captures
             .lock()
             .unwrap()
-            .push((req.role, req.thread_id));
+            .push((req.role.clone(), req.thread_id.clone()));
+        self.handles
+            .conversation
+            .lock()
+            .unwrap()
+            .push((req.role, req.thread_id, req.content));
         Ok(Response::new(AppendMessageResponse { sequence: 1 }))
     }
 
@@ -635,11 +851,22 @@ impl SessionCore for MockSessionCore {
 
     async fn list_conversation(
         &self,
-        _: TReq<ListConversationRequest>,
+        request: TReq<ListConversationRequest>,
     ) -> Result<Response<ListConversationResponse>, Status> {
-        Err(Status::unimplemented(
-            "list_conversation not needed in this test",
-        ))
+        let req = request.into_inner();
+        let messages = self
+            .handles
+            .conversation
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, thread_id, _)| thread_id == &req.thread_id)
+            .map(|(role, _, content)| SessionMessage {
+                role: role.clone(),
+                content: content.clone(),
+            })
+            .collect();
+        Ok(Response::new(ListConversationResponse { messages }))
     }
 
     async fn replay_thread(
@@ -653,11 +880,26 @@ impl SessionCore for MockSessionCore {
 
     async fn get_context_assembly(
         &self,
-        _: TReq<GetContextAssemblyRequest>,
+        request: TReq<GetContextAssemblyRequest>,
     ) -> Result<Response<GetContextAssemblyResponse>, Status> {
-        Err(Status::unimplemented(
-            "get_context_assembly not needed in this test",
-        ))
+        self.handles
+            .context_assembly_count
+            .fetch_add(1, Ordering::SeqCst);
+        let req = request.into_inner();
+        self.handles
+            .context_assembly_requests
+            .lock()
+            .unwrap()
+            .push((req.thread_id, req.run_id, req.max_tokens));
+        let Some(segments) = self.handles.context_segments.lock().unwrap().clone() else {
+            return Err(Status::unimplemented(
+                "get_context_assembly not configured in this test",
+            ));
+        };
+        Ok(Response::new(GetContextAssemblyResponse {
+            segments,
+            estimated_tokens: 123,
+        }))
     }
 
     async fn compact_now(
@@ -740,7 +982,7 @@ fn make_state(
 #[serial_test::serial]
 async fn ai_images_routes_forward_to_inference_core() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
-    let client = spawn_mock(MockOk).await;
+    let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _) = make_state(client, session_client);
@@ -881,7 +1123,7 @@ async fn ai_images_routes_forward_to_inference_core() {
 async fn invoke_emits_ingress_and_usage_on_success() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let client = spawn_mock(MockOk).await;
+    let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
@@ -951,7 +1193,7 @@ async fn invoke_returns_502_when_inference_unavailable() {
 async fn invoke_stream_emits_stream_and_usage_on_success() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let client = spawn_mock(MockOk).await;
+    let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
@@ -981,9 +1223,551 @@ async fn invoke_stream_emits_stream_and_usage_on_success() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn invoke_stream_returns_done_event_when_inference_unavailable() {
+async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    *session_handles.append_missing_thread_once.lock().unwrap() =
+        Some("thread-client-provisional".to_owned());
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client);
+    let app = build_router(state, None);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"mitt navn er ima","model":"m","thread_id":"thread-client-provisional","session_key":"thread-client-provisional"}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: connected"), "{body}");
+    assert!(
+        body.contains(r#""thread_id":"thread-thread-client-provisional""#),
+        "{body}"
+    );
+    assert!(body.contains("event: done"), "{body}");
+
+    assert_eq!(
+        session_handles.create_thread_count.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        session_handles.append_message_count.load(Ordering::SeqCst),
+        3
+    );
+    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *session_handles.start_run_thread_id.lock().unwrap(),
+        Some("thread-thread-client-provisional".to_owned())
+    );
+    let appended = session_handles.append_captures.lock().unwrap();
+    assert_eq!(
+        appended.as_slice(),
+        [
+            (
+                "user".to_owned(),
+                "thread-thread-client-provisional".to_owned()
+            ),
+            (
+                "assistant".to_owned(),
+                "thread-thread-client-provisional".to_owned()
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_includes_thread_history_and_persists_assistant() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles.conversation.lock().unwrap().extend([
+        (
+            "user".to_owned(),
+            "thread-existing".to_owned(),
+            "kan du gi meg svaret på model plane og hva den er?".to_owned(),
+        ),
+        (
+            "assistant".to_owned(),
+            "thread-existing".to_owned(),
+            "Model Plane owns reasoning, sessions, runs, inference, and tools.".to_owned(),
+        ),
+    ]);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client);
+    let app = build_router(state, None);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"hva var det igjen?","model":"m","thread_id":"thread-existing"}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: done"));
+
+    let captured = captured_messages.lock().unwrap();
+    let messages = captured.first().expect("infer_stream should be called");
+    assert!(messages.iter().any(|(role, content)| {
+        role == "assistant" && content.contains("Model Plane owns reasoning")
+    }));
+    assert_eq!(
+        messages.last(),
+        Some(&("user".to_owned(), "hva var det igjen?".to_owned()))
+    );
+    drop(captured);
+
+    assert_eq!(
+        session_handles.create_thread_count.load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    let appended = session_handles.append_captures.lock().unwrap();
+    assert_eq!(
+        appended.as_slice(),
+        [
+            ("user".to_owned(), "thread-existing".to_owned()),
+            ("assistant".to_owned(), "thread-existing".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_uses_context_assembly_segments_before_inference() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    *session_handles.context_segments.lock().unwrap() = Some(vec![
+        ContextSegment {
+            kind: "thread".to_owned(),
+            content: "assistant: Model Plane owns reasoning, sessions, runs, inference, and tools."
+                .to_owned(),
+            estimated_tokens: 12,
+        },
+        ContextSegment {
+            kind: "thread".to_owned(),
+            content: "user: contact ima@example.com about context".to_owned(),
+            estimated_tokens: 8,
+        },
+        ContextSegment {
+            kind: "episodic".to_owned(),
+            content: "Previous note from contact ima@example.com about context".to_owned(),
+            estimated_tokens: 8,
+        },
+        ContextSegment {
+            kind: "retrieval".to_owned(),
+            content: "Data Plane retrieval says Model Plane owns inference and execution context."
+                .to_owned(),
+            estimated_tokens: 12,
+        },
+        ContextSegment {
+            kind: "knowledge".to_owned(),
+            content: "LLM wiki entry: Model Plane routes model runs through gateway adapters."
+                .to_owned(),
+            estimated_tokens: 12,
+        },
+        ContextSegment {
+            kind: "graph".to_owned(),
+            content: "GraphRAG: Model Plane -> session-core -> inference-core.".to_owned(),
+            estimated_tokens: 10,
+        },
+        ContextSegment {
+            kind: "prompt".to_owned(),
+            content: "contact ima@example.com about context".to_owned(),
+            estimated_tokens: 8,
+        },
+    ]);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client);
+    let app = build_router(state, None);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"contact ima@example.com about context","model":"m","thread_id":"thread-assembly","features":["pii"]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: done"));
+
+    let captured = captured_messages.lock().unwrap();
+    let messages = captured.first().expect("infer_stream should be called");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].0, "system");
+    assert!(messages[0].1.contains("Velion context assembly"));
+    assert!(messages[0].1.contains("[thread]"));
+    assert!(messages[0].1.contains("Model Plane owns reasoning"));
+    assert!(messages[0].1.contains("[episodic]"));
+    assert!(messages[0].1.contains("[redacted-email]"));
+    assert!(messages[0].1.contains("[retrieval]"));
+    assert!(messages[0].1.contains("Data Plane retrieval"));
+    assert!(messages[0].1.contains("[knowledge]"));
+    assert!(messages[0].1.contains("LLM wiki entry"));
+    assert!(messages[0].1.contains("[graph]"));
+    assert!(messages[0].1.contains("GraphRAG"));
+    assert!(!messages[0].1.contains("[prompt]"));
+    assert!(!messages[0].1.contains("ima@example.com"));
+    assert_eq!(
+        messages[1],
+        (
+            "user".to_owned(),
+            "contact [redacted-email] about context".to_owned()
+        )
+    );
+    drop(captured);
+
+    assert_eq!(
+        session_handles
+            .context_assembly_count
+            .load(Ordering::SeqCst),
+        1
+    );
+    let context_requests = session_handles.context_assembly_requests.lock().unwrap();
+    assert_eq!(context_requests.len(), 1);
+    assert_eq!(context_requests[0].0, "thread-assembly");
+    assert_eq!(context_requests[0].1, "run-for-thread-assembly");
+    assert!(context_requests[0].2 >= 512);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .and(body_string_contains("Ima name meaning"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "results": [{
+                    "url": "https://names.test/ima",
+                    "title": "Ima name meaning",
+                    "snippet": "Ima can be interpreted as a short personal name with meanings that vary by language and culture.",
+                    "source": "mock",
+                    "score": 0.98
+                }]
+            }
+        })))
+        .mount(&quarry)
+        .await;
+
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client);
+    state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: Duration::from_secs(5),
+    });
+    let app = build_router(state, None);
+
+    let name_req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"mitt navn er ima","model":"m","thread_id":"thread-name-memory"}"#,
+        ))
+        .unwrap();
+    let name_resp = app.clone().oneshot(name_req).await.unwrap();
+    assert_eq!(name_resp.status(), StatusCode::OK);
+    let name_body = to_bytes(name_resp.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8(name_body.to_vec())
+        .unwrap()
+        .contains("event: done"));
+
+    let search_req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"kan du finne ut hva navnet mitt betyr?","model":"m","thread_id":"thread-name-memory","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
+        ))
+        .unwrap();
+    let search_resp = app.oneshot(search_req).await.unwrap();
+    assert_eq!(search_resp.status(), StatusCode::OK);
+    let search_body = to_bytes(search_resp.into_body(), usize::MAX).await.unwrap();
+    let search_body = String::from_utf8(search_body.to_vec()).unwrap();
+    assert!(search_body.contains("event: citation"));
+    assert!(search_body.contains("https://names.test/ima"));
+
+    let captured = captured_messages.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let search_messages = captured.last().expect("search answer should infer");
+    assert!(search_messages
+        .iter()
+        .any(|(role, content)| { role == "user" && content.contains("mitt navn er ima") }));
+    assert!(search_messages.iter().any(|(role, content)| {
+        role == "user" && content.contains("kan du finne ut hva navnet mitt betyr?")
+    }));
+    assert!(search_messages.iter().any(|(_, content)| {
+        content.contains("Current request: kan du finne ut hva navnet mitt betyr?")
+    }));
+    assert!(search_messages.iter().any(|(_, content)| {
+        content.contains("do not ask for information already present in the conversation")
+    }));
+    drop(captured);
+
+    let appended = session_handles.append_captures.lock().unwrap();
+    assert_eq!(
+        appended.as_slice(),
+        [
+            ("user".to_owned(), "thread-name-memory".to_owned()),
+            ("assistant".to_owned(), "thread-name-memory".to_owned()),
+            ("user".to_owned(), "thread-name-memory".to_owned()),
+            ("assistant".to_owned(), "thread-name-memory".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_generate_image_emits_attachment_and_persists() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client);
+    let app = build_router(state, None);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"lag et bilde av det","model":"gpt-4o-mini","thread_id":"thread-image","generate_image":true,"features":["artifacts"]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: artifact"));
+    assert!(body.contains("event: attachment"));
+    assert!(body.contains("data:image/png;base64,aW1hZ2U="));
+    assert!(body.contains(
+        "I generated an image artifact: generated-image.png for prompt: lag et bilde av det"
+    ));
+    assert!(body.contains("event: done"));
+
+    let appended = session_handles.append_captures.lock().unwrap();
+    assert_eq!(
+        appended.as_slice(),
+        [
+            ("user".to_owned(), "thread-image".to_owned()),
+            ("assistant".to_owned(), "thread-image".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "results": [{
+                    "url": "https://velion.test/model-plane",
+                    "title": "Model Plane",
+                    "snippet": "Model Plane owns reasoning, sessions, inference, tools, and cost controls.",
+                    "source": "mock",
+                    "score": 0.99
+                }]
+            }
+        })))
+        .mount(&quarry)
+        .await;
+
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client);
+    state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: Duration::from_secs(5),
+    });
+    let app = build_router(state, None);
+
+    let search_req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"kan du gi meg svaret på model plane og hva den er?","model":"m","thread_id":"thread-sequence","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
+        ))
+        .unwrap();
+    let search_resp = app.clone().oneshot(search_req).await.unwrap();
+    assert_eq!(search_resp.status(), StatusCode::OK);
+    let search_body = to_bytes(search_resp.into_body(), usize::MAX).await.unwrap();
+    let search_body = String::from_utf8(search_body.to_vec()).unwrap();
+    assert!(search_body.contains("event: citation"));
+    assert!(search_body.contains("https://velion.test/model-plane"));
+
+    let image_req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"lag et bilde av det","model":"gpt-4o-mini","thread_id":"thread-sequence","generate_image":true,"features":["artifacts"]}"#,
+        ))
+        .unwrap();
+    let image_resp = app.clone().oneshot(image_req).await.unwrap();
+    assert_eq!(image_resp.status(), StatusCode::OK);
+    let image_body = to_bytes(image_resp.into_body(), usize::MAX).await.unwrap();
+    let image_body = String::from_utf8(image_body.to_vec()).unwrap();
+    assert!(image_body.contains("event: attachment"));
+    assert!(image_body.contains("data:image/png;base64,aW1hZ2U="));
+    assert!(image_body.contains(
+        "I generated an image artifact: generated-image.png for prompt: lag et bilde av det"
+    ));
+
+    *session_handles.context_segments.lock().unwrap() = Some(vec![ContextSegment {
+        kind: "thread".to_owned(),
+        content: "user: kan du gi meg svaret på model plane og hva den er?".to_owned(),
+        estimated_tokens: 12,
+    }]);
+
+    let followup_req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"hva snakket vi om, og lagde vi et bilde?","model":"m","thread_id":"thread-sequence","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
+        ))
+        .unwrap();
+    let followup_resp = app.oneshot(followup_req).await.unwrap();
+    assert_eq!(followup_resp.status(), StatusCode::OK);
+    let followup_body = to_bytes(followup_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let followup_body = String::from_utf8(followup_body.to_vec()).unwrap();
+    assert!(followup_body.contains("event: done"));
+
+    let captured = captured_messages.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].iter().any(|(_, content)| {
+        content.contains("Tool results") && content.contains("https://velion.test/model-plane")
+    }));
+    let followup_messages = captured.last().unwrap();
+    assert!(followup_messages.iter().any(|(role, content)| {
+        role == "assistant"
+            && content
+                .contains("I generated an image artifact: generated-image.png for prompt: lag et bilde av det")
+    }));
+    assert!(followup_messages.iter().any(|(role, content)| {
+        role == "system" && content.contains("the assistant already generated an image artifact")
+    }));
+    assert!(!followup_messages
+        .iter()
+        .any(|(_, content)| content.contains("Tool results")));
+    assert!(followup_messages.iter().any(|(role, content)| {
+        role == "user" && content.contains("kan du gi meg svaret på model plane")
+    }));
+    assert_eq!(
+        followup_messages.last(),
+        Some(&(
+            "user".to_owned(),
+            "hva snakket vi om, og lagde vi et bilde?".to_owned(),
+        ))
+    );
+    drop(captured);
+
+    let appended = session_handles.append_captures.lock().unwrap();
+    assert_eq!(appended.len(), 6);
+    assert!(appended
+        .iter()
+        .all(|(_, thread_id)| thread_id == "thread-sequence"));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_falls_back_to_infer_when_stream_unavailable() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    // InferStream is unavailable but non-streaming Infer works: the endpoint
+    // must reveal Infer's real content in chunks and close with a real `done`
+    // (the 8ac31cfb fallback) — never a bare empty-done stub.
+    let client = spawn_mock(MockStreamDown).await;
+    let (mock_session, _session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, publisher) = make_state(client, session_client);
+    let app = build_router(state, None);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"content":"hi","model":"m"}"#))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    // Real content from the Infer fallback, streamed as chunks then a real done.
+    assert!(body.contains("event: chunk"));
+    assert!(body.contains("\"delta\":\"hello\""));
+    assert!(body.contains("event: done"));
+    assert!(body.contains("\"done\":true"));
+    assert!(!body.contains("event: error"));
+
+    let drained = publisher.drain();
+    assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.opened"));
+    assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.closed"));
+    assert!(drained.iter().any(|(s, _)| s.starts_with("mp.v1.usage.")));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_emits_error_when_inference_fully_unavailable() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    // Both InferStream and the Infer fallback are down: emit an honest `error`
+    // event (chat-parity §20), never a fake successful `done`, and publish no
+    // usage because no tokens were produced.
     let client = spawn_mock(MockDown).await;
     let (mock_session, _session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
@@ -1002,13 +1786,14 @@ async fn invoke_stream_returns_done_event_when_inference_unavailable() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(!body.contains("event: chunk"));
-    assert!(body.contains("event: done"));
-    assert!(body.contains("\"done\":true"));
+    assert!(!body.contains("event: done"));
+    assert!(body.contains("event: error"));
+    assert!(body.contains("model_plane_unavailable"));
 
     let drained = publisher.drain();
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.opened"));
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.closed"));
-    assert!(drained.iter().any(|(s, _)| s.starts_with("mp.v1.usage.")));
+    assert!(!drained.iter().any(|(s, _)| s.starts_with("mp.v1.usage.")));
 }
 
 #[tokio::test]
@@ -1016,7 +1801,7 @@ async fn invoke_stream_returns_done_event_when_inference_unavailable() {
 async fn invoke_replay_determinism() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let client = spawn_mock(MockOk).await;
+    let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
@@ -1052,7 +1837,7 @@ async fn invoke_replay_determinism() {
 async fn invoke_propagates_thread_id() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let client = spawn_mock(MockOk).await;
+    let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
@@ -1081,7 +1866,7 @@ async fn invoke_propagates_thread_id() {
 async fn invoke_reuses_existing_thread() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let client = spawn_mock(MockOk).await;
+    let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);

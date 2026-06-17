@@ -17,8 +17,11 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::zdr::ZdrMode;
 use quarry_runtime::ai_formats::AiFormatRunner;
+use quarry_runtime::driver::FetchHints;
+use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
 use quarry_runtime::mp_client::ModelPlaneClient;
 
 use crate::state::AppState;
@@ -41,6 +44,12 @@ pub struct ExtractRequest {
     pub prompt: Option<String>,
     #[serde(default)]
     pub max_urls: Option<u32>,
+    #[serde(default)]
+    pub zdr: Option<bool>,
+    #[serde(default)]
+    pub privacy: Option<PrivacyPolicy>,
+    #[serde(default)]
+    pub signals: Option<DriverSignals>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,8 +102,21 @@ pub(crate) fn expand_targets(urls: &[String], max: usize) -> Vec<String> {
     out
 }
 
-async fn fetch_markdown(state: &AppState, url: &Url) -> Result<String, String> {
-    match state.driver.fetch(url).await {
+async fn fetch_markdown(
+    state: &AppState,
+    url: &Url,
+    org_id: &str,
+    privacy: PrivacyPolicy,
+    signals: DriverSignals,
+) -> Result<String, String> {
+    let plan = plan_from_signals(signals);
+    let driver = state.drivers.build_driver(&plan);
+    let hints = FetchHints {
+        org_id: org_id.to_string(),
+        privacy,
+        ..FetchHints::default()
+    };
+    match driver.fetch_conditional(url, &hints).await {
         Ok(resp) if (200..300).contains(&resp.status) => {
             let html = String::from_utf8_lossy(&resp.body);
             let mut md = quarry_transform::readability::html_to_readable_markdown(&html);
@@ -113,7 +135,11 @@ pub async fn extract(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ExtractRequest>,
 ) -> impl IntoResponse {
-    let max = req.max_urls.map(|m| m as usize).unwrap_or(DEFAULT_MAX_URLS).clamp(1, MAX_MAX_URLS);
+    let max = req
+        .max_urls
+        .map(|m| m as usize)
+        .unwrap_or(DEFAULT_MAX_URLS)
+        .clamp(1, MAX_MAX_URLS);
     let targets = expand_targets(&req.urls, max);
     if targets.is_empty() {
         return (
@@ -155,13 +181,24 @@ pub async fn extract(
             .into_response();
     }
 
+    let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    let privacy = req.privacy.unwrap_or_default().with_zdr(zdr);
+    let signals = req.signals.unwrap_or_default();
     let mut results = Vec::with_capacity(targets.len());
     for raw in &targets {
         let url = match Url::parse(raw) {
             Ok(u) => u,
             Err(_) => continue,
         };
-        let item = match fetch_markdown(&state, &url).await {
+        let item = match fetch_markdown(
+            &state,
+            &url,
+            &claims.org_id,
+            privacy.clone(),
+            signals.clone(),
+        )
+        .await
+        {
             Err(e) => ExtractItem {
                 url: raw.clone(),
                 status: "error".into(),
@@ -219,7 +256,11 @@ pub async fn extract(
     let count = results.len();
     (
         StatusCode::OK,
-        Json(ExtractResponse { results, count, requested: targets.len() }),
+        Json(ExtractResponse {
+            results,
+            count,
+            requested: targets.len(),
+        }),
     )
         .into_response()
 }
@@ -239,7 +280,10 @@ mod tests {
             "https://a.com/3".into(),
         ];
         let got = expand_targets(&urls, 2);
-        assert_eq!(got, vec!["https://a.com/1".to_string(), "https://a.com/2".to_string()]);
+        assert_eq!(
+            got,
+            vec!["https://a.com/1".to_string(), "https://a.com/2".to_string()]
+        );
     }
 
     #[test]

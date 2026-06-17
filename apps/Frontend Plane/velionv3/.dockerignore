@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+# Never ship the host's incremental tsc cache into the image — a stale
+# .tsbuildinfo makes `tsc -b` skip files or report phantom errors. Excluding it
+# forces a clean, deterministic full typecheck on every Docker build.
+*.tsbuildinfo
+.tsbuildinfo
+*.png
+*.jpg
+*.jpeg
+apps/gateway/target
+docs/
+README.md
+*.snap
+*.spec.ts

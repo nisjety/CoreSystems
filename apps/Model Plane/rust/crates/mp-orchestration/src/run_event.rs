@@ -33,6 +33,10 @@ pub enum OrchestrationEventKind {
     RunPausedForApproval,
     /// Run resumed after an approval checkpoint.
     RunResumedAfterApproval,
+    /// The browser agent dispatched an action to the browser executor.
+    BrowserActionDispatched,
+    /// The browser agent received an observation back from the executor.
+    BrowserObservationReceived,
 }
 
 /// Typed orchestration event payload. Each variant carries the minimum fields
@@ -119,6 +123,38 @@ pub enum OrchestrationEvent {
         /// Timestamp.
         at: DateTime<Utc>,
     },
+    /// The browser agent dispatched an action to the browser executor (B4).
+    BrowserActionDispatched {
+        /// Run this browser session belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving this session.
+        plan_id: String,
+        /// Per-action id (e.g. `act_0001`).
+        action_id: String,
+        /// Action type slug: goto|click|type|extract|observe|scroll|wait.
+        action_type: String,
+        /// Target URL for navigations. Empty for non-goto actions.
+        url: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
+    /// The browser agent received an observation back from the executor (B4).
+    BrowserObservationReceived {
+        /// Run this browser session belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving this session.
+        plan_id: String,
+        /// Id of the action that produced this observation.
+        action_id: String,
+        /// Observation status slug: success|failed|timeout|blocked.
+        status: String,
+        /// Page URL after the action settled. Empty when unavailable.
+        page_url: String,
+        /// Page title after the action settled. Empty when unavailable.
+        page_title: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
 }
 
 impl OrchestrationEvent {
@@ -133,6 +169,12 @@ impl OrchestrationEvent {
             Self::SubagentStopped { .. } => OrchestrationEventKind::SubagentStopped,
             Self::RunPausedForApproval { .. } => OrchestrationEventKind::RunPausedForApproval,
             Self::RunResumedAfterApproval { .. } => OrchestrationEventKind::RunResumedAfterApproval,
+            Self::BrowserActionDispatched { .. } => {
+                OrchestrationEventKind::BrowserActionDispatched
+            }
+            Self::BrowserObservationReceived { .. } => {
+                OrchestrationEventKind::BrowserObservationReceived
+            }
         }
     }
 }
@@ -199,7 +241,9 @@ mod tests {
             OrchestrationEventKind::SubagentStopped,
             OrchestrationEventKind::RunPausedForApproval,
             OrchestrationEventKind::RunResumedAfterApproval,
+            OrchestrationEventKind::BrowserActionDispatched,
+            OrchestrationEventKind::BrowserObservationReceived,
         ];
-        assert_eq!(kinds.len(), 7);
+        assert_eq!(kinds.len(), 9);
     }
 }

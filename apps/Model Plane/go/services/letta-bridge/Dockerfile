@@ -27,6 +27,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /service ./cmd/
 
 FROM alpine:3.20
-RUN apk --no-cache add ca-certificates curl
+RUN apk --no-cache add ca-certificates curl postgresql-client
 COPY --from=builder /service /usr/local/bin/service
-ENTRYPOINT ["service"]
+COPY services/letta-bridge/migrations /app/migrations
+COPY services/letta-bridge/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["service"]

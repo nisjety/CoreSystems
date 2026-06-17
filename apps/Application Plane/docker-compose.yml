@@ -204,6 +204,8 @@ services:
       convex-backend:
         condition: service_healthy
 
+  # velionv3 and the Rust onboarding gateway now live in
+  # `apps/Frontend Plane/velionv3/docker-compose.yml`.
 
   # ============================================================================
   # 6) AFFiNE Core — First-party planner workspace boundary
@@ -262,7 +264,7 @@ services:
     depends_on:
       application-postgres:
         condition: service_healthy
-      application-redis:
+      application-dragonfly:
         condition: service_healthy
       affine-runtime-migration:
         condition: service_completed_successfully
@@ -273,8 +275,8 @@ services:
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
       DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@application-postgres:5432/affine
-      REDIS_SERVER_HOST: application-redis
-      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}
+      REDIS_SERVER_HOST: application-dragonfly
+      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
       - affine-uploads:/root/.affine/storage
@@ -313,15 +315,15 @@ services:
     depends_on:
       application-postgres:
         condition: service_healthy
-      application-redis:
+      application-dragonfly:
         condition: service_healthy
     environment:
       NODE_ENV: production
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
       DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@application-postgres:5432/affine
-      REDIS_SERVER_HOST: application-redis
-      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}
+      REDIS_SERVER_HOST: application-dragonfly
+      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
       - affine-uploads:/root/.affine/storage
@@ -370,15 +372,20 @@ services:
       retries: 5
       start_period: 10s
 
-  application-redis:
-    image: redis:7-alpine
-    container_name: application-redis
+  application-dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: application-dragonfly
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    command:
+      - "--requirepass=${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}"
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
     ports:
       - "6480:6379"
     volumes:
-      - application-redis-data:/data
+      - application-dragonfly-data:/data
     networks:
       - app-net
     deploy:
@@ -394,7 +401,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${APPLICATION_PLANE_REDIS_PASSWORD:-${NOTIFICATION_REDIS_PASSWORD:-notif-redis-secret}}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -480,6 +487,60 @@ services:
       retries: 3
       start_period: 20s
 
+  social-core:
+    build:
+      context: ./social-core
+      dockerfile: Dockerfile
+    container_name: social-core
+    restart: unless-stopped
+    environment:
+      PORT: "3162"
+      SERVICE_NAME: social-core
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      NATS_URL: nats://nats:4222
+      VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      SOCIAL_PUBLISH_WORKER_ENABLED: ${SOCIAL_PUBLISH_WORKER_ENABLED:-true}
+      SOCIAL_PUBLISH_WORKER_POLL_INTERVAL: ${SOCIAL_PUBLISH_WORKER_POLL_INTERVAL:-5s}
+      SOCIAL_PUBLISH_WORKER_BATCH_SIZE: ${SOCIAL_PUBLISH_WORKER_BATCH_SIZE:-10}
+      LINKEDIN_API_BASE_URL: ${LINKEDIN_API_BASE_URL:-https://api.linkedin.com}
+      LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202606}
+      X_API_BASE_URL: ${X_API_BASE_URL:-https://api.x.com}
+      INSTAGRAM_GRAPH_API_BASE_URL: ${INSTAGRAM_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
+      FACEBOOK_GRAPH_API_BASE_URL: ${FACEBOOK_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
+      TIKTOK_API_BASE_URL: ${TIKTOK_API_BASE_URL:-https://open.tiktokapis.com}
+      SNAPCHAT_API_BASE_URL: ${SNAPCHAT_API_BASE_URL:-https://adsapi.snapchat.com/v1}
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    ports:
+      - "${SOCIAL_CORE_HOST_PORT:-3162}:3162"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3162/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   information-core:
     build:
       context: ./information-core
@@ -537,7 +598,7 @@ services:
         condition: service_healthy
       application-postgres:
         condition: service_healthy
-      application-redis:
+      application-dragonfly:
         condition: service_healthy
     ports:
       - "3140:3140"
@@ -603,7 +664,7 @@ volumes:
     driver: local
   application-postgres-data:
     driver: local
-  application-redis-data:
+  application-dragonfly-data:
     driver: local
   app-nats-data:
     driver: local

@@ -275,11 +275,12 @@ impl AzureRealtimeProvider {
             .or_else(|| env_nonempty("AZURE_OPENAI_API_VERSION"))
             .unwrap_or_else(|| "2025-04-01-preview".to_owned());
 
-        let sessions_url = env_nonempty("AZURE_OPENAI_REALTIME_SESSIONS_URL").unwrap_or_else(|| {
-            format!("{endpoint}/openai/realtimeapi/sessions?api-version={api_version}")
-        });
-        let websocket_url = env_nonempty("AZURE_OPENAI_REALTIME_WEBSOCKET_URL").unwrap_or_else(
-            || {
+        let sessions_url =
+            env_nonempty("AZURE_OPENAI_REALTIME_SESSIONS_URL").unwrap_or_else(|| {
+                format!("{endpoint}/openai/realtimeapi/sessions?api-version={api_version}")
+            });
+        let websocket_url =
+            env_nonempty("AZURE_OPENAI_REALTIME_WEBSOCKET_URL").unwrap_or_else(|| {
                 let host = endpoint
                     .strip_prefix("https://")
                     .or_else(|| endpoint.strip_prefix("http://"))
@@ -287,8 +288,7 @@ impl AzureRealtimeProvider {
                 format!(
                     "wss://{host}/openai/realtime?api-version={api_version}&deployment={deployment}"
                 )
-            },
-        );
+            });
 
         Some(Self {
             client: reqwest::Client::new(),
@@ -569,7 +569,10 @@ mod tests {
         assert_eq!(body["voice"], "alloy");
         assert_eq!(body["input_audio_format"], "pcm16");
         assert_eq!(body["turn_detection"]["type"], "server_vad");
-        assert!(body.get("session").is_none(), "must NOT nest under `session`");
+        assert!(
+            body.get("session").is_none(),
+            "must NOT nest under `session`"
+        );
     }
 
     #[test]

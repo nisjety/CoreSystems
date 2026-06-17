@@ -158,10 +158,12 @@ CREATE TABLE IF NOT EXISTS "oauth_application" (
   "client_id" TEXT UNIQUE,
   "client_secret" TEXT,
   "name" TEXT,
-  "redirect_u_r_ls" TEXT,
+  "icon" TEXT,
+  "redirect_ur_ls" TEXT,
   "metadata" TEXT,
+  "authentication_scheme" TEXT,
   "type" TEXT,
-  "disabled" BOOLEAN,
+  "disabled" BOOLEAN DEFAULT false,
   "user_id" TEXT,
   "created_at" TIMESTAMP,
   "updated_at" TIMESTAMP
@@ -192,6 +194,18 @@ CREATE TABLE IF NOT EXISTS "oauth_consent" (
   "updated_at" TIMESTAMP
 );
 
+-- Product privacy/cookie consent table
+CREATE TABLE IF NOT EXISTS "privacy_consent" (
+  "id" TEXT PRIMARY KEY,
+  "user_id" TEXT REFERENCES "user"("id") ON DELETE CASCADE,
+  "session_id" TEXT,
+  "analytics" BOOLEAN NOT NULL DEFAULT false,
+  "marketing" BOOLEAN NOT NULL DEFAULT false,
+  "necessary" BOOLEAN NOT NULL DEFAULT true,
+  "created_at" TIMESTAMP NOT NULL DEFAULT now(),
+  "updated_at" TIMESTAMP NOT NULL DEFAULT now()
+);
+
 -- API key table
 CREATE TABLE IF NOT EXISTS "apikey" (
   "id" TEXT PRIMARY KEY,
@@ -199,7 +213,9 @@ CREATE TABLE IF NOT EXISTS "apikey" (
   "start" TEXT,
   "prefix" TEXT,
   "key" TEXT NOT NULL,
-  "user_id" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+  "config_id" TEXT NOT NULL DEFAULT 'user-keys',
+  "reference_id" TEXT NOT NULL,
+  "user_id" TEXT REFERENCES "user"("id") ON DELETE CASCADE,
   "refill_interval" INTEGER,
   "refill_amount" INTEGER,
   "last_refill_at" TIMESTAMP,
@@ -223,3 +239,10 @@ CREATE INDEX IF NOT EXISTS idx_account_user_id ON "account"("user_id");
 CREATE INDEX IF NOT EXISTS idx_member_org_id ON "member"("organization_id");
 CREATE INDEX IF NOT EXISTS idx_member_user_id ON "member"("user_id");
 CREATE INDEX IF NOT EXISTS idx_apikey_user_id ON "apikey"("user_id");
+CREATE INDEX IF NOT EXISTS idx_apikey_config_id ON "apikey"("config_id");
+CREATE INDEX IF NOT EXISTS idx_apikey_reference_id ON "apikey"("reference_id");
+CREATE INDEX IF NOT EXISTS idx_apikey_config_reference ON "apikey"("config_id", "reference_id");
+CREATE INDEX IF NOT EXISTS idx_apikey_key_hash ON "apikey"("key");
+CREATE INDEX IF NOT EXISTS idx_apikey_reference_enabled ON "apikey"("reference_id", "enabled") WHERE "enabled" = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_consent_user_id ON "privacy_consent"("user_id") WHERE "user_id" IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_consent_session_id ON "privacy_consent"("session_id") WHERE "session_id" IS NOT NULL;

@@ -188,6 +188,49 @@ const knowledgePayload = {
         updated: "8m ago",
       },
     ],
+    diagnostics: {
+      available: true,
+      sparseBackend: "quickwit-with-postgres-fallback",
+      vectorCollections: ["dataplane_knowledge", "wiki_block_embeddings", "entity_summary_embeddings"],
+      quickwitIndexes: ["dataplane-corpus"],
+      services: [
+        {
+          id: "retrieval-engine",
+          label: "Retrieval engine",
+          status: "Ready",
+          tone: "good",
+          detail: "Sparse backend quickwit-with-postgres-fallback is serving live retrieval.",
+          meta: "retrieval-engine-rs",
+        },
+      ],
+      storage: [
+        {
+          id: "qdrant",
+          label: "Qdrant vectors",
+          status: "Ready",
+          tone: "good",
+          detail: "Collections include dataplane_knowledge and wiki_block_embeddings.",
+          meta: "3 collections",
+        },
+      ],
+      capabilities: [
+        {
+          id: "embeddings",
+          label: "Embedding system",
+          status: "Live",
+          tone: "good",
+          detail: "embedding-engine and Qdrant collections are ready.",
+          meta: "wiki_block_embeddings",
+        },
+        {
+          id: "context-mode",
+          label: "Context mode",
+          status: "Not wired",
+          tone: "warn",
+          detail: "No current Data Plane v2 implementation was detected.",
+        },
+      ],
+    },
     finspo: {
       available: true,
       sourceCount: 2,
@@ -217,9 +260,12 @@ describe("VelionKnowledgePage", () => {
     expect(screen.getByRole("heading", { name: /^integrations$/i, level: 2 })).toBeVisible();
     expect(screen.getByRole("heading", { name: /^files$/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /tracked web sources/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /data plane status/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /support knowledge/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /microsoft 365/i })).toBeVisible();
     expect(screen.getByText(/docs\.velion\.ai/i)).toBeVisible();
+    expect(screen.getAllByText(/quickwit-with-postgres-fallback/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/context mode/i)).toBeVisible();
     expect(screen.getAllByText(/shipping faq/i)[0]).toBeVisible();
   });
 
@@ -269,6 +315,21 @@ describe("VelionKnowledgePage", () => {
 
     expect(screen.getAllByText(/returns policy/i)[0]).toBeVisible();
     expect(screen.queryAllByText(/shipping faq/i)).toHaveLength(0);
+  });
+
+  it("renders safely when diagnostics are missing from the payload", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(makeFetchResponse({
+      data: {
+        ...knowledgePayload.data,
+        diagnostics: undefined,
+      },
+    }))));
+
+    render(<VelionKnowledgePage />);
+
+    expect(await screen.findByRole("heading", { name: /data plane status/i })).toBeVisible();
+    expect(screen.getByText(/sparse backend: unknown/i)).toBeVisible();
+    expect(screen.getAllByText(/no live diagnostics were returned for this group yet/i).length).toBeGreaterThan(0);
   });
 
   it("starts a website crawl from the add source modal", async () => {

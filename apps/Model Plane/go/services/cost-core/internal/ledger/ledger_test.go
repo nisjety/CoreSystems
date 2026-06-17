@@ -1,0 +1,153 @@
+package ledger
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestStore_RecordAndGetUsage(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", InputTokens: 100, OutputTokens: 50, CostUSD: 0.5})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", InputTokens: 10, OutputTokens: 5, CostUSD: 0.05})
+
+	u, err := s.GetUsage(ctx, "org1", "u1")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	if u.TotalInputTokens != 110 || u.TotalOutputTokens != 55 {
+		t.Fatalf("tokens = %d/%d, want 110/55", u.TotalInputTokens, u.TotalOutputTokens)
+	}
+	if u.TotalCostUSD != 0.55 {
+		t.Fatalf("cost = %v, want 0.55", u.TotalCostUSD)
+	}
+	if u.EntryCount != 2 {
+		t.Fatalf("entry count = %d, want 2", u.EntryCount)
+	}
+}
+
+func TestStore_GetUsageNotFound(t *testing.T) {
+	s := NewStore()
+	_, err := s.GetUsage(context.Background(), "missing", "u")
+	if !errors.Is(err, ErrUsageNotFound) {
+		t.Fatalf("err = %v, want ErrUsageNotFound", err)
+	}
+}
+
+func TestStore_Idempotency(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	e := Entry{OrgID: "org1", UserID: "u1", InputTokens: 7, IdempotencyKey: "dup-key"}
+	mustRecord(t, s, e)
+	mustRecord(t, s, e) // duplicate must be ignored
+
+	u, err := s.GetUsage(ctx, "org1", "u1")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	if u.EntryCount != 1 || u.TotalInputTokens != 7 {
+		t.Fatalf("dedupe failed: count=%d tokens=%d", u.EntryCount, u.TotalInputTokens)
+	}
+}
+
+func TestStore_GetRunUsage(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", RunID: "run-A", InputTokens: 10, CostUSD: 1})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u2", RunID: "run-A", OutputTokens: 20, CostUSD: 2})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", RunID: "run-B", InputTokens: 99})
+
+	u, err := s.GetRunUsage(ctx, "run-A")
+	if err != nil {
+		t.Fatalf("GetRunUsage: %v", err)
+	}
+	if u.TotalInputTokens != 10 || u.TotalOutputTokens != 20 || u.TotalCostUSD != 3 || u.EntryCount != 2 {
+		t.Fatalf("run-A rollup wrong: %+v", u)
+	}
+
+	if _, err := s.GetRunUsage(ctx, "no-such-run"); !errors.Is(err, ErrUsageNotFound) {
+		t.Fatalf("missing run err = %v, want ErrUsageNotFound", err)
+	}
+}
+
+func TestStore_AggregateWithFilters(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", Model: "gpt", InputTokens: 1, CostUSD: 0.1})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u2", Model: "gpt", InputTokens: 2, CostUSD: 0.2})
+	mustRecord(t, s, Entry{OrgID: "org2", UserID: "u3", Model: "claude", InputTokens: 4, CostUSD: 0.4})
+
+	// Org-wide rollup.
+	u, _ := s.Aggregate(ctx, AggregateFilter{OrgID: "org1"})
+	if u.TotalInputTokens != 3 || u.EntryCount != 2 {
+		t.Fatalf("org1 aggregate wrong: %+v", u)
+	}
+
+	// Model-scoped rollup across orgs.
+	u, _ = s.Aggregate(ctx, AggregateFilter{Model: "gpt"})
+	if u.EntryCount != 2 || u.TotalInputTokens != 3 || u.TotalCostUSD < 0.29 || u.TotalCostUSD > 0.31 {
+		t.Fatalf("gpt aggregate wrong: %+v", u)
+	}
+
+	// No match yields zero-valued Usage, not an error.
+	u, err := s.Aggregate(ctx, AggregateFilter{OrgID: "nope"})
+	if err != nil {
+		t.Fatalf("Aggregate err = %v", err)
+	}
+	if u.EntryCount != 0 {
+		t.Fatalf("empty aggregate count = %d, want 0", u.EntryCount)
+	}
+}
+
+func TestStore_ListEntriesNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	base := time.Now().UTC()
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", Model: "old", CreatedAt: base.Add(-2 * time.Hour)})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", Model: "new", CreatedAt: base})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", Model: "mid", CreatedAt: base.Add(-1 * time.Hour)})
+
+	entries, err := s.ListEntries(ctx, AggregateFilter{OrgID: "org1"}, 2)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2 (limit)", len(entries))
+	}
+	if entries[0].Model != "new" || entries[1].Model != "mid" {
+		t.Fatalf("ordering wrong: %s, %s", entries[0].Model, entries[1].Model)
+	}
+}
+
+func TestStore_CheckBudget(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", InputTokens: 600, OutputTokens: 500, CostUSD: 5})
+
+	// Within budget.
+	if err := s.CheckBudget(ctx, "org1", "u1", 10, 2000); err != nil {
+		t.Fatalf("within budget err = %v", err)
+	}
+	// Cost cap exceeded.
+	if err := s.CheckBudget(ctx, "org1", "u1", 5, 0); !errors.Is(err, ErrBudgetExceededCost) {
+		t.Fatalf("cost cap err = %v, want ErrBudgetExceededCost", err)
+	}
+	// Token cap exceeded (1100 >= 1000).
+	if err := s.CheckBudget(ctx, "org1", "u1", 0, 1000); !errors.Is(err, ErrBudgetExceededTokens) {
+		t.Fatalf("token cap err = %v, want ErrBudgetExceededTokens", err)
+	}
+	// Unknown key is always within budget.
+	if err := s.CheckBudget(ctx, "org1", "ghost", 0.0001, 1); err != nil {
+		t.Fatalf("unknown key err = %v, want nil", err)
+	}
+}
+
+func mustRecord(t *testing.T, s *Store, e Entry) {
+	t.Helper()
+	if err := s.RecordEntry(context.Background(), e); err != nil {
+		t.Fatalf("RecordEntry: %v", err)
+	}
+}

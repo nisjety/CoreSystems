@@ -12,6 +12,8 @@ type Config struct {
 	ServiceName    string
 	InternalAPIKey string
 	UserAgent      string
+	BringAPIUID    string
+	BringAPIKey    string
 }
 
 func Load() Config {
@@ -20,6 +22,8 @@ func Load() Config {
 		ServiceName:    getString("SERVICE_NAME", "information-core"),
 		InternalAPIKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
 		UserAgent:      getString("INFORMATION_CORE_USER_AGENT", "VelionInformationCore/1.0 (ops@velion.local)"),
+		BringAPIUID:    strings.TrimSpace(os.Getenv("BRING_API_UID")),
+		BringAPIKey:    strings.TrimSpace(os.Getenv("BRING_API_KEY")),
 	}
 }
 

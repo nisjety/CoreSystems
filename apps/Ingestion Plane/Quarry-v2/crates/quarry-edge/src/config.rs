@@ -12,6 +12,8 @@ pub struct EdgeConfig {
     pub control_base_url: String,
     #[serde(default)]
     pub redis_url: Option<String>,
+    #[serde(default)]
+    pub dragonfly_url: Option<String>,
     #[serde(default = "default_artifact_backend")]
     pub artifact_backend: String,
     #[serde(default = "default_artifact_root")]
@@ -22,6 +24,10 @@ pub struct EdgeConfig {
     pub control_api_key: String,
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_secs: u64,
+    /// Optional file-backed URL security snapshot. The feed sync script writes
+    /// URLhaus/PhishTank host blocklists in quarry-security's native JSON shape.
+    #[serde(default)]
+    pub security_snapshot_path: Option<String>,
     #[serde(default)]
     pub data_plane_url: Option<String>,
     #[serde(default)]
@@ -70,6 +76,35 @@ pub struct EdgeConfig {
     /// Prefer a small fast model (e.g. Haiku). Empty/None → MP picks.
     #[serde(default)]
     pub llm_classify_model: Option<String>,
+    /// Autoprompt — when `true` AND `model_plane_url` is set, the router
+    /// rewrites verbose `Research`/`Comparative` queries into a tighter
+    /// web-search query before fan-out. Degrade-safe (falls back to the
+    /// original query). Default off to preserve deterministic latency.
+    #[serde(default)]
+    pub autoprompt: bool,
+    /// Optional Model Plane model override for autoprompt rewriting.
+    #[serde(default)]
+    pub autoprompt_model: Option<String>,
+    /// Semantic rerank — when `true` AND `model_plane_url` is set, the merged
+    /// result set is reordered by query-relevance via the Model Plane, with a
+    /// short relevance highlight attached per result (Exa-style). Degrade-safe
+    /// (falls back to the original order). Default off.
+    #[serde(default)]
+    pub semantic_rerank: bool,
+    /// Optional Model Plane model override for semantic reranking.
+    #[serde(default)]
+    pub semantic_rerank_model: Option<String>,
+    /// How many top results to rerank (the long tail is left in place). Default
+    /// 10 when unset.
+    #[serde(default)]
+    pub semantic_rerank_top_n: Option<usize>,
+    /// Zero-SaaS search posture (data residency): when `true`, the SmartRouter
+    /// refuses to register external paid SERP providers (Brave/Serper) that send
+    /// the query to a third party. Only in-infra providers (Tantivy / Stract /
+    /// SearXNG + Data Plane) are used, so search queries never leave the cluster.
+    /// Default `false` (Brave/Serper are registered as paid backups when keyed).
+    #[serde(default)]
+    pub zero_saas_search: bool,
     /// P1 / cluster #nats — NATS JetStream URL for cross-plane event
     /// fan-out (e.g. `nats://nats:4222`). When set, every `EventSink::emit`
     /// also publishes to JetStream so autocomplete-core, model-plane,
@@ -154,7 +189,11 @@ impl EdgeConfig {
         let cfg = config::Config::builder()
             .add_source(config::Environment::with_prefix("QUARRY_EDGE").separator("__"))
             .build()?;
-        Ok(cfg.try_deserialize().unwrap_or(Self::defaults()))
+        let mut edge: Self = cfg.try_deserialize().unwrap_or_else(|_| Self::defaults());
+        if edge.redis_url.is_none() {
+            edge.redis_url = edge.dragonfly_url.clone();
+        }
+        Ok(edge)
     }
 
     fn defaults() -> Self {
@@ -164,11 +203,13 @@ impl EdgeConfig {
             fetch_timeout_s: default_timeout(),
             control_base_url: default_control_url(),
             redis_url: None,
+            dragonfly_url: None,
             artifact_backend: default_artifact_backend(),
             artifact_root: default_artifact_root(),
             s3_bucket: None,
             control_api_key: String::new(),
             cache_ttl_secs: default_cache_ttl(),
+            security_snapshot_path: None,
             data_plane_url: None,
             data_plane_api_key: None,
             browserbase_api_key: None,
@@ -184,6 +225,12 @@ impl EdgeConfig {
             model_plane_token: None,
             llm_classify_intent: false,
             llm_classify_model: None,
+            autoprompt: false,
+            autoprompt_model: None,
+            semantic_rerank: false,
+            semantic_rerank_model: None,
+            semantic_rerank_top_n: None,
+            zero_saas_search: false,
             nats_url: None,
             nats_token: None,
             nats_creds_file: None,

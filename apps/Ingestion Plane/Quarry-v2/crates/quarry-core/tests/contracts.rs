@@ -244,6 +244,11 @@ fn data_plane_ingest_request_serde_roundtrip() {
         fingerprint: "blake3:abc123".into(),
         zdr: ZdrMode::Off,
         retention_policy: Some("30d".into()),
+        privacy_policy: Some(quarry_core::privacy::PrivacyPolicy {
+            purpose_id: Some("support".into()),
+            retention_policy: Some("30d".into()),
+            ..quarry_core::privacy::PrivacyPolicy::default()
+        }),
         source_trace: Some(SourceTrace {
             source_url: "https://example.com/page".into(),
             fetched_at: chrono::Utc::now(),

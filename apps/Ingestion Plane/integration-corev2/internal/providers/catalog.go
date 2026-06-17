@@ -43,6 +43,12 @@ func Catalog() []Provider {
 		Notion(),
 		Shopify(),
 		Stripe(),
+		LinkedIn(),
+		X(),
+		Instagram(),
+		Facebook(),
+		TikTok(),
+		Snapchat(),
 		Okta(),
 		SCIM(),
 	}
@@ -77,6 +83,11 @@ func OAuthCatalog() []Provider {
 		GitHub(),
 		Shopify(),
 		Stripe(),
+		LinkedIn(),
+		X(),
+		Instagram(),
+		Facebook(),
+		Snapchat(),
 	}
 }
 
@@ -582,6 +593,365 @@ func Stripe() Provider {
 	}
 }
 
+func LinkedIn() Provider {
+	return Provider{
+		Key:              "linkedin",
+		Label:            "LinkedIn",
+		Category:         "social",
+		ConnectorType:    "linkedin",
+		AuthType:         "oauth2_authorization_code_app_review",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Profile and page metadata",
+				Description: "Read member identity and available organization/page publishing targets.",
+				Scopes:      []string{"openid", "profile", "email"},
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Create posts",
+				Description: "Publish approved posts to LinkedIn profiles or organization pages.",
+				Scopes:      []string{"w_member_social"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Upload approved media assets used by scheduled LinkedIn posts.",
+				Scopes:      []string{"w_member_social"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Post analytics",
+				Description: "Read post status, reach, engagement, and error details.",
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Social account preview",
+				Description:  "Profile and page metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "publishing",
+				Label:        "Approved publishing",
+				Description:  "Schedule and publish approved LinkedIn posts with media.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
+			},
+			{
+				Key:          "full",
+				Label:        "Publishing and analytics",
+				Description:  "Publishing plus performance reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read"},
+			},
+		},
+	}
+}
+
+func X() Provider {
+	return Provider{
+		Key:              "x",
+		Label:            "X",
+		Category:         "social",
+		ConnectorType:    "x",
+		AuthType:         "oauth2_authorization_code_pkce_app_review",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Profile metadata",
+				Description: "Read account identity and available posting context.",
+				Scopes:      []string{"tweet.read", "users.read", "offline.access"},
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Create posts",
+				Description: "Publish approved posts and threads.",
+				Scopes:      []string{"tweet.write"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Upload approved images or video for scheduled posts.",
+				Scopes:      []string{"tweet.write"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Post analytics",
+				Description: "Read status and engagement metadata for published posts.",
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Social account preview",
+				Description:  "Account metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "publishing",
+				Label:        "Approved publishing",
+				Description:  "Schedule and publish approved X posts.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
+			},
+			{
+				Key:          "full",
+				Label:        "Publishing and analytics",
+				Description:  "Publishing plus performance reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read"},
+			},
+		},
+	}
+}
+
+func Instagram() Provider {
+	return Provider{
+		Key:              "instagram",
+		Label:            "Instagram",
+		Category:         "social",
+		ConnectorType:    "instagram",
+		AuthType:         "meta_oauth_app_review",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Business profile metadata",
+				Description: "Read connected Instagram business account identity and publishing readiness.",
+				Scopes:      []string{"instagram_basic", "pages_show_list", "pages_read_engagement"},
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Create posts",
+				Description: "Publish approved feed posts, reels, and carousel posts through provider-specific media workflows.",
+				Scopes:      []string{"instagram_content_publish"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Prepare and submit approved media containers for publishing.",
+				Scopes:      []string{"instagram_content_publish"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Post analytics",
+				Description: "Read post status, reach, and engagement metadata.",
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Social account preview",
+				Description:  "Business account metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "publishing",
+				Label:        "Approved publishing",
+				Description:  "Schedule and publish approved Instagram posts with media preparation.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
+			},
+			{
+				Key:          "full",
+				Label:        "Publishing and analytics",
+				Description:  "Publishing plus performance reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read"},
+			},
+		},
+	}
+}
+
+func Facebook() Provider {
+	return Provider{
+		Key:              "facebook",
+		Label:            "Facebook",
+		Category:         "social",
+		ConnectorType:    "facebook",
+		AuthType:         "meta_oauth_app_review",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Page metadata",
+				Description: "Read connected Facebook Page identity and publishing readiness.",
+				Scopes:      []string{"pages_show_list", "pages_read_engagement"},
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Create Page posts",
+				Description: "Publish approved text, link, or photo posts to connected Facebook Pages.",
+				Scopes:      []string{"pages_manage_posts"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Prepare approved image assets for Page publishing.",
+				Scopes:      []string{"pages_manage_posts"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.inbox.read",
+				Label:       "Page conversations",
+				Description: "Read Page comments and conversation metadata for unified inbox workflows.",
+				Scopes:      []string{"pages_read_user_content", "pages_manage_metadata"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Page analytics",
+				Description: "Read Page and post performance metadata.",
+				Scopes:      []string{"read_insights"},
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Social account preview",
+				Description:  "Page metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "publishing",
+				Label:        "Approved Page publishing",
+				Description:  "Schedule and publish approved Facebook Page posts.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
+			},
+			{
+				Key:          "inbox",
+				Label:        "Page inbox",
+				Description:  "Page metadata plus comment/conversation intake for unified inbox workflows.",
+				Capabilities: []string{"social.profile.read", "social.inbox.read"},
+			},
+			{
+				Key:          "full",
+				Label:        "Publishing, inbox, and analytics",
+				Description:  "Publishing, inbox intake, and performance reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.inbox.read", "social.analytics.read"},
+			},
+		},
+	}
+}
+
+func TikTok() Provider {
+	return Provider{
+		Key:              "tiktok",
+		Label:            "TikTok",
+		Category:         "social",
+		ConnectorType:    "tiktok",
+		AuthType:         "oauth2_authorization_code_app_review",
+		DirectOAuthReady: false,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Creator profile metadata",
+				Description: "Read connected TikTok creator identity and content posting readiness.",
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Create posts",
+				Description: "Publish approved direct posts through TikTok's content posting workflow.",
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Prepare approved video or image media for scheduled posts.",
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Post analytics",
+				Description: "Read post status and performance metadata where provider access permits it.",
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Social account preview",
+				Description:  "Creator profile metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "publishing",
+				Label:        "Approved publishing",
+				Description:  "Schedule and publish approved TikTok posts with media preparation.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
+			},
+			{
+				Key:          "full",
+				Label:        "Publishing and analytics",
+				Description:  "Publishing plus performance reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read"},
+			},
+		},
+	}
+}
+
+func Snapchat() Provider {
+	return Provider{
+		Key:              "snapchat",
+		Label:            "Snapchat",
+		Category:         "social",
+		ConnectorType:    "snapchat",
+		AuthType:         "oauth2_authorization_code_app_review",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Public profile metadata",
+				Description: "Read allowlisted Snapchat Public Profile metadata where available.",
+				Scopes:      []string{"snapchat-profile-api"},
+			},
+			{
+				Key:         "social.ads.manage",
+				Label:       "Marketing API",
+				Description: "Manage Snapchat organizations, ad accounts, campaigns, creatives, and reporting through the Marketing API.",
+				Scopes:      []string{"snapchat-marketing-api"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Ads analytics",
+				Description: "Read Snapchat campaign and ad account performance metadata.",
+				Scopes:      []string{"snapchat-marketing-api"},
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Social account preview",
+				Description:  "Profile and organization metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "ads",
+				Label:        "Snapchat marketing",
+				Description:  "Ad account, campaign, creative, and reporting workflows.",
+				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.analytics.read"},
+			},
+			{
+				Key:          "full",
+				Label:        "Marketing and analytics",
+				Description:  "Snapchat marketing workflows and reporting.",
+				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.analytics.read"},
+			},
+		},
+	}
+}
+
 func Okta() Provider {
 	return Provider{
 		Key:              "okta",
@@ -670,6 +1040,18 @@ func NormalizeKey(key string) string {
 		return "github"
 	case "stripe-connect":
 		return "stripe"
+	case "linkedin-pages", "linkedin-page", "linkedin-organization":
+		return "linkedin"
+	case "twitter", "twitter-x", "x-twitter":
+		return "x"
+	case "ig", "instagram-business", "meta-instagram":
+		return "instagram"
+	case "facebook-page", "facebook-pages", "meta-facebook":
+		return "facebook"
+	case "tik-tok", "tiktok-business":
+		return "tiktok"
+	case "snap", "snapchat-ads", "snapchat-marketing":
+		return "snapchat"
 	case "okta-oauth", "okta-api":
 		return "okta"
 	case "scim-v2", "scim2":

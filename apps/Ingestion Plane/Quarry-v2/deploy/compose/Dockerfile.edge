@@ -65,17 +65,26 @@ ENV CARGO_BUILD_RUSTFLAGS="--cfg=reqwest_unstable"
 # only fires when the request carries `prefer_http3: true` AND the edge
 # was started with `QUARRY_EDGE__HTTP3_ENABLED=1`. See
 # crates/quarry-runtime/src/http3.rs for the TLS-fingerprint caveat.
+#
+# Cap parallel codegen so the release build's peak memory fits a constrained
+# Docker Desktop VM — a from-scratch build otherwise spawns one rustc+LLVM per
+# core and can OOM (which silently kills the build with exit 101).
+ENV CARGO_BUILD_JOBS=4
 RUN cargo build --release -p quarry-edge --bin quarry-edge-rs --features grpc,http3
 
 # ---- Runtime image -----------------------------------------------------------
 # Use bookworm-slim (not distroless) so healthcheck has wget available and
-# operators can shell in for triage. Adds ~25 MB over distroless; worth it.
+# operators can shell in for triage. Chromium is included so the local
+# Chromiumoxide browser driver can render JavaScript when Browserbase is not
+# configured.
 FROM debian:bookworm-slim
 RUN set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
         ca-certificates \
+        chromium \
+        fonts-liberation \
         wget \
         > /tmp/apt-install.log 2>&1; then \
         cat /tmp/apt-install.log; \
@@ -88,6 +97,8 @@ RUN set -e; \
 
 COPY --from=build --chown=quarry:quarry \
     /src/target/release/quarry-edge-rs /usr/local/bin/quarry-edge-rs
+
+ENV CHROME=/usr/bin/chromium
 
 USER quarry
 EXPOSE 8082

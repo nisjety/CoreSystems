@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/triodelab/model-plane/services/capability-core/internal/scoring"
 )
 
 // CapabilityRow is the full mutable row for the capabilities table.
@@ -67,6 +70,15 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow) error 
 	}
 	if r.ConfigJSON == nil {
 		r.ConfigJSON = []byte("{}")
+	}
+	// The tags / enabled_for_scopes columns are NOT NULL DEFAULT '{}'; a nil
+	// Go slice encodes as SQL NULL and violates that constraint, so coalesce to
+	// an empty slice.
+	if r.Tags == nil {
+		r.Tags = []string{}
+	}
+	if r.EnabledForScopes == nil {
+		r.EnabledForScopes = []string{}
 	}
 	if r.RolloutState == "" {
 		r.RolloutState = "stable"
@@ -273,6 +285,100 @@ func (s *CapabilitiesStore) QueryAuditLog(ctx context.Context, entityKind, entit
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// ScoredCapability pairs a capability row with its composite rank in [0,1].
+type ScoredCapability struct {
+	Row   *CapabilityRow `json:"capability"`
+	Score float64        `json:"score"`
+}
+
+// Score computes the composite rank for a single row from its health columns
+// and rollout state under the default scoring policy.
+func (r *CapabilityRow) Score() float64 {
+	return scoring.Score(scoring.Metrics{
+		SuccessRate:    r.SuccessRate,
+		SchemaFailRate: r.SchemaFailRate,
+		P95LatencyMS:   r.P95LatencyMS,
+		MeanCostUSD:    r.MeanCostUSD,
+		ApprovalRate:   r.ApprovalRate,
+		IncidentCount:  r.IncidentCount,
+		OperatorRating: r.OperatorRating,
+		RolloutState:   r.RolloutState,
+	}, scoring.DefaultWeights())
+}
+
+// RankedList returns enabled, non-deleted capabilities for the org (plus
+// 'global'), optionally filtered by kind, ordered by descending composite score
+// (ties broken by kind, then name for stable output). When ids is non-nil, only
+// capabilities whose id is in the set are returned — this is how scope
+// resolution (ScopeStore.ResolveForScope) narrows the ranked catalog to what an
+// (org, agent) is actually granted. limit <= 0 defaults to 50.
+func (s *CapabilitiesStore) RankedList(ctx context.Context, orgID, kind string, ids []string, limit int) ([]ScoredCapability, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	where := "deleted_at IS NULL AND enabled = TRUE"
+	args := []any{}
+	n := 1
+	if orgID != "" {
+		where += fmt.Sprintf(" AND (org_id = $%d OR org_id = 'global')", n)
+		args = append(args, orgID)
+		n++
+	}
+	if kind != "" {
+		where += fmt.Sprintf(" AND kind = $%d", n)
+		args = append(args, kind)
+		n++
+	}
+	if ids != nil {
+		where += fmt.Sprintf(" AND id = ANY($%d)", n)
+		args = append(args, ids)
+		n++
+	}
+
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		SELECT id, org_id, kind, name, version, description,
+		       risk_level, scope, lazy_load, enabled, idempotency_key,
+		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
+		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
+		       approval_rate, incident_count, operator_rating, rollout_state,
+		       created_by, created_at, updated_at
+		FROM capabilities
+		WHERE %s
+	`, where), args...)
+	if err != nil {
+		return nil, fmt.Errorf("ranked list query: %w", err)
+	}
+	defer rows.Close()
+
+	scored := make([]ScoredCapability, 0)
+	for rows.Next() {
+		r, err := scanCapabilityRowFull(rows)
+		if err != nil {
+			return nil, err
+		}
+		scored = append(scored, ScoredCapability{Row: r, Score: r.Score()})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].Score != scored[j].Score {
+			return scored[i].Score > scored[j].Score
+		}
+		if scored[i].Row.Kind != scored[j].Row.Kind {
+			return scored[i].Row.Kind < scored[j].Row.Kind
+		}
+		return scored[i].Row.Name < scored[j].Row.Name
+	})
+
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored, nil
 }
 
 // -- helpers ------------------------------------------------------------------

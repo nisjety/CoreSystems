@@ -124,6 +124,11 @@ func TestValidateProviderRequiresProviderSpecificCredentials(t *testing.T) {
 		{provider: "notion", want: "NOTION_CLIENT_ID"},
 		{provider: "github", want: "GITHUB_CLIENT_ID"},
 		{provider: "shopify", want: "SHOPIFY_CLIENT_ID"},
+		{provider: "linkedin", want: "LINKEDIN_CLIENT_ID"},
+		{provider: "x", want: "X_CLIENT_ID"},
+		{provider: "instagram", want: "INSTAGRAM_CLIENT_ID"},
+		{provider: "facebook", want: "FACEBOOK_CLIENT_ID"},
+		{provider: "snapchat", want: "SNAPCHAT_CLIENT_ID"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {

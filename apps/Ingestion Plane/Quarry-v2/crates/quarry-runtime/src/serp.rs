@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchResult {
     pub url: String,
     pub title: Option<String>,
@@ -26,6 +26,15 @@ pub struct SearchResult {
     pub rank: u32,
     /// Provider name ("brave", "serper", "searxng") for telemetry.
     pub provider: String,
+    /// Relevance score in `[0,1]` assigned by the semantic reranker. `None`
+    /// when the result was not reranked. Omitted from the wire shape when
+    /// absent so non-reranked responses stay byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    /// Query-relevant highlight passages (Exa-style) attached by the reranker.
+    /// Empty when not reranked; omitted from the wire shape when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +58,12 @@ pub struct SearchOptions {
     /// Stract) ignore this field — they search the public web and have
     /// no per-tenant concept.
     pub org_id: Option<String>,
+    /// Restrict results to these domains (Exa-style `includeDomains`). Applied
+    /// as `site:` operators on remote SERP providers. Empty = no restriction.
+    pub include_domains: Vec<String>,
+    /// Exclude these domains (Exa-style `excludeDomains`). Applied as `-site:`
+    /// operators on remote SERP providers. Empty = no exclusion.
+    pub exclude_domains: Vec<String>,
 }
 
 impl Default for SearchOptions {
@@ -62,7 +77,81 @@ impl Default for SearchOptions {
             time_range: None,
             exact_match: false,
             org_id: None,
+            include_domains: Vec::new(),
+            exclude_domains: Vec::new(),
         }
+    }
+}
+
+/// Append Google-style `site:` / `-site:` operators to a query for domain
+/// filtering. Brave, Serper, SearXNG and Stract all proxy to engines that
+/// honor these operators, so applying them at the query-string level keeps
+/// domain filtering provider-agnostic. Multiple includes form an OR-group;
+/// excludes are negated. Returns the query unchanged when no filters are set.
+///
+/// Not applied by `TantivyLocalIndex` (local corpus is already org-scoped and
+/// its query parser would treat `site:` as literal tokens).
+pub(crate) fn apply_domain_filters(query: &str, opts: &SearchOptions) -> String {
+    if opts.include_domains.is_empty() && opts.exclude_domains.is_empty() {
+        return query.to_string();
+    }
+    let mut q = query.trim().to_string();
+    let includes: Vec<String> = opts
+        .include_domains
+        .iter()
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+        .map(|d| format!("site:{d}"))
+        .collect();
+    match includes.len() {
+        0 => {}
+        1 => q.push_str(&format!(" {}", includes[0])),
+        _ => q.push_str(&format!(" ({})", includes.join(" OR "))),
+    }
+    for d in &opts.exclude_domains {
+        let d = d.trim();
+        if !d.is_empty() {
+            q.push_str(&format!(" -site:{d}"));
+        }
+    }
+    q.trim().to_string()
+}
+
+/// Map our recency bucket (`day|week|month|year`) to Brave's `freshness` param.
+fn brave_freshness(time_range: Option<&str>) -> Option<&'static str> {
+    match time_range?.trim() {
+        "day" => Some("pd"),
+        "week" => Some("pw"),
+        "month" => Some("pm"),
+        "year" => Some("py"),
+        _ => None,
+    }
+}
+
+/// Map our recency bucket to Google/Serper `tbs=qdr:` value.
+fn serper_tbs(time_range: Option<&str>) -> Option<&'static str> {
+    match time_range?.trim() {
+        "day" => Some("qdr:d"),
+        "week" => Some("qdr:w"),
+        "month" => Some("qdr:m"),
+        "year" => Some("qdr:y"),
+        _ => None,
+    }
+}
+
+/// SearXNG accepts `day|week|month|year` directly on `time_range`; validate so
+/// we never forward a junk value.
+fn searxng_time_range(time_range: Option<&str>) -> Option<&str> {
+    let t = time_range?.trim();
+    matches!(t, "day" | "week" | "month" | "year").then_some(t)
+}
+
+/// Map a topic vertical to a SearXNG category. Only `news` maps cleanly; other
+/// topics fall through to SearXNG's default (general) vertical.
+fn searxng_category(topic: Option<&str>) -> Option<&'static str> {
+    match topic?.trim().to_ascii_lowercase().as_str() {
+        "news" => Some("news"),
+        _ => None,
     }
 }
 
@@ -156,18 +245,22 @@ impl BraveSearch {
 #[async_trait]
 impl SearchProvider for BraveSearch {
     async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let effective_query = apply_domain_filters(query, opts);
         let mut req = self
             .http
             .get(&self.endpoint)
             .header("x-subscription-token", &self.api_key)
             .header("accept", "application/json")
-            .query(&[("q", query)])
+            .query(&[("q", effective_query.as_str())])
             .query(&[("count", &opts.limit.to_string())]);
         if let Some(c) = &opts.country {
             req = req.query(&[("country", c.as_str())]);
         }
         if let Some(l) = &opts.language {
             req = req.query(&[("search_lang", l.as_str())]);
+        }
+        if let Some(freshness) = brave_freshness(opts.time_range.as_deref()) {
+            req = req.query(&[("freshness", freshness)]);
         }
         if opts.safe_search {
             req = req.query(&[("safesearch", "moderate")]);
@@ -192,6 +285,7 @@ impl SearchProvider for BraveSearch {
                 snippet: r.description,
                 rank: (i as u32) + 1,
                 provider: "brave".into(),
+                ..Default::default()
             });
         }
         Ok(results)
@@ -251,12 +345,16 @@ impl SerperSearch {
 #[async_trait]
 impl SearchProvider for SerperSearch {
     async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
-        let body = serde_json::json!({
-            "q": query,
+        let effective_query = apply_domain_filters(query, opts);
+        let mut body = serde_json::json!({
+            "q": effective_query,
             "num": opts.limit,
             "gl": opts.country.clone().unwrap_or_default(),
             "hl": opts.language.clone().unwrap_or_default(),
         });
+        if let Some(tbs) = serper_tbs(opts.time_range.as_deref()) {
+            body["tbs"] = serde_json::Value::from(tbs);
+        }
         let resp = self
             .http
             .post(&self.endpoint)
@@ -284,6 +382,7 @@ impl SearchProvider for SerperSearch {
                 snippet: r.snippet,
                 rank: (i as u32) + 1,
                 provider: "serper".into(),
+                ..Default::default()
             });
         }
         Ok(results)
@@ -332,14 +431,21 @@ impl SearXNGSearch {
 impl SearchProvider for SearXNGSearch {
     async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
         let url = format!("{}/search", self.base_url.trim_end_matches('/'));
+        let effective_query = apply_domain_filters(query, opts);
         let mut req = self
             .http
             .get(&url)
-            .query(&[("q", query)])
+            .query(&[("q", effective_query.as_str())])
             .query(&[("format", "json")])
             .query(&[("count", &opts.limit.to_string())]);
         if let Some(c) = &opts.country {
             req = req.query(&[("language", c.as_str())]);
+        }
+        if let Some(tr) = searxng_time_range(opts.time_range.as_deref()) {
+            req = req.query(&[("time_range", tr)]);
+        }
+        if let Some(cat) = searxng_category(opts.topic.as_deref()) {
+            req = req.query(&[("categories", cat)]);
         }
         let resp = req
             .send()
@@ -360,6 +466,7 @@ impl SearchProvider for SearXNGSearch {
                 snippet: r.content,
                 rank: (i as u32) + 1,
                 provider: "searxng".into(),
+                ..Default::default()
             });
         }
         Ok(results)
@@ -533,8 +640,9 @@ impl StractSearch {
 #[async_trait]
 impl SearchProvider for StractSearch {
     async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        let effective_query = apply_domain_filters(query, opts);
         let body = serde_json::json!({
-            "query": query,
+            "query": effective_query,
             "numResults": opts.limit,
             "safeSearch": opts.safe_search,
             // Stract supports a `selectedRegion` field for country bias.
@@ -567,6 +675,7 @@ impl SearchProvider for StractSearch {
                 snippet: w.snippet,
                 rank: (i as u32) + 1,
                 provider: "stract".into(),
+                ..Default::default()
             });
         }
         Ok(results)
@@ -787,6 +896,62 @@ mod tests {
         let opts = SearchOptions::default();
         assert_eq!(opts.limit, 10);
         assert!(opts.safe_search);
+        assert!(opts.include_domains.is_empty());
+        assert!(opts.exclude_domains.is_empty());
+    }
+
+    #[test]
+    fn domain_filters_noop_when_empty() {
+        let opts = SearchOptions::default();
+        assert_eq!(apply_domain_filters("rust async", &opts), "rust async");
+    }
+
+    #[test]
+    fn domain_filters_single_include_appends_site() {
+        let opts = SearchOptions {
+            include_domains: vec!["docs.rs".into()],
+            ..Default::default()
+        };
+        assert_eq!(apply_domain_filters("tokio", &opts), "tokio site:docs.rs");
+    }
+
+    #[test]
+    fn domain_filters_multi_include_or_group() {
+        let opts = SearchOptions {
+            include_domains: vec!["a.com".into(), "b.com".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_domain_filters("q", &opts),
+            "q (site:a.com OR site:b.com)"
+        );
+    }
+
+    #[test]
+    fn domain_filters_exclude_negates() {
+        let opts = SearchOptions {
+            exclude_domains: vec!["spam.com".into(), " ".into()],
+            ..Default::default()
+        };
+        // Blank entries are skipped.
+        assert_eq!(apply_domain_filters("q", &opts), "q -site:spam.com");
+    }
+
+    #[test]
+    fn time_range_mappings_are_per_provider() {
+        assert_eq!(brave_freshness(Some("week")), Some("pw"));
+        assert_eq!(brave_freshness(Some("nonsense")), None);
+        assert_eq!(serper_tbs(Some("day")), Some("qdr:d"));
+        assert_eq!(serper_tbs(None), None);
+        assert_eq!(searxng_time_range(Some("month")), Some("month"));
+        assert_eq!(searxng_time_range(Some("decade")), None);
+    }
+
+    #[test]
+    fn searxng_category_maps_only_news() {
+        assert_eq!(searxng_category(Some("news")), Some("news"));
+        assert_eq!(searxng_category(Some("finance")), None);
+        assert_eq!(searxng_category(None), None);
     }
 
     #[tokio::test]
@@ -821,6 +986,7 @@ mod tests {
                     snippet: None,
                     rank: 1,
                     provider: "working".into(),
+                    ..Default::default()
                 }])
             }
             fn name(&self) -> &str {

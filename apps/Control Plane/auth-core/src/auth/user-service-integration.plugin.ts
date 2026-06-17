@@ -6,7 +6,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
-import { createAuthMiddleware } from 'better-auth/plugins';
+import { createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
 import { AuthIntegrationService } from '../internal/auth-integration.service';
 
@@ -38,10 +38,11 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
         {
           matcher: ({ path }) => {
             console.log('🔍 [Plugin Debug] Checking signup path:', path);
+            const currentPath = path ?? '';
             const isMatch =
-              path.includes('/sign-up') ||
-              path === '/sign-up/email' ||
-              path === '/sign-up';
+              currentPath.includes('/sign-up') ||
+              currentPath === '/sign-up/email' ||
+              currentPath === '/sign-up';
             console.log('🔍 [Plugin Debug] Signup path match result:', isMatch);
             return isMatch;
           },
@@ -130,7 +131,7 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
 
         // Profile update
         {
-          matcher: ({ path }) => path.includes('/update-user'),
+          matcher: ({ path }) => (path ?? '').includes('/update-user'),
           handler: createAuthMiddleware(async (ctx) => {
             if (!authIntegrationService) return;
             const user = ctx.context.user;
@@ -153,7 +154,7 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
         //   + Always call handleUserLogin when a session exists so last_login &
         //     session events are tracked for every OAuth authentication
         {
-          matcher: ({ path }) => path.startsWith('/callback/'),
+          matcher: ({ path }) => (path ?? '').startsWith('/callback/'),
           handler: createAuthMiddleware(async (ctx) => {
             if (!authIntegrationService) return;
             const user = ctx.context.user;

@@ -10,7 +10,7 @@ will happen in production.
 
 - The full DPv2 stack (same as `make docker-up`)
 - `toxiproxy` (port 8474) interposed in front of NATS, Postgres, Qdrant,
-  and Redis on container-local DNS aliases.
+  and Dragonfly on container-local DNS aliases.
 
 Services connect to the proxied endpoints; the tests use toxiproxy's HTTP
 API to inject latency / cut connections / corrupt bytes.
@@ -22,7 +22,7 @@ API to inject latency / cut connections / corrupt bytes.
 | C-01 | NATS down for 30s | embedding-engine consumer pauses, resumes when NATS recovers, no message loss |
 | C-02 | Qdrant 5s latency injected | retrieval p95 stays under the timeout, no partial-candidate corruption |
 | C-03 | Postgres pool exhausted (max_conns=1) | acquire_timeout returns 503 quickly; `dpv2_postgres_pool_saturation` gauge fires alert (§16.2.7) |
-| C-04 | Redis disconnected mid-request | cache layer degrades to no-op, retrieval still succeeds |
+| C-04 | Dragonfly disconnected mid-request | cache layer degrades to no-op, retrieval still succeeds |
 | C-05 | Bandwidth-limit NATS to 1KB/s | DLQ entries appear after `max_deliver`, replayable via `dlq-replay` (§16.2.4) |
 
 ## Running

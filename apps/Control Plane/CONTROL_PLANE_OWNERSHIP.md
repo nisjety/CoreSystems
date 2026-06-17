@@ -4,6 +4,8 @@
 
 This document defines the **clear data boundaries** between the Control Plane (source of truth) and Convex (derived/real-time layer). The Control Plane owns all critical organizational and user data, while Convex provides real-time features for conversations and AI interactions.
 
+Companion privacy contract: [`../GDPR_SUMMARY.md`](../GDPR_SUMMARY.md). This ownership map defines authority; the GDPR summary defines the cross-plane retention, deletion, anonymization, processor, and ZDR obligations that follow authority decisions.
+
 ---
 
 ## 🏛️ Control Plane Ownership (Source of Truth)
@@ -286,7 +288,9 @@ users: defineTable({
 6. Convex receives event → soft-deletes user projection:
    - Sets syncStatus = "deleted"
    - Sets deletedAt timestamp
-   - Optionally anonymizes conversations
+   - Applies the deletion action from the privacy event to conversations, messages, and jobs
+   - Hard delete is required when content is in scope
+   - Pseudonymization is allowed only when a documented retention exception applies
 ```
 
 ### Organization Deletion (Full Data Purge)
@@ -303,7 +307,9 @@ users: defineTable({
 5. org-core publishes NATS event: organization.deleted
 6. Convex receives event → soft-deletes org projection:
    - Sets syncStatus = "deleted"
-   - Archives all conversations (optional: hard delete)
+   - Applies the deletion action to conversations, messages, and jobs
+   - Hard delete is the default after retention expires
+   - Archival or pseudonymized retention requires a documented legal, billing, security, or audit exception
 7. auth-core receives event → removes org-related data:
    - Deletes all member relationships
    - Deletes pending invitations

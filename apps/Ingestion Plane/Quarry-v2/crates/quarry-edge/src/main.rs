@@ -106,8 +106,24 @@ async fn main() -> anyhow::Result<()> {
     if !proxy_pool.is_empty() {
         tracing::info!(count = proxy_pool.len(), "proxy pool wired");
     }
-    let static_driver = StaticDriver::with_proxy_pool(timeout, &cfg.user_agent, proxy_pool)
-        .map_err(|e| anyhow::anyhow!("static driver init: {e:?}"))?;
+    let proxy_processor_id = if env_flag("QUARRY_PROXY_FIRST_PARTY") {
+        tracing::info!("proxy pool classified as first-party egress");
+        None
+    } else if proxy_pool.is_empty() {
+        None
+    } else {
+        let processor_id = std::env::var("QUARRY_PROXY_PROCESSOR_ID")
+            .unwrap_or_else(|_| "quarry_proxy_pool".into());
+        tracing::info!(%processor_id, "proxy pool requires request privacy processor approval");
+        Some(processor_id)
+    };
+    let static_driver = StaticDriver::with_proxy_pool_and_processor(
+        timeout,
+        &cfg.user_agent,
+        proxy_pool,
+        proxy_processor_id,
+    )
+    .map_err(|e| anyhow::anyhow!("static driver init: {e:?}"))?;
 
     let mut drivers = DriverRegistry::new(DriverKind::Static);
     drivers.register(Arc::new(static_driver));
@@ -137,16 +153,49 @@ async fn main() -> anyhow::Result<()> {
         };
         let bb_driver = Arc::new(BrowserbaseDriver::new(bb_config));
         let pool = Arc::new(RuntimeLeasePool::new(4));
-        let adapter = BrowserDriverAdapter::new(bb_driver, pool);
+        let processor_id = std::env::var("QUARRY_BROWSERBASE_PROCESSOR_ID")
+            .unwrap_or_else(|_| "browserbase".into());
+        let adapter = BrowserDriverAdapter::managed_provider(bb_driver, pool, processor_id);
         drivers.register(Arc::new(adapter));
         tracing::info!("browser driver registered (browserbase)");
+    }
+
+    #[cfg(feature = "browser-agent")]
+    if !drivers.has(DriverKind::Browser) {
+        let browser_driver: Arc<dyn quarry_browser::BrowserDriver> =
+            Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new());
+        let pool = Arc::new(RuntimeLeasePool::new(2));
+        let adapter = BrowserDriverAdapter::new(browser_driver, pool);
+        drivers.register(Arc::new(adapter));
+        tracing::info!("browser driver registered (local chromiumoxide)");
     }
 
     let default_driver = drivers
         .default_driver()
         .ok_or_else(|| anyhow::anyhow!("no drivers available"))?;
 
-    let security = DefaultEngine::new();
+    let security = if let Some(path) = cfg
+        .security_snapshot_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        match DefaultEngine::new().with_persistence(path).await {
+            Ok(engine) => {
+                tracing::info!(path, "loaded quarry security snapshot");
+                engine
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path,
+                    "could not load quarry security snapshot; using in-memory policy",
+                );
+                DefaultEngine::new()
+            }
+        }
+    } else {
+        DefaultEngine::new()
+    };
     let artifacts: Arc<dyn ArtifactStore> = match cfg.artifact_backend.as_str() {
         "fs" | "filesystem" => {
             tracing::info!(root = %cfg.artifact_root, "artifact backend: filesystem");
@@ -462,24 +511,45 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => tracing::warn!(error = %e, "searxng init failed"),
         }
     }
-    if let Some(key) = cfg.brave_search_key.as_deref().filter(|s| !s.is_empty()) {
-        match quarry_runtime::serp::BraveSearch::new(key) {
-            Ok(p) => {
-                tracing::info!("smart_router[+]: brave (paid backup)");
-                builder = builder.with_brave(Arc::new(p));
-                configured_any = true;
-            }
-            Err(e) => tracing::warn!(error = %e, "brave init failed"),
+    // Data residency: Brave & Serper are external SaaS — they receive the raw
+    // query. In zero-SaaS mode we refuse to register them so web search stays
+    // entirely in-infra (Tantivy/Stract/SearXNG + Data Plane). Otherwise they
+    // register as paid backups, but we log loudly that queries may egress.
+    let brave_keyed = cfg.brave_search_key.as_deref().filter(|s| !s.is_empty());
+    let serper_keyed = cfg.serper_key.as_deref().filter(|s| !s.is_empty());
+    if cfg.zero_saas_search {
+        if brave_keyed.is_some() || serper_keyed.is_some() {
+            tracing::warn!(
+                "zero_saas_search=on: NOT registering Brave/Serper — web search stays \
+                 in-infra (Tantivy/Stract/SearXNG + Data Plane); queries never egress"
+            );
         }
-    }
-    if let Some(key) = cfg.serper_key.as_deref().filter(|s| !s.is_empty()) {
-        match quarry_runtime::serp::SerperSearch::new(key) {
-            Ok(p) => {
-                tracing::info!("smart_router[+]: serper (paid backup)");
-                builder = builder.with_serper(Arc::new(p));
-                configured_any = true;
+    } else {
+        if let Some(key) = brave_keyed {
+            match quarry_runtime::serp::BraveSearch::new(key) {
+                Ok(p) => {
+                    tracing::warn!(
+                        "smart_router[+]: brave (paid backup) — EXTERNAL: queries egress to \
+                         api.search.brave.com; set QUARRY_EDGE__ZERO_SAAS_SEARCH=1 to disable"
+                    );
+                    builder = builder.with_brave(Arc::new(p));
+                    configured_any = true;
+                }
+                Err(e) => tracing::warn!(error = %e, "brave init failed"),
             }
-            Err(e) => tracing::warn!(error = %e, "serper init failed"),
+        }
+        if let Some(key) = serper_keyed {
+            match quarry_runtime::serp::SerperSearch::new(key) {
+                Ok(p) => {
+                    tracing::warn!(
+                        "smart_router[+]: serper (paid backup) — EXTERNAL: queries egress to \
+                         google.serper.dev; set QUARRY_EDGE__ZERO_SAAS_SEARCH=1 to disable"
+                    );
+                    builder = builder.with_serper(Arc::new(p));
+                    configured_any = true;
+                }
+                Err(e) => tracing::warn!(error = %e, "serper init failed"),
+            }
         }
     }
 
@@ -529,6 +599,36 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("smart_router intent classifier: rule-only (LLM disabled)");
     }
 
+    // Autoprompt — optional LLM query rewriter for Research/Comparative
+    // queries. Same gating as the intent classifier: requires the flag AND a
+    // Model Plane URL. The rewriter is degrade-safe (original query on any
+    // failure), so this never blocks search.
+    if cfg.autoprompt {
+        if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
+            match quarry_runtime::mp_client::ModelPlaneClient::new(mp_url) {
+                Ok(mut mp) => {
+                    if let Some(tok) = cfg.model_plane_token.as_deref().filter(|s| !s.is_empty()) {
+                        mp = mp.with_bearer_token(tok);
+                    }
+                    let mut rewriter = quarry_runtime::ModelPlaneQueryRewriter::new(Arc::new(mp));
+                    if let Some(m) = cfg.autoprompt_model.as_deref().filter(|s| !s.is_empty()) {
+                        rewriter = rewriter.with_model(m);
+                    }
+                    tracing::info!(
+                        model = cfg.autoprompt_model.as_deref().unwrap_or("<mp-default>"),
+                        "smart_router autoprompt: enabled"
+                    );
+                    builder = builder.with_query_rewriter(Arc::new(rewriter));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "autoprompt: MP client init failed; rewriting disabled")
+                }
+            }
+        } else {
+            tracing::warn!("autoprompt=true but MODEL_PLANE_URL is unset; rewriting disabled");
+        }
+    }
+
     let search: Option<Arc<dyn quarry_runtime::serp::SearchProvider>> = if configured_any {
         match builder.build() {
             Ok(router) => {
@@ -545,28 +645,80 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // OSS-parity P0 1C: hybrid search (Path A). When a Data Plane URL is
+    // Build the Data Plane vector index once (when DATA_PLANE_URL is set). It is
+    // shared by the hybrid search provider below AND retained in AppState for
+    // the find-similar route (`POST /v1/search/similar`), which queries it
+    // directly rather than going through the lexical/SERP chain.
+    let vector_index: Option<Arc<dyn quarry_runtime::vector_index::VectorIndex>> = cfg
+        .data_plane_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|dp_url| {
+            let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url);
+            if let Some(key) = cfg.data_plane_api_key.as_deref().filter(|s| !s.is_empty()) {
+                vidx = vidx.with_api_key(key);
+            }
+            Arc::new(vidx) as Arc<dyn quarry_runtime::vector_index::VectorIndex>
+        });
+
+    // OSS-parity P0 1C: hybrid search (Path A). When the vector index is
     // configured, wrap the lexical/SERP router in a HybridSearchProvider that
     // RRF-fuses Quarry's own-corpus lexical recall with the Data Plane's
     // semantic (Qdrant) retrieval. Best-effort: vector failures degrade to
     // lexical-only. Transparent to /v1/search + AnswerPipeline (both read
     // `search`). No new infra — delegates to the Data Plane's retrieval_v2.
+    let search: Option<Arc<dyn quarry_runtime::serp::SearchProvider>> =
+        match (search, vector_index.clone()) {
+            (Some(lexical), Some(vidx)) => {
+                tracing::info!("hybrid search: lexical ⊕ Data Plane vector (RRF) wired");
+                Some(Arc::new(quarry_runtime::HybridSearchProvider::new(
+                    lexical, vidx,
+                )))
+            }
+            (other, _) => other,
+        };
+
+    // Exa-style semantic rerank — when enabled AND a Model Plane URL is set,
+    // wrap the search provider so the top-N merged results are reordered by
+    // query relevance with a short highlight attached per result. Degrade-safe
+    // inside the reranker (original order on any failure). Wrapping here means
+    // both /v1/search and the AnswerPipeline read reranked results, and the edge
+    // cache stores the reranked output (no repeat LLM cost on cache hits).
     let search: Option<Arc<dyn quarry_runtime::serp::SearchProvider>> = match (
         search,
-        cfg.data_plane_url.as_deref().filter(|s| !s.is_empty()),
+        cfg.semantic_rerank,
+        cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
-        (Some(lexical), Some(dp_url)) => {
-            let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url);
-            if let Some(key) = cfg.data_plane_api_key.as_deref().filter(|s| !s.is_empty()) {
-                vidx = vidx.with_api_key(key);
+        (Some(inner), true, Some(mp_url)) => {
+            match quarry_runtime::mp_client::ModelPlaneClient::new(mp_url) {
+                Ok(mut mp) => {
+                    if let Some(tok) = cfg.model_plane_token.as_deref().filter(|s| !s.is_empty()) {
+                        mp = mp.with_bearer_token(tok);
+                    }
+                    let mut reranker = quarry_runtime::ModelPlaneSearchReranker::new(Arc::new(mp));
+                    if let Some(m) = cfg
+                        .semantic_rerank_model
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                    {
+                        reranker = reranker.with_model(m);
+                    }
+                    let top_n = cfg.semantic_rerank_top_n.unwrap_or(10);
+                    tracing::info!(top_n, "semantic rerank: enabled");
+                    Some(Arc::new(quarry_runtime::RerankingSearchProvider::new(
+                        inner,
+                        Arc::new(reranker),
+                        top_n,
+                    ))
+                        as Arc<dyn quarry_runtime::serp::SearchProvider>)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "semantic rerank: MP client init failed; disabled");
+                    Some(inner)
+                }
             }
-            tracing::info!("hybrid search: lexical ⊕ Data Plane vector (RRF) wired");
-            Some(Arc::new(quarry_runtime::HybridSearchProvider::new(
-                lexical,
-                Arc::new(vidx),
-            )))
         }
-        (other, _) => other,
+        (other, _, _) => other,
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).
@@ -673,6 +825,7 @@ async fn main() -> anyhow::Result<()> {
         ingest,
         profiles,
         search,
+        vector_index,
         searxng_url: cfg.searxng_url.clone().filter(|s| !s.is_empty()),
         model_plane_url: cfg.model_plane_url.clone(),
         model_plane_token: cfg.model_plane_token.clone(),
@@ -724,6 +877,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 pub fn routes_for_test(state: state::AppState) -> Router {

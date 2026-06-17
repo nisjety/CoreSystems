@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VelionSidebar } from "@/features/shell-v2/components/VelionSidebar";
 
 const navigationMocks = vi.hoisted(() => ({
@@ -36,6 +36,121 @@ vi.mock("@/lib/auth/auth-client", () => ({
     signOut: vi.fn(),
   },
 }));
+
+function makeFetchResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as Response;
+}
+
+const knowledgePayload = {
+  data: {
+    generatedAt: "2026-06-07T08:00:00.000Z",
+    orgId: "org-1",
+    collections: [
+      { id: "all", label: "General Knowledge", count: 3 },
+      { id: "provider:notion", label: "Notion", count: 1 },
+      { id: "provider:microsoft", label: "Microsoft 365", count: 1 },
+      { id: "web", label: "Web sources", count: 1 },
+    ],
+    dataPlane: {
+      available: true,
+      documentCount: 3,
+      indexedCount: 3,
+    },
+    graph: {
+      available: false,
+      edgeCount: 0,
+      groups: [],
+      nodeCount: 0,
+      nodes: [],
+      links: [],
+      truncated: false,
+    },
+    metrics: { connected: 2, failed: 0, syncing: 0 },
+    metricCards: [],
+    folders: [
+      {
+        id: "source:notion",
+        title: "Notion",
+        subtitle: "1 retrieval document",
+        providerKey: "notion",
+        primaryValue: "1",
+        primaryLabel: "Docs",
+        secondaryValue: "1",
+        secondaryLabel: "Indexed",
+        connections: ["Notion", "Data Plane"],
+        tone: "warm",
+      },
+    ],
+    integrations: [],
+    files: [],
+    sources: [
+      {
+        id: "doc-shipping",
+        title: "Shipping FAQ",
+        description: "Notion · Indexed",
+        type: "Notion",
+        provider: "Notion",
+        providerKey: "notion",
+        category: "policy",
+        owner: "System",
+        updated: "5m ago",
+        size: "12 KB",
+        status: "Indexed",
+        chunks: 3,
+        hitRate: "88%",
+        coverage: "100%",
+        similarity: "0.88",
+        tags: ["Shipping", "Policy"],
+        related: ["Carrier"],
+        chunksPreview: [],
+      },
+      {
+        id: "doc-returns",
+        title: "Returns Policy",
+        description: "Microsoft 365 · Indexed",
+        type: "Docs",
+        provider: "Microsoft 365",
+        providerKey: "microsoft",
+        category: "policy",
+        owner: "System",
+        updated: "12m ago",
+        size: "18 KB",
+        status: "Indexed",
+        chunks: 2,
+        hitRate: "91%",
+        coverage: "100%",
+        similarity: "0.91",
+        tags: ["Returns", "Policy"],
+        related: ["Support"],
+        chunksPreview: [],
+      },
+    ],
+    webSources: [
+      {
+        id: "web-docs",
+        name: "Velion docs",
+        url: "https://docs.velion.ai",
+        kind: "crawl",
+        status: "active",
+        providerKey: "web",
+        updated: "8m ago",
+      },
+    ],
+    finspo: {
+      available: false,
+      sourceCount: 0,
+      largestCount: 0,
+      inactiveCount: 0,
+      duplicateGroups: 0,
+      recommendationCount: 0,
+      reclaimableBytes: 0,
+    },
+  },
+};
 
 function renderInboxSidebar() {
   return render(
@@ -147,6 +262,11 @@ describe("VelionSidebar knowledge navigation", () => {
     navigationMocks.pathname = "/knowledge";
     navigationMocks.searchParams = new URLSearchParams();
     navigationMocks.push.mockReset();
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(makeFetchResponse(knowledgePayload))));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("uses a dropdown selector for knowledge sidebar views", async () => {
@@ -156,12 +276,30 @@ describe("VelionSidebar knowledge navigation", () => {
     const selector = screen.getByRole("button", { name: /select knowledge view/i });
     expect(selector).toHaveTextContent("Knowledge Base");
     expect(screen.getByRole("navigation", { name: /knowledge navigation/i })).toBeVisible();
+    expect(await screen.findByRole("button", { name: /general knowledge/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /onboarding/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /integrations/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /documents/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /rag operations/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /chunk quality/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /retrieval evals/i })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: /onboarding/i }));
+    expect(screen.getByText(/no sources found/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /documents/i }));
 
     await user.click(selector);
     await user.click(screen.getByRole("menuitemradio", { name: "Sources" }));
 
     expect(selector).toHaveTextContent("Sources");
     expect(screen.getByRole("button", { name: /shipping faq/i })).toBeVisible();
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/v1/knowledge/sources",
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "include",
+      }),
+    );
   });
 });
 

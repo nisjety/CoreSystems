@@ -84,7 +84,7 @@ func (a *Adapter) ChargeInvoice(ctx context.Context, invoice billing.Invoice) er
 
 func (a *Adapter) EnsureCustomer(
 	ctx context.Context,
-	input billing.StripeCustomerInput,
+	input billing.CustomerInput,
 ) (string, error) {
 	if a.apiKey == "" {
 		if strings.TrimSpace(input.ExistingCustomerID) != "" {
@@ -133,7 +133,7 @@ func (a *Adapter) EnsureCustomer(
 
 func (a *Adapter) CreateCheckoutSession(
 	ctx context.Context,
-	params billing.StripeCheckoutParams,
+	params billing.CheckoutParams,
 ) (billing.CheckoutSession, error) {
 	if a.apiKey == "" {
 		return billing.CheckoutSession{}, fmt.Errorf("stripe api key missing")
@@ -187,9 +187,17 @@ func (a *Adapter) CreateCheckoutSession(
 	}
 
 	return billing.CheckoutSession{
-		ID:  session.ID,
-		URL: session.URL,
+		ID:       session.ID,
+		URL:      session.URL,
+		Provider: "stripe",
 	}, nil
+}
+
+func (a *Adapter) RetrieveCheckoutSession(
+	_ context.Context,
+	_ billing.CheckoutLookupParams,
+) (billing.CheckoutStatus, error) {
+	return billing.CheckoutStatus{}, fmt.Errorf("stripe checkout status retrieval is not implemented")
 }
 
 func (a *Adapter) postForm(ctx context.Context, path string, form url.Values) ([]byte, error) {

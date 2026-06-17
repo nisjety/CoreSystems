@@ -15,11 +15,18 @@ func TestDataPlaneIngestRequest_RoundTrip(t *testing.T) {
 		"org_id": "org_demo",
 		"source_url": "https://example.com",
 		"title": "Hello",
-		"markdown": "# Hello",
-		"chunks": [],
-		"fingerprint": "blake3:abc",
-		"zdr": "off"
-	}`)
+			"markdown": "# Hello",
+			"chunks": [],
+			"fingerprint": "blake3:abc",
+			"zdr": "off",
+			"privacy_policy": {
+				"purpose_id": "support",
+				"lawful_basis": "contract",
+				"privacy_classification": "personal",
+				"zdr": "off",
+				"allow_third_party_processing": false
+			}
+		}`)
 
 	var parsed DataPlaneIngestRequest
 	if err := json.Unmarshal(canonical, &parsed); err != nil {
@@ -36,6 +43,12 @@ func TestDataPlaneIngestRequest_RoundTrip(t *testing.T) {
 	}
 	if parsed.IsZeroRetention() {
 		t.Error("IsZeroRetention() should be false when zdr=off")
+	}
+	if parsed.PrivacyPolicy == nil {
+		t.Fatal("privacy_policy should roundtrip")
+	}
+	if parsed.PrivacyPolicy.PrivacyClassification != PrivacyPersonal {
+		t.Errorf("privacy_classification = %q, want %q", parsed.PrivacyPolicy.PrivacyClassification, PrivacyPersonal)
 	}
 
 	// Roundtrip — serialize then deserialize, structure must match.
@@ -54,27 +67,27 @@ func TestDataPlaneIngestRequest_RoundTrip(t *testing.T) {
 
 func TestDataPlaneIngestRequest_ZdrSemantics(t *testing.T) {
 	cases := []struct {
-		name       string
-		req        DataPlaneIngestRequest
-		wantZDR    bool
+		name        string
+		req         DataPlaneIngestRequest
+		wantZDR     bool
 		wantContent bool
 	}{
 		{
-			name:       "zdr_on_with_markdown",
-			req:        DataPlaneIngestRequest{Zdr: ZdrOn, Markdown: ptr("# X")},
-			wantZDR:    true,
+			name:        "zdr_on_with_markdown",
+			req:         DataPlaneIngestRequest{Zdr: ZdrOn, Markdown: ptr("# X")},
+			wantZDR:     true,
 			wantContent: true,
 		},
 		{
-			name:       "zdr_on_without_content",
-			req:        DataPlaneIngestRequest{Zdr: ZdrOn},
-			wantZDR:    true,
+			name:        "zdr_on_without_content",
+			req:         DataPlaneIngestRequest{Zdr: ZdrOn},
+			wantZDR:     true,
 			wantContent: false,
 		},
 		{
-			name:       "zdr_off_with_html",
-			req:        DataPlaneIngestRequest{Zdr: ZdrOff, HTMLRef: ptr("art_1")},
-			wantZDR:    false,
+			name:        "zdr_off_with_html",
+			req:         DataPlaneIngestRequest{Zdr: ZdrOff, HTMLRef: ptr("art_1")},
+			wantZDR:     false,
 			wantContent: true,
 		},
 	}

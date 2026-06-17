@@ -700,15 +700,19 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
 // Event broadcast helpers
 // ---------------------------------------------------------------------------
 
+/// Broadcast an event to streaming clients and buffer it for replay. Returns
+/// the server-assigned monotonic `event_id` so callers that need to echo it
+/// back (e.g. `RecordOrchestrationEvent`) can do so.
 fn broadcast_event(
     tx: &broadcast::Sender<proto::OrchestrationEvent>,
     replay: &ReplayBuffer,
     mut ev: proto::OrchestrationEvent,
-) {
+) -> String {
     // Assign a monotonic id used as the SSE `id:` line and the resume cursor.
     if ev.event_id.is_empty() {
         ev.event_id = mp_ids::new_ulid();
     }
+    let event_id = ev.event_id.clone();
     // Retain in the per-run replay buffer so a reconnecting client can resume
     // from Last-Event-Id. Only run-scoped events are buffered (the stream is
     // keyed by run_id; thread-only events are never delivered per run anyway).
@@ -718,6 +722,7 @@ fn broadcast_event(
     // `send` only fails when there are zero subscribers; that's expected when
     // no streaming clients are attached. Don't propagate as an error.
     let _ = tx.send(ev);
+    event_id
 }
 
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
@@ -729,6 +734,8 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::SubagentAttached(p) => Some(&p.parent_run_id),
         orchestration_event::Event::RunPausedForApproval(p) => Some(&p.run_id),
         orchestration_event::Event::RunResumedAfterApproval(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserActionDispatched(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserObservationReceived(p) => Some(&p.run_id),
     }
 }
 
@@ -1035,21 +1042,26 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             } else {
                 req.client_approval_id.clone()
             };
-            let plan_id = if req.step_id.is_empty() {
-                None
-            } else {
-                Some(req.step_id.as_str())
-            };
+            // `step_id` names the gated step, NOT a plan. The approvals table
+            // has no step_id column and plan_id is an FK → plans(id); binding
+            // step_id to plan_id made every tool-step approval violate
+            // `approvals_plan_id_fkey` and silently fail to persist (the gate
+            // fired but no durable approval was ever recorded). Keep plan_id
+            // NULL here and preserve step_id in metadata for traceability.
+            let plan_id: Option<&str> = None;
             let expires_at = if req.expires_in_seconds > 0 {
                 Some(Utc::now() + chrono::Duration::seconds(i64::from(req.expires_in_seconds)))
             } else {
                 None
             };
-            let metadata = if req.reason.is_empty() {
-                JsonValue::Object(serde_json::Map::new())
-            } else {
-                serde_json::json!({ "reason": req.reason })
-            };
+            let mut metadata_map = serde_json::Map::new();
+            if !req.reason.is_empty() {
+                metadata_map.insert("reason".to_owned(), JsonValue::String(req.reason.clone()));
+            }
+            if !req.step_id.is_empty() {
+                metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
+            }
+            let metadata = JsonValue::Object(metadata_map);
 
             let created = store::request_approval(
                 &self.pool,
@@ -1171,6 +1183,28 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 },
             );
 
+            // A granted decision unblocks the gated run. Emit the matching
+            // RunResumedAfterApproval (the inverse of RunPausedForApproval at
+            // create_approval time) so SSE consumers — the chat "internal
+            // Claude Code" surface and operator views — resume the run.
+            // Denials/timeouts leave the run paused; no resume signal.
+            if new_status == "granted" {
+                broadcast_event(
+                    &self.events_tx,
+                    &self.replay,
+                    proto::OrchestrationEvent {
+                        event_id: String::new(),
+                        at: Some(now_ts()),
+                        event: Some(orchestration_event::Event::RunResumedAfterApproval(
+                            orchestration_event::RunResumedAfterApproval {
+                                run_id: after.run_id.clone(),
+                                approval_id: after.id.clone(),
+                            },
+                        )),
+                    },
+                );
+            }
+
             Ok(Response::new(proto::DecideApprovalResponse {
                 approval: Some(approval),
             }))
@@ -1267,6 +1301,40 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("attach_subagent", started, result.is_ok());
+        result
+    }
+
+    async fn record_orchestration_event(
+        &self,
+        request: Request<proto::RecordOrchestrationEventRequest>,
+    ) -> Result<Response<proto::RecordOrchestrationEventResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::RecordOrchestrationEventResponse>, Status> = async {
+            let req = request.into_inner();
+            let mut ev = req
+                .event
+                .ok_or_else(|| Status::invalid_argument("event is required"))?;
+            if ev.event.is_none() {
+                return Err(Status::invalid_argument("event payload is required"));
+            }
+            // Only run-scoped events are deliverable on the per-run stream;
+            // reject ones we couldn't route so callers learn early.
+            if event_run_id(&ev).is_none_or(str::is_empty) {
+                return Err(Status::invalid_argument(
+                    "event must carry a non-empty run_id",
+                ));
+            }
+            // Server owns the timestamp; fill it in when the caller left it empty.
+            if ev.at.is_none() {
+                ev.at = Some(now_ts());
+            }
+            let event_id = broadcast_event(&self.events_tx, &self.replay, ev);
+            Ok(Response::new(proto::RecordOrchestrationEventResponse {
+                event_id,
+            }))
+        }
+        .await;
+        record_metrics("record_orchestration_event", started, result.is_ok());
         result
     }
 
@@ -1629,5 +1697,82 @@ mod tests {
             )),
         };
         assert_eq!(event_run_id(&attach), Some("run_p"));
+
+        // A granted decision emits RunResumedAfterApproval, which must be
+        // run-scoped so it lands in the per-run replay buffer (SSE resume
+        // cursor) — the inverse of the RunPausedForApproval pause event.
+        let resumed = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunResumedAfterApproval(
+                orchestration_event::RunResumedAfterApproval {
+                    run_id: "run_r".into(),
+                    approval_id: "appr_r".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&resumed), Some("run_r"));
+
+        // Browser-agent progress events (B4) are run-scoped so they reach the
+        // per-run SSE stream and replay buffer.
+        let browser_action = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserActionDispatched(
+                orchestration_event::BrowserActionDispatched {
+                    run_id: "run_b".into(),
+                    plan_id: "plan_b".into(),
+                    action_id: "act_0001".into(),
+                    action_type: "goto".into(),
+                    url: "https://example.com".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&browser_action), Some("run_b"));
+
+        let browser_obs = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserObservationReceived(
+                orchestration_event::BrowserObservationReceived {
+                    run_id: "run_o".into(),
+                    plan_id: "plan_o".into(),
+                    action_id: "act_0001".into(),
+                    status: "success".into(),
+                    page_url: "https://example.com/landing".into(),
+                    page_title: "Example".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&browser_obs), Some("run_o"));
+    }
+
+    #[tokio::test]
+    async fn record_orchestration_event_broadcasts_and_buffers_browser_event() {
+        let (tx, mut rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        let replay = ReplayBuffer::default();
+
+        let ev = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: Some(now_ts()),
+            event: Some(orchestration_event::Event::BrowserActionDispatched(
+                orchestration_event::BrowserActionDispatched {
+                    run_id: "run_rec".into(),
+                    plan_id: "plan_rec".into(),
+                    action_id: "act_0001".into(),
+                    action_type: "observe".into(),
+                    url: String::new(),
+                },
+            )),
+        };
+        let event_id = broadcast_event(&tx, &replay, ev);
+        assert!(!event_id.is_empty(), "broadcast assigned an event_id");
+
+        let received = rx.try_recv().expect("subscriber received the event");
+        assert_eq!(received.event_id, event_id);
+        assert_eq!(event_run_id(&received), Some("run_rec"));
+
+        let buffered = replay.replay_after("run_rec", "").await;
+        assert_eq!(buffered.len(), 1, "browser event buffered for replay");
     }
 }

@@ -381,6 +381,7 @@ mod tests {
             fingerprint: "blake3:abc".into(),
             zdr: ZdrMode::Off,
             retention_policy: None,
+            privacy_policy: Some(quarry_core::privacy::PrivacyPolicy::default()),
             source_trace: None,
         }
     }

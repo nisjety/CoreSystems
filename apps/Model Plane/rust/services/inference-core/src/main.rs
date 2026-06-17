@@ -25,6 +25,10 @@ async fn main() -> Result<()> {
     );
 
     let chain = provider::fallback::FallbackChain::from_config(&cfg);
+    let policy_state = http_health::PolicyState {
+        policy: chain.policy_handle(),
+        client: chain.policy_client(),
+    };
     let speech = provider::speech::SpeechChain::from_env();
     info!(
         providers = speech.provider_count(),
@@ -71,7 +75,7 @@ async fn main() -> Result<()> {
         realtime,
         video,
     }));
-    let http_handle = tokio::spawn(http_health::serve());
+    let http_handle = tokio::spawn(http_health::serve(policy_state));
 
     let shutdown = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

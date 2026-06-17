@@ -13,6 +13,7 @@ use quarry_core::ids::kinds::RunKind;
 use quarry_core::output::{
     ChangeInfo, DriverInfo, FormatRef, NormalizedOutput, OutputFormats, UrlTriple,
 };
+use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use quarry_core::{error::ErrorCode, QuarryError, QuarryResult};
 use quarry_security::SecurityEngine;
@@ -44,6 +45,7 @@ pub struct PageRunner {
     /// entirely (used in test harnesses and dev mode).
     pub ingest: Option<Arc<dyn DataPlaneIngest>>,
     pub org_id: Option<String>,
+    pub privacy: PrivacyPolicy,
     /// Optional cancellation token. When set, the spawned ingest task
     /// races against this token and aborts cleanly when the parent run
     /// is cancelled — without this, in-flight ingests continue running
@@ -161,6 +163,7 @@ impl PageRunner {
         let fetch_hints = FetchHints {
             render: self.render.clone(),
             org_id: self.org_id.clone().unwrap_or_default(),
+            privacy: self.privacy.clone().with_zdr(self.zdr),
             ..FetchHints::default()
         };
         let fetch_result = self
@@ -555,6 +558,7 @@ impl PageRunner {
                     identity_id: identity.id,
                 }
             }),
+            privacy: Some(self.privacy.clone().with_zdr(self.zdr)),
         };
 
         // Cycle 19 / cluster #16: index successful scrape into the local
@@ -615,7 +619,8 @@ impl PageRunner {
                     metadata: json!({}),
                     fingerprint: fp.0.clone(),
                     zdr: self.zdr,
-                    retention_policy: None,
+                    retention_policy: self.privacy.retention_policy.clone(),
+                    privacy_policy: Some(self.privacy.clone().with_zdr(self.zdr)),
                     source_trace: Some(source_trace),
                 };
 

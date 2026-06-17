@@ -1,0 +1,54 @@
+import { createEffect, createMemo } from 'solid-js'
+import { WorkflowCanvas, WorkflowGenerationStatus, WorkflowPromptComposer, WorkflowTopBar } from '@/features/agents/components/WorkflowCanvas'
+import { WorkflowInspector } from '@/features/agents/components/WorkflowInspector'
+import { WorkflowToolsPanel } from '@/features/agents/components/WorkflowToolsPanel'
+import { inspectorByTool, toolToCanvasNode } from '@/features/agents/lib/velion-workflow-builder-data'
+import { useAgentSelection, useWorkflowBuilderTool } from '@/features/agents/lib/use-agent-selection'
+
+export function WorkflowBuilder() {
+  const [agentSelection, setAgentSelection] = useAgentSelection()
+  const [selectedTool, setSelectedTool] = useWorkflowBuilderTool()
+  const selectedNodeId = createMemo(() => toolToCanvasNode[selectedTool()])
+  const inspector = createMemo(() => inspectorByTool[selectedNodeId()])
+
+  createEffect(() => {
+    if (agentSelection() !== 'workflow') {
+      setAgentSelection('workflow')
+    }
+  })
+
+  return (
+    <div class="flex h-full min-h-0 min-w-0 bg-[#F5F1EC] p-2 text-[#2B2D31] dark:bg-[#101114] dark:text-[#F7F8F8]">
+      <div class="relative min-h-0 flex-1 overflow-hidden rounded-[16px] border border-[#D8D2C8] bg-[#F8F9FA] shadow-[0_18px_42px_rgba(43,45,52,0.07)] dark:border-[#2A2C31] dark:bg-[#15161A]">
+        <div
+          aria-hidden="true"
+          class="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,rgba(41,44,50,0.12)_1px,transparent_0)] [background-size:22px_22px] dark:bg-[radial-gradient(circle_at_1px_1px,rgba(255,255,255,0.11)_1px,transparent_0)]"
+        />
+        <div
+          aria-hidden="true"
+          class="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.62),rgba(242,243,244,0.88))] dark:bg-[linear-gradient(180deg,rgba(16,17,20,0.48),rgba(16,17,20,0.92))]"
+        />
+
+        <div class="absolute bottom-0 left-0 top-0 z-40 w-[320px] shadow-[14px_0_40px_rgba(42,44,50,0.08)] lg:hidden">
+          <WorkflowToolsPanel />
+        </div>
+
+        <WorkflowTopBar />
+
+        <section
+          aria-label="Workflow canvas"
+          class="absolute inset-y-0 left-0 right-0 overflow-hidden pt-20 lg:right-[338px]"
+        >
+          <WorkflowCanvas
+            selectedNodeId={selectedNodeId()}
+            onNodeSelect={setSelectedTool}
+          />
+          <WorkflowGenerationStatus />
+          <WorkflowPromptComposer />
+        </section>
+
+        <WorkflowInspector inspector={inspector()} />
+      </div>
+    </div>
+  )
+}

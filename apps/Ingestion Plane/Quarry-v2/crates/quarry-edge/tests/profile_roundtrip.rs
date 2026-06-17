@@ -41,6 +41,7 @@ async fn spawn_app() -> SocketAddr {
         ingest: None,
         profiles: Arc::new(InMemoryProfileStore::new()),
         search: None,
+        vector_index: None,
         searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
@@ -52,6 +53,10 @@ async fn spawn_app() -> SocketAddr {
         #[cfg(feature = "postgres-queue")]
         event_history: None,
         usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),
+        #[cfg(feature = "browser-agent")]
+        agent_driver: Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new()),
+        #[cfg(feature = "browser-agent")]
+        agent_runs: quarry_edge::agent_routes::new_runs(),
     };
     let app = quarry_edge::routes::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

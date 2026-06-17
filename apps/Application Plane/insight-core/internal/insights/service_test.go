@@ -1,0 +1,170 @@
+package insights
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestOverviewIncludesAllVelionSurfaces(t *testing.T) {
+	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})), WithNow(func() time.Time {
+		return now
+	}))
+
+	if _, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:      "org-1",
+		Surface:    SurfaceSocial,
+		Metric:     "published_posts",
+		Value:      3,
+		OccurredAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("RecordMetricEvent error: %v", err)
+	}
+
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1"})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	if overview.Plane.ServicePlane != ServicePlane {
+		t.Fatalf("plane = %s, want %s", overview.Plane.ServicePlane, ServicePlane)
+	}
+	if len(overview.Surfaces) != len(SupportedSurfaces()) {
+		t.Fatalf("surface count = %d, want %d", len(overview.Surfaces), len(SupportedSurfaces()))
+	}
+	if overview.Surfaces[0].Surface != SurfaceSocial || overview.Surfaces[0].Metrics[0].Value != 3 {
+		t.Fatalf("social rollup = %#v, want published_posts=3", overview.Surfaces[0])
+	}
+}
+
+func TestOverviewDoesNotLeakEventsAcrossOrganizations(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	for _, orgID := range []string{"org-1", "org-2"} {
+		if _, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+			OrgID:   orgID,
+			Surface: SurfaceInbox,
+			Metric:  "open_conversations",
+			Value:   10,
+		}); err != nil {
+			t.Fatalf("RecordMetricEvent(%s) error: %v", orgID, err)
+		}
+	}
+
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1", Surfaces: []string{SurfaceInbox}})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	if got := overview.Surfaces[0].Metrics[0].Value; got != 10 {
+		t.Fatalf("org-scoped value = %v, want 10", got)
+	}
+}
+
+func TestOverviewFiltersByWindowAndSurfaceList(t *testing.T) {
+	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})), WithNow(func() time.Time {
+		return now
+	}))
+	events := []IngestMetricEventInput{
+		{OrgID: "org-1", Surface: SurfaceSocial, Metric: "published_posts", Value: 1, OccurredAt: now.Add(-2 * time.Hour)},
+		{OrgID: "org-1", Surface: SurfaceSocial, Metric: "published_posts", Value: 2, OccurredAt: now.Add(-30 * time.Minute)},
+		{OrgID: "org-1", Surface: SurfaceInbox, Metric: "open_conversations", Value: 4, OccurredAt: now.Add(-30 * time.Minute)},
+	}
+	for _, event := range events {
+		if _, err := service.RecordMetricEvent(context.Background(), event); err != nil {
+			t.Fatalf("RecordMetricEvent error: %v", err)
+		}
+	}
+
+	from := now.Add(-time.Hour)
+	overview, err := service.Overview(context.Background(), OverviewQuery{
+		OrgID:    "org-1",
+		Surfaces: []string{"social,inbox"},
+		From:     &from,
+	})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	if got := overview.Surfaces[0].Metrics[0].Value; got != 2 {
+		t.Fatalf("filtered social value = %v, want 2", got)
+	}
+	if got := overview.Surfaces[1].Metrics[0].Value; got != 4 {
+		t.Fatalf("filtered inbox value = %v, want 4", got)
+	}
+}
+
+func TestRejectsUnsupportedSurface(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	_, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:   "org-1",
+		Surface: "billing",
+		Metric:  "usage",
+		Value:   1,
+	})
+	if !IsInvalidInput(err) {
+		t.Fatalf("error = %v, want invalid input", err)
+	}
+}
+
+func TestOverviewRejectsInvalidWindow(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	from := time.Date(2026, 6, 17, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
+
+	_, err := service.Overview(context.Background(), OverviewQuery{
+		OrgID: "org-1",
+		From:  &from,
+		To:    &to,
+	})
+	if !IsInvalidInput(err) {
+		t.Fatalf("error = %v, want invalid input", err)
+	}
+}
+
+func TestListConnectorSlotsRequiresOrg(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+
+	_, err := service.ListConnectorSlots(context.Background(), "")
+	if !IsInvalidInput(err) {
+		t.Fatalf("error = %v, want invalid input", err)
+	}
+}
+
+func TestOwnershipDecisionKeepsInsightsOutOfControlPlaneStorage(t *testing.T) {
+	decision := OwnershipDecision()
+	if decision.ServicePlane != "application-plane" {
+		t.Fatalf("service plane = %s, want application-plane", decision.ServicePlane)
+	}
+	joined := strings.Join(decision.Rules, " ")
+	for _, required := range []string{"org scope", "integration-core", "no direct Control"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("ownership decision missing %q in %q", required, joined)
+		}
+	}
+}
+
+func TestDefaultConnectorsIncludeGoogleContractsWithoutSecrets(t *testing.T) {
+	connectors := DefaultConnectorSlots(ConnectorSlotOptions{TokenLeaseAudience: "insight-core"})
+	var ga4, searchConsole *ConnectorSlot
+	for i := range connectors {
+		switch connectors[i].Type {
+		case "google_analytics_4":
+			ga4 = &connectors[i]
+		case "google_search_console":
+			searchConsole = &connectors[i]
+		}
+	}
+	if ga4 == nil || searchConsole == nil {
+		t.Fatalf("missing google connector slots: ga4=%v searchConsole=%v", ga4 != nil, searchConsole != nil)
+	}
+	if ga4.Status != ConnectorStatusRequiresTokenLease || searchConsole.Status != ConnectorStatusRequiresTokenLease {
+		t.Fatalf("google connector status must require token lease")
+	}
+	for _, connector := range []ConnectorSlot{*ga4, *searchConsole} {
+		for _, env := range connector.RequiredEnv {
+			if strings.Contains(strings.ToLower(env), "secret") {
+				t.Fatalf("connector %s declares secret env %s", connector.Type, env)
+			}
+		}
+	}
+}

@@ -135,3 +135,6 @@ coverage/
 # ──────────────────────────────────────────────────────────────────────
 /tmp/
 .scratch/
+
+# Playwright MCP browser-automation artifacts (screenshots/traces)
+.playwright-mcp/

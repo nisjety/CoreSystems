@@ -21,7 +21,7 @@ use mp_contracts::model_plane::v1::{
     ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
     GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest, ListApprovalsRequest,
     ListModelsRequest, ListPlansRequest, ListSpeechVoicesRequest, ListTodosRequest,
-    ListTranslationLanguagesRequest, Plan, PlanState, PlanStep, PlanStepState,
+    ListTranslationLanguagesRequest, Plan, PlanState, PlanStep, PlanStepState, ResumeRunRequest,
     StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole, SynthesizeSpeechRequest,
     Todo, TodoPriority, TodoState, TranscribeSpeechRequest, TransitionPlanRequest,
     TransitionTodoRequest, TranslateTextRequest, TranslationInput,
@@ -115,6 +115,12 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route(
             "/v1/finetune/jobs/:job_id",
             get(crate::finetune_routes::get_job).delete(crate::finetune_routes::cancel_job),
+        )
+        // Promote a succeeded job's deployment to a hosting tier (admin-gated).
+        // Body { "tier": "production" | "developer" }.
+        .route(
+            "/v1/finetune/jobs/:job_id/deploy",
+            post(crate::finetune_routes::deploy_job),
         )
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn(auth::require_auth))
@@ -621,6 +627,34 @@ async fn decide_approval(
     let approval = resp
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
+
+    // Close the human-in-the-loop loop: a granted approval resumes the gated
+    // run on execution-core (flips AwaitingApproval → Running) so the agent
+    // proceeds without manual intervention. session-core's decide_approval has
+    // already broadcast RunResumedAfterApproval for SSE consumers. Best-effort:
+    // the durable decision above already succeeded, so a resume hiccup must not
+    // fail the request. Denials/timeouts leave the run paused.
+    if matches!(target_state, ApprovalState::Granted) {
+        match state
+            .execution_client
+            .clone()
+            .resume_run(ResumeRunRequest {
+                run_id: approval.run_id.clone(),
+                checkpoint_id: String::new(),
+                org_id: claims.org_id.clone(),
+            })
+            .await
+        {
+            Ok(resp) => info!(
+                approval_id = %approval.id,
+                run_id = %approval.run_id,
+                resumed = resp.into_inner().resumed,
+                "approval granted → execution-core resume_run"
+            ),
+            Err(e) => warn!(error = %e, approval_id = %approval.id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)"),
+        }
+    }
+
     Ok(Json(json!({ "approval": approval_value(&approval) })))
 }
 
@@ -660,12 +694,31 @@ async fn cancel_run(
     ))
 }
 
-/// Resume a cancelled/paused run — recorded as an event.
+/// Resume a cancelled/paused run — flips execution-core's run state back to
+/// Running and records a `RUN_RESUME_REQUESTED` event for any downstream
+/// consumers. The direct gRPC call is best-effort so a stopped execution-core
+/// never blocks the operator action.
 async fn resume_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Direct, immediate unblock: execution-core flips AwaitingApproval/paused
+    // → Running. Without this the event below has no consumer and the run
+    // stays stuck.
+    if let Err(e) = state
+        .execution_client
+        .clone()
+        .resume_run(ResumeRunRequest {
+            run_id: run_id.clone(),
+            checkpoint_id: String::new(),
+            org_id: claims.org_id.clone(),
+        })
+        .await
+    {
+        warn!(error = %e, run_id = %run_id, "execution-core resume_run failed (best-effort)");
+    }
+
     let envelope = mp_events::envelope::Envelope {
         event_id: new_ulid(),
         event_type: "RUN_RESUME_REQUESTED".to_owned(),

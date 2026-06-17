@@ -6,56 +6,32 @@ import {
   CheckCircle2,
   ChevronDown,
   Database,
+  Folder,
+  Globe2,
   KeyRound,
   Plus,
+  ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
-import { knowledgeCollections, knowledgeSources } from "@/features/knowledge-v2/lib/knowledge-data";
+import { sourceTypeIcon } from "@/features/knowledge-v2/lib/knowledge-data";
+import type { LiveKnowledgePayload, LiveKnowledgeSource } from "@/features/knowledge-v2/lib/knowledge-live";
 import {
   SidebarPanelTitle,
   SidebarSearchField,
 } from "@/features/shell-v2/components/VelionSidebarPrimitives";
+import {
+  buildKnowledgeSidebarLiveData,
+  filterKnowledgeFolders,
+  filterKnowledgeSources,
+  getKnowledgeFolderSourceIds,
+  getVisibleKnowledgeTags,
+  type KnowledgeSidebarFolderNode,
+} from "@/features/shell-v2/lib/knowledge-sidebar-live";
 import { sidebarFocusClass, sidebarType } from "@/features/shell-v2/lib/sidebar-style";
+import { apiGet } from "@/lib/api/client-envelope";
 import { cn } from "@/lib/utils";
 
-const knowledgeSidebarTree = [
-  {
-    id: "general",
-    label: "General Knowledge",
-    count: 142,
-    children: [
-      {
-        id: "onboarding",
-        label: "Onboarding",
-        count: 15,
-        children: [
-          { id: "subfolder-1", label: "Subfolder 1", count: 5 },
-          { id: "subfolder-2", label: "Subfolder 2", count: 10 },
-        ],
-      },
-      { id: "integrations", label: "Integrations", count: 29 },
-      { id: "documents", label: "Documents", count: 41 },
-    ],
-  },
-  {
-    id: "rag",
-    label: "RAG Operations",
-    count: 32,
-    children: [
-      { id: "chunk-quality", label: "Chunk quality", count: 18 },
-      { id: "retrieval-evals", label: "Retrieval evals", count: 14 },
-    ],
-  },
-] as const;
-
 type KnowledgeSidebarModeId = "folders" | "sources" | "tags";
-
-type KnowledgeSidebarFolder = {
-  id: string;
-  label: string;
-  count: number;
-  children?: readonly KnowledgeSidebarFolder[];
-};
 
 const knowledgeSidebarModeOptions: Array<{ id: KnowledgeSidebarModeId; label: string; icon: LucideIcon }> = [
   { id: "folders", label: "Knowledge Base", icon: BookOpen },
@@ -65,18 +41,62 @@ const knowledgeSidebarModeOptions: Array<{ id: KnowledgeSidebarModeId; label: st
 
 export function KnowledgeExpandedSidebarPanel({ onCollapse }: { onCollapse: () => void }) {
   const [activeMode, setActiveMode] = useState<KnowledgeSidebarModeId>("folders");
-  const [activeFolderId, setActiveFolderId] = useState<string>(knowledgeSidebarTree[0].id);
-  const [activeSourceId, setActiveSourceId] = useState(knowledgeSources[0].id);
+  const [activeFolderId, setActiveFolderId] = useState<string>("");
+  const [activeSourceId, setActiveSourceId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [liveKnowledge, setLiveKnowledge] = useState<LiveKnowledgePayload | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const normalizedSearch = searchQuery.trim().toLowerCase();
-  const visibleFolders = filterKnowledgeFolders(knowledgeSidebarTree, normalizedSearch);
-  const visibleSources = knowledgeSources.filter((source) => (
-    !normalizedSearch ||
-    source.title.toLowerCase().includes(normalizedSearch) ||
-    source.type.toLowerCase().includes(normalizedSearch) ||
-    source.tags.some((tag) => tag.toLowerCase().includes(normalizedSearch))
-  ));
-  const visibleTags = getVisibleKnowledgeTags(normalizedSearch);
+  const sidebarData = liveKnowledge ? buildKnowledgeSidebarLiveData(liveKnowledge) : null;
+  const activeFolderSourceIds = sidebarData ? getKnowledgeFolderSourceIds(sidebarData.folders, activeFolderId) : null;
+  const scopedSources = sidebarData?.sources.filter((source) => (
+    !activeFolderSourceIds || activeFolderSourceIds.includes(source.id)
+  )) ?? [];
+  const visibleFolders = filterKnowledgeFolders(sidebarData?.folders ?? [], normalizedSearch);
+  const visibleSources = filterKnowledgeSources(scopedSources, normalizedSearch);
+  const visibleTags = getVisibleKnowledgeTags(scopedSources, normalizedSearch);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    setLoading(true);
+    setError(null);
+    apiGet<LiveKnowledgePayload>("/api/v1/knowledge/sources", {
+      credentials: "include",
+      signal: controller.signal,
+    })
+      .then((payload) => {
+        if (!active) return;
+        setLiveKnowledge(payload);
+      })
+      .catch((nextError) => {
+        if (!active) return;
+        if (nextError instanceof DOMException && nextError.name === "AbortError") {
+          return;
+        }
+        setLiveKnowledge(null);
+        setError(nextError instanceof Error ? nextError.message : "Knowledge API unavailable.");
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarData) return;
+    if (!activeFolderId || !folderExists(sidebarData.folders, activeFolderId)) {
+      setActiveFolderId(sidebarData.folders[0]?.id ?? "");
+    }
+    if (!activeSourceId || !sidebarData.sources.some((source) => source.id === activeSourceId)) {
+      setActiveSourceId(sidebarData.sources[0]?.id ?? "");
+    }
+  }, [activeFolderId, activeSourceId, sidebarData]);
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-[#F7F7F8] px-5 pb-5 pt-6 dark:bg-[#101114]">
@@ -107,7 +127,11 @@ export function KnowledgeExpandedSidebarPanel({ onCollapse }: { onCollapse: () =
                 </button>
               </div>
               <div className="space-y-1">
-                {visibleFolders.length ? (
+                {loading && !sidebarData ? (
+                  <KnowledgeSidebarEmptyState label="Loading collections…" />
+                ) : error ? (
+                  <KnowledgeSidebarEmptyState label="Knowledge API unavailable." />
+                ) : visibleFolders.length ? (
                   visibleFolders.map((folder) => (
                     <KnowledgeSidebarTreeItem
                       key={folder.id}
@@ -125,6 +149,8 @@ export function KnowledgeExpandedSidebarPanel({ onCollapse }: { onCollapse: () =
 
             <KnowledgeSourcesList
               activeSourceId={activeSourceId}
+              error={error}
+              loading={loading}
               limit={4}
               onSelect={setActiveSourceId}
               sources={visibleSources}
@@ -136,6 +162,8 @@ export function KnowledgeExpandedSidebarPanel({ onCollapse }: { onCollapse: () =
         {activeMode === "sources" ? (
           <KnowledgeSourcesList
             activeSourceId={activeSourceId}
+            error={error}
+            loading={loading}
             onSelect={setActiveSourceId}
             sources={visibleSources}
             title="Sources"
@@ -149,7 +177,11 @@ export function KnowledgeExpandedSidebarPanel({ onCollapse }: { onCollapse: () =
               <span className={cn("text-[#8B95A7]", sidebarType.secondary)}>{visibleTags.length}</span>
             </div>
             <div className="space-y-1">
-              {visibleTags.length ? (
+              {loading && !sidebarData ? (
+                <KnowledgeSidebarEmptyState label="Loading tags…" />
+              ) : error ? (
+                <KnowledgeSidebarEmptyState label="Knowledge API unavailable." />
+              ) : visibleTags.length ? (
                 visibleTags.map((tag) => (
                   <button
                     key={tag.label}
@@ -346,15 +378,19 @@ function KnowledgeModeSelector({
 
 function KnowledgeSourcesList({
   activeSourceId,
+  error,
+  loading,
   limit,
   onSelect,
   sources,
   title,
 }: {
   activeSourceId: string;
+  error?: string | null;
+  loading?: boolean;
   limit?: number;
   onSelect: (sourceId: string) => void;
-  sources: typeof knowledgeSources;
+  sources: readonly LiveKnowledgeSource[];
   title: string;
 }) {
   const visibleSources = limit ? sources.slice(0, limit) : sources;
@@ -366,9 +402,13 @@ function KnowledgeSourcesList({
         <span className={cn("text-[#8B95A7]", sidebarType.secondary)}>{visibleSources.length}</span>
       </div>
       <div className="space-y-1">
-        {visibleSources.length ? (
+        {loading && visibleSources.length === 0 ? (
+          <KnowledgeSidebarEmptyState label="Loading sources…" />
+        ) : error ? (
+          <KnowledgeSidebarEmptyState label="Knowledge API unavailable." />
+        ) : visibleSources.length ? (
           visibleSources.map((source) => {
-            const Icon = source.icon;
+            const Icon = sourceTypeIcon[source.type];
             const active = activeSourceId === source.id;
             return (
               <button
@@ -416,10 +456,10 @@ function KnowledgeSidebarTreeItem({
 }: {
   activeFolderId: string;
   depth: number;
-  folder: KnowledgeSidebarFolder;
+  folder: KnowledgeSidebarFolderNode;
   onSelect: (folderId: string) => void;
 }) {
-  const Icon = depth === 0 ? knowledgeCollections.find((collection) => collection.id === folder.id)?.icon ?? FolderIcon : FolderIcon;
+  const Icon = knowledgeFolderIcon(folder, depth);
   const active = activeFolderId === folder.id;
 
   return (
@@ -454,45 +494,26 @@ function KnowledgeSidebarTreeItem({
   );
 }
 
-function filterKnowledgeFolders(
-  folders: readonly KnowledgeSidebarFolder[],
-  normalizedSearch: string,
-): readonly KnowledgeSidebarFolder[] {
-  if (!normalizedSearch) {
-    return folders;
-  }
-
-  return folders.reduce<KnowledgeSidebarFolder[]>((matches, folder) => {
-    const children = folder.children ? filterKnowledgeFolders(folder.children, normalizedSearch) : [];
-    const folderMatches = folder.label.toLowerCase().includes(normalizedSearch);
-
-    if (!folderMatches && children.length === 0) {
-      return matches;
-    }
-
-    return [
-      ...matches,
-      {
-        ...folder,
-        children: children.length ? children : folder.children,
-      },
-    ];
-  }, []);
-}
-
 function FolderIcon({ className, strokeWidth }: { className?: string; strokeWidth?: number }) {
   return <BookOpen className={className} strokeWidth={strokeWidth} />;
 }
 
-function getVisibleKnowledgeTags(normalizedSearch: string) {
-  const tagCounts = new Map<string, number>();
-
-  for (const source of knowledgeSources) {
-    for (const tag of source.tags) {
-      if (normalizedSearch && !tag.toLowerCase().includes(normalizedSearch)) continue;
-      tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
-    }
+function knowledgeFolderIcon(folder: KnowledgeSidebarFolderNode, depth: number) {
+  if (depth > 0) {
+    return FolderIcon;
   }
+  if (folder.providerKey === "rag") {
+    return ShieldCheck;
+  }
+  if (folder.providerKey === "web") {
+    return Globe2;
+  }
+  if (folder.id === "all") {
+    return Folder;
+  }
+  return FolderIcon;
+}
 
-  return Array.from(tagCounts, ([label, count]) => ({ label, count }));
+function folderExists(folders: readonly KnowledgeSidebarFolderNode[], folderId: string): boolean {
+  return folders.some((folder) => folder.id === folderId || folderExists(folder.children ?? [], folderId));
 }

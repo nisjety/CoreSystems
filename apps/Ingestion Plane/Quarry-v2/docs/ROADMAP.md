@@ -65,6 +65,15 @@
   - docs and migration guides.
 - Keep optional high-cost features (`branding`, `audio`, LLM `summary/query/json`) feature-gated and artifact-backed.
 
+## Future — Sovereign scraping reliability
+- Build the self-owned reliability layer described in
+  [`SOVEREIGN_SCRAPING_RELIABILITY.md`](SOVEREIGN_SCRAPING_RELIABILITY.md):
+  domain intelligence, EgressBroker v2, session health, owned browser fleet,
+  challenge classification, and benchmark gates.
+- Keep page execution, transforms, artifacts, retention, and audit receipts
+  inside CoreSystem; network-only proxy providers remain optional and
+  policy-gated.
+
 ## Non-goals
 
 - Retrieval/search/embeddings ⇒ Data Plane, not Quarry.

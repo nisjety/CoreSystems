@@ -23,11 +23,8 @@
 //! `pick()` and fall back to direct egress. This is the default in
 //! dev and single-tenant deployments.
 //!
-//! Out of scope for v1: health checking, latency-aware selection,
-//! per-proxy capacity. The pool is static after construction. When
-//! one proxy starts failing the host-scheduler's bad-host backoff
-//! handles it indirectly (the scheduler thinks the *host* is failing
-//! and slows down).
+//! Health checking and block-aware ordering live in `egress_broker`; this pool
+//! only owns deterministic candidate ordering.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -106,6 +103,23 @@ impl ProxyPool {
     /// scrape carries the same org the bias is intentional — that's
     /// session continuity.
     pub fn pick(&self, org_id: &str, host: &str) -> Option<&ProxyEntry> {
+        self.slot(org_id, host)
+            .and_then(|slot| self.entries.get(slot))
+    }
+
+    /// Return every proxy in deterministic retry order for `(org_id, host)`.
+    /// The sticky primary is first; remaining entries wrap around from there.
+    pub fn ordered_candidates(&self, org_id: &str, host: &str) -> Vec<ProxyEntry> {
+        let Some(start) = self.slot(org_id, host) else {
+            return Vec::new();
+        };
+        (0..self.entries.len())
+            .filter_map(|offset| self.entries.get((start + offset) % self.entries.len()))
+            .cloned()
+            .collect()
+    }
+
+    fn slot(&self, org_id: &str, host: &str) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
         }
@@ -115,8 +129,7 @@ impl ProxyPool {
         // doesn't collide with org_id="" + host="abc".
         0u8.hash(&mut hasher);
         host.hash(&mut hasher);
-        let slot = (hasher.finish() as usize) % self.entries.len();
-        self.entries.get(slot)
+        Some((hasher.finish() as usize) % self.entries.len())
     }
 }
 
@@ -187,5 +200,15 @@ mod tests {
         let y = pool.pick("a", "bc").unwrap().clone();
         // Both must resolve to an entry; equality is allowed but rare.
         let _ = (x, y);
+    }
+
+    #[test]
+    fn ordered_candidates_starts_with_sticky_pick() {
+        let pool = ProxyPool::from_env_string("socks5://p1:1080;socks5://p2:1080;socks5://p3:1080");
+        let primary = pool.pick("acme", "example.com").unwrap().clone();
+        let ordered = pool.ordered_candidates("acme", "example.com");
+
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0], primary);
     }
 }

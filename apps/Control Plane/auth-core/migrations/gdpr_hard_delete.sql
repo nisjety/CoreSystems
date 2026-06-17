@@ -43,7 +43,10 @@ BEGIN
     
     -- API Keys
     WITH deleted_apikeys AS (
-        DELETE FROM apikey WHERE user_id = user_id_param RETURNING id
+        DELETE FROM apikey
+        WHERE user_id = user_id_param
+           OR (config_id = 'user-keys' AND reference_id = user_id_param)
+        RETURNING id
     )
     SELECT jsonb_agg(id) INTO deleted_records->'apikeys' FROM deleted_apikeys;
     
@@ -126,7 +129,9 @@ BEGIN
     DELETE FROM passkey WHERE user_id = user_id_param;
     
     -- Remove API keys
-    DELETE FROM apikey WHERE user_id = user_id_param;
+    DELETE FROM apikey
+    WHERE user_id = user_id_param
+       OR (config_id = 'user-keys' AND reference_id = user_id_param);
     
     result := jsonb_build_object(
         'success', true,

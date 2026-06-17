@@ -23,6 +23,7 @@ import {
   VelionSelect,
 } from "@/components/ui/velion-ui";
 import { KnowledgeAddSourceModal } from "@/features/knowledge-v2/components/KnowledgeAddSourceModal";
+import { KnowledgeDiagnosticsPanel } from "@/features/knowledge-v2/components/KnowledgeDiagnosticsPanel";
 import type {
   LiveKnowledgeCollection,
   LiveKnowledgeFile,
@@ -571,6 +572,11 @@ function OverviewCanvas({
       </section>
 
       <WebSourcesPanel webSources={liveKnowledge.webSources} />
+
+      <KnowledgeDiagnosticsPanel
+        dataPlane={liveKnowledge.dataPlane}
+        diagnostics={liveKnowledge.diagnostics}
+      />
 
       {liveKnowledge.sources.length > 0 ? (
         <LiveSourceInspector liveKnowledge={liveKnowledge} />

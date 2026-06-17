@@ -123,11 +123,6 @@ if $RUN_GRPC; then
   if ! command -v grpcurl &>/dev/null; then
     skip "grpcurl not installed — skipping gRPC tests"
   else
-    GRPC_META=""
-    if [ -n "$API_KEY" ]; then
-      GRPC_META="-H x-api-key:$API_KEY"
-    fi
-
     # gRPC server doesn't ship reflection in prod; use proto files directly.
     # If a method call succeeds, the service is registered and reachable.
     # Use a Bash array for flags so paths-with-spaces work correctly.
@@ -147,7 +142,7 @@ if $RUN_GRPC; then
     fi
 
     echo ""
-    echo "─── gRPC Document CRUD ───"
+    echo "─── gRPC Document Writes ───"
 
     # Create via gRPC
     GRPC_CREATE=$(grpcurl -plaintext ${GRPC_META_FLAGS[@]+"${GRPC_META_FLAGS[@]}"} "${PROTO_FLAGS[@]}" \
@@ -156,14 +151,22 @@ if $RUN_GRPC; then
 
     GRPC_DOC_ID=$(echo "$GRPC_CREATE" | python3 -c "import sys,json; d=json.load(sys.stdin).get('document',{}); print(d.get('documentId',''))" 2>/dev/null || echo "")
 
-    if [ -n "$GRPC_DOC_ID" ]; then
-      pass "gRPC CreateDocument → doc_id=$GRPC_DOC_ID"
+    if [ "${DPV2_ALLOW_GRPC_DOCUMENT_WRITES:-}" = "1" ]; then
+      if [ -n "$GRPC_DOC_ID" ]; then
+        pass "gRPC CreateDocument → doc_id=$GRPC_DOC_ID"
+      else
+        fail "gRPC CreateDocument → no document_id ($(echo "$GRPC_CREATE" | head -1))"
+      fi
     else
-      fail "gRPC CreateDocument → no document_id ($(echo "$GRPC_CREATE" | head -1))"
+      if echo "$GRPC_CREATE" | grep -q "FailedPrecondition" && echo "$GRPC_CREATE" | grep -qi "deprecated"; then
+        pass "gRPC CreateDocument → blocked as deprecated"
+      else
+        fail "gRPC CreateDocument → expected deprecation block ($(echo "$GRPC_CREATE" | head -1))"
+      fi
     fi
 
-    # Get via gRPC
-    if [ -n "$GRPC_DOC_ID" ]; then
+    # Get via gRPC, only when write opt-back-in created a document.
+    if [ "${DPV2_ALLOW_GRPC_DOCUMENT_WRITES:-}" = "1" ] && [ -n "$GRPC_DOC_ID" ]; then
       GRPC_GET=$(grpcurl -plaintext ${GRPC_META_FLAGS[@]+"${GRPC_META_FLAGS[@]}"} "${PROTO_FLAGS[@]}" \
         -d "{\"document_id\":\"$GRPC_DOC_ID\",\"org_id\":\"smoke-grpc\"}" \
         "$GRPC_ADDR" dataplane.documents.v2.DocumentService/GetDocument 2>&1 || echo "ERROR")
@@ -185,7 +188,7 @@ if $RUN_GRPC; then
     echo "─── gRPC Auth ───"
 
     # No key should fail
-    GRPC_NOAUTH=$(grpcurl -plaintext $PROTO_FLAGS \
+    GRPC_NOAUTH=$(grpcurl -plaintext "${PROTO_FLAGS[@]}" \
       -d '{"org_id":"smoke-grpc"}' \
       "$GRPC_ADDR" dataplane.documents.v2.DocumentService/GetIngestStatus 2>&1 || echo "")
 

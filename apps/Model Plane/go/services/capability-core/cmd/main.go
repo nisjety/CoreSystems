@@ -77,7 +77,18 @@ func main() {
 		slog.Warn("capabilities store unavailable", "error", err)
 	}
 
+	// Durable scope-grant store backs per-(org, agent) capability resolution in
+	// the policy engine. Nil-safe: if construction fails the engine keeps the
+	// static EnabledForScopes semantics.
+	scopeStore, err := registry.NewScopeStore(pool)
+	if err != nil {
+		slog.Warn("scope store unavailable; durable scope grants disabled", "error", err)
+	}
+
 	pol := policy.New(reg)
+	if scopeStore != nil {
+		pol = pol.WithScopeResolver(scopeStore)
+	}
 
 	// Dial session-core + inference-core ONCE (guarded on their addrs; lazy grpc
 	// clients). Shared by the /commands delegation (/models → inference
@@ -126,9 +137,14 @@ func main() {
 	})
 	mux.Handle("/api/v1/model-plane/implementation-status", roadmap.NewHandler())
 
-	// Capability-core product APIs
+	// Capability-core product APIs. The scope store (when available) enables
+	// the durable grant/revoke/resolve endpoints and ranked listing.
 	if capStore != nil {
-		api.NewCapabilitiesHandler(capStore).Register(mux)
+		ch := api.NewCapabilitiesHandler(capStore)
+		if scopeStore != nil {
+			ch = ch.WithScopeStore(scopeStore)
+		}
+		ch.Register(mux)
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
@@ -159,7 +175,10 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer()
-	capserver.Register(grpcServer, capserver.NewServer(reg, modelsReg, pol))
+	// Attach the durable store so ListCapabilities returns score-ranked results
+	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
+	capSrv := capserver.NewServer(reg, modelsReg, pol).WithStore(capStore)
+	capserver.Register(grpcServer, capSrv)
 
 	go func() {
 		slog.Info("gRPC listening", "addr", ":9097")

@@ -3,22 +3,27 @@ import * as dotenv from 'dotenv';
 
 dotenv.config();
 
-// Redis client configuration
+// Dragonfly speaks the Redis protocol, so the Node redis client is still used.
+const cacheUrl =
+  process.env.DRAGONFLY_URL ||
+  process.env.CACHE_URL ||
+  process.env.REDIS_URL ||
+  'redis://localhost:6379';
+
 const redis: RedisClientType = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379',
+  url: cacheUrl,
 });
 
-// Connect to Redis
 redis.on('error', (err) => {
-  console.error('Redis Client Error:', err);
+  console.error('Dragonfly cache client error:', err);
 });
 
 redis.on('connect', () => {
-  console.log('✅ Connected to Redis');
+  console.log('✅ Connected to Dragonfly cache');
 });
 
 redis.on('ready', () => {
-  console.log('✅ Redis client ready');
+  console.log('✅ Dragonfly cache client ready');
 });
 
 // Initialize connection
@@ -29,9 +34,9 @@ const connectRedis = async () => {
     try {
       await redis.connect();
       isConnected = true;
-      console.log('🔌 Redis connection established');
+      console.log('🔌 Dragonfly cache connection established');
     } catch (error) {
-      console.error('❌ Failed to connect to Redis:', error);
+      console.error('❌ Failed to connect to Dragonfly cache:', error);
       throw error;
     }
   }
@@ -43,17 +48,17 @@ export const redisSecondaryStorage = {
   get: async (key: string): Promise<string | null> => {
     try {
       await connectRedis();
-      console.log(`🔍 [Redis GET] Attempting to retrieve key: ${key}`);
+      console.log(`🔍 [Cache GET] Attempting to retrieve key: ${key}`);
       const value = await redis.get(key);
       if (value) {
-        console.log(`✅ [Redis GET] Found value for key: ${key}`);
+        console.log(`✅ [Cache GET] Found value for key: ${key}`);
         console.log(`   Value length: ${value.length} chars`);
       } else {
-        console.log(`❌ [Redis GET] No value found for key: ${key}`);
+        console.log(`❌ [Cache GET] No value found for key: ${key}`);
       }
       return value ? value : null;
     } catch (error) {
-      console.error('❌ Redis GET error:', error);
+      console.error('❌ Cache GET error:', error);
       return null;
     }
   },
@@ -61,7 +66,7 @@ export const redisSecondaryStorage = {
   set: async (key: string, value: string, ttl?: number): Promise<void> => {
     try {
       await connectRedis();
-      console.log(`💾 [Redis SET] Storing key: ${key}`);
+      console.log(`💾 [Cache SET] Storing key: ${key}`);
       console.log(
         `   Value length: ${value.length} chars, TTL: ${ttl || 'none'} seconds`,
       );
@@ -72,9 +77,9 @@ export const redisSecondaryStorage = {
         // Set without expiration
         await redis.set(key, value);
       }
-      console.log(`✅ [Redis SET] Successfully stored key: ${key}`);
+      console.log(`✅ [Cache SET] Successfully stored key: ${key}`);
     } catch (error) {
-      console.error('❌ Redis SET error:', error);
+      console.error('❌ Cache SET error:', error);
       throw error;
     }
   },

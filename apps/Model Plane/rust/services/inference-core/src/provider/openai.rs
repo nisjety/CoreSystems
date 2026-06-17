@@ -11,6 +11,11 @@ use super::{
 
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 
+/// Default chat model used when a request leaves the model unspecified
+/// ("Velion Auto"). The fallback chain substitutes this when OpenAI/Azure is
+/// the provider serving an unpinned request.
+pub(crate) const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+
 /// OpenAI-compatible inference provider.
 #[derive(Clone)]
 enum OpenAiFlavor {
@@ -299,6 +304,38 @@ fn is_reasoning_model(model: &str) -> bool {
     normalized.starts_with("gpt-5") || normalized.starts_with("o1") || normalized.starts_with("o3")
 }
 
+/// Classify a deployment id into a UI modality group. The Azure chat-deployment
+/// catalog (`AZURE_OPENAI_CHAT_DEPLOYMENTS`) may legitimately include
+/// image/video/transcribe deployments on the same resource; group them so the
+/// SPA can present "image", "video", "transcribe" sections without the gateway
+/// having to know per-model knowledge.
+fn model_modality(model: &str) -> String {
+    let m = model.to_ascii_lowercase();
+    if m.contains("image") || m.starts_with("dall-e") || m.starts_with("mai-image") {
+        "image".to_owned()
+    } else if m.contains("sora") || m.contains("video") {
+        "video".to_owned()
+    } else if m.contains("transcribe") || m.contains("whisper") {
+        "transcribe".to_owned()
+    } else if m.contains("embedding") {
+        "embedding".to_owned()
+    } else {
+        "chat".to_owned()
+    }
+}
+
+/// True for low-cost / economy deployments so the UI can group "cheap" models
+/// and pick a cheap default. Covers the mini/nano tiers and `model-router`
+/// (which itself routes to the cheapest capable model).
+fn is_cheap_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m == "model-router"
+        || m.contains("mini")
+        || m.contains("nano")
+        || m.contains("deepseek")
+        || m.contains("embedding")
+}
+
 #[allow(clippy::too_many_lines)]
 #[async_trait::async_trait]
 impl ProviderRouter for OpenAiProvider {
@@ -465,10 +502,16 @@ impl ProviderRouter for OpenAiProvider {
 
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             if let Some(usage) = json["usage"].as_object() {
-                                if let Some(p) = usage.get("prompt_tokens").and_then(|v| v.as_i64()) {
+                                if let Some(p) = usage
+                                    .get("prompt_tokens")
+                                    .and_then(serde_json::Value::as_i64)
+                                {
                                     input_tokens = to_i32_or_max(p);
                                 }
-                                if let Some(c) = usage.get("completion_tokens").and_then(|v| v.as_i64()) {
+                                if let Some(c) = usage
+                                    .get("completion_tokens")
+                                    .and_then(serde_json::Value::as_i64)
+                                {
                                     output_tokens = to_i32_or_max(c);
                                 }
                             }
@@ -596,15 +639,19 @@ impl ProviderRouter for OpenAiProvider {
             .map(|id| ModelInfo {
                 id: id.clone(),
                 provider: provider.clone(),
-                modality: "chat".to_owned(),
+                modality: model_modality(id),
                 streaming: true,
                 features: chat_features.clone(),
+                cheap: is_cheap_model(id),
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),
                 provider: provider.clone(),
                 modality: "embedding".to_owned(),
                 streaming: false,
+                // Embeddings are an economy modality; flag so the UI can default
+                // to a cheap embedder.
+                cheap: true,
                 ..Default::default()
             }))
             .collect()

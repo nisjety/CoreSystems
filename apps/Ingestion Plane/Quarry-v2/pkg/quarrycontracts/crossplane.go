@@ -42,6 +42,30 @@ const (
 	EmbeddingSkipped  EmbeddingStatus = "skipped"
 )
 
+// PrivacyClassification mirrors `quarry_core::privacy::PrivacyClassification`.
+type PrivacyClassification string
+
+const (
+	PrivacyPublicNonPersonal PrivacyClassification = "public_non_personal"
+	PrivacyCustomerPrivate   PrivacyClassification = "customer_private"
+	PrivacyPersonal          PrivacyClassification = "personal"
+	PrivacySensitivePersonal PrivacyClassification = "sensitive_personal"
+	PrivacyCredentialSecret  PrivacyClassification = "credential_or_secret"
+	PrivacyZdrEphemeral      PrivacyClassification = "zdr_ephemeral"
+)
+
+// PrivacyPolicy mirrors `quarry_core::privacy::PrivacyPolicy`.
+type PrivacyPolicy struct {
+	PurposeID                 *string               `json:"purpose_id,omitempty"`
+	LawfulBasis               *string               `json:"lawful_basis,omitempty"`
+	PrivacyClassification     PrivacyClassification `json:"privacy_classification"`
+	Zdr                       ZdrMode               `json:"zdr"`
+	RetentionPolicy           *string               `json:"retention_policy,omitempty"`
+	Residency                 *string               `json:"residency,omitempty"`
+	AllowThirdPartyProcessing bool                  `json:"allow_third_party_processing"`
+	ProcessorID               *string               `json:"processor_id,omitempty"`
+}
+
 // ChunkRef points to a chunked artifact slice produced by the index engine.
 type ChunkRef struct {
 	ChunkID  string          `json:"chunk_id"`
@@ -79,6 +103,7 @@ type DataPlaneIngestRequest struct {
 	Fingerprint     string          `json:"fingerprint"`
 	Zdr             ZdrMode         `json:"zdr"`
 	RetentionPolicy *string         `json:"retention_policy,omitempty"`
+	PrivacyPolicy   *PrivacyPolicy  `json:"privacy_policy,omitempty"`
 	SourceTrace     *SourceTrace    `json:"source_trace,omitempty"`
 }
 

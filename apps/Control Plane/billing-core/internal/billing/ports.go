@@ -4,8 +4,9 @@ import "context"
 
 type PaymentAdapter interface {
 	ChargeInvoice(ctx context.Context, invoice Invoice) error
-	EnsureCustomer(ctx context.Context, input StripeCustomerInput) (string, error)
-	CreateCheckoutSession(ctx context.Context, params StripeCheckoutParams) (CheckoutSession, error)
+	EnsureCustomer(ctx context.Context, input CustomerInput) (string, error)
+	CreateCheckoutSession(ctx context.Context, params CheckoutParams) (CheckoutSession, error)
+	RetrieveCheckoutSession(ctx context.Context, params CheckoutLookupParams) (CheckoutStatus, error)
 }
 
 type InvoiceAdapter interface {

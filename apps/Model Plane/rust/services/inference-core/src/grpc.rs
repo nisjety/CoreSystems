@@ -43,6 +43,29 @@ const MAX_VIDEO_PROMPT_LEN: usize = 4_000;
 const MAX_VIDEO_DURATION_SECONDS: u32 = 20;
 const MAX_VIDEO_VARIANTS: u32 = 4;
 
+/// Convert an internal [`provider::ModelInfo`] into the wire [`pb::ModelInfo`].
+///
+/// The proto `ModelInfo` has no dedicated cost field, so the internal `cheap`
+/// flag is surfaced as a `"cheap"` entry appended to `features`. The gateway
+/// passes `/v1/models` through verbatim, so the SPA can group economy models
+/// (and pick a cheap default) by testing `features.includes("cheap")` without
+/// any proto change.
+impl From<provider::ModelInfo> for pb::ModelInfo {
+    fn from(model: provider::ModelInfo) -> Self {
+        let mut features = model.features;
+        if model.cheap {
+            features.push("cheap".to_owned());
+        }
+        Self {
+            id: model.id,
+            provider: model.provider,
+            modality: model.modality,
+            streaming: model.streaming,
+            features,
+        }
+    }
+}
+
 pub struct InferenceService {
     chain: FallbackChain,
     speech: SpeechChain,
@@ -60,9 +83,10 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::InferRequest>,
     ) -> Result<Response<pb::InferResponse>, Status> {
+        let (org_id, user_id) = tenant_from_metadata(request.metadata());
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req);
+        let internal_req = to_internal_request(&req, org_id, user_id);
 
         let result = self
             .chain
@@ -98,9 +122,10 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::InferRequest>,
     ) -> Result<Response<Self::InferStreamStream>, Status> {
+        let (org_id, user_id) = tenant_from_metadata(request.metadata());
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req);
+        let internal_req = to_internal_request(&req, org_id, user_id);
 
         let rx = self
             .chain
@@ -150,97 +175,49 @@ impl InferenceCore for InferenceService {
             .chain
             .list_models(&req.modality, &req.provider)
             .into_iter()
-            .map(|model| pb::ModelInfo {
-                id: model.id,
-                provider: model.provider,
-                modality: model.modality,
-                streaming: model.streaming,
-                features: model.features,
-            })
+            .map(pb::ModelInfo::from)
             .collect();
         models.extend(
             self.speech
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
         models.extend(
             self.translation
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
         models.extend(
             self.vision
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
         models.extend(
             self.doc_intel
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
         models.extend(
             self.language
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
         models.extend(
             self.realtime
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
         models.extend(
             self.video
                 .list_models(&req.modality, &req.provider)
                 .into_iter()
-                .map(|model| pb::ModelInfo {
-                    id: model.id,
-                    provider: model.provider,
-                    modality: model.modality,
-                    streaming: model.streaming,
-                    features: model.features,
-                }),
+                .map(pb::ModelInfo::from),
         );
 
         Ok(Response::new(pb::ListModelsResponse { models }))
@@ -839,8 +816,34 @@ impl InferenceCore for InferenceService {
     }
 }
 
-/// Convert a proto `InferRequest` to an internal `InferRequest`.
-fn to_internal_request(req: &pb::InferRequest) -> provider::InferRequest {
+/// Extract the tenant scope (org id, user id) from gRPC request metadata for
+/// the Velion intent layer's budget check. The gateway forwards these as
+/// `x-org-id` / `x-user-id`; both default to empty when absent (the budget gate
+/// then degrades to an `Unknown` posture — see `provider::intent`).
+fn tenant_from_metadata(md: &tonic::metadata::MetadataMap) -> (String, String) {
+    let get = |keys: &[&str]| -> String {
+        for key in keys {
+            if let Some(value) = md.get(*key).and_then(|v| v.to_str().ok()) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_owned();
+                }
+            }
+        }
+        String::new()
+    };
+    let org_id = get(&["x-org-id", "x-velion-org-id", "organization-id"]);
+    let user_id = get(&["x-user-id", "x-velion-user-id"]);
+    (org_id, user_id)
+}
+
+/// Convert a proto `InferRequest` to an internal `InferRequest`. `org_id`/
+/// `user_id` come from gRPC metadata (see `tenant_from_metadata`).
+fn to_internal_request(
+    req: &pb::InferRequest,
+    org_id: String,
+    user_id: String,
+) -> provider::InferRequest {
     let messages = req
         .messages
         .iter()
@@ -876,6 +879,16 @@ fn to_internal_request(req: &pb::InferRequest) -> provider::InferRequest {
         zdr: req.zdr,
         tools,
         tool_choice: req.tool_choice.clone(),
+        // Prefer the gateway's JWT-derived body `org_id` (not client-spoofable);
+        // fall back to gRPC metadata for direct callers that don't set it. The
+        // proto carries no user_id, so the budget check's user scope comes from
+        // metadata only (empty → cost-core's org-wide "__org__" key).
+        org_id: if req.org_id.trim().is_empty() {
+            org_id
+        } else {
+            req.org_id.clone()
+        },
+        user_id,
     }
 }
 

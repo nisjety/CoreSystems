@@ -8,12 +8,15 @@ Billing Core is the financial control plane for CoreSystem.
 - Usage ingestion from product events through NATS (`usage.>`).
 - Provider adapter orchestration:
   - Invoice + metering adapter (`Lago`)
-  - Payment adapter (`Stripe`)
+  - Payment adapter (`Hyperswitch`, with Stripe fallback)
 - Uniform API so product services never call Stripe/Lago directly.
 
 ## Adapter Configuration
 
-- `STRIPE_BASE_URL`, `STRIPE_API_KEY`
+- `PAYMENT_PROVIDER=hyperswitch|stripe|auto`
+- `HYPERSWITCH_BASE_URL`, `HYPERSWITCH_API_KEY`, `HYPERSWITCH_PUBLISHABLE_KEY`
+- Optional: `HYPERSWITCH_PROFILE_ID`, `HYPERSWITCH_CLIENT_URL`, `HYPERSWITCH_BACKEND_URL`
+- Stripe fallback: `STRIPE_BASE_URL`, `STRIPE_API_KEY`
 - `LAGO_BASE_URL`, `LAGO_API_KEY`
 - `ADAPTER_TIMEOUT_SECONDS`
 
@@ -35,6 +38,7 @@ The service exposes:
 - `GET /api/v1/billing/orgs/:orgId/quotas/:metric`
 - `POST /api/v1/billing/orgs/:orgId/invoices`
 - `POST /api/v1/billing/orgs/:orgId/checkout-session`
+- `POST /api/v1/billing/orgs/:orgId/checkout-session/confirm`
 
 Usage ingestion supports idempotency via `event_id` and replay-safe processing for NATS events.
 

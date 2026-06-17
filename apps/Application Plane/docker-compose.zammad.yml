@@ -14,7 +14,7 @@ x-shared:
       POSTGRESQL_PORT: ${POSTGRES_PORT:-5432}
       POSTGRESQL_OPTIONS: ${POSTGRESQL_OPTIONS:-?pool=50}
       POSTGRESQL_DB_CREATE:
-      REDIS_URL: ${REDIS_URL:-redis://zammad-redis:6379}
+      REDIS_URL: ${REDIS_URL:-redis://zammad-dragonfly:6379}
       REDIS_SENTINELS:
       REDIS_SENTINEL_NAME:
       REDIS_USERNAME:
@@ -66,7 +66,7 @@ x-shared:
     depends_on:
       - zammad-memcached
       - zammad-postgresql
-      - zammad-redis
+      - zammad-dragonfly
     networks:
       - zammad-net
     logging:
@@ -109,7 +109,7 @@ services:
     user: "0:0"
     depends_on:
       - zammad-postgresql
-      - zammad-redis
+      - zammad-dragonfly
       - zammad-memcached
       - zammad-elasticsearch
 
@@ -164,14 +164,25 @@ services:
       - zammad-net
       - velion-net
 
-  zammad-redis:
-    image: redis:${REDIS_VERSION:-8.6.1-alpine}
+  zammad-dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: zammad-dragonfly
     restart: unless-stopped
     init: true
+    command:
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
     volumes:
-      - redis-data:/data
+      - zammad-dragonfly-data:/data
     networks:
       - zammad-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     logging:
       driver: json-file
       options:
@@ -201,7 +212,7 @@ volumes:
     driver: local
   postgresql-data:
     driver: local
-  redis-data:
+  zammad-dragonfly-data:
     driver: local
   zammad-backup:
     driver: local

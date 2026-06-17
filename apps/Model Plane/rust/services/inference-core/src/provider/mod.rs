@@ -4,9 +4,12 @@ pub mod anthropic;
 pub mod artifact_ref;
 pub mod doc_intel;
 pub mod fallback;
+pub mod intent;
 pub mod language;
 pub mod openai;
+pub mod policy_client;
 pub mod realtime;
+pub mod routing_policy;
 pub mod speech;
 pub mod translation;
 pub mod video;
@@ -44,6 +47,11 @@ pub struct InferRequest {
     pub tools: Vec<ToolDefinition>,
     /// Tool selection policy: "auto" | "none" | "required" | a tool name.
     pub tool_choice: String,
+    /// Tenant scope for the Velion intent layer's budget check (from gRPC
+    /// metadata `x-org-id`; empty when the caller doesn't forward it).
+    pub org_id: String,
+    /// Acting user for the budget check (from gRPC metadata `x-user-id`).
+    pub user_id: String,
 }
 
 /// A function the model may call (chat-parity §2).
@@ -124,6 +132,10 @@ pub struct ModelInfo {
     /// chat-parity §2 per-model feature families (e.g. "reasoning", "tools",
     /// "vision", "image"), derived from the provider's `ProviderCapabilities`.
     pub features: Vec<String>,
+    /// True for a low-cost / economy model (mini/nano/haiku/router tiers). Lets
+    /// the UI group "cheap" models and pick a cheap default. Carried as a
+    /// `"cheap"` entry in the proto `ModelInfo.features` list at the gRPC edge.
+    pub cheap: bool,
 }
 
 /// Introspectable feature flags for a provider.

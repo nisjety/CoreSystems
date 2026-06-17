@@ -8,6 +8,7 @@ import {
   HttpCode,
   HttpStatus,
   Logger,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -18,6 +19,10 @@ import {
 import type { Request, Response } from 'express';
 import { orpcRouter } from '../auth/orpc-router';
 import { AuthIntegrationService } from '../internal/auth-integration.service';
+import {
+  assertNotDisposableEmail,
+  DisposableEmailError,
+} from '../security/disposable-email';
 
 interface ErrorWithStatus extends Error {
   status?: number;
@@ -127,6 +132,18 @@ export class ConsolidatedAuthController {
     @Res() response: Response,
   ): Promise<any> {
     try {
+      try {
+        assertNotDisposableEmail(body.email);
+      } catch (error) {
+        if (error instanceof DisposableEmailError) {
+          throw new BadRequestException({
+            code: 'DISPOSABLE_EMAIL_BLOCKED',
+            message: 'Use a permanent email address to create an account.',
+          });
+        }
+        throw error;
+      }
+
       // Call the original Better Auth signup
       const result = await this.handleProcedure(
         'auth.signUp',

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use quarry_core::output::DriverKind;
+use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::QuarryResult;
 use quarry_tls::TlsProfile;
 
@@ -47,6 +48,9 @@ pub struct FetchHints {
     /// as anonymous and maps deterministically onto slot 0 of the
     /// pool. Ignored when no proxy pool is wired.
     pub org_id: String,
+    /// Privacy policy for this fetch. Drivers consult this before using any
+    /// third-party proxy, browser, unblocker, or managed provider.
+    pub privacy: PrivacyPolicy,
 }
 
 /// Browser-only render hints. Static fetch drivers ignore these.

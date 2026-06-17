@@ -8,19 +8,21 @@ import (
 
 	"coresystem/apps/application-plane/information-core/internal/config"
 	"coresystem/apps/application-plane/information-core/internal/news"
+	"coresystem/apps/application-plane/information-core/internal/shipping"
 	"coresystem/apps/application-plane/information-core/internal/traffic"
 	"coresystem/apps/application-plane/information-core/internal/weather"
 )
 
 type Handler struct {
-	cfg     config.Config
-	news    *news.Service
-	traffic *traffic.Service
-	weather *weather.Service
+	cfg      config.Config
+	news     *news.Service
+	shipping *shipping.Service
+	traffic  *traffic.Service
+	weather  *weather.Service
 }
 
-func NewHandler(cfg config.Config, newsSvc *news.Service, trafficSvc *traffic.Service, weatherSvc *weather.Service) *Handler {
-	return &Handler{cfg: cfg, news: newsSvc, traffic: trafficSvc, weather: weatherSvc}
+func NewHandler(cfg config.Config, newsSvc *news.Service, shippingSvc *shipping.Service, trafficSvc *traffic.Service, weatherSvc *weather.Service) *Handler {
+	return &Handler{cfg: cfg, news: newsSvc, shipping: shippingSvc, traffic: trafficSvc, weather: weatherSvc}
 }
 
 func (h *Handler) Health(c *gin.Context) {
@@ -66,6 +68,21 @@ func (h *Handler) Weather(c *gin.Context) {
 	payload, err := h.weather.Forecast(c.Request.Context(), h.cfg.UserAgent, lat, lon, altitude)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, errorPayload("weather_unavailable", "Weather data is unavailable right now."))
+		return
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+func (h *Handler) Shipping(c *gin.Context) {
+	trackingNumber := c.Query("trackingNumber")
+	if trackingNumber == "" {
+		c.JSON(http.StatusBadRequest, errorPayload("missing_param", "trackingNumber query parameter is required"))
+		return
+	}
+
+	payload, err := h.shipping.Track(c.Request.Context(), trackingNumber)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, errorPayload("shipping_unavailable", "Shipping data is unavailable right now."))
 		return
 	}
 	c.JSON(http.StatusOK, payload)

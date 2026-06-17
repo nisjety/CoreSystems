@@ -14,6 +14,7 @@ import (
 	"coresystem/apps/application-plane/information-core/internal/config"
 	apphttp "coresystem/apps/application-plane/information-core/internal/http"
 	"coresystem/apps/application-plane/information-core/internal/news"
+	"coresystem/apps/application-plane/information-core/internal/shipping"
 	"coresystem/apps/application-plane/information-core/internal/traffic"
 	"coresystem/apps/application-plane/information-core/internal/weather"
 )
@@ -27,6 +28,7 @@ func main() {
 	handler := apphttp.NewHandler(
 		cfg,
 		news.NewService(httpClient, cacheStore),
+		shipping.NewService(httpClient, cacheStore, cfg.BringAPIUID, cfg.BringAPIKey),
 		traffic.NewService(httpClient, cacheStore),
 		weather.NewService(httpClient, cacheStore),
 	)

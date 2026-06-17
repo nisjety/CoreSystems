@@ -156,6 +156,16 @@ func (c *OAuth2Client) Profile(ctx context.Context, accessToken string, _ map[st
 		return c.githubProfile(ctx, accessToken)
 	case "stripe":
 		return c.stripeProfile(ctx, accessToken)
+	case "linkedin":
+		return c.linkedinProfile(ctx, accessToken)
+	case "x":
+		return c.xProfile(ctx, accessToken)
+	case "instagram":
+		return c.instagramProfile(ctx, accessToken)
+	case "facebook":
+		return c.facebookProfile(ctx, accessToken)
+	case "snapchat":
+		return c.snapchatProfile(ctx, accessToken)
 	default:
 		return ProviderProfile{}, fmt.Errorf("profile discovery is not implemented for %s", c.cfg.ProviderKey)
 	}
@@ -274,6 +284,77 @@ func (c *OAuth2Client) stripeProfile(ctx context.Context, accessToken string) (P
 		WorkspaceName: firstNonEmpty(stringValue(body["business_name"]), stringValue(body["display_name"]), stringValue(businessProfile["name"])),
 		TenantID:      stringValue(body["id"]),
 	}, nil
+}
+
+func (c *OAuth2Client) linkedinProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/v2/userinfo", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	return ProviderProfile{
+		ID:          stringValue(body["sub"]),
+		DisplayName: firstNonEmpty(stringValue(body["name"]), stringValue(body["localizedFirstName"])+" "+stringValue(body["localizedLastName"])),
+		Email:       stringValue(body["email"]),
+	}, nil
+}
+
+func (c *OAuth2Client) xProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/2/users/me?user.fields=username,name", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	data, _ := body["data"].(map[string]any)
+	username := stringValue(data["username"])
+	return ProviderProfile{
+		ID:          stringValue(data["id"]),
+		DisplayName: firstNonEmpty(stringValue(data["name"]), username),
+		WorkspaceID: username,
+	}, nil
+}
+
+func (c *OAuth2Client) instagramProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/me?fields=id,name", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	return ProviderProfile{
+		ID:          stringValue(body["id"]),
+		DisplayName: firstNonEmpty(stringValue(body["name"]), stringValue(body["id"])),
+	}, nil
+}
+
+func (c *OAuth2Client) facebookProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/me?fields=id,name", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	return ProviderProfile{
+		ID:          stringValue(body["id"]),
+		DisplayName: firstNonEmpty(stringValue(body["name"]), stringValue(body["id"])),
+	}, nil
+}
+
+func (c *OAuth2Client) snapchatProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/me/organizations", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	profile := ProviderProfile{
+		ID:          "snapchat",
+		DisplayName: "Snapchat Marketing",
+	}
+	if organizations, ok := body["organizations"].([]any); ok && len(organizations) > 0 {
+		if wrapper, ok := organizations[0].(map[string]any); ok {
+			if org, ok := wrapper["organization"].(map[string]any); ok {
+				profile.ID = firstNonEmpty(stringValue(org["id"]), profile.ID)
+				profile.DisplayName = firstNonEmpty(stringValue(org["name"]), profile.DisplayName)
+				profile.WorkspaceID = stringValue(org["id"])
+				profile.WorkspaceName = stringValue(org["name"])
+				profile.TenantID = stringValue(org["id"])
+			}
+		}
+	}
+	return profile, nil
 }
 
 func (c *OAuth2Client) getJSON(ctx context.Context, accessToken, endpoint string, headers map[string]string) (map[string]any, error) {

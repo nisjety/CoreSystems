@@ -11,7 +11,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/triodelab/model-plane/services/letta-bridge/internal/agentmemory"
+	"github.com/triodelab/model-plane/services/letta-bridge/internal/pgstore"
 	lbserver "github.com/triodelab/model-plane/services/letta-bridge/internal/server"
 	"google.golang.org/grpc"
 )
@@ -51,8 +54,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	memServer, closeStore := buildMemoryServer(ctx)
+	defer closeStore()
+
 	grpcServer := grpc.NewServer()
-	lbserver.Register(grpcServer, buildMemoryServer())
+	lbserver.Register(grpcServer, memServer)
 
 	go func() {
 		slog.Info("gRPC listening", "addr", ":9096")
@@ -67,18 +73,42 @@ func main() {
 	_ = healthServer.Shutdown(context.Background())
 }
 
-// buildMemoryServer selects the memory backend. When AGENT_MEMORY_URL is set,
-// letta-bridge uses Redis Agent Memory (semantic vector long-term recall);
-// otherwise it falls back to the in-memory substring store so the service
-// still boots with no external dependency.
-func buildMemoryServer() *lbserver.Server {
+// buildMemoryServer selects the memory backend in priority order and returns
+// the server plus a cleanup func that releases any backend resources.
+//
+//  1. AGENT_MEMORY_URL set → Redis Agent Memory (semantic vector long-term
+//     recall, the preferred tier).
+//  2. DATABASE_URL set → Postgres-backed durable store (survives restarts;
+//     used so orchestrator-core's memory-consolidation writes persist).
+//  3. neither set → in-memory substring store, so the service still boots with
+//     no external dependency.
+func buildMemoryServer(ctx context.Context) (*lbserver.Server, func()) {
+	noop := func() {}
+
 	if cli, ok := agentmemory.New(agentmemory.Config{
 		BaseURL: os.Getenv("AGENT_MEMORY_URL"),
 		APIKey:  os.Getenv("AGENT_MEMORY_TOKEN"),
 	}); ok {
 		slog.Info("agent memory backend enabled (redis agent-memory-server)")
-		return lbserver.NewServerWithStore(cli)
+		return lbserver.NewServerWithStore(cli), noop
 	}
-	slog.Info("agent memory backend disabled (AGENT_MEMORY_URL unset); using in-memory store")
-	return lbserver.NewServer()
+
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			slog.Error("postgres backend requested but pool init failed; falling back to in-memory store", "error", err)
+			return lbserver.NewServer(), noop
+		}
+		store, err := pgstore.New(ctx, pool)
+		if err != nil {
+			slog.Error("postgres backend requested but schema ensure failed; falling back to in-memory store", "error", err)
+			pool.Close()
+			return lbserver.NewServer(), noop
+		}
+		slog.Info("postgres durable memory backend enabled (DATABASE_URL set)")
+		return lbserver.NewServerWithStore(store), pool.Close
+	}
+
+	slog.Info("no durable memory backend configured (AGENT_MEMORY_URL and DATABASE_URL unset); using in-memory store")
+	return lbserver.NewServer(), noop
 }

@@ -266,13 +266,13 @@ func (s *Service) persistAccount(ctx context.Context, account Account) error {
 	return nil
 }
 
-func (s *Service) syncStripeCustomer(ctx context.Context, account Account) (Account, error) {
+func (s *Service) syncPaymentCustomer(ctx context.Context, account Account) (Account, error) {
 	if s.paymentAdapter == nil {
 		return account, nil
 	}
 
 	orgSeed, _ := s.fetchOrgCoreSeed(ctx, account.OrgID)
-	existingCustomerID := strings.TrimSpace(account.ProviderCustomerID["stripe"])
+	existingCustomerID := strings.TrimSpace(account.ProviderCustomerID["payment"])
 	billingEmail, _ := account.Metadata["billing_email"].(string)
 	orgName := strings.TrimSpace(orgSeed.Name)
 	if orgName == "" {
@@ -281,7 +281,7 @@ func (s *Service) syncStripeCustomer(ctx context.Context, account Account) (Acco
 		}
 	}
 
-	customerID, err := s.paymentAdapter.EnsureCustomer(ctx, StripeCustomerInput{
+	customerID, err := s.paymentAdapter.EnsureCustomer(ctx, CustomerInput{
 		OrgID:              account.OrgID,
 		OrganizationName:   orgName,
 		BillingEmail:       strings.TrimSpace(billingEmail),
@@ -295,7 +295,7 @@ func (s *Service) syncStripeCustomer(ctx context.Context, account Account) (Acco
 	}
 
 	if customerID != "" && customerID != existingCustomerID {
-		account.ProviderCustomerID["stripe"] = customerID
+		account.ProviderCustomerID["payment"] = customerID
 	}
 	if orgName != "" {
 		account.Metadata["org_name"] = orgName
@@ -305,7 +305,7 @@ func (s *Service) syncStripeCustomer(ctx context.Context, account Account) (Acco
 }
 
 func (s *Service) UpsertAccount(ctx context.Context, account Account) error {
-	syncedAccount, err := s.syncStripeCustomer(ctx, account)
+	syncedAccount, err := s.syncPaymentCustomer(ctx, account)
 	if err != nil {
 		return err
 	}
@@ -534,7 +534,7 @@ func (s *Service) CreateCheckoutSession(
 		return CheckoutSession{}, err
 	}
 
-	account, err = s.syncStripeCustomer(ctx, account)
+	account, err = s.syncPaymentCustomer(ctx, account)
 	if err != nil {
 		return CheckoutSession{}, err
 	}
@@ -543,10 +543,10 @@ func (s *Service) CreateCheckoutSession(
 	}
 
 	orgName, _ := account.Metadata["org_name"].(string)
-	session, err := s.paymentAdapter.CreateCheckoutSession(ctx, StripeCheckoutParams{
+	session, err := s.paymentAdapter.CreateCheckoutSession(ctx, CheckoutParams{
 		OrgID:        orgID,
 		Plan:         plan,
-		CustomerID:   strings.TrimSpace(account.ProviderCustomerID["stripe"]),
+		CustomerID:   strings.TrimSpace(account.ProviderCustomerID["payment"]),
 		SuccessURL:   successURL,
 		CancelURL:    cancelURL,
 		Organization: strings.TrimSpace(orgName),
@@ -559,6 +559,45 @@ func (s *Service) CreateCheckoutSession(
 	}
 
 	return session, nil
+}
+
+func (s *Service) ConfirmCheckoutSession(
+	ctx context.Context,
+	orgID, plan, paymentID, clientSecret string,
+) (CheckoutStatus, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return CheckoutStatus{}, fmt.Errorf("org_id is required")
+	}
+	plan = billablePlan(plan)
+	if plan == "free" {
+		return CheckoutStatus{}, fmt.Errorf("checkout is only supported for paid plans")
+	}
+	if s.paymentAdapter == nil {
+		return CheckoutStatus{}, fmt.Errorf("payment adapter is not configured")
+	}
+
+	status, err := s.paymentAdapter.RetrieveCheckoutSession(ctx, CheckoutLookupParams{
+		PaymentID:    paymentID,
+		ClientSecret: clientSecret,
+	})
+	if err != nil {
+		return CheckoutStatus{}, err
+	}
+
+	if strings.TrimSpace(status.OrgID) != "" && strings.TrimSpace(status.OrgID) != strings.TrimSpace(orgID) {
+		return CheckoutStatus{}, fmt.Errorf("checkout session org mismatch")
+	}
+	if strings.TrimSpace(status.Plan) != "" && billablePlan(status.Plan) != plan {
+		return CheckoutStatus{}, fmt.Errorf("checkout session plan mismatch")
+	}
+	if !checkoutStatusActivatesPlan(status.Status) {
+		return status, nil
+	}
+
+	if err := s.ApplyPlanChange(ctx, orgID, "", plan); err != nil {
+		return CheckoutStatus{}, err
+	}
+	return status, nil
 }
 
 func (s *Service) RecordUsage(ctx context.Context, usage UsageEvent) error {

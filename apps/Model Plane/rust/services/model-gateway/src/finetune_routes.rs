@@ -32,7 +32,8 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::auth::Claims;
-use crate::finetune_azure::{AzureFinetuneClient, AzureHyperparameters};
+use crate::finetune_azure::{AzureFinetuneClient, AzureHyperparameters, DeploymentTier};
+use crate::finetune_poller::generate_deployment_name;
 use crate::state::{AppState, DynPublisher};
 use mp_events::publisher::EventPublisher;
 
@@ -41,10 +42,39 @@ type HttpJsonError = (StatusCode, Json<Value>);
 const ADMIN_SCOPE: &str = "admin";
 const FEATURE_ENV: &str = "FINETUNE_ENABLED";
 
+/// Our production hosting rate (USD/hour) for a deployed fine-tuned model —
+/// our markup over Azure's $1.70 Standard hosting fee. Configurable via
+/// `FINETUNE_PRODUCTION_HOSTING_USD_PER_HOUR` (default 2.00). The Developer
+/// (test) tier is always $0, so only production deployments accrue this.
+fn production_hosting_usd_per_hour() -> f64 {
+    std::env::var("FINETUNE_PRODUCTION_HOSTING_USD_PER_HOUR")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+        .unwrap_or(2.00)
+}
+
 /// Single source of truth for converting a `pb::FinetuneJob` to a JSON
 /// envelope the UI consumes. Stable shape — Wave 7 doc cites these fields.
+///
+/// `deployment_tier` + `*_hosting_usd_per_hour` let the UI show the cost choice:
+/// auto-deploys land on the **developer** tier ($0/hr, auto-deletes in 24h);
+/// promoting to **production** costs `production_hosting_usd_per_hour` plus
+/// per-token inference. RAG is always-on and free of this charge — fine-tuning
+/// is an optional, opt-in enhancement.
 fn job_value(job: &pb::FinetuneJob) -> Value {
+    // Persisted tier from the row; fall back to "developer" for pre-migration
+    // rows that read back an empty string.
+    let deployment_tier = if job.deployment_tier.is_empty() {
+        "developer"
+    } else {
+        job.deployment_tier.as_str()
+    };
     json!({
+        "deployment_tier": deployment_tier,
+        "developer_hosting_usd_per_hour": 0.0,
+        "developer_auto_delete_hours": 24,
+        "production_hosting_usd_per_hour": production_hosting_usd_per_hour(),
         "job_id": job.job_id,
         "org_id": job.org_id,
         "agent_id": job.agent_id,
@@ -377,6 +407,10 @@ fn azure_err(e: &crate::finetune_azure::AzureError) -> HttpJsonError {
             StatusCode::BAD_GATEWAY,
             format!("azure response decode: {m}"),
         ),
+        AzureError::MgmtNotConfigured => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "azure management plane not configured".to_owned(),
+        ),
     };
     warn!(error = %e, "azure call failed");
     (code, Json(json!({ "error": msg })))
@@ -695,6 +729,7 @@ pub async fn get_job(
                         deployment_name: String::new(),
                         actual_cost_usd: 0.0,
                         set_completed: terminal,
+                        deployment_tier: String::new(),
                     })
                     .await;
                 match update {
@@ -778,6 +813,7 @@ pub async fn cancel_job(
             deployment_name: String::new(),
             actual_cost_usd: 0.0,
             set_completed: true,
+            deployment_tier: String::new(),
         })
         .await
     {
@@ -807,6 +843,169 @@ pub async fn cancel_job(
             "job_id": resp.job_id,
             "status": resp.status,
             "azure_job_id": resp.azure_job_id,
+        }),
+    )
+    .await;
+
+    Ok(Json(job_value(&resp)))
+}
+
+#[derive(Deserialize)]
+pub struct DeployJobBody {
+    /// Target hosting tier. Defaults to `production` for this endpoint (the
+    /// promote action); `developer` is accepted to (re)deploy the free test
+    /// tier. Unknown values fall back to `developer` (never silently paid).
+    #[serde(default)]
+    pub tier: Option<String>,
+}
+
+/// How many hours per month we assume a production deployment runs when
+/// pre-flighting the budget guard. 730 ≈ a 30.4-day month. Used only to derive
+/// a conservative hosting estimate; the actual accrual is tracked elsewhere.
+const PRODUCTION_HOURS_PER_MONTH: f64 = 730.0;
+
+/// `POST /v1/finetune/jobs/:job_id/deploy`
+///
+/// Operator promote action: provision (or re-provision) an Azure deployment for
+/// a succeeded fine-tuned model at the requested hosting tier. Body
+/// `{ "tier": "production" | "developer" }`; defaults to `production`.
+///
+/// Steps:
+///   1. Feature-flag + admin-scope guards (same as the other mutations).
+///   2. Load the job (org-scoped). Require `status == succeeded` and a
+///      non-empty `fine_tuned_model` — you can't deploy what isn't trained.
+///   3. Require the Azure management plane to be configured — else 503.
+///   4. For the `production` tier, run the budget guard against the estimated
+///      monthly hosting cost so a promote can't blow the org cap.
+///   5. Call `create_deployment(deployment_name, fine_tuned_model, tier)`.
+///   6. `UpdateJobStatus` to persist `deployment_name` + `deployment_tier`
+///      (status stays `succeeded`).
+///   7. Return the updated job via `job_value`.
+///
+/// # Errors
+///
+/// Returns a feature-disabled/admin error from the guards, a `409 CONFLICT` if
+/// the job is not `succeeded` or lacks a `fine_tuned_model`, a `503` if the
+/// Azure management plane is unconfigured, a `429` if the production hosting
+/// estimate exceeds a budget cap, or maps upstream Azure/gRPC failures.
+pub async fn deploy_job(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(job_id): Path<String>,
+    Json(body): Json<DeployJobBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_feature_enabled()?;
+    require_admin(&claims)?;
+
+    // Default to production for this endpoint (it's the promote action); accept
+    // "developer" to redeploy the free test tier.
+    let tier = match body.tier.as_deref() {
+        Some(s) if !s.trim().is_empty() => DeploymentTier::from_str_or_developer(s),
+        _ => DeploymentTier::Production,
+    };
+
+    // The Azure management plane must be configured to provision a deployment.
+    // Check before touching session-core so a misconfigured gateway returns a
+    // clear 503 rather than mutating state it can't follow through on.
+    let azure = state.azure_finetune.as_ref().filter(|c| c.mgmt_configured());
+    let Some(azure) = azure else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "Azure management plane not configured; cannot provision deployment",
+                "hint": "set AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_OPENAI_ACCOUNT_NAME, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET",
+            })),
+        ));
+    };
+
+    let job = state
+        .finetune_jobs_client
+        .clone()
+        .get_job(pb::GetFinetuneJobRequest {
+            job_id: job_id.clone(),
+            org_id: claims.org_id.clone(),
+        })
+        .await
+        .map_err(|e| grpc_err(&e))?
+        .into_inner();
+
+    if job.status != "succeeded" {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "job must be in status 'succeeded' to deploy (current: {})",
+                    job.status
+                ),
+            })),
+        ));
+    }
+    if job.fine_tuned_model.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "job has no fine_tuned_model; nothing to deploy",
+            })),
+        ));
+    }
+
+    // Budget guard for the paid tier only — the Developer tier is $0/hr.
+    if tier == DeploymentTier::Production {
+        let monthly_estimate = production_hosting_usd_per_hour() * PRODUCTION_HOURS_PER_MONTH;
+        enforce_budget_estimate(
+            &state,
+            &claims.org_id,
+            monthly_estimate,
+            job.training_example_count,
+            &job.base_model,
+        )
+        .await?;
+    }
+
+    let deployment_name = if job.deployment_name.is_empty() {
+        generate_deployment_name(&job.job_id)
+    } else {
+        // Re-use the existing name so a redeploy targets the same Azure
+        // resource (create-or-update is idempotent).
+        job.deployment_name.clone()
+    };
+
+    azure
+        .create_deployment(&deployment_name, &job.fine_tuned_model, tier)
+        .await
+        .map_err(|e| azure_err(&e))?;
+
+    let resp = state
+        .finetune_jobs_client
+        .clone()
+        .update_job_status(pb::UpdateFinetuneJobStatusRequest {
+            job_id: job_id.clone(),
+            org_id: claims.org_id.clone(),
+            // Status is already succeeded — re-assert it (UpdateJobStatus
+            // validates the value; succeeded is valid and the row stays put).
+            status: "succeeded".to_owned(),
+            error_message: String::new(),
+            fine_tuned_model: String::new(),
+            deployment_name: deployment_name.clone(),
+            actual_cost_usd: 0.0,
+            set_completed: false,
+            deployment_tier: tier.as_str().to_owned(),
+        })
+        .await
+        .map_err(|e| grpc_err(&e))?
+        .into_inner();
+
+    publish_finetune_event(
+        &state.publisher,
+        &claims.org_id,
+        &claims.user_id,
+        &resp.job_id,
+        mp_events::subjects::FINETUNE_EVENT_DEPLOYED,
+        json!({
+            "job_id": resp.job_id,
+            "deployment_name": deployment_name,
+            "deployment_tier": tier.as_str(),
+            "fine_tuned_model": resp.fine_tuned_model,
         }),
     )
     .await;
@@ -1401,6 +1600,7 @@ mod tests {
             azure_job_id: "j1".into(),
             fine_tuned_model: String::new(),
             deployment_name: String::new(),
+            deployment_tier: "developer".into(),
             status: "queued".into(),
             error_message: String::new(),
             created_at: Some(prost_types::Timestamp {

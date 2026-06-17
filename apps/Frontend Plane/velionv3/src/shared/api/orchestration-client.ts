@@ -1,0 +1,93 @@
+import { requestJson } from './http'
+
+// Human-in-the-loop run control for agentic chat runs. These call the gateway
+// `/api/v1/orchestration/*` proxy (→ model-gateway → session-core/execution-core).
+// Used by the chat "internal Claude Code" approval UI + plan mode: when an
+// agentic run pauses for a risky tool (a `step_update` with status "paused"),
+// the chat lists the run's pending approvals here, the user decides, and the
+// run is resumed.
+
+export type ApprovalDecision = 'approve' | 'reject'
+
+/** A pending/decided approval as reported by model-gateway's orchestration API. */
+export type Approval = {
+  id: string
+  runId?: string
+  planId?: string
+  stepId?: string
+  /** Approval kind, e.g. tool/plan/command — provider string, rendered as-is. */
+  kind?: string
+  /** PENDING | GRANTED | DENIED | EXPIRED (uppercased provider enum name). */
+  status?: string
+  requestedBy?: string
+  /** Free-form detail/summary of what needs approval, when present. */
+  detail?: string
+}
+
+type RawApproval = Record<string, unknown>
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
+function normalizeApproval(raw: RawApproval): Approval | null {
+  const id = str(raw.id) ?? str(raw.approval_id)
+  if (!id) return null
+  return {
+    id,
+    runId: str(raw.run_id) ?? str(raw.runId),
+    planId: str(raw.plan_id) ?? str(raw.planId),
+    stepId: str(raw.step_id) ?? str(raw.stepId),
+    kind: str(raw.kind) ?? str(raw.approval_kind),
+    status: str(raw.status) ?? str(raw.state),
+    requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
+    detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),
+  }
+}
+
+/** List a run's approvals; only PENDING ones are surfaced for a decision. */
+export async function listApprovals(runId: string, signal?: AbortSignal): Promise<Approval[]> {
+  const payload = await requestJson<{ approvals?: RawApproval[] }>(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/approvals`,
+    { signal },
+  )
+  const list = Array.isArray(payload.approvals) ? payload.approvals : []
+  return list.map(normalizeApproval).filter((a): a is Approval => a !== null)
+}
+
+/** Approve or reject a pending approval (unblocks/blocks the gated tool step). */
+export async function decideApproval(
+  approvalId: string,
+  decision: ApprovalDecision,
+  reason?: string,
+  signal?: AbortSignal,
+): Promise<Approval | null> {
+  const payload = await requestJson<{ approval?: RawApproval }>(
+    `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ decision, reason: reason ?? '' }),
+      signal,
+    },
+  )
+  return payload.approval ? normalizeApproval(payload.approval) : null
+}
+
+/** Resume a run that paused for approval, after the decision is recorded. */
+export async function resumeRun(runId: string, signal?: AbortSignal): Promise<void> {
+  await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/resume`, {
+    method: 'POST',
+    body: '{}',
+    signal,
+  })
+}
+
+/** Cancel a run (e.g. the user rejects and wants to stop the whole run). */
+export async function cancelRun(runId: string, signal?: AbortSignal): Promise<void> {
+  await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    body: '{}',
+    signal,
+  })
+}

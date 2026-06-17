@@ -184,7 +184,7 @@ that Velion and external clients talk to.
 | **S3 / MinIO** | Artifact storage (raw HTML, screenshots, PDFs, profiles). |
 | **Postgres** | Jobs, stores, profiles, event history. |
 | **Brave / Bing / Tavily** | Pluggable web-search backends. |
-| **Firecrawl** (optional adapter) | External-provider fallback for sites Quarry's own driver doesn't yet handle. |
+| **Firecrawl** (optional adapter) | Compatibility, migration, and benchmark target only by default; not a GDPR/default scraping fallback. |
 
 ## Where to read more
 
@@ -195,3 +195,5 @@ that Velion and external clients talk to.
   [`openapi.yaml`](openapi.yaml).
 - Driver matrix (which engine handles what): [`DRIVER_MATRIX.md`](DRIVER_MATRIX.md).
 - Roadmap: [`ROADMAP.md`](ROADMAP.md).
+- Future self-owned reliability layer:
+  [`SOVEREIGN_SCRAPING_RELIABILITY.md`](SOVEREIGN_SCRAPING_RELIABILITY.md).

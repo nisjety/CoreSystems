@@ -3,6 +3,7 @@
 > Generated: 2026-05-06  
 > Scope: Quarry v2, Data Plane, Model Plane, App/Shell, and future reference tooling.  
 > Rule: **Quarry captures evidence. Data Plane knows. Model Plane reasons. App Shell presents.**
+> Privacy contract: [`GDPR_SUMMARY.md`](./GDPR_SUMMARY.md).
 
 ## 0. Decision Rules
 
@@ -106,9 +107,10 @@
 2. **No independent embeddings.** Model Plane and Quarry never embed/rerank independently except in isolated eval labs.
 3. **No agent bypass around Quarry policy.** Model Plane can propose browser actions; Quarry executes or rejects them.
 4. **ZDR propagates across planes.** If `zeroDataRetention=true`, Quarry rejects or keeps ephemeral-only any Data/Model enrichment that would persist content.
-5. **Knowledge assets are Data Plane-owned.** Graphs, wiki pages, embeddings, chunks, source logs, contradiction indexes live in Data Plane.
-6. **Reasoning is Model Plane-owned.** Autoresearch, graph-aware synthesis, wiki maintenance agents, browser-agent planning live in Model Plane.
-7. **UX is App/Shell-owned.** Logseq-like page/graph editing, CLI/TUI, IDE bridge, channel inbox, voice/canvas surfaces live above the core planes.
+5. **GDPR policy metadata travels with data.** Durable records and processing jobs carry or link to purpose, lawful basis, retention, residency, privacy class, third-party processing allowance, and deletion scope.
+6. **Knowledge assets are Data Plane-owned.** Graphs, wiki pages, embeddings, chunks, source logs, contradiction indexes live in Data Plane.
+7. **Reasoning is Model Plane-owned.** Autoresearch, graph-aware synthesis, wiki maintenance agents, browser-agent planning live in Model Plane.
+8. **UX is App/Shell-owned.** Logseq-like page/graph editing, CLI/TUI, IDE bridge, channel inbox, voice/canvas surfaces live above the core planes.
 
 ## 4. Research Notes Used
 

@@ -181,6 +181,7 @@ mod tests {
                 recording_id: None,
             },
             determinism: None,
+            privacy: None,
             branding: None,
             etag: None,
             last_modified: None,

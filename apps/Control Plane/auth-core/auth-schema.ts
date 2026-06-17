@@ -112,7 +112,8 @@ export const oauthApplication = pgTable("oauth_application", {
   metadata: text("metadata"),
   clientId: text("client_id").unique(),
   clientSecret: text("client_secret"),
-  redirectURLs: text("redirect_ur_ls"),
+  redirectUrls: text("redirect_ur_ls"),
+  authenticationScheme: text("authentication_scheme"),
   type: text("type"),
   disabled: boolean("disabled").default(false),
   userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
@@ -147,15 +148,29 @@ export const oauthConsent = pgTable("oauth_consent", {
   consentGiven: boolean("consent_given"),
 });
 
+export const privacyConsent = pgTable("privacy_consent", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+  sessionId: text("session_id"),
+  analytics: boolean("analytics").default(false).notNull(),
+  marketing: boolean("marketing").default(false).notNull(),
+  necessary: boolean("necessary").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => /* @__PURE__ */ new Date())
+    .notNull(),
+});
+
 export const apikey = pgTable("apikey", {
   id: text("id").primaryKey(),
   name: text("name"),
   start: text("start"),
   prefix: text("prefix"),
   key: text("key").notNull(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
+  configId: text("config_id").notNull().default("user-keys"),
+  referenceId: text("reference_id").notNull(),
+  userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
   refillInterval: integer("refill_interval"),
   refillAmount: integer("refill_amount"),
   lastRefillAt: timestamp("last_refill_at"),

@@ -21,13 +21,14 @@ use dashmap::DashMap;
 use mp_events::publisher::EventPublisher;
 use mp_ids::new_ulid;
 use tonic::Status;
-use tracing::warn;
+use tracing::{info, warn};
 
 use mp_contracts::model_plane::v1::{
+    execution_core_client::ExecutionCoreClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient, ApprovalKind, ApprovalState,
     ApproveApprovalRequest, ApproveApprovalResponse, CreateApprovalRequest, DecideApprovalRequest,
     DenyApprovalRequest, DenyApprovalResponse, GatewayApproval, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, RequestApprovalRequest, RequestApprovalResponse,
+    ListPendingApprovalsResponse, RequestApprovalRequest, RequestApprovalResponse, ResumeRunRequest,
 };
 use tonic::transport::Channel;
 
@@ -105,6 +106,39 @@ pub async fn persist_approval_decision(
         .await
     {
         warn!(error = %e, approval_id = %approval.approval_id, "durable approval decision persist failed (best-effort)");
+    }
+}
+
+/// Best-effort resume of the gated run once an approval is **granted**.
+///
+/// The gateway is the approval decision point but does not drive the execution
+/// loop, so it signals execution-core directly to flip the run from
+/// `AwaitingApproval` back to `Running`. session-core separately broadcasts
+/// `RunResumedAfterApproval` for SSE consumers. Denials/timeouts never resume.
+/// Logged on failure, never blocks the caller — the in-memory decision already
+/// succeeded by the time this runs.
+pub async fn resume_run_if_approved(
+    client: &mut ExecutionCoreClient<Channel>,
+    approval: &GatewayApproval,
+) {
+    if approval.status != STATUS_APPROVED {
+        return;
+    }
+    match client
+        .resume_run(ResumeRunRequest {
+            run_id: approval.run_id.clone(),
+            checkpoint_id: String::new(),
+            org_id: approval.org_id.clone(),
+        })
+        .await
+    {
+        Ok(resp) => info!(
+            approval_id = %approval.approval_id,
+            run_id = %approval.run_id,
+            resumed = resp.into_inner().resumed,
+            "approval granted → execution-core resume_run"
+        ),
+        Err(e) => warn!(error = %e, approval_id = %approval.approval_id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)"),
     }
 }
 

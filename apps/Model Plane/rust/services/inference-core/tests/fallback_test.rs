@@ -45,6 +45,7 @@ impl ProviderRouterDyn for MockProvider {
             stop_reason: "end_turn".to_owned(),
             input_tokens: 10,
             output_tokens: 5,
+            ..Default::default()
         })
     }
 
@@ -89,6 +90,7 @@ impl ProviderRouterDyn for MockProvider {
             provider: self.name.clone(),
             modality: "embedding".to_owned(),
             streaming: false,
+            ..Default::default()
         }]
     }
 }
@@ -107,6 +109,7 @@ fn sample_request() -> InferRequest {
         max_tokens: 100,
         structured_output_schema: None,
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -257,15 +260,70 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         openai_embedding_models: vec!["embed-test".to_owned()],
         azure_openai_chat_deployments: vec!["azure-chat".to_owned()],
         azure_openai_embedding_deployments: vec!["azure-embed".to_owned()],
+        azure_anthropic_endpoint: None,
+        azure_anthropic_api_key: None,
+        azure_anthropic_deployments: vec![],
         max_retries_per_provider: 1,
         cache_ttl_secs: 60,
+        velion_intent_enabled: false,
+        cost_core_url: None,
+        velion_intent_budget_usd: 50.0,
+        session_core_url: None,
+        router_policy_refresh_secs: 60,
     };
 
     let chain = FallbackChain::from_config(&cfg);
 
     assert_eq!(chain.provider_count(), 1);
-    assert_eq!(
-        chain.list_models("", "azure-openai")[0].id,
-        "azure-chat"
-    );
+    assert_eq!(chain.list_models("", "azure-openai")[0].id, "azure-chat");
+}
+
+#[test]
+fn azure_anthropic_registers_and_advertises_claude_catalog() {
+    // The `anthropic` slot resolves to the Azure Foundry Claude resource when
+    // AZURE_ANTHROPIC_* is configured (the direct key is out of credit).
+    let cfg = InferenceConfig {
+        provider_order: vec!["azure".to_owned(), "anthropic".to_owned()],
+        anthropic_api_key: Some("direct-but-broke".to_owned()),
+        openai_api_base: None,
+        openai_api_key: None,
+        azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
+        azure_openai_api_key: Some("test-key".to_owned()),
+        azure_openai_api_version: "2025-01-01-preview".to_owned(),
+        openai_chat_models: vec![],
+        openai_embedding_models: vec![],
+        azure_openai_chat_deployments: vec!["model-router".to_owned(), "gpt-4o-mini".to_owned()],
+        azure_openai_embedding_deployments: vec![],
+        azure_anthropic_endpoint: Some(
+            "https://cloude-ai-resource.services.ai.azure.com".to_owned(),
+        ),
+        azure_anthropic_api_key: Some("azure-claude-key".to_owned()),
+        azure_anthropic_deployments: vec!["claude-haiku-4-5".to_owned(), "claude-opus-4-8".to_owned()],
+        max_retries_per_provider: 1,
+        cache_ttl_secs: 60,
+        velion_intent_enabled: false,
+        cost_core_url: None,
+        velion_intent_budget_usd: 50.0,
+        session_core_url: None,
+        router_policy_refresh_secs: 60,
+    };
+
+    let chain = FallbackChain::from_config(&cfg);
+
+    // azure-openai + azure-anthropic (direct anthropic is NOT registered because
+    // the Azure flavor took the slot).
+    assert_eq!(chain.provider_count(), 2);
+
+    // The Claude catalog is advertised under the azure-anthropic provider, with
+    // haiku flagged cheap (carried in features as "cheap" at the gRPC edge).
+    let claude = chain.list_models("", "azure-anthropic");
+    assert_eq!(claude.len(), 2);
+    assert!(claude.iter().all(|m| m.provider == "azure-anthropic"));
+    let haiku = claude.iter().find(|m| m.id == "claude-haiku-4-5").unwrap();
+    assert!(haiku.cheap);
+
+    // model-router is the azure-openai default and is flagged cheap.
+    let chat = chain.list_models("", "azure-openai");
+    let router = chat.iter().find(|m| m.id == "model-router").unwrap();
+    assert!(router.cheap);
 }

@@ -115,11 +115,19 @@ func loadConfig() (*config, error) {
 			port = p
 		}
 	}
+	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
+	if internalAPIKey == "" {
+		internalAPIKey = os.Getenv("INTERNAL_SERVICE_SECRET")
+	}
+	if internalAPIKey == "" {
+		return nil, fmt.Errorf("INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET is required")
+	}
+
 	return &config{
 		DatabaseURL:    dsn,
 		NATSURL:        natsURL,
 		NATSToken:      os.Getenv("NATS_TOKEN"),
 		HTTPPort:       port,
-		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
+		InternalAPIKey: internalAPIKey,
 	}, nil
 }

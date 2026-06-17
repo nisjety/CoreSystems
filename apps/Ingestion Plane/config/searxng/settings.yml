@@ -1,0 +1,73 @@
+# SearXNG settings — Quarry-v2-owned copy (Ingestion Plane stack).
+#
+# Quarry-v2 owns its web-search dependency: this file is bind-mounted into the
+# `searxng` service defined in apps/Ingestion Plane/docker-compose.yml. Defining
+# searxng here (rather than relying on the root mega-stack) makes the Ingestion
+# Plane self-contained — bringing up only this stack gives quarry-edge a working
+# SmartRouter SearXNG provider over inter-plane-bus.
+#
+# Key change vs SearXNG defaults: JSON output format is ENABLED here.
+# SearXNG ships with only "html" in search.formats; quarry-runtime's
+# SearXNGSearch provider (crates/quarry-runtime/src/serp/searxng.rs) calls the
+# /search endpoint with format=json, which returns 403 unless json is listed.
+#
+# To customise further (engines, UI, ...) edit this file and
+# `docker compose restart searxng`.
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Quarry SearXNG"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+search:
+  # safe_search: 0 = off, 1 = moderate, 2 = strict
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  # JSON must be listed here or SearXNG returns 403 on format=json requests.
+  # quarry-runtime/src/serp/searxng.rs sends ?format=json — do not remove it.
+  formats:
+    - html
+    - json
+
+server:
+  # SEARXNG_SECRET env var overrides this at runtime; value here is a fallback.
+  secret_key: "change-me-searxng-secret-32chars!!"
+  limiter: false
+  image_proxy: false
+  # Port the container listens on (published as 8888 on the host).
+  port: 8080
+  bind_address: "0.0.0.0"
+  # Base URL as seen from inside the compose network (used for self-links).
+  base_url: "http://searxng:8080/"
+
+ui:
+  static_use_hash: true
+  default_locale: "en"
+  query_in_title: false
+  infinite_scroll: false
+  center_alignment: false
+  results_on_new_tab: false
+  theme_args:
+    simple_style: auto
+
+# Redis is wired via SEARXNG_REDIS_URL env var (set in docker-compose.yml).
+# The url key here is a no-op when the env var is present, but kept for
+# documentation clarity.
+redis:
+  url: false
+
+# Engine request timeouts. SearXNG's defaults (~3s) are too aggressive for some
+# networks/engines and make every engine report "timeout" (empty results even
+# though container egress works). Give upstream engines room to respond.
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true

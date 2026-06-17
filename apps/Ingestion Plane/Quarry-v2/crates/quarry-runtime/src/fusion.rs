@@ -74,6 +74,7 @@ pub fn rrf_fuse(
                     snippet: a.snippet.clone(),
                     rank: 0,
                     provider: "hybrid".into(),
+                    ..Default::default()
                 },
             )
         })
@@ -102,6 +103,7 @@ mod tests {
             snippet: None,
             rank: 0,
             provider: "lex".into(),
+            ..Default::default()
         }
     }
     fn vh(url: &str, score: f32) -> VectorHit {

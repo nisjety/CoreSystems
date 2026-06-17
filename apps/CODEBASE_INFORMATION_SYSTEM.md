@@ -14,6 +14,7 @@ Scope:
 Evidence used:
 - CodeGraph index: 3,246 indexed files, 58,130 symbols, Go/TypeScript/TSX/Python/Rust/JavaScript.
 - Canonical target ownership: `apps/master-ownership-matrix.md`.
+- Cross-plane privacy contract: `apps/GDPR_SUMMARY.md`.
 - As-built snapshot: `apps/Frontend Plane/velionv2/docs/coresystem-architecture-map.md`.
 - Plane docs and manifests indexed in context-mode as `CoreSystem plane docs snapshot 2026-06-07`.
 - Channel Plane is docs-only today: `apps/Channel Plane/docs/vision.md`.
@@ -63,9 +64,10 @@ flowchart LR
 2. No independent embeddings or reranking outside isolated labs. Data Plane owns embedding and retrieval parity.
 3. No browser-agent bypass around Quarry policy. Model Plane proposes browser actions; Quarry executes or rejects them.
 4. Zero Data Retention must propagate across every boundary that could persist content.
-5. Durable knowledge assets live in Data Plane: documents, chunks, embeddings, graph, wiki, source logs, retrieval traces.
-6. Reasoning lives in Model Plane: planning, synthesis, agent loops, tool selection, memory/wiki maintenance proposals.
-7. Human-facing UX lives in Frontend/Application/Channel surfaces, not in core storage or reasoning services.
+5. GDPR policy metadata must travel with data and processing jobs: purpose, lawful basis, retention, residency, privacy class, third-party processing allowance, and deletion scope.
+6. Durable knowledge assets live in Data Plane: documents, chunks, embeddings, graph, wiki, source logs, retrieval traces.
+7. Reasoning lives in Model Plane: planning, synthesis, agent loops, tool selection, memory/wiki maintenance proposals.
+8. Human-facing UX lives in Frontend/Application/Channel surfaces, not in core storage or reasoning services.
 
 ## Plane Details
 

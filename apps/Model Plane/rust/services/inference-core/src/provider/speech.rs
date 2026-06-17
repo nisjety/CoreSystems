@@ -713,8 +713,11 @@ impl SpeechProvider for AzureSpeechProvider {
         } else {
             req.language.clone()
         };
+        // Azure Speech TTS requires the synthesis namespace on <speak>; without
+        // `xmlns="http://www.w3.org/2001/10/synthesis"` it rejects the request
+        // with HTTP 400 (empty body) before reading the voice/text.
         let ssml = format!(
-            r#"<speak version="1.0" xml:lang="{}"><voice name="{}">{}</voice></speak>"#,
+            r#"<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{}"><voice name="{}">{}</voice></speak>"#,
             escape_xml(&language),
             escape_xml(voice),
             escape_xml(&req.text)
@@ -756,11 +759,82 @@ impl SpeechProvider for AzureSpeechProvider {
 
     async fn transcribe(
         &self,
-        _req: &SpeechTranscriptionRequest,
+        req: &SpeechTranscriptionRequest,
     ) -> Result<TranscriptResult, ProviderError> {
-        Err(ProviderError::UnsupportedModel(
-            "azure-speech:stt".to_owned(),
-        ))
+        if req.audio_bytes.is_empty() {
+            return Err(ProviderError::InvalidResponse("audio is required".into()));
+        }
+        let language = if req.language.trim().is_empty() {
+            "en-US".to_owned()
+        } else {
+            req.language.clone()
+        };
+        // STT is served on the `.stt.` host; the configured endpoint is the
+        // `.tts.` host, so swap it. (Falls through unchanged for custom
+        // endpoints that don't match the regional TTS pattern.)
+        let stt_host = self
+            .endpoint
+            .replacen(".tts.speech.microsoft.com", ".stt.speech.microsoft.com", 1);
+        let url = format!(
+            "{}/speech/recognition/conversation/cognitiveservices/v1?language={}&format=detailed",
+            stt_host.trim_end_matches('/'),
+            language
+        );
+        // Short-audio REST accepts WAV/PCM and OGG/OPUS natively; map the
+        // request format to the right Content-Type.
+        let content_type = match req.format.trim().to_ascii_lowercase().as_str() {
+            "mp3" | "mpeg" => "audio/mpeg",
+            "ogg" | "opus" => "audio/ogg; codecs=opus",
+            _ => "audio/wav; codecs=audio/pcm",
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .header("Ocp-Apim-Subscription-Key", &self.api_key)
+            .header("Content-Type", content_type)
+            .header("Accept", "application/json")
+            .body(req.audio_bytes.clone())
+            .send()
+            .await
+            .map_err(|e| ProviderError::Http(format!("azure speech stt: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Unavailable(format!(
+                "azure speech stt HTTP {status}: {}",
+                truncate(&body, 300)
+            )));
+        }
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Http(format!("azure speech stt json: {e}")))?;
+        let status = json
+            .get("RecognitionStatus")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if status != "Success" {
+            return Err(ProviderError::InvalidResponse(format!(
+                "azure speech stt recognition status: {status}"
+            )));
+        }
+        let top = json.get("NBest").and_then(|v| v.as_array()).and_then(|a| a.first());
+        let text = top
+            .and_then(|t| t.get("Display").and_then(serde_json::Value::as_str))
+            .or_else(|| json.get("DisplayText").and_then(serde_json::Value::as_str))
+            .unwrap_or_default()
+            .to_owned();
+        #[allow(clippy::cast_possible_truncation)]
+        let confidence = top
+            .and_then(|t| t.get("Confidence").and_then(serde_json::Value::as_f64))
+            .unwrap_or(0.0) as f32;
+        Ok(TranscriptResult {
+            text,
+            language,
+            confidence,
+            model_used: "azure-speech-stt".to_owned(),
+            provider_used: self.provider_name().to_owned(),
+        })
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
@@ -781,6 +855,9 @@ impl SpeechProvider for AzureSpeechProvider {
 fn speech_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        // Azure Speech TTS rejects requests with NO User-Agent (HTTP 400, empty
+        // body). reqwest sends none by default, so set one explicitly.
+        .user_agent("velion-model-plane/1.0")
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

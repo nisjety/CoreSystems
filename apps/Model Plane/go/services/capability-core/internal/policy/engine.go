@@ -27,11 +27,35 @@ const (
 // ScopeWildcard matches any scope in an EnabledForScopes entry.
 const ScopeWildcard = "*"
 
+// ScopeResolver checks the durable capability_scopes grant table. It is the
+// per-(org, agent) authority layer: distinct from a capability's static
+// EnabledForScopes array, which only declares which scope *kinds* a capability
+// supports. registry.ScopeStore satisfies this interface.
+//
+// HasAnyGrants reports whether the capability is governed by the grant table
+// for the given scope kind at all (no grants of that kind => not opted in, so
+// the engine falls back to the static EnabledForScopes check). IsGrantedForScope
+// reports whether an active grant covers the exact (kind, value) — wildcard '*'
+// grants cover any value.
+type ScopeResolver interface {
+	HasAnyGrants(ctx context.Context, capabilityID, scopeKind string) (bool, error)
+	IsGrantedForScope(ctx context.Context, capabilityID, scopeKind, scopeValue string) (bool, error)
+}
+
 // Engine evaluates capability invocation requests against the registry.
 type Engine struct {
 	reg          *registry.Registry
 	subjectRoles map[string][]string
 	roleCaps     map[string][]string
+	scopes       ScopeResolver
+}
+
+// WithScopeResolver attaches a durable scope-grant resolver. Returns the same
+// Engine for chaining. Nil resolver (the default) leaves grant enforcement off,
+// preserving the prior static-only scope semantics.
+func (e *Engine) WithScopeResolver(r ScopeResolver) *Engine {
+	e.scopes = r
+	return e
 }
 
 // NewWithRBAC constructs an Engine with RBAC bindings for Enforce.
@@ -91,6 +115,11 @@ func (e *Engine) Evaluate(ctx context.Context, capID, runID, agentID, orgID, sco
 		return nil, err
 	}
 	if denial := e.denyOnScope(ctx, capEntry, scope); denial != nil {
+		return denial, nil
+	}
+	if denial, derr := e.denyOnGrant(ctx, capEntry, agentID, orgID, scope); derr != nil {
+		return nil, derr
+	} else if denial != nil {
 		return denial, nil
 	}
 	switch capEntry.RiskLevel {
@@ -153,4 +182,66 @@ func (e *Engine) denyOnScope(ctx context.Context, cap *models.Capability, scope 
 		),
 		BudgetContext: "",
 	}
+}
+
+// scopeValueFor resolves the concrete scope_value to look up in the grant table
+// for a given scope kind from the request tuple. org → orgID, agent → agentID.
+// Kinds whose value is not carried in this tuple (run/thread/workspace/user)
+// return "" — the grant check is skipped for them (they fall back to the static
+// EnabledForScopes check already applied by denyOnScope).
+func scopeValueFor(scopeKind, agentID, orgID string) string {
+	switch scopeKind {
+	case registry.ScopeKindOrg:
+		return orgID
+	case registry.ScopeKindAgent:
+		return agentID
+	default:
+		return ""
+	}
+}
+
+// denyOnGrant consults the durable capability_scopes grant table. It only acts
+// when a ScopeResolver is configured and `scope` is one of the kinds whose
+// value this tuple carries (org/agent). If the capability has *any* active
+// grant of that kind, the grant table governs it: a request whose resolved
+// scope_value is not covered (exact or wildcard) is denied. If the capability
+// has no grants of that kind, the table is not opted-in for it and the engine
+// defers to the static EnabledForScopes decision (returns nil). Returns
+// (nil, nil) when the check does not apply, (denial, nil) on a grant miss, and
+// (nil, err) only on a resolver/DB error.
+func (e *Engine) denyOnGrant(ctx context.Context, cap *models.Capability, agentID, orgID, scope string) (*Result, error) {
+	if e.scopes == nil || scope == "" {
+		return nil, nil
+	}
+	scopeValue := scopeValueFor(scope, agentID, orgID)
+	if scopeValue == "" {
+		return nil, nil
+	}
+	governed, err := e.scopes.HasAnyGrants(ctx, cap.ID, scope)
+	if err != nil {
+		return nil, err
+	}
+	if !governed {
+		return nil, nil
+	}
+	granted, err := e.scopes.IsGrantedForScope(ctx, cap.ID, scope, scopeValue)
+	if err != nil {
+		return nil, err
+	}
+	if granted {
+		return nil, nil
+	}
+	telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("decision", DecisionDeny),
+		attribute.String("risk", string(cap.RiskLevel)),
+		attribute.String("reason", "scope_grant_missing"),
+	))
+	return &Result{
+		Decision: DecisionDeny,
+		Reason: fmt.Sprintf(
+			"capability %s has no active %s-scope grant for %q",
+			cap.ID, scope, scopeValue,
+		),
+		BudgetContext: "",
+	}, nil
 }

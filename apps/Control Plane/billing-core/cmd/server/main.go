@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/hyperswitch"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/lago"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/stripe"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/billing"
@@ -97,17 +98,13 @@ func main() {
 	}
 
 	timeout := time.Duration(cfg.AdapterTimeoutSeconds) * time.Second
-	stripeAdapter := stripe.NewAdapter(stripe.Config{
-		BaseURL: cfg.StripeBaseURL,
-		APIKey:  cfg.StripeAPIKey,
-		Timeout: timeout,
-	})
+	paymentAdapter := buildPaymentAdapter(cfg, timeout)
 	lagoAdapter := lago.NewAdapter(lago.Config{
 		BaseURL: cfg.LagoBaseURL,
 		APIKey:  cfg.LagoAPIKey,
 		Timeout: timeout,
 	})
-	billingService := billing.NewService(repo, stripeAdapter, lagoAdapter, redisClient)
+	billingService := billing.NewService(repo, paymentAdapter, lagoAdapter, redisClient)
 
 	// Wire shared cross-plane publisher (velion-nats) independently from
 	// local controlplane-nats so cross-plane propagation still works if the
@@ -211,5 +208,44 @@ func main() {
 	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown error: %v", err)
+	}
+}
+
+func buildPaymentAdapter(cfg *config.Config, timeout time.Duration) billing.PaymentAdapter {
+	provider := strings.ToLower(strings.TrimSpace(cfg.PaymentProvider))
+	if provider == "" || provider == "auto" {
+		if strings.TrimSpace(cfg.HyperswitchAPIKey) != "" || strings.TrimSpace(cfg.HyperswitchPublishableKey) != "" {
+			provider = "hyperswitch"
+		} else {
+			provider = "stripe"
+		}
+	}
+
+	switch provider {
+	case "hyperswitch":
+		log.Println("billing-core payment provider: hyperswitch")
+		return hyperswitch.NewAdapter(hyperswitch.Config{
+			BaseURL:        cfg.HyperswitchBaseURL,
+			APIKey:         cfg.HyperswitchAPIKey,
+			PublishableKey: cfg.HyperswitchPublishableKey,
+			ProfileID:      cfg.HyperswitchProfileID,
+			ClientURL:      cfg.HyperswitchClientURL,
+			BackendURL:     cfg.HyperswitchBackendURL,
+			Timeout:        timeout,
+		})
+	case "stripe":
+		log.Println("billing-core payment provider: stripe")
+		return stripe.NewAdapter(stripe.Config{
+			BaseURL: cfg.StripeBaseURL,
+			APIKey:  cfg.StripeAPIKey,
+			Timeout: timeout,
+		})
+	default:
+		log.Printf("billing-core unknown PAYMENT_PROVIDER=%q; falling back to stripe", cfg.PaymentProvider)
+		return stripe.NewAdapter(stripe.Config{
+			BaseURL: cfg.StripeBaseURL,
+			APIKey:  cfg.StripeAPIKey,
+			Timeout: timeout,
+		})
 	}
 }

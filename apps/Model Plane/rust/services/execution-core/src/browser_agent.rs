@@ -74,6 +74,17 @@ pub enum ObservationStatus {
     Blocked,
 }
 
+impl ObservationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BrowserAction {
     pub action_id: String,
@@ -97,6 +108,27 @@ pub struct BrowserObservation {
     pub screenshot_ref: String,
     pub dom_snapshot_ref: String,
     pub error_message: String,
+}
+
+/// Sink for surfacing browser-agent progress as orchestration events (B4).
+///
+/// The loop calls these per dispatched action and received observation so the
+/// run-event stream (`/v1/runs/:id/events`) shows live browser progress. The
+/// concrete implementation (in `browser_events.rs`) publishes to session-core's
+/// orchestration broadcast via `RecordOrchestrationEvent`.
+///
+/// Implementations MUST be best-effort: a failure here must never surface to
+/// the loop. Errors are swallowed and logged by the implementation, and the
+/// loop ignores the returned unit regardless.
+///
+/// Kept free of proto types so the loop stays unit-testable without a gRPC
+/// client; the implementation does the wire translation.
+#[tonic::async_trait]
+pub trait BrowserEventSink: Send + Sync {
+    /// Emit that `action` was dispatched for the run/plan in `config`.
+    async fn action_dispatched(&self, config: &PlanConfig, action: &BrowserAction);
+    /// Emit that `observation` was received for the run/plan in `config`.
+    async fn observation_received(&self, config: &PlanConfig, observation: &BrowserObservation);
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +337,7 @@ pub async fn run_browser_agent_loop(
     config: PlanConfig,
     client: Option<&crate::quarry_agent::QuarryAgentClient>,
     planner: Option<&crate::llm_planner::LlmPlanner>,
+    sink: Option<&dyn BrowserEventSink>,
 ) -> (PlanStatus, Vec<BrowserObservation>, String) {
     let mut plan = AgentPlan::new(config);
     info!(plan_id = %plan.config.plan_id, "browser-agent loop started");
@@ -367,6 +400,11 @@ pub async fn run_browser_agent_loop(
                     action_type = action.action_type.as_str(),
                     "dispatching browser action to quarry"
                 );
+                // Best-effort: surface the dispatched action on the run-event
+                // stream before we block on Quarry. Never fails the loop.
+                if let Some(sink) = sink {
+                    sink.action_dispatched(&plan.config, &action).await;
+                }
                 let wire_action = crate::quarry_agent::action_to_wire(&action);
                 match client
                     .step(
@@ -380,11 +418,16 @@ pub async fn run_browser_agent_loop(
                     .await
                 {
                     Ok(wire_obs) => {
-                        pending = Some(crate::quarry_agent::observation_from_wire(
+                        let obs = crate::quarry_agent::observation_from_wire(
                             &wire_obs,
                             &action.action_id,
                             &plan.config.grant_id,
-                        ));
+                        );
+                        // Best-effort: surface the observation we just received.
+                        if let Some(sink) = sink {
+                            sink.observation_received(&plan.config, &obs).await;
+                        }
+                        pending = Some(obs);
                     }
                     Err(e) => {
                         plan.status = PlanStatus::Failed;

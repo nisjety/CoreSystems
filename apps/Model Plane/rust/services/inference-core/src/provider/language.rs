@@ -825,7 +825,14 @@ mod tests {
             summary_kind: String::new(),
         };
         let p = language_prompt(&req);
-        for cat in ["hate", "harassment", "violence", "self_harm", "sexual", "flagged"] {
+        for cat in [
+            "hate",
+            "harassment",
+            "violence",
+            "self_harm",
+            "sexual",
+            "flagged",
+        ] {
             assert!(p.contains(cat), "prompt must mention {cat}");
         }
     }
@@ -840,7 +847,11 @@ mod tests {
         assert_eq!(v["flagged"], true);
         assert_eq!(v["categories"]["hate"], 0.9);
         // non-content-safety ops leave the field empty
-        let s = parse_llm_results(LanguageOperation::Sentiment, "[{\"sentiment\":\"neg\"}]", &["x".to_owned()]);
+        let s = parse_llm_results(
+            LanguageOperation::Sentiment,
+            "[{\"sentiment\":\"neg\"}]",
+            &["x".to_owned()],
+        );
         assert!(s[0].content_safety_json.is_empty());
     }
 

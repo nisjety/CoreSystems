@@ -11,7 +11,7 @@ Dual-run migration: v1 and v2 run simultaneously with traffic split. v2 ports ar
 | Documents API | 8000 | 8010 |
 | PostgreSQL | 5432 | 5442 |
 | Qdrant | 6333 | 6345 |
-| Redis | 6379 | 6389 |
+| Dragonfly cache (Redis-compatible) | 6379 | 6389 |
 | NATS | — | 4232 |
 
 ## Pre-Migration Checklist
@@ -120,7 +120,7 @@ Dual-run migration: v1 and v2 run simultaneously with traffic split. v2 ports ar
    - Retrieval latency p95 < 2s
    - Error rate < 0.5%
    - Qdrant query latency
-   - Redis cache hit rate
+   - Dragonfly cache hit rate
 
 ## Phase 4: v1 Decommission
 
@@ -153,7 +153,7 @@ v1 stays running and data-current through Phase 3. After Phase 4, rollback requi
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | yes | — | v2 Postgres connection string |
 | `QDRANT_URL` | yes | — | v2 Qdrant HTTP endpoint |
-| `REDIS_URL` | no | redis://localhost:6379 | Redis cache (degrades gracefully) |
+| `DRAGONFLY_URL` / `CACHE_URL` / `REDIS_URL` | no | redis://localhost:6379 | Redis-compatible Dragonfly cache (degrades gracefully) |
 | `NATS_URL` | yes | — | NATS JetStream for async events |
 | `AZURE_OPENAI_API_KEY` | yes | — | Embedding provider |
 | `AZURE_OPENAI_ENDPOINT` | yes | — | Embedding endpoint |

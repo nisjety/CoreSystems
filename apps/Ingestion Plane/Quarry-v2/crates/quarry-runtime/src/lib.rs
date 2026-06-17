@@ -17,6 +17,7 @@ pub mod dns_guard;
 pub mod driver;
 pub mod driver_plan;
 pub mod driver_registry;
+pub mod egress_broker;
 pub mod event_bus;
 pub mod events;
 pub mod host_scheduler;
@@ -24,6 +25,7 @@ pub mod intent_classifier;
 pub mod nats_event_bus;
 
 pub mod agent_memory;
+pub mod autoprompt;
 pub mod autoscale;
 pub mod cached_profile_store;
 pub mod crawl_frontier;
@@ -59,6 +61,7 @@ pub mod postgres_queue;
 pub mod proxy_pool;
 pub mod publisher;
 pub mod request_queue;
+pub mod rerank;
 pub mod retry;
 pub mod robots_cache;
 pub mod s3_profile_store;
@@ -81,6 +84,7 @@ pub use answer::{
     AnswerPipeline, AnswerRequest, AnswerResult, Citation, ClosureFetcher, MarkdownFetcher,
     SimpleHttpMarkdownFetcher,
 };
+pub use autoprompt::{ModelPlaneQueryRewriter, QueryRewriter};
 pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
 pub use browser_driver::BrowserDriverAdapter;
 pub use crawl_frontier::{
@@ -97,6 +101,7 @@ pub use deep_research::{
 pub use driver::{BrowserMeta, Driver, DriverSelection};
 pub use driver_plan::DriverPlan;
 pub use driver_registry::DriverRegistry;
+pub use egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
 pub use events::EventSink;
 pub use fallback_driver::FallbackDriver;
@@ -127,6 +132,7 @@ pub use policy::{
 pub use publisher::EventPublisher;
 pub use quarry_tls::TlsProfile;
 pub use request_queue::{InMemoryRequestQueue, Priority, QueueStats, QueuedRequest, RequestQueue};
+pub use rerank::{ModelPlaneSearchReranker, RerankingSearchProvider, SearchReranker};
 pub use retry::{backoff_delay, classify, execute_with_retry, wait, IdempotencyKey, RetryClass};
 pub use robots_cache::{ReqwestRobotsFetcher, RobotsCache, RobotsFetcher};
 pub use s3_profile_store::S3ProfileStore;

@@ -12,7 +12,10 @@ use tracing::{info, warn};
 use super::{narrow_f64, ModelInfo, ProviderError};
 
 const DEFAULT_AZURE_API_VERSION: &str = "2024-11-30";
-const DEFAULT_MODEL: &str = "prebuilt-document";
+// `prebuilt-document` was removed in the v4 GA API (2024-11-30) → HTTP 404
+// ModelNotFound. `prebuilt-layout` is its general-purpose replacement
+// (text + tables + structure) and is available under this api-version.
+const DEFAULT_MODEL: &str = "prebuilt-layout";
 const POLL_INTERVAL_MS: u64 = 500;
 const MAX_POLL_ATTEMPTS: usize = 60;
 

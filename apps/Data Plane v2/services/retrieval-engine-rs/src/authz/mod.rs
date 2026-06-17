@@ -12,7 +12,7 @@
 //!         * [`NoopPolicyClient`]   — local dev: pass-through allow-all.
 //!         * [`HttpPolicyClient`]   — production: HTTP calls to the
 //!                                     Control Plane services with a
-//!                                     Redis-backed TTL cache.
+//!                                     Redis-compatible TTL cache.
 //!
 //! The `CONTROL_PLANE_ENFORCEMENT` env var selects the impl:
 //!   - `off`        → NoopPolicyClient (default for v2.3; back-compat)
@@ -32,7 +32,8 @@ pub mod policy;
 
 pub use context::{AuthContext, AuthMethod, Claims, EffectiveAcl};
 pub use jwks::JwksCache;
-#[allow(unused_imports)] // PolicyDecision is part of the public surface; consumers land in later wiring
+#[allow(unused_imports)]
+// PolicyDecision is part of the public surface; consumers land in later wiring
 pub use policy::{
     EnforcementMode, HttpPolicyClient, NoopPolicyClient, PolicyClient, PolicyDecision,
 };

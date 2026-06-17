@@ -35,6 +35,9 @@ base64 = "0.22"
 # Concurrent cache
 dashmap = "6"
 
+# Hot-swappable runtime routing policy (lock-free reads)
+arc-swap = "1.9"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 

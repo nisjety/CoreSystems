@@ -58,7 +58,12 @@ impl ChromiumoxideDriver {
             return Ok(());
         }
 
-        let config = BrowserConfig::builder().build().map_err(|e| {
+        let mut builder = BrowserConfig::builder().arg("--disable-dev-shm-usage");
+        if env_truthy("QUARRY_BROWSER_NO_SANDBOX") {
+            builder = builder.no_sandbox();
+        }
+
+        let config = builder.build().map_err(|e| {
             QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide config build failed")
                 .with_details(json!({ "error": e.to_string() }))
         })?;
@@ -87,6 +92,12 @@ impl ChromiumoxideDriver {
             )
         })
     }
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 #[async_trait]

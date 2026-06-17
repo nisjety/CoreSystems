@@ -165,3 +165,76 @@ impl NextAction {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> NextAction {
+        serde_json::from_str(json).expect("valid action json")
+    }
+
+    #[test]
+    fn navigate_maps_to_goto_with_url() {
+        let action = parse(r#"{"action":"navigate","url":"https://example.com"}"#)
+            .into_browser_action()
+            .expect("navigate is not terminal");
+        assert_eq!(action.action_type, ActionType::Goto);
+        assert_eq!(action.url, "https://example.com");
+    }
+
+    #[test]
+    fn click_maps_to_click_with_selector() {
+        let action = parse(r#"{"action":"click","selector":"button.submit"}"#)
+            .into_browser_action()
+            .expect("click is not terminal");
+        assert_eq!(action.action_type, ActionType::Click);
+        assert_eq!(action.selector, "button.submit");
+    }
+
+    #[test]
+    fn type_maps_to_type_with_value() {
+        // Double-hash raw delimiter so the `#` in the CSS id selector doesn't
+        // terminate the string.
+        let action = parse(r##"{"action":"type","selector":"#q","value":"rust lang"}"##)
+            .into_browser_action()
+            .expect("type is not terminal");
+        assert_eq!(action.action_type, ActionType::Type);
+        assert_eq!(action.value, "rust lang");
+        assert_eq!(action.selector, "#q");
+    }
+
+    #[test]
+    fn done_is_terminal() {
+        assert!(parse(r#"{"action":"done"}"#)
+            .into_browser_action()
+            .is_none());
+    }
+
+    #[test]
+    fn unknown_action_falls_back_to_observe() {
+        // A hallucinated/unsupported action degrades to a safe re-observe
+        // rather than failing the loop.
+        let action = parse(r#"{"action":"frobnicate"}"#)
+            .into_browser_action()
+            .expect("unknown maps to observe, not terminal");
+        assert_eq!(action.action_type, ActionType::Observe);
+    }
+
+    #[test]
+    fn missing_required_action_is_a_parse_error() {
+        // `action` is required by the schema; absent it, parsing must fail so
+        // the caller degrades to the deterministic planner.
+        assert!(serde_json::from_str::<NextAction>(r#"{"selector":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn extra_unknown_fields_are_ignored() {
+        // The model emits a `reason` field (present in ACTION_SCHEMA) that
+        // NextAction does not capture; serde must ignore it, not reject.
+        let action = parse(r#"{"action":"scroll","reason":"need to see more"}"#)
+            .into_browser_action()
+            .expect("scroll is not terminal");
+        assert_eq!(action.action_type, ActionType::Scroll);
+    }
+}

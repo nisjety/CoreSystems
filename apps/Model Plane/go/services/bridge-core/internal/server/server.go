@@ -182,14 +182,30 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	telemetry.IngestTotal.Add(r.Context(), 1, metric.WithAttributes(
-		attribute.String("channel", sess.Channel),
-		attribute.String("outcome", "ok"),
-	))
+	// Deliver the processed result back through the channel. For the noop
+	// adapter this is a logged no-op; for the webhook adapter this enqueues a
+	// durable, retried delivery to the external channel. Enqueue failures are
+	// surfaced as a delivery_error outcome but the ingest still returns the
+	// processed result so the synchronous caller is not blocked on transport.
+	delivered := true
+	if derr := adapter.Deliver(r.Context(), id, result); derr != nil {
+		delivered = false
+		slog.Warn("channel deliver failed", "session_id", id, "channel", sess.Channel, "error", derr)
+		telemetry.IngestTotal.Add(r.Context(), 1, metric.WithAttributes(
+			attribute.String("channel", sess.Channel),
+			attribute.String("outcome", "delivery_error"),
+		))
+	} else {
+		telemetry.IngestTotal.Add(r.Context(), 1, metric.WithAttributes(
+			attribute.String("channel", sess.Channel),
+			attribute.String("outcome", "ok"),
+		))
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id": id,
 		"result":     result,
+		"delivered":  delivered,
 	})
 }
 

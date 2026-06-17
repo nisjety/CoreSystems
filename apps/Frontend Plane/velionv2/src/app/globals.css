@@ -1356,6 +1356,10 @@ button:disabled {
 	grid-template-rows: 31% 25.5% minmax(0, 1fr);
 }
 
+.velion-home-bands.velion-home-bands-previewing {
+	grid-template-rows: 21% minmax(0, 1fr) 0fr;
+}
+
 .velion-home-band {
 	display: flex;
 	min-height: 0;

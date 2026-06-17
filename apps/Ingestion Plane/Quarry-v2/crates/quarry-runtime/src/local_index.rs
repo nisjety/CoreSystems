@@ -271,8 +271,13 @@ impl TantivyLocalIndex {
             _ => user_query,
         };
 
+        // Over-fetch BM25 candidates so the recency rerank below has room to
+        // reorder before truncating to the caller's limit.
+        let candidate_limit = limit
+            .saturating_mul(RECENCY_OVERFETCH)
+            .clamp(limit, RECENCY_MAX_CANDIDATES);
         let top_docs = searcher
-            .search(&*final_query, &TopDocs::with_limit(limit))
+            .search(&*final_query, &TopDocs::with_limit(candidate_limit))
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
@@ -280,8 +285,13 @@ impl TantivyLocalIndex {
                 )
             })?;
 
-        let mut results = Vec::with_capacity(top_docs.len());
-        for (rank_idx, (_score, doc_address)) in top_docs.into_iter().enumerate() {
+        // Combine BM25 with a gentle recency decay over the indexed `fetched_at`
+        // so fresher corpus documents edge ahead when relevance is comparable —
+        // without letting age override a strong lexical match (the multiplier is
+        // bounded to `[RECENCY_FLOOR, 1.0]`).
+        let now_secs = Utc::now().timestamp();
+        let mut scored: Vec<(f32, SearchResult)> = Vec::with_capacity(top_docs.len());
+        for (score, doc_address) in top_docs {
             let retrieved: tantivy::TantivyDocument = searcher.doc(doc_address).map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
@@ -290,14 +300,30 @@ impl TantivyLocalIndex {
             })?;
             let url = field_text(&retrieved, self.schema.url).unwrap_or_default();
             let title = field_text(&retrieved, self.schema.title);
-            results.push(SearchResult {
-                url,
-                title,
-                snippet: None,
-                rank: (rank_idx as u32) + 1,
-                provider: "tantivy_local".to_string(),
-            });
+            let recency =
+                recency_multiplier(field_date_secs(&retrieved, self.schema.fetched_at), now_secs);
+            scored.push((
+                score * recency,
+                SearchResult {
+                    url,
+                    title,
+                    snippet: None,
+                    rank: 0,
+                    provider: "tantivy_local".to_string(),
+                    ..Default::default()
+                },
+            ));
         }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        let results = scored
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (_combined, mut result))| {
+                result.rank = (idx as u32) + 1;
+                result
+            })
+            .collect();
         Ok(results)
     }
 
@@ -311,6 +337,66 @@ fn field_text(doc: &tantivy::TantivyDocument, field: Field) -> Option<String> {
     use tantivy::schema::Value;
     doc.get_first(field)
         .and_then(|v| v.as_str().map(|s| s.to_string()))
+}
+
+/// Over-fetch factor + hard cap on BM25 candidates considered for the recency
+/// rerank, so a small `limit` still has neighbours to reorder.
+const RECENCY_OVERFETCH: usize = 4;
+const RECENCY_MAX_CANDIDATES: usize = 200;
+/// Recency decay knobs: a `fetched_at` half-life and a floor so age only nudges
+/// ranking (the multiplier stays within `[RECENCY_FLOOR, 1.0]`).
+const RECENCY_HALF_LIFE_DAYS: f32 = 180.0;
+const RECENCY_FLOOR: f32 = 0.5;
+
+/// Read a stored DATE field as unix seconds.
+fn field_date_secs(doc: &tantivy::TantivyDocument, field: Field) -> Option<i64> {
+    use tantivy::schema::Value;
+    doc.get_first(field)
+        .and_then(|v| v.as_datetime())
+        .map(|dt| dt.into_utc().unix_timestamp())
+}
+
+/// Gentle recency multiplier in `[RECENCY_FLOOR, 1.0]`: 1.0 for a just-fetched
+/// doc, decaying by half-life toward the floor for older docs. A missing date is
+/// neutral (1.0).
+fn recency_multiplier(fetched_at_secs: Option<i64>, now_secs: i64) -> f32 {
+    let Some(ts) = fetched_at_secs else {
+        return 1.0;
+    };
+    let age_days = (now_secs.saturating_sub(ts).max(0) as f32) / 86_400.0;
+    let decay = 0.5_f32.powf(age_days / RECENCY_HALF_LIFE_DAYS);
+    RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * decay
+}
+
+#[cfg(test)]
+mod recency_tests {
+    use super::{recency_multiplier, RECENCY_FLOOR, RECENCY_HALF_LIFE_DAYS};
+
+    const DAY: i64 = 86_400;
+
+    #[test]
+    fn fresh_doc_is_unboosted_and_old_doc_decays() {
+        let now = 1_000 * DAY;
+        // Just-fetched → ~1.0 (top of the range).
+        assert!((recency_multiplier(Some(now), now) - 1.0).abs() < 1e-4);
+        // One half-life old → floor + half the remaining range.
+        let half_life = now - (RECENCY_HALF_LIFE_DAYS as i64) * DAY;
+        let expected = RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * 0.5;
+        assert!((recency_multiplier(Some(half_life), now) - expected).abs() < 1e-2);
+        // Ancient doc → approaches the floor, never below it.
+        let ancient = now - 5_000 * DAY;
+        let m = recency_multiplier(Some(ancient), now);
+        assert!(m >= RECENCY_FLOOR && m < RECENCY_FLOOR + 0.05);
+    }
+
+    #[test]
+    fn missing_or_future_date_is_neutral() {
+        let now = 1_000 * DAY;
+        assert_eq!(recency_multiplier(None, now), 1.0);
+        // Future fetched_at (clock skew) clamps to age 0 → ~1.0, never > 1.0.
+        let future = recency_multiplier(Some(now + 10 * DAY), now);
+        assert!((future - 1.0).abs() < 1e-4);
+    }
 }
 
 #[async_trait]

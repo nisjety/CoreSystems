@@ -207,6 +207,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "connections_list_failed", err.Error())
 		}
+		connections = filterConnectionsByCategory(connections, firstNonEmpty(c.Query("category"), c.Query("providerCategory")))
 		return success(c, fiber.Map{"connections": connections})
 	})
 
@@ -798,6 +799,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "profile_projection_failed", err.Error())
 		}
+		connections = filterConnectionsByCategory(connections, firstNonEmpty(c.Query("category"), c.Query("providerCategory")))
 		items := make([]fiber.Map, 0, len(connections))
 		for _, connection := range connections {
 			consents, _ := cfg.Repo.ListConnectionConsents(c.UserContext(), connection.ID)
@@ -830,6 +832,22 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		var token oauth.AccessTokenResult
 		var err error
 		if strings.TrimSpace(body.ConnectionID) != "" {
+			if strings.TrimSpace(body.OrganizationID) == "" {
+				return apiError(c, fiber.StatusBadRequest, "organization_required", "organizationId is required.")
+			}
+			connection, lookupErr := cfg.Repo.GetConnection(c.UserContext(), strings.TrimSpace(body.ConnectionID))
+			if lookupErr != nil {
+				if errors.Is(lookupErr, store.ErrNotFound) {
+					return apiError(c, fiber.StatusNotFound, "connection_not_found", "No active connection exists for this organization and connector.")
+				}
+				return apiError(c, fiber.StatusBadGateway, "token_broker_failed", "Could not resolve a provider access token.")
+			}
+			if connection.DeletedAt != nil || connection.Status == "deleted" {
+				return apiError(c, fiber.StatusNotFound, "connection_not_found", "No active connection exists for this organization and connector.")
+			}
+			if strings.TrimSpace(connection.OrganizationID) != strings.TrimSpace(body.OrganizationID) {
+				return apiError(c, fiber.StatusForbidden, "connection_org_mismatch", "Connection does not belong to the requested organization.")
+			}
 			token, err = cfg.OAuth.AccessTokenForConnection(c.UserContext(), body.ConnectionID)
 		} else if strings.TrimSpace(body.OrganizationID) == "" {
 			return apiError(c, fiber.StatusBadRequest, "organization_required", "organizationId is required.")
@@ -1989,9 +2007,29 @@ func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessT
 		ExpiresAt:      token.ExpiresAt,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := cfg.Repo.InsertTokenLease(ctx, lease); err != nil && cfg.Logger != nil {
-		cfg.Logger.Warn().Err(err).Str("connection_id", connection.ID).Msg("record token lease")
+	if err := cfg.Repo.InsertTokenLease(ctx, lease); err != nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn().Err(err).Str("connection_id", connection.ID).Msg("record token lease")
+		}
+		return
 	}
+	recordAuditEvent(ctx, cfg, store.AuditEvent{
+		OrganizationID: connection.OrganizationID,
+		UserID:         connection.UserID,
+		ConnectionID:   connection.ID,
+		EventType:      "connection.token_leased",
+		ProviderKey:    connection.ProviderKey,
+		Metadata: map[string]any{
+			"consumer":  lease.Consumer,
+			"leaseId":   lease.ID,
+			"expiresAt": lease.ExpiresAt,
+		},
+	})
+	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.token_lease_created", connection, map[string]any{
+		"consumer":  lease.Consumer,
+		"leaseId":   lease.ID,
+		"expiresAt": lease.ExpiresAt,
+	})
 }
 
 func tokenLeaseConsumerAllowed(cfg config.Config, consumer string) bool {
@@ -2008,6 +2046,22 @@ func tokenLeaseConsumerAllowed(cfg config.Config, consumer string) bool {
 		}
 	}
 	return false
+}
+
+func filterConnectionsByCategory(connections []store.Connection, category string) []store.Connection {
+	category = strings.ToLower(strings.TrimSpace(category))
+	if category == "" || category == "all" {
+		return connections
+	}
+	filtered := make([]store.Connection, 0, len(connections))
+	for _, connection := range connections {
+		provider, ok := providers.Find(firstNonEmpty(connection.ProviderKey, connection.ConnectorType))
+		if !ok || provider.Category != category {
+			continue
+		}
+		filtered = append(filtered, connection)
+	}
+	return filtered
 }
 
 func buildGDPRExport(ctx context.Context, cfg ServerConfig, organizationID, userID string) (fiber.Map, error) {

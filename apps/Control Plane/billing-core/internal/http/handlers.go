@@ -216,10 +216,52 @@ func (s *Server) createCheckoutSession(c *gin.Context) {
 			strings.Contains(message, "invalid"):
 			c.JSON(http.StatusBadRequest, gin.H{"error": message})
 		default:
-			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to create stripe checkout session"})
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to create checkout session"})
 		}
 		return
 	}
 
 	c.JSON(http.StatusCreated, session)
+}
+
+func (s *Server) confirmCheckoutSession(c *gin.Context) {
+	orgID := c.Param("orgId")
+
+	var req struct {
+		Plan         string `json:"plan" binding:"required"`
+		PaymentID    string `json:"payment_id,omitempty"`
+		ClientSecret string `json:"client_secret,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "plan and payment reference are required"})
+		return
+	}
+	if strings.TrimSpace(req.PaymentID) == "" && strings.TrimSpace(req.ClientSecret) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "payment_id or client_secret is required"})
+		return
+	}
+
+	status, err := s.billingCore.ConfirmCheckoutSession(
+		c.Request.Context(),
+		orgID,
+		req.Plan,
+		req.PaymentID,
+		req.ClientSecret,
+	)
+	if err != nil {
+		message := err.Error()
+		switch {
+		case strings.Contains(message, "required"),
+			strings.Contains(message, "supported"),
+			strings.Contains(message, "mismatch"),
+			strings.Contains(message, "not configured"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": message})
+		default:
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to confirm checkout session"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
 }

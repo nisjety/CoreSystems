@@ -1,0 +1,69 @@
+use axum::{
+    extract::{Extension, Path, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::{
+    config::AppState,
+    envelope::{error, ok},
+    middleware::AuthenticatedUser,
+};
+
+use super::dispatchers::{
+    dispatch_connect_source, dispatch_crawl_site, dispatch_import_source, dispatch_recrawl,
+    dispatch_scrape_url, dispatch_toggle_policy, dispatch_upload_files,
+};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExecuteActionRequest {
+    action_id: String,
+    input: Value,
+}
+
+pub(super) async fn execute_action(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<ExecuteActionRequest>,
+) -> Response {
+    match body.action_id.as_str() {
+        "knowledge.recrawl_source" => dispatch_recrawl(&state, &user, &headers, &body.input).await,
+        "knowledge.scrape_url" => dispatch_scrape_url(&state, &user, &headers, &body.input).await,
+        "knowledge.crawl_site" => dispatch_crawl_site(&state, &user, &headers, &body.input).await,
+        "knowledge.import_source" => {
+            dispatch_import_source(&state, &user, &headers, &body.input).await
+        }
+        "knowledge.connect_source" => {
+            dispatch_connect_source(&state, &user, &headers, &body.input).await
+        }
+        "knowledge.upload_files" => dispatch_upload_files().await,
+        "workflows.toggle_policy" => dispatch_toggle_policy(&state, &user, &body.input).await,
+        other => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(error(
+                "not_implemented",
+                format!("no live dispatch for action '{other}'"),
+            )),
+        )
+            .into_response(),
+    }
+}
+
+pub(super) async fn action_run_status(
+    _state: State<AppState>,
+    _user: Extension<AuthenticatedUser>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(ok(json!({
+            "runId": run_id,
+            "status": "queued",
+        }))),
+    )
+}

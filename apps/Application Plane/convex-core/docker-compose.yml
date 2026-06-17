@@ -258,7 +258,7 @@ services:
     depends_on:
       affine-postgres:
         condition: service_healthy
-      affine-redis:
+      affine-dragonfly:
         condition: service_healthy
       affine-migration:
         condition: service_completed_successfully
@@ -267,7 +267,7 @@ services:
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
       DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@affine-postgres:5432/affine
-      REDIS_SERVER_HOST: affine-redis
+      REDIS_SERVER_HOST: affine-dragonfly
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
       - affine-uploads:/root/.affine/storage
@@ -301,7 +301,7 @@ services:
     depends_on:
       affine-postgres:
         condition: service_healthy
-      affine-redis:
+      affine-dragonfly:
         condition: service_healthy
     command: ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
     environment:
@@ -309,7 +309,7 @@ services:
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
       DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@affine-postgres:5432/affine
-      REDIS_SERVER_HOST: affine-redis
+      REDIS_SERVER_HOST: affine-dragonfly
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
       - affine-uploads:/root/.affine/storage
@@ -356,23 +356,30 @@ services:
       timeout: 5s
       retries: 10
 
-  affine-redis:
-    image: redis:7-alpine
-    container_name: affine-redis
+  affine-dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: affine-dragonfly
     profiles: ["affine"]
     restart: unless-stopped
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 15s
+    command:
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
+    volumes:
+      - affine-dragonfly-data:/data
     networks:
       - app-net
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 384M
           cpus: "0.25"
         reservations:
-          memory: 64M
+          memory: 128M
     logging:
       driver: json-file
       options:
@@ -392,6 +399,8 @@ volumes:
   affine-config:
     driver: local
   affine-postgres-data:
+    driver: local
+  affine-dragonfly-data:
     driver: local
 
 networks:

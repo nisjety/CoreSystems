@@ -1,0 +1,1595 @@
+import { MoreHorizontal } from 'lucide-solid'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js'
+import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
+import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
+import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
+import {
+  confirmBillingCheckout,
+  loadBillingAccount,
+  startBillingCheckout,
+  type BillingAccount,
+  type CheckoutSession,
+} from '@/features/billing/lib/api'
+import {
+  billingPlans,
+  isCheckoutActivatingStatus,
+  paidBillingPlan,
+  planLabel,
+  type BillingPlanId,
+} from '@/features/billing/lib/plans'
+import { requestJson } from '@/shared/api/http'
+import { getSession } from '@/shared/session/session-store'
+import {
+  getWorkspaceSettingsSection,
+  isWorkspaceSettingsSection,
+  workspaceSettingsSectionIds,
+  workspaceSettingsSections,
+  type WorkspaceSettingsSectionId,
+} from '@/features/settings/lib/settings-sections'
+import {
+  DataRow,
+  FeaturePanel,
+  Metric,
+  SectionHeader,
+  SettingsButton,
+  SettingsField,
+  SettingsHero,
+  SettingsSaveActions,
+  SettingsSelect,
+  SettingsSurface,
+  StatusGrid,
+  ToggleRow,
+  type StatusCard,
+} from '@/features/settings/components/settings-ui'
+
+export type { WorkspaceSettingsSectionId }
+export { getWorkspaceSettingsSection, isWorkspaceSettingsSection, workspaceSettingsSectionIds, workspaceSettingsSections }
+
+type LiveMember = { userId: string; name?: string; email: string; role: string; status: string }
+type MemberListResponse = { members?: unknown[]; count?: number }
+
+type IntegrationSettingsProvider = {
+  key: string
+  label: string
+  category: string
+  configured: boolean
+  status: string
+  missingConfig: string[]
+  directOAuthReady: boolean
+  capabilities: Array<{ key: string; sensitive?: boolean }>
+}
+
+type IntegrationSettingsConnection = {
+  id: string
+  providerKey: string
+  providerLabel: string
+  displayName: string
+  status: string
+  capabilities: string[]
+  scopeCount: number
+  syncStatus: string
+  latestSyncJob?: { status: string; updatedAt?: string }
+}
+
+type IntegrationSettingsSummary = {
+  metrics: {
+    connected: number
+    failed: number
+    readyProviders: number
+    syncing: number
+    totalProviders: number
+  }
+  providers: IntegrationSettingsProvider[]
+  connections: IntegrationSettingsConnection[]
+}
+
+type IntegrationSettingsProvidersResponse = { providers?: unknown[] }
+type IntegrationSettingsConnectionsResponse = { connections?: unknown[] }
+
+type ConnectSessionResult = {
+  authMode?: 'direct-oauth'
+  connectUrl: string
+  expiresAt?: string
+  providerConfigKey?: string
+  sessionToken?: string
+}
+
+type IntegrationSettingsRow = {
+  action: 'admin' | 'connect' | 'loading' | 'missing' | 'connected'
+  connection?: IntegrationSettingsConnection
+  detail: string
+  name: string
+  provider: IntegrationSettingsProvider
+  status: string
+}
+
+type AuditEvent = {
+  id?: string
+  action?: string
+  actor?: string
+  outcome?: string
+  resource?: string
+  ipAddress?: string
+  requestId?: string
+  createdAt?: string
+}
+
+const fallbackIntegrationRows = [
+  { name: 'Microsoft 365', detail: 'SharePoint, OneDrive, Outlook, Teams', status: 'Loading', action: 'loading' as const },
+  { name: 'Google Workspace', detail: 'Drive, Gmail, Calendar', status: 'Loading', action: 'loading' as const },
+  { name: 'Slack', detail: 'Workspace metadata and channels', status: 'Loading', action: 'loading' as const },
+  { name: 'GitHub', detail: 'Repositories, README, issues', status: 'Loading', action: 'loading' as const },
+]
+
+const securityToggles = [
+  {
+    title: 'Require MFA for admins',
+    description: 'Admins must use multi-factor authentication before accessing organization settings.',
+    enabled: true,
+  },
+  {
+    title: 'Restrict sign-in to verified domains',
+    description: 'Only users with approved workspace domains can sign in.',
+    enabled: true,
+  },
+  {
+    title: 'Log admin configuration changes',
+    description: 'Keep an audit trail for billing, member, SSO, and integration changes.',
+    enabled: true,
+  },
+]
+
+const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
+  workspace: [
+    { label: 'Primary domain', value: 'Verified', detail: 'aquatiq.no is ready for customer-facing links.', tone: 'ok' },
+    { label: 'Data region', value: 'Europe', detail: 'All new workspace data is stored in EU infrastructure.', tone: 'neutral' },
+    { label: 'Routing owner', value: 'Support ops', detail: 'Default inbox ownership is assigned.', tone: 'ok' },
+  ],
+  members: [],
+  billing: [],
+  sso: [
+    { label: 'Provider', value: 'Google', detail: 'Metadata loaded from Google Workspace.', tone: 'ok' },
+    { label: 'SCIM', value: 'Ready', detail: 'Provisioning token generated but not enforced.', tone: 'neutral' },
+    { label: 'Enforcement', value: 'Admins only', detail: 'Members can still sign in with email.', tone: 'warn' },
+  ],
+  'org-security': [
+    { label: 'MFA', value: 'Required', detail: 'Admins must use MFA for sensitive settings.', tone: 'ok' },
+    { label: 'Sessions', value: '30 days', detail: 'Idle sessions are revoked after 30 days.', tone: 'neutral' },
+    { label: 'Audit log', value: '365 days', detail: 'Security and billing changes are retained.', tone: 'ok' },
+  ],
+  integrations: [
+    { label: 'Connected apps', value: '2 / 4', detail: 'Zendesk and Slack are connected.', tone: 'neutral' },
+    { label: 'Sync health', value: 'Healthy', detail: 'Last workspace sync finished 8 minutes ago.', tone: 'ok' },
+    { label: 'Webhook errors', value: '0', detail: 'No failed deliveries in the last 24 hours.', tone: 'ok' },
+  ],
+  // Router policy and fine-tune sections render their own dedicated pages
+  // (no shared status grid), so these stay empty.
+  'router-policy': [],
+  finetune: [],
+}
+
+const domainRows = [
+  { domain: 'aquatiq.no', status: 'Verified', owner: 'Customer portal' },
+  { domain: 'support.aquatiq.no', status: 'DNS pending', owner: 'Help center' },
+]
+
+const businessHourRows = [
+  { day: 'Monday-Friday', hours: '08:00-17:00', inbox: 'Priority support' },
+  { day: 'Saturday', hours: '10:00-14:00', inbox: 'Overflow' },
+]
+
+const roleRows = [
+  { role: 'Owner', access: 'Full workspace, billing, and security', members: '1' },
+  { role: 'Admin', access: 'Members, inboxes, automations, and integrations', members: '1' },
+  { role: 'Agent', access: 'Assigned conversations and knowledge suggestions', members: '1' },
+  { role: 'Viewer', access: 'Reports and read-only customer context', members: '0' },
+]
+
+function recordFrom(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
+}
+
+function stringValue(record: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+function normalizeMember(value: unknown): LiveMember | null {
+  const member = recordFrom(value)
+  const userId = stringValue(member, 'userId', 'user_id', 'id')
+  const email = stringValue(member, 'email', 'userEmail', 'user_email', 'invited_email', 'invitedEmail') || userId
+  if (!userId && !email) return null
+
+  return {
+    userId: userId || email,
+    name: stringValue(member, 'name', 'displayName', 'display_name') || undefined,
+    email,
+    role: stringValue(member, 'role') || 'member',
+    status: stringValue(member, 'status') || 'active',
+  }
+}
+
+function normalizeMemberList(payload: unknown): LiveMember[] {
+  const record = recordFrom(payload)
+  const members = Array.isArray(record.members)
+    ? record.members
+    : Array.isArray(payload)
+      ? payload
+      : []
+
+  return members.map(normalizeMember).filter((member): member is LiveMember => Boolean(member))
+}
+
+const ssoMappingRows = [
+  { attribute: 'email', source: 'primaryEmail', destination: 'User email' },
+  { attribute: 'department', source: 'orgUnitPath', destination: 'Team' },
+  { attribute: 'role', source: 'customSchema.velionRole', destination: 'Workspace role' },
+]
+
+const webhookRows = [
+  { endpoint: 'Zendesk ticket sync', status: '200 OK', lastRun: '8 min ago' },
+  { endpoint: 'Slack escalation', status: '200 OK', lastRun: '14 min ago' },
+  { endpoint: 'CRM customer upsert', status: 'Paused', lastRun: '2 days ago' },
+]
+
+export function VelionWorkspaceSettingsPage(props: {
+  section?: WorkspaceSettingsSectionId
+}) {
+  const session = getSession()
+  const section = () => props.section ?? 'workspace'
+  const details = () => getWorkspaceSettingsSection(section())
+  const orgId = () => session.activeOrg?.id ?? null
+  const [billingAccount, setBillingAccount] = createSignal<BillingAccount | null>(null)
+  const [billingLoading, setBillingLoading] = createSignal(false)
+  const [billingError, setBillingError] = createSignal<string | null>(null)
+
+  async function refreshBillingAccount(signal?: AbortSignal) {
+    setBillingLoading(true)
+    setBillingError(null)
+    try {
+      setBillingAccount(await loadBillingAccount(signal))
+    } catch (reason) {
+      if (reason instanceof Error && reason.name === 'AbortError') return
+      setBillingError(reason instanceof Error ? reason.message : 'Could not load billing account.')
+    } finally {
+      if (!signal?.aborted) setBillingLoading(false)
+    }
+  }
+
+  createEffect(() => {
+    if (section() !== 'billing') return
+
+    const controller = new AbortController()
+    void refreshBillingAccount(controller.signal)
+    onCleanup(() => controller.abort())
+  })
+
+  const billingStatusCards = (): StatusCard[] => [
+    {
+      label: 'Current plan',
+      value: billingAccount() ? planLabel(billingAccount()?.plan) : '—',
+      detail: billingError() ?? (billingAccount()?.subscription_state
+        ? `Status: ${billingAccount()?.subscription_state}`
+        : billingLoading()
+          ? 'Loading plan information...'
+          : 'Plan information unavailable'),
+      tone: billingAccount()?.subscription_state === 'past_due' ? 'warn' : billingAccount() ? 'ok' : 'neutral',
+    },
+    {
+      label: 'Credits',
+      value: billingAccount()?.credits != null ? String(billingAccount()?.credits) : '—',
+      detail: 'Available credits on this plan',
+      tone: 'neutral',
+    },
+    {
+      label: 'Payment method',
+      value: billingAccount()?.provider_customer_id?.payment ? 'Stored' : '—',
+      detail: billingAccount()?.provider_customer_id?.payment
+        ? 'Payment customer is synced.'
+        : 'Add a payment method through checkout.',
+      tone: billingAccount()?.provider_customer_id?.payment ? 'ok' : 'neutral',
+    },
+  ]
+
+  const liveStatusCards = createMemo<Record<WorkspaceSettingsSectionId, StatusCard[]>>(() => ({
+    ...sectionStatusCards,
+    billing: billingStatusCards(),
+    members: sectionStatusCards.members,
+  }))
+
+  return (
+    <Switch
+      fallback={
+        <WorkspaceSettingsChrome
+          section={section()}
+          details={details()}
+          orgId={orgId()}
+          billingAccount={billingAccount()}
+          billingError={billingError()}
+          billingLoading={billingLoading()}
+          liveStatusCards={liveStatusCards()}
+          onRefreshBilling={() => refreshBillingAccount()}
+        />
+      }
+    >
+      <Match when={section() === 'router-policy'}>
+        <RouterPolicyPage />
+      </Match>
+      <Match when={section() === 'finetune'}>
+        <FinetuneJobsPage />
+      </Match>
+    </Switch>
+  )
+}
+
+function WorkspaceSettingsChrome(props: {
+  section: WorkspaceSettingsSectionId
+  details: ReturnType<typeof getWorkspaceSettingsSection>
+  orgId: string | null
+  billingAccount: BillingAccount | null
+  billingError: string | null
+  billingLoading: boolean
+  liveStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]>
+  onRefreshBilling: () => Promise<void>
+}) {
+  const details = () => props.details
+  const section = () => props.section
+  return (
+    <SettingsSurface contentVariant="workspace">
+      <SettingsHero
+        eyebrow="Admin"
+        title={details().title}
+        description={details().description}
+      />
+
+      <Show when={props.liveStatusCards[section()].length > 0}>
+        <StatusGrid cards={props.liveStatusCards[section()]} />
+      </Show>
+
+      <section id={details().id} class="velion-settings-section velion-settings-section--after-status">
+        <WorkspaceSettingsSection
+          section={section()}
+          orgId={props.orgId}
+          billingAccount={props.billingAccount}
+          billingError={props.billingError}
+          billingLoading={props.billingLoading}
+          onRefreshBilling={props.onRefreshBilling}
+        />
+      </section>
+
+      <SettingsSaveActions saveLabel={details().saveLabel} />
+    </SettingsSurface>
+  )
+}
+
+export default function SettingsPage(props: { section?: string }) {
+  const section = () => props.section && isWorkspaceSettingsSection(props.section)
+    ? props.section
+    : 'workspace'
+
+  return <VelionWorkspaceSettingsPage section={section()} />
+}
+
+function WorkspaceSettingsSection(props: {
+  billingAccount: BillingAccount | null
+  billingError: string | null
+  billingLoading: boolean
+  section: WorkspaceSettingsSectionId
+  orgId: string | null
+  onRefreshBilling: () => Promise<void>
+}) {
+  return (
+    <Switch fallback={<WorkspaceSection />}>
+      <Match when={props.section === 'members'}>
+        <MembersSection orgId={props.orgId} />
+      </Match>
+      <Match when={props.section === 'billing'}>
+        <BillingSection
+          account={props.billingAccount}
+          error={props.billingError}
+          loading={props.billingLoading}
+          onRefresh={props.onRefreshBilling}
+        />
+      </Match>
+      <Match when={props.section === 'sso'}>
+        <SsoSection />
+      </Match>
+      <Match when={props.section === 'org-security'}>
+        <OrgSecuritySection />
+      </Match>
+      <Match when={props.section === 'integrations'}>
+        <IntegrationsSection />
+      </Match>
+    </Switch>
+  )
+}
+
+function WorkspaceSection() {
+  return (
+    <>
+      <SectionHeader title="Workspace basics" description="Shared workspace fields that affect URLs, defaults, and support routing." />
+      <div class="velion-settings-field-grid">
+        <SettingsField id="workspace-name" label="Workspace name" value="aquatiq-as" />
+        <SettingsField id="workspace-url" label="Workspace URL" value="aquatiq-as.velion.ai" />
+        <SettingsField id="primary-domain" label="Primary domain" value="aquatiq.no" />
+        <SettingsSelect
+          id="data-region"
+          label="Data region"
+          value="europe"
+          options={[
+            { value: 'europe', label: 'Europe' },
+            { value: 'us', label: 'United States' },
+          ]}
+        />
+        <SettingsSelect
+          id="default-language"
+          label="Default language"
+          value="english"
+          options={[
+            { value: 'english', label: 'English' },
+            { value: 'norwegian', label: 'Norwegian' },
+            { value: 'french', label: 'French' },
+          ]}
+        />
+        <SettingsField id="admin-owner" label="Admin owner" value="Author Name" />
+      </div>
+      <div class="velion-settings-feature-grid">
+        <FeaturePanel
+          title="Verified domains"
+          description="Domain records ready for DNS verification and customer-facing links."
+          actionLabel="Add domain"
+        >
+          <div class="velion-settings-row-divider">
+            <For each={domainRows}>
+              {(row) => <DataRow primary={row.domain} secondary={row.owner} meta={row.status} />}
+            </For>
+          </div>
+        </FeaturePanel>
+        <FeaturePanel
+          title="Business hours"
+          description="Workspace-wide routing windows for support inbox ownership."
+          actionLabel="Edit schedule"
+        >
+          <div class="velion-settings-row-divider">
+            <For each={businessHourRows}>
+              {(row) => <DataRow primary={row.day} secondary={row.inbox} meta={row.hours} />}
+            </For>
+          </div>
+        </FeaturePanel>
+      </div>
+    </>
+  )
+}
+
+function MembersSection(props: { orgId: string | null }) {
+  const [members, setMembers] = createSignal<LiveMember[]>([])
+  const [loading, setLoading] = createSignal(false)
+  const [error, setError] = createSignal<string | null>(null)
+
+  createEffect(() => {
+    const orgId = props.orgId
+    setMembers([])
+    setError(null)
+
+    if (!orgId) {
+      setLoading(false)
+      return
+    }
+
+    setLoading(true)
+    const controller = new AbortController()
+
+    requestJson<MemberListResponse | LiveMember[]>(
+      `/api/v1/orgs/${encodeURIComponent(orgId)}/members`,
+      { signal: controller.signal },
+    )
+      .then((data) => {
+        setMembers(normalizeMemberList(data))
+        setLoading(false)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name === 'AbortError') return
+        setError('Could not load members.')
+        setLoading(false)
+      })
+
+    onCleanup(() => controller.abort())
+  })
+
+  return (
+    <>
+      <SectionHeader title="Members & roles" description="Invite teammates, assign access, and review seat status." />
+      <div class="velion-settings-invite-grid">
+        <SettingsField id="invite-email" label="Invite by email" type="email" placeholder="teammate@company.com" />
+        <SettingsSelect
+          id="invite-role"
+          label="Role"
+          value="agent"
+          options={[
+            { value: 'agent', label: 'Agent' },
+            { value: 'admin', label: 'Admin' },
+            { value: 'owner', label: 'Owner' },
+          ]}
+        />
+      </div>
+      <div class="velion-settings-list-card">
+        <Show when={!loading()} fallback={<p class="velion-settings-empty-row">Loading members...</p>}>
+          <Show when={!error()} fallback={<p class="velion-settings-empty-row">{error()}</p>}>
+            <Show when={members().length > 0} fallback={<p class="velion-settings-empty-row">No members found.</p>}>
+              <For each={members()}>
+                {(member) => (
+                  <div class="velion-settings-member-row">
+                    <div>
+                      <p>{member.name ?? member.email}</p>
+                      <span>{member.email}</span>
+                    </div>
+                    <strong>{member.role}</strong>
+                    <span>{member.status}</span>
+                    <button type="button" aria-label={`More actions for ${member.name ?? member.email}`} class="velion-settings-icon-button">
+                      <MoreHorizontal class="size-4" strokeWidth={1.7} />
+                    </button>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </Show>
+        </Show>
+      </div>
+      <FeaturePanel
+        title="Role templates"
+        description="Reusable access templates for member invites and SSO role mapping."
+        actionLabel="Create role"
+        class="velion-settings-feature-panel--spaced"
+      >
+        <div class="velion-settings-row-divider">
+          <For each={roleRows}>
+            {(role) => (
+              <DataRow
+                primary={role.role}
+                secondary={role.access}
+                meta={`${role.members} members`}
+              />
+            )}
+          </For>
+        </div>
+      </FeaturePanel>
+    </>
+  )
+}
+
+function formatSubscriptionStatus(status?: string | null): string {
+  if (!status) return '—'
+  return status.replaceAll('_', ' ')
+}
+
+function quotaValue(account: BillingAccount | null, metric: string): number | null {
+  const value = account?.quota_limits?.[metric]
+  return typeof value === 'number' ? value : null
+}
+
+function quotaDisplay(value: number | null): string {
+  if (value == null) return '—'
+  if (value < 0) return 'Unlimited'
+  return String(value)
+}
+
+function settingsCheckoutUrl(kind: 'cancel' | 'success', plan: BillingPlanId): string {
+  if (typeof window === 'undefined') return `/settings/billing?checkout=${kind}&plan=${plan}`
+  const url = new URL('/settings/billing', window.location.origin)
+  url.searchParams.set('checkout', kind)
+  url.searchParams.set('plan', plan)
+  return url.toString()
+}
+
+function clearCheckoutParams() {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  for (const key of ['checkout', 'payment_id', 'payment_intent_client_secret', 'status', 'plan']) {
+    url.searchParams.delete(key)
+  }
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+}
+
+function BillingSection(props: {
+  account: BillingAccount | null
+  error: string | null
+  loading: boolean
+  onRefresh: () => Promise<void>
+}) {
+  const [selectedPlan, setSelectedPlan] = createSignal<BillingPlanId>('standard')
+  const [checkoutSession, setCheckoutSession] = createSignal<CheckoutSession>()
+  const [startingCheckout, setStartingCheckout] = createSignal(false)
+  const [confirmingCheckout, setConfirmingCheckout] = createSignal(false)
+  const [message, setMessage] = createSignal<string | null>(null)
+  const [checkoutError, setCheckoutError] = createSignal<string | null>(null)
+
+  const currentPaidPlan = () => paidBillingPlan(props.account?.plan)
+  const plan = () => props.account ? planLabel(props.account.plan) : '—'
+  const status = () => formatSubscriptionStatus(props.account?.subscription_state)
+  const credits = () => props.account?.credits != null ? String(props.account.credits) : '—'
+  const seatLimit = () => quotaValue(props.account, 'users')
+  const apiCallLimit = () => quotaValue(props.account, 'api_calls')
+  const storageLimit = () => quotaValue(props.account, 'storage_mb')
+
+  createEffect(() => {
+    const current = currentPaidPlan()
+    if (current) setSelectedPlan(current)
+  })
+
+  onMount(() => {
+    if (typeof window === 'undefined') return
+
+    const params = new URLSearchParams(window.location.search)
+    const checkoutState = params.get('checkout')
+    const planParam = paidBillingPlan(params.get('plan')) ?? selectedPlan()
+
+    if (checkoutState === 'cancel') {
+      setSelectedPlan(planParam)
+      setMessage('Payment was cancelled.')
+      clearCheckoutParams()
+      return
+    }
+
+    if (checkoutState !== 'success') return
+
+    const paymentId = params.get('payment_id') || undefined
+    const clientSecret = params.get('payment_intent_client_secret') || undefined
+    const providerStatus = params.get('status') || 'processing'
+    setSelectedPlan(planParam)
+
+    if (!paymentId && !clientSecret) {
+      setCheckoutError('Payment reference is missing. Start checkout again.')
+      clearCheckoutParams()
+      return
+    }
+
+    void finalizeCheckout({
+      paymentId,
+      clientSecret,
+      status: providerStatus,
+      plan: planParam,
+    })
+  })
+
+  async function startPlanCheckout(planId: BillingPlanId) {
+    const planOption = billingPlans.find((item) => item.id === planId)
+    if (!planOption?.checkoutEnabled) {
+      setMessage('Custom plan changes are handled by sales.')
+      return
+    }
+
+    setSelectedPlan(planId)
+    setMessage(null)
+    setCheckoutError(null)
+    setCheckoutSession(undefined)
+    setStartingCheckout(true)
+
+    try {
+      const session = await startBillingCheckout({
+        plan: planId,
+        successUrl: settingsCheckoutUrl('success', planId),
+        cancelUrl: settingsCheckoutUrl('cancel', planId),
+      })
+
+      if (session.url) {
+        window.location.assign(session.url)
+        return
+      }
+
+      if (session.provider === 'hyperswitch' && session.client_secret && session.publishable_key) {
+        setCheckoutSession(session)
+        return
+      }
+
+      throw new Error('Checkout session did not include a payment surface.')
+    } catch (reason) {
+      setCheckoutError(reason instanceof Error ? reason.message : 'Could not start checkout.')
+    } finally {
+      setStartingCheckout(false)
+    }
+  }
+
+  async function finalizeCheckout(payment: {
+    clientSecret?: string
+    paymentId?: string
+    plan?: BillingPlanId
+    status: string
+  }) {
+    const planId = payment.plan ?? selectedPlan()
+    setConfirmingCheckout(true)
+    setMessage(null)
+    setCheckoutError(null)
+
+    try {
+      const result = await confirmBillingCheckout({
+        plan: planId,
+        paymentId: payment.paymentId,
+        clientSecret: payment.clientSecret,
+      })
+
+      if (!isCheckoutActivatingStatus(result.status)) {
+        throw new Error(`Payment status is ${result.status}.`)
+      }
+
+      setCheckoutSession(undefined)
+      setMessage(result.status === 'processing'
+        ? 'Payment is processing. Your plan will stay active while confirmation completes.'
+        : 'Payment confirmed. Your billing plan is active.')
+      await props.onRefresh()
+      clearCheckoutParams()
+    } catch (reason) {
+      setCheckoutError(reason instanceof Error ? reason.message : 'Could not confirm checkout.')
+    } finally {
+      setConfirmingCheckout(false)
+    }
+  }
+
+  return (
+    <>
+      <SectionHeader title="Plan & usage" description="Review plan, usage, payment method, and invoices." />
+      <Show when={props.error}>
+        {(error) => <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">{error()}</p>}
+      </Show>
+      <div class="velion-settings-metric-grid">
+        <Metric label="Plan" value={plan()} detail={`Status: ${status()}`} />
+        <Metric label="Seats" value={quotaDisplay(seatLimit())} detail={seatLimit() != null ? 'Seats included on this plan' : 'Seat quota unavailable'} />
+        <Metric label="Credits" value={credits()} detail="Available on this plan" />
+      </div>
+      <section class="velion-settings-plan-picker" aria-labelledby="settings-billing-plan-heading">
+        <div class="velion-settings-section-header velion-settings-section-header--compact">
+          <h2 id="settings-billing-plan-heading">Choose plan</h2>
+          <p>Change the workspace plan through billing-core checkout. Paid plans open secure Hyperswitch payment.</p>
+        </div>
+        <div class="velion-settings-plan-list">
+          <For each={billingPlans}>
+            {(billingPlan) => {
+              const active = () => currentPaidPlan() === billingPlan.id
+              const selected = () => selectedPlan() === billingPlan.id
+              return (
+                <article
+                  class="velion-settings-plan-row"
+                  classList={{
+                    'velion-settings-plan-row--active': active(),
+                    'velion-settings-plan-row--selected': selected(),
+                  }}
+                >
+                  <div class="velion-settings-plan-row__copy">
+                    <div>
+                      <h3>{billingPlan.name}</h3>
+                      <span>{billingPlan.priceLabel}</span>
+                    </div>
+                    <p>{billingPlan.description}</p>
+                    <ul>
+                      <For each={billingPlan.features}>{(feature) => <li>{feature}</li>}</For>
+                    </ul>
+                  </div>
+                  <div class="velion-settings-plan-row__actions">
+                    <Show when={active()}>
+                      <span class="velion-settings-plan-pill">Current plan</span>
+                    </Show>
+                    <SettingsButton
+                      settingsSize="sm"
+                      variant={selected() ? 'primary' : 'secondary'}
+                      disabled={props.loading || startingCheckout() || confirmingCheckout() || active()}
+                      onClick={() => void startPlanCheckout(billingPlan.id)}
+                    >
+                      {active()
+                        ? 'Active'
+                        : billingPlan.checkoutEnabled
+                          ? `${startingCheckout() && selected() ? 'Starting' : 'Activate'} ${billingPlan.name}`
+                          : 'Contact sales'}
+                    </SettingsButton>
+                  </div>
+                </article>
+              )
+            }}
+          </For>
+        </div>
+      </section>
+      <Show
+        when={
+          checkoutSession()?.provider === 'hyperswitch' && checkoutSession()?.client_secret
+            ? checkoutSession()
+            : undefined
+        }
+      >
+        {(session) => (
+          <HyperswitchCheckout
+            session={session()}
+            confirming={confirmingCheckout()}
+            returnUrl={settingsCheckoutUrl('success', selectedPlan())}
+            onConfirmed={(payment) => finalizeCheckout({ ...payment, plan: selectedPlan() })}
+          />
+        )}
+      </Show>
+      <Show when={message()}>
+        {(text) => <p class="velion-settings-status-message velion-settings-status-message--success" role="status">{text()}</p>}
+      </Show>
+      <Show when={checkoutError()}>
+        {(text) => <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">{text()}</p>}
+      </Show>
+      <div class="velion-settings-field-grid velion-settings-field-grid--spaced">
+        <SettingsField id="billing-email" label="Billing email" type="email" placeholder="billing@yourcompany.com" />
+        <SettingsSelect
+          id="usage-cap"
+          label="Usage cap"
+          value="notify"
+          options={[
+            { value: 'notify', label: 'Notify at 80%' },
+            { value: 'pause', label: 'Pause at limit' },
+            { value: 'none', label: 'No cap' },
+          ]}
+        />
+      </div>
+      <div class="velion-settings-billing-grid">
+        <FeaturePanel
+          title="Invoice history"
+          description="Workspace invoice history and downloadable billing records."
+          actionLabel="Download CSV"
+        >
+          <p class="velion-settings-panel-note">Ingen fakturaer ennå - invoices will appear here once a paid plan is active.</p>
+        </FeaturePanel>
+        <FeaturePanel
+          title="Spend controls"
+          description="Plan limits and quota details for this workspace."
+          actionLabel="Configure"
+        >
+          <Show
+            when={props.account != null}
+            fallback={<p class="velion-settings-panel-note">Loading plan details...</p>}
+          >
+            <div class="velion-settings-key-values">
+              <p><span>Plan</span><strong>{plan()}</strong></p>
+              <p><span>Status</span><strong>{status()}</strong></p>
+              <p><span>Credits</span><strong>{credits()}</strong></p>
+              <p><span>API calls</span><strong>{quotaDisplay(apiCallLimit())}</strong></p>
+              <p><span>Storage</span><strong>{quotaDisplay(storageLimit())}</strong></p>
+            </div>
+          </Show>
+        </FeaturePanel>
+      </div>
+    </>
+  )
+}
+
+function SsoSection() {
+  return (
+    <>
+      <SectionHeader title="SSO configuration" description="Configure organization sign-in, domains, and provisioning." />
+      <div class="velion-settings-field-grid">
+        <SettingsSelect
+          id="sso-provider"
+          label="Provider"
+          value="google"
+          options={[
+            { value: 'google', label: 'Google Workspace' },
+            { value: 'microsoft', label: 'Microsoft Entra ID' },
+            { value: 'saml', label: 'SAML 2.0' },
+          ]}
+        />
+        <SettingsField id="sso-domain" label="Allowed domain" value="aquatiq.no" />
+        <SettingsField id="scim-token" label="SCIM token" value="Configured" />
+        <SettingsSelect
+          id="sso-enforcement"
+          label="Enforcement"
+          value="admins"
+          options={[
+            { value: 'admins', label: 'Admins only' },
+            { value: 'all', label: 'All members' },
+            { value: 'off', label: 'Off' },
+          ]}
+        />
+      </div>
+      <div class="velion-settings-sso-grid">
+        <FeaturePanel
+          title="Connection test"
+          description="SSO validation checks to run before enforcing sign-in."
+          actionLabel="Run test"
+        >
+          <div class="velion-settings-key-values">
+            <p><span>Metadata</span><strong>Loaded</strong></p>
+            <p><span>Domain claim</span><strong>Verified</strong></p>
+            <p><span>Last test</span><strong>2 hours ago</strong></p>
+          </div>
+        </FeaturePanel>
+        <FeaturePanel
+          title="Attribute mapping"
+          description="SCIM and SAML attributes mapped into Velion workspace fields."
+          actionLabel="Edit mapping"
+        >
+          <div class="velion-settings-row-divider">
+            <For each={ssoMappingRows}>
+              {(row) => (
+                <DataRow
+                  primary={row.attribute}
+                  secondary={`${row.source} -> ${row.destination}`}
+                  meta="Mapped"
+                />
+              )}
+            </For>
+          </div>
+        </FeaturePanel>
+      </div>
+    </>
+  )
+}
+
+function RecentSecurityEvents() {
+  const [events, setEvents] = createSignal<AuditEvent[]>([])
+  const [loading, setLoading] = createSignal(true)
+
+  onMount(() => {
+    const controller = new AbortController()
+
+    fetch('/api/v1/audit', {
+      credentials: 'include',
+      signal: controller.signal,
+    })
+      .then((res) => res.json() as Promise<{ success: boolean; data: AuditEvent[] }>)
+      .then((json) => {
+        setEvents(Array.isArray(json.data) ? json.data : [])
+        setLoading(false)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name === 'AbortError') return
+        setEvents([])
+        setLoading(false)
+      })
+
+    onCleanup(() => controller.abort())
+  })
+
+  return (
+    <Show when={!loading()} fallback={<p class="velion-settings-panel-note">Loading security events...</p>}>
+      <Show when={events().length > 0} fallback={<p class="velion-settings-panel-note">Ingen sikkerhetshendelser ennå</p>}>
+        <div class="velion-settings-row-divider">
+          <For each={events()}>
+            {(event, index) => {
+              const dateStr = () => {
+                if (!event.createdAt || Number.isNaN(new Date(event.createdAt).getTime())) return ''
+                return new Date(event.createdAt).toLocaleString()
+              }
+              const secondary = () => [event.actor, event.ipAddress].filter(Boolean).join(' · ')
+              return (
+                <DataRow
+                  primary={`${event.action ?? 'Event'}${event.outcome ? ` - ${event.outcome}` : ''}`}
+                  secondary={secondary()}
+                  meta={dateStr() || event.requestId || String(index())}
+                />
+              )
+            }}
+          </For>
+        </div>
+      </Show>
+    </Show>
+  )
+}
+
+function OrgSecuritySection() {
+  return (
+    <>
+      <SectionHeader title="Security policy" description="Set organization-wide security requirements and audit controls." />
+      <div class="velion-settings-divided-list">
+        <For each={securityToggles}>
+          {(toggle) => <ToggleRow {...toggle} />}
+        </For>
+      </div>
+      <div class="velion-settings-field-grid velion-settings-field-grid--spaced">
+        <SettingsSelect
+          id="session-duration"
+          label="Session duration"
+          value="30-days"
+          options={[
+            { value: '7-days', label: '7 days' },
+            { value: '30-days', label: '30 days' },
+            { value: '90-days', label: '90 days' },
+          ]}
+        />
+        <SettingsField id="audit-retention" label="Audit retention" value="365 days" />
+      </div>
+      <FeaturePanel
+        title="Recent security events"
+        description="Recent organization changes that administrators should review."
+        actionLabel="Open audit log"
+        class="velion-settings-feature-panel--spaced"
+      >
+        <RecentSecurityEvents />
+      </FeaturePanel>
+    </>
+  )
+}
+
+function IntegrationsSection() {
+  const session = getSession()
+  const [summary, setSummary] = createSignal<IntegrationSettingsSummary | null>(null)
+  const [actionBusy, setActionBusy] = createSignal<string | null>(null)
+  const [loadFailed, setLoadFailed] = createSignal(false)
+  const [syncProgress, setSyncProgress] = createSignal<Record<string, string>>({})
+  const [notice, setNotice] = createSignal<string | null>(null)
+  const eventSources: EventSource[] = []
+  const orgId = createMemo(() => session.activeOrg?.id ?? '')
+
+  const refresh = async () => {
+    try {
+      setSummary(await loadIntegrationSettingsSummary(orgId()))
+      setLoadFailed(false)
+    } catch {
+      setLoadFailed(true)
+    }
+  }
+
+  onMount(() => {
+    void refresh()
+  })
+
+  onCleanup(() => {
+    for (const source of eventSources) source.close()
+    eventSources.splice(0, eventSources.length)
+  })
+
+  const rows = createMemo(() => buildIntegrationRows(summary()))
+  const socialRows = createMemo(() => rows().filter(isSocialIntegrationRow))
+  const socialStats = createMemo(() => buildSocialIntegrationStats(summary()))
+
+  const runAction = async (
+    row: IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number],
+    action: 'connect' | 'disconnect' | 'reconnect' | 'sync',
+  ) => {
+    if (!('provider' in row)) return
+    const busyKey = `${row.provider.key}:${action}`
+    setActionBusy(busyKey)
+    setNotice(null)
+
+    try {
+      if (action === 'connect') {
+        const session = await requestJson<ConnectSessionResult>(
+          `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ bundles: connectBundlesFor(row.provider) }),
+            headers: integrationHeaders(orgId()),
+          },
+        )
+        await runSettingsOAuth(session)
+        setNotice(`${row.name} connected.`)
+      } else if (action === 'reconnect' && row.connection) {
+        const session = await requestJson<ConnectSessionResult>(
+          `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}/reconnect-session`,
+          { method: 'POST', body: JSON.stringify({}), headers: integrationHeaders(orgId()) },
+        )
+        await runSettingsOAuth(session)
+        setNotice(`${row.name} reconnected.`)
+      } else if (action === 'disconnect' && row.connection) {
+        await requestJson<{ disconnected: boolean }>(
+          `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}`,
+          { method: 'DELETE', headers: integrationHeaders(orgId()) },
+        )
+        setNotice(`${row.name} disconnected.`)
+      } else if (action === 'sync' && row.connection) {
+        const result = await requestJson<{ syncJob?: { id?: string; status?: string } }>(
+          '/api/v1/integrations/sync-jobs',
+          {
+            method: 'POST',
+            body: JSON.stringify({ connectionId: row.connection.id, reason: 'settings_user_requested', mode: 'incremental' }),
+            headers: integrationHeaders(orgId()),
+          },
+        )
+        const jobId = result.syncJob?.id
+        setSyncProgress((prev) => ({
+          ...prev,
+          [row.connection!.id]: result.syncJob?.status ?? 'queued',
+        }))
+        if (jobId) watchSyncProgress(row.connection.id, jobId, setSyncProgress, eventSources, refresh)
+      }
+      await refresh()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Integration action failed.')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  return (
+    <>
+      <SectionHeader title="Workspace integrations" description="Connect shared systems used by the workspace." />
+      <Show when={summary()}>
+        {(current) => (
+          <div class="velion-settings-metric-grid">
+            <Metric
+              label="Connected"
+              value={String(current().metrics.connected)}
+              detail={`${current().metrics.readyProviders} providers configured`}
+            />
+            <Metric
+              label="Syncing"
+              value={String(current().metrics.syncing)}
+              detail="Live sync jobs visible from integration-corev2"
+            />
+            <Metric
+              label="Attention"
+              value={String(current().metrics.failed)}
+              detail="Sources needing reconnect or review"
+            />
+          </div>
+        )}
+      </Show>
+      <section class="velion-settings-social-layer" aria-labelledby="velion-settings-social-title">
+        <div class="velion-settings-social-layer__header">
+          <div>
+            <span>Social layer</span>
+            <h3 id="velion-settings-social-title">Publishing, inbox, and campaign adapters</h3>
+            <p>
+              integration-core owns OAuth and token leases; social-core consumes scoped capabilities for provider-specific workflows.
+            </p>
+          </div>
+          <a class="velion-settings-button velion-settings-button--sm" href="/social/calendar">Open calendar</a>
+        </div>
+        <div class="velion-settings-social-summary">
+          <div>
+            <strong>{socialStats().providers}</strong>
+            <span>social providers</span>
+          </div>
+          <div>
+            <strong>{socialStats().connected}</strong>
+            <span>connected</span>
+          </div>
+          <div>
+            <strong>{socialStats().publishingReady}</strong>
+            <span>publish-ready</span>
+          </div>
+          <div>
+            <strong>{socialStats().inboxReady}</strong>
+            <span>inbox-ready</span>
+          </div>
+        </div>
+        <Show
+          when={socialRows().length > 0}
+          fallback={<p class="velion-settings-subnote">Social providers have not been exposed by integration-core yet.</p>}
+        >
+          <div class="velion-settings-social-provider-grid">
+            <For each={socialRows()}>
+              {(integration) => (
+                <article class="velion-settings-social-provider">
+                  <div class="velion-settings-social-provider__top">
+                    <div>
+                      <p>{integration.name}</p>
+                      <span>{socialProviderRole(integration.provider)}</span>
+                    </div>
+                    <span class="velion-settings-integration-status">{integration.status}</span>
+                  </div>
+                  <p>{integration.detail}</p>
+                  <div class="velion-settings-social-capabilities">
+                    <For each={socialCapabilityLabels(integration)}>
+                      {(capability) => <span>{capability}</span>}
+                    </For>
+                  </div>
+                  <div class="velion-settings-social-provider__actions">
+                    <IntegrationRowActions
+                      busyKey={actionBusy()}
+                      row={integration}
+                      onAction={runAction}
+                    />
+                  </div>
+                </article>
+              )}
+            </For>
+          </div>
+        </Show>
+      </section>
+      <div class="velion-settings-list-card">
+        <For each={rows()}>
+          {(integration) => {
+            const rowSyncProgress = () =>
+              'connection' in integration && integration.connection
+                ? syncProgress()[integration.connection.id]
+                : undefined
+            return (
+              <div class="velion-settings-integration-row">
+                <div>
+                  <p>{integration.name}</p>
+                  <span>{rowSyncProgress() ? `${integration.detail} · ${rowSyncProgress()}` : integration.detail}</span>
+                </div>
+                <div>
+                  <span class="velion-settings-integration-status">{integration.status}</span>
+                  {'provider' in integration ? (
+                    <IntegrationRowActions
+                      busyKey={actionBusy()}
+                      row={integration}
+                      onAction={runAction}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            )
+          }}
+        </For>
+      </div>
+      <p class="velion-settings-subnote">
+        Source contents and graph edits are managed later in Knowledge, where changes can be reviewed and audited.
+        {loadFailed() ? ' Integration state could not be refreshed from the local services.' : ''}
+      </p>
+      <Show when={notice()}>
+        {(message) => <p class="velion-settings-status-message" role="status">{message()}</p>}
+      </Show>
+      <FeaturePanel
+        title="Webhook delivery"
+        description="Delivery health for shared workspace automations."
+        actionLabel="View logs"
+        class="velion-settings-feature-panel--spaced"
+      >
+        <div class="velion-settings-row-divider">
+          <For each={webhookRows}>
+            {(row) => <DataRow primary={row.endpoint} secondary={row.lastRun} meta={row.status} />}
+          </For>
+        </div>
+      </FeaturePanel>
+    </>
+  )
+}
+
+async function loadIntegrationSettingsSummary(orgId: string): Promise<IntegrationSettingsSummary> {
+  const headers = integrationHeaders(orgId)
+  const [providersResult, connectionsResult] = await Promise.all([
+    requestJson<IntegrationSettingsProvidersResponse>('/api/v1/integrations/providers', { headers }),
+    requestJson<IntegrationSettingsConnectionsResponse>('/api/v1/integrations/connections', { headers })
+      .catch(() => ({ connections: [] })),
+  ])
+  const providers = arrayValue(providersResult.providers).map(normalizeIntegrationProvider)
+  const connections = arrayValue(connectionsResult.connections).map(normalizeIntegrationConnection)
+
+  return {
+    metrics: {
+      connected: connections.length,
+      failed: connections.filter((connection) => isFailedIntegrationStatus(connection.status)).length,
+      readyProviders: providers.filter((provider) => provider.configured && provider.directOAuthReady).length,
+      syncing: connections.filter((connection) => isSyncingIntegrationStatus(connection.syncStatus, connection.latestSyncJob?.status)).length,
+      totalProviders: providers.length,
+    },
+    providers,
+    connections,
+  }
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return arrayValue(value).filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+}
+
+function normalizeIntegrationProvider(value: unknown): IntegrationSettingsProvider {
+  const provider = recordFrom(value)
+  const capabilities = arrayValue(provider.capabilities)
+    .map((capability) => {
+      const record = recordFrom(capability)
+      const key = stringValue(record, 'key')
+      if (!key) return null
+      return { key, sensitive: record.sensitive === true }
+    })
+    .filter((capability): capability is { key: string; sensitive: boolean } => Boolean(capability))
+
+  return {
+    key: stringValue(provider, 'key'),
+    label: stringValue(provider, 'label', 'name') || stringValue(provider, 'key'),
+    category: stringValue(provider, 'category') || 'source',
+    configured: provider.configured === true,
+    status: stringValue(provider, 'status') || 'unknown',
+    missingConfig: stringArrayValue(provider.missingConfig),
+    directOAuthReady: provider.directOAuthReady === true,
+    capabilities,
+  }
+}
+
+function normalizeIntegrationConnection(value: unknown): IntegrationSettingsConnection {
+  const connection = recordFrom(value)
+  const providerKey = stringValue(connection, 'providerKey', 'provider_key')
+  const scopes = stringArrayValue(connection.scopes)
+
+  return {
+    id: stringValue(connection, 'id'),
+    providerKey,
+    providerLabel: stringValue(connection, 'providerLabel', 'provider_label') || providerKey,
+    displayName: stringValue(connection, 'displayName', 'display_name', 'providerAccountId', 'provider_account_id') || providerKey,
+    status: stringValue(connection, 'status') || 'unknown',
+    capabilities: stringArrayValue(connection.capabilities),
+    scopeCount: typeof connection.scopeCount === 'number' ? connection.scopeCount : scopes.length,
+    syncStatus: stringValue(connection, 'syncStatus', 'sync_status', 'lastSyncStatus', 'last_sync_status') || 'unknown',
+    latestSyncJob: normalizeLatestSyncJob(connection.latestSyncJob ?? connection.latest_sync_job),
+  }
+}
+
+function normalizeLatestSyncJob(value: unknown): IntegrationSettingsConnection['latestSyncJob'] {
+  const job = recordFrom(value)
+  const status = stringValue(job, 'status')
+  if (!status) return undefined
+  return { status, updatedAt: stringValue(job, 'updatedAt', 'updated_at') || undefined }
+}
+
+function integrationHeaders(orgId: string): HeadersInit | undefined {
+  const trimmed = orgId.trim()
+  return trimmed ? { 'x-velion-org-id': trimmed } : undefined
+}
+
+function isFailedIntegrationStatus(status: string): boolean {
+  return ['failed', 'error', 'needs_reconnect', 'revoked', 'expired'].includes(status.trim().toLowerCase())
+}
+
+function isSyncingIntegrationStatus(syncStatus: string, latestJobStatus?: string): boolean {
+  return [syncStatus, latestJobStatus ?? ''].some((status) =>
+    ['queued', 'running', 'syncing', 'waiting_provider', 'handoff_data_plane'].includes(status.trim().toLowerCase()),
+  )
+}
+
+function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Array<IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number]> {
+  if (!summary) return fallbackIntegrationRows
+
+  const connectionsByProvider = new Map(summary.connections.map((connection) => [connection.providerKey, connection]))
+  return summary.providers.map((provider) => {
+    const connection = connectionsByProvider.get(provider.key)
+    if (connection) {
+      return {
+        name: provider.label,
+        detail: [
+          connection.displayName,
+          connection.capabilities.length > 0 ? `${connection.capabilities.length} capabilities` : null,
+          connection.scopeCount > 0 ? `${connection.scopeCount} scopes` : null,
+          connection.latestSyncJob?.status ? `sync ${connection.latestSyncJob.status}` : null,
+        ].filter(Boolean).join(' · '),
+        status: 'Connected',
+        action: 'connected',
+        connection,
+        provider,
+      }
+    }
+
+    if (!provider.configured) {
+      return {
+        name: provider.label,
+        detail: provider.missingConfig.length > 0
+          ? `Missing ${provider.missingConfig.slice(0, 2).join(', ')}`
+          : 'Provider credentials are not configured',
+        status: 'Missing config',
+        action: 'missing',
+        provider,
+      }
+    }
+
+    if (!provider.directOAuthReady) {
+      return {
+        name: provider.label,
+        detail: `${provider.category} adapter is configured for admin setup`,
+        status: 'Admin setup',
+        action: 'admin',
+        provider,
+      }
+    }
+
+    return {
+      name: provider.label,
+      detail: `${provider.category} source · ${provider.capabilities.length} capabilities`,
+      status: 'Ready',
+      action: 'connect',
+      provider,
+    }
+  })
+}
+
+function isSocialIntegrationRow(row: IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number]): row is IntegrationSettingsRow {
+  return 'provider' in row && row.provider.category === 'social'
+}
+
+function connectBundlesFor(provider: IntegrationSettingsProvider): string[] {
+  return provider.category === 'social' ? ['full'] : ['knowledge']
+}
+
+function buildSocialIntegrationStats(summary: IntegrationSettingsSummary | null) {
+  const socialProviders = summary?.providers.filter((provider) => provider.category === 'social') ?? []
+  const socialProviderKeys = new Set(socialProviders.map((provider) => provider.key))
+  const socialConnections = summary?.connections.filter((connection) => socialProviderKeys.has(connection.providerKey)) ?? []
+
+  return {
+    providers: socialProviders.length,
+    connected: socialConnections.length,
+    publishingReady: socialConnections.filter((connection) => connection.capabilities.includes('social.post.write')).length,
+    inboxReady: socialConnections.filter((connection) => connection.capabilities.includes('social.inbox.read')).length,
+  }
+}
+
+function socialProviderRole(provider: IntegrationSettingsProvider): string {
+  switch (provider.key) {
+    case 'facebook':
+      return 'Page publishing, comments, inbox, and analytics'
+    case 'instagram':
+      return 'Media publishing, messaging, and analytics'
+    case 'linkedin':
+      return 'Organization posts, comments, and reporting'
+    case 'x':
+      return 'Posts, replies, direct messages, and metrics'
+    case 'tiktok':
+      return 'Content Posting API uploads and status tracking'
+    case 'snapchat':
+      return 'Ads, creative, campaign, and reporting workflows'
+    default:
+      return 'Social workflow adapter'
+  }
+}
+
+function socialCapabilityLabels(row: IntegrationSettingsRow): string[] {
+  const connectionCapabilities = row.connection?.capabilities ?? []
+  const providerCapabilities = row.provider.capabilities.map((capability) => capability.key)
+  const source = connectionCapabilities.length > 0 ? connectionCapabilities : providerCapabilities
+  const socialCapabilities = source
+    .filter((capability) => capability.startsWith('social.'))
+    .map(formatSocialCapability)
+
+  return socialCapabilities.length > 0 ? socialCapabilities.slice(0, 4) : ['review required']
+}
+
+function formatSocialCapability(capability: string): string {
+  switch (capability) {
+    case 'social.profile.read':
+      return 'profile'
+    case 'social.post.write':
+      return 'publishing'
+    case 'social.media.upload':
+      return 'media'
+    case 'social.inbox.read':
+      return 'inbox'
+    case 'social.analytics.read':
+      return 'analytics'
+    case 'social.ads.manage':
+      return 'ads'
+    default:
+      return capability.replace(/^social\./, '').replace(/\./g, ' ')
+  }
+}
+
+function IntegrationRowActions(props: {
+  busyKey: string | null
+  onAction: (row: IntegrationSettingsRow, action: 'connect' | 'disconnect' | 'reconnect' | 'sync') => void
+  row: IntegrationSettingsRow
+}) {
+  const busy = () => props.busyKey?.startsWith(`${props.row.provider.key}:`) ?? false
+  return (
+    <Switch>
+      <Match when={props.row.action === 'connect'}>
+        <SettingsButton settingsSize="sm" disabled={busy()} onClick={() => void props.onAction(props.row, 'connect')}>
+          {busy() ? 'Opening' : 'Connect'}
+        </SettingsButton>
+      </Match>
+      <Match when={props.row.action === 'connected'}>
+        <SettingsButton settingsSize="sm" disabled={busy()} onClick={() => void props.onAction(props.row, 'sync')}>
+          Sync
+        </SettingsButton>
+        <SettingsButton settingsSize="sm" disabled={busy()} onClick={() => void props.onAction(props.row, 'reconnect')}>
+          Reconnect
+        </SettingsButton>
+        <SettingsButton settingsSize="sm" danger disabled={busy()} onClick={() => void props.onAction(props.row, 'disconnect')}>
+          Disconnect
+        </SettingsButton>
+      </Match>
+    </Switch>
+  )
+}
+
+function runSettingsOAuth(session: ConnectSessionResult): Promise<void> {
+  if (session.authMode !== 'direct-oauth' || !session.connectUrl || !session.sessionToken) {
+    return Promise.reject(new Error('Integration service returned an incomplete connect session.'))
+  }
+  const authWindow = openSettingsOAuthWindow()
+  if (!authWindow) {
+    return Promise.reject(new Error('The provider sign-in window was blocked by the browser.'))
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const settle = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      window.clearInterval(closePoll)
+      window.removeEventListener('message', onMessage)
+      callback()
+    }
+    const onMessage = (event: MessageEvent) => {
+      const payload = event.data
+      if (!payload || typeof payload !== 'object') return
+      const record = payload as Record<string, unknown>
+      if (record.type !== 'velion.integration.connected') return
+      if (record.sessionToken !== session.sessionToken) return
+      if (record.status === 'success') {
+        settle(resolve)
+        return
+      }
+      settle(() => reject(new Error(typeof record.message === 'string' ? record.message : 'Provider authorization failed.')))
+    }
+    window.addEventListener('message', onMessage)
+    const timeout = window.setTimeout(() => {
+      settle(() => reject(new Error('Provider authorization timed out.')))
+    }, 120_000)
+    const closePoll = window.setInterval(() => {
+      if (!authWindow.closed) return
+      settle(() => reject(new Error('Provider authorization was closed before it finished.')))
+    }, 500)
+    try {
+      authWindow.location.href = session.connectUrl
+    } catch {
+      settle(() => reject(new Error('Could not open provider authorization.')))
+    }
+  })
+}
+
+function openSettingsOAuthWindow(): Window | null {
+  const width = Math.min(540, window.screen.width)
+  const height = Math.min(720, window.screen.height)
+  const left = Math.max(window.screen.width / 2 - width / 2, 0)
+  const top = Math.max(window.screen.height / 2 - height / 2, 0)
+  return window.open(
+    '',
+    '_blank',
+    [
+      `left=${left}`,
+      `top=${top}`,
+      `width=${width}`,
+      `height=${height}`,
+      'scrollbars=yes',
+      'resizable=yes',
+      'status=no',
+      'toolbar=no',
+      'location=no',
+      'menubar=no',
+    ].join(','),
+  )
+}
+
+function watchSyncProgress(
+  connectionId: string,
+  jobId: string,
+  setSyncProgress: (next: (prev: Record<string, string>) => Record<string, string>) => Record<string, string>,
+  eventSources: EventSource[],
+  onTerminal?: () => void,
+) {
+  const source = new EventSource(`/api/v1/integrations/sync-jobs/${encodeURIComponent(jobId)}/events`)
+  eventSources.push(source)
+  const close = () => {
+    source.close()
+    const index = eventSources.indexOf(source)
+    if (index >= 0) eventSources.splice(index, 1)
+  }
+  const update = (event: MessageEvent) => {
+    const status = syncStatusFromEvent(event)
+    if (!status) return
+    setSyncProgress((prev) => ({ ...prev, [connectionId]: status }))
+    if (['completed', 'failed', 'cancelled'].includes(status)) {
+      close()
+      onTerminal?.()
+    }
+  }
+  source.addEventListener('sync.queued', update)
+  source.addEventListener('sync.running', update)
+  source.addEventListener('sync.waiting_provider', update)
+  source.addEventListener('sync.handoff_data_plane', update)
+  source.addEventListener('sync.completed', update)
+  source.addEventListener('sync.failed', update)
+  source.addEventListener('sync.cancelled', update)
+  source.addEventListener('sync.snapshot', update)
+  source.onerror = () => close()
+}
+
+function syncStatusFromEvent(event: MessageEvent): string | null {
+  try {
+    const payload = JSON.parse(String(event.data)) as {
+      type?: string
+      syncJob?: { status?: unknown }
+    }
+    if (payload.syncJob && typeof payload.syncJob.status === 'string') return payload.syncJob.status
+    if (typeof payload.type === 'string') return payload.type.replace(/^sync\./, '')
+  } catch {
+    return null
+  }
+  return null
+}

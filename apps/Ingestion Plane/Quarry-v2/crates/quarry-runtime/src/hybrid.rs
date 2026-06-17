@@ -105,6 +105,7 @@ mod tests {
             snippet: None,
             rank: 1,
             provider: "lex".into(),
+            ..Default::default()
         }
     }
     fn vh(url: &str) -> VectorHit {

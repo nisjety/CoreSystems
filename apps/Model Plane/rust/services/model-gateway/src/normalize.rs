@@ -38,9 +38,16 @@ fn load_allowed_models() -> Option<Vec<String>> {
 
 /// Load the default model from `DEFAULT_MODEL` env var. Shared with the SSE
 /// stream path so it resolves an unspecified model identically to the unary
-/// path (sending the literal "default" breaks provider deployment lookup).
+/// path. When unset, returns an EMPTY string on purpose: inference-core's
+/// fallback chain then resolves "Velion Auto" to the configured provider's own
+/// default (per-provider), so chat works against any single provider without an
+/// operator pinning a model. (The previous literal "default" was not a real
+/// model id and made every unpinned request fail provider lookup.)
 pub(crate) fn load_default_model() -> String {
-    std::env::var("DEFAULT_MODEL").unwrap_or_else(|_| "default".to_owned())
+    std::env::var("DEFAULT_MODEL")
+        .ok()
+        .map(|m| m.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// Normalize and validate an incoming invoke request.
@@ -86,9 +93,11 @@ pub fn normalize(
         .filter(|m| !m.is_empty())
         .map_or(default_model, str::to_owned);
 
-    // Validate model against allowlist
+    // Validate model against allowlist — but skip when the model is unspecified
+    // (empty): inference-core resolves it to a provider default downstream, so
+    // there is nothing to validate against the allowlist yet.
     if let Some(allowed) = load_allowed_models() {
-        if !allowed.is_empty() && !allowed.contains(&model) {
+        if !model.is_empty() && !allowed.is_empty() && !allowed.contains(&model) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({
@@ -174,10 +183,19 @@ mod tests {
     }
 
     #[test]
-    fn uses_default_model_when_none() {
+    fn unspecified_model_resolves_to_configured_default() {
         let req = make_request("hello", None);
         let result = normalize(&req).expect("should succeed");
-        // Default model comes from env or hardcoded "default"
-        assert!(!result.model.is_empty());
+        // Unspecified model → the gateway's configured default: `DEFAULT_MODEL`
+        // env when set, else empty so inference-core resolves a per-provider
+        // default downstream ("Velion Auto"). Deterministic regardless of env.
+        assert_eq!(result.model, load_default_model());
+    }
+
+    #[test]
+    fn explicit_model_is_preserved() {
+        let req = make_request("hello", Some("claude-sonnet-4-20250514"));
+        let result = normalize(&req).expect("should succeed");
+        assert_eq!(result.model, "claude-sonnet-4-20250514");
     }
 }

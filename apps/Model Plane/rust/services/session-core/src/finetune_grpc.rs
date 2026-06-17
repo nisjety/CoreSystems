@@ -70,6 +70,7 @@ struct FinetuneJobRow {
     azure_job_id: String,
     fine_tuned_model: String,
     deployment_name: String,
+    deployment_tier: String,
     status: String,
     error_message: String,
     hyperparameters_json: serde_json::Value,
@@ -99,6 +100,7 @@ fn row_to_pb(row: FinetuneJobRow) -> pb::FinetuneJob {
         azure_job_id: row.azure_job_id,
         fine_tuned_model: row.fine_tuned_model,
         deployment_name: row.deployment_name,
+        deployment_tier: row.deployment_tier,
         status: row.status,
         error_message: row.error_message,
         created_at: Some(to_pb_ts(row.created_at)),
@@ -182,7 +184,7 @@ impl FinetuneJobs for FinetuneJobsService {
                 RETURNING
                     job_id, org_id, agent_id, base_model,
                     azure_file_id, azure_job_id, fine_tuned_model, deployment_name,
-                    status, error_message,
+                    deployment_tier, status, error_message,
                     hyperparameters_json, training_example_count,
                     estimated_cost_usd::float8 AS estimated_cost_usd,
                     actual_cost_usd::float8 AS actual_cost_usd,
@@ -224,7 +226,7 @@ impl FinetuneJobs for FinetuneJobsService {
                 "SELECT
                     job_id, org_id, agent_id, base_model,
                     azure_file_id, azure_job_id, fine_tuned_model, deployment_name,
-                    status, error_message,
+                    deployment_tier, status, error_message,
                     hyperparameters_json, training_example_count,
                     estimated_cost_usd::float8 AS estimated_cost_usd,
                     actual_cost_usd::float8 AS actual_cost_usd,
@@ -281,7 +283,7 @@ impl FinetuneJobs for FinetuneJobsService {
                 "SELECT
                     job_id, org_id, agent_id, base_model,
                     azure_file_id, azure_job_id, fine_tuned_model, deployment_name,
-                    status, error_message,
+                    deployment_tier, status, error_message,
                     hyperparameters_json, training_example_count,
                     estimated_cost_usd::float8 AS estimated_cost_usd,
                     actual_cost_usd::float8 AS actual_cost_usd,
@@ -332,7 +334,7 @@ impl FinetuneJobs for FinetuneJobsService {
                 "SELECT
                     job_id, org_id, agent_id, base_model,
                     azure_file_id, azure_job_id, fine_tuned_model, deployment_name,
-                    status, error_message,
+                    deployment_tier, status, error_message,
                     hyperparameters_json, training_example_count,
                     estimated_cost_usd::float8 AS estimated_cost_usd,
                     actual_cost_usd::float8 AS actual_cost_usd,
@@ -427,13 +429,14 @@ impl FinetuneJobs for FinetuneJobsService {
                     deployment_name = CASE WHEN $6 <> '' THEN $6 ELSE deployment_name END,
                     actual_cost_usd = CASE WHEN $7 > 0 THEN $7 ELSE actual_cost_usd END,
                     completed_at = CASE WHEN $8 THEN now() ELSE completed_at END,
+                    deployment_tier = CASE WHEN $9 <> '' THEN $9 ELSE deployment_tier END,
                     updated_at = now()
                  WHERE job_id = $1 AND org_id = $2
                    AND ($3 <> 'cancelled' OR status NOT IN ('succeeded','failed','cancelled'))
                  RETURNING
                     job_id, org_id, agent_id, base_model,
                     azure_file_id, azure_job_id, fine_tuned_model, deployment_name,
-                    status, error_message,
+                    deployment_tier, status, error_message,
                     hyperparameters_json, training_example_count,
                     estimated_cost_usd::float8 AS estimated_cost_usd,
                     actual_cost_usd::float8 AS actual_cost_usd,
@@ -447,6 +450,7 @@ impl FinetuneJobs for FinetuneJobsService {
             .bind(&req.deployment_name)
             .bind(req.actual_cost_usd)
             .bind(req.set_completed)
+            .bind(&req.deployment_tier)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| {

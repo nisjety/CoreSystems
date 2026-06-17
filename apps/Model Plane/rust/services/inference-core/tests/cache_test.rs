@@ -17,6 +17,7 @@ fn make_request(model: &str, content: &str) -> InferRequest {
         max_tokens: 1024,
         structured_output_schema: None,
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -28,6 +29,7 @@ fn make_response(content: &str) -> InferResponse {
         stop_reason: "end_turn".to_owned(),
         input_tokens: 10,
         output_tokens: 5,
+        ..Default::default()
     }
 }
 
@@ -88,4 +90,41 @@ fn ttl_eviction() {
 
     // Entry should be expired
     assert!(cache.get(&req).is_none());
+}
+
+#[test]
+fn tools_change_the_cache_key() {
+    // A request with the same messages but a tool available must NOT collide
+    // with a tool-less one — otherwise it would be served the wrong (tool-less)
+    // cached completion.
+    let cache = PromptCache::new(300);
+    let plain = make_request("gpt-4o-mini", "same question");
+    cache.put(&plain, &make_response("plain answer"));
+
+    let mut with_tool = make_request("gpt-4o-mini", "same question");
+    with_tool.tools = vec![inference_core::provider::ToolDefinition {
+        name: "web_search".to_owned(),
+        description: "search".to_owned(),
+        parameters_json: "{}".to_owned(),
+    }];
+    assert!(
+        cache.get(&with_tool).is_none(),
+        "tool presence must change the cache key"
+    );
+    // The original tool-less request still hits.
+    assert!(cache.get(&plain).is_some());
+}
+
+#[test]
+fn structured_output_schema_changes_the_cache_key() {
+    let cache = PromptCache::new(300);
+    let plain = make_request("gpt-4o-mini", "same question");
+    cache.put(&plain, &make_response("plain answer"));
+
+    let mut with_schema = make_request("gpt-4o-mini", "same question");
+    with_schema.structured_output_schema = Some("{\"type\":\"object\"}".to_owned());
+    assert!(
+        cache.get(&with_schema).is_none(),
+        "structured-output schema must change the cache key"
+    );
 }

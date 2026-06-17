@@ -1,0 +1,47 @@
+- generic [ref=e61] [box=0,0,1440,1100]:
+  - generic [ref=e62] [box=0,0,1440,1100]:
+    - generic [ref=e63] [box=156,176,1128,34]:
+      - button "Tilbake" [ref=e65] [box=156,176,93,34]:
+        - img [ref=e66] [box=169,185,16,16]
+        - text: Tilbake
+      - navigation "Onboarding steps" [ref=e68] [box=658,189,124,8]:
+        - button "Step 1" [ref=e69] [box=658,189,12,8]
+        - button "Step 2" [ref=e70] [box=678,189,12,8]
+        - button "Step 3" [ref=e71] [box=698,189,12,8]
+        - button "Step 4" [ref=e72] [box=718,189,24,8]
+        - button "Step 5" [ref=e73] [box=750,189,12,8]
+        - button "Step 6" [ref=e74] [box=770,189,12,8]
+      - generic [ref=e76] [box=1100,176,184,34]:
+        - button "Language" [ref=e77] [box=1100,176,85,34]:
+          - img [ref=e78] [box=1113,185,16,16]
+          - generic [ref=e81] [box=1135,184,17,18]: NB
+          - img [ref=e82] [box=1158,186,14,14]
+        - generic [ref=e84] [box=1193,176,91,34]: Steg 4 av 6
+    - generic [ref=e86] [box=692,236,55,18]: Velion
+    - generic [ref=e87] [box=156,280,1128,624]:
+      - generic [ref=e88] [box=157,281,647,622]:
+        - generic [ref=e89] [box=221,348,400,462]:
+          - paragraph [ref=e90] [box=221,348,400,24]: Steg 5 av 6 · Trygghet
+          - heading "Bygg Med Velion" [level=1] [ref=e91] [box=221,390,400,123]
+          - paragraph [ref=e92] [box=221,531,400,72]: Vi gir samme infrastruktur som større supportteam - uten tungt oppsett. Datakildene du nettopp koblet til er allerede klare.
+          - list [ref=e93] [box=221,621,400,133]:
+            - listitem [ref=e94] [box=221,621,400,45]
+            - listitem [ref=e96] [box=221,666,400,45]
+            - listitem [ref=e98] [box=221,710,400,44]
+          - button "Se planene" [ref=e100] [cursor=pointer] [box=221,772,400,38]
+        - paragraph [ref=e101] [box=221,822,519,18]:
+          - text: Står du fast?
+          - link "support@velion.com" [ref=e102] [cursor=pointer] [box=300,823,121,15]:
+            - /url: mailto:support@velion.com
+      - generic [ref=e105] [box=804,281,479,622]:
+        - generic [ref=e106] [box=804,281,160,311]: Apple
+        - generic [ref=e107] [box=964,281,160,311]: Microsoft
+        - generic [ref=e108] [box=1123,281,160,311]: Slack
+        - generic [ref=e109] [box=804,592,160,311]: Notion
+        - generic [ref=e110] [box=964,592,160,311]: Zammad
+        - generic [ref=e111] [box=1123,592,160,311]: Sanity
+  - generic [box=0,1070,1440,18]:
+    - button "Om oss" [ref=e112] [box=535,1070,44,18]
+    - button "Personvern" [ref=e113] [box=603,1070,67,18]
+    - button "Opphavsrett" [ref=e114] [box=694,1070,73,18]
+    - button "Cookie-innstillinger" [ref=e115] [box=791,1070,114,18]

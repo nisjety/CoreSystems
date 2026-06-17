@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use super::{ModelInfo, ProviderError};
 
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
-const DEFAULT_IMAGE_MODEL: &str = "dall-e-3";
+const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
 const DEFAULT_VISION_MODEL: &str = "gpt-4o";
 const OCR_PROMPT: &str =
     "Extract all text from this image verbatim. Return only the text, no commentary.";
@@ -233,6 +233,7 @@ enum OpenAiVisionFlavor {
     Azure {
         endpoint: String,
         api_version: String,
+        image_api_version: String,
     },
 }
 
@@ -268,6 +269,8 @@ impl OpenAiVisionProvider {
         let api_key = env_nonempty("AZURE_OPENAI_API_KEY")?;
         let api_version = env_nonempty("AZURE_OPENAI_API_VERSION")
             .unwrap_or_else(|| "2025-01-01-preview".to_owned());
+        let image_api_version =
+            env_nonempty("AZURE_OPENAI_IMAGE_API_VERSION").unwrap_or_else(|| "preview".to_owned());
         let image_models = csv_env_with_legacy(
             "AZURE_OPENAI_IMAGE_DEPLOYMENTS",
             "AZURE_OPENAI_IMAGE_DEPLOYMENT",
@@ -285,6 +288,7 @@ impl OpenAiVisionProvider {
             flavor: OpenAiVisionFlavor::Azure {
                 endpoint,
                 api_version,
+                image_api_version,
             },
             image_models,
             vision_models,
@@ -306,12 +310,23 @@ impl OpenAiVisionProvider {
             OpenAiVisionFlavor::Azure {
                 endpoint,
                 api_version,
-            } => format!(
-                "{}/openai/deployments/{}/images/generations?api-version={}",
-                endpoint.trim_end_matches('/'),
-                model,
-                api_version
-            ),
+                image_api_version,
+            } => {
+                if is_gpt_image_model(model) {
+                    format!(
+                        "{}/openai/v1/images/generations?api-version={}",
+                        endpoint.trim_end_matches('/'),
+                        image_api_version
+                    )
+                } else {
+                    format!(
+                        "{}/openai/deployments/{}/images/generations?api-version={}",
+                        endpoint.trim_end_matches('/'),
+                        model,
+                        api_version
+                    )
+                }
+            }
         }
     }
 
@@ -323,6 +338,7 @@ impl OpenAiVisionProvider {
             OpenAiVisionFlavor::Azure {
                 endpoint,
                 api_version,
+                ..
             } => format!(
                 "{}/openai/deployments/{}/chat/completions?api-version={}",
                 endpoint.trim_end_matches('/'),
@@ -360,6 +376,21 @@ impl OpenAiVisionProvider {
     }
 }
 
+fn is_gpt_image_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("gpt-image")
+}
+
+fn image_quality(model: &str, requested: &str) -> String {
+    let requested = requested.trim();
+    if is_gpt_image_model(model) && (requested.is_empty() || requested == "standard") {
+        "medium".to_owned()
+    } else if requested.is_empty() {
+        "standard".to_owned()
+    } else {
+        requested.to_owned()
+    }
+}
+
 #[async_trait::async_trait]
 impl VisionProvider for OpenAiVisionProvider {
     async fn generate_image(
@@ -371,11 +402,13 @@ impl VisionProvider for OpenAiVisionProvider {
             "prompt": req.prompt,
             "n": req.n.max(1),
             "size": if req.size.trim().is_empty() { "1024x1024" } else { &req.size },
-            "quality": if req.quality.trim().is_empty() { "standard" } else { &req.quality },
-            "response_format": "b64_json",
+            "quality": image_quality(model, &req.quality),
         });
-        if matches!(&self.flavor, OpenAiVisionFlavor::OpenAi { .. }) {
+        if matches!(&self.flavor, OpenAiVisionFlavor::OpenAi { .. }) || is_gpt_image_model(model) {
             body["model"] = json!(model);
+        }
+        if !is_gpt_image_model(model) {
+            body["response_format"] = json!("b64_json");
         }
 
         let response = self
@@ -576,11 +609,18 @@ fn csv_env(name: &str, default: &[&str]) -> Vec<String> {
 }
 
 fn csv_env_with_legacy(name: &str, legacy: &str, default: &[&str]) -> Vec<String> {
-    std::env::var(name)
-        .or_else(|_| std::env::var(legacy))
-        .ok()
-        .map(|value| parse_csv(&value))
-        .filter(|values| !values.is_empty())
+    // A SET-BUT-EMPTY primary (e.g. `AZURE_OPENAI_VISION_DEPLOYMENTS=`) must be
+    // treated as absent so the legacy var is consulted — `var().or_else()`
+    // would otherwise stop at `Ok("")` and skip the legacy fallback, landing on
+    // the hardcoded default (a model that may not be deployed → 404).
+    let from = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|value| parse_csv(&value))
+            .filter(|values| !values.is_empty())
+    };
+    from(name)
+        .or_else(|| from(legacy))
         .unwrap_or_else(|| default.iter().map(|value| (*value).to_owned()).collect())
 }
 
@@ -648,6 +688,7 @@ mod tests {
             flavor: OpenAiVisionFlavor::Azure {
                 endpoint: "https://example.openai.azure.com/".to_owned(),
                 api_version: "2025-01-01-preview".to_owned(),
+                image_api_version: "preview".to_owned(),
             },
             image_models: vec!["dalle".to_owned()],
             vision_models: vec!["gpt-4o".to_owned()],
@@ -657,5 +698,28 @@ mod tests {
             provider.images_url("dalle"),
             "https://example.openai.azure.com/openai/deployments/dalle/images/generations?api-version=2025-01-01-preview"
         );
+    }
+
+    #[test]
+    fn azure_gpt_image_url_uses_current_v1_endpoint() {
+        let provider = OpenAiVisionProvider {
+            client: reqwest::Client::new(),
+            api_key: "key".to_owned(),
+            flavor: OpenAiVisionFlavor::Azure {
+                endpoint: "https://example.openai.azure.com/".to_owned(),
+                api_version: "2025-01-01-preview".to_owned(),
+                image_api_version: "preview".to_owned(),
+            },
+            image_models: vec!["gpt-image-1".to_owned()],
+            vision_models: vec!["gpt-4o".to_owned()],
+        };
+
+        assert_eq!(
+            provider.images_url("gpt-image-1"),
+            "https://example.openai.azure.com/openai/v1/images/generations?api-version=preview"
+        );
+        assert_eq!(image_quality("gpt-image-1", ""), "medium");
+        assert_eq!(image_quality("gpt-image-1", "standard"), "medium");
+        assert_eq!(image_quality("dall-e-3", ""), "standard");
     }
 }

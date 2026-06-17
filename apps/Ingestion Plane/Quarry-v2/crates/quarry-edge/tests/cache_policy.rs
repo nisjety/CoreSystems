@@ -52,6 +52,7 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
         ingest: None,
         profiles: Arc::new(quarry_browser::session::InMemoryProfileStore::new()),
         search: None,
+        vector_index: None,
         searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
@@ -63,6 +64,10 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
         #[cfg(feature = "postgres-queue")]
         event_history: None,
         usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),
+        #[cfg(feature = "browser-agent")]
+        agent_driver: Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new()),
+        #[cfg(feature = "browser-agent")]
+        agent_runs: quarry_edge::agent_routes::new_runs(),
     };
     Some((state, conn))
 }

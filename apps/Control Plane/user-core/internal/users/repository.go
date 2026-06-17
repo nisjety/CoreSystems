@@ -713,6 +713,39 @@ func (r *Repository) GetPrimaryUserOrgMembership(ctx context.Context, userID str
 	return out, nil
 }
 
+// GetUserOrgMembership returns the user's active membership for a specific org,
+// or nil when the user is not an active member of that org. Used to scope the
+// session context to the org the user is currently acting as (the session's
+// active organization) rather than always the primary membership.
+func (r *Repository) GetUserOrgMembership(ctx context.Context, userID, orgID string) (*UserOrgMembership, error) {
+	query := `
+		SELECT id, user_id, org_id, role, status, COALESCE(invited_by, ''), created_at, updated_at
+		FROM user_org_memberships
+		WHERE user_id = $1 AND org_id = $2 AND status = 'active'
+		LIMIT 1
+	`
+
+	out := &UserOrgMembership{}
+	err := r.db.Pool.QueryRow(ctx, query, userID, orgID).Scan(
+		&out.ID,
+		&out.UserID,
+		&out.OrgID,
+		&out.Role,
+		&out.Status,
+		&out.InvitedBy,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get user org membership: %w", err)
+	}
+
+	return out, nil
+}
+
 // CountActiveOrgMemberships returns active membership count for role bootstrap rules.
 func (r *Repository) CountActiveOrgMemberships(ctx context.Context, orgID string) (int, error) {
 	query := `SELECT COUNT(*) FROM user_org_memberships WHERE org_id = $1 AND status = 'active'`

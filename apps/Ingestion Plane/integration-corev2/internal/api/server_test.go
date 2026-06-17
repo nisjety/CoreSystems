@@ -20,6 +20,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/auth"
 	"github.com/triodelab/integration-corev2/internal/config"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
+	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -307,6 +308,70 @@ func TestConnectionsListScopesBearerToPrincipalOrganization(t *testing.T) {
 	}
 	if len(decoded.Data.Connections) != 1 || decoded.Data.Connections[0].OrganizationID != "org-1" {
 		t.Fatalf("connections = %#v, want only org-1", decoded.Data.Connections)
+	}
+}
+
+func TestConnectionsListFiltersByProviderCategory(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	for _, connection := range []store.Connection{
+		{
+			ID:                   "conn-ms",
+			ProviderKey:          "microsoft",
+			ConnectorType:        "microsoft-graph",
+			OrganizationID:       "org-1",
+			UserID:               "user-1",
+			Status:               "active",
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+		{
+			ID:                   "conn-linkedin",
+			ProviderKey:          "linkedin",
+			ConnectorType:        "linkedin",
+			OrganizationID:       "org-1",
+			UserID:               "user-1",
+			Status:               "active",
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+		{
+			ID:                   "conn-x",
+			ProviderKey:          "x",
+			ConnectorType:        "x",
+			OrganizationID:       "org-1",
+			UserID:               "user-2",
+			Status:               "active",
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+	} {
+		if _, err := repo.UpsertConnection(t.Context(), connection); err != nil {
+			t.Fatalf("UpsertConnection(%s) error: %v", connection.ID, err)
+		}
+	}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	req := httptest.NewRequest("GET", "/api/v1/connections?organizationId=org-1&category=social", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var decoded struct {
+		Data struct {
+			Connections []store.Connection `json:"connections"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if len(decoded.Data.Connections) != 2 {
+		t.Fatalf("connections = %#v, want 2 social connections", decoded.Data.Connections)
+	}
+	for _, connection := range decoded.Data.Connections {
+		if connection.ProviderKey != "linkedin" && connection.ProviderKey != "x" {
+			t.Fatalf("connection provider = %s, want only social providers", connection.ProviderKey)
+		}
 	}
 }
 
@@ -1134,6 +1199,90 @@ func TestInternalTokenBrokerRejectsUnapprovedConsumer(t *testing.T) {
 	}
 }
 
+func TestInternalTokenBrokerRejectsConnectionOrgMismatch(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.TokenLeaseConsumers = []string{"social-publisher"}
+	_, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID:             "conn-social-1",
+		ProviderKey:    "x",
+		ConnectorType:  "x",
+		OrganizationID: "org-owner",
+		UserID:         "user-1",
+		Status:         "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	req := httptest.NewRequest("POST", "/internal/connectors/token", strings.NewReader(`{"organizationId":"org-attacker","connectionId":"conn-social-1","connectorType":"x","consumer":"social-publisher"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 403 {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestInternalTokenBrokerPublishesRedactedLeaseEvent(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.TokenLeaseConsumers = []string{"social-publisher"}
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-social-lease"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-social-lease",
+		ProviderKey:          "x",
+		ConnectorType:        "x",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		EncryptedAccessToken: encrypted,
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	publisher := &fakeEventsPublisher{}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Events: publisher})
+
+	req := httptest.NewRequest("POST", "/internal/connectors/token", strings.NewReader(`{"organizationId":"org-1","connectionId":"conn-social-lease","connectorType":"x","consumer":"social-publisher"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("events = %#v, want one token lease event", publisher.events)
+	}
+	event := publisher.events[0]
+	if event.Type != "velion.ingestion.integration.token_lease_created" {
+		t.Fatalf("event type = %s, want token lease created", event.Type)
+	}
+	if event.OrganizationID != "org-1" || event.ConnectionID != "conn-social-lease" || event.ProviderKey != "x" {
+		t.Fatalf("event scope = %#v, want org/connection/provider", event)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal event error: %v", err)
+	}
+	if strings.Contains(string(encoded), "access-token") {
+		t.Fatalf("event leaked access token: %s", encoded)
+	}
+}
+
 func TestSCIMProvisioningRequiresBearerToken(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.SCIMBearerToken = "scim-secret"
@@ -1535,6 +1684,15 @@ func (f fakeVerifier) VerifyToken(context.Context, string) (auth.Principal, erro
 		return auth.Principal{}, f.err
 	}
 	return f.principal, nil
+}
+
+type fakeEventsPublisher struct {
+	events []events.Event
+}
+
+func (f *fakeEventsPublisher) Publish(_ context.Context, event events.Event) error {
+	f.events = append(f.events, event)
+	return nil
 }
 
 type fakeOrgClient struct {

@@ -67,6 +67,50 @@ export const getKnowledgeRetrievalUrl = () =>
       "http://retrieval-engine:8004",
   );
 
+export const getEmbeddingEngineUrl = () =>
+  trimRightSlash(
+    process.env.DATA_PLANE_EMBEDDING_URL ||
+      process.env.DATA_PLANE_EMBEDDING_BASE_URL ||
+      process.env.EMBEDDING_ENGINE_URL ||
+      "http://embedding-engine:9202",
+  );
+
+export const getWikiStoreUrl = () =>
+  trimRightSlash(
+    process.env.DATA_PLANE_WIKI_URL ||
+      process.env.DATA_PLANE_WIKI_BASE_URL ||
+      process.env.WIKI_STORE_URL ||
+      "http://wiki-store:8011",
+  );
+
+export const getQuickwitAdapterUrl = () =>
+  trimRightSlash(
+    process.env.DATA_PLANE_QUICKWIT_ADAPTER_URL ||
+      process.env.QUICKWIT_ADAPTER_URL ||
+      "http://quickwit-adapter:9204",
+  );
+
+export const getQuickwitUrl = () =>
+  trimRightSlash(
+    process.env.DATA_PLANE_QUICKWIT_URL ||
+      process.env.QUICKWIT_URL ||
+      "http://quickwit:7280",
+  );
+
+export const getQdrantUrl = () =>
+  trimRightSlash(
+    process.env.DATA_PLANE_QDRANT_URL ||
+      process.env.QDRANT_URL ||
+      "http://qdrant:6333",
+  );
+
+export const getMinioUrl = () =>
+  trimRightSlash(
+    process.env.DATA_PLANE_MINIO_URL ||
+      process.env.MINIO_URL ||
+      "http://minio:9000",
+  );
+
 export const getModelPlaneRecommendUrl = () => {
   const explicit = process.env.MODEL_PLANE_RECOMMEND_URL?.trim();
   if (explicit) return trimRightSlash(explicit);

@@ -7,7 +7,7 @@ Data Plane v2 stores canonical state in two places:
 1. **Postgres** — documents, knowledge_units, retrieval_traces, wiki pages, graph entities, eval results, source/maintenance logs. Backed up via `pg_dump`.
 2. **Qdrant** — dense vectors keyed by `knowledge_id`. Backed up via Qdrant snapshot API.
 
-Redis and NATS are caches/transport — they do **not** require backup. They can be cold-restarted; data flows back from Postgres/Qdrant on first request.
+Dragonfly and NATS are cache/transport dependencies — they do **not** require backup. They can be cold-restarted; data flows back from Postgres/Qdrant on first request.
 
 ## Quick start
 

@@ -1,4 +1,4 @@
-import { createAuthMiddleware } from 'better-auth/plugins';
+import { createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
 import type { SharedNatsService } from '../nats/shared-nats.service';
 
@@ -69,10 +69,11 @@ export function auditPlugin(): BetterAuthPlugin {
         // Sign-in events
         {
           matcher: (context) => {
+            const path = context.path ?? '';
             return (
-              context.path === '/sign-in/email' ||
-              context.path === '/sign-in/oauth' ||
-              context.path.startsWith('/oauth/')
+              path === '/sign-in/email' ||
+              path === '/sign-in/oauth' ||
+              path.startsWith('/oauth/')
             );
           },
           handler: createAuthMiddleware(async (ctx) => {
@@ -115,10 +116,11 @@ export function auditPlugin(): BetterAuthPlugin {
         // Two-Factor Authentication events
         {
           matcher: (context) => {
+            const path = context.path ?? '';
             return (
-              context.path === '/two-factor/enable' ||
-              context.path === '/two-factor/disable' ||
-              context.path === '/two-factor/verify'
+              path === '/two-factor/enable' ||
+              path === '/two-factor/disable' ||
+              path === '/two-factor/verify'
             );
           },
           handler: createAuthMiddleware(async (ctx) => {
@@ -190,10 +192,11 @@ export function auditPlugin(): BetterAuthPlugin {
         // Session revocation events
         {
           matcher: (context) => {
+            const path = context.path ?? '';
             return (
-              context.path === '/revoke-sessions' ||
-              context.path === '/revoke-other-sessions' ||
-              context.path.includes('/revoke-session')
+              path === '/revoke-sessions' ||
+              path === '/revoke-other-sessions' ||
+              path.includes('/revoke-session')
             );
           },
           handler: createAuthMiddleware(async (ctx) => {
@@ -262,12 +265,13 @@ export function auditPlugin(): BetterAuthPlugin {
         // General authentication attempt logging
         {
           matcher: (context) => {
+            const path = context.path ?? '';
             return (
-              context.path === '/sign-in/email' ||
-              context.path === '/sign-up/email' ||
-              context.path.startsWith('/oauth/') ||
-              context.path.includes('verify') ||
-              context.path.includes('two-factor')
+              path === '/sign-in/email' ||
+              path === '/sign-up/email' ||
+              path.startsWith('/oauth/') ||
+              path.includes('verify') ||
+              path.includes('two-factor')
             );
           },
           handler: createAuthMiddleware(async (ctx) => {

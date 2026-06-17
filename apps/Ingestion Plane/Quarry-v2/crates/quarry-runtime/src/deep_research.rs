@@ -220,6 +220,8 @@ impl ResearchExecutor {
             // envelope so any private-corpus provider (TantivyLocalIndex)
             // restricts results to this org's documents.
             org_id: Some(org_id.to_string()),
+            include_domains: Vec::new(),
+            exclude_domains: Vec::new(),
         };
         let results = provider.search(query, &opts).await?;
         Ok(ResearchArtifacts {
@@ -285,6 +287,7 @@ mod tests {
                 snippet: None,
                 rank: 1,
                 provider: "fake".into(),
+                ..Default::default()
             }])
         }
         fn name(&self) -> &str {

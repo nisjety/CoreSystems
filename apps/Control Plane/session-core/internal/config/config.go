@@ -115,9 +115,9 @@ func Load() *Config {
 			MinConnections: getEnvAsInt("DATABASE_MIN_CONNS", 5),
 		},
 		Redis: RedisConfig{
-			Addr:     getEnv("REDIS_ADDR", "controlplane-redis:6379"),
-			Password: getEnv("REDIS_PASSWORD", ""),
-			DB:       getEnvAsInt("REDIS_DB", 1),
+			Addr:     getEnv("DRAGONFLY_ADDR", getEnv("CACHE_ADDR", getEnv("REDIS_ADDR", "controlplane-dragonfly:6379"))),
+			Password: getEnv("DRAGONFLY_PASSWORD", getEnv("CACHE_PASSWORD", getEnv("REDIS_PASSWORD", ""))),
+			DB:       getEnvAsInt("DRAGONFLY_DB", getEnvAsInt("CACHE_DB", getEnvAsInt("REDIS_DB", 1))),
 		},
 		NATS: NATSConfig{
 			LocalURL:               getEnv("NATS_LOCAL_URL", "nats://controlplane-nats:4222"),

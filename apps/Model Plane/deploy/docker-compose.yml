@@ -133,7 +133,11 @@ services:
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-4o-mini}
+      # Empty by default = "Velion Auto": inference-core resolves an unpinned
+      # request to the configured provider's own default (per-provider), so chat
+      # works with whichever provider key is set (Anthropic-only, OpenAI-only,
+      # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-}
       RATE_LIMIT_RPM: "100"
       # Local-dev auth bypass is defined in ../.env, but compose was not
       # forwarding it, so Velion's `dev-bypass` bearer was rejected before
@@ -153,10 +157,20 @@ services:
       # can resolve to Control Plane services instead.
       SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
       INFERENCE_CORE_ADDR: http://model-plane-inference-core-1:9092
-      ORCHESTRATOR_CORE_ADDR: http://model-plane-orchestrator-core-1:8084
+      # orchestrator-core's gRPC (OrchestrationCoreService proxy → session-core)
+      # listens on :9080; :8084 is its HTTP health port. Pointing the gateway's
+      # gRPC client at :8084 yields "h2 protocol error".
+      ORCHESTRATOR_CORE_ADDR: http://model-plane-orchestrator-core-1:9080
+      # execution-core gRPC — used to resume a run after an approval is granted
+      # (B3 approval→resume). Without this the gateway falls back to
+      # localhost:9093 and the resume call fails with "tcp connect error".
+      EXECUTION_CORE_ADDR: http://model-plane-execution-core-1:9093
       SANDBOX_MANAGER_ADDR: http://model-plane-sandbox-manager-1:9094
       BROWSER_BROKER_ADDR: http://model-plane-browser-broker-1:9095
-      LETTA_BRIDGE_ADDR: http://model-plane-letta-bridge-1:9096
+      MEMORY_SERVICE_URL: http://model-plane-session-core-1:9091
+      # Legacy env name retained for older gateway builds; memory authority is
+      # session-core, which syncs to Letta through LETTA_MEMORY_ADDR below.
+      LETTA_BRIDGE_ADDR: http://model-plane-session-core-1:9091
       CAPABILITY_CORE_ADDR: http://model-plane-capability-core-1:9097
       CAPABILITY_CORE_HTTP_URL: http://model-plane-capability-core-1:8085
       # Data Plane v2 — retrieval-engine serves Retrieval+Document+Knowledge on
@@ -263,6 +277,7 @@ services:
       OTEL_SERVICE_NAME: session-core
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
+      LETTA_MEMORY_ADDR: ${LETTA_MEMORY_ADDR:-http://model-plane-letta-bridge-1:9096}
     depends_on:
       postgres:
         condition: service_healthy
@@ -288,7 +303,28 @@ services:
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
+      # Velion intent layer — turns the velion-budget/-balance/-genius modes into
+      # a concrete model from request complexity + the org's cost-core budget,
+      # with model-router as the cheap fallback (see provider/intent.rs). The
+      # budget gate is best-effort: COST_CORE_URL points at cost-core's HTTP API;
+      # org/user scope arrives via gRPC metadata (x-org-id/x-user-id) and degrades
+      # to an Unknown posture when absent.
+      VELION_INTENT_ENABLED: ${VELION_INTENT_ENABLED:-1}
+      COST_CORE_URL: ${COST_CORE_URL:-http://model-plane-cost-core-1:8089}
+      VELION_INTENT_BUDGET_USD: ${VELION_INTENT_BUDGET_USD:-50}
+      # Runtime RoutingPolicy store: inference-core polls session-core's
+      # RoutingPolicy gRPC for the live intent-routing policy (the Velion
+      # "model router" tuning), refreshing every ROUTER_POLICY_REFRESH_SECS.
+      # Unset → the chain runs on the built-in RoutingPolicy::default.
+      SESSION_CORE_URL: ${SESSION_CORE_URL:-http://model-plane-session-core-1:9091}
+      ROUTER_POLICY_REFRESH_SECS: ${ROUTER_POLICY_REFRESH_SECS:-60}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Azure AI Foundry Claude (claude-ai project). When set, the `anthropic`
+      # provider slot routes claude-* models to <endpoint>/anthropic/v1/messages
+      # (native Anthropic body + x-api-key auth) instead of api.anthropic.com.
+      AZURE_ANTHROPIC_ENDPOINT: ${AZURE_ANTHROPIC_ENDPOINT:-}
+      AZURE_ANTHROPIC_API_KEY: ${AZURE_ANTHROPIC_API_KEY:-}
+      AZURE_ANTHROPIC_DEPLOYMENTS: ${AZURE_ANTHROPIC_DEPLOYMENTS:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
       OPENAI_CHAT_MODELS: ${OPENAI_CHAT_MODELS:-}
@@ -396,6 +432,17 @@ services:
       SESSION_CORE_ADDR: http://session-core:9091
       INFERENCE_CORE_ADDR: http://inference-core:9092
       CAPABILITY_CORE_ADDR: http://capability-core:9097
+      # Quarry-v2 edge (Ingestion Plane) — backs the real web_search / web_fetch
+      # agentic tools and the browser-agent loop. Cross-plane reach is via the
+      # host-published port (same convention model-gateway uses).
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://host.docker.internal:8082}
+      QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-}
+      # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
+      # (RAG over the org's ingested docs). execution-core is not on the
+      # inter-plane bus, so it reaches the engine via the host-published gRPC
+      # port. DATAPLANE_INTERNAL_KEY is sent as the x-api-key credential.
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL_EXEC:-http://host.docker.internal:50062}
+      DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
     depends_on:
       postgres:
         condition: service_healthy
@@ -446,6 +493,9 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
       REDIS_URL: redis://dragonfly:6379
       NATS_URL: nats://nats:4222
+      APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
+    volumes:
+      - mp-capability-core-data:/var/lib/capability-core
     depends_on:
       postgres:
         condition: service_healthy
@@ -491,6 +541,11 @@ services:
       # backend). Unset AGENT_MEMORY_URL to fall back to the in-memory store.
       AGENT_MEMORY_URL: ${AGENT_MEMORY_URL:-http://agent-memory-server:8000}
       AGENT_MEMORY_TOKEN: ${AGENT_MEMORY_TOKEN:-}
+      # Durable Postgres memory backend (auto-creates schema on boot). NOTE:
+      # deploy routes orchestrator/gateway memory at session-core:9091, so
+      # letta-bridge is currently shadowed — this makes its own store durable
+      # should anything route to it.
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
     depends_on:
       agent-memory-server:
         condition: service_healthy
@@ -563,8 +618,13 @@ services:
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: cost-core
+      # Durable cost ledger (the migration entrypoint applies 0001_cost_ledger
+      # on boot). Shares the Model Plane Postgres / session_core DB.
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
     depends_on:
       nats:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8089/healthz"]
@@ -602,6 +662,7 @@ volumes:
   mp-temporal-postgres-data:
   mp-dragonfly-data:
   mp-agent-memory-redis-data:
+  mp-capability-core-data:
 
 networks:
   default:

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::kinds;
+use crate::privacy::PrivacyPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedOutput {
@@ -23,6 +24,9 @@ pub struct NormalizedOutput {
     /// current PageRunner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub determinism: Option<DeterminismStamp>,
+    /// Privacy policy that governed the fetch and any downstream writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<PrivacyPolicy>,
     /// Branding signals extracted by `quarry_transform::branding_rendered`
     /// for HTML responses (favicon, theme color, palette, logo
     /// candidate, font family, og:image). `None` for binary responses

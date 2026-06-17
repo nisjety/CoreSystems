@@ -10,8 +10,8 @@ use mp_contracts::dataplane::{
 };
 use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
-    finetune_jobs_client::FinetuneJobsClient, inference_core_client::InferenceCoreClient,
-    memory_service_client::MemoryServiceClient,
+    execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
+    inference_core_client::InferenceCoreClient, memory_service_client::MemoryServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     sandbox_manager_client::SandboxManagerClient, session_core_client::SessionCoreClient,
 };
@@ -69,6 +69,10 @@ pub struct AppState {
     pub inference_client: InferenceCoreClient<Channel>,
     pub session_client: SessionCoreClient<Channel>,
     pub orchestration_client: OrchestrationCoreServiceClient<Channel>,
+    /// execution-core (:9093). Used to resume a run after an approval is
+    /// granted — the gateway is the approval decision point but does not drive
+    /// the execution loop, so it signals execution-core directly.
+    pub execution_client: ExecutionCoreClient<Channel>,
     pub sandbox_client: SandboxManagerClient<Channel>,
     pub browser_client: BrowserBrokerClient<Channel>,
     pub memory_client: MemoryServiceClient<Channel>,
@@ -154,9 +158,10 @@ impl AppState {
         // it reuses the session channel. Cheap clone — Channel is Arc<Inner>.
         let finetune_channel = session_channel.clone();
         let orchestration_channel = Endpoint::from_static("http://localhost:9080").connect_lazy();
+        let execution_channel = Endpoint::from_static("http://localhost:9093").connect_lazy();
         let sandbox_channel = Endpoint::from_static("http://localhost:9094").connect_lazy();
         let browser_channel = Endpoint::from_static("http://localhost:9095").connect_lazy();
-        let memory_channel = Endpoint::from_static("http://localhost:9096").connect_lazy();
+        let memory_channel = Endpoint::from_static("http://localhost:9091").connect_lazy();
         let capability_channel = Endpoint::from_static("http://localhost:9097").connect_lazy();
         let dp_retrieval_channel = Endpoint::from_static("http://localhost:50052").connect_lazy();
         let dp_documents_channel = Endpoint::from_static("http://localhost:50052").connect_lazy();
@@ -169,6 +174,7 @@ impl AppState {
             inference_client: InferenceCoreClient::new(inference_channel),
             session_client: SessionCoreClient::new(session_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
+            execution_client: ExecutionCoreClient::new(execution_channel),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
             browser_client: BrowserBrokerClient::new(browser_channel),
             memory_client: MemoryServiceClient::new(memory_channel),
@@ -267,6 +273,11 @@ impl AppState {
             "ORCHESTRATOR_CORE_ADDR",
             "http://localhost:9080",
         )?);
+        let execution_client = ExecutionCoreClient::new(Self::lazy_channel(
+            "EXECUTION_CORE_URL",
+            "EXECUTION_CORE_ADDR",
+            "http://localhost:9093",
+        )?);
         let sandbox_client = SandboxManagerClient::new(Self::lazy_channel(
             "SANDBOX_MANAGER_URL",
             "SANDBOX_MANAGER_ADDR",
@@ -278,9 +289,9 @@ impl AppState {
             "http://localhost:9095",
         )?);
         let memory_client = MemoryServiceClient::new(Self::lazy_channel(
-            "LETTA_BRIDGE_URL",
+            "MEMORY_SERVICE_URL",
             "LETTA_BRIDGE_ADDR",
-            "http://localhost:9096",
+            "http://localhost:9091",
         )?);
         let capability_client = CapabilityCoreClient::new(Self::lazy_channel(
             "CAPABILITY_CORE_URL",
@@ -366,6 +377,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.orchestration_client = orchestration_client;
+            state.execution_client = execution_client.clone();
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
             state.memory_client = memory_client;
@@ -393,6 +405,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.orchestration_client = orchestration_client;
+            state.execution_client = execution_client;
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
             state.memory_client = memory_client;

@@ -22,8 +22,9 @@ services:
       QUARRY_EDGE__NATS_URL: nats://nats:4222
       QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
-      # searxng must share a network with quarry-edge (inter-plane-bus).
-      QUARRY_EDGE__SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      # SearXNG is owned by this Ingestion Plane stack so Quarry-v2 is
+      # self-contained and does not depend on a root mega-stack service.
+      QUARRY_EDGE__SEARXNG_URL: http://searxng:8080
       QUARRY_EDGE__BRAVE_SEARCH_KEY: ${BRAVE_API_KEY:-${BRAVE_SEARCH_KEY:-}}
       # Accept any non-empty Bearer in dev so the orchestrator's calls
       # to /v1/internal/run_page succeed without a real auth-core JWT.
@@ -32,8 +33,12 @@ services:
       # operators must either unset this OR set ENVIRONMENT=dev (the
       # latter is wrong; do the former).
       QUARRY_EDGE_AUTH_DEV_BYPASS: "${QUARRY_EDGE_AUTH_DEV_BYPASS:-1}"
+      # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
+      QUARRY_BROWSER_NO_SANDBOX: "${QUARRY_BROWSER_NO_SANDBOX:-1}"
       ENVIRONMENT: ${ENVIRONMENT:-dev}
-      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}@ingestion-redis:6379/6
+      QUARRY_EDGE__DRAGONFLY_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/6
+      # Compatibility for already-built Quarry Edge images and Redis-protocol clients.
+      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/6
       QUARRY_EDGE__ARTIFACT_BACKEND: ${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
       QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
       # Model Plane gateway. EdgeConfig field is `model_plane_url` (NOT *_base_url) —
@@ -44,6 +49,18 @@ services:
       # runs MODEL_GATEWAY_AUTH_DEV_BYPASS=1 (accepts any non-empty bearer in dev);
       # an empty token omits the header → 401. `dev-token` is the shared dev value.
       QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-dev-token}
+      # Exa-style search-quality layers (all default OFF; need MODEL_PLANE_URL).
+      # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
+      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
+      QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}
+      # Semantic rerank: reorder top-N merged results by relevance + attach a
+      # query-relevant highlight per result.
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
+      QUARRY_EDGE__SEMANTIC_RERANK_MODEL: ${QUARRY_SEMANTIC_RERANK_MODEL:-}
+      QUARRY_EDGE__SEMANTIC_RERANK_TOP_N: ${QUARRY_SEMANTIC_RERANK_TOP_N:-10}
+      # Data residency: set to 1 to refuse external SERP SaaS (Brave/Serper) so
+      # web-search queries never leave the cluster (in-infra providers only).
+      QUARRY_EDGE__ZERO_SAAS_SEARCH: "${QUARRY_EDGE_ZERO_SAAS_SEARCH:-0}"
       # Data Plane retrieval (EdgeConfig field `data_plane_url`) → retrieval_v2 /v1/retrieve,
       # powering hybrid search (lexical ⊕ Qdrant semantic, RRF-fused). A separate
       # ingest/documents URL (dpv2-documents-api:8010) is added in Phase 4 for content
@@ -54,6 +71,7 @@ services:
       QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
       QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}
       QUARRY_EDGE__FETCH_TIMEOUT_S: ${QUARRY_FETCH_TIMEOUT_S:-30}
+      QUARRY_EDGE__SECURITY_SNAPSHOT_PATH: ${QUARRY_SECURITY_SNAPSHOT_PATH:-/app/data/security-feeds/quarry-security.json}
       # Wave 7 — wire the optional HTTP/3 driver. Default `1` because
       # the edge image is now built with `--features http3` so the
       # cost of having the driver available is paid at build time;
@@ -70,12 +88,16 @@ services:
     depends_on:
       quarry-control:
         condition: service_healthy
-      redis:
+      dragonfly:
         condition: service_healthy
       nats:
         condition: service_healthy
+      searxng:
+        condition: service_healthy
     ports:
       - "8082:8082"
+    volumes:
+      - ./config/security-feeds:/app/data/security-feeds
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -198,6 +220,12 @@ services:
 
       NATS_URL: nats://nats:4222
       NATS_TOKEN:
+      DOCUMENT_PROCESSOR_ORDER: ${DOCUMENT_PROCESSOR_ORDER:-local}
+      TIKA_ENABLED: ${TIKA_ENABLED:-false}
+      TIKA_URL: ${TIKA_URL:-http://tika:9998}
+      TIKA_TIMEOUT_S: ${TIKA_TIMEOUT_S:-20}
+      GOTENBERG_URL: ${GOTENBERG_URL:-http://gotenberg:3000}
+      STIRLING_PDF_URL: ${STIRLING_PDF_URL:-http://stirling-pdf:8080}
     deploy:
       resources:
         limits:
@@ -241,7 +269,7 @@ services:
       # the runtime is integration-corev2. Service URLs and safety knobs below
       # intentionally override this file, but provider secrets should flow
       # through instead of being masked to empty values.
-      - ./integration-core/.env
+      - ./integration-corev2/.env
     environment:
       PORT: "3026"
       SERVICE_NAME: integration-corev2
@@ -328,7 +356,7 @@ services:
     entrypoint: ["/app/finspo-worker"]
     restart: unless-stopped
     env_file:
-      - ./integration-core/.env
+      - ./integration-corev2/.env
     environment:
       SERVICE_NAME: integration-finspo-worker
       ENVIRONMENT: ${ENVIRONMENT:-dev}
@@ -634,11 +662,16 @@ services:
       timeout: 5s
       retries: 5
 
-  connector-runtime-redis:
+  connector-runtime-dragonfly:
     profiles: ["legacy-nango"]
-    image: redis:7.2.4
-    container_name: connector-runtime-redis
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: connector-runtime-dragonfly
     restart: unless-stopped
+    command:
+      - "--cache_mode=true"
+      - "--maxmemory=256mb"
+      - "--proactor_threads=1"
+      - "--dir=/data"
     networks:
       - ingestion-net
 
@@ -663,7 +696,7 @@ services:
       # host URL the browser can resolve.
       NANGO_SERVER_URL: ${CONNECTOR_RUNTIME_PUBLIC_SERVER_URL:-http://localhost:3003}
       NANGO_PUBLIC_SERVER_URL: ${CONNECTOR_RUNTIME_PUBLIC_SERVER_URL:-http://localhost:3003}
-      NANGO_REDIS_URL: ${CONNECTOR_RUNTIME_REDIS_URL:-redis://connector-runtime-redis:6379}
+      NANGO_REDIS_URL: ${CONNECTOR_RUNTIME_REDIS_URL:-redis://connector-runtime-dragonfly:6379}
       # Self-hosted Nango validates backend API calls against environment-scoped
       # secret keys. integration-core uses CONNECTOR_RUNTIME_SECRET as its
       # Nango bearer token, so expose the same value as the DEV API key here.
@@ -679,7 +712,7 @@ services:
     depends_on:
       connector-runtime-db:
         condition: service_healthy
-      connector-runtime-redis:
+      connector-runtime-dragonfly:
         condition: service_started
     ports:
       - "3003:3003"
@@ -702,13 +735,13 @@ services:
   nango-seed:
     profiles: ["legacy-nango"]
     build:
-      context: ./integration-core
+      context: ./integration-corev2
       dockerfile: Dockerfile
     container_name: nango-seed
     restart: "no"
     command: ["node", "dist/scripts/seed-nango-providers.js"]
     env_file:
-      - ./integration-core/.env
+      - ./integration-corev2/.env
     depends_on:
       connector-runtime-engine:
         condition: service_healthy
@@ -766,36 +799,35 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7.2.4-alpine
-    container_name: ingestion-redis
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    container_name: ingestion-dragonfly
     restart: unless-stopped
     networks:
       - ingestion-net
-    # No host port mapping — Redis is reached only via the compose
-    # network as `ingestion-redis:6379`. Avoids clashing with any local
-    # Redis the operator may run, and removes a Redis instance from the
+    # No host port mapping — Dragonfly is reached only via the compose
+    # network as `dragonfly:6379`. Avoids clashing with any local cache
+    # the operator may run, and removes a cache instance from the
     # public host-network attack surface.
     expose:
       - "6379"
     volumes:
-      - ingestion-redis-data:/data
+      - ingestion-dragonfly-data:/data
     command: >
-      redis-server
-      --requirepass ${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}
-      --appendonly yes
-      --maxmemory 96mb
-      --maxmemory-policy allkeys-lru
-      --tcp-backlog 128
+      --requirepass=${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}
+      --cache_mode=true
+      --maxmemory=256mb
+      --proactor_threads=1
+      --dir=/data
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 384M
           cpus: "0.25"
         reservations:
-          memory: 32M
+          memory: 128M
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${INGESTION_REDIS_PASSWORD:-ingestion_redis_password_2026}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -980,6 +1012,128 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ==================== Self-owned document processors ====================
+  # Default-off profile. Enable with:
+  #   docker compose --profile self-owned-docs up -d tika gotenberg stirling-pdf
+  tika:
+    image: apache/tika:latest-full
+    container_name: ingestion-tika
+    profiles: ["self-owned-docs"]
+    restart: unless-stopped
+    init: true
+    expose:
+      - "9998"
+    networks:
+      - ingestion-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:9998/tika || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: ingestion-gotenberg
+    profiles: ["self-owned-docs"]
+    restart: unless-stopped
+    init: true
+    expose:
+      - "3000"
+    networks:
+      - ingestion-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:latest
+    container_name: ingestion-stirling-pdf
+    profiles: ["self-owned-docs"]
+    restart: unless-stopped
+    init: true
+    environment:
+      DOCKER_ENABLE_SECURITY: ${STIRLING_PDF_ENABLE_SECURITY:-false}
+      INSTALL_BOOK_AND_ADVANCED_HTML_OPS: ${STIRLING_PDF_ADVANCED_HTML_OPS:-false}
+    expose:
+      - "8080"
+    volumes:
+      - stirling-pdf-data:/configs
+    networks:
+      - ingestion-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:8080/api/v1/info/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  # ==================== SearXNG (Quarry-v2 web search) ====================
+  # Quarry-v2 owns its web-search dependency. quarry-edge's SmartRouter calls
+  # this as the free primary provider (format=json). Defining it here — rather
+  # than relying on the root mega-stack — makes the Ingestion Plane
+  # self-contained: bringing up only this stack gives quarry-edge a working
+  # SearXNG over inter-plane-bus (reachable as `searxng:8080`).
+  searxng:
+    image: searxng/searxng:latest
+    container_name: ingestion-searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: "http://searxng:8080/"
+      # Dragonfly is RESP-compatible — SearXNG's Redis client talks to it
+      # unmodified. db 7 keeps it clear of quarry-edge's db 6. Password matches
+      # the dragonfly service's --requirepass.
+      SEARXNG_REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/7
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-searxng-secret-32chars!!}
+    volumes:
+      # Bundled settings enable the JSON output format SmartRouter requires.
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    depends_on:
+      dragonfly:
+        condition: service_healthy
+    expose:
+      - "8080"
+    ports:
+      - "127.0.0.1:8888:8080"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
 volumes:
   ingestion-postgres-data:
     driver: local
@@ -989,13 +1143,15 @@ volumes:
   # of the rest of the Ingestion Plane state.
   ingestion-temporal-postgres-data:
     driver: local
-  ingestion-redis-data:
+  ingestion-dragonfly-data:
     driver: local
   ingestion-nats-data:
     driver: local
   ingestion-qdrant-data:
     driver: local
   connector-runtime-db-data:
+    driver: local
+  stirling-pdf-data:
     driver: local
 
 networks:

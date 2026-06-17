@@ -165,6 +165,8 @@ impl AnswerPipeline {
             time_range: None,
             exact_match: false,
             org_id: req.org_id.clone(),
+            include_domains: Vec::new(),
+            exclude_domains: Vec::new(),
         };
         let results = self.search.search(&req.query, &opts).await?;
         if results.is_empty() {
@@ -421,6 +423,7 @@ mod tests {
                     snippet: None,
                     rank: 1,
                     provider: "mock".into(),
+                    ..Default::default()
                 },
                 SearchResult {
                     url: "https://b.example/page".into(),
@@ -428,6 +431,7 @@ mod tests {
                     snippet: None,
                     rank: 2,
                     provider: "mock".into(),
+                    ..Default::default()
                 },
             ],
         });
@@ -543,6 +547,7 @@ mod tests {
                 snippet: None,
                 rank: 1,
                 provider: "mock".into(),
+                ..Default::default()
             }],
         });
         let fetcher = Arc::new(MockFetcher {

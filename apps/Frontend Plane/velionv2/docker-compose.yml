@@ -7,7 +7,7 @@ name: frontend-plane-velionv2
 services:
   nats:
     image: nats:2-alpine
-    container_name: velion-nats
+    container_name: velion-nats2
     command: ["-js", "-m", "8222", "-sd", "/data"]
     volumes:
       - velion-nats-data:/data
@@ -46,7 +46,11 @@ services:
       WATCHPACK_POLLING: "true"
       CHOKIDAR_USEPOLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
-      VELION_SKIP_BOOTSTRAP: "${VELION_SKIP_BOOTSTRAP:-0}"
+      # In normal parity work we already have the shared plane services up, so
+      # the v2 frontend should start immediately instead of rebuilding other
+      # stacks before Next.js can serve. Set `VELION_SKIP_BOOTSTRAP=0` to force
+      # the old bootstrap flow when you explicitly want it.
+      VELION_SKIP_BOOTSTRAP: "${VELION_SKIP_BOOTSTRAP:-1}"
       VELION_NATS_URL: nats://velion-nats:4222
       CONTROL_PLANE_AUTH_URL: http://auth-core:3011
       AUTH_CORE_URL: http://auth-core:3011
@@ -59,6 +63,7 @@ services:
       INTEGRATION_CORE_URL: http://integration-api:3026
       GRAPH_INDEX_URL: http://dpv2-graph-index:9203
       DATA_PLANE_DOCUMENTS_URL: http://dpv2-documents-api:8010
+      DATA_PLANE_MINIO_URL: http://minio:9000
       MODEL_PLANE_URL: http://model-gateway:8080
       MODEL_PLANE_AI_URL: http://model-gateway:8080
       NOTIFICATION_CORE_URL: http://notification-core:3140

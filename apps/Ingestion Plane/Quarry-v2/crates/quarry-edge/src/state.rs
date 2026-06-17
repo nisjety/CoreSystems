@@ -10,6 +10,7 @@ use quarry_runtime::ingest_client::DataPlaneIngest;
 use quarry_runtime::local_index::TantivyLocalIndex;
 use quarry_runtime::serp::SearchProvider;
 use quarry_runtime::usage::UsageMeter;
+use quarry_runtime::vector_index::VectorIndex;
 use quarry_security::SecurityEngine;
 
 #[derive(Clone)]
@@ -29,6 +30,11 @@ pub struct AppState {
     pub ingest: Option<Arc<dyn DataPlaneIngest>>,
     pub profiles: Arc<dyn ProfileStore>,
     pub search: Option<Arc<dyn SearchProvider>>,
+    /// Semantic retrieval backend (Data Plane v2 `retrieval_v2` → Qdrant).
+    /// Powers `POST /v1/search/similar` (find-similar) directly, and is the
+    /// same handle fused into the hybrid `search` provider above. `Some` when
+    /// `DATA_PLANE_URL` is configured; `None` makes find-similar return 501.
+    pub vector_index: Option<Arc<dyn VectorIndex>>,
     /// IMAGES vertical (`POST /v1/search/images`). The web `search` provider
     /// above is the `SmartSearchRouter` and has no image concept, so image
     /// search talks to SearXNG directly. `Some` when `SEARXNG_URL` is

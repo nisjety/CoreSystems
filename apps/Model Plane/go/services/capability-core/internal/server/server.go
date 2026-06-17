@@ -16,13 +16,15 @@ import (
 	"google.golang.org/grpc"
 )
 
-// Server is the default CapabilityCore implementation backed by an in-memory
-// registry and policy engine.
+// Server is the default CapabilityCore implementation backed by the registry,
+// policy engine, and (optionally) the durable capabilities store used for
+// score-ranked listing.
 type Server struct {
 	mpv1.UnimplementedCapabilityCoreServer
 	registry *registry.Registry
 	modelReg *registry.ModelsRegistry
 	policy   *policy.Engine
+	store    *registry.CapabilitiesStore // optional: enables score-ranked List
 }
 
 // toDetail converts a domain Capability into a wire CapabilityDetail.
@@ -60,9 +62,24 @@ func NewServer(reg *registry.Registry, modelReg *registry.ModelsRegistry, pol *p
 	return &Server{registry: reg, modelReg: modelReg, policy: pol}
 }
 
-// ListCapabilities returns a filtered, paginated list of capabilities.
+// WithStore attaches the durable capabilities store. When present,
+// ListCapabilities ranks results by composite score (descending) instead of the
+// registry's kind/name order. Returns the same Server for chaining; a nil store
+// leaves the in-memory ordering in place.
+func (s *Server) WithStore(store *registry.CapabilitiesStore) *Server {
+	s.store = store
+	return s
+}
+
+// ListCapabilities returns a filtered, paginated list of capabilities. When a
+// durable store is attached it returns results ranked by composite score
+// (descending) so the agentic loop sees the healthiest/safest capabilities
+// first; otherwise it falls back to the in-memory registry's kind/name order.
 func (s *Server) ListCapabilities(ctx context.Context, req *mpv1.ListCapabilitiesRequest) (*mpv1.ListCapabilitiesResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ListCapabilities")))
+	if s.store != nil {
+		return s.listRanked(ctx, req)
+	}
 	items, hasMore := s.registry.List(req.KindFilter, req.Query, req.AfterId, req.Limit)
 	details := make([]*mpv1.CapabilityDetail, 0, len(items))
 	for _, c := range items {
@@ -78,6 +95,77 @@ func (s *Server) ListCapabilities(ctx context.Context, req *mpv1.ListCapabilitie
 		}
 	}
 	return &mpv1.ListCapabilitiesResponse{Capabilities: details, HasMore: hasMore}, nil
+}
+
+// listRanked serves ListCapabilities from the durable store, ordered by
+// descending composite score. The text query filters by name/description; the
+// kind filter narrows by kind; AfterId is an id cursor over the ranked order.
+func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesRequest) (*mpv1.ListCapabilitiesResponse, error) {
+	limit := int(req.Limit)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	// Pull a generous ranked window (org-agnostic global view here; per-org
+	// scoping is enforced at EvaluatePolicy time). Over-fetch so the query
+	// filter + cursor can still fill a page.
+	scored, err := s.store.RankedList(ctx, "", req.KindFilter, nil, limit*4+200)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+
+	q := strings.ToLower(strings.TrimSpace(req.Query))
+	filtered := make([]*registry.CapabilityRow, 0, len(scored))
+	for _, sc := range scored {
+		if q != "" &&
+			!strings.Contains(strings.ToLower(sc.Row.Name), q) &&
+			!strings.Contains(strings.ToLower(sc.Row.Description), q) {
+			continue
+		}
+		filtered = append(filtered, sc.Row)
+	}
+
+	start := 0
+	if req.AfterId != "" {
+		for i, r := range filtered {
+			if r.ID == req.AfterId {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	hasMore := false
+	if end < len(filtered) {
+		hasMore = true
+	} else {
+		end = len(filtered)
+	}
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+
+	details := make([]*mpv1.CapabilityDetail, 0, end-start)
+	for _, r := range filtered[start:end] {
+		details = append(details, rowToDetail(r))
+	}
+	return &mpv1.ListCapabilitiesResponse{Capabilities: details, HasMore: hasMore}, nil
+}
+
+// rowToDetail converts a durable CapabilityRow into a wire CapabilityDetail.
+func rowToDetail(r *registry.CapabilityRow) *mpv1.CapabilityDetail {
+	if r == nil {
+		return nil
+	}
+	return &mpv1.CapabilityDetail{
+		CapabilityId: r.ID,
+		Name:         r.Name,
+		Kind:         r.Kind,
+		Version:      r.Version,
+		Description:  r.Description,
+		RiskLevel:    r.RiskLevel,
+		LazyLoad:     r.LazyLoad,
+		Scope:        r.Scope,
+	}
 }
 
 // GetCapability returns a single capability by ID, honouring an optional version constraint.

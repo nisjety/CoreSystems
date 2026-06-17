@@ -35,7 +35,11 @@ impl PromptCache {
         }
     }
 
-    /// Compute the cache key for a request: blake3(model + messages JSON).
+    /// Compute the cache key for a request. Covers every field that changes the
+    /// completion: model + messages + sampling **and** the response-shaping
+    /// fields (`tools`, `tool_choice`, structured-output schema). Omitting the latter
+    /// let an identical-message request *with* tools/schema collide with one
+    /// *without* and be served the wrong (tool-less / unstructured) answer.
     fn cache_key(req: &InferRequest) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(req.provider_hint.as_bytes());
@@ -46,6 +50,15 @@ impl PromptCache {
         }
         hasher.update(&req.temperature.to_le_bytes());
         hasher.update(&req.max_tokens.to_le_bytes());
+        // Response-shaping fields — a tool/schema change must miss the cache.
+        for tool in &req.tools {
+            hasher.update(tool.name.as_bytes());
+            hasher.update(tool.parameters_json.as_bytes());
+        }
+        hasher.update(req.tool_choice.as_bytes());
+        if let Some(schema) = &req.structured_output_schema {
+            hasher.update(schema.as_bytes());
+        }
         hasher.finalize().to_hex().to_string()
     }
 

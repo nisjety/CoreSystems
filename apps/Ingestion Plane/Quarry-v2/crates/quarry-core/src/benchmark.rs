@@ -179,27 +179,51 @@ mod compare_tests {
     #[test]
     fn higher_better_regression_grades() {
         // 12% drop → Fail, 7% drop → Warn, improvement → Pass.
-        assert_eq!(compare_score(88.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Fail);
-        assert_eq!(compare_score(93.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Warn);
-        assert_eq!(compare_score(105.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
+        assert_eq!(
+            compare_score(88.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Fail
+        );
+        assert_eq!(
+            compare_score(93.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Warn
+        );
+        assert_eq!(
+            compare_score(105.0, 100.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Pass
+        );
     }
 
     #[test]
     fn lower_better_inverts() {
         // latency: lower candidate beats baseline → Pass; much higher → Fail.
-        assert_eq!(compare_score(80.0, 100.0, MetricTarget::LowerBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
-        assert_eq!(compare_score(120.0, 100.0, MetricTarget::LowerBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Fail);
+        assert_eq!(
+            compare_score(80.0, 100.0, MetricTarget::LowerBetter, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Pass
+        );
+        assert_eq!(
+            compare_score(120.0, 100.0, MetricTarget::LowerBetter, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Fail
+        );
     }
 
     #[test]
     fn in_range_grades_by_distance() {
-        assert_eq!(compare_score(102.0, 100.0, MetricTarget::InRange, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
-        assert_eq!(compare_score(120.0, 100.0, MetricTarget::InRange, WARN_PCT, FAIL_PCT), ComparisonVerdict::Fail);
+        assert_eq!(
+            compare_score(102.0, 100.0, MetricTarget::InRange, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Pass
+        );
+        assert_eq!(
+            compare_score(120.0, 100.0, MetricTarget::InRange, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Fail
+        );
     }
 
     #[test]
     fn zero_baseline_passes() {
-        assert_eq!(compare_score(50.0, 0.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT), ComparisonVerdict::Pass);
+        assert_eq!(
+            compare_score(50.0, 0.0, MetricTarget::HigherBetter, WARN_PCT, FAIL_PCT),
+            ComparisonVerdict::Pass
+        );
     }
 }
 

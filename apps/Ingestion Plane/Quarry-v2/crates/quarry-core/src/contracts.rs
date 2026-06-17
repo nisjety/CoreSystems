@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::kinds;
+use crate::privacy::PrivacyPolicy;
 use crate::zdr::ZdrMode;
 
 // ---------------------------------------------------------------------------
@@ -136,6 +137,8 @@ pub struct DataPlaneIngestRequest {
     pub zdr: ZdrMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy_policy: Option<PrivacyPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_trace: Option<SourceTrace>,
 }

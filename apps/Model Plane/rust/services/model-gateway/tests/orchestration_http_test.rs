@@ -353,6 +353,18 @@ impl OrchestrationCoreService for MockOrchestration {
         ))
     }
 
+    async fn record_orchestration_event(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::RecordOrchestrationEventRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::RecordOrchestrationEventResponse>, Status>
+    {
+        Ok(Response::new(
+            mp_contracts::model_plane::v1::RecordOrchestrationEventResponse {
+                event_id: "evt-mock".into(),
+            },
+        ))
+    }
+
     async fn stream_run_events(
         &self,
         request: TonicRequest<StreamRunEventsRequest>,

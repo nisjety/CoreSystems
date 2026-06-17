@@ -49,11 +49,20 @@ impl ExecutionCore for ExecutionService {
 
         let prior = self.state.get_or_create(&run_id);
 
+        // Surface browser-agent progress (B4) on the run-event stream. The sink
+        // publishes BrowserActionDispatched/BrowserObservationReceived events to
+        // session-core's orchestration broadcast (shared channel). Best-effort:
+        // failures never fail the step.
+        let browser_sink =
+            crate::browser_events::OrchestrationEventSink::new(self.session_channel.clone());
+
         let outcome = runtime_loop::execute_step(
             &req.tool_name,
             &req.tool_input,
             &req.permission_mode,
             &req.hook_context,
+            &req.org_id,
+            Some(&browser_sink),
         )
         .await;
 
@@ -163,8 +172,15 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::ResumeRunResponse>, Status> {
         let req = request.into_inner();
         let mut snapshot = self.state.get_or_create(&req.run_id);
+        let prior_status = snapshot.status;
         snapshot.status = RunStatus::Running;
         self.state.update(snapshot.clone());
+        info!(
+            run_id = %req.run_id,
+            step_index = snapshot.step_index,
+            from = prior_status.as_str(),
+            "resume_run: run state set to Running"
+        );
 
         Ok(Response::new(pb::ResumeRunResponse {
             resumed: true,
@@ -190,8 +206,13 @@ impl ExecutionCore for ExecutionService {
 /// Returns an error if the server fails to bind.
 pub async fn serve(state: StateStore) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9093".parse()?;
-    let session_url =
-        std::env::var("SESSION_CORE_URL").unwrap_or_else(|_| "http://localhost:9091".to_owned());
+    // Accept either env name: deployments wire `SESSION_CORE_ADDR` (compose),
+    // while `SESSION_CORE_URL` is the documented primary. Reading only the
+    // former silently fell back to localhost and broke the durable
+    // create_approval / save_checkpoint path (gRPC "tcp connect error").
+    let session_url = std::env::var("SESSION_CORE_URL")
+        .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
+        .unwrap_or_else(|_| "http://localhost:9091".to_owned());
     let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
     info!("gRPC listening on :9093");
 
