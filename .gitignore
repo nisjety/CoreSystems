@@ -138,3 +138,7 @@ coverage/
 
 # Playwright MCP browser-automation artifacts (screenshots/traces)
 .playwright-mcp/
+
+# Screen recordings + compiled Go migrator binary (build artifacts)
+*.mov
+apps/Data Plane v2/tools/migrator/migrator
