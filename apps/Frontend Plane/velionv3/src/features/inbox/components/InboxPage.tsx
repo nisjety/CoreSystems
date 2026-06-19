@@ -4,7 +4,6 @@ import { ConversationPanel } from '@/features/inbox/components/ConversationPanel
 import { InboxAside } from '@/features/inbox/components/InboxAside'
 import { InboxWorkModal, type InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import { TicketQueue } from '@/features/inbox/components/TicketQueue'
-import { demoQuickReplies } from '@/features/inbox/lib/inbox-demo-data'
 import {
   customerName,
   resolveInboxRouteFilter,
@@ -272,7 +271,9 @@ export default function InboxPage() {
 
   const suggestReply = () => {
     if (!selectedTicket()) return
-    setReplyText(demoQuickReplies[0] ?? '')
+    // No model-gateway reply suggestion is wired yet: clear to an honest empty
+    // draft instead of injecting a fabricated canned reply.
+    setReplyText('')
   }
 
   const createSocialFollowUp = async () => {

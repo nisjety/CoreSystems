@@ -14,8 +14,6 @@ const LIVE_ACTIONS = new Set<ActionId>([
   'operating_map.refresh',
   'operating_map.review_proposal',
   'operating_map.create_agent_blueprint',
-  'security.check_url_reputation',
-  'security.investigate_url',
   'workflows.toggle_policy',
 ])
 
@@ -24,10 +22,6 @@ const riskCost = {
   medium: 'moderate token budget',
   high: 'approval-gated budget',
 } as const
-
-function createId(prefix: string) {
-  return `${prefix}_${crypto.randomUUID()}`
-}
 
 function formatValidationIssues(error: z.ZodError): readonly string[] {
   return error.issues.map((issue) => issue.path.join('.') || issue.message)
@@ -71,21 +65,16 @@ export async function executeAction(
     throw new Error(`Invalid action input for ${actionId}: ${issues}`)
   }
 
-  if (LIVE_ACTIONS.has(actionId)) {
-    return requestJson<ActionExecution>('/api/v1/actions/execute', {
-      method: 'POST',
-      body: JSON.stringify({ actionId, input: validation.data }),
-      headers: { 'x-velion-org-id': actor.orgId },
-    })
+  if (!LIVE_ACTIONS.has(actionId)) {
+    // No client-side fabrication: an action without a gateway implementation is
+    // surfaced as an honest, typed "not available" error instead of a synthetic
+    // queued run with a fake runId/auditId.
+    throw new Error(`action_not_available: "${actionId}" has no gateway implementation`)
   }
 
-  const runId = actor.runId ?? createId('run')
-
-  return {
-    actionId,
-    runId,
-    status: descriptor.requiresApproval ? 'waiting_approval' : 'queued',
-    auditId: createId('audit'),
-    eventStream: `/api/v1/runs/${runId}/events`,
-  }
+  return requestJson<ActionExecution>('/api/v1/actions/execute', {
+    method: 'POST',
+    body: JSON.stringify({ actionId, input: validation.data }),
+    headers: { 'x-velion-org-id': actor.orgId },
+  })
 }

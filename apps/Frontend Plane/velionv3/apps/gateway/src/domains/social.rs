@@ -1,11 +1,9 @@
 //! Social planning domain — account readiness, calendar, drafts, and publish intents.
 //!
-//! This is the browser-facing contract for the Velion v3 social workspace. The
-//! route surface is intentionally stable: current storage is process-local,
-//! while the durable publisher worker / backing store can replace the repository
-//! without changing SPA contracts.
-
-use std::{collections::BTreeMap, sync::Arc};
+//! This is the browser-facing contract for the Velion v3 social workspace. All
+//! reads and writes proxy to social-core; when it is unavailable, reads return
+//! an honest empty payload with `meta.source = "unavailable"` and writes return
+//! 503 `social_core_unavailable` — no in-memory store, no fabricated data.
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -18,12 +16,11 @@ use chrono::DateTime;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::RwLock;
 
 use crate::{
     config::AppState,
     contracts::ActionActor,
-    envelope::{error, ok},
+    envelope::{error, ok, ok_with_source},
     middleware::{require_session, AuthenticatedUser},
     upstream::proxy_json,
 };
@@ -55,63 +52,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct SocialStore {
-    inner: Arc<RwLock<SocialStoreInner>>,
-}
-
-#[derive(Default)]
-struct SocialStoreInner {
-    posts_by_org: BTreeMap<String, Vec<SocialPost>>,
-    next_post_id: u64,
-}
-
-impl SocialStore {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    async fn list_posts(&self, org_id: &str, org_label: String) -> Vec<SocialPost> {
-        let mut inner = self.inner.write().await;
-        seed_org_posts(&mut inner, org_id, org_label);
-        inner.posts_by_org.get(org_id).cloned().unwrap_or_default()
-    }
-
-    async fn insert_post(&self, org_id: &str, post: SocialPost) -> SocialPost {
-        let mut inner = self.inner.write().await;
-        let posts = inner.posts_by_org.entry(org_id.to_owned()).or_default();
-        if let Some(index) = posts.iter().position(|candidate| candidate.id == post.id) {
-            posts[index] = post.clone();
-        } else {
-            posts.insert(0, post.clone());
-        }
-        post
-    }
-
-    async fn next_post_id(&self, prefix: &str) -> String {
-        let mut inner = self.inner.write().await;
-        inner.next_post_id = inner.next_post_id.saturating_add(1);
-        format!("{prefix}_{}", inner.next_post_id)
-    }
-
-    async fn update_post<F>(&self, org_id: &str, id: &str, update: F) -> Option<SocialPost>
-    where
-        F: FnOnce(&SocialPost) -> SocialPost,
-    {
-        let mut inner = self.inner.write().await;
-        let posts = inner.posts_by_org.get_mut(org_id)?;
-        let index = posts.iter().position(|post| post.id == id)?;
-        let updated = update(&posts[index]);
-        posts[index] = updated.clone();
-        Some(updated)
-    }
-}
-
-fn seed_org_posts(inner: &mut SocialStoreInner, org_id: &str, org_label: String) {
-    inner
-        .posts_by_org
-        .entry(org_id.to_owned())
-        .or_insert_with(|| demo_posts(org_label));
+/// Standard 503 for social write paths when social-core is unavailable. We no
+/// longer persist to an in-memory store or fabricate a "success" — the write
+/// fails honestly so the SPA can surface it.
+fn social_core_unavailable() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error(
+            "social_core_unavailable",
+            "Social core is unavailable; the action was not performed.",
+        )),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -448,17 +400,13 @@ async fn list_accounts(
         Err(response) => return response,
     };
     match load_social_accounts(&state, &user, &org_id).await {
-        CoreRead::Ready(accounts) => {
-            return Json(ok(AccountList { accounts })).into_response();
-        }
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {}
+        CoreRead::Ready(accounts) => Json(ok(AccountList { accounts })).into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => Json(ok_with_source(
+            AccountList { accounts: vec![] },
+            "unavailable",
+        ))
+        .into_response(),
     }
-
-    Json(ok(AccountList {
-        accounts: demo_accounts(),
-    }))
-    .into_response()
 }
 
 async fn list_adapters() -> impl IntoResponse {
@@ -477,19 +425,13 @@ async fn list_approvals(
         Err(response) => return response,
     };
     match load_core_approvals(&state, &user, &org_id, &query).await {
-        CoreRead::Ready(approvals) => return Json(ok(ApprovalList { approvals })).into_response(),
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {}
+        CoreRead::Ready(approvals) => Json(ok(ApprovalList { approvals })).into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => Json(ok_with_source(
+            ApprovalList { approvals: vec![] },
+            "unavailable",
+        ))
+        .into_response(),
     }
-
-    let posts = state
-        .social_store
-        .list_posts(&org_id, org_label(&org_id))
-        .await;
-    Json(ok(ApprovalList {
-        approvals: fallback_approvals_from_posts(posts),
-    }))
-    .into_response()
 }
 
 async fn decide_approval(
@@ -526,27 +468,10 @@ async fn decide_approval(
     )
     .await
     {
-        CoreApprovalMutation::Ready(approval) => {
-            return Json(ok(*approval)).into_response();
-        }
-        CoreApprovalMutation::Error(response) => return response,
-        CoreApprovalMutation::Unavailable => {}
+        CoreApprovalMutation::Ready(approval) => Json(ok(*approval)).into_response(),
+        CoreApprovalMutation::Error(response) => response,
+        CoreApprovalMutation::Unavailable => social_core_unavailable(),
     }
-
-    let Some(post_id) = id.strip_prefix("approval_") else {
-        return not_found("social_approval_not_found", "Social approval not found.");
-    };
-    let Some(post) = state
-        .social_store
-        .update_post(&org_id, post_id, |current| {
-            with_status(current, current.status, decision)
-        })
-        .await
-    else {
-        return not_found("social_approval_not_found", "Social approval not found.");
-    };
-    let approval = fallback_approval_from_post(&post);
-    Json(ok(approval)).into_response()
 }
 
 async fn list_campaigns(
@@ -559,19 +484,13 @@ async fn list_campaigns(
         Err(response) => return response,
     };
     match load_core_campaigns(&state, &user, &org_id, &query).await {
-        CoreRead::Ready(campaigns) => return Json(ok(CampaignList { campaigns })).into_response(),
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {}
+        CoreRead::Ready(campaigns) => Json(ok(CampaignList { campaigns })).into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => Json(ok_with_source(
+            CampaignList { campaigns: vec![] },
+            "unavailable",
+        ))
+        .into_response(),
     }
-
-    let posts = state
-        .social_store
-        .list_posts(&org_id, org_label(&org_id))
-        .await;
-    Json(ok(CampaignList {
-        campaigns: fallback_campaigns_from_posts(posts),
-    }))
-    .into_response()
 }
 
 async fn create_campaign(
@@ -609,31 +528,11 @@ async fn create_campaign(
     });
     match create_core_campaign(&state, &user, &org_id, core_body).await {
         CoreCampaignMutation::Ready(campaign) => {
-            return (StatusCode::CREATED, Json(ok(campaign))).into_response();
+            (StatusCode::CREATED, Json(ok(campaign))).into_response()
         }
-        CoreCampaignMutation::Error(response) => return response,
-        CoreCampaignMutation::Unavailable => {}
+        CoreCampaignMutation::Error(response) => response,
+        CoreCampaignMutation::Unavailable => social_core_unavailable(),
     }
-
-    let campaign = SocialCampaign {
-        id: format!("campaign_{}", sanitize_id(&input.name)),
-        name: input.name,
-        brief: input.brief,
-        goal: input.goal,
-        status: campaign_status_from_core(Some(&input.status)),
-        platforms: normalized_platforms(Some(&input.platforms)),
-        starts_at: input.starts_at,
-        ends_at: input.ends_at,
-        source: SocialPostSource {
-            kind: "campaign",
-            label: "Studio campaign".to_owned(),
-            href: Some("/studio/campaigns".to_owned()),
-        },
-        owner_user_id: user.user_id,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-    };
-    (StatusCode::CREATED, Json(ok(campaign))).into_response()
 }
 
 async fn list_competitor_watch(
@@ -646,8 +545,15 @@ async fn list_competitor_watch(
     };
     let accounts = match load_social_accounts(&state, &user, &org_id).await {
         CoreRead::Ready(accounts) => accounts,
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => demo_accounts(),
+        CoreRead::Error(_) | CoreRead::Unavailable => {
+            return Json(ok_with_source(
+                CompetitorWatchList {
+                    competitors: vec![],
+                },
+                "unavailable",
+            ))
+            .into_response();
+        }
     };
 
     Json(ok(CompetitorWatchList {
@@ -666,12 +572,9 @@ async fn list_trends(
     };
     let posts = match load_core_posts(&state, &user, &org_id).await {
         CoreRead::Ready(posts) => posts,
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {
-            state
-                .social_store
-                .list_posts(&org_id, org_label(&org_id))
-                .await
+        CoreRead::Error(_) | CoreRead::Unavailable => {
+            return Json(ok_with_source(TrendList { trends: vec![] }, "unavailable"))
+                .into_response();
         }
     };
 
@@ -691,12 +594,12 @@ async fn list_evergreen(
     };
     let posts = match load_core_posts(&state, &user, &org_id).await {
         CoreRead::Ready(posts) => posts,
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {
-            state
-                .social_store
-                .list_posts(&org_id, org_label(&org_id))
-                .await
+        CoreRead::Error(_) | CoreRead::Unavailable => {
+            return Json(ok_with_source(
+                EvergreenList { items: vec![] },
+                "unavailable",
+            ))
+            .into_response();
         }
     };
 
@@ -715,18 +618,11 @@ async fn list_posts(
         Err(response) => return response,
     };
     match load_core_posts(&state, &user, &org_id).await {
-        CoreRead::Ready(posts) => return Json(ok(PostList { posts })).into_response(),
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {}
+        CoreRead::Ready(posts) => Json(ok(PostList { posts })).into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => {
+            Json(ok_with_source(PostList { posts: vec![] }, "unavailable")).into_response()
+        }
     }
-
-    Json(ok(PostList {
-        posts: state
-            .social_store
-            .list_posts(&org_id, org_label(&org_id))
-            .await,
-    }))
-    .into_response()
 }
 
 async fn calendar(
@@ -739,31 +635,35 @@ async fn calendar(
     };
     let accounts = match load_social_accounts(&state, &user, &org_id).await {
         CoreRead::Ready(accounts) => accounts,
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => demo_accounts(),
-    };
-    match load_core_posts(&state, &user, &org_id).await {
-        CoreRead::Ready(posts) => {
-            return Json(ok(SocialCalendar {
-                accounts,
-                posts,
-                recommended_windows: recommended_windows(),
-            }))
+        CoreRead::Error(_) | CoreRead::Unavailable => {
+            return Json(ok_with_source(
+                SocialCalendar {
+                    accounts: vec![],
+                    posts: vec![],
+                    recommended_windows: recommended_windows(),
+                },
+                "unavailable",
+            ))
             .into_response();
         }
-        CoreRead::Error(response) => return response,
-        CoreRead::Unavailable => {}
+    };
+    match load_core_posts(&state, &user, &org_id).await {
+        CoreRead::Ready(posts) => Json(ok(SocialCalendar {
+            accounts,
+            posts,
+            recommended_windows: recommended_windows(),
+        }))
+        .into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => Json(ok_with_source(
+            SocialCalendar {
+                accounts,
+                posts: vec![],
+                recommended_windows: recommended_windows(),
+            },
+            "unavailable",
+        ))
+        .into_response(),
     }
-
-    Json(ok(SocialCalendar {
-        accounts,
-        posts: state
-            .social_store
-            .list_posts(&org_id, org_label(&org_id))
-            .await,
-        recommended_windows: recommended_windows(),
-    }))
-    .into_response()
 }
 
 async fn create_post(
@@ -798,33 +698,11 @@ async fn create_post(
     });
     match create_core_post(&state, &user, &org_id, core_body).await {
         CoreMutation::Ready(post) => {
-            return (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response();
+            (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response()
         }
-        CoreMutation::Error(response) => return response,
-        CoreMutation::Unavailable => {}
+        CoreMutation::Error(response) => response,
+        CoreMutation::Unavailable => social_core_unavailable(),
     }
-
-    let post_id = state.social_store.next_post_id("social_draft").await;
-    let post = state
-        .social_store
-        .insert_post(
-            &org_id,
-            draft_post(
-                &post_id,
-                &input.title,
-                &input.body,
-                &input.scheduled_at,
-                input.platforms,
-                SocialPostSource {
-                    kind: "manual",
-                    label: "Manual draft".to_owned(),
-                    href: None,
-                },
-            ),
-        )
-        .await;
-
-    (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response()
 }
 
 async fn create_draft_from_inbox(
@@ -875,33 +753,11 @@ async fn create_draft_from_inbox(
     match create_core_post(&state, &user, &org_id, core_body).await {
         CoreMutation::Ready(post) => {
             link_social_post_to_ticket(&state, &user, &org_id, &body, &post).await;
-            return (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response();
+            (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response()
         }
-        CoreMutation::Error(response) => return response,
-        CoreMutation::Unavailable => {}
+        CoreMutation::Error(response) => response,
+        CoreMutation::Unavailable => social_core_unavailable(),
     }
-
-    let post = state
-        .social_store
-        .insert_post(
-            &org_id,
-            draft_post(
-                &format!("social_inbox_{}", sanitize_id(&body.ticket_id)),
-                &title,
-                &text,
-                "2026-06-17T09:30:00.000Z",
-                vec!["linkedin", "x"],
-                SocialPostSource {
-                    kind: "inbox",
-                    label: format!("Inbox ticket {}", body.ticket_id),
-                    href: Some(format!("/inbox?ticketId={}", body.ticket_id)),
-                },
-            ),
-        )
-        .await;
-    link_social_post_to_ticket(&state, &user, &org_id, &body, &post).await;
-
-    (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response()
 }
 
 async fn schedule_post(
@@ -926,22 +782,10 @@ async fn schedule_post(
         Err(response) => return response,
     };
     match schedule_core_post(&state, &user, &org_id, &id, body.scheduled_at.trim()).await {
-        CoreMutation::Ready(post) => return Json(ok(PostMutation { post })).into_response(),
-        CoreMutation::Error(response) => return response,
-        CoreMutation::Unavailable => {}
+        CoreMutation::Ready(post) => Json(ok(PostMutation { post })).into_response(),
+        CoreMutation::Error(response) => response,
+        CoreMutation::Unavailable => social_core_unavailable(),
     }
-
-    let Some(post) = state
-        .social_store
-        .update_post(&org_id, &id, |current| {
-            with_schedule(current, body.scheduled_at.trim(), "scheduled", "approved")
-        })
-        .await
-    else {
-        return not_found("social_post_not_found", "Social post not found.");
-    };
-
-    Json(ok(PostMutation { post })).into_response()
 }
 
 async fn publish_post(
@@ -954,45 +798,17 @@ async fn publish_post(
         Err(response) => return response,
     };
     match enqueue_core_publish(&state, &user, &org_id, &id).await {
-        CorePublish::Ready(post, result) => {
-            return (
-                StatusCode::ACCEPTED,
-                Json(ok(PublishMutation {
-                    post: *post,
-                    result,
-                })),
-            )
-                .into_response();
-        }
-        CorePublish::Error(response) => return response,
-        CorePublish::Unavailable => {}
+        CorePublish::Ready(post, result) => (
+            StatusCode::ACCEPTED,
+            Json(ok(PublishMutation {
+                post: *post,
+                result,
+            })),
+        )
+            .into_response(),
+        CorePublish::Error(response) => response,
+        CorePublish::Unavailable => social_core_unavailable(),
     }
-
-    let Some(existing) = state
-        .social_store
-        .update_post(&org_id, &id, |current| {
-            with_status(current, "publishing", "approved")
-        })
-        .await
-    else {
-        return not_found("social_post_not_found", "Social post not found.");
-    };
-
-    let mut post = existing;
-    let accounts = match load_social_accounts(&state, &user, &org_id).await {
-        CoreRead::Ready(accounts) => accounts,
-        CoreRead::Error(_) | CoreRead::Unavailable => demo_accounts(),
-    };
-    let result = build_publish_result(&post, &accounts);
-    if result.status == "blocked" {
-        post.status = "blocked";
-    }
-    let post = state.social_store.insert_post(&org_id, post).await;
-    (
-        StatusCode::ACCEPTED,
-        Json(ok(PublishMutation { post, result })),
-    )
-        .into_response()
 }
 
 enum CoreRead<T> {
@@ -1088,32 +904,10 @@ pub(crate) async fn create_studio_social_draft(
         }
     });
     match create_core_post(state, user, org_id, core_body).await {
-        CoreMutation::Ready(post) => return Ok(social_post_value(post)),
-        CoreMutation::Error(response) => return Err(response),
-        CoreMutation::Unavailable => {}
+        CoreMutation::Ready(post) => Ok(social_post_value(post)),
+        CoreMutation::Error(response) => Err(response),
+        CoreMutation::Unavailable => Err(social_core_unavailable()),
     }
-
-    let post_id = state.social_store.next_post_id("social_studio").await;
-    let post = state
-        .social_store
-        .insert_post(
-            org_id,
-            draft_post(
-                &post_id,
-                &input.title,
-                &input.body,
-                &input.scheduled_at,
-                input.platforms,
-                SocialPostSource {
-                    kind: "campaign",
-                    label: input.source_label,
-                    href: Some(format!("/studio/canvas?projectId={}", input.project_id)),
-                },
-            ),
-        )
-        .await;
-
-    Ok(social_post_value(post))
 }
 
 async fn social_core_json(
@@ -2349,192 +2143,6 @@ fn with_query(base: &str, params: &[(&str, Option<&str>)]) -> String {
     }
 }
 
-fn not_found(code: &'static str, message: &'static str) -> axum::response::Response {
-    (StatusCode::NOT_FOUND, Json(error(code, message))).into_response()
-}
-
-fn demo_accounts() -> Vec<SocialAccount> {
-    vec![
-        SocialAccount {
-            id: "acct_linkedin_company".to_owned(),
-            provider_key: "linkedin",
-            label: "Velion Company Page".to_owned(),
-            handle: "linkedin.com/company/velion".to_owned(),
-            status: "needs_oauth",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.post.write".to_owned(),
-            ],
-            accent: "#0a66c2",
-        },
-        SocialAccount {
-            id: "acct_x_founder".to_owned(),
-            provider_key: "x",
-            label: "Founder account".to_owned(),
-            handle: "@velion".to_owned(),
-            status: "needs_oauth",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.post.write".to_owned(),
-            ],
-            accent: "#111111",
-        },
-        SocialAccount {
-            id: "acct_instagram_brand".to_owned(),
-            provider_key: "instagram",
-            label: "Instagram brand".to_owned(),
-            handle: "@velion.ai".to_owned(),
-            status: "manual_review",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.media.upload".to_owned(),
-            ],
-            accent: "#d9468f",
-        },
-        SocialAccount {
-            id: "acct_facebook_page".to_owned(),
-            provider_key: "facebook",
-            label: "Facebook Page".to_owned(),
-            handle: "facebook.com/velion".to_owned(),
-            status: "needs_oauth",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.post.write".to_owned(),
-                "social.media.upload".to_owned(),
-            ],
-            accent: "#1877f2",
-        },
-        SocialAccount {
-            id: "acct_tiktok_creator".to_owned(),
-            provider_key: "tiktok",
-            label: "Creator profile".to_owned(),
-            handle: "@velionstudio".to_owned(),
-            status: "manual_review",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.media.upload".to_owned(),
-            ],
-            accent: "#00a6a6",
-        },
-        SocialAccount {
-            id: "acct_snapchat_ads".to_owned(),
-            provider_key: "snapchat",
-            label: "Snapchat ad account".to_owned(),
-            handle: "Snap marketing".to_owned(),
-            status: "manual_review",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.ads.manage".to_owned(),
-                "social.analytics.read".to_owned(),
-            ],
-            accent: "#facc15",
-        },
-    ]
-}
-
-fn demo_posts(org_label: String) -> Vec<SocialPost> {
-    vec![
-        scheduled_post(
-            "social_post_1",
-            "How support signals become product content",
-            "Every support conversation contains a growth signal. Velion turns repeated customer questions into approved posts, docs, and follow-up workflows.",
-            "2026-06-16T08:30:00.000Z",
-            vec!["linkedin", "x"],
-            SocialPostSource {
-                kind: "inbox",
-                label: "Inbox trend: shipping delays".to_owned(),
-                href: Some("/inbox?view=social".to_owned()),
-            },
-        ),
-        draft_post(
-            "social_post_2",
-            "Weekly knowledge graph update",
-            "This week the knowledge graph found new product gaps across onboarding, billing, and handoff flows.",
-            "2026-06-18T11:00:00.000Z",
-            vec!["linkedin"],
-            SocialPostSource {
-                kind: "knowledge",
-                label: org_label,
-                href: Some("/knowledge".to_owned()),
-            },
-        ),
-        draft_post(
-            "social_post_3",
-            "Short-form launch note",
-            "A concise product update for channels that need video-first creative and a tighter hook.",
-            "2026-06-19T13:00:00.000Z",
-            vec!["instagram", "tiktok"],
-            SocialPostSource {
-                kind: "campaign",
-                label: "Launch calendar".to_owned(),
-                href: None,
-            },
-        ),
-    ]
-}
-
-fn fallback_approvals_from_posts(posts: Vec<SocialPost>) -> Vec<SocialApproval> {
-    posts
-        .into_iter()
-        .filter(|post| post.approval.required && post.approval.state != "approved")
-        .map(|post| fallback_approval_from_post(&post))
-        .collect()
-}
-
-fn fallback_approval_from_post(post: &SocialPost) -> SocialApproval {
-    SocialApproval {
-        id: format!("approval_{}", post.id),
-        post_id: post.id.clone(),
-        campaign_id: String::new(),
-        state: post.approval.state,
-        requested_by_user_id: String::new(),
-        requested_of_user_id: String::new(),
-        decided_by_user_id: String::new(),
-        decision_reason: String::new(),
-        due_at: None,
-        decided_at: None,
-        post: Some(post.clone()),
-        created_at: post.scheduled_at.clone(),
-        updated_at: post.scheduled_at.clone(),
-    }
-}
-
-fn fallback_campaigns_from_posts(posts: Vec<SocialPost>) -> Vec<SocialCampaign> {
-    let mut campaigns = BTreeMap::<String, SocialCampaign>::new();
-    for post in posts
-        .into_iter()
-        .filter(|post| post.source.kind == "campaign")
-    {
-        let key = post.source.label.clone();
-        let platforms = post.platforms.clone();
-        campaigns
-            .entry(key.clone())
-            .or_insert_with(|| SocialCampaign {
-                id: format!("campaign_{}", sanitize_id(&key)),
-                name: key.clone(),
-                brief: post.body.clone(),
-                goal: "Coordinate social campaign posts across selected channels.".to_owned(),
-                status: if post.status == "published" || post.status == "scheduled" {
-                    "active"
-                } else {
-                    "draft"
-                },
-                platforms,
-                starts_at: Some(post.scheduled_at.clone()),
-                ends_at: None,
-                source: SocialPostSource {
-                    kind: "campaign",
-                    label: "Social calendar".to_owned(),
-                    href: post.source.href.clone(),
-                },
-                owner_user_id: String::new(),
-                created_at: post.scheduled_at.clone(),
-                updated_at: post.scheduled_at.clone(),
-            });
-    }
-    campaigns.into_values().collect()
-}
-
 fn derived_competitor_watch(accounts: Vec<SocialAccount>) -> Vec<SocialCompetitorWatchItem> {
     if accounts.is_empty() {
         return vec![SocialCompetitorWatchItem {
@@ -2756,95 +2364,6 @@ fn recommended_windows() -> Vec<RecommendedWindow> {
             reason: "Reserved for visual-first Instagram/TikTok content.",
         },
     ]
-}
-
-fn draft_post(
-    id: &str,
-    title: &str,
-    body: &str,
-    scheduled_at: &str,
-    platforms: Vec<&'static str>,
-    source: SocialPostSource,
-) -> SocialPost {
-    let media = vec![];
-    let previews = build_platform_previews(title, body, &platforms, &media);
-    SocialPost {
-        id: id.to_owned(),
-        title: title.to_owned(),
-        body: body.to_owned(),
-        status: "draft",
-        scheduled_at: scheduled_at.to_owned(),
-        platforms,
-        source,
-        approval: ApprovalState {
-            required: true,
-            state: "not_requested",
-        },
-        media,
-        previews,
-    }
-}
-
-fn scheduled_post(
-    id: &str,
-    title: &str,
-    body: &str,
-    scheduled_at: &str,
-    platforms: Vec<&'static str>,
-    source: SocialPostSource,
-) -> SocialPost {
-    let media = vec![MediaAsset {
-        kind: "image",
-        label: "1:1 visual",
-        status: "ready",
-    }];
-    let previews = build_platform_previews(title, body, &platforms, &media);
-    SocialPost {
-        id: id.to_owned(),
-        title: title.to_owned(),
-        body: body.to_owned(),
-        status: "scheduled",
-        scheduled_at: scheduled_at.to_owned(),
-        platforms,
-        source,
-        approval: ApprovalState {
-            required: true,
-            state: "approved",
-        },
-        media,
-        previews,
-    }
-}
-
-fn with_schedule(
-    current: &SocialPost,
-    scheduled_at: &str,
-    status: &'static str,
-    approval_state: &'static str,
-) -> SocialPost {
-    let mut next = current.clone();
-    next.scheduled_at = scheduled_at.to_owned();
-    next.status = status;
-    next.approval = ApprovalState {
-        required: true,
-        state: approval_state,
-    };
-    next.previews = build_platform_previews(&next.title, &next.body, &next.platforms, &next.media);
-    next
-}
-
-fn with_status(
-    current: &SocialPost,
-    status: &'static str,
-    approval_state: &'static str,
-) -> SocialPost {
-    let mut next = current.clone();
-    next.status = status;
-    next.approval = ApprovalState {
-        required: true,
-        state: approval_state,
-    };
-    next
 }
 
 fn build_platform_previews(
@@ -3081,14 +2600,6 @@ fn truncate_chars(value: &str, max_characters: usize) -> String {
     truncated
 }
 
-fn org_label(org_id: &str) -> String {
-    let org_id = org_id.trim();
-    if org_id.is_empty() {
-        return "Velion workspace".to_owned();
-    }
-    format!("Organization {}", org_id)
-}
-
 fn sanitize_id(value: &str) -> String {
     value
         .chars()
@@ -3191,96 +2702,6 @@ mod tests {
     }
 
     #[test]
-    fn publish_result_blocks_until_accounts_are_connected() {
-        let post = draft_post(
-            "post_1",
-            "Customer insight",
-            "A useful post",
-            "2026-06-17T10:00:00.000Z",
-            vec!["linkedin", "x"],
-            SocialPostSource {
-                kind: "manual",
-                label: "Manual".to_owned(),
-                href: None,
-            },
-        );
-
-        let result = build_publish_result(&post, &[]);
-
-        assert_eq!(result.status, "blocked");
-        assert!(result
-            .attempts
-            .iter()
-            .all(|attempt| attempt.status == "blocked"));
-    }
-
-    #[test]
-    fn publish_result_queues_for_connected_accounts_with_publish_capability() {
-        let post = scheduled_post(
-            "post_1",
-            "Customer insight",
-            "A useful post",
-            "2026-06-17T10:00:00.000Z",
-            vec!["linkedin"],
-            SocialPostSource {
-                kind: "manual",
-                label: "Manual".to_owned(),
-                href: None,
-            },
-        );
-        let accounts = vec![SocialAccount {
-            id: "acct_linkedin".to_owned(),
-            provider_key: "linkedin",
-            label: "LinkedIn".to_owned(),
-            handle: "linkedin.com/company/velion".to_owned(),
-            status: "connected",
-            capabilities: vec![
-                "social.profile.read".to_owned(),
-                "social.post.write".to_owned(),
-            ],
-            accent: "#0a66c2",
-        }];
-
-        let result = build_publish_result(&post, &accounts);
-
-        assert_eq!(result.status, "queued");
-        assert_eq!(result.attempts[0].status, "queued");
-    }
-
-    #[test]
-    fn publish_result_blocks_connected_accounts_without_publish_capability() {
-        let post = scheduled_post(
-            "post_1",
-            "Customer insight",
-            "A useful post",
-            "2026-06-17T10:00:00.000Z",
-            vec!["facebook"],
-            SocialPostSource {
-                kind: "manual",
-                label: "Manual".to_owned(),
-                href: None,
-            },
-        );
-        let accounts = vec![SocialAccount {
-            id: "acct_facebook".to_owned(),
-            provider_key: "facebook",
-            label: "Facebook".to_owned(),
-            handle: "facebook.com/velion".to_owned(),
-            status: "connected",
-            capabilities: vec!["social.profile.read".to_owned()],
-            accent: "#1877f2",
-        }];
-
-        let result = build_publish_result(&post, &accounts);
-
-        assert_eq!(result.status, "blocked");
-        assert!(result.attempts[0]
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("social.post.write")));
-    }
-
-    #[test]
     fn validates_create_post_timestamps() {
         let body = CreatePostBody {
             title: Some("Post".to_owned()),
@@ -3354,55 +2775,6 @@ mod tests {
     }
 
     #[test]
-    fn derives_social_operations_read_models() {
-        let accounts = vec![
-            SocialAccount {
-                id: "acct_linkedin".to_owned(),
-                provider_key: "linkedin",
-                label: "LinkedIn".to_owned(),
-                handle: "linkedin.com/company/velion".to_owned(),
-                status: "connected",
-                capabilities: vec![
-                    "social.profile.read".to_owned(),
-                    "social.post.write".to_owned(),
-                ],
-                accent: "#0a66c2",
-            },
-            SocialAccount {
-                id: "acct_x".to_owned(),
-                provider_key: "x",
-                label: "X".to_owned(),
-                handle: "@velion".to_owned(),
-                status: "needs_oauth",
-                capabilities: vec!["social.profile.read".to_owned()],
-                accent: "#111111",
-            },
-        ];
-        let posts = demo_posts("Velion".to_owned());
-        let adapters = platform_adapters();
-
-        let competitors = derived_competitor_watch(accounts);
-        let trends = derived_trends(posts.clone(), adapters.clone());
-        let evergreen = derived_evergreen(posts, adapters);
-
-        assert_eq!(competitors[0].id, "competitor_watch_linkedin");
-        assert_eq!(
-            competitors[0].source_href.as_deref(),
-            Some("/social/trends")
-        );
-        assert_eq!(
-            competitors[1].source_href.as_deref(),
-            Some("/settings/integrations")
-        );
-        assert!(trends
-            .iter()
-            .any(|signal| signal.status == "needs_media" || signal.status == "blocked"));
-        assert!(evergreen
-            .iter()
-            .any(|item| item.source_post_id.as_deref() == Some("social_post_1")));
-    }
-
-    #[test]
     fn validates_create_campaign_dates_and_query_encoding() {
         let body = CreateCampaignBody {
             name: "Launch".to_owned(),
@@ -3426,63 +2798,5 @@ mod tests {
             ),
             "/api/v1/social/approvals?state=pending%20review&limit=10"
         );
-    }
-
-    #[tokio::test]
-    async fn social_store_seeds_and_persists_posts_per_org() {
-        let store = SocialStore::new();
-        let seeded = store.list_posts("org_a", "Organization A".to_owned()).await;
-        assert_eq!(seeded.len(), 3);
-
-        let inserted = store
-            .insert_post(
-                "org_a",
-                draft_post(
-                    "post_custom",
-                    "Custom post",
-                    "This is a custom post.",
-                    "2026-06-20T10:00:00.000Z",
-                    vec!["linkedin"],
-                    SocialPostSource {
-                        kind: "manual",
-                        label: "Manual".to_owned(),
-                        href: None,
-                    },
-                ),
-            )
-            .await;
-        assert_eq!(inserted.id, "post_custom");
-
-        let posts = store.list_posts("org_a", "Organization A".to_owned()).await;
-        assert_eq!(
-            posts.first().map(|post| post.id.as_str()),
-            Some("post_custom")
-        );
-        assert_eq!(posts.len(), 4);
-
-        let other_org = store.list_posts("org_b", "Organization B".to_owned()).await;
-        assert_eq!(other_org.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn social_store_schedule_update_preserves_post_content() {
-        let store = SocialStore::new();
-        let _ = store.list_posts("org_a", "Organization A".to_owned()).await;
-
-        let updated = store
-            .update_post("org_a", "social_post_2", |current| {
-                with_schedule(current, "2026-06-22T12:00:00.000Z", "scheduled", "approved")
-            })
-            .await
-            .expect("post exists");
-
-        assert_eq!(updated.title, "Weekly knowledge graph update");
-        assert_eq!(updated.status, "scheduled");
-        assert_eq!(updated.scheduled_at, "2026-06-22T12:00:00.000Z");
-        assert_eq!(updated.approval.state, "approved");
-        assert!(updated
-            .previews
-            .iter()
-            .any(|preview| preview.provider_key == "linkedin"));
     }
 }

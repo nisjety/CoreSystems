@@ -36,17 +36,11 @@ import {
 } from '@/features/inbox/components/InboxAsidePrimitives'
 import type { InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import {
-  demoCalendarEvents,
-  demoCalendarNotes,
-  demoCustomerContext,
-  demoMacros,
-  demoQuickReplies,
-} from '@/features/inbox/lib/inbox-demo-data'
-import {
   customerName,
   formatDateKey,
   type CalendarEvent,
   type CalendarNote,
+  type Macro,
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
 import { cn } from '@/shared/lib/cn'
@@ -199,21 +193,7 @@ function DetailsPanel(props: {
                   <ExternalLink class="size-4" />
                 </button>
               </div>
-              <Show when={demoCustomerContext.shopify?.orders?.length} fallback={<p>No Shopify context connected.</p>}>
-                <div class="velion-inbox-commerce-list">
-                  <For each={(demoCustomerContext.shopify?.orders ?? []).slice(0, 3)}>
-                    {(order) => (
-                      <div class="velion-inbox-commerce-card">
-                        <div>
-                          <strong>{order.name ?? `#${order.order_number ?? order.id}`}</strong>
-                          <span>{order.fulfillment_status ?? 'Unfulfilled'}</span>
-                        </div>
-                        <p>{order.created_at ?? ''}{order.total_price ? ` - $${order.total_price}` : ''}</p>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </Show>
+              <p>No Shopify context connected.</p>
             </section>
 
             <AccordionSection icon={<UserRound class="size-4" />} title="User data" />
@@ -238,13 +218,7 @@ function DetailsPanel(props: {
                   <ExternalLink class="size-4" />
                 </button>
               </div>
-              <Show when={demoCustomerContext.stripe} fallback={<p>No Stripe context connected.</p>}>
-                <div class="velion-inbox-stripe-card">
-                  <FieldRow label="Customer" value={demoCustomerContext.stripe?.customer?.email ?? demoCustomerContext.stripe?.customer?.id ?? '-'} />
-                  <FieldRow label="Subscription" value={demoCustomerContext.stripe?.subscription?.status ?? 'Unknown'} />
-                  <FieldRow label="Plan" value={demoCustomerContext.stripe?.subscription?.plan ?? '-'} />
-                </div>
-              </Show>
+              <p>No Stripe context connected.</p>
             </section>
           </>
         )}
@@ -267,20 +241,19 @@ function VelionPanel(props: {
 
   const generateQuickReplies = () => {
     if (!props.selectedTicket || quickLoading()) return
+    // Quick-reply generation requires the model gateway, which is not wired into
+    // this panel yet — surface an honest empty result, never canned replies.
     setQuickLoading(true)
-    window.setTimeout(() => {
-      setQuickReplies(demoQuickReplies)
-      setQuickLoading(false)
-    }, 160)
+    setQuickReplies([])
+    setQuickLoading(false)
   }
 
   const generateSummary = () => {
     if (!props.selectedTicket || summaryLoading()) return
+    // No model-gateway summary wiring yet: honest empty result, never a fabricated summary.
     setSummaryLoading(true)
-    window.setTimeout(() => {
-      setSummary('Customer needs a clear next step, ownership, and timing. Reply with the current status and keep any unresolved action as an internal note.')
-      setSummaryLoading(false)
-    }, 160)
+    setSummary(null)
+    setSummaryLoading(false)
   }
 
   return (
@@ -396,8 +369,8 @@ function VelionPanel(props: {
 }
 
 function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
-  const [events, setEvents] = createSignal<CalendarEvent[]>(demoCalendarEvents)
-  const [notes, setNotes] = createSignal<CalendarNote[]>(demoCalendarNotes)
+  const [events, setEvents] = createSignal<CalendarEvent[]>([])
+  const [notes, setNotes] = createSignal<CalendarNote[]>([])
   const [selectedDate, setSelectedDate] = createSignal(new Date('2026-06-12T09:00:00.000Z'))
   const [eventTitle, setEventTitle] = createSignal('')
   const [noteText, setNoteText] = createSignal('')
@@ -562,7 +535,7 @@ function MacrosPanel(props: { onMacroExecuted: () => void; selectedTicket: Zamma
       </button>
       <Show when={expanded()}>
         <ul>
-          <For each={demoMacros}>
+          <For each={[] as Macro[]} fallback={<li class="velion-inbox-macros__empty">No macros configured.</li>}>
             {(macro) => (
               <li>
                 <span>{macro.name}</span>

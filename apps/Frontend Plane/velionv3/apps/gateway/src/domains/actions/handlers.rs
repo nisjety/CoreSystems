@@ -1,17 +1,13 @@
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use crate::{
-    config::AppState,
-    envelope::{error, ok},
-    middleware::AuthenticatedUser,
-};
+use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 
 use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_crawl_site, dispatch_import_source,
@@ -64,18 +60,4 @@ pub(super) async fn execute_action(
         )
             .into_response(),
     }
-}
-
-pub(super) async fn action_run_status(
-    _state: State<AppState>,
-    _user: Extension<AuthenticatedUser>,
-    Path(run_id): Path<String>,
-) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(ok(json!({
-            "runId": run_id,
-            "status": "queued",
-        }))),
-    )
 }

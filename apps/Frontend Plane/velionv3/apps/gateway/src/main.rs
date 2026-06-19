@@ -170,7 +170,6 @@ mod tests {
             audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
             cache: crate::cache::ResultCache::disabled(),
             chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
-            social_store: crate::domains::social::SocialStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers,
             allow_dev_auth_bypass: allow_dev_actor_headers,

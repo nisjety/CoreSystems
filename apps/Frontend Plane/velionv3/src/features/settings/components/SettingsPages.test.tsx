@@ -145,7 +145,9 @@ describe('workspace settings page', () => {
     expect(screen.queryByRole('heading', { name: /must have/i })).toBeNull()
     expect(screen.queryByText('Workspace name, URL, and primary domain')).toBeNull()
     expect(screen.getByRole('heading', { name: /verified domains/i })).toBeTruthy()
-    expect(screen.getByText('support.aquatiq.no')).toBeTruthy()
+    // De-faked: no fabricated verified domains; honest empty state instead.
+    expect(screen.getByText(/no domains have been verified/i)).toBeTruthy()
+    expect(screen.queryByText('support.aquatiq.no')).toBeNull()
     expect(screen.getByRole('button', { name: /edit schedule/i })).toBeTruthy()
     expect((screen.getByRole('textbox', { name: /workspace name/i }) as HTMLInputElement).value).toBe('aquatiq-as')
     expect(screen.queryByRole('textbox', { name: /invite by email/i })).toBeNull()
@@ -165,7 +167,8 @@ describe('workspace settings page', () => {
     render(() => <VelionWorkspaceSettingsPage section="org-security" />)
 
     expect(screen.getByRole('heading', { name: /org security/i, level: 1 })).toBeTruthy()
-    expect(screen.getByText('Admins must use MFA for sensitive settings.')).toBeTruthy()
+    // De-faked: the fabricated MFA/Sessions/Audit status cards were removed; the
+    // live security toggle control remains the source of truth.
     expect(screen.getByRole('switch', { name: /require mfa for admins/i }).getAttribute('aria-checked')).toBe('true')
     expect((screen.getByRole('combobox', { name: /session duration/i }) as HTMLSelectElement).value).toBe('30-days')
     expect(screen.getByRole('heading', { name: /recent security events/i })).toBeTruthy()
@@ -324,9 +327,11 @@ describe('workspace settings page', () => {
     render(() => <VelionWorkspaceSettingsPage section="sso" />)
 
     expect(screen.getByRole('heading', { name: /sso/i, level: 1 })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /connection test/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /run test/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /attribute mapping/i })).toBeTruthy()
+    // De-faked: SSO is honestly "Not configured" — the fabricated provider form,
+    // connection test, and attribute mapping panels were removed.
+    expect(screen.getByText(/single sign-on is not configured/i)).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /connection test/i })).toBeNull()
+    expect(screen.queryByRole('heading', { name: /attribute mapping/i })).toBeNull()
     expect(screen.queryByText('SSO provider selection and verified domain')).toBeNull()
   })
 })

@@ -141,16 +141,10 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   ],
   members: [],
   billing: [],
-  sso: [
-    { label: 'Provider', value: 'Google', detail: 'Metadata loaded from Google Workspace.', tone: 'ok' },
-    { label: 'SCIM', value: 'Ready', detail: 'Provisioning token generated but not enforced.', tone: 'neutral' },
-    { label: 'Enforcement', value: 'Admins only', detail: 'Members can still sign in with email.', tone: 'warn' },
-  ],
-  'org-security': [
-    { label: 'MFA', value: 'Required', detail: 'Admins must use MFA for sensitive settings.', tone: 'ok' },
-    { label: 'Sessions', value: '30 days', detail: 'Idle sessions are revoked after 30 days.', tone: 'neutral' },
-    { label: 'Audit log', value: '365 days', detail: 'Security and billing changes are retained.', tone: 'ok' },
-  ],
+  // SSO + org-security status are not wired to a real source; show no
+  // fabricated "Verified / Required / 365 days" cards.
+  sso: [],
+  'org-security': [],
   integrations: [
     { label: 'Connected apps', value: '2 / 4', detail: 'Zendesk and Slack are connected.', tone: 'neutral' },
     { label: 'Sync health', value: 'Healthy', detail: 'Last workspace sync finished 8 minutes ago.', tone: 'ok' },
@@ -162,11 +156,6 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   'router-policy': [],
   finetune: [],
 }
-
-const domainRows = [
-  { domain: 'aquatiq.no', status: 'Verified', owner: 'Customer portal' },
-  { domain: 'support.aquatiq.no', status: 'DNS pending', owner: 'Help center' },
-]
 
 const businessHourRows = [
   { day: 'Monday-Friday', hours: '08:00-17:00', inbox: 'Priority support' },
@@ -217,12 +206,6 @@ function normalizeMemberList(payload: unknown): LiveMember[] {
 
   return members.map(normalizeMember).filter((member): member is LiveMember => Boolean(member))
 }
-
-const ssoMappingRows = [
-  { attribute: 'email', source: 'primaryEmail', destination: 'User email' },
-  { attribute: 'department', source: 'orgUnitPath', destination: 'Team' },
-  { attribute: 'role', source: 'customSchema.velionRole', destination: 'Workspace role' },
-]
 
 const webhookRows = [
   { endpoint: 'Zendesk ticket sync', status: '200 OK', lastRun: '8 min ago' },
@@ -440,11 +423,7 @@ function WorkspaceSection() {
           description="Domain records ready for DNS verification and customer-facing links."
           actionLabel="Add domain"
         >
-          <div class="velion-settings-row-divider">
-            <For each={domainRows}>
-              {(row) => <DataRow primary={row.domain} secondary={row.owner} meta={row.status} />}
-            </For>
-          </div>
+          <p class="velion-settings-panel-note">No domains have been verified for this organization.</p>
         </FeaturePanel>
         <FeaturePanel
           title="Business hours"
@@ -857,60 +836,11 @@ function SsoSection() {
   return (
     <>
       <SectionHeader title="SSO configuration" description="Configure organization sign-in, domains, and provisioning." />
-      <div class="velion-settings-field-grid">
-        <SettingsSelect
-          id="sso-provider"
-          label="Provider"
-          value="google"
-          options={[
-            { value: 'google', label: 'Google Workspace' },
-            { value: 'microsoft', label: 'Microsoft Entra ID' },
-            { value: 'saml', label: 'SAML 2.0' },
-          ]}
-        />
-        <SettingsField id="sso-domain" label="Allowed domain" value="aquatiq.no" />
-        <SettingsField id="scim-token" label="SCIM token" value="Configured" />
-        <SettingsSelect
-          id="sso-enforcement"
-          label="Enforcement"
-          value="admins"
-          options={[
-            { value: 'admins', label: 'Admins only' },
-            { value: 'all', label: 'All members' },
-            { value: 'off', label: 'Off' },
-          ]}
-        />
-      </div>
-      <div class="velion-settings-sso-grid">
-        <FeaturePanel
-          title="Connection test"
-          description="SSO validation checks to run before enforcing sign-in."
-          actionLabel="Run test"
-        >
-          <div class="velion-settings-key-values">
-            <p><span>Metadata</span><strong>Loaded</strong></p>
-            <p><span>Domain claim</span><strong>Verified</strong></p>
-            <p><span>Last test</span><strong>2 hours ago</strong></p>
-          </div>
-        </FeaturePanel>
-        <FeaturePanel
-          title="Attribute mapping"
-          description="SCIM and SAML attributes mapped into Velion workspace fields."
-          actionLabel="Edit mapping"
-        >
-          <div class="velion-settings-row-divider">
-            <For each={ssoMappingRows}>
-              {(row) => (
-                <DataRow
-                  primary={row.attribute}
-                  secondary={`${row.source} -> ${row.destination}`}
-                  meta="Mapped"
-                />
-              )}
-            </For>
-          </div>
-        </FeaturePanel>
-      </div>
+      <p class="velion-settings-panel-note">
+        Single sign-on is not configured for this organization. No identity
+        provider, allowed domain, SCIM token, or attribute mapping is set up, and
+        SSO/SCIM configuration is not available in this build.
+      </p>
     </>
   )
 }
@@ -986,7 +916,6 @@ function OrgSecuritySection() {
             { value: '90-days', label: '90 days' },
           ]}
         />
-        <SettingsField id="audit-retention" label="Audit retention" value="365 days" />
       </div>
       <FeaturePanel
         title="Recent security events"

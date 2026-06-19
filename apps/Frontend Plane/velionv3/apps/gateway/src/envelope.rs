@@ -25,6 +25,16 @@ pub(crate) fn ok<T: Serialize>(data: T) -> Value {
     serde_json::to_value(ApiSuccessEnvelope { data }).unwrap_or_else(|_| json!({ "data": null }))
 }
 
+/// Success envelope carrying a `meta.source` hint. Used when an upstream core is
+/// unavailable: the data is an honest empty payload and `meta.source` tells the
+/// SPA the result is degraded (rather than fabricating data or erroring out).
+pub(crate) fn ok_with_source<T: Serialize>(data: T, source: &str) -> Value {
+    json!({
+        "data": serde_json::to_value(data).unwrap_or(Value::Null),
+        "meta": { "source": source },
+    })
+}
+
 pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
     serde_json::to_value(ApiErrorEnvelope {
         error: ApiError {
