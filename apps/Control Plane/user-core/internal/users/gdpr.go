@@ -36,6 +36,14 @@ func (s *Service) SetAuthPool(pool *pgxpool.Pool) {
 	s.authPool = pool
 }
 
+// ErasureAvailable reports whether the auth-DB pool is wired, i.e. whether
+// hard-erase / anonymize can actually run. When false (AUTH_DATABASE_URL unset),
+// callers should refuse the erasure routes with an explicit 503 rather than
+// attempting the operation and surfacing an opaque 500.
+func (s *Service) ErasureAvailable() bool {
+	return s.authPool != nil
+}
+
 // ErasureReceipt aggregates the auth-DB proc receipt and the local cleanup.
 type ErasureReceipt struct {
 	Success      bool            `json:"success"`

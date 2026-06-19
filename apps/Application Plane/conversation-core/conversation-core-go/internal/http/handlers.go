@@ -998,6 +998,29 @@ func (h *Handler) RemoveTag(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": detail})
 }
 
+func (h *Handler) ListAIActions(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	conversationID := strings.TrimSpace(c.Query("conversation_id"))
+	if conversationID == "" {
+		conversationID = strings.TrimSpace(c.Query("conversationId"))
+	}
+	actions, err := h.service.ListAIActions(c.Request.Context(), conversation.AIActionListFilter{
+		OrgID:          orgID,
+		Status:         c.Query("status"),
+		ConversationID: conversationID,
+		Limit:          limit,
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": actions, "meta": gin.H{"limit": limit, "has_next": false, "next_cursor": nil}})
+}
+
 func (h *Handler) ReviewAIAction(c *gin.Context) {
 	h.reviewAIAction(c, "")
 }

@@ -19,6 +19,10 @@ type fakeRepository struct {
 	checklists      map[string]*TicketChecklist
 	rules           []TicketAutomationRule
 	classifications []TicketClassificationInput
+	aiActions       []AIAction
+	lastReview      AIActionReview
+	reviewCalls     int
+	reviewErr       error
 }
 
 func newFakeRepository() *fakeRepository {
@@ -111,8 +115,27 @@ func (f *fakeRepository) RemoveTag(_ context.Context, _ string, conversationID, 
 	return detail, nil
 }
 
-func (f *fakeRepository) ReviewAIAction(_ context.Context, _ AIActionReview) error {
-	return nil
+func (f *fakeRepository) ReviewAIAction(_ context.Context, input AIActionReview) error {
+	f.reviewCalls++
+	f.lastReview = input
+	return f.reviewErr
+}
+
+func (f *fakeRepository) ListAIActions(_ context.Context, filter AIActionListFilter) ([]AIAction, error) {
+	out := []AIAction{}
+	for _, action := range f.aiActions {
+		if action.OrgID != filter.OrgID {
+			continue
+		}
+		if filter.Status != "" && action.Status != filter.Status {
+			continue
+		}
+		if filter.ConversationID != "" && action.ConversationID != filter.ConversationID {
+			continue
+		}
+		out = append(out, action)
+	}
+	return out, nil
 }
 
 func (f *fakeRepository) ListTickets(_ context.Context, _ TicketListFilter) ([]Ticket, error) {
@@ -652,5 +675,127 @@ func TestTicketChecklistItemCompletion(t *testing.T) {
 	}
 	if !updated.Items[0].Completed {
 		t.Fatal("first checklist item is not completed")
+	}
+}
+
+func TestReviewAIActionRejectsUnknownDecision(t *testing.T) {
+	for _, decision := range []string{"maybe", "approve", "APPROVED", "deleted", "ok"} {
+		repository := newFakeRepository()
+		service := NewService(repository, &fakePublisher{})
+		err := service.ReviewAIAction(context.Background(), AIActionReview{
+			OrgID:      "org_1",
+			AIActionID: "aiact_1",
+			ReviewerID: "user_1",
+			Decision:   decision,
+		})
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("decision %q: error = %v, want ErrInvalidInput", decision, err)
+		}
+		if repository.reviewCalls != 0 {
+			t.Fatalf("decision %q: repository.ReviewAIAction called %d times, want 0 (rejected before reaching the repository)", decision, repository.reviewCalls)
+		}
+	}
+}
+
+func TestReviewAIActionRequiresOrg(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+	err := service.ReviewAIAction(context.Background(), AIActionReview{
+		AIActionID: "aiact_1",
+		ReviewerID: "user_1",
+		Decision:   "approved",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if repository.reviewCalls != 0 {
+		t.Fatalf("repository.ReviewAIAction called %d times, want 0", repository.reviewCalls)
+	}
+}
+
+func TestReviewAIActionPropagatesNotFoundWithoutPublishing(t *testing.T) {
+	repository := newFakeRepository()
+	repository.reviewErr = ErrNotFound
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher)
+
+	err := service.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:      "org_1",
+		AIActionID: "missing",
+		ReviewerID: "user_1",
+		Decision:   "approved",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if len(publisher.subjects) != 0 {
+		t.Fatalf("subjects = %#v, want none (no reviewed event for a non-existent action)", publisher.subjects)
+	}
+}
+
+func TestReviewAIActionValidDecisionsPublishReviewed(t *testing.T) {
+	for _, decision := range []string{"approved", "rejected"} {
+		repository := newFakeRepository()
+		publisher := &fakePublisher{}
+		service := NewService(repository, publisher)
+
+		err := service.ReviewAIAction(context.Background(), AIActionReview{
+			OrgID:      "org_1",
+			AIActionID: "aiact_1",
+			ReviewerID: "user_1",
+			Decision:   decision,
+		})
+		if err != nil {
+			t.Fatalf("decision %q: ReviewAIAction() error = %v", decision, err)
+		}
+		if repository.reviewCalls != 1 || repository.lastReview.Decision != decision {
+			t.Fatalf("decision %q: repository review = (calls %d, decision %q), want (1, %q)", decision, repository.reviewCalls, repository.lastReview.Decision, decision)
+		}
+		if len(publisher.subjects) != 1 || publisher.subjects[0] != SubjectAIActionReviewed {
+			t.Fatalf("decision %q: subjects = %#v, want ai_action.reviewed once", decision, publisher.subjects)
+		}
+	}
+}
+
+func TestListAIActionsDefaultsToSuggestedAndScopesByOrg(t *testing.T) {
+	repository := newFakeRepository()
+	repository.aiActions = []AIAction{
+		{ID: "a1", OrgID: "org_1", Status: "suggested", ConversationID: "conv_1"},
+		{ID: "a2", OrgID: "org_1", Status: "approved", ConversationID: "conv_1"},
+		{ID: "a3", OrgID: "org_2", Status: "suggested", ConversationID: "conv_9"},
+	}
+	service := NewService(repository, nil)
+
+	// Default (no status) ⇒ only suggested actions for the caller's org.
+	got, err := service.ListAIActions(context.Background(), AIActionListFilter{OrgID: "org_1"})
+	if err != nil {
+		t.Fatalf("ListAIActions() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "a1" {
+		t.Fatalf("default list = %#v, want only suggested action a1 for org_1", got)
+	}
+
+	// A foreign org's suggested action (a3) must never leak through.
+	for _, action := range got {
+		if action.OrgID != "org_1" {
+			t.Fatalf("leaked foreign-org action: %#v", action)
+		}
+	}
+
+	// status=all ⇒ every status for org_1 (a1 + a2), still org-scoped.
+	all, err := service.ListAIActions(context.Background(), AIActionListFilter{OrgID: "org_1", Status: "all"})
+	if err != nil {
+		t.Fatalf("ListAIActions(all) error = %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("status=all list = %#v, want both org_1 actions", all)
+	}
+}
+
+func TestListAIActionsRequiresOrg(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	_, err := service.ListAIActions(context.Background(), AIActionListFilter{})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
 	}
 }

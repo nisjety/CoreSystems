@@ -21,6 +21,7 @@ import {
 } from 'lucide-solid'
 import { createEffect, createSignal, For, Show, type Component, type JSX } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
+import { AiActionReviewPanel } from '@/features/inbox/components/AiActionReviewPanel'
 import { SentimentBadge } from '@/features/inbox/components/SentimentBadge'
 import type { InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import {
@@ -106,6 +107,7 @@ export function ConversationPanel(props: {
               selectedTicket={ticket()}
               sentiment={props.sentiment}
             />
+            <AiActionReviewPanel conversationId={(ticket() as { conversationId?: string }).conversationId} />
             <ConversationTranscript
               articles={props.articles}
               articlesLoading={props.articlesLoading}

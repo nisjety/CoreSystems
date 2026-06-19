@@ -192,6 +192,9 @@ func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) erro
 	if input.OrgID == "" || input.AIActionID == "" || input.ReviewerID == "" || input.Decision == "" {
 		return fmt.Errorf("%w: org_id, ai_action_id, reviewer_id, and decision are required", ErrInvalidInput)
 	}
+	if input.Decision != "approved" && input.Decision != "rejected" {
+		return fmt.Errorf("%w: decision must be 'approved' or 'rejected'", ErrInvalidInput)
+	}
 	if err := s.repository.ReviewAIAction(ctx, input); err != nil {
 		return err
 	}
@@ -200,6 +203,27 @@ func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) erro
 		"decision":     input.Decision,
 	})
 	return nil
+}
+
+func (s *Service) ListAIActions(ctx context.Context, filter AIActionListFilter) ([]AIAction, error) {
+	filter.OrgID = strings.TrimSpace(filter.OrgID)
+	filter.Status = strings.TrimSpace(filter.Status)
+	filter.ConversationID = strings.TrimSpace(filter.ConversationID)
+	if filter.OrgID == "" {
+		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	// Default to the review queue (suggested actions awaiting a human decision).
+	// "all" is the explicit escape hatch to list every status for the org.
+	switch strings.ToLower(filter.Status) {
+	case "":
+		filter.Status = "suggested"
+	case "all":
+		filter.Status = ""
+	}
+	if filter.Limit < 1 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	return s.repository.ListAIActions(ctx, filter)
 }
 
 func (s *Service) ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error) {

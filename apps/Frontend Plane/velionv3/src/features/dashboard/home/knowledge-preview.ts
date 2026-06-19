@@ -1,8 +1,10 @@
 import type { ScrapePreviewResult, ScrapeResult } from '@/shared/api/knowledge-client'
+import type { BrowserSessionResponse } from '@/shared/api/browser-client'
 
 export type ScrapeBlock = { heading: boolean; raw: string; text: string }
 
 export type ScrapePreview = {
+  browserSession?: BrowserSessionResponse
   blocks: ScrapeBlock[]
   charCount: number
   description: string

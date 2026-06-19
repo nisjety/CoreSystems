@@ -15,6 +15,13 @@ import { createEffect, createMemo, createResource, createSignal, For, Match, onC
 import { executeAction } from '@/shared/actions/action-client'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
+  closeBrowserSession,
+  createBrowserSession,
+  runBrowserAction,
+  type BrowserAction,
+  type BrowserSessionResponse,
+} from '@/shared/api/browser-client'
+import {
   crawlSelectedPages,
   createDocument,
   discoverCrawlPages,
@@ -36,6 +43,7 @@ import { readClientJson, writeClientJson } from '@/shared/session/client-storage
 import { CrawlPagePicker } from './CrawlPagePicker'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
+import { attachBrowserSession } from './browser-session'
 import {
   hostnameOf,
   normalizeUrl,
@@ -71,6 +79,7 @@ type IngestEvent = {
 
 const TERMINAL = new Set(['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled'])
 const POLL_INTERVAL_MS = 2500
+const BROWSER_SESSION_TIMEOUT_MS = 9000
 const crawlJobsStoragePrefix = 'velion.dashboard.crawl.jobs'
 
 async function loadOrgContext() {
@@ -106,6 +115,7 @@ export function KnowledgeComposer(props: {
   const [crawlMaxPages, setCrawlMaxPages] = createSignal(25)
   const [submitting, setSubmitting] = createSignal(false)
   const [adding, setAdding] = createSignal(false)
+  const [browserBusy, setBrowserBusy] = createSignal(false)
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -206,7 +216,7 @@ export function KnowledgeComposer(props: {
 
   const switchMode = (next: IngestMode) => {
     setMode(next)
-    if (next !== 'link') setPreview(null)
+    if (next !== 'link') clearPreview()
     if (next !== 'crawl') setDiscovery(null)
     if (next !== 'products') {
       setProductExtraction(null)
@@ -382,7 +392,9 @@ export function KnowledgeComposer(props: {
   }
 
   const loadLinkPreview = async (target: string) => {
+    let browserSessionPromise: Promise<BrowserSessionResponse | null> | null = null
     try {
+      browserSessionPromise = tryCreateBrowserSession(target)
       const result = await scrapePreview(orgId(), {
         url: target,
         signals: {
@@ -397,9 +409,63 @@ export function KnowledgeComposer(props: {
           waitForTimeoutMs: 1800,
         },
       })
-      setPreview(toScrapePreview(target, result))
+      const browserSession = await browserSessionPromise
+      setPreview(attachBrowserSession(toScrapePreview(target, result), browserSession))
     } catch (reason) {
+      void browserSessionPromise?.then((session) => {
+        closeBrowserSessionById(session?.session.id)
+      })
       setFormError(reason instanceof Error ? reason.message : 'Skraping kunne ikke fullføres.')
+    }
+  }
+
+  const tryCreateBrowserSession = async (target: string): Promise<BrowserSessionResponse | null> => {
+    const id = orgId()
+    if (!id) return null
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), BROWSER_SESSION_TIMEOUT_MS)
+    try {
+      return await createBrowserSession(id, {
+        url: target,
+        viewport: { width: 1280, height: 800 },
+      }, controller.signal)
+    } catch {
+      return null
+    } finally {
+      window.clearTimeout(timeout)
+    }
+  }
+
+  const closeBrowserSessionById = (sessionId?: string | null) => {
+    const id = orgId()
+    if (!id || !sessionId) return
+    void closeBrowserSession(id, sessionId).catch(() => undefined)
+  }
+
+  const closePreviewBrowserSession = (current: ScrapePreview | null) => {
+    closeBrowserSessionById(current?.browserSession?.session.id)
+  }
+
+  const clearPreview = () => {
+    const current = preview()
+    closePreviewBrowserSession(current)
+    setPreview(null)
+  }
+
+  const performBrowserAction = async (action: BrowserAction) => {
+    const current = preview()
+    const sessionId = current?.browserSession?.session.id
+    const id = orgId()
+    if (!current || !sessionId || !id || browserBusy()) return
+    setBrowserBusy(true)
+    setFormError(null)
+    try {
+      const nextSession = await runBrowserAction(id, sessionId, action)
+      setPreview(attachBrowserSession(current, nextSession))
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : 'Nettleserhandlingen kunne ikke fullføres.')
+    } finally {
+      setBrowserBusy(false)
     }
   }
 
@@ -454,6 +520,7 @@ export function KnowledgeComposer(props: {
         sourceUrl: current.url,
       })
       updateJob(key, { status: 'completed' })
+      closePreviewBrowserSession(current)
       setPreview(null)
       setUrl('')
     } catch (reason) {
@@ -491,6 +558,7 @@ export function KnowledgeComposer(props: {
   onCleanup(() => {
     if (pollTimer !== undefined) window.clearInterval(pollTimer)
     for (const controller of crawlStreams.values()) controller.abort()
+    closePreviewBrowserSession(untrack(preview))
   })
 
   return (
@@ -603,8 +671,10 @@ export function KnowledgeComposer(props: {
         {(current) => (
           <ScrapePreviewPanel
             adding={adding()}
+            browserBusy={browserBusy()}
+            onBrowserAction={(action) => void performBrowserAction(action)}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
-            onDiscard={() => setPreview(null)}
+            onDiscard={clearPreview}
             preview={current}
           />
         )}

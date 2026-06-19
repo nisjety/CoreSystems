@@ -1,17 +1,34 @@
-import { Check, ExternalLink, Loader2, X } from 'lucide-solid'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  Code2,
+  ExternalLink,
+  Globe2,
+  Loader2,
+  LockKeyhole,
+  Maximize2,
+  MessageSquare,
+  RefreshCw,
+  ShieldCheck,
+  X,
+} from 'lucide-solid'
 import { createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX } from 'solid-js'
+import type { BrowserAction } from '@/shared/api/browser-client'
+import { browserSessionFromPreview } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
 // Inline markdown → safe JSX. We only resolve the tokens that are reliable to
-// detect in scraped content — links and inline images, both anchored on an
-// explicit http(s) URL — and clean residual emphasis/markers from the text in
+// detect in scraped content — links and inline images, resolved against the
+// scraped page URL — and clean residual emphasis/markers from the text in
 // between. Everything is built as real elements (never innerHTML), so an
 // untrusted scraped string can't inject markup.
-const INLINE_LINK_RE = /(!?)\[([^\]]*)\]\((https?:\/\/[^)\s]+)[^)]*\)/g
+const INLINE_LINK_RE = /(!?)\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g
 
 function cleanInlineText(value: string): string {
   return value
     .replace(/\*\*|__|[*_`]/g, '')
+    .replace(/(^|\s)#{1,6}\s+/g, '$1')
     .replace(/[-=_~]{3,}/g, ' ')
     .replace(/[ \t]{2,}/g, ' ')
 }
@@ -21,7 +38,26 @@ function hideBrokenImage(event: Event) {
   if (image) image.style.display = 'none'
 }
 
-function renderInline(input: string): JSX.Element {
+function resolveInlineUrl(value: string, baseUrl: string): string | null {
+  try {
+    const url = new URL(value, baseUrl)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function blockNodeName(block: ScrapeBlock): string {
+  const raw = block.raw.trim()
+  if (/^#{1,6}\s+/.test(raw)) return 'heading'
+  if (/^!\[/.test(raw)) return 'image'
+  if (/^>\s+/.test(raw)) return 'quote'
+  if (/^\s*(?:[-*+]|\d+\.)\s+/.test(raw)) return 'listitem'
+  if (block.heading) return 'heading'
+  return 'paragraph'
+}
+
+function renderInline(input: string, baseUrl: string): JSX.Element {
   const nodes: JSX.Element[] = []
   let lastIndex = 0
   let match: RegExpExecArray | null
@@ -36,8 +72,8 @@ function renderInline(input: string): JSX.Element {
     pushText(input.slice(lastIndex, match.index))
     const isImage = match[1] === '!'
     const label = match[2] ?? ''
-    const url = match[3] ?? ''
-    if (isImage) {
+    const url = resolveInlineUrl(match[3] ?? '', baseUrl)
+    if (isImage && url) {
       nodes.push(
         <img
           class="knowledge-scrape-page__inline-img"
@@ -47,13 +83,15 @@ function renderInline(input: string): JSX.Element {
           onError={hideBrokenImage}
         />,
       )
-    } else {
+    } else if (url) {
       const text = cleanInlineText(label).trim()
       nodes.push(
         <a href={url} target="_blank" rel="noopener noreferrer">
           {text || hostnameOf(url)}
         </a>,
       )
+    } else {
+      pushText(label)
     }
     lastIndex = match.index + match[0].length
   }
@@ -65,24 +103,35 @@ function renderInline(input: string): JSX.Element {
 /** Render one scraped block as the element it represents — heading, standalone
  * image, blockquote, list item, or paragraph — so the left column reads like a
  * page rather than a flat text dump. */
-function BlockBody(props: { block: ScrapeBlock }) {
+function BlockBody(props: { baseUrl: string; block: ScrapeBlock }) {
   const raw = () => props.block.raw.trim()
-  const imageMatch = () => /^!\[([^\]]*)\]\((https?:\/\/[^)\s]+)[^)]*\)\s*$/.exec(raw())
+  const imageMatch = () => /^!\[([^\]]*)\]\(([^)\s]+)[^)]*\)\s*$/.exec(raw())
   const headingMatch = () => /^(#{1,6})\s+(.*)$/s.exec(raw())
   const quoteMatch = () => /^>\s+(.*)$/s.exec(raw())
   const listMatch = () => /^\s*(?:[-*+]|\d+\.)\s+(.*)$/s.exec(raw())
 
   return (
-    <Switch fallback={<p class="knowledge-scrape-page__p">{renderInline(raw())}</p>}>
+    <Switch fallback={<p class="knowledge-scrape-page__p">{renderInline(raw(), props.baseUrl)}</p>}>
       <Match when={imageMatch()} keyed>
-        {(match) => (
-          <figure class="knowledge-scrape-page__figure">
-            <img src={match[2]} alt={match[1] ?? ''} loading="lazy" onError={hideBrokenImage} />
-            <Show when={match[1]}>
-              <figcaption>{match[1]}</figcaption>
+        {(match) => {
+          const src = () => resolveInlineUrl(match[2] ?? '', props.baseUrl)
+          return (
+            <Show
+              when={src()}
+              keyed
+              fallback={<p class="knowledge-scrape-page__p">{cleanInlineText(match[1] ?? '')}</p>}
+            >
+              {(url) => (
+                <figure class="knowledge-scrape-page__figure">
+                  <img src={url} alt={match[1] ?? ''} loading="lazy" onError={hideBrokenImage} />
+                  <Show when={match[1]}>
+                    <figcaption>{match[1]}</figcaption>
+                  </Show>
+                </figure>
+              )}
             </Show>
-          </figure>
-        )}
+          )
+        }}
       </Match>
       <Match when={headingMatch()} keyed>
         {(match) => (
@@ -92,15 +141,15 @@ function BlockBody(props: { block: ScrapeBlock }) {
             role="heading"
             aria-level={Math.min((match[1]?.length ?? 0), 6)}
           >
-            {renderInline(match[2] ?? '')}
+            {renderInline(match[2] ?? '', props.baseUrl)}
           </p>
         )}
       </Match>
       <Match when={quoteMatch()} keyed>
-        {(match) => <blockquote class="knowledge-scrape-page__quote">{renderInline(match[1] ?? '')}</blockquote>}
+        {(match) => <blockquote class="knowledge-scrape-page__quote">{renderInline(match[1] ?? '', props.baseUrl)}</blockquote>}
       </Match>
       <Match when={listMatch()} keyed>
-        {(match) => <p class="knowledge-scrape-page__li">{renderInline(match[1] ?? '')}</p>}
+        {(match) => <p class="knowledge-scrape-page__li">{renderInline(match[1] ?? '', props.baseUrl)}</p>}
       </Match>
     </Switch>
   )
@@ -110,6 +159,7 @@ function BlockBody(props: { block: ScrapeBlock }) {
  * here is mirrored in the block list and vice-versa via the shared state owned
  * by ScrapePreviewPanel. */
 function ScrapeRegion(props: {
+  baseUrl: string
   block: ScrapeBlock
   selected: boolean
   hovered: boolean
@@ -145,14 +195,269 @@ function ScrapeRegion(props: {
         </Show>
       </span>
       <div class="knowledge-scrape-region__content">
-        <BlockBody block={props.block} />
+        <BlockBody baseUrl={props.baseUrl} block={props.block} />
       </div>
+    </div>
+  )
+}
+
+function BrowserSessionSurface(props: {
+  browserBusy?: boolean
+  hovered: number | null
+  onBrowserAction?: (action: BrowserAction) => void
+  onEnter: (index: number) => void
+  onLeave: (index: number) => void
+  onSelectAll: () => void
+  onSelectNone: () => void
+  onToggle: (index: number) => void
+  preview: ScrapePreview
+  selected: Set<number>
+  selectedChars: number
+  selectedCount: number
+  total: number
+}) {
+  const session = createMemo(() => browserSessionFromPreview(props.preview))
+  const [brokenFrameUrl, setBrokenFrameUrl] = createSignal<string | null>(null)
+  const allSelected = () => props.total > 0 && props.selectedCount === props.total
+  const isLive = () => session().renderMode === 'chromium'
+  const controlsDisabled = () => !isLive() || props.browserBusy || !session().sessionId
+  const frameUrl = () => {
+    const url = session().frameUrl
+    return url && brokenFrameUrl() !== url ? url : null
+  }
+  const runAction = (action: BrowserAction) => {
+    if (controlsDisabled()) return
+    props.onBrowserAction?.(action)
+  }
+
+  return (
+    <div
+      class="knowledge-browser-frame"
+      classList={{
+        'knowledge-browser-frame--live': isLive(),
+        'knowledge-browser-frame--fallback': !isLive(),
+      }}
+    >
+      <div class="knowledge-browser-frame__topbar">
+        <div class="knowledge-browser-frame__tabs">
+          <span class="knowledge-browser-traffic" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span class="knowledge-browser-frame__tab">Sammendrag</span>
+          <span class="knowledge-browser-frame__tab knowledge-browser-frame__tab--active">
+            <Globe2 class="size-3.5" /> Browser
+          </span>
+          <span class="knowledge-browser-frame__plus">+</span>
+        </div>
+        <span class="knowledge-browser-commenting">
+          <MessageSquare class="size-3.5" /> Annotering
+        </span>
+      </div>
+
+      <div class="knowledge-browser-frame__nav" aria-label="Nettleserkontroller">
+        <div class="knowledge-browser-frame__controls">
+          <button
+            type="button"
+            aria-label="Gå tilbake i nettleserøkten"
+            title="Gå tilbake"
+            disabled={controlsDisabled()}
+            onClick={() => runAction({ type: 'back' })}
+          >
+            <ArrowLeft class="size-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label="Gå fremover i nettleserøkten"
+            title="Fremover kommer i neste Chromium-steg"
+            disabled
+          >
+            <ArrowRight class="size-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label="Last nettlesersiden på nytt"
+            title="Last på nytt"
+            disabled={controlsDisabled()}
+            onClick={() => runAction({ type: 'navigate', url: session().url })}
+          >
+            <RefreshCw class="size-3.5" />
+          </button>
+        </div>
+        <div class="knowledge-browser-frame__address">
+          <LockKeyhole class="size-3.5" aria-hidden="true" />
+          <span>{session().url}</span>
+        </div>
+        <span class="knowledge-browser-frame__source">
+          <Globe2 class="size-3.5" /> {session().host}
+        </span>
+      </div>
+
+      <div class="knowledge-browser-canvas">
+        <div class="knowledge-browser-canvas__meta">
+          <span><Maximize2 class="size-3.5" /> {session().viewport.width} × {session().viewport.height}</span>
+          <span><ShieldCheck class="size-3.5" /> {session().sourceLabel}</span>
+        </div>
+
+        <For each={session().commentAnchors}>
+          {(anchor) => (
+            <span
+              class="knowledge-browser-comment-anchor"
+              style={{
+                left: `${anchor.x * 100}%`,
+                top: `${anchor.y * 100}%`,
+              }}
+              aria-label={`Kommentar ${anchor.label}`}
+            >
+              {anchor.label}
+            </span>
+          )}
+        </For>
+
+        <Show
+          when={isLive()}
+          fallback={
+            <div class="knowledge-scrape-page" aria-label="Gjengitt side i nettleservisning">
+              <header class="knowledge-scrape-page__browser-head">
+                <span>{hostnameOf(props.preview.url)}</span>
+                <strong>{props.preview.title}</strong>
+                <Show when={props.preview.description}>
+                  <p>{props.preview.description}</p>
+                </Show>
+              </header>
+              <For each={props.preview.blocks}>
+                {(block, index) => (
+                  <ScrapeRegion
+                    baseUrl={props.preview.url}
+                    block={block}
+                    selected={props.selected.has(index())}
+                    hovered={props.hovered === index()}
+                    onToggle={() => props.onToggle(index())}
+                    onEnter={() => props.onEnter(index())}
+                    onLeave={() => props.onLeave(index())}
+                  />
+                )}
+              </For>
+            </div>
+          }
+        >
+          <div class="knowledge-browser-live-surface" aria-label="Live nettleserobservasjon">
+            <div class="knowledge-browser-live-surface__toolbar">
+              <span>{session().status}</span>
+              <span>{session().profileLabel}</span>
+              <Show when={session().frameArtifactId ?? session().screenshotArtifactId}>
+                {(artifactId) => <span>shot {artifactId()}</span>}
+              </Show>
+              <button
+                type="button"
+                disabled={controlsDisabled()}
+                onClick={() => runAction({ type: 'screenshot', full_page: false })}
+              >
+                Capture
+              </button>
+            </div>
+            <div class="knowledge-browser-live-surface__page">
+              <header>
+                <span>{session().host}</span>
+                <strong>{session().title}</strong>
+              </header>
+              <Show
+                when={frameUrl()}
+                keyed
+                fallback={
+                  <div class="knowledge-browser-live-dom">
+                    <For
+                      each={session().domNodes}
+                      fallback={<p class="knowledge-browser-live-dom__empty">Ingen DOM-noder returnert ennå.</p>}
+                    >
+                      {(node) => (
+                        <div class="knowledge-browser-live-dom__node">
+                          <span>{node.kind}</span>
+                          <p>{node.text}</p>
+                          <Show when={node.selector}>
+                            {(selector) => <code>{selector()}</code>}
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                }
+              >
+                {(src) => (
+                  <div class="knowledge-browser-screenshot" aria-label="Gjengitt Chromium-side">
+                    <img
+                      src={src}
+                      alt={`Gjengitt nettleserside for ${session().title}`}
+                      decoding="async"
+                      onError={() => setBrokenFrameUrl(src)}
+                    />
+                  </div>
+                )}
+              </Show>
+            </div>
+          </div>
+        </Show>
+      </div>
+
+      <div class="knowledge-browser-frame__footer">
+        <div class="knowledge-browser-frame__selection">
+          <span><Code2 class="size-3.5" /> {props.selectedCount}/{props.total} seksjoner valgt</span>
+          <span>{props.selectedChars.toLocaleString('nb-NO')} tegn</span>
+        </div>
+        <div class="knowledge-scrape-preview__select-actions" aria-label="Seksjonsvalg">
+          <button type="button" onClick={() => props.onSelectAll()} disabled={allSelected()}>Velg alle</button>
+          <button type="button" onClick={() => props.onSelectNone()} disabled={props.selectedCount === 0}>Fjern alle</button>
+        </div>
+      </div>
+
+      <details class="knowledge-browser-selection-drawer">
+        <summary>
+          <span>Presist seksjonsvalg</span>
+          <strong>{props.selectedCount}/{props.total}</strong>
+        </summary>
+        <div class="knowledge-scrape-list" aria-label="DOM-seksjoner">
+          <For each={props.preview.blocks}>
+            {(block, index) => {
+              const isSelected = () => props.selected.has(index())
+              return (
+                <button
+                  type="button"
+                  class="knowledge-scrape-block"
+                  classList={{
+                    'knowledge-scrape-block--heading': block.heading,
+                    'knowledge-scrape-block--selected': isSelected(),
+                    'knowledge-scrape-block--deselected': !isSelected(),
+                    'knowledge-scrape-block--hovered': props.hovered === index(),
+                  }}
+                  aria-pressed={isSelected()}
+                  onClick={() => props.onToggle(index())}
+                  onMouseEnter={() => props.onEnter(index())}
+                  onMouseLeave={() => props.onLeave(index())}
+                >
+                  <span class="knowledge-scrape-block__node" aria-hidden="true">
+                    {blockNodeName(block)}
+                  </span>
+                  <span class="knowledge-scrape-block__text">{block.text}</span>
+                  <span class="knowledge-scrape-block__check" aria-hidden="true">
+                    <Show when={isSelected()}>
+                      <Check class="size-3" />
+                    </Show>
+                  </span>
+                </button>
+              )
+            }}
+          </For>
+        </div>
+      </details>
     </div>
   )
 }
 
 export function ScrapePreviewPanel(props: {
   adding: boolean
+  browserBusy?: boolean
+  onBrowserAction?: (action: BrowserAction) => void
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
   preview: ScrapePreview
@@ -199,7 +504,7 @@ export function ScrapePreviewPanel(props: {
     <section class="velion-fade-up knowledge-scrape-preview" aria-label="Forhåndsvisning av skrapet side">
       <div class="knowledge-scrape-preview__head">
         <div class="knowledge-scrape-preview__heading">
-          <span class="knowledge-scrape-preview__tag">Forhåndsvisning · ikke lagt til ennå</span>
+          <span class="knowledge-scrape-preview__tag">Nettleserøkt · ikke lagt til ennå</span>
           <p class="knowledge-scrape-preview__title">{props.preview.title}</p>
           <a
             href={props.preview.url}
@@ -220,65 +525,25 @@ export function ScrapePreviewPanel(props: {
         <p class="knowledge-scrape-preview__desc">{props.preview.description}</p>
       </Show>
 
-      <div class="knowledge-scrape-preview__toolbar">
-        <p class="knowledge-scrape-preview__hint">Hold over en seksjon for å markere den — klikk for å velge den bort.</p>
-        <div class="knowledge-scrape-preview__select-actions">
-          <button type="button" onClick={selectAll} disabled={allSelected()}>Velg alle</button>
-          <button type="button" onClick={selectNone} disabled={selectedCount() === 0}>Fjern alle</button>
-        </div>
-      </div>
-
       <Show
         when={total() > 0}
         fallback={<p class="knowledge-scrape-preview__empty">{emptyMessage()}</p>}
       >
-        <div class="knowledge-scrape-preview__split">
-          <div class="knowledge-scrape-page" aria-label="Gjengitt side">
-            <For each={props.preview.blocks}>
-              {(block, index) => (
-                <ScrapeRegion
-                  block={block}
-                  selected={selected().has(index())}
-                  hovered={hovered() === index()}
-                  onToggle={() => toggle(index())}
-                  onEnter={() => enter(index())}
-                  onLeave={() => leave(index())}
-                />
-              )}
-            </For>
-          </div>
-
-          <div class="knowledge-scrape-list" aria-label="Seksjoner">
-            <For each={props.preview.blocks}>
-              {(block, index) => {
-                const isSelected = () => selected().has(index())
-                return (
-                  <button
-                    type="button"
-                    class="knowledge-scrape-block"
-                    classList={{
-                      'knowledge-scrape-block--heading': block.heading,
-                      'knowledge-scrape-block--selected': isSelected(),
-                      'knowledge-scrape-block--deselected': !isSelected(),
-                      'knowledge-scrape-block--hovered': hovered() === index(),
-                    }}
-                    aria-pressed={isSelected()}
-                    onClick={() => toggle(index())}
-                    onMouseEnter={() => enter(index())}
-                    onMouseLeave={() => leave(index())}
-                  >
-                    <span class="knowledge-scrape-block__check" aria-hidden="true">
-                      <Show when={isSelected()}>
-                        <Check class="size-3" />
-                      </Show>
-                    </span>
-                    <span class="knowledge-scrape-block__text">{block.text}</span>
-                  </button>
-                )
-              }}
-            </For>
-          </div>
-        </div>
+        <BrowserSessionSurface
+          browserBusy={props.browserBusy}
+          hovered={hovered()}
+          onBrowserAction={props.onBrowserAction}
+          onEnter={enter}
+          onLeave={leave}
+          onSelectAll={selectAll}
+          onSelectNone={selectNone}
+          onToggle={toggle}
+          preview={props.preview}
+          selected={selected()}
+          selectedChars={selectedChars()}
+          selectedCount={selectedCount()}
+          total={total()}
+        />
       </Show>
 
       <div class="knowledge-scrape-preview__actions">

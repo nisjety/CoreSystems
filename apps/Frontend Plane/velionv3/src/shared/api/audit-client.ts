@@ -22,7 +22,9 @@ export interface AuditEvent {
   outcome?: string
   createdAt?: string
   created_at?: string
-  /** Free-form per-event metadata. For `tool_action`: `{ tool, data_category, source }`. */
+  /** Zero-data-retention marker — may arrive top-level or inside `details`. */
+  zdr?: boolean
+  /** Free-form per-event metadata. For `tool_action`: `{ tool, data_category, source, zdr }`. */
   details?: Record<string, unknown>
 }
 
@@ -141,4 +143,75 @@ export function aggregateToolActions(events: AuditEvent[]): Map<string, ToolActi
     summaries.set(key, existing)
   }
   return summaries
+}
+
+/**
+ * Whether an event was processed under zero data retention. The flag may be
+ * carried top-level (`zdr`) or inside `details` under any of a few names. Absent
+ * ⇒ false (we never imply ZDR we can't see).
+ */
+export function zeroDataRetention(event: AuditEvent): boolean {
+  if (event.zdr === true) return true
+  const details = event.details
+  if (!details) return false
+  for (const key of ['zdr', 'zero_data_retention', 'zeroDataRetention']) {
+    const value = details[key]
+    if (value === true || value === 'true') return true
+  }
+  return false
+}
+
+/** One data category the AI has touched across the workspace. */
+export interface DataCategoryActivity {
+  category: string
+  /** Tool-action events recorded against this category. */
+  count: number
+  /** How many of those events were processed under zero data retention. */
+  zdrCount: number
+}
+
+/**
+ * Workspace-level AI activity: a per-data-category rollup over ALL tool-action
+ * events, regardless of whether an event could be attributed to a specific
+ * connection. This is the honest granularity available today — per-connection
+ * attribution is deferred until producers emit a reliable source/tool identity.
+ */
+export interface WorkspaceAiActivity {
+  totalEvents: number
+  zdrEvents: number
+  categories: DataCategoryActivity[]
+  tools: string[]
+}
+
+/**
+ * Build the workspace rollup. Unlike {@link aggregateToolActions}, this counts
+ * EVERY event — including those with no attributable source — so a tool action
+ * the AI took is never silently dropped from the workspace view. Events without
+ * a declared data category fall under "Uncategorized".
+ */
+export function aggregateWorkspaceActivity(events: AuditEvent[]): WorkspaceAiActivity {
+  const categories = new Map<string, DataCategoryActivity>()
+  const tools = new Set<string>()
+  let zdrEvents = 0
+
+  for (const event of events) {
+    const zdr = zeroDataRetention(event)
+    if (zdr) zdrEvents += 1
+
+    const category = dataCategory(event) ?? 'Uncategorized'
+    const existing = categories.get(category) ?? { category, count: 0, zdrCount: 0 }
+    existing.count += 1
+    if (zdr) existing.zdrCount += 1
+    categories.set(category, existing)
+
+    const tool = toolName(event)
+    if (tool) tools.add(tool)
+  }
+
+  return {
+    totalEvents: events.length,
+    zdrEvents,
+    categories: [...categories.values()].sort((a, b) => b.count - a.count),
+    tools: [...tools],
+  }
 }

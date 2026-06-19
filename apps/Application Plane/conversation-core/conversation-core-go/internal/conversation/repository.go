@@ -15,11 +15,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// PgxPool is the subset of *pgxpool.Pool that PGRepository depends on. Modelling
+// it as an interface lets tests inject a fake pool/transaction so transactional
+// behaviour (e.g. the AI-action review rollback) can be verified without a live
+// database. *pgxpool.Pool satisfies this interface, so production wiring is
+// unchanged.
+type PgxPool interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
 type PGRepository struct {
-	pool *pgxpool.Pool
+	pool PgxPool
 }
 
 func NewRepository(pool *pgxpool.Pool) *PGRepository {
+	// Keep a nil pool as a nil interface (not a non-nil interface wrapping a nil
+	// pointer) so ensureConfigured's `r.pool == nil` guard still catches it.
+	if pool == nil {
+		return &PGRepository{}
+	}
 	return &PGRepository{pool: pool}
 }
 
@@ -361,6 +378,9 @@ WHERE link.tag_id = tag.id
 }
 
 func (r *PGRepository) ReviewAIAction(ctx context.Context, input AIActionReview) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -371,11 +391,19 @@ func (r *PGRepository) ReviewAIAction(ctx context.Context, input AIActionReview)
 			_ = tx.Rollback(ctx)
 		}
 	}()
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 UPDATE conversation_ai_actions
 SET status = $3, reviewed_by = $4, reviewed_at = $5, updated_at = $5
-WHERE org_id = $1 AND id = $2`, input.OrgID, input.AIActionID, input.Decision, input.ReviewerID, input.OccurredAt); err != nil {
+WHERE org_id = $1 AND id = $2`, input.OrgID, input.AIActionID, input.Decision, input.ReviewerID, input.OccurredAt)
+	if err != nil {
 		return err
+	}
+	// Zero rows updated ⇒ the action does not exist for this org (missing id or a
+	// foreign-org id). Return ErrNotFound (→404) and let the deferred rollback fire
+	// so we never persist an orphan conversation_ai_reviews row for an action that
+	// was never actually reviewed.
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO conversation_ai_reviews (id, org_id, ai_action_id, reviewer_user_id, decision, comment, created_at)
@@ -387,6 +415,55 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`, newID("airev"), input.OrgID, input.AIActio
 	}
 	committed = true
 	return nil
+}
+
+func (r *PGRepository) ListAIActions(ctx context.Context, filter AIActionListFilter) ([]AIAction, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	if filter.Limit < 1 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT id, org_id, conversation_id, kind, status, payload, created_by, reviewed_by, reviewed_at, created_at, updated_at
+FROM conversation_ai_actions
+WHERE org_id = $1
+  AND ($2 = '' OR status = $2)
+  AND ($3 = '' OR conversation_id = $3)
+ORDER BY created_at DESC, id DESC
+LIMIT $4`, filter.OrgID, filter.Status, filter.ConversationID, filter.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	actions := []AIAction{}
+	for rows.Next() {
+		action, err := scanAIAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		actions = append(actions, action)
+	}
+	return actions, rows.Err()
+}
+
+func scanAIAction(row scanner) (AIAction, error) {
+	var action AIAction
+	var payloadBytes []byte
+	if err := row.Scan(
+		&action.ID, &action.OrgID, &action.ConversationID, &action.Kind, &action.Status,
+		&payloadBytes, &action.CreatedBy, &action.ReviewedBy, &action.ReviewedAt,
+		&action.CreatedAt, &action.UpdatedAt,
+	); err != nil {
+		return AIAction{}, err
+	}
+	if len(payloadBytes) > 0 {
+		_ = json.Unmarshal(payloadBytes, &action.Payload)
+	}
+	if action.Payload == nil {
+		action.Payload = map[string]any{}
+	}
+	return action, nil
 }
 
 func (r *PGRepository) ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error) {

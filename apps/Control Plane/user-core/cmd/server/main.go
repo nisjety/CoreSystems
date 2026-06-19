@@ -300,7 +300,7 @@ func main() {
 			log.Println("✅ GDPR: connected to auth_service DB for gdpr_hard_delete_user / gdpr_anonymize_user")
 		}
 	} else {
-		log.Println("ℹ️  GDPR: AUTH_DATABASE_URL not set — user hard-erase/anonymize disabled (DSAR export still works)")
+		log.Println("⚠️  GDPR: AUTH_DATABASE_URL not set — hard-erase/anonymize routes will return 503 erasure_unavailable (never an opaque 500); DSAR export still works")
 	}
 
 	// Create gRPC server with NATS publisher and Better Auth client

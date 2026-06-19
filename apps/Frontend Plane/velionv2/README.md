@@ -1,6 +1,6 @@
-# Velion v2
+# Velion
 
-Velion v2 is the frontend workspace for Velion, an AI-first customer experience system where the AI worker, also named Velion, is the main operating layer for support, sales assistance, knowledge, and workflow execution.
+Velion is the frontend workspace for Velion, an AI-first customer experience system where the AI worker, also named Velion, is the main operating layer for support, sales assistance, knowledge, and workflow execution.
 
 The product goal is not "a helpdesk with AI features." Velion should feel like an AI teammate that can understand a company, propose work, execute approved actions, and keep humans in control. Every task Velion can do autonomously must also be possible manually in the UI.
 

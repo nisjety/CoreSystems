@@ -56,6 +56,7 @@ type Repository interface {
 	AddTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
 	RemoveTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
 	ReviewAIAction(ctx context.Context, input AIActionReview) error
+	ListAIActions(ctx context.Context, filter AIActionListFilter) ([]AIAction, error)
 	ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error)
 	GetTicket(ctx context.Context, orgID, ticketID string) (*Ticket, error)
 	GetTicketByConversation(ctx context.Context, orgID, conversationID string) (*Ticket, error)
@@ -379,6 +380,30 @@ type AIActionReview struct {
 	Decision   string
 	Comment    string
 	OccurredAt time.Time
+}
+
+// AIAction is a model-proposed action awaiting (or having received) a human
+// review decision — the read shape backing the HITL review queue. It mirrors a
+// row of conversation_ai_actions.
+type AIAction struct {
+	ID             string         `json:"id"`
+	OrgID          string         `json:"org_id"`
+	ConversationID string         `json:"conversation_id"`
+	Kind           string         `json:"kind"`
+	Status         string         `json:"status"`
+	Payload        map[string]any `json:"payload"`
+	CreatedBy      string         `json:"created_by"`
+	ReviewedBy     string         `json:"reviewed_by,omitempty"`
+	ReviewedAt     *time.Time     `json:"reviewed_at,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+type AIActionListFilter struct {
+	OrgID          string
+	Status         string
+	ConversationID string
+	Limit          int
 }
 
 type CreateTicketInput struct {

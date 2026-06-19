@@ -256,6 +256,53 @@ export async function removeConversationTag(orgId: string, conversationId: strin
   )
 }
 
+// ── AI-action HITL review queue ───────────────────────────────────────────────
+//
+// Model-proposed actions on a conversation awaiting a human decision. The org is
+// resolved from the authenticated session at the gateway — these calls do NOT
+// send any client org header (a forged one would be stripped at ingress anyway).
+
+export interface AiAction {
+  id: string
+  org_id: string
+  conversation_id: string
+  kind: string
+  status: string
+  payload: Record<string, unknown>
+  created_by: string
+  reviewed_by?: string
+  reviewed_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export async function listAiActions(
+  params: { status?: string; conversationId?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AiAction[]> {
+  const query = new URLSearchParams()
+  if (params.status) query.set('status', params.status)
+  if (params.conversationId) query.set('conversation_id', params.conversationId)
+  query.set('limit', String(params.limit ?? 50))
+  const data = await requestJson<AiAction[]>(`/api/v1/inbox/ai-actions?${query}`, { signal })
+  return Array.isArray(data) ? data : []
+}
+
+/** Record a human review decision on a model-proposed action. The gateway forces
+ * the decision from the route (`approve` → approved, `reject` → rejected); the
+ * optional comment is the only body the reviewer supplies. Resolves only on a 2xx
+ * — a missing/foreign-org action id surfaces as a thrown 404. */
+export async function reviewAiAction(
+  aiActionId: string,
+  decision: 'approve' | 'reject',
+  comment?: string,
+): Promise<void> {
+  await requestJson(`/api/v1/inbox/ai-actions/${encodeURIComponent(aiActionId)}/${decision}`, {
+    method: 'POST',
+    body: JSON.stringify(comment && comment.trim() ? { comment: comment.trim() } : {}),
+  })
+}
+
 export async function listInboxesAsGroups(orgId: string, signal?: AbortSignal): Promise<Group[]> {
   const inboxes = await requestJson<Array<{ id: string; name: string }>>('/api/v1/inbox/inboxes', {
     headers: orgHeaders(orgId),

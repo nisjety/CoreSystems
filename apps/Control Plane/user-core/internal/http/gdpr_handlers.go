@@ -58,6 +58,17 @@ func auditOrgID(c *gin.Context) string {
 	return strings.TrimSpace(c.GetHeader("X-Org-Id"))
 }
 
+// erasureUnavailable refuses an erasure/anonymize request with an explicit 503
+// when the auth-DB pool is not wired (AUTH_DATABASE_URL unset). This replaces the
+// previous opaque 500 — an Art. 17 trap where the route looked live but always
+// failed. DSAR export is independent and stays available.
+func erasureUnavailable(c *gin.Context) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{
+		"error":   "erasure_unavailable",
+		"message": "User erasure is not configured on this deployment (AUTH_DATABASE_URL unset). Data export (DSAR) is unaffected.",
+	})
+}
+
 // hardEraseUser irreversibly erases a user via gdpr_hard_delete_user (auth DB)
 // plus local user_service cleanup. Admin or self; requires confirm: true.
 // DELETE /api/v1/users/:id/gdpr/erase   Body: { "confirm": true }
@@ -88,6 +99,14 @@ func (s *Server) hardEraseUser(c *gin.Context) {
 		return
 	}
 
+	// Capability gate after authz + confirm: if the auth-DB pool is not wired
+	// (AUTH_DATABASE_URL unset) refuse with an explicit 503 instead of attempting
+	// the proc and returning an opaque 500.
+	if !s.userService.ErasureAvailable() {
+		erasureUnavailable(c)
+		return
+	}
+
 	orgID := auditOrgID(c)
 	role := actorRole(isAdmin, callerID == targetID)
 
@@ -115,6 +134,11 @@ func (s *Server) anonymizeUser(c *gin.Context) {
 
 	callerID, isAdmin, ok := s.resolveErasureActor(c, targetID)
 	if !ok {
+		return
+	}
+
+	if !s.userService.ErasureAvailable() {
+		erasureUnavailable(c)
 		return
 	}
 

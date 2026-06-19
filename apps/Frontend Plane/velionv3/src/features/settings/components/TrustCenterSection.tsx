@@ -1,9 +1,11 @@
-import { Database, Loader2, ShieldCheck, Sparkles, Unplug } from 'lucide-solid'
+import { Database, Loader2, ShieldCheck, ShieldOff, Sparkles, Unplug } from 'lucide-solid'
 import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import {
   aggregateToolActions,
+  aggregateWorkspaceActivity,
   listToolActionEvents,
   type ToolActionSummary,
+  type WorkspaceAiActivity,
 } from '@/shared/api/audit-client'
 import {
   disconnectConnection,
@@ -34,6 +36,8 @@ interface TrustCenterData {
   providers: IntegrationProvider[]
   profile: IntegrationProfile | null
   toolActions: Map<string, ToolActionSummary>
+  /** Workspace-level per-data-category AI activity (the honest, attribution-free view). */
+  workspaceActivity: WorkspaceAiActivity
   /** Whether the audit read succeeded — drives the empty-vs-no-telemetry copy. */
   auditAvailable: boolean
 }
@@ -49,16 +53,18 @@ async function loadTrustCenter(orgId: string): Promise<TrustCenterData> {
   ])
 
   let toolActions = new Map<string, ToolActionSummary>()
+  let workspaceActivity: WorkspaceAiActivity = { totalEvents: 0, zdrEvents: 0, categories: [], tools: [] }
   let auditAvailable = false
   try {
     const events = await listToolActionEvents()
     toolActions = aggregateToolActions(events)
+    workspaceActivity = aggregateWorkspaceActivity(events)
     auditAvailable = true
   } catch {
     auditAvailable = false
   }
 
-  return { connections, providers, profile, toolActions, auditAvailable }
+  return { connections, providers, profile, toolActions, workspaceActivity, auditAvailable }
 }
 
 function providerFor(
@@ -180,16 +186,69 @@ export function TrustCenterSection() {
         }
       >
         {(loaded) => (
-          <Show
-            when={connections().length > 0}
-            fallback={
-              <div class="velion-settings-list-card">
-                <p class="velion-settings-empty-row">
-                  No apps are connected yet. Connect a source under Integrations to see it here.
-                </p>
-              </div>
-            }
-          >
+          <>
+            <section class="velion-trust-activity" aria-label="Workspace AI activity">
+              <header class="velion-trust-activity__head">
+                <Sparkles size={14} aria-hidden="true" />
+                <span>AI activity in this workspace</span>
+              </header>
+              <Show
+                when={loaded().auditAvailable}
+                fallback={
+                  <p class="velion-trust-muted">
+                    Telemetry pending — no AI tool-action events are flowing yet.
+                  </p>
+                }
+              >
+                <Show
+                  when={loaded().workspaceActivity.totalEvents > 0}
+                  fallback={
+                    <p class="velion-trust-muted">
+                      No AI tool-action activity has been recorded for this workspace yet.
+                    </p>
+                  }
+                >
+                  <p class="velion-trust-activity__summary">
+                    {loaded().workspaceActivity.totalEvents} recorded tool actions
+                    {' · '}
+                    {loaded().workspaceActivity.zdrEvents} under zero data retention
+                  </p>
+                  <div class="velion-trust-chips">
+                    <For each={loaded().workspaceActivity.categories}>
+                      {(cat) => (
+                        <span class="velion-trust-chip velion-trust-chip--data">
+                          <Database size={12} aria-hidden="true" />
+                          {cat.category} · {cat.count}
+                          <Show when={cat.zdrCount > 0}>
+                            <span
+                              class="velion-trust-activity__zdr"
+                              title={`${cat.zdrCount} processed under zero data retention`}
+                            >
+                              <ShieldOff size={11} aria-hidden="true" /> {cat.zdrCount} ZDR
+                            </span>
+                          </Show>
+                        </span>
+                      )}
+                    </For>
+                  </div>
+                  <p class="velion-settings-subnote">
+                    Counted across the whole workspace — per-connection attribution is shown in the
+                    table below only where an event could be reliably attributed.
+                  </p>
+                </Show>
+              </Show>
+            </section>
+
+            <Show
+              when={connections().length > 0}
+              fallback={
+                <div class="velion-settings-list-card">
+                  <p class="velion-settings-empty-row">
+                    No apps are connected yet. Connect a source under Integrations to see it here.
+                  </p>
+                </div>
+              }
+            >
             <div class="velion-trust-table" role="table" aria-label="Connected app transparency">
               <div class="velion-trust-row velion-trust-row--head" role="row">
                 <span role="columnheader">App</span>
@@ -253,7 +312,14 @@ export function TrustCenterSection() {
                       <span class="velion-trust-cell" role="cell">
                         <Show
                           when={usedByAi()}
-                          fallback={<span class="velion-trust-pill velion-trust-pill--idle">No</span>}
+                          fallback={
+                            <span
+                              class="velion-trust-pill velion-trust-pill--idle"
+                              title="No tool-action event could be attributed to this connection. Per-connection attribution is not yet reliable, so this is not a claim that the AI has never used it."
+                            >
+                              Attribution unavailable
+                            </span>
+                          }
                         >
                           <span class="velion-trust-pill velion-trust-pill--active">
                             <Sparkles size={12} aria-hidden="true" />
@@ -295,10 +361,12 @@ export function TrustCenterSection() {
 
             <p class="velion-settings-subnote">
               <ShieldCheck size={14} aria-hidden="true" /> Disconnecting an app revokes its access
-              and purges its cached data. "Used by AI?" and "Data fetched" reflect recorded
-              tool-action audit events for this workspace.
+              and purges its cached data. "Yes" under "Used by AI?" means a tool-action event was
+              attributed to this connection; "Attribution unavailable" means none could be —
+              not that the AI has never used it.
             </p>
           </Show>
+          </>
         )}
       </Show>
     </>

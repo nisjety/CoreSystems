@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Velion">
+  <rect width="64" height="64" rx="14" fill="#070910" />
+  <path
+    d="M15 17h8l9 27 9-27h8L36 47h-8L15 17Z"
+    fill="#f8fbff"
+  />
+  <circle cx="45" cy="21" r="4" fill="#ff7d3d" />
+</svg>

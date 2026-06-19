@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 )
 
 func init() { gin.SetMode(gin.TestMode) }
@@ -77,6 +79,40 @@ func TestHardEraseRequiresAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 unauthenticated, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestHardEraseUnavailableWhenAuthPoolUnset proves the Art. 17 trap is closed:
+// an authorized, confirmed hard-erase against a deployment with no auth-DB pool
+// (AUTH_DATABASE_URL unset) returns an explicit 503, never a silent/opaque 500.
+func TestHardEraseUnavailableWhenAuthPoolUnset(t *testing.T) {
+	s := &Server{userService: &users.Service{}} // non-nil service, authPool unset
+
+	c, w := newGDPRTestContext(t, http.MethodDelete, "/api/v1/users/u_123/gdpr/erase", `{"confirm":true}`, "u_123", "")
+	c.Params = gin.Params{{Key: "id", Value: "u_123"}}
+
+	s.hardEraseUser(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when AUTH_DATABASE_URL unset, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "erasure_unavailable") {
+		t.Errorf("expected erasure_unavailable error, got %s", w.Body.String())
+	}
+}
+
+// TestAnonymizeUnavailableWhenAuthPoolUnset is the same guard for the anonymize
+// variant.
+func TestAnonymizeUnavailableWhenAuthPoolUnset(t *testing.T) {
+	s := &Server{userService: &users.Service{}}
+
+	c, w := newGDPRTestContext(t, http.MethodPost, "/api/v1/users/u_123/gdpr/anonymize", `{}`, "u_123", "")
+	c.Params = gin.Params{{Key: "id", Value: "u_123"}}
+
+	s.anonymizeUser(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when AUTH_DATABASE_URL unset, got %d (body=%s)", w.Code, w.Body.String())
 	}
 }
 
