@@ -1,0 +1,78 @@
+name: Velion v3 CI
+
+# CI gate for the Velion v3 SPA + its Rust/axum BFF gateway
+# (apps/Frontend Plane/velionv3). GitHub Actions only executes workflows from
+# the repository-root .github/workflows, so this lives at the monorepo root but
+# is path-scoped to the v3 frontend so it does not fire on unrelated plane
+# changes. Mirrors apps/Data Plane v2/.github/workflows/ci.yml.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/Frontend Plane/velionv3/**'
+      - '.github/workflows/velionv3-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/Frontend Plane/velionv3/**'
+      - '.github/workflows/velionv3-ci.yml'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gateway-rust:
+    name: Gateway — fmt + clippy + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/velionv3/apps/gateway'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Frontend Plane/velionv3/apps/gateway -> target'
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # Scoped to the gateway crate only (no --workspace) so unrelated
+      # workspace members (e.g. inference-core) cannot fail this gate.
+      - name: Clippy (deny warnings, all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+  spa-verify:
+    name: SPA — lint + typecheck + test + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/velionv3'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: 'apps/Frontend Plane/velionv3/pnpm-lock.yaml'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify (lint -> typecheck -> test -> build)
+        run: pnpm verify
