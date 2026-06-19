@@ -28,6 +28,9 @@ mod ssrf_tests {
             ttl_s: 3600,
             capabilities: vec![Capability::Screenshots],
             artifact_bucket: "test-bucket".to_string(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "test-org".to_string(),
         }
     }
 

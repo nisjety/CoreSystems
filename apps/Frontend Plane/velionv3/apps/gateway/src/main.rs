@@ -69,13 +69,16 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::inbox::router(state.clone()))
         .merge(domains::information::router(state.clone()))
         .merge(domains::ingestions::router(state.clone()))
+        .merge(domains::insights::router(state.clone()))
         .merge(domains::integrations::router(state.clone()))
         .merge(domains::knowledge::router(state.clone()))
+        .merge(domains::monitoring::router(state.clone()))
         .merge(domains::navbar::router(state.clone()))
         .merge(domains::notifications::router(state.clone()))
         .merge(domains::onboarding::router(state.clone()))
         .merge(domains::orchestration::router(state.clone()))
         .merge(domains::orgs::router(state.clone()))
+        .merge(domains::privacy::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
@@ -142,6 +145,7 @@ mod tests {
             org_core_url: "http://127.0.0.1:1".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),
+            insight_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),
@@ -169,6 +173,7 @@ mod tests {
             zammad_api_url: "http://127.0.0.1:1".into(),
             zammad_api_token: String::new(),
             audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
+            browser_run_store: crate::domains::browser::new_browser_run_store(),
             cache: crate::cache::ResultCache::disabled(),
             chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),

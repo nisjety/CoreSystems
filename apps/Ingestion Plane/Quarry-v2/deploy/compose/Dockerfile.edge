@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # quarry-edge-rs (Rust hot path: REST/SSE/cache/transform)
 #
 # Workspace declares rust-version = 1.85 but transitive deps (aws-smithy-*,
@@ -66,11 +67,30 @@ ENV CARGO_BUILD_RUSTFLAGS="--cfg=reqwest_unstable"
 # was started with `QUARRY_EDGE__HTTP3_ENABLED=1`. See
 # crates/quarry-runtime/src/http3.rs for the TLS-fingerprint caveat.
 #
+# Phase 1 Track C / cluster #9 — `postgres-queue` is compiled in so the
+# durable baseline + diff store (PostgresBaselineStore) and the
+# `/v1/change/*` change-monitoring routes activate at runtime. The store
+# is wired only when `QUARRY_EDGE__DATABASE_URL` is set; without it the
+# edge runs in-memory exactly as before, and the change routes 501. The
+# binary runs `quarry_runtime::run_migrations` against that DSN on boot
+# (see main.rs) so the `quarry_baselines` / `quarry_change_diffs` tables
+# exist before the store serves a request.
+#
 # Cap parallel codegen so the release build's peak memory fits a constrained
 # Docker Desktop VM — a from-scratch build otherwise spawns one rustc+LLVM per
 # core and can OOM (which silently kills the build with exit 101).
-ENV CARGO_BUILD_JOBS=4
-RUN cargo build --release -p quarry-edge --bin quarry-edge-rs --features grpc,http3
+ENV CARGO_BUILD_JOBS=2
+ARG QUARRY_EDGE_FEATURES=grpc,http3,postgres-queue
+RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \
+    if [ -n "${QUARRY_EDGE_FEATURES}" ]; then \
+        cargo build --release -p quarry-edge --bin quarry-edge-rs --features "${QUARRY_EDGE_FEATURES}"; \
+    else \
+        cargo build --release -p quarry-edge --bin quarry-edge-rs; \
+    fi \
+    && mkdir -p /out \
+    && cp /src/target/release/quarry-edge-rs /out/quarry-edge-rs
 
 # ---- Runtime image -----------------------------------------------------------
 # Use bookworm-slim (not distroless) so healthcheck has wget available and
@@ -96,7 +116,7 @@ RUN set -e; \
     echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
 
 COPY --from=build --chown=quarry:quarry \
-    /src/target/release/quarry-edge-rs /usr/local/bin/quarry-edge-rs
+    /out/quarry-edge-rs /usr/local/bin/quarry-edge-rs
 
 ENV CHROME=/usr/bin/chromium
 

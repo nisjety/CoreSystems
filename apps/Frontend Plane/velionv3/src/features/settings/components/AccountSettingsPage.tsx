@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, onMount, Show } from 'solid-js'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
+import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
 import {
   SectionHeader,
@@ -247,6 +248,7 @@ export default function AccountSettingsPage() {
       <TwoFactorEnrollmentSection />
       <PasskeySecuritySection />
       <PrivacySection />
+      <PrivacyDataSection />
       <SettingsSaveActions
         description={actionDescription()}
         saveLabel={loadState().type === 'saving' ? 'Saving...' : 'Save profile'}

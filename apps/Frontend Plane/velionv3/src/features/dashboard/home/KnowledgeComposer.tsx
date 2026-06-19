@@ -5,9 +5,12 @@ import {
   CheckCircle2,
   FileUp,
   Globe2,
+  KeyRound,
   Link2,
   ListChecks,
   Loader2,
+  RefreshCw,
+  ShieldCheck,
   ShoppingBag,
   Sparkles,
 } from 'lucide-solid'
@@ -17,8 +20,11 @@ import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
   closeBrowserSession,
   createBrowserSession,
+  listBrowserProfiles,
+  probeBrowserProfile,
   runBrowserAction,
   type BrowserAction,
+  type BrowserProfileRestoreProbe,
   type BrowserSessionResponse,
 } from '@/shared/api/browser-client'
 import {
@@ -76,11 +82,17 @@ type IngestEvent = {
   progress?: number
   status?: string
 }
+type BrowserSessionAttempt = {
+  error: string | null
+  session: BrowserSessionResponse | null
+}
 
 const TERMINAL = new Set(['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled'])
 const POLL_INTERVAL_MS = 2500
-const BROWSER_SESSION_TIMEOUT_MS = 9000
+const BROWSER_SESSION_TIMEOUT_MS = 30000
 const crawlJobsStoragePrefix = 'velion.dashboard.crawl.jobs'
+const isolatedProfileChoice = 'isolated'
+const newProfileChoice = 'new'
 
 async function loadOrgContext() {
   const [session, ctx] = await Promise.all([getAuthSession(), getSessionContext()])
@@ -116,6 +128,12 @@ export function KnowledgeComposer(props: {
   const [submitting, setSubmitting] = createSignal(false)
   const [adding, setAdding] = createSignal(false)
   const [browserBusy, setBrowserBusy] = createSignal(false)
+  const [browserProfiles, setBrowserProfiles] = createSignal<string[]>([])
+  const [browserProfilesLoading, setBrowserProfilesLoading] = createSignal(false)
+  const [browserProfileChoice, setBrowserProfileChoice] = createSignal(isolatedProfileChoice)
+  const [browserProfileProbe, setBrowserProfileProbe] = createSignal<BrowserProfileRestoreProbe | null>(null)
+  const [browserProfileProbing, setBrowserProfileProbing] = createSignal(false)
+  const [browserProfileError, setBrowserProfileError] = createSignal<string | null>(null)
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -125,6 +143,7 @@ export function KnowledgeComposer(props: {
   const [formError, setFormError] = createSignal<string | null>(null)
   const [jobs, setJobs] = createSignal<IngestJob[]>([])
   let fileInputRef: HTMLInputElement | undefined
+  let hydratedProfilesOrg: string | null = null
 
   // Tell the dashboard when a preview / page-picker / product-picker is on screen
   // so it can hide the info cards and surface the results/cards chevron toggle.
@@ -134,6 +153,11 @@ export function KnowledgeComposer(props: {
   const canSubmitUrl = createMemo(() => url().trim().length > 0 && !submitting() && !discovering() && ready() && (mode() !== 'crawl' || crawlMaxPages() > 0))
   const canDiscover = createMemo(() => url().trim().length > 0 && !discovering() && !submitting() && ready())
   const openFileDialog = () => fileInputRef?.click()
+  const selectedBrowserProfileId = createMemo(() => {
+    const choice = browserProfileChoice()
+    return isProfileId(choice) ? choice : null
+  })
+  const shouldPersistBrowserProfile = createMemo(() => browserProfileChoice() === newProfileChoice || Boolean(selectedBrowserProfileId()))
 
   const updateJob = (key: string, patch: Partial<IngestJob>) => {
     setJobs((current) => current.map((job) => (job.key === key ? { ...job, ...patch } : job)))
@@ -261,6 +285,13 @@ export function KnowledgeComposer(props: {
   })
 
   createEffect(() => {
+    const id = orgId()
+    if (!id || hydratedProfilesOrg === id) return
+    hydratedProfilesOrg = id
+    void refreshBrowserProfiles()
+  })
+
+  createEffect(() => {
     const key = crawlJobsStorageKey()
     if (!key || hydratedJobsKey !== key) return
     writeClientJson(key, jobs())
@@ -377,6 +408,42 @@ export function KnowledgeComposer(props: {
     }
   }
 
+  const refreshBrowserProfiles = async () => {
+    const id = orgId()
+    if (!id || browserProfilesLoading()) return
+    setBrowserProfilesLoading(true)
+    setBrowserProfileError(null)
+    try {
+      const result = await listBrowserProfiles(id)
+      setBrowserProfiles(result.profiles)
+      if (selectedBrowserProfileId() && !result.profiles.includes(selectedBrowserProfileId() ?? '')) {
+        setBrowserProfileChoice(isolatedProfileChoice)
+        setBrowserProfileProbe(null)
+      }
+    } catch (reason) {
+      setBrowserProfileError(reason instanceof Error ? reason.message : 'Nettleserprofiler kunne ikke hentes.')
+    } finally {
+      setBrowserProfilesLoading(false)
+    }
+  }
+
+  const probeSelectedBrowserProfile = async () => {
+    const id = orgId()
+    const profileId = selectedBrowserProfileId()
+    const target = normalizeUrl(url())
+    if (!id || !profileId || !target || browserProfileProbing()) return
+    setBrowserProfileProbing(true)
+    setBrowserProfileError(null)
+    try {
+      setBrowserProfileProbe(await probeBrowserProfile(id, profileId, target))
+    } catch (reason) {
+      setBrowserProfileProbe(null)
+      setBrowserProfileError(reason instanceof Error ? reason.message : 'Profilen kunne ikke sjekkes.')
+    } finally {
+      setBrowserProfileProbing(false)
+    }
+  }
+
   const summarizeSelection = async (selected: Product[], focus: string) => {
     if (selected.length === 0 || summarizing()) return
     setSummarizing(true)
@@ -392,7 +459,7 @@ export function KnowledgeComposer(props: {
   }
 
   const loadLinkPreview = async (target: string) => {
-    let browserSessionPromise: Promise<BrowserSessionResponse | null> | null = null
+    let browserSessionPromise: Promise<BrowserSessionAttempt> | null = null
     try {
       browserSessionPromise = tryCreateBrowserSession(target)
       const result = await scrapePreview(orgId(), {
@@ -410,27 +477,42 @@ export function KnowledgeComposer(props: {
         },
       })
       const browserSession = await browserSessionPromise
-      setPreview(attachBrowserSession(toScrapePreview(target, result), browserSession))
+      setPreview({
+        ...attachBrowserSession(toScrapePreview(target, result), browserSession.session),
+        browserSessionError: browserSession.error,
+      })
     } catch (reason) {
-      void browserSessionPromise?.then((session) => {
-        closeBrowserSessionById(session?.session.id)
+      void browserSessionPromise?.then((attempt) => {
+        closeBrowserSessionById(attempt.session?.session.id)
       })
       setFormError(reason instanceof Error ? reason.message : 'Skraping kunne ikke fullføres.')
     }
   }
 
-  const tryCreateBrowserSession = async (target: string): Promise<BrowserSessionResponse | null> => {
+  const tryCreateBrowserSession = async (target: string): Promise<BrowserSessionAttempt> => {
     const id = orgId()
-    if (!id) return null
+    if (!id) return { error: 'Arbeidsområde mangler for nettleserøkt.', session: null }
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), BROWSER_SESSION_TIMEOUT_MS)
+    const profileId = selectedBrowserProfileId()
     try {
-      return await createBrowserSession(id, {
+      const session = await createBrowserSession(id, {
+        ...(shouldPersistBrowserProfile() ? { persistentProfile: true } : {}),
+        ...(profileId ? { profileId } : {}),
         url: target,
         viewport: { width: 1280, height: 800 },
       }, controller.signal)
-    } catch {
-      return null
+      const returnedProfileId = session.session.profile.id
+      if (session.session.profile.storage === 'persistent' && returnedProfileId) {
+        setBrowserProfiles((current) => current.includes(returnedProfileId) ? current : [returnedProfileId, ...current])
+        setBrowserProfileChoice(returnedProfileId)
+      }
+      return { error: null, session }
+    } catch (reason) {
+      return {
+        error: reason instanceof Error ? reason.message : 'Nettleserøkt kunne ikke startes.',
+        session: null,
+      }
     } finally {
       window.clearTimeout(timeout)
     }
@@ -631,6 +713,70 @@ export function KnowledgeComposer(props: {
           </button>
         </div>
 
+        <Show when={mode() === 'link'}>
+          <div class="dashboard-knowledge-composer__browser-options">
+            <label class="dashboard-knowledge-composer__browser-profile">
+              <KeyRound class="size-3.5" aria-hidden="true" />
+              <select
+                value={browserProfileChoice()}
+                onChange={(event) => {
+                  setBrowserProfileChoice(event.currentTarget.value)
+                  setBrowserProfileProbe(null)
+                  setBrowserProfileError(null)
+                }}
+                disabled={!ready()}
+                aria-label="Nettleserprofil"
+              >
+                <option value={isolatedProfileChoice}>Isolert</option>
+                <option value={newProfileChoice}>Ny profil</option>
+                <For each={browserProfiles()}>
+                  {(profileId) => <option value={profileId}>{shortProfileLabel(profileId)}</option>}
+                </For>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="dashboard-knowledge-composer__browser-tool"
+              onClick={() => void refreshBrowserProfiles()}
+              disabled={!ready() || browserProfilesLoading()}
+              aria-label="Oppdater nettleserprofiler"
+              title="Oppdater"
+            >
+              <Show when={!browserProfilesLoading()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
+                <RefreshCw class="size-3.5" />
+              </Show>
+            </button>
+            <button
+              type="button"
+              class="dashboard-knowledge-composer__browser-tool"
+              onClick={() => void probeSelectedBrowserProfile()}
+              disabled={!ready() || !selectedBrowserProfileId() || browserProfileProbing() || !normalizeUrl(url())}
+              aria-label="Sjekk nettleserprofil"
+              title="Sjekk profil"
+            >
+              <Show when={!browserProfileProbing()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
+                <ShieldCheck class="size-3.5" />
+              </Show>
+            </button>
+            <Show when={browserProfileProbe()}>
+              {(probe) => (
+                <span class="dashboard-knowledge-composer__browser-profile-status">
+                  <ShieldCheck class="size-3.5" />
+                  {profileProbeSummary(probe())}
+                </span>
+              )}
+            </Show>
+            <Show when={browserProfileError()}>
+              {(message) => (
+                <span class="dashboard-knowledge-composer__browser-profile-error">
+                  <AlertCircle class="size-3.5" />
+                  {message()}
+                </span>
+              )}
+            </Show>
+          </div>
+        </Show>
+
         <Show when={mode() === 'crawl'}>
           <div class="dashboard-knowledge-composer__crawl-options">
             <label>
@@ -808,6 +954,19 @@ function normalizeProgress(value: number | undefined): number | null {
   if (value === undefined || !Number.isFinite(value)) return null
   const pct = value <= 1 ? value * 100 : value
   return Math.min(100, Math.max(0, Math.round(pct)))
+}
+
+function isProfileId(value: string): boolean {
+  return /^prof_[A-Za-z0-9_-]{3,}$/.test(value)
+}
+
+function shortProfileLabel(profileId: string): string {
+  return profileId.length <= 18 ? profileId : `${profileId.slice(0, 10)}...${profileId.slice(-5)}`
+}
+
+function profileProbeSummary(probe: BrowserProfileRestoreProbe): string {
+  const stored = probe.cookies_count + probe.local_storage_count + probe.session_storage_count + probe.indexed_db_count
+  return probe.restorable ? `${stored} lagrede signaler` : 'Tom profil'
 }
 
 function parseJobKey(key: string): number {

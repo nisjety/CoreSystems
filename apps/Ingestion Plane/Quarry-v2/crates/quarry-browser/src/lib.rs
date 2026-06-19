@@ -102,6 +102,11 @@ pub trait BrowserDriver: Send + Sync {
     async fn back(&self, _session: &BrowserSession) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("back"))
     }
+
+    /// Navigate forward in the browser history. Default: Unsupported.
+    async fn forward(&self, _session: &BrowserSession) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("forward"))
+    }
 }
 
 #[derive(Debug)]

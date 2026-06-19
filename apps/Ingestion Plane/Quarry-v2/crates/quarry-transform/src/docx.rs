@@ -23,15 +23,22 @@ pub fn extract_text(body: &[u8]) -> QuarryResult<String> {
         ));
     }
     let mut zip = zip::ZipArchive::new(Cursor::new(body)).map_err(|e| {
-        QuarryError::new(ErrorCode::BadRequest, format!("not a valid docx (zip): {e}"))
+        QuarryError::new(
+            ErrorCode::BadRequest,
+            format!("not a valid docx (zip): {e}"),
+        )
     })?;
     let mut xml = String::new();
     {
         let mut f = zip.by_name("word/document.xml").map_err(|e| {
-            QuarryError::new(ErrorCode::BadRequest, format!("docx missing word/document.xml: {e}"))
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                format!("docx missing word/document.xml: {e}"),
+            )
         })?;
-        f.read_to_string(&mut xml)
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("read document.xml: {e}")))?;
+        f.read_to_string(&mut xml).map_err(|e| {
+            QuarryError::new(ErrorCode::Internal, format!("read document.xml: {e}"))
+        })?;
     }
     Ok(strip_wordml(&xml))
 }
@@ -50,7 +57,11 @@ pub(crate) fn strip_wordml(xml: &str) -> String {
         rest = &rest[lt..];
         let Some(gt) = rest.find('>') else { break };
         let tag = &rest[1..gt];
-        let name = tag.split_whitespace().next().unwrap_or("").trim_end_matches('/');
+        let name = tag
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
         match name {
             "w:t" => in_text = true,
             "/w:t" => in_text = false,
@@ -124,8 +135,8 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
-            let opts: zip::write::FileOptions<'_, ()> =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
             zw.start_file("word/document.xml", opts).unwrap();
             zw.write_all(
                 br#"<w:document><w:body><w:p><w:r><w:t>Contract text</w:t></w:r></w:p></w:body></w:document>"#,

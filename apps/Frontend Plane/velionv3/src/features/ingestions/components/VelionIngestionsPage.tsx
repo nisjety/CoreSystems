@@ -9,10 +9,21 @@ import {
   RefreshCw,
   ScanSearch,
   ShieldCheck,
+  Telescope,
   TimerReset,
   type LucideProps,
 } from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from 'solid-js'
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  onCleanup,
+  onMount,
+  Show,
+  type Component,
+} from 'solid-js'
 import {
   createIngestionRun,
   createIngestionSchedule,
@@ -30,6 +41,12 @@ import {
   type ScheduleItem,
   type SourcePayload,
 } from '@/shared/api/ingestions-client'
+import {
+  checkUrlNow,
+  getChangeHistory,
+  type BaselineSnapshot,
+  type ChangeRecord,
+} from '@/shared/api/monitoring-client'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
@@ -37,7 +54,7 @@ import { VelionSegmented, VelionSegmentedButton } from '@/shared/ui/velion/Velio
 import { VelionSelect } from '@/shared/ui/velion/VelionSelect'
 import { VelionTextarea } from '@/shared/ui/velion/VelionTextarea'
 
-type IngestionView = 'runs' | 'schedules' | 'sources' | 'evidence' | 'profiles'
+type IngestionView = 'runs' | 'schedules' | 'monitoring' | 'sources' | 'evidence' | 'profiles'
 
 type RunFormState = {
   kind: string
@@ -56,6 +73,7 @@ type ScheduleFormState = {
 const views: Array<{ id: IngestionView; label: string; icon: Component<LucideProps> }> = [
   { id: 'runs', label: 'Runs', icon: ScanSearch },
   { id: 'schedules', label: 'Schedules', icon: CalendarClock },
+  { id: 'monitoring', label: 'Monitoring', icon: Telescope },
   { id: 'sources', label: 'Sources', icon: Globe },
   { id: 'evidence', label: 'Evidence', icon: FileSearch },
   { id: 'profiles', label: 'Profiles', icon: ShieldCheck },
@@ -263,6 +281,10 @@ export default function VelionIngestionsPage() {
             />
             <SchedulesPanel schedules={schedules()} onAction={runScheduleAction} />
           </section>
+        </Show>
+
+        <Show when={activeView() === 'monitoring'}>
+          <MonitoringPanel />
         </Show>
 
         <Show when={activeView() === 'sources'}>
@@ -541,6 +563,173 @@ function SchedulesPanel(props: {
       </div>
     </section>
   )
+}
+
+function MonitoringPanel() {
+  // The URL the user is actively working with vs. the one we've committed to
+  // (submitted) — history/last-checked load only for a committed, valid URL.
+  const [urlInput, setUrlInput] = createSignal('')
+  const [watchedUrl, setWatchedUrl] = createSignal<string | null>(null)
+  const [checking, setChecking] = createSignal(false)
+  const [lastResult, setLastResult] = createSignal<ChangeRecord | null>(null)
+  const [error, setError] = createSignal<string | null>(null)
+
+  // On-demand history for the committed URL. Empty until baselines accrue —
+  // every row traces to a real edge baseline; nothing is synthesized.
+  const [history, { refetch: refetchHistory }] = createResource(watchedUrl, (url) =>
+    getChangeHistory(url),
+  )
+
+  async function check() {
+    const candidate = urlInput().trim()
+    if (!candidate) {
+      setError('Enter a URL to check.')
+      return
+    }
+    setError(null)
+    setChecking(true)
+    try {
+      setWatchedUrl(candidate)
+      const result = await checkUrlNow(candidate)
+      setLastResult(result)
+      // The check may have produced a new baseline upstream; refresh history.
+      void refetchHistory()
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Check could not be completed.')
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <section class="ingestions-two-column ingestions-two-column--runs">
+      <form
+        class="velion-panel ingestions-card ingestions-composer"
+        onSubmit={(event) => {
+          event.preventDefault()
+          void check()
+        }}
+      >
+        <div>
+          <h2>Check a page for changes</h2>
+          <p>
+            On-demand only: Velion fetches the page now, fingerprints its content, and compares it to the last
+            baseline this workspace captured. Recurring at-scale monitoring is not yet available.
+          </p>
+        </div>
+        <label class="ingestions-field">
+          Page URL
+          <VelionInput
+            value={urlInput()}
+            onInput={(event) => setUrlInput(event.currentTarget.value)}
+            placeholder="https://example.com/pricing"
+          />
+        </label>
+        <Button variant="primary" fullWidth type="submit" disabled={checking()}>
+          <ScanSearch class={cn('size-4', checking() && 'ingestions-spin')} strokeWidth={1.9} />
+          {checking() ? 'Checking…' : 'Check now'}
+        </Button>
+
+        <Show when={error()}>
+          {(message) => (
+            <div class="ingestions-alert" role="alert">
+              {message()}
+            </div>
+          )}
+        </Show>
+
+        <Show when={lastResult()}>
+          {(result) => (
+            <div class="ingestions-code-card">
+              <div class="ingestions-title-row">
+                <Telescope class="size-4" strokeWidth={1.9} />
+                <h3>Latest check</h3>
+                <ChangeStatusBadge status={result().status} />
+              </div>
+              <div class="ingestions-meta-row ingestions-meta-row--spread">
+                <span class="ingestions-truncate">{result().sourceUrl}</span>
+                <span>{relativeTime(result().checkedAt)}</span>
+              </div>
+              <Show
+                when={result().prevBaseline}
+                fallback={<p>No earlier baseline — this is the first time this workspace has checked this page.</p>}
+              >
+                {(prev) => <p>Previous baseline captured {relativeTime(prev().capturedAt)}.</p>}
+              </Show>
+            </div>
+          )}
+        </Show>
+      </form>
+
+      <section class="velion-panel ingestions-card ingestions-runs-panel">
+        <div class="ingestions-card__header">
+          <div>
+            <h2>Change history</h2>
+            <p>Captured baselines for the page above, newest first. Empty until a check records a baseline.</p>
+          </div>
+        </div>
+        <Show
+          when={watchedUrl()}
+          fallback={<div class="ingestions-empty-box">Run a check to see this page's baseline history.</div>}
+        >
+          <Show
+            when={!history.loading}
+            fallback={<div class="ingestions-empty-box">Loading history…</div>}
+          >
+            <div class="ingestions-table-wrap">
+              <table class="ingestions-table">
+                <thead>
+                  <tr>
+                    <th>Captured</th>
+                    <th>Fingerprint</th>
+                    <th>Run</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For
+                    each={history() ?? []}
+                    fallback={
+                      <tr>
+                        <td colspan="3" class="ingestions-empty-cell">
+                          No baselines recorded for this page yet.
+                        </td>
+                      </tr>
+                    }
+                  >
+                    {(snapshot: BaselineSnapshot) => (
+                      <tr class="ingestions-row">
+                        <td class="ingestions-muted-cell">{relativeTime(snapshot.capturedAt)}</td>
+                        <td class="ingestions-truncate">{shortFingerprint(snapshot.fingerprint)}</td>
+                        <td class="ingestions-muted-cell">{snapshot.runId || '—'}</td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
+          </Show>
+        </Show>
+      </section>
+    </section>
+  )
+}
+
+function ChangeStatusBadge(props: { status: ChangeRecord['status'] }) {
+  const tone = () => {
+    if (props.status === 'changed' || props.status === 'unreachable') return 'ingestions-status--warning'
+    if (props.status === 'new') return 'ingestions-status--info'
+    return 'ingestions-status--success'
+  }
+  return <span class={cn('ingestions-status', tone())}>{props.status}</span>
+}
+
+function shortFingerprint(value: string) {
+  // Fingerprints are like `blake3:<64 hex>`; show the algorithm + a short prefix.
+  const colon = value.indexOf(':')
+  const algo = colon >= 0 ? value.slice(0, colon) : ''
+  const hash = colon >= 0 ? value.slice(colon + 1) : value
+  const head = hash.slice(0, 12)
+  return algo ? `${algo}:${head}…` : `${head}…`
 }
 
 function SourcesPanel(props: { sources: SourcePayload | null }) {

@@ -16,6 +16,18 @@ export type BrowserDomNode = {
   text: string
 }
 
+export type BrowserConsoleEntry = {
+  level: string
+  text: string
+}
+
+export type BrowserNetworkEntry = {
+  content_type?: string | null
+  method: string
+  status: number
+  url: string
+}
+
 export type BrowserSessionViewModel = {
   capabilities: string[]
   commentAnchors: Array<{
@@ -24,12 +36,17 @@ export type BrowserSessionViewModel = {
     x: number
     y: number
   }>
+  consoleEntries: BrowserConsoleEntry[]
   domNodes: BrowserDomNode[]
+  degradedReason?: string | null
   frameArtifactId?: string | null
   frameMediaType?: string | null
   frameUrl?: string | null
   host: string
+  networkEntries: BrowserNetworkEntry[]
+  nodeCount?: number | null
   observation?: BrowserObservation | null
+  policyDenials: string[]
   profileLabel: string
   renderMode: BrowserSurfaceMode
   screenshotArtifactId?: string | null
@@ -62,14 +79,19 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
         y: 0.18,
       },
     ],
+    consoleEntries: observation?.console_summary ?? [],
     domNodes: observation?.dom_summary
       ? domNodesFromObservation(observation)
       : domNodesFromPreview(preview),
+    degradedReason: preview.browserSessionError ?? null,
     frameArtifactId: session?.frame?.artifactId ?? observation?.screenshot_artifact_id ?? null,
     frameMediaType: session?.frame?.mediaType ?? null,
     frameUrl,
     host: hostnameOf(session?.url ?? preview.url),
+    networkEntries: observation?.network_summary ?? [],
+    nodeCount: observation?.dom_summary?.node_count ?? null,
     observation,
+    policyDenials: observation?.policy_denials ?? [],
     profileLabel: profileLabel(session),
     renderMode: mode,
     screenshotArtifactId: observation?.screenshot_artifact_id ?? null,
@@ -87,11 +109,32 @@ export function attachBrowserSession(
   browserSession: BrowserSessionResponse | null,
 ): ScrapePreview {
   if (!browserSession) return preview
+  const previous = preview.browserSession?.session
+  const session = browserSession.session
+  const mergedSession: BrowserSessionResponse['session'] = {
+    ...session,
+    capabilities: session.capabilities.length > 0
+      ? session.capabilities
+      : previous?.capabilities ?? session.capabilities,
+    leaseId: session.leaseId ?? previous?.leaseId ?? null,
+    profile: {
+      id: session.profile.id ?? previous?.profile.id ?? null,
+      scope: session.profile.id ? session.profile.scope : previous?.profile.scope ?? session.profile.scope,
+      storage: session.profile.id ? session.profile.storage : previous?.profile.storage ?? session.profile.storage,
+    },
+    viewport: session.viewport ?? previous?.viewport,
+  }
+  const mergedBrowserSession: BrowserSessionResponse = {
+    ...browserSession,
+    session: mergedSession,
+  }
+
   return {
     ...preview,
-    browserSession,
-    title: browserSession.observation?.title || browserSession.session.title || preview.title,
-    url: browserSession.observation?.url || browserSession.session.url || preview.url,
+    browserSession: mergedBrowserSession,
+    browserSessionError: null,
+    title: browserSession.observation?.title || mergedSession.title || preview.title,
+    url: browserSession.observation?.url || mergedSession.url || preview.url,
   }
 }
 

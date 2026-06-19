@@ -21,9 +21,9 @@ pub mod pdf;
 pub mod readability;
 pub mod robots;
 pub mod sitemap;
-pub mod synonyms;
 pub mod soft_404;
 pub mod source_trace;
+pub mod synonyms;
 
 pub use determinism::{verify_deterministic, DeterminismError};
 pub use fingerprint::{content_fingerprint, Fingerprint};

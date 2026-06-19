@@ -17,6 +17,15 @@ services:
       QUARRY_EDGE__BROWSERLESS_TOKEN: ${BROWSERLESS_TOKEN:-}
       QUARRY_EDGE__CONTROL_BASE_URL: http://quarry-control:8081
       QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      # Phase 1 Track C / cluster #9 — durable change-monitoring store.
+      # The edge image is built with `--features postgres-queue`; setting this
+      # DSN activates PostgresBaselineStore + the `/v1/change/*` routes (which
+      # 501 when unset). Dedicated `quarry_edge` database (NOT the shared
+      # `quarry_v2` quarry-control uses) so the edge's `_sqlx_migrations` set
+      # never collides with another service's. The config crate maps
+      # QUARRY_EDGE__DATABASE_URL → EdgeConfig.database_url (prefix QUARRY_EDGE,
+      # separator `__`); plain DATABASE_URL is NOT read.
+      QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_edge?sslmode=disable
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
@@ -87,6 +96,10 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       quarry-control:
+        condition: service_healthy
+      # Track C: the change-monitoring store connects to ingestion-postgres
+      # (database `quarry_edge`) at boot and applies its migrations there.
+      postgres:
         condition: service_healthy
       dragonfly:
         condition: service_healthy

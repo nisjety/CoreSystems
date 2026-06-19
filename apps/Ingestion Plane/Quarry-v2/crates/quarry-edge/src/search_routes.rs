@@ -1042,7 +1042,10 @@ mod tests {
 
     #[test]
     fn parse_suggestions_drops_correction_equal_to_query() {
-        let out = parse_suggestions("{\"corrected_query\":\"rust\",\"related_queries\":[]}", "RUST");
+        let out = parse_suggestions(
+            "{\"corrected_query\":\"rust\",\"related_queries\":[]}",
+            "RUST",
+        );
         assert!(out.corrected_query.is_none());
     }
 
@@ -1057,7 +1060,9 @@ mod tests {
     #[test]
     fn parse_suggestions_builds_entity_panel() {
         let body = r#"{"corrected_query":null,"related_queries":[],"entity":{"name":"Ada Lovelace","kind":"Person","summary":"19th-century mathematician.","facts":[{"label":"Born","value":"1815"},{"label":"","value":"drop"},{"label":"Known for","value":"first algorithm"}]}}"#;
-        let entity = parse_suggestions(body, "ada lovelace").entity.expect("entity present");
+        let entity = parse_suggestions(body, "ada lovelace")
+            .entity
+            .expect("entity present");
         assert_eq!(entity.name, "Ada Lovelace");
         assert_eq!(entity.kind, "Person");
         // The blank-label fact is dropped; valid ones survive.

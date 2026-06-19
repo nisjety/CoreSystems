@@ -136,6 +136,10 @@ pub fn router(state: AppState) -> Router {
         // Cycle 22 / cluster #4 part 1 — resource list endpoints.
         // /v1/artifacts is served locally; the rest forward to control plane.
         .route("/v1/artifacts", get(crate::resource_routes::list_artifacts))
+        .route(
+            "/v1/artifacts/:id",
+            get(crate::resource_routes::get_artifact),
+        )
         .route("/v1/sources", get(crate::resource_routes::list_sources))
         .route("/v1/snapshots", get(crate::resource_routes::list_snapshots))
         .route("/v1/:kind/jobs", get(crate::resource_routes::list_jobs))
@@ -820,7 +824,7 @@ mod tests {
     use quarry_core::error::{ErrorCode, QuarryError};
     use quarry_core::output::DriverKind;
     use quarry_core::QuarryResult;
-    use quarry_runtime::artifact_store::InMemoryStore;
+    use quarry_runtime::artifact_store::{ArtifactStore, InMemoryStore};
     use quarry_runtime::driver::{Driver, FetchHints};
     use quarry_runtime::driver_registry::DriverRegistry;
     use quarry_runtime::fetch::FetchResponse;
@@ -893,6 +897,21 @@ mod tests {
         drivers: DriverRegistry,
         http3: Option<Arc<dyn Driver>>,
     ) -> AppState {
+        test_state_with_artifacts(
+            static_driver,
+            drivers,
+            http3,
+            Arc::new(InMemoryStore::new()),
+        )
+    }
+
+    #[allow(unexpected_cfgs)]
+    fn test_state_with_artifacts(
+        static_driver: Arc<dyn Driver>,
+        drivers: DriverRegistry,
+        http3: Option<Arc<dyn Driver>>,
+        artifacts: Arc<dyn ArtifactStore>,
+    ) -> AppState {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         AppState {
@@ -900,7 +919,7 @@ mod tests {
             drivers,
             http3,
             security: Arc::new(quarry_security::preflight::DefaultEngine::new()),
-            artifacts: Arc::new(InMemoryStore::new()),
+            artifacts,
             control_base_url: String::new(),
             redis: None,
             cache: None,
@@ -927,6 +946,43 @@ mod tests {
             #[cfg(feature = "browser-agent")]
             agent_runs: crate::agent_routes::new_runs(),
         }
+    }
+
+    #[tokio::test]
+    async fn artifact_route_returns_stored_bytes() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let static_driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, b"unused"));
+        let drivers = DriverRegistry::new(DriverKind::Static);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let handle = artifacts
+            .put(
+                &RunKind::new(),
+                "blake3:browser-frame",
+                "screenshot",
+                b"png bytes".to_vec(),
+            )
+            .await
+            .expect("stored artifact");
+        let state = test_state_with_artifacts(static_driver, drivers, None, artifacts);
+
+        let response = crate::resource_routes::get_artifact(
+            State(state),
+            axum::extract::Path(handle.artifact_id.to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/octet-stream"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"png bytes");
     }
 
     #[tokio::test]

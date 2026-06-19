@@ -193,6 +193,8 @@ mod tests {
             ttl_s,
             capabilities: vec![],
             artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         }
     }

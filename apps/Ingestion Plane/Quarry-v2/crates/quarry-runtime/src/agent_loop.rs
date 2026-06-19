@@ -396,6 +396,8 @@ mod tests {
             ttl_s: 60,
             capabilities: vec![],
             artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         };
         let session = browser.acquire(&lease).await.unwrap();
@@ -508,6 +510,8 @@ mod tests {
             ttl_s: 60,
             capabilities: vec![],
             artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         };
         let session = browser.acquire(&lease).await.unwrap();
@@ -584,6 +588,8 @@ mod tests {
             ttl_s: 60,
             capabilities: vec![],
             artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         };
         let session = browser.acquire(&lease).await.unwrap();
@@ -630,6 +636,8 @@ mod tests {
             ttl_s: 60,
             capabilities: vec![],
             artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         };
         let session = browser.acquire(&lease).await.unwrap();

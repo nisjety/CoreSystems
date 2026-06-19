@@ -1,21 +1,31 @@
 import {
+  AlertCircle,
   ArrowLeft,
   ArrowRight,
+  Camera,
   Check,
   Code2,
   ExternalLink,
   Globe2,
+  Keyboard,
   Loader2,
   LockKeyhole,
   Maximize2,
   MessageSquare,
+  MousePointer2,
+  Navigation,
+  Network,
   RefreshCw,
+  Send,
   ShieldCheck,
+  Terminal,
+  TextCursorInput,
+  Timer,
   X,
 } from 'lucide-solid'
-import { createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX } from 'solid-js'
 import type { BrowserAction } from '@/shared/api/browser-client'
-import { browserSessionFromPreview } from './browser-session'
+import { browserSessionFromPreview, type BrowserSessionViewModel } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
 // Inline markdown → safe JSX. We only resolve the tokens that are reliable to
@@ -201,6 +211,133 @@ function ScrapeRegion(props: {
   )
 }
 
+function compactBrowserUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    const path = `${url.pathname}${url.search}`.replace(/\/$/, '')
+    return `${url.hostname}${path || '/'}`
+  } catch {
+    return value
+  }
+}
+
+function consoleTone(level: string): 'error' | 'warn' | 'info' {
+  const normalized = level.toLowerCase()
+  if (normalized.includes('error')) return 'error'
+  if (normalized.includes('warn')) return 'warn'
+  return 'info'
+}
+
+function networkTone(status: number): 'error' | 'warn' | 'redirect' | 'ok' {
+  if (status >= 500) return 'error'
+  if (status >= 400) return 'warn'
+  if (status >= 300) return 'redirect'
+  return 'ok'
+}
+
+function BrowserObservationInspector(props: { session: BrowserSessionViewModel }) {
+  const domNodes = () => props.session.domNodes.slice(0, 8)
+  const consoleEntries = () => props.session.consoleEntries.slice(0, 5)
+  const networkEntries = () => props.session.networkEntries.slice(0, 6)
+  const domCount = () => props.session.nodeCount ?? props.session.domNodes.length
+
+  return (
+    <aside class="knowledge-browser-inspector" aria-label="Nettleserinspektør">
+      <div class="knowledge-browser-inspector__tabs" aria-label="Observasjonspaneler">
+        <span class="knowledge-browser-inspector__tab knowledge-browser-inspector__tab--active">
+          <Code2 class="size-3.5" /> DOM
+        </span>
+        <span class="knowledge-browser-inspector__tab">
+          <Terminal class="size-3.5" /> Console
+        </span>
+        <span class="knowledge-browser-inspector__tab">
+          <Network class="size-3.5" /> Network
+        </span>
+      </div>
+
+      <section class="knowledge-browser-inspector__section">
+        <header>
+          <span><MousePointer2 class="size-3.5" /> Interaktive noder</span>
+          <strong>{domCount()}</strong>
+        </header>
+        <div class="knowledge-browser-live-dom">
+          <For
+            each={domNodes()}
+            fallback={<p class="knowledge-browser-inspector__empty">Ingen DOM-noder returnert ennå.</p>}
+          >
+            {(node) => (
+              <div class="knowledge-browser-live-dom__node">
+                <span>{node.kind}</span>
+                <p>{node.text}</p>
+                <Show when={node.selector}>
+                  {(selector) => <code>{selector()}</code>}
+                </Show>
+              </div>
+            )}
+          </For>
+        </div>
+      </section>
+
+      <section class="knowledge-browser-inspector__section">
+        <header>
+          <span><Terminal class="size-3.5" /> Console</span>
+          <strong>{props.session.consoleEntries.length}</strong>
+        </header>
+        <div class="knowledge-browser-console-list">
+          <For
+            each={consoleEntries()}
+            fallback={<p class="knowledge-browser-inspector__empty">Ingen console-hendelser.</p>}
+          >
+            {(entry) => (
+              <div class={`knowledge-browser-console-row knowledge-browser-console-row--${consoleTone(entry.level)}`}>
+                <span>{entry.level}</span>
+                <p>{entry.text}</p>
+              </div>
+            )}
+          </For>
+        </div>
+      </section>
+
+      <section class="knowledge-browser-inspector__section">
+        <header>
+          <span><Network class="size-3.5" /> Network</span>
+          <strong>{props.session.networkEntries.length}</strong>
+        </header>
+        <div class="knowledge-browser-network-list">
+          <For
+            each={networkEntries()}
+            fallback={<p class="knowledge-browser-inspector__empty">Ingen nettverkskall returnert ennå.</p>}
+          >
+            {(entry) => (
+              <div class={`knowledge-browser-network-row knowledge-browser-network-row--${networkTone(entry.status)}`}>
+                <span>{entry.method}</span>
+                <strong>{entry.status}</strong>
+                <p title={entry.url}>{compactBrowserUrl(entry.url)}</p>
+              </div>
+            )}
+          </For>
+        </div>
+      </section>
+
+      <Show when={props.session.policyDenials.length > 0}>
+        <section class="knowledge-browser-inspector__section knowledge-browser-inspector__section--policy">
+          <header>
+            <span><ShieldCheck class="size-3.5" /> Policy</span>
+            <strong>{props.session.policyDenials.length}</strong>
+          </header>
+          <For each={props.session.policyDenials.slice(0, 4)}>
+            {(denial) => (
+              <p class="knowledge-browser-policy-denial">
+                <AlertCircle class="size-3.5" /> {denial}
+              </p>
+            )}
+          </For>
+        </section>
+      </Show>
+    </aside>
+  )
+}
+
 function BrowserSessionSurface(props: {
   browserBusy?: boolean
   hovered: number | null
@@ -218,6 +355,11 @@ function BrowserSessionSurface(props: {
 }) {
   const session = createMemo(() => browserSessionFromPreview(props.preview))
   const [brokenFrameUrl, setBrokenFrameUrl] = createSignal<string | null>(null)
+  const [addressInput, setAddressInput] = createSignal('')
+  const [lastObservedUrl, setLastObservedUrl] = createSignal('')
+  const [selectorInput, setSelectorInput] = createSignal('')
+  const [textInput, setTextInput] = createSignal('')
+  const [keyInput, setKeyInput] = createSignal('Enter')
   const allSelected = () => props.total > 0 && props.selectedCount === props.total
   const isLive = () => session().renderMode === 'chromium'
   const controlsDisabled = () => !isLive() || props.browserBusy || !session().sessionId
@@ -229,6 +371,25 @@ function BrowserSessionSurface(props: {
     if (controlsDisabled()) return
     props.onBrowserAction?.(action)
   }
+  const selector = () => selectorInput().trim()
+  const address = () => addressInput().trim()
+  const textValue = () => textInput()
+  const keyValue = () => keyInput().trim() || 'Enter'
+  const selectorActionDisabled = () => controlsDisabled() || selector().length === 0
+  const typeActionDisabled = () => selectorActionDisabled() || textValue().length === 0
+  const navigateFromAddress = () => {
+    const target = address() || session().url
+    if (!target) return
+    runAction({ type: 'navigate', url: target })
+  }
+
+  createEffect(() => {
+    const url = session().url
+    if (url && lastObservedUrl() !== url) {
+      setAddressInput(url)
+      setLastObservedUrl(url)
+    }
+  })
 
   return (
     <div
@@ -270,8 +431,9 @@ function BrowserSessionSurface(props: {
           <button
             type="button"
             aria-label="Gå fremover i nettleserøkten"
-            title="Fremover kommer i neste Chromium-steg"
-            disabled
+            title="Gå fremover"
+            disabled={controlsDisabled()}
+            onClick={() => runAction({ type: 'forward' })}
           >
             <ArrowRight class="size-3.5" />
           </button>
@@ -285,10 +447,31 @@ function BrowserSessionSurface(props: {
             <RefreshCw class="size-3.5" />
           </button>
         </div>
-        <div class="knowledge-browser-frame__address">
+        <label class="knowledge-browser-frame__address">
           <LockKeyhole class="size-3.5" aria-hidden="true" />
-          <span>{session().url}</span>
-        </div>
+          <input
+            value={addressInput()}
+            disabled={controlsDisabled()}
+            aria-label="Nettleseradresse"
+            spellcheck={false}
+            onInput={(event) => setAddressInput(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                navigateFromAddress()
+              }
+            }}
+          />
+          <button
+            type="button"
+            aria-label="Naviger til adresse"
+            title="Naviger"
+            disabled={controlsDisabled() || !address()}
+            onClick={navigateFromAddress}
+          >
+            <Send class="size-3.5" />
+          </button>
+        </label>
         <span class="knowledge-browser-frame__source">
           <Globe2 class="size-3.5" /> {session().host}
         </span>
@@ -298,6 +481,13 @@ function BrowserSessionSurface(props: {
         <div class="knowledge-browser-canvas__meta">
           <span><Maximize2 class="size-3.5" /> {session().viewport.width} × {session().viewport.height}</span>
           <span><ShieldCheck class="size-3.5" /> {session().sourceLabel}</span>
+          <Show when={session().degradedReason}>
+            {(reason) => (
+              <span class="knowledge-browser-canvas__meta-warning" title={reason()}>
+                <AlertCircle class="size-3.5" /> {reason()}
+              </span>
+            )}
+          </Show>
         </div>
 
         <For each={session().commentAnchors}>
@@ -346,55 +536,146 @@ function BrowserSessionSurface(props: {
             <div class="knowledge-browser-live-surface__toolbar">
               <span>{session().status}</span>
               <span>{session().profileLabel}</span>
+              <span>{session().domNodes.length}/{session().nodeCount ?? session().domNodes.length} DOM</span>
+              <span>{session().networkEntries.length} network</span>
               <Show when={session().frameArtifactId ?? session().screenshotArtifactId}>
                 {(artifactId) => <span>shot {artifactId()}</span>}
               </Show>
               <button
                 type="button"
+                aria-label="Ta skjermbilde"
+                title="Skjermbilde"
                 disabled={controlsDisabled()}
                 onClick={() => runAction({ type: 'screenshot', full_page: false })}
               >
-                Capture
+                <Camera class="size-3.5" />
               </button>
             </div>
-            <div class="knowledge-browser-live-surface__page">
-              <header>
-                <span>{session().host}</span>
-                <strong>{session().title}</strong>
-              </header>
-              <Show
-                when={frameUrl()}
-                keyed
-                fallback={
-                  <div class="knowledge-browser-live-dom">
-                    <For
-                      each={session().domNodes}
-                      fallback={<p class="knowledge-browser-live-dom__empty">Ingen DOM-noder returnert ennå.</p>}
-                    >
-                      {(node) => (
-                        <div class="knowledge-browser-live-dom__node">
-                          <span>{node.kind}</span>
-                          <p>{node.text}</p>
-                          <Show when={node.selector}>
-                            {(selector) => <code>{selector()}</code>}
-                          </Show>
-                        </div>
-                      )}
-                    </For>
-                  </div>
-                }
-              >
-                {(src) => (
-                  <div class="knowledge-browser-screenshot" aria-label="Gjengitt Chromium-side">
-                    <img
-                      src={src}
-                      alt={`Gjengitt nettleserside for ${session().title}`}
-                      decoding="async"
-                      onError={() => setBrokenFrameUrl(src)}
-                    />
-                  </div>
-                )}
-              </Show>
+            <div class="knowledge-browser-actionbar" aria-label="Nettleserhandlinger">
+              <label class="knowledge-browser-actionbar__field knowledge-browser-actionbar__field--selector">
+                <MousePointer2 class="size-3.5" aria-hidden="true" />
+                <input
+                  value={selectorInput()}
+                  disabled={controlsDisabled()}
+                  placeholder="CSS selector"
+                  spellcheck={false}
+                  onInput={(event) => setSelectorInput(event.currentTarget.value)}
+                />
+              </label>
+              <label class="knowledge-browser-actionbar__field">
+                <TextCursorInput class="size-3.5" aria-hidden="true" />
+                <input
+                  value={textInput()}
+                  disabled={controlsDisabled()}
+                  placeholder="Text"
+                  onInput={(event) => setTextInput(event.currentTarget.value)}
+                />
+              </label>
+              <label class="knowledge-browser-actionbar__field knowledge-browser-actionbar__field--key">
+                <Keyboard class="size-3.5" aria-hidden="true" />
+                <input
+                  value={keyInput()}
+                  disabled={controlsDisabled()}
+                  placeholder="Key"
+                  spellcheck={false}
+                  onInput={(event) => setKeyInput(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      runAction({ type: 'press', key: keyValue() })
+                    }
+                  }}
+                />
+              </label>
+              <div class="knowledge-browser-actionbar__buttons">
+                <button
+                  type="button"
+                  aria-label="Klikk valgt selector"
+                  title="Klikk"
+                  disabled={selectorActionDisabled()}
+                  onClick={() => runAction({ type: 'click', selector: selector() })}
+                >
+                  <MousePointer2 class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Skriv tekst i valgt selector"
+                  title="Skriv"
+                  disabled={typeActionDisabled()}
+                  onClick={() => runAction({ type: 'type', selector: selector(), text: textValue() })}
+                >
+                  <TextCursorInput class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Send tastetrykk"
+                  title="Tast"
+                  disabled={controlsDisabled()}
+                  onClick={() => runAction({ type: 'press', key: keyValue() })}
+                >
+                  <Keyboard class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Vent på valgt selector"
+                  title="Vent på selector"
+                  disabled={selectorActionDisabled()}
+                  onClick={() => runAction({ type: 'wait_for', selector: selector(), timeout_ms: 5000 })}
+                >
+                  <Timer class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Rull til valgt selector"
+                  title="Rull"
+                  disabled={selectorActionDisabled()}
+                  onClick={() => runAction({ type: 'scroll', target: selector() })}
+                >
+                  <Navigation class="size-3.5" />
+                </button>
+              </div>
+            </div>
+            <div class="knowledge-browser-live-surface__workspace">
+              <div class="knowledge-browser-live-surface__page">
+                <header>
+                  <span>{session().host}</span>
+                  <strong>{session().title}</strong>
+                </header>
+                <Show
+                  when={frameUrl()}
+                  keyed
+                  fallback={
+                    <div class="knowledge-browser-live-dom">
+                      <For
+                        each={session().domNodes}
+                        fallback={<p class="knowledge-browser-inspector__empty">Ingen DOM-noder returnert ennå.</p>}
+                      >
+                        {(node) => (
+                          <div class="knowledge-browser-live-dom__node">
+                            <span>{node.kind}</span>
+                            <p>{node.text}</p>
+                            <Show when={node.selector}>
+                              {(selector) => <code>{selector()}</code>}
+                            </Show>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  }
+                >
+                  {(src) => (
+                    <div class="knowledge-browser-screenshot" aria-label="Gjengitt Chromium-side">
+                      <img
+                        src={src}
+                        alt={`Gjengitt nettleserside for ${session().title}`}
+                        decoding="async"
+                        onError={() => setBrokenFrameUrl(src)}
+                      />
+                    </div>
+                  )}
+                </Show>
+              </div>
+              <BrowserObservationInspector session={session()} />
             </div>
           </div>
         </Show>

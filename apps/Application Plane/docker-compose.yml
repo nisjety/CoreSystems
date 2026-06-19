@@ -541,6 +541,49 @@ services:
       retries: 3
       start_period: 20s
 
+  insight-core:
+    build:
+      context: ./insight-core
+      dockerfile: Dockerfile
+    container_name: insight-core
+    restart: unless-stopped
+    # Registry-only Market-Intelligence service. NO database and NO NATS: it
+    # serves the connector registry from an in-memory, per-process repository, so
+    # it MUST run as a single instance — the container_name pins it to exactly one.
+    # Do NOT scale it; replicas would each hold divergent in-memory state.
+    environment:
+      PORT: "3163"
+      SERVICE_NAME: insight-core
+      # Must equal the gateway's forwarded x-internal-api-key (config.go hard-fails
+      # if empty). Resolves from the shared ${INTERNAL_API_KEY} like the other cores.
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      # Explicit (config.go hard-fails on empty) — audience for connector token leases.
+      INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE: ${INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE:-insight-core}
+    ports:
+      - "${INSIGHT_CORE_HOST_PORT:-3163}:3163"
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3163/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   information-core:
     build:
       context: ./information-core

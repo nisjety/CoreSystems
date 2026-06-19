@@ -422,17 +422,40 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // C30.2 / cluster #9 — durable baseline + diff store.
+    //
+    // Phase 1 Track C: apply the embedded migration set against the DSN
+    // BEFORE wiring the store. Historically this block only connected a
+    // pool — `sqlx::migrate!` ran solely in test helpers — so a real
+    // edge wired with `QUARRY_EDGE__DATABASE_URL` hit an empty database
+    // and `/v1/change/check` failed with "relation quarry_baselines does
+    // not exist" instead of serving a real comparison. We now run
+    // migrations explicitly and only wire the store when they succeed,
+    // so the route degrades to an honest 501 (store = None) rather than
+    // a 500 against missing tables. Point a dedicated `quarry_edge`
+    // database at the DSN to avoid `_sqlx_migrations` checksum
+    // collisions with services sharing the same Postgres server.
     #[cfg(feature = "postgres-queue")]
     let baseline_store: Option<
         Arc<quarry_runtime::postgres_baseline_store::PostgresBaselineStore>,
     > = match cfg.database_url.as_deref().filter(|s| !s.is_empty()) {
         Some(dsn) => match sqlx::postgres::PgPool::connect(dsn).await {
-            Ok(pool) => {
-                tracing::info!("change tracking: PostgresBaselineStore wired");
-                Some(Arc::new(
-                    quarry_runtime::postgres_baseline_store::PostgresBaselineStore::new(pool),
-                ))
-            }
+            Ok(pool) => match quarry_runtime::migrations::run_migrations(&pool).await {
+                Ok(()) => {
+                    tracing::info!(
+                        "change tracking: migrations applied; PostgresBaselineStore wired"
+                    );
+                    Some(Arc::new(
+                        quarry_runtime::postgres_baseline_store::PostgresBaselineStore::new(pool),
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "baseline store: migrations failed; change tracking disabled (route will 501)"
+                    );
+                    None
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "baseline store: PgPool connect failed");
                 None
@@ -807,8 +830,10 @@ async fn main() -> anyhow::Result<()> {
     // the live run→session map. Acquire fails at runtime if no Chrome is
     // reachable; that is a real (not mocked) driver, simply unconfigured.
     #[cfg(feature = "browser-agent")]
-    let agent_driver: Arc<dyn quarry_browser::BrowserDriver> =
-        Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new());
+    let agent_driver: Arc<dyn quarry_browser::BrowserDriver> = Arc::new(
+        quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
+            .with_profile_store(profiles.clone()),
+    );
     #[cfg(feature = "browser-agent")]
     let agent_runs = agent_routes::new_runs();
 

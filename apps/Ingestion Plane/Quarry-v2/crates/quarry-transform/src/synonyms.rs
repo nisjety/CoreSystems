@@ -54,7 +54,10 @@ impl SynonymMap {
     }
 
     pub fn synonyms_of(&self, term: &str) -> &[String] {
-        self.map.get(&term.to_lowercase()).map(Vec::as_slice).unwrap_or(&[])
+        self.map
+            .get(&term.to_lowercase())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 

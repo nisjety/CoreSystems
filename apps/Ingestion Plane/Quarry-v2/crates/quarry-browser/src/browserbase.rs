@@ -281,6 +281,8 @@ mod tests {
             ttl_s: 30,
             capabilities: vec![Capability::Js],
             artifact_bucket: "b".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         }
     }

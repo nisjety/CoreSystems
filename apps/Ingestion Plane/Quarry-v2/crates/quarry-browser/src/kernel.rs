@@ -667,6 +667,11 @@ impl BrowserDriver for KernelDriver {
         let id = self.ensure_browser(&session.lease).await?;
         self.post_bytes(&id, "back", json!({})).await.map(|_| ())
     }
+
+    async fn forward(&self, session: &BrowserSession) -> QuarryResult<()> {
+        let id = self.ensure_browser(&session.lease).await?;
+        self.post_bytes(&id, "forward", json!({})).await.map(|_| ())
+    }
 }
 
 fn opt_string(s: &str) -> Option<String> {
@@ -697,6 +702,8 @@ mod tests {
             ttl_s: 60,
             capabilities: vec![Capability::Js],
             artifact_bucket: "b".into(),
+            persist_profile: false,
+            viewport: None,
             org_id: "test_org".into(),
         }
     }
@@ -923,7 +930,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acceptance_action_script_click_type_press_select_back() {
+    async fn acceptance_action_script_click_type_press_select_back_forward() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(wpath("/v1/browsers"))
@@ -934,7 +941,7 @@ mod tests {
             .mount(&server)
             .await;
         // Each action endpoint returns 200 ok.
-        for action in ["click", "type", "press", "select", "back"] {
+        for action in ["click", "type", "press", "select", "back", "forward"] {
             Mock::given(method("POST"))
                 .and(wpath(format!("/v1/browsers/b_a/{action}")))
                 .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
@@ -953,6 +960,7 @@ mod tests {
         driver.press(&session, "Enter").await.unwrap();
         driver.select(&session, "#country", "US").await.unwrap();
         driver.back(&session).await.unwrap();
+        driver.forward(&session).await.unwrap();
     }
 
     #[tokio::test]

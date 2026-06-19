@@ -300,8 +300,10 @@ impl TantivyLocalIndex {
             })?;
             let url = field_text(&retrieved, self.schema.url).unwrap_or_default();
             let title = field_text(&retrieved, self.schema.title);
-            let recency =
-                recency_multiplier(field_date_secs(&retrieved, self.schema.fetched_at), now_secs);
+            let recency = recency_multiplier(
+                field_date_secs(&retrieved, self.schema.fetched_at),
+                now_secs,
+            );
             scored.push((
                 score * recency,
                 SearchResult {

@@ -117,6 +117,8 @@ impl BrowserDriverAdapter {
                 ttl_s: 30,
                 capabilities: vec![],
                 artifact_bucket: "default".into(),
+                persist_profile: false,
+                viewport: None,
                 // Internal lease minted on the fetch path — the org_id
                 // travels with the request via the PageRunner that
                 // invoked us. This adapter doesn't yet have access to

@@ -40,7 +40,7 @@ mod enabled {
     use quarry_core::event::EventType;
     use quarry_core::ids::kinds::{LeaseKind, ProfileKind, RequestKind, RunKind};
     use quarry_core::ids::Id;
-    use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
+    use quarry_core::lease::{BrowserLease, BrowserViewport, Capability, ProxyAffinity};
     use quarry_core::zdr::ZdrMode;
     use quarry_runtime::observation::{ObservationContext, ObservationRunner};
 
@@ -77,6 +77,10 @@ mod enabled {
         #[serde(default)]
         pub profile_id: Option<String>,
         #[serde(default)]
+        pub persist_profile: bool,
+        #[serde(default)]
+        pub viewport: Option<BrowserViewport>,
+        #[serde(default)]
         pub zdr: bool,
     }
 
@@ -93,6 +97,7 @@ mod enabled {
     pub struct StartRunData {
         pub run_id: String,
         pub lease_id: String,
+        pub profile_id: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -142,7 +147,10 @@ mod enabled {
             .unwrap_or_else(Id::new);
         let zdr = ZdrMode::from(body.zdr);
         let ttl_s = body.constraints.max_runtime_s.unwrap_or(120);
+        let viewport = normalize_viewport(body.viewport)
+            .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg.as_str()))?;
 
+        let persist_profile = body.persist_profile || body.profile_id.is_some();
         let lease = BrowserLease {
             lease_id: lease_id.clone(),
             profile_id,
@@ -154,8 +162,11 @@ mod enabled {
             ttl_s,
             capabilities: vec![Capability::Actions, Capability::Js, Capability::Screenshots],
             artifact_bucket: String::new(),
+            persist_profile,
+            viewport,
             org_id: org_id.clone(),
         };
+        let profile_id = lease.profile_id.to_string();
 
         let session = state
             .agent_driver
@@ -198,8 +209,64 @@ mod enabled {
             StartRunData {
                 run_id: run_id.to_string(),
                 lease_id: lease_id.to_string(),
+                profile_id,
             },
         )))
+    }
+
+    fn normalize_viewport(
+        viewport: Option<BrowserViewport>,
+    ) -> Result<Option<BrowserViewport>, String> {
+        let Some(viewport) = viewport else {
+            return Ok(None);
+        };
+        if !(320..=3840).contains(&viewport.width) || !(240..=2160).contains(&viewport.height) {
+            return Err("viewport must be between 320x240 and 3840x2160".to_owned());
+        }
+        let device_scale_factor = if viewport.device_scale_factor > 0.0 {
+            viewport.device_scale_factor.clamp(0.5, 4.0)
+        } else {
+            1.0
+        };
+        Ok(Some(BrowserViewport {
+            device_scale_factor,
+            ..viewport
+        }))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn normalize_viewport_accepts_reasonable_desktop_size() {
+            let viewport = normalize_viewport(Some(BrowserViewport {
+                width: 1280,
+                height: 800,
+                device_scale_factor: 0.0,
+                is_mobile: false,
+            }))
+            .expect("valid viewport")
+            .expect("viewport");
+
+            assert_eq!(viewport.width, 1280);
+            assert_eq!(viewport.height, 800);
+            assert_eq!(viewport.device_scale_factor, 1.0);
+            assert!(!viewport.is_mobile);
+        }
+
+        #[test]
+        fn normalize_viewport_rejects_unbounded_sizes() {
+            let err = normalize_viewport(Some(BrowserViewport {
+                width: 10_000,
+                height: 800,
+                device_scale_factor: 1.0,
+                is_mobile: false,
+            }))
+            .expect_err("oversized viewport should be rejected");
+
+            assert!(err.contains("viewport"));
+        }
     }
 
     /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the

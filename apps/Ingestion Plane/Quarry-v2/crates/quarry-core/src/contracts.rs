@@ -98,6 +98,7 @@ pub enum AgentAction {
     Pdf,
     Evaluate { script: String },
     Back,
+    Forward,
     GetContent,
 }
 

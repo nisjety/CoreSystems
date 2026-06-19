@@ -69,6 +69,20 @@ describe('buildExternalAnalyticsSlots', () => {
     expect(slots[1]?.status).toBe('not_connected')
   })
 
+  it('ignores non-analytics registry connectors for the GA4 and SEO slots', () => {
+    // The real gateway registry mixes native surfaces (social/inbox/agents)
+    // with free-form kind/status strings. None of these are GA4 or Search
+    // Console, so both external slots must stay not-connected — never live.
+    const slots = buildExternalAnalyticsSlots(integrations([]), insightConnectors([
+      { id: 'social-core', kind: 'social', label: 'Velion Social', status: 'native' },
+      { id: 'conversation-core', kind: 'inbox', label: 'Velion Inbox', status: 'native' },
+      { id: 'model-plane-agents', kind: 'agents', label: 'Velion Agents', status: 'planned' },
+    ]))
+
+    expect(slots.map((slot) => slot.status)).toEqual(['not_connected', 'not_connected'])
+    expect(slots.map((slot) => slot.statusLabel)).toEqual(['Not connected', 'Not connected'])
+  })
+
   it('propagates connector registry outages to both external slots', () => {
     const slots = buildExternalAnalyticsSlots({
       data: [],

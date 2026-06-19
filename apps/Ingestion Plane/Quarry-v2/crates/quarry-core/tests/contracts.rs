@@ -215,6 +215,7 @@ fn agent_action_all_variants_serialize() {
             script: "1+1".into(),
         },
         AgentAction::Back,
+        AgentAction::Forward,
         AgentAction::GetContent,
     ];
     for action in actions {

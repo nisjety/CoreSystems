@@ -1,35 +1,15 @@
 import { requestJson } from './http'
 
-export type InsightConnectorKind = 'ga4' | 'search_console' | 'unknown'
-export type InsightConnectorStatus = 'connected' | 'not_connected' | 'needs_oauth' | 'unavailable'
+// The gateway returns `kind` and `status` as free-form strings sourced from the
+// connector registry ("social", "inbox", "agents", "native", "planned",
+// "external_analytics", "google_analytics_4", ...). They are NOT a fixed union,
+// so the SPA must treat them as opaque strings and never assume a closed set.
+export type InsightConnectorKind = string
+export type InsightConnectorStatus = string
 
 export type InsightDateRange = {
   endDate: string
   startDate: string
-}
-
-export type InsightMetricSummary = {
-  delta?: string
-  label: string
-  state?: string
-  value: string
-}
-
-export type InsightSignalSummary = {
-  detail: string
-  href?: string | null
-  source?: string
-  state?: string
-  title: string
-}
-
-export type InsightOverviewResponse = {
-  generatedAt?: string
-  metrics?: InsightMetricSummary[]
-  range?: InsightDateRange
-  signals?: InsightSignalSummary[]
-  source?: string
-  status?: string
 }
 
 export type InsightConnectorReportShape = {
@@ -48,24 +28,12 @@ export type InsightConnector = {
   status: InsightConnectorStatus
 }
 
-export type InsightConnectorsResponse = {
-  connectors: InsightConnector[]
-}
-
-function orgHeaders(orgId: string): Record<string, string> {
-  return { 'x-velion-org-id': orgId }
-}
-
 // Gateway-facing only. The browser must not call Application Plane insight-core
-// directly or attach internal service keys; velion-gateway-rs will own that hop.
-export function getInsightsOverview(orgId: string): Promise<InsightOverviewResponse> {
-  return requestJson<InsightOverviewResponse>('/api/v1/insights/overview', {
-    headers: orgHeaders(orgId),
-  })
-}
-
-export function listInsightConnectors(orgId: string): Promise<InsightConnectorsResponse> {
-  return requestJson<InsightConnectorsResponse>('/api/v1/insights/connectors', {
-    headers: orgHeaders(orgId),
-  })
+// directly, attach internal service keys, or send any org header: the gateway
+// resolves the org from the session and serves the connector registry through
+// `GET /api/v1/insights/connectors` as a `{ data: InsightConnector[] }` envelope.
+// `requestJson` already unwraps the top-level `data`, so this resolves to the
+// connector array directly.
+export function listInsightConnectors(): Promise<InsightConnector[]> {
+  return requestJson<InsightConnector[]>('/api/v1/insights/connectors')
 }

@@ -5,6 +5,7 @@ export type ScrapeBlock = { heading: boolean; raw: string; text: string }
 
 export type ScrapePreview = {
   browserSession?: BrowserSessionResponse
+  browserSessionError?: string | null
   blocks: ScrapeBlock[]
   charCount: number
   description: string

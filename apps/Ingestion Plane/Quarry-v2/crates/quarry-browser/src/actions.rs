@@ -17,6 +17,7 @@ pub enum Action {
     Press { key: String },
     Select { selector: String, value: String },
     Back,
+    Forward,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

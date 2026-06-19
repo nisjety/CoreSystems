@@ -15,15 +15,17 @@
 //! filter the backend sees — query-string `org_id` is ignored.
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Extension, Json,
 };
 use serde::Deserialize;
 
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::ids::kinds::RequestKind;
+use quarry_core::ids::kinds::{ArtifactKind, RequestKind};
 use quarry_core::pagination::{ListFilter, Page};
 use quarry_core::resources::{
     ArtifactSummary, BenchmarkSummary, JobResourceKind, JobSummary, RequestQueueSummary,
@@ -124,6 +126,36 @@ pub async fn list_artifacts(
         .await
         .map_err(|e| err_response(&request_id, e))?;
     Ok(Json(Envelope::ok(request_id, page)))
+}
+
+pub async fn get_artifact(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let request_id = RequestKind::new().to_string();
+    let artifact_id = match id.parse::<ArtifactKind>() {
+        Ok(value) => value,
+        Err(err) => return err_response(&request_id, err).into_response(),
+    };
+    let bytes = match state.artifacts.get(&artifact_id).await {
+        Ok(value) => value,
+        Err(err) => return err_response(&request_id, err).into_response(),
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, artifact_content_type(&id))
+        .header(header::CACHE_CONTROL, "private, max-age=30")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| {
+            err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::Internal, "artifact response build failed"),
+            )
+            .into_response()
+        })
+}
+
+fn artifact_content_type(_id: &str) -> HeaderValue {
+    HeaderValue::from_static("application/octet-stream")
 }
 
 // =============================================================================

@@ -535,30 +535,30 @@ async fn create_campaign(
     }
 }
 
+/// Competitor-watch read surface.
+///
+/// Phase 1 Track C: this used to synthesize fake "competitor lane" items from
+/// the org's connected social accounts (`derived_competitor_watch`) — an
+/// affordance for a feature that does not run. There is no competitor-watch
+/// producer today, so the honest answer is an empty list explicitly tagged
+/// `"unavailable"`. The real, on-demand change-monitoring surface lives in the
+/// `monitoring` domain (`/api/v1/monitoring/*`); at-scale competitor tracking
+/// is deferred to Phase 2. We still verify the session resolves an org so the
+/// boundary is enforced even while the payload is empty.
 async fn list_competitor_watch(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> axum::response::Response {
-    let org_id = match authorized_social_org_id(&state, &user).await {
-        Ok(org_id) => org_id,
-        Err(response) => return response,
-    };
-    let accounts = match load_social_accounts(&state, &user, &org_id).await {
-        CoreRead::Ready(accounts) => accounts,
-        CoreRead::Error(_) | CoreRead::Unavailable => {
-            return Json(ok_with_source(
-                CompetitorWatchList {
-                    competitors: vec![],
-                },
-                "unavailable",
-            ))
-            .into_response();
-        }
-    };
+    if let Err(response) = authorized_social_org_id(&state, &user).await {
+        return response;
+    }
 
-    Json(ok(CompetitorWatchList {
-        competitors: derived_competitor_watch(accounts),
-    }))
+    Json(ok_with_source(
+        CompetitorWatchList {
+            competitors: vec![],
+        },
+        "unavailable",
+    ))
     .into_response()
 }
 
@@ -2141,52 +2141,6 @@ fn with_query(base: &str, params: &[(&str, Option<&str>)]) -> String {
     } else {
         format!("{}?{}", base, query.join("&"))
     }
-}
-
-fn derived_competitor_watch(accounts: Vec<SocialAccount>) -> Vec<SocialCompetitorWatchItem> {
-    if accounts.is_empty() {
-        return vec![SocialCompetitorWatchItem {
-            id: "competitor_watch_pending".to_owned(),
-            label: "Watchlist endpoint pending".to_owned(),
-            provider_key: "linkedin",
-            handle: "No organization accounts resolved".to_owned(),
-            signal: "Connect social accounts first; competitor watch will inherit the same org boundary."
-                .to_owned(),
-            velocity: "Unavailable",
-            captured_at: None,
-            status: "endpoint_pending",
-            source_href: Some("/settings/integrations".to_owned()),
-        }];
-    }
-
-    accounts
-        .into_iter()
-        .take(3)
-        .map(|account| {
-            let connected = account.status == "connected";
-            SocialCompetitorWatchItem {
-                id: format!("competitor_watch_{}", account.provider_key),
-                label: format!("{} competitor lane", provider_label(account.provider_key)),
-                provider_key: account.provider_key,
-                handle: account.handle,
-                signal: if connected {
-                    "Ready to attach watched accounts once competitor streams are configured."
-                        .to_owned()
-                } else {
-                    "Account connection needs attention before this channel can track competitors."
-                        .to_owned()
-                },
-                velocity: if connected { "Ready" } else { "Blocked" },
-                captured_at: None,
-                status: "endpoint_pending",
-                source_href: Some(if connected {
-                    "/social/trends".to_owned()
-                } else {
-                    "/settings/integrations".to_owned()
-                }),
-            }
-        })
-        .collect()
 }
 
 fn derived_trends(

@@ -23,6 +23,7 @@ pub(crate) struct AppState {
     pub(crate) org_core_url: String,
     pub(crate) integration_core_url: String,
     pub(crate) audit_core_url: String,
+    pub(crate) insight_core_url: String,
     pub(crate) user_core_url: String,
     pub(crate) graph_index_url: String,
     pub(crate) quarry_edge_url: String,
@@ -50,6 +51,7 @@ pub(crate) struct AppState {
     pub(crate) zammad_api_url: String,
     pub(crate) zammad_api_token: String,
     pub(crate) audience_token_cache: AudienceTokenCache,
+    pub(crate) browser_run_store: crate::domains::browser::BrowserRunStore,
     pub(crate) cache: crate::cache::ResultCache,
     pub(crate) chat_history_store: crate::domains::chat::history::ChatHistoryStore,
     pub(crate) studio_store: crate::domains::studio::StudioStore,
@@ -98,6 +100,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // audit-core (Control Plane) serves the audit read API the Trust Center
         // aggregates over. Internal-key auth (X-Internal-Api-Key) like the other cores.
         audit_core_url: env_url("AUDIT_CORE_URL", "http://audit-core:8187"),
+        // insight-core (Application Plane, registry-only) serves the connector
+        // registry. Internal-key auth + x-org-id header, like the other cores.
+        insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
         user_core_url: env_url("USER_CORE_URL", "http://user-core:3012"),
         graph_index_url: env_url("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203"),
         quarry_edge_url: env_url("QUARRY_EDGE_URL", "http://quarry-edge:8082"),
@@ -150,6 +155,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .trim()
             .to_owned(),
         audience_token_cache: new_audience_token_cache(),
+        browser_run_store: crate::domains::browser::new_browser_run_store(),
         cache,
         chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
         studio_store: crate::domains::studio::StudioStore::new(),

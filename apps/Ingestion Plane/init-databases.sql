@@ -53,6 +53,20 @@ SELECT 'CREATE DATABASE quarry_v2 OWNER ingestion_user'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'quarry_v2')\gexec
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 2b. quarry_edge database  (Phase 1 Track C / cluster #9 — change-monitoring)
+--     Dedicated database for quarry-edge's durable baseline + diff store
+--     (PostgresBaselineStore, tables quarry_baselines / quarry_change_diffs).
+--     Kept separate from `quarry_v2` (owned by quarry-control) so the edge's
+--     sqlx `_sqlx_migrations` set never collides with another service applying
+--     a different migration history to the same database. The edge applies its
+--     own migrations at boot (quarry_runtime::run_migrations) — keep this empty.
+-- ─────────────────────────────────────────────────────────────────────────────
+\connect ingestion_plane_db
+
+SELECT 'CREATE DATABASE quarry_edge OWNER ingestion_user'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'quarry_edge')\gexec
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- 3. imports database  (used by imports-core / document import pipeline)
 -- ─────────────────────────────────────────────────────────────────────────────
 \connect ingestion_plane_db

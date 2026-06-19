@@ -45,6 +45,8 @@ pub mod hybrid;
 pub mod ingest_client;
 pub mod lease_pool;
 pub mod local_index;
+#[cfg(feature = "postgres-queue")]
+pub mod migrations;
 pub mod mp_client;
 pub mod observation;
 pub mod pipeline;

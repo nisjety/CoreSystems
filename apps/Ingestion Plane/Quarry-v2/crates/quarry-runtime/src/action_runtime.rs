@@ -331,6 +331,16 @@ impl ActionRuntime {
                 }
                 None
             }
+            Action::Forward => {
+                if let (Some(driver), Some(session)) =
+                    (self.browser.as_ref(), self.session.as_ref())
+                {
+                    driver.forward(session).await?;
+                } else {
+                    trace!(action_index = index, "forward (dry-run)");
+                }
+                None
+            }
         };
 
         let mut result = ActionResult::ok(index, output);
@@ -387,11 +397,13 @@ mod tests {
                 Action::Evaluate {
                     script: "window.x = 1".into(),
                 },
+                Action::Back,
+                Action::Forward,
             ],
             OnError::Abort,
         );
         let results = runtime.run(&s).await.unwrap();
-        assert_eq!(results.len(), 8);
+        assert_eq!(results.len(), 10);
         assert!(results.iter().all(|r| r.success));
     }
 

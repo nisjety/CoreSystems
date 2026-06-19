@@ -271,35 +271,12 @@ export function fallbackSocialCampaigns(calendar: SocialCalendar): SocialCampaig
   }))
 }
 
-export function fallbackSocialCompetitorWatch(accounts: readonly SocialCalendar['accounts'][number][]): SocialCompetitorWatchItem[] {
-  if (!accounts.length) {
-    return [{
-      id: 'competitor_watch_pending',
-      label: 'Watchlist endpoint pending',
-      providerKey: 'linkedin',
-      handle: 'No organization accounts resolved',
-      signal: 'Connect social accounts first; competitor watch will inherit the same org boundary.',
-      velocity: 'Unavailable',
-      capturedAt: null,
-      status: 'endpoint_pending',
-      sourceHref: '/settings/integrations',
-    }]
-  }
-
-  return accounts.slice(0, 3).map((account) => ({
-    id: `competitor_watch_${account.providerKey}`,
-    label: `${platformLabels[account.providerKey]} competitor lane`,
-    providerKey: account.providerKey,
-    handle: account.handle,
-    signal: account.status === 'connected'
-      ? 'Ready to attach watched accounts once the competitor-watch endpoint lands.'
-      : 'Account connection needs attention before this channel can track competitors.',
-    velocity: account.status === 'connected' ? 'Ready' : 'Blocked',
-    capturedAt: null,
-    status: 'endpoint_pending',
-    sourceHref: account.status === 'connected' ? '/social/trends' : '/settings/integrations',
-  }))
-}
+// Phase 1 Track C: the client-side competitor-watch fabrication
+// (`fallbackSocialCompetitorWatch`) was removed alongside the gateway's
+// `derived_competitor_watch`. There is no competitor-watch producer today, so
+// the workspace renders an honest empty list (`fallbackSocialOperations`
+// already returns `competitors: []`) and the real on-demand change-monitoring
+// surface lives in the Ingestions › Monitoring tab.
 
 export function fallbackSocialTrends(
   posts: readonly SocialPost[],

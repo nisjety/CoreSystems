@@ -4,6 +4,11 @@
 //! `/v1/agent/runs` acquires a chromiumoxide-backed run, and `/step` executes
 //! one browser action at a time. The SPA never sees raw CDP or Quarry tokens.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex},
+};
+
 use axum::{
     body::Body,
     extract::{Extension, Path, State},
@@ -33,7 +38,23 @@ struct CreateSessionBody {
     #[serde(default)]
     profile_id: Option<String>,
     #[serde(default)]
+    persistent_profile: bool,
+    #[serde(default)]
     viewport: Option<Viewport>,
+}
+
+pub(crate) type BrowserRunStore = Arc<StdMutex<HashMap<String, BrowserRunMetadata>>>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct BrowserRunMetadata {
+    lease_id: Option<String>,
+    profile_id: Option<String>,
+    persistent_profile: bool,
+    viewport: Viewport,
+}
+
+pub(crate) fn new_browser_run_store() -> BrowserRunStore {
+    Arc::new(StdMutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -45,6 +66,11 @@ struct Viewport {
 #[derive(Debug, Deserialize)]
 struct ActionBody {
     action: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestoreProbeBody {
+    url: String,
 }
 
 const DEFAULT_VIEWPORT: Viewport = Viewport {
@@ -69,6 +95,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             delete(close_session),
         )
         .route("/api/v1/browser/profiles", get(list_profiles))
+        .route(
+            "/api/v1/browser/profiles/:profile_id/restore-probe",
+            post(restore_profile_probe),
+        )
+        .route(
+            "/api/v1/browser/profiles/:profile_id",
+            delete(delete_profile),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -100,10 +134,18 @@ async fn create_session(
             "allowed_domains": allowed_domain.map(|domain| vec![domain]).unwrap_or_default(),
             "max_runtime_s": 120
         },
+        "viewport": {
+            "width": viewport.width,
+            "height": viewport.height
+        },
         "zdr": false
     });
     if let Some(profile_id) = profile_id {
         start_body["profile_id"] = Value::String(profile_id.to_owned());
+    }
+    let requested_persistent_profile = body.persistent_profile || profile_id.is_some();
+    if requested_persistent_profile {
+        start_body["persist_profile"] = Value::Bool(true);
     }
 
     let (start_status, start_body) = quarry_call(
@@ -131,7 +173,8 @@ async fn create_session(
             .into_response();
     };
     let lease_id = str_field(&start_data, "lease_id");
-
+    let returned_profile_id =
+        str_field(&start_data, "profile_id").or_else(|| profile_id.map(str::to_owned));
     let step_body = json!({
         "action": {
             "type": "navigate",
@@ -162,13 +205,17 @@ async fn create_session(
     }
 
     let observation = unwrap_data(&step_body);
-    let response = browser_response(
-        &run_id,
-        lease_id.as_deref(),
-        profile_id,
+    let metadata = BrowserRunMetadata {
+        lease_id,
+        profile_id: returned_profile_id,
+        persistent_profile: requested_persistent_profile,
         viewport,
-        Some(observation),
-    );
+    };
+    if let Ok(mut runs) = state.browser_run_store.lock() {
+        runs.insert(run_id.clone(), metadata.clone());
+    }
+
+    let response = browser_response(&run_id, &metadata, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
 }
 
@@ -201,7 +248,8 @@ async fn run_action(
     }
 
     let observation = unwrap_data(&body);
-    let response = browser_response(&session_id, None, None, DEFAULT_VIEWPORT, Some(observation));
+    let metadata = browser_run_metadata(&state, &session_id);
+    let response = browser_response(&session_id, &metadata, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
 }
 
@@ -224,6 +272,9 @@ async fn close_session(
     .await;
     if !status.is_success() && status != StatusCode::NOT_FOUND {
         return forward_quarry_failure(status, body);
+    }
+    if let Ok(mut runs) = state.browser_run_store.lock() {
+        runs.remove(&session_id);
     }
     (StatusCode::OK, Json(ok(json!({ "closed": true })))).into_response()
 }
@@ -356,11 +407,87 @@ async fn list_profiles(
     (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
 }
 
+async fn restore_profile_probe(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    Json(body): Json<RestoreProbeBody>,
+) -> Response {
+    if !is_valid_profile_id(&profile_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_profile",
+                "The requested browser profile id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let target = match normalize_public_http_url(&body.url) {
+        Ok(value) => value,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(error("invalid_url", message))).into_response()
+        }
+    };
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::POST,
+        &format!(
+            "/v1/profiles/{}/restore_probe",
+            urlencoding::encode(&profile_id)
+        ),
+        Some(json!({ "url": target })),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
+}
+
+async fn delete_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+) -> Response {
+    if !is_valid_profile_id(&profile_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_profile",
+                "The requested browser profile id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::DELETE,
+        &format!("/v1/profiles/{}", urlencoding::encode(&profile_id)),
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() && status != StatusCode::NOT_FOUND {
+        return forward_quarry_failure(status, body);
+    }
+    (StatusCode::OK, Json(ok(json!({ "deleted": true })))).into_response()
+}
+
 fn browser_response(
     run_id: &str,
-    lease_id: Option<&str>,
-    profile_id: Option<&str>,
-    viewport: Viewport,
+    metadata: &BrowserRunMetadata,
     observation: Option<Value>,
 ) -> Value {
     let observed_url = observation
@@ -397,25 +524,39 @@ fn browser_response(
     json!({
         "session": {
             "id": run_id,
-            "leaseId": lease_id,
+            "leaseId": metadata.lease_id,
             "status": "live",
             "renderMode": "chromium",
             "title": title,
             "url": observed_url,
             "viewport": {
-                "width": viewport.width,
-                "height": viewport.height
+                "width": metadata.viewport.width,
+                "height": metadata.viewport.height
             },
             "profile": {
-                "id": profile_id,
-                "scope": if profile_id.is_some() { "user_private" } else { "run_scoped" },
-                "storage": if profile_id.is_some() { "persistent" } else { "isolated" }
+                "id": metadata.profile_id,
+                "scope": if metadata.persistent_profile { "user_private" } else { "run_scoped" },
+                "storage": if metadata.persistent_profile { "persistent" } else { "isolated" }
             },
             "frame": frame,
-            "capabilities": ["navigate", "click", "type", "scroll", "inspect_dom", "screenshot_artifact", "annotate"]
+            "capabilities": ["navigate", "back", "forward", "click", "type", "press", "scroll", "wait_for", "select", "inspect_dom", "screenshot_artifact", "annotate", "persistent_profile"]
         },
         "observation": observation
     })
+}
+
+fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadata {
+    state
+        .browser_run_store
+        .lock()
+        .ok()
+        .and_then(|runs| runs.get(session_id).cloned())
+        .unwrap_or_else(|| BrowserRunMetadata {
+            lease_id: None,
+            profile_id: None,
+            persistent_profile: false,
+            viewport: DEFAULT_VIEWPORT,
+        })
 }
 
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
@@ -439,7 +580,7 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
             Ok(action)
         }
         "click" | "press" | "scroll" | "select" | "wait" | "wait_for" | "screenshot" | "back"
-        | "get_content" => Ok(action),
+        | "forward" | "get_content" => Ok(action),
         "type" => {
             if action
                 .get("text")
@@ -480,7 +621,17 @@ async fn quarry_call(
 }
 
 async fn quarry_token(state: &AppState, user: &AuthenticatedUser, cookie: &str) -> Option<String> {
-    get_audience_token(state, &user.user_id, cookie, "quarry").await
+    get_audience_token(state, &user.user_id, cookie, "quarry")
+        .await
+        .or_else(|| dev_quarry_token(state))
+}
+
+fn dev_quarry_token(state: &AppState) -> Option<String> {
+    dev_quarry_token_for(state.allow_dev_auth_bypass)
+}
+
+fn dev_quarry_token_for(allow_dev_auth_bypass: bool) -> Option<String> {
+    allow_dev_auth_bypass.then(|| "dev-bypass".to_owned())
 }
 
 fn cookie_header(headers: &HeaderMap) -> String {
@@ -534,6 +685,12 @@ fn is_valid_artifact_id(value: &str) -> bool {
         .is_some_and(|suffix| !suffix.is_empty() && is_valid_path_segment(value))
 }
 
+fn is_valid_profile_id(value: &str) -> bool {
+    value
+        .strip_prefix("prof_")
+        .is_some_and(|suffix| !suffix.is_empty() && is_valid_path_segment(value))
+}
+
 fn safe_image_content_type(value: Option<&str>) -> HeaderValue {
     match value
         .unwrap_or_default()
@@ -575,12 +732,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_action_allows_forward_history_navigation() {
+        let action = sanitize_action(json!({ "type": "forward" })).expect("valid action");
+        assert_eq!(action["type"], "forward");
+    }
+
+    #[test]
     fn browser_response_includes_scoped_screenshot_frame_url() {
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-1".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            viewport: DEFAULT_VIEWPORT,
+        };
         let response = browser_response(
             "run_browser_01",
-            Some("lease-1"),
-            None,
-            DEFAULT_VIEWPORT,
+            &metadata,
             Some(json!({
                 "run_id": "run_browser_01",
                 "url": "https://example.com",
@@ -601,6 +768,20 @@ mod tests {
         assert!(!is_valid_artifact_id("file_01JZ9XM7EXAMPLESHOT00001"));
         assert!(!is_valid_artifact_id("art_../secret"));
         assert!(!is_valid_artifact_id("art_"));
+    }
+
+    #[test]
+    fn profile_ids_are_strict_path_segments() {
+        assert!(is_valid_profile_id("prof_01JZ9XM7EXAMPLEPROFILE0001"));
+        assert!(!is_valid_profile_id("art_01JZ9XM7EXAMPLESHOT00001"));
+        assert!(!is_valid_profile_id("prof_../secret"));
+        assert!(!is_valid_profile_id("prof_"));
+    }
+
+    #[test]
+    fn dev_quarry_token_requires_gateway_dev_bypass() {
+        assert_eq!(dev_quarry_token_for(false), None);
+        assert_eq!(dev_quarry_token_for(true), Some("dev-bypass".to_owned()));
     }
 
     #[test]

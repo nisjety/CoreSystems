@@ -13,6 +13,15 @@ pub struct BrowserLease {
     pub ttl_s: u32,
     pub capabilities: Vec<Capability>,
     pub artifact_bucket: String,
+    /// Persist browser state back into the profile store when the session
+    /// releases. False keeps the profile id run-scoped and isolated.
+    #[serde(default)]
+    pub persist_profile: bool,
+    /// Requested browser viewport for this lease. Drivers that can only apply
+    /// viewport at launch should relaunch when this differs from the active
+    /// browser viewport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<BrowserViewport>,
     /// Tenant scope. P0 / cluster #auth+tenancy. The lease's `org_id`
     /// MUST match the requesting tenant — orchestrator activities
     /// populate this from the verified JWT claim that arrived with the
@@ -38,4 +47,14 @@ pub enum Capability {
     Pdf,
     Actions,
     Downloads,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BrowserViewport {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub device_scale_factor: f64,
+    #[serde(default)]
+    pub is_mobile: bool,
 }

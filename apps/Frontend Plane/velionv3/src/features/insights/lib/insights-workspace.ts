@@ -1,21 +1,13 @@
-import { fetchChatbotSupportStatus, type SupportIntegrationStatus } from '@/features/agents/lib/use-chatbot-support-status'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
-  getInsightsOverview,
   listInsightConnectors,
   type InsightConnector,
-  type InsightOverviewResponse,
 } from '@/shared/api/insights-client'
 import { listConnections, type IntegrationConnection } from '@/shared/api/integrations-client'
-import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
-import {
-  getSocialCalendar,
-  listSocialAdapters,
-  type SocialCalendar,
-  type SocialPlatformAdapter,
-} from '@/shared/api/social-client'
 
-export type InsightsSection = 'overview' | 'social' | 'inbox' | 'agents' | 'campaigns' | 'experiments'
+// `live` describes a CONTRACT that responded with real rows. It must never be
+// attached to a rendered metric VALUE, because there are no live metric
+// producers behind insight-core yet — only the connector registry is real.
 export type MeasurementState = 'live' | 'empty' | 'not_connected' | 'unavailable' | 'planned'
 
 export type InsightsContext = {
@@ -32,17 +24,10 @@ export type ResourceResult<T> = {
 }
 
 export type InsightsWorkspace = {
-  agents: ResourceResult<SupportIntegrationStatus | null>
   context: InsightsContext
   externalAnalytics: ExternalAnalyticsSlot[]
-  inbox: ResourceResult<LiveTicket[]>
   insightConnectors: ResourceResult<InsightConnector[]>
-  insightCore: ResourceResult<InsightOverviewResponse | null>
   integrations: ResourceResult<IntegrationConnection[]>
-  social: ResourceResult<{
-    adapters: SocialPlatformAdapter[]
-    calendar: SocialCalendar
-  }>
 }
 
 export type ExternalAnalyticsSlot = {
@@ -57,40 +42,14 @@ export type ExternalAnalyticsSlot = {
   title: string
 }
 
-const emptySocialCalendar: SocialCalendar = {
-  accounts: [],
-  posts: [],
-  recommendedWindows: [],
-}
-
 const INSIGHTS_RESOURCE_TIMEOUT_MS = 3500
 
 export async function loadInsightsWorkspace(): Promise<InsightsWorkspace> {
   const context = await loadInsightsContext()
-  const [insightCore, insightConnectors, social, inbox, agents, integrations] = await Promise.all([
-    withResourceTimeout(readInsightCore(context.orgId), {
-      data: null,
-      message: 'Insight-core did not respond before the dashboard timeout.',
-      state: 'unavailable',
-    }),
-    withResourceTimeout(readInsightConnectors(context.orgId), {
+  const [insightConnectors, integrations] = await Promise.all([
+    withResourceTimeout(readInsightConnectors(), {
       data: [],
       message: 'Insight connector registry did not respond before the dashboard timeout.',
-      state: 'unavailable',
-    }),
-    withResourceTimeout(readSocial(context.orgId), {
-      data: { adapters: [], calendar: emptySocialCalendar },
-      message: 'Social measurement did not respond before the dashboard timeout.',
-      state: 'unavailable',
-    }),
-    withResourceTimeout(readInbox(context.orgId), {
-      data: [],
-      message: 'Inbox measurement did not respond before the dashboard timeout.',
-      state: 'unavailable',
-    }),
-    withResourceTimeout(readAgents(), {
-      data: null,
-      message: 'Agent measurement did not respond before the dashboard timeout.',
       state: 'unavailable',
     }),
     withResourceTimeout(readIntegrations(context.orgId), {
@@ -101,14 +60,10 @@ export async function loadInsightsWorkspace(): Promise<InsightsWorkspace> {
   ])
 
   return {
-    agents,
     context,
     externalAnalytics: buildExternalAnalyticsSlots(integrations, insightConnectors),
-    inbox,
     insightConnectors,
-    insightCore,
     integrations,
-    social,
   }
 }
 
@@ -161,130 +116,21 @@ async function withValueTimeout<T>(
   }
 }
 
-async function readInsightCore(orgId: string): Promise<InsightsWorkspace['insightCore']> {
-  if (!orgId.trim()) {
-    return {
-      data: null,
-      message: 'No organization scope was resolved for insight-core measurement.',
-      state: 'unavailable',
-    }
-  }
-
+// The gateway resolves the org from the session, so the SPA sends no org scope.
+async function readInsightConnectors(): Promise<InsightsWorkspace['insightConnectors']> {
   try {
-    const overview = await getInsightsOverview(orgId)
+    const connectors = await listInsightConnectors()
     return {
-      data: overview,
-      message: 'Insight-core overview is available through the Velion gateway.',
-      state: 'live',
-    }
-  } catch {
-    return {
-      data: null,
-      message: 'Insight-core exists, but the Velion v3 gateway proxy is not available yet. Using derived contracts.',
-      state: 'unavailable',
-    }
-  }
-}
-
-async function readInsightConnectors(orgId: string): Promise<InsightsWorkspace['insightConnectors']> {
-  if (!orgId.trim()) {
-    return {
-      data: [],
-      message: 'No organization scope was resolved for insight-core connectors.',
-      state: 'unavailable',
-    }
-  }
-
-  try {
-    const result = await listInsightConnectors(orgId)
-    return {
-      data: result.connectors,
-      message: result.connectors.length
+      data: connectors,
+      message: connectors.length
         ? 'Insight-core connector registry is available through the Velion gateway.'
-        : 'Insight-core connector registry is live, but no analytics connectors are connected.',
-      state: result.connectors.length ? 'live' : 'empty',
+        : 'Insight-core connector registry is live, but no connectors are registered yet.',
+      state: connectors.length ? 'live' : 'empty',
     }
   } catch {
     return {
       data: [],
       message: 'Insight-core connector proxy is not available yet; falling back to integration connections.',
-      state: 'unavailable',
-    }
-  }
-}
-
-async function readSocial(orgId: string): Promise<InsightsWorkspace['social']> {
-  if (!orgId.trim()) {
-    return {
-      data: { adapters: [], calendar: emptySocialCalendar },
-      message: 'No organization scope was resolved for social measurement.',
-      state: 'unavailable',
-    }
-  }
-
-  try {
-    const [calendar, adaptersResult] = await Promise.all([
-      getSocialCalendar(orgId),
-      listSocialAdapters(orgId),
-    ])
-    const adapters = adaptersResult.adapters
-    return {
-      data: { adapters, calendar },
-      message: calendar.accounts.length || calendar.posts.length
-        ? 'Social calendar and adapter contracts are live.'
-        : 'Social contracts are live, but no accounts or posts exist yet.',
-      state: calendar.accounts.length || calendar.posts.length ? 'live' : 'empty',
-    }
-  } catch {
-    return {
-      data: { adapters: [], calendar: emptySocialCalendar },
-      message: 'The org-scoped social gateway is unavailable.',
-      state: 'unavailable',
-    }
-  }
-}
-
-async function readInbox(orgId: string): Promise<InsightsWorkspace['inbox']> {
-  if (!orgId.trim()) {
-    return {
-      data: [],
-      message: 'No organization scope was resolved for inbox measurement.',
-      state: 'unavailable',
-    }
-  }
-
-  try {
-    const result = await listConversations(orgId, { limit: 100 })
-    return {
-      data: result.tickets,
-      message: result.tickets.length
-        ? 'Conversation-core summaries are live.'
-        : 'Conversation-core is live, but no conversations matched the current scope.',
-      state: result.tickets.length ? 'live' : 'empty',
-    }
-  } catch {
-    return {
-      data: [],
-      message: 'The inbox conversation contract is unavailable.',
-      state: 'unavailable',
-    }
-  }
-}
-
-async function readAgents(): Promise<InsightsWorkspace['agents']> {
-  try {
-    const status = await fetchChatbotSupportStatus()
-    return {
-      data: status,
-      message: status.status === 'connected'
-        ? 'Chatbot support runtime status is live.'
-        : status.message,
-      state: status.status === 'connected' ? 'live' : status.status === 'not-configured' ? 'not_connected' : 'unavailable',
-    }
-  } catch {
-    return {
-      data: null,
-      message: 'Agent runtime measurement is unavailable.',
       state: 'unavailable',
     }
   }

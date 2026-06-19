@@ -63,6 +63,7 @@ impl ObservationRunner {
                 script: script.clone(),
             },
             AgentAction::Back => Action::Back,
+            AgentAction::Forward => Action::Forward,
             AgentAction::GetContent => Action::Navigate { url: String::new() },
         }
     }
@@ -145,9 +146,17 @@ impl ObservationRunner {
             AgentAction::Back => {
                 self.browser.back(session).await?;
             }
+            AgentAction::Forward => {
+                self.browser.forward(session).await?;
+            }
             AgentAction::GetContent => {
                 let _content = self.browser.content(session).await?;
             }
+        }
+
+        let page_state = self.page_state(session).await;
+        if let Some(url) = page_state.url.as_deref().filter(|url| !url.is_empty()) {
+            ctx.current_url = url.to_owned();
         }
 
         let html_bytes = match self.browser.content(session).await {
@@ -160,9 +169,11 @@ impl ObservationRunner {
             build_dom_summary(&html_str)
         });
 
-        let title = html_bytes.as_ref().and_then(|bytes| {
-            let html_str = String::from_utf8_lossy(bytes);
-            extract_title(&html_str)
+        let title = page_state.title.or_else(|| {
+            html_bytes.as_ref().and_then(|bytes| {
+                let html_str = String::from_utf8_lossy(bytes);
+                extract_title(&html_str)
+            })
         });
 
         if screenshot_artifact_id.is_none() {
@@ -209,6 +220,40 @@ impl ObservationRunner {
         ctx.step += 1;
         Ok(observation)
     }
+
+    async fn page_state(&self, session: &quarry_browser::BrowserSession) -> PageState {
+        self.browser
+            .evaluate(
+                session,
+                r#"(() => ({
+                    url: window.location && window.location.href ? window.location.href : null,
+                    title: document && document.title ? document.title : null
+                }))()"#,
+            )
+            .await
+            .ok()
+            .and_then(|value| {
+                Some(PageState {
+                    url: value
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    title: value
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .map(str::to_owned),
+                })
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Default)]
+struct PageState {
+    url: Option<String>,
+    title: Option<String>,
 }
 
 fn extract_title(html: &str) -> Option<String> {
@@ -366,5 +411,12 @@ mod tests {
             Action::Click { selector } => assert_eq!(selector, "#btn"),
             _ => panic!("wrong action type"),
         }
+    }
+
+    #[test]
+    fn forward_action_converts_to_browser_action() {
+        let browser_action =
+            ObservationRunner::agent_action_to_browser_action(&AgentAction::Forward);
+        assert!(matches!(browser_action, Action::Forward));
     }
 }
