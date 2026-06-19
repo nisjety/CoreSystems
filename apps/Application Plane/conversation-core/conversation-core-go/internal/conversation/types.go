@@ -25,6 +25,7 @@ const (
 	SubjectTagAdded            = "velion.application.conversation.tag.added"
 	SubjectTagRemoved          = "velion.application.conversation.tag.removed"
 	SubjectAIActionReviewed    = "velion.application.conversation.ai_action.reviewed"
+	SubjectAIActionExecuted    = "velion.application.conversation.ai_action.executed"
 	SubjectTicketSuggested     = "velion.application.conversation.ticket.suggested"
 	SubjectTicketCreated       = "velion.application.conversation.ticket.created"
 	SubjectTicketUpdated       = "velion.application.conversation.ticket.updated"

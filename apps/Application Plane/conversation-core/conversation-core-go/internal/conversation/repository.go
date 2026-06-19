@@ -466,6 +466,60 @@ func scanAIAction(row scanner) (AIAction, error) {
 	return action, nil
 }
 
+// GetAIAction returns a single model-proposed action scoped to the org. Returns
+// ErrNotFound for a missing id or a foreign-org id, so it never leaks an action
+// across tenants (mirrors the ReviewAIAction org-scoping).
+func (r *PGRepository) GetAIAction(ctx context.Context, orgID, id string) (*AIAction, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	row := r.pool.QueryRow(ctx, `
+SELECT id, org_id, conversation_id, kind, status, payload, created_by, reviewed_by, reviewed_at, created_at, updated_at
+FROM conversation_ai_actions
+WHERE org_id = $1 AND id = $2`, orgID, id)
+	action, err := scanAIAction(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &action, nil
+}
+
+// MarkAIActionExecuted atomically claims an approved action for execution by
+// transitioning status approved → executed. This is the idempotency gate for
+// the HITL executor: exactly one delivery of a duplicated or redelivered
+// ai_action.reviewed event observes RowsAffected == 1 (and may apply side
+// effects); every other delivery observes 0 and must skip. Org-scoped.
+func (r *PGRepository) MarkAIActionExecuted(ctx context.Context, orgID, id string) (bool, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return false, err
+	}
+	tag, err := r.pool.Exec(ctx, `
+UPDATE conversation_ai_actions
+SET status = 'executed', updated_at = NOW()
+WHERE org_id = $1 AND id = $2 AND status = 'approved'`, orgID, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// UnmarkAIActionExecuted reverts a claim (executed → approved) so a transient
+// failure while applying side effects leaves the action eligible for a
+// JetStream redelivery rather than stranded as executed-but-unapplied.
+func (r *PGRepository) UnmarkAIActionExecuted(ctx context.Context, orgID, id string) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	_, err := r.pool.Exec(ctx, `
+UPDATE conversation_ai_actions
+SET status = 'approved', updated_at = NOW()
+WHERE org_id = $1 AND id = $2 AND status = 'executed'`, orgID, id)
+	return err
+}
+
 func (r *PGRepository) ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error) {
 	if err := r.ensureConfigured(); err != nil {
 		return nil, err

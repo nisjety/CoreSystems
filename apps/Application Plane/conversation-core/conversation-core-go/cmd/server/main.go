@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/config"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/eventing"
@@ -54,6 +55,19 @@ func main() {
 
 	repository := conversation.NewRepository(db.Pool)
 	service := conversation.NewService(repository, publisher)
+
+	// W4 HITL executor: when a human approves a ticket.classification action,
+	// promote the suggested ticket + apply routing. Only runs when JetStream is
+	// available (publisher set in the NATS branch above). Idempotent by action id.
+	if natsClient != nil && publisher != nil {
+		executor := consumers.NewAIActionExecutor(natsClient.JS, repository, service, publisher)
+		if err := executor.Start(ctx); err != nil {
+			log.Printf("conversation-core-go: ai-action executor: %v", err)
+		} else {
+			defer executor.Stop()
+		}
+	}
+
 	handler := apphttp.NewHandler(cfg, service)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
 

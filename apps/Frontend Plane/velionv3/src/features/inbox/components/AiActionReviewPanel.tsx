@@ -6,7 +6,10 @@ import { listAiActions, reviewAiAction, type AiAction } from '@/shared/api/inbox
  * actually provided — never fabricates a confidence, category, or priority. */
 function summarize(action: AiAction): { label: string; detail: string } {
   const payload = action.payload ?? {}
-  const proposed = (payload.proposed_ticket ?? {}) as Record<string, unknown>
+  // conversation-core stores the AI's suggested ticket fields under
+  // `suggested_fields` (RecordTicketClassification). `proposed_ticket` is kept
+  // as a forward-compat fallback.
+  const proposed = (payload.suggested_fields ?? payload.proposed_ticket ?? {}) as Record<string, unknown>
   const label =
     action.kind === 'ticket_classification' || action.kind === 'ticket.classification'
       ? 'Proposed support ticket'
@@ -30,7 +33,9 @@ function summarize(action: AiAction): { label: string; detail: string } {
 export function AiActionReviewPanel(props: { conversationId: string | undefined }) {
   const [actions, { refetch }] = createResource(
     () => props.conversationId,
-    (conversationId) => listAiActions({ conversationId, status: 'suggested' }),
+    // Pending ticket.classification actions carry the classification outcome as
+    // their status ("suggest_ticket"); that is the awaiting-human-review state.
+    (conversationId) => listAiActions({ conversationId, status: 'suggest_ticket' }),
   )
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [recorded, setRecorded] = createSignal<string | null>(null)
@@ -42,7 +47,11 @@ export function AiActionReviewPanel(props: { conversationId: string | undefined 
     setBusyId(action.id)
     try {
       await reviewAiAction(action.id, decision)
-      setRecorded(`Decision recorded — ${decision === 'approve' ? 'approved' : 'rejected'}.`)
+      setRecorded(
+        decision === 'approve'
+          ? 'Applied — the suggested ticket was promoted and routed.'
+          : 'Decision recorded — suggestion dismissed.',
+      )
       await refetch()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not record the decision. Please retry.')
@@ -114,7 +123,7 @@ export function AiActionReviewPanel(props: { conversationId: string | undefined 
           <p class="velion-ai-review__error" role="alert">{error()}</p>
         </Show>
         <p class="velion-ai-review__note">
-          Decisions are recorded for audit. Approved actions are not auto-executed yet.
+          Approving promotes and routes the suggested ticket; rejecting dismisses it. Every decision is audited.
         </p>
       </section>
     </Show>
