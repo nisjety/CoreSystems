@@ -81,3 +81,43 @@ DoD evidence:
 No-new-fakeness proof: "Applied" copy ships only because a real approve→promote round-trip was
 verified end-to-end against running NATS+Postgres+cc-go. The review panel now renders real pending
 actions (not an empty list) and their real suggested fields.
+
+---
+
+## PR-2 — E5 audit tool-NAME fix (+ findings on per-connection & admin erasure)
+**Status:** E5 backend tool-name fix complete; per-connection UI + admin erasure scoped below.
+
+### Done — E5 backend: audit `details.tool` is the real tool NAME (was the call-id)
+Root cause: execution-core `tool_step_id` suffixes the step with the provider **call id** when present
+(`agent.rs:385`), and session-core derived `details.tool` from that suffix — so the GDPR `tool_action`
+audit row recorded an opaque call id, not the tool name.
+
+Fix (no proto churn — `mp-contracts/src/gen` is stale, so reuse the existing execution-core→session-core
+metadata side channel, the `CompleteStepRequest` output prefix):
+- execution-core `record_tool_step`: extend the prefix `[data_category=… zdr=…]` → adds `tool=<name>`
+  (it already has `tool_name`). Tool identifiers have no spaces, so the space-delimited prefix stays parseable.
+- session-core `audit_publisher`: `ToolActionDetail` gains `tool: Option<String>`; `parse_tool_action_detail`
+  reads `tool=`; new `resolve_tool_name(detail, step_id)` prefers the prefix name and falls back to the
+  step_id-derived id only for pre-E5 steps. `grpc.rs` caller uses `resolve_tool_name`.
+- Evidence: `cargo check -p execution-core` → ok; `cargo test -p session-core audit_publisher` → 6 passed / 0 failed;
+  tests assert the prefix `tool=` parse + the prefer-prefix-over-step_id resolution + pre-E5 fallback.
+  (Full live verification — rebuild execution-core+session-core, drive an agentic tool run, inspect the
+  audit row — is the recommended next confirmation; the unit tests pin the parse/resolve against the exact
+  prefix execution-core now writes.)
+
+### Finding — per-connection "Used by AI?" is NOT honestly buildable from the current toolset
+The builtin agent tools (knowledge_search, company_lookup→Brreg, web_search, …) are not bound to per-org
+**connections**, so a per-connection Yes/No column would fabricate attribution (violating the absolute rule).
+The honest, real signal is **tool-level + data-category** attribution — which `audit-client.ts` already
+aggregates and which Phase-1 E1 deliberately scoped to. The tool-NAME fix makes that view truthful; the
+per-connection column stays honestly "Attribution unavailable" until connection-bound tools exist. **Not
+fabricating it.** (Path to real per-connection: connection-bound MCP tools + a `source`/connection field on
+the audit detail — deferred, not faked.)
+
+### Remaining (PR-2, substantial) — admin Control-Plane erasure
+The self-service erasure (Phase-1 D) already ships confirm + step-up + the CP-only DSAR disclosure. The
+admin variant (an org admin erasing another user's CP account data) needs: an RBAC-gated endpoint over
+user-core's existing hard_delete/anonymize (gdpr.go), typed-confirm + step-up re-auth, honest copy ("CP
+account data; Model/Data purge pending" — never "erased everywhere"), gateway proxy + admin UI, and the CP
+`.env` DB_PASSWORD-drift reconcile before the erase path runs (never change the live hex). Scoped as the
+next PR-2 increment.

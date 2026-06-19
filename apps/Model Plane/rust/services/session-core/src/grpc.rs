@@ -620,7 +620,9 @@ async fn maybe_publish_tool_action(
         .await
     {
         Ok(Some((org_id, user_id))) => {
-            let tool = crate::audit_publisher::tool_name_from_step_id(&req.step_id);
+            // Prefer the human-readable tool name from the execution-core prefix
+            // (E5); fall back to the step_id-derived call id only for pre-E5 steps.
+            let tool = crate::audit_publisher::resolve_tool_name(&detail, &req.step_id);
             let body = crate::audit_publisher::build_tool_action_body(
                 &org_id,
                 &user_id,

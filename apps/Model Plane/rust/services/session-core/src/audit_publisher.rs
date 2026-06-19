@@ -22,11 +22,15 @@
 pub const SUBJECT_MODEL_TOOL_ACTION: &str = "velion.audit.v1.model.tool_action";
 
 /// Parsed GDPR detail extracted from a per-tool step's output prefix
-/// `[data_category=<class> zdr=<bool>]`.
+/// `[data_category=<class> zdr=<bool> tool=<name>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolActionDetail {
     pub data_category: String,
     pub zdr: bool,
+    /// Human-readable tool name carried in the prefix (`tool=<name>`, E5). `None`
+    /// for steps written before E5 — callers then fall back to
+    /// [`tool_name_from_step_id`], which yields the opaque provider call id.
+    pub tool: Option<String>,
 }
 
 /// Sink for audit event bodies. Abstracted so the publish path is unit-testable
@@ -56,18 +60,36 @@ pub fn parse_tool_action_detail(output: &str, error: &str) -> Option<ToolActionD
 
     let mut data_category = None;
     let mut zdr = None;
+    let mut tool = None;
     for token in inner.split_whitespace() {
         if let Some(value) = token.strip_prefix("data_category=") {
             data_category = Some(value.to_owned());
         } else if let Some(value) = token.strip_prefix("zdr=") {
             zdr = Some(value == "true");
+        } else if let Some(value) = token.strip_prefix("tool=") {
+            if !value.is_empty() {
+                tool = Some(value.to_owned());
+            }
         }
     }
 
     Some(ToolActionDetail {
         data_category: data_category?,
         zdr: zdr.unwrap_or(false),
+        tool,
     })
+}
+
+/// Resolve the human-readable tool name for an audit row: prefer the explicit
+/// `tool=<name>` from the execution-core prefix (E5); fall back to extracting it
+/// from the `step_id` (which yields the opaque provider call id) only for steps
+/// written before E5.
+#[must_use]
+pub fn resolve_tool_name(detail: &ToolActionDetail, step_id: &str) -> String {
+    detail
+        .tool
+        .clone()
+        .unwrap_or_else(|| tool_name_from_step_id(step_id))
 }
 
 /// Extract the tool name from a per-tool `step_id`. execution-core mints these
@@ -183,12 +205,13 @@ mod tests {
     #[test]
     fn parses_prefix_from_output() {
         let detail = parse_tool_action_detail(
-            "[data_category=customer_private zdr=true] some tool output",
+            "[data_category=customer_private zdr=true tool=knowledge_search] some tool output",
             "",
         )
         .expect("prefix present");
         assert_eq!(detail.data_category, "customer_private");
         assert!(detail.zdr);
+        assert_eq!(detail.tool.as_deref(), Some("knowledge_search"));
     }
 
     #[test]
@@ -198,6 +221,27 @@ mod tests {
                 .expect("prefix present");
         assert_eq!(detail.data_category, "public_non_personal");
         assert!(!detail.zdr);
+        // No tool= token (pre-E5 prefix) → tool is None and the caller falls back.
+        assert!(detail.tool.is_none());
+    }
+
+    #[test]
+    fn resolve_tool_name_prefers_prefix_over_step_id() {
+        let with_tool = ToolActionDetail {
+            data_category: "public_non_personal".to_owned(),
+            zdr: false,
+            tool: Some("company_lookup".to_owned()),
+        };
+        // The step_id suffix is the opaque provider call id; the prefix wins.
+        assert_eq!(resolve_tool_name(&with_tool, "tool_1_call-abc123"), "company_lookup");
+
+        let legacy = ToolActionDetail {
+            data_category: "public_non_personal".to_owned(),
+            zdr: false,
+            tool: None,
+        };
+        // Pre-E5 step with no tool= → fall back to the step_id-derived name.
+        assert_eq!(resolve_tool_name(&legacy, "tool_2_yr_weather"), "yr_weather");
     }
 
     #[test]
@@ -219,6 +263,7 @@ mod tests {
         let detail = ToolActionDetail {
             data_category: "customer_private".to_owned(),
             zdr: true,
+            tool: Some("knowledge_search".to_owned()),
         };
         let body = build_tool_action_body(
             "org_1",

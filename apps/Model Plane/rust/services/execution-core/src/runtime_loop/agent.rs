@@ -479,7 +479,15 @@ async fn record_tool_step(
     outcome: &StepOutcome,
     zdr: bool,
 ) {
-    let detail = format!("[data_category={} zdr={zdr}] ", data_category(tool_name));
+    // The prefix is the execution-core → session-core metadata side channel for
+    // the tool_action audit row. `tool=<name>` carries the human-readable tool
+    // NAME so the audit details.tool is the name, not the opaque provider call id
+    // that the step_id suffix uses (E5). Tool identifiers never contain spaces,
+    // so the space-delimited prefix stays parseable.
+    let detail = format!(
+        "[data_category={} zdr={zdr} tool={tool_name}] ",
+        data_category(tool_name)
+    );
     let (output, error) = if outcome.error.is_empty() {
         (
             format!("{detail}{}", truncate(&outcome.output, OUTPUT_TRUNCATE)),
