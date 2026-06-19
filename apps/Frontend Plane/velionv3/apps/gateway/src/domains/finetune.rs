@@ -40,14 +40,6 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-fn org_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-velion-org-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_owned)
-}
-
 fn actor_for(user: &AuthenticatedUser) -> ActionActor {
     ActionActor {
         user_id: user.user_id.clone(),
@@ -69,16 +61,16 @@ fn qs(uri: &Uri) -> String {
 async fn list_jobs(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
     let url = format!("{}/v1/finetune/jobs{}", state.model_gateway_url, qs(&uri));
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::GET,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )
@@ -88,16 +80,16 @@ async fn list_jobs(
 async fn create_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let url = format!("{}/v1/finetune/jobs", state.model_gateway_url);
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::POST,
         &url,
         Some(body),
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )
@@ -107,7 +99,6 @@ async fn create_job(
 async fn get_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
     let url = format!(
@@ -115,12 +106,13 @@ async fn get_job(
         state.model_gateway_url,
         urlencoding::encode(&job_id)
     );
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::GET,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )
@@ -130,7 +122,6 @@ async fn get_job(
 async fn cancel_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
     let url = format!(
@@ -138,12 +129,13 @@ async fn cancel_job(
         state.model_gateway_url,
         urlencoding::encode(&job_id)
     );
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::DELETE,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )
@@ -157,7 +149,6 @@ async fn cancel_job(
 async fn deploy_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(job_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -166,12 +157,13 @@ async fn deploy_job(
         state.model_gateway_url,
         urlencoding::encode(&job_id)
     );
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::POST,
         &url,
         Some(body),
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )
@@ -205,7 +197,8 @@ async fn upload_training_file(
     if !actor.user_role.is_empty() {
         req = req.header("x-user-role", &actor.user_role);
     }
-    if let Some(org_id) = org_id_from_headers(&headers) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if !org_id.is_empty() {
         req = req.header("x-org-id", org_id);
     }
     if let Some(content_type) = headers.get("content-type").and_then(|v| v.to_str().ok()) {

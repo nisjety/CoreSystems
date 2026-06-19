@@ -341,4 +341,67 @@ mod tests {
         // boot-time panic (e.g. a duplicated `/api/v1/me` across domains).
         let _ = crate::build_router(test_state(false));
     }
+
+    /// Tier-2 (cross-tenant IDOR): drive the *real* router end-to-end. An
+    /// authenticated user forges `x-velion-org-id` for a victim org; the gateway
+    /// must never forward that id to the upstream core as `x-org-id`. Fails on
+    /// pre-fix code (handler read the client header), passes after the org is
+    /// derived from the validated session + the header is stripped at ingress.
+    #[tokio::test]
+    async fn forged_org_header_never_reaches_upstream() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Stand-in inference-core: records every inbound request, always 200.
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/internal/v1/router-policy"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&upstream)
+            .await;
+
+        // Dev-bypass auth on; point router-policy's upstream at the mock. The
+        // dev user has no active org and user-core is unreachable in tests, so
+        // the authoritative org resolves to empty.
+        let mut state = test_state(true);
+        state.inference_core_url = upstream.uri();
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/router-policy")
+                    .header("authorization", "Bearer dev-bypass")
+                    .header("x-velion-org-id", "org-victim")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // The request must have been proxied (not rejected) so the assertion
+        // below is meaningful.
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.into_body().collect().await.unwrap();
+
+        // Negative control across EVERY recorded upstream request.
+        let received = upstream.received_requests().await.unwrap();
+        assert!(
+            !received.is_empty(),
+            "router-policy must proxy through to the upstream core"
+        );
+        for req in &received {
+            let forwarded = req.headers.get("x-org-id").and_then(|v| v.to_str().ok());
+            assert_ne!(
+                forwarded,
+                Some("org-victim"),
+                "a client-forged x-velion-org-id must never be forwarded as x-org-id"
+            );
+        }
+    }
 }

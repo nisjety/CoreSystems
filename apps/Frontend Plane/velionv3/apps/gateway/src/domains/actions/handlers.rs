@@ -40,22 +40,19 @@ pub(super) async fn execute_action(
         "knowledge.import_source" => {
             dispatch_import_source(&state, &user, &headers, &body.input).await
         }
-        "knowledge.connect_source" => {
-            dispatch_connect_source(&state, &user, &headers, &body.input).await
-        }
+        "knowledge.connect_source" => dispatch_connect_source(&state, &user, &body.input).await,
         "knowledge.upload_files" => dispatch_upload_files().await,
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
             dispatch_brreg_lookup(&state, &user, &body.input).await
         }
         "operating_map.generate" | "operating_map.refresh" => {
-            dispatch_operating_map_generate(&state, &user, &headers, &body.input, &body.action_id)
-                .await
+            dispatch_operating_map_generate(&state, &user, &body.input, &body.action_id).await
         }
         "operating_map.review_proposal" => {
-            dispatch_operating_map_review(&state, &user, &headers, &body.input).await
+            dispatch_operating_map_review(&state, &user, &body.input).await
         }
         "operating_map.create_agent_blueprint" => {
-            dispatch_operating_map_blueprint(&state, &user, &headers, &body.input).await
+            dispatch_operating_map_blueprint(&state, &user, &body.input).await
         }
         "workflows.toggle_policy" => dispatch_toggle_policy(&state, &user, &body.input).await,
         other => (

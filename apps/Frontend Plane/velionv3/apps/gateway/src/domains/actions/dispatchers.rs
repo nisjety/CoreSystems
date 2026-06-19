@@ -14,7 +14,7 @@ use crate::{
     upstream::{proxy_bearer_json, proxy_json},
 };
 
-use super::shared::{cookie_header, org_id_from_headers, quarry_token};
+use super::shared::{cookie_header, quarry_token};
 
 pub(super) async fn dispatch_recrawl(
     state: &AppState,
@@ -23,7 +23,7 @@ pub(super) async fn dispatch_recrawl(
     input: &Value,
 ) -> Response {
     let source_id = input.get("sourceId").and_then(|v| v.as_str()).unwrap_or("");
-    let org_id = org_id_from_headers(headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let cookie = cookie_header(headers);
     let token = quarry_token(state, user, &cookie).await;
 
@@ -123,7 +123,7 @@ pub(super) async fn dispatch_crawl_site(
     input: &Value,
 ) -> Response {
     let target = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let org_id = org_id_from_headers(headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let cookie = cookie_header(headers);
     let token = quarry_token(state, user, &cookie).await;
 
@@ -235,7 +235,6 @@ pub(super) async fn dispatch_import_source(
 pub(super) async fn dispatch_connect_source(
     state: &AppState,
     user: &AuthenticatedUser,
-    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let source_type = input
@@ -254,7 +253,7 @@ pub(super) async fn dispatch_connect_source(
             .into_response();
     }
 
-    let org_id = org_id_from_headers(headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -426,11 +425,10 @@ pub(super) async fn dispatch_toggle_policy(
 pub(super) async fn dispatch_operating_map_generate(
     state: &AppState,
     user: &AuthenticatedUser,
-    headers: &HeaderMap,
     input: &Value,
     action_id: &str,
 ) -> Response {
-    let org_id = org_id_from_headers(headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -483,7 +481,6 @@ pub(super) async fn dispatch_operating_map_generate(
 pub(super) async fn dispatch_operating_map_review(
     state: &AppState,
     user: &AuthenticatedUser,
-    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let proposal_id = input
@@ -507,7 +504,7 @@ pub(super) async fn dispatch_operating_map_review(
             .into_response();
     }
 
-    let org_id = org_id_from_headers(headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -551,7 +548,6 @@ pub(super) async fn dispatch_operating_map_review(
 pub(super) async fn dispatch_operating_map_blueprint(
     state: &AppState,
     user: &AuthenticatedUser,
-    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let version_id = input
@@ -585,7 +581,7 @@ pub(super) async fn dispatch_operating_map_blueprint(
             .into_response();
     }
 
-    let org_id = org_id_from_headers(headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),

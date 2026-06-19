@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
@@ -15,10 +15,12 @@ use crate::{
 pub(super) async fn list_documents(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!(
         "{}/v1/documents{}",
         state.documents_api_url,
@@ -44,10 +46,12 @@ pub(super) async fn list_documents(
 pub(super) async fn create_document(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let content = body.get("content").and_then(Value::as_str).unwrap_or("");
     if content.trim().is_empty() {
         return (
@@ -106,10 +110,12 @@ pub(super) async fn create_document(
 pub(super) async fn get_document(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!(
         "{}/v1/documents/{}",
         state.documents_api_url,
@@ -130,10 +136,12 @@ pub(super) async fn get_document(
 pub(super) async fn list_sources(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/sources{}", state.documents_api_url, shared::qs(&uri));
     proxy_json(
         &state,

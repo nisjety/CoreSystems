@@ -516,7 +516,6 @@ async fn search_videos(
 async fn search_suggestions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
     let empty = || (StatusCode::OK, Json(ok(json!({ "suggestions": [] }))));
@@ -539,7 +538,15 @@ async fn search_suggestions(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(8)
         .clamp(1, 20);
-    let org_id = org_id_from_headers(&headers).unwrap_or_else(|| user.user_id.clone());
+    // Org comes from the validated session, never a client header. Autocomplete
+    // is per-user (not tenant data), so when the session has no active org we
+    // intentionally keep the v2 fallback to the user id for the scope key.
+    let resolved_org = crate::upstream::authorized_org_id(&state, &user).await;
+    let org_id = if resolved_org.is_empty() {
+        user.user_id.clone()
+    } else {
+        resolved_org
+    };
     let url = format!("{}/v1/suggestions", state.autocomplete_core_url);
 
     let request = state
@@ -618,14 +625,6 @@ async fn quarry_token(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     get_audience_token(state, &user.user_id, cookie, "quarry").await
-}
-
-fn org_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-velion-org-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_owned)
 }
 
 /// POST a JSON body to quarry-edge with the audience bearer token and forwarded

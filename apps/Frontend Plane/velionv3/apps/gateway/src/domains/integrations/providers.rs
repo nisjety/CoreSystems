@@ -1,6 +1,5 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::HeaderMap,
     Json,
 };
 use reqwest::Method;
@@ -8,14 +7,16 @@ use serde_json::Value;
 
 use crate::{config::AppState, middleware::AuthenticatedUser, upstream::proxy_integration_json};
 
-use super::shared::{actor_for, org_id_from_headers};
+use super::shared::actor_for;
 
 pub(super) async fn list_providers(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
 ) -> impl axum::response::IntoResponse {
-    let org_id = org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/api/v1/providers", state.integration_core_url);
     proxy_integration_json(
         &state,
@@ -31,11 +32,13 @@ pub(super) async fn list_providers(
 pub(super) async fn start_connect_session(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(provider): Path<String>,
     Json(body): Json<Value>,
 ) -> impl axum::response::IntoResponse {
-    let org_id = org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!(
         "{}/api/v1/providers/{}/connect-session",
         state.integration_core_url,

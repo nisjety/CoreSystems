@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Extension, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -28,15 +28,15 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(4);
 pub(super) async fn sync_workspace(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
 ) -> Response {
-    let Some(org) = shared::org_id_from_headers(&headers) else {
+    let org = crate::upstream::authorized_org_id(&state, &user).await;
+    if org.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error("no_active_org", "No active organization found.")),
         )
             .into_response();
-    };
+    }
     let actor = shared::actor_for(&user);
 
     let connections_url = format!(
@@ -181,16 +181,16 @@ pub(super) async fn sync_workspace(
 pub(super) async fn register_sharepoint(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(input): Json<Value>,
 ) -> Response {
-    let Some(org) = shared::org_id_from_headers(&headers) else {
+    let org = crate::upstream::authorized_org_id(&state, &user).await;
+    if org.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error("no_active_org", "No active organization found.")),
         )
             .into_response();
-    };
+    }
     let actor = shared::actor_for(&user);
 
     let create_body = json!({

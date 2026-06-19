@@ -1,6 +1,5 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::HeaderMap,
     response::IntoResponse,
     Json,
 };
@@ -15,10 +14,12 @@ use crate::{
 pub(super) async fn search_knowledge(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/knowledge/search", state.retrieval_engine_url);
     proxy_json(
         &state,
@@ -35,10 +36,12 @@ pub(super) async fn search_knowledge(
 pub(super) async fn get_retrieval_trace(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(trace_id): Path<String>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!(
         "{}/v1/retrieval/{}",
         state.retrieval_engine_url,
@@ -59,10 +62,12 @@ pub(super) async fn get_retrieval_trace(
 pub(super) async fn resolve_sources(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/retrieve/sources", state.retrieval_engine_url);
     proxy_json(
         &state,
@@ -79,10 +84,12 @@ pub(super) async fn resolve_sources(
 pub(super) async fn expand_chunks(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/retrieve/chunks", state.retrieval_engine_url);
     proxy_json(
         &state,
@@ -99,10 +106,12 @@ pub(super) async fn expand_chunks(
 pub(super) async fn graph_retrieve(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/retrieve/graph", state.retrieval_engine_url);
     proxy_json(
         &state,
@@ -119,10 +128,12 @@ pub(super) async fn graph_retrieve(
 pub(super) async fn wiki_retrieve(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/retrieve/wiki", state.retrieval_engine_url);
     proxy_json(
         &state,

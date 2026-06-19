@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -29,6 +29,9 @@ const STRIPPED_HEADERS: &[&str] = &[
     "x-internal-api-key",
     "x-internal-request",
     "x-org-id",
+    // Client-controlled tenant scoping must never be trusted: the org id is
+    // derived server-side from the validated session (`authorized_org_id`).
+    "x-velion-org-id",
 ];
 
 /// User identity extracted from a validated Better Auth session.
@@ -70,12 +73,19 @@ struct UserFields {
     email_verified: bool,
 }
 
+/// Remove every [`STRIPPED_HEADERS`] entry from a header map. Header-name
+/// matching is case-insensitive (HTTP normalizes names), so a forged
+/// `X-Velion-Org-Id` is dropped just like `x-velion-org-id`.
+fn strip_identity_headers(headers: &mut HeaderMap) {
+    for name in STRIPPED_HEADERS {
+        headers.remove(*name);
+    }
+}
+
 /// Strip identity/internal headers that must never arrive from the browser.
 /// Applied globally before any routing so no handler ever sees spoofed identity.
 pub(crate) async fn strip_inbound_identity_headers(mut request: Request, next: Next) -> Response {
-    for name in STRIPPED_HEADERS {
-        request.headers_mut().remove(*name);
-    }
+    strip_identity_headers(request.headers_mut());
     next.run(request).await
 }
 
@@ -218,4 +228,44 @@ pub(crate) async fn validate_session_cookie(
         auth_role: user.role,
         active_org_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    /// Tier-1: the ingress strip set must drop a client-forged tenant-scoping
+    /// header (`x-velion-org-id`) — the root of the cross-tenant IDOR — along
+    /// with `x-org-id`, while leaving unrelated headers intact. Case-insensitive.
+    #[test]
+    fn strips_forged_org_scoping_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-velion-org-id", HeaderValue::from_static("org-victim"));
+        headers.insert("X-Velion-Org-Id", HeaderValue::from_static("org-victim"));
+        headers.insert("x-org-id", HeaderValue::from_static("org-victim"));
+        headers.insert("cookie", HeaderValue::from_static("session=abc"));
+
+        strip_identity_headers(&mut headers);
+
+        assert!(
+            headers.get("x-velion-org-id").is_none(),
+            "x-velion-org-id must be stripped at ingress"
+        );
+        assert!(
+            headers.get("x-org-id").is_none(),
+            "x-org-id must be stripped at ingress"
+        );
+        assert_eq!(
+            headers.get("cookie").map(|v| v.to_str().unwrap()),
+            Some("session=abc"),
+            "non-identity headers must survive"
+        );
+    }
+
+    #[test]
+    fn stripped_headers_includes_velion_org_id() {
+        assert!(STRIPPED_HEADERS.contains(&"x-velion-org-id"));
+        assert!(STRIPPED_HEADERS.contains(&"x-org-id"));
+    }
 }

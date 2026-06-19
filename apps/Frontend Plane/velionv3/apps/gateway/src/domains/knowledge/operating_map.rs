@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Extension, Path, State},
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -16,9 +16,11 @@ use crate::{
 pub(super) async fn get_operating_map(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/wiki/operating-map", state.wiki_store_url);
     proxy_json(
         &state,
@@ -35,10 +37,12 @@ pub(super) async fn get_operating_map(
 pub(super) async fn generate_operating_map(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     body["requested_by"] = Value::String(user.user_id.clone());
     if body.get("generated_from").is_none() {
         body["generated_from"] = json!({
@@ -62,10 +66,12 @@ pub(super) async fn generate_operating_map(
 pub(super) async fn operating_map_run_events(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(run_id): Path<String>,
 ) -> Response {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!("{}/v1/wiki/operating-map", state.wiki_store_url);
     let (upstream_status, Json(body)) = proxy_json(
         &state,
@@ -134,11 +140,13 @@ fn operating_map_run_event_payload(run_id: &str, snapshot: &Value) -> Value {
 pub(super) async fn review_operating_map_proposal(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(proposal_id): Path<String>,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     body["reviewed_by"] = Value::String(user.user_id.clone());
     let url = format!(
         "{}/v1/wiki/operating-map/proposals/{}/review",

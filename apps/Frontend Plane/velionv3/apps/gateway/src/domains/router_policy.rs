@@ -11,7 +11,6 @@
 
 use axum::{
     extract::{Extension, State},
-    http::HeaderMap,
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -32,14 +31,6 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-fn org_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-velion-org-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_owned)
-}
-
 fn actor_for(user: &AuthenticatedUser) -> ActionActor {
     ActionActor {
         user_id: user.user_id.clone(),
@@ -52,15 +43,15 @@ fn actor_for(user: &AuthenticatedUser) -> ActionActor {
 async fn get_policy(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
 ) -> impl IntoResponse {
     let url = format!("{}/internal/v1/router-policy", state.inference_core_url);
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::GET,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )
@@ -70,16 +61,16 @@ async fn get_policy(
 async fn put_policy(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let url = format!("{}/internal/v1/router-policy", state.inference_core_url);
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     proxy_json(
         &state,
         Method::PUT,
         &url,
         Some(body),
-        org_id_from_headers(&headers).as_deref(),
+        Some(org_id.as_str()),
         Some(&actor_for(&user)),
         None,
     )

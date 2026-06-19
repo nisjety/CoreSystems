@@ -1,20 +1,19 @@
-use axum::{
-    extract::{Extension, Path, State},
-    http::HeaderMap,
-};
+use axum::extract::{Extension, Path, State};
 use reqwest::Method;
 
 use crate::{config::AppState, middleware::AuthenticatedUser, upstream::proxy_integration_json};
 
-use super::shared::{actor_for, org_id_from_headers};
+use super::shared::actor_for;
 
 pub(super) async fn connect_session_status(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl axum::response::IntoResponse {
-    let org_id = org_id_from_headers(&headers);
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
     let url = format!(
         "{}/api/v1/connect-sessions/{}/status",
         state.integration_core_url,

@@ -50,7 +50,7 @@ pub(super) async fn load_workspace(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let org_id = shared::org_id_from_headers(&headers).unwrap_or_default();
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let actor = shared::actor_for(&user);
     let cookie = shared::cookie_header(&headers);
     let org_opt = (!org_id.trim().is_empty()).then(|| org_id.clone());
