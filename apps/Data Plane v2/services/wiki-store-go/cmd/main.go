@@ -85,6 +85,11 @@ func main() {
 
 	r.Route("/v1/wiki", func(r chi.Router) {
 		r.Use(handler.OrgIDMiddleware)
+		r.Get("/operating-map", wikiHandler.GetOperatingMap)
+		r.Post("/operating-map/proposals", wikiHandler.SubmitOperatingMapProposal)
+		r.Post("/operating-map/proposals/{proposalID}/review", wikiHandler.ReviewOperatingMapProposal)
+		r.Post("/operating-map/agent-blueprints", wikiHandler.CreateOperatingMapBlueprintSuggestion)
+		r.Post("/operating-map/refresh", wikiHandler.RefreshOperatingMap)
 		r.Post("/pages", wikiHandler.CreatePage)
 		// Wave 3.1 / Wave 11.C-b — paginated list-all-pages for velion sidebar.
 		r.Get("/pages", wikiHandler.ListPages)

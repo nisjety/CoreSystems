@@ -153,7 +153,7 @@ Used by all control-plane services when running Docker Compose:
 
 - **PostgreSQL**: `aquatiq-postgres-local:5432`
   - User: `aquatiq`
-  - Password: `change-me-db-password` (in `.env.docker`)
+  - Password: `<redacted-rotate-and-set-locally>` (in `.env.docker`)
 
 - **Redis**: `aquatiq-redis-local:6379`
   - Password: `change-me-redis-password` (in `.env.docker`)

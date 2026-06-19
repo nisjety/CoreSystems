@@ -55,6 +55,26 @@ func TestNewRegistry_SeedsV2ParityInferenceCapabilities(t *testing.T) {
 	}
 }
 
+func TestNewRegistry_SeedsOperatingMapGenerateCapability(t *testing.T) {
+	r := newReg(t)
+	capability, err := r.Get("operating_map.generate", "")
+	if err != nil {
+		t.Fatalf("expected seeded operating map capability: %v", err)
+	}
+	if capability.Kind != models.KindInference {
+		t.Fatalf("expected kind=inference, got %s", capability.Kind)
+	}
+	if capability.RiskLevel != models.RiskMedium {
+		t.Fatalf("expected risk=medium, got %s", capability.RiskLevel)
+	}
+	if capability.Scope != "workspace" {
+		t.Fatalf("expected workspace scope, got %s", capability.Scope)
+	}
+	if !capability.Enabled {
+		t.Fatalf("expected operating_map.generate to be enabled")
+	}
+}
+
 func TestValidateSkill_SkillExistsAndIsValid(t *testing.T) {
 	r := newReg(t)
 	capability, errs, err := r.ValidateSkill("cap.skill.summarize")

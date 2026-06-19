@@ -6,6 +6,7 @@ import type { JSX } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryProvider } from '@/app/providers/QueryProvider'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
+import { readActiveChatThreadId, setActiveChatThreadId, upsertChatThreadHistory } from '@/features/chat/lib/chat-thread-history'
 import { CoreSidebar } from '@/features/core/components/CoreSidebar'
 import { demoWorkspaceIdentity, routeFromPath } from '@/features/core/lib/shell-data'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
@@ -20,6 +21,21 @@ function renderWithRouter(component: () => JSX.Element, path = '/dashboard') {
       </Router>
     </QueryProvider>
   ))
+}
+
+function createStorageMock(): Storage {
+  const entries = new Map<string, string>()
+
+  return {
+    clear: vi.fn(() => entries.clear()),
+    getItem: vi.fn((key: string) => entries.get(key) ?? null),
+    key: vi.fn((index: number) => Array.from(entries.keys())[index] ?? null),
+    get length() {
+      return entries.size
+    },
+    removeItem: vi.fn((key: string) => entries.delete(key)),
+    setItem: vi.fn((key: string, value: string) => entries.set(key, value)),
+  }
 }
 
 afterEach(() => {
@@ -148,8 +164,7 @@ describe('v2 dashboard shell port', () => {
     renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Historikk' }))
-    expect(screen.getByText('Open chat to load real conversation history.')).toBeTruthy()
-    expect(screen.getByText('View all conversations')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('View all conversations')).toBeTruthy())
 
     fireEvent.click(screen.getByRole('button', { name: 'Innstillinger' }))
     expect(screen.getByText('Voice language')).toBeTruthy()
@@ -233,6 +248,11 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByText('Velion AI Agent')).toBeTruthy()
     expect(screen.getByText('Your inbox')).toBeTruthy()
 
+    renderSidebar('/tickets?queue=suggested')
+    expect(screen.getByRole('navigation', { name: 'Ticketing navigation' })).toBeTruthy()
+    expect(screen.getByText('Suggested by AI')).toBeTruthy()
+    expect(screen.getByText('SLA risk')).toBeTruthy()
+
     renderSidebar('/studio/canvas')
     expect(screen.getByRole('navigation', { name: 'Studio navigation' })).toBeTruthy()
     expect(screen.getByText('Campaign planner')).toBeTruthy()
@@ -263,5 +283,141 @@ describe('v2 dashboard shell port', () => {
     renderSidebar('/account')
     expect(screen.getByRole('navigation', { name: 'Account sections' })).toBeTruthy()
     expect(screen.getByText('Connected accounts')).toBeTruthy()
+  })
+
+  it('renders saved chat thread history in the expanded chat sidebar', () => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    setActiveChatThreadId('thread-history-1')
+    upsertChatThreadHistory({
+      threadId: 'thread-history-1',
+      title: 'history visible check',
+      preview: 'Assistant reply preview',
+      updatedAt: new Date().toISOString(),
+    })
+
+    renderWithRouter(() => (
+      <AgentsProvider>
+        <CoreSidebar
+          activeRoute="/chat"
+          expanded
+          onExpandedChange={vi.fn()}
+          onOpenSearch={vi.fn()}
+        />
+      </AgentsProvider>
+    ), '/chat')
+
+    const chatHistory = screen.getByRole('navigation', { name: 'Chat conversations' })
+    expect(within(chatHistory).getByText('history visible check')).toBeTruthy()
+    expect(within(chatHistory).getByText('Just now')).toBeTruthy()
+    expect(within(chatHistory).queryByText('Assistant reply preview')).toBeNull()
+    expect(within(chatHistory).queryByText('Current thread')).toBeNull()
+  })
+
+  it('keeps and uploads local chat history when the server index is empty', async () => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-local-only',
+      title: 'local only thread',
+      preview: 'Assistant reply preview',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/chat/threads' && init?.method !== 'DELETE') {
+        return new Response(JSON.stringify({ data: { sessions: [] } }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      if (url === '/api/v1/chat/threads/thread-local-only' && init?.method === 'PUT') {
+        return new Response(JSON.stringify({
+          data: {
+            session: {
+              threadId: 'thread-local-only',
+              title: 'local only thread',
+              preview: 'Assistant reply preview',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+            },
+          },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      return new Response(JSON.stringify({ data: {} }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithRouter(() => (
+      <AgentsProvider>
+        <CoreSidebar
+          activeRoute="/chat"
+          expanded
+          onExpandedChange={vi.fn()}
+          onOpenSearch={vi.fn()}
+        />
+      </AgentsProvider>
+    ), '/chat')
+
+    const chatHistory = screen.getByRole('navigation', { name: 'Chat conversations' })
+    expect(within(chatHistory).getByText('local only thread')).toBeTruthy()
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/threads/thread-local-only',
+      expect.objectContaining({ method: 'PUT', credentials: 'include' }),
+    ))
+    expect(within(chatHistory).getByText('local only thread')).toBeTruthy()
+  })
+
+  it('clears the active chat thread when starting a new sidebar conversation', () => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    setActiveChatThreadId('thread-history-1')
+    upsertChatThreadHistory({
+      threadId: 'thread-history-1',
+      title: 'history visible check',
+      preview: 'Assistant reply preview',
+      updatedAt: new Date().toISOString(),
+    })
+
+    renderWithRouter(() => (
+      <AgentsProvider>
+        <CoreSidebar
+          activeRoute="/chat"
+          expanded
+          onExpandedChange={vi.fn()}
+          onOpenSearch={vi.fn()}
+        />
+      </AgentsProvider>
+    ), '/chat')
+
+    fireEvent.click(screen.getByText('Ny samtale'))
+
+    expect(readActiveChatThreadId()).toBeNull()
+    expect(screen.getByText('history visible check')).toBeTruthy()
   })
 })

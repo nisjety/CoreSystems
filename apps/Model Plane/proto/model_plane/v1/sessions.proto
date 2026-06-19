@@ -58,6 +58,10 @@ service SessionCore {
   // conversation.
   rpc ListConversation(ListConversationRequest) returns (ListConversationResponse);
 
+  // List an authenticated user's durable conversation threads for cross-device
+  // chat history. Timestamps are based on creation/message writes, never reads.
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse);
+
   // Set a run's mode (execute | plan | reactive | research) durably on the
   // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
   // write-throughs here so plan mode survives restart — auditability/resume
@@ -332,6 +336,30 @@ message ListConversationResponse {
   repeated SessionMessage messages = 1;
 }
 
+// --- ListThreads (durable cross-device chat history) ---
+
+message ListThreadsRequest {
+  // Required. Only this org's threads are returned.
+  string org_id = 1;
+  // Required. Only this user's threads are returned.
+  string user_id = 2;
+  // Optional. 0 means server default.
+  uint32 limit = 3;
+}
+
+message ThreadSummary {
+  string thread_id = 1;
+  string session_key = 2;
+  string title = 3;
+  string preview = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message ListThreadsResponse {
+  repeated ThreadSummary threads = 1;
+}
+
 // --- SetRunMode (ROADMAP P3 run modes) ---
 
 message SetRunModeRequest {
@@ -348,4 +376,3 @@ message SetRunModeResponse {
   string run_id = 1;
   string mode = 2;
 }
-

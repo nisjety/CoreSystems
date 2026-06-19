@@ -1,5 +1,7 @@
 //! Runtime loop orchestration for one execution step.
 
+pub mod agent;
+
 use crate::hook;
 use crate::permission::{self, PermissionDecision, PermissionMode};
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
@@ -22,6 +24,16 @@ const WEB_FETCH_TOOL: &str = "web_fetch";
 /// RAG over the org's own ingested knowledge via Data Plane v2 retrieval
 /// (`knowledge_tools`). Async, read-only. `org_id` comes from the run context.
 const KNOWLEDGE_SEARCH_TOOL: &str = "knowledge_search";
+
+/// Norwegian real-time read tools backed by the Application Plane
+/// `information-core` service (`info_tools`) plus the public Brønnøysund
+/// registry. All five are read-only (none match `permission::is_risky_tool`),
+/// so they run under `ask` posture without an approval gate.
+const YR_WEATHER_TOOL: &str = "yr_weather";
+const TRAFFIC_TOOL: &str = "traffic";
+const NEWS_TOOL: &str = "news";
+const TRACK_SHIPMENT_TOOL: &str = "track_shipment";
+const COMPANY_LOOKUP_TOOL: &str = "company_lookup";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepOutcome {
@@ -106,6 +118,16 @@ pub async fn execute_step(
         execute_web_fetch(tool_input).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
         execute_knowledge_search(tool_input, org_id).await
+    } else if tool_name == YR_WEATHER_TOOL {
+        execute_yr_weather(tool_input).await
+    } else if tool_name == TRAFFIC_TOOL {
+        execute_traffic(tool_input).await
+    } else if tool_name == NEWS_TOOL {
+        execute_news(tool_input).await
+    } else if tool_name == TRACK_SHIPMENT_TOOL {
+        execute_track_shipment(tool_input).await
+    } else if tool_name == COMPANY_LOOKUP_TOOL {
+        execute_company_lookup(tool_input).await
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };
@@ -233,7 +255,148 @@ async fn execute_knowledge_search(tool_input: &str, org_id: &str) -> tool_bridge
             "knowledge_search unavailable: DATAPLANE_RETRIEVAL_URL not configured".to_owned(),
         );
     };
-    match client.search(org_id, &input.query, input.top_k.unwrap_or(5)).await {
+    match client
+        .search(org_id, &input.query, input.top_k.unwrap_or(5))
+        .await
+    {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `yr_weather` tool — input JSON `{"lat": f64, "lon": f64}`. Returns a compact
+/// Yr forecast for the coordinate via information-core. Read-only.
+async fn execute_yr_weather(tool_input: &str) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct WeatherInput {
+        lat: f64,
+        lon: f64,
+    }
+    let input: WeatherInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid yr_weather input: {e}")),
+    };
+    let Some(client) = crate::info_tools::InfoToolsClient::from_env() else {
+        return tool_error(
+            "yr_weather unavailable: info tools client could not be built".to_owned(),
+        );
+    };
+    match client.yr_weather(input.lat, input.lon).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `traffic` tool — input JSON `{"lat": f64, "lon": f64, "radius"?: u32}`.
+/// Returns nearby traffic registration stations via information-core. Read-only.
+async fn execute_traffic(tool_input: &str) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct TrafficInput {
+        lat: f64,
+        lon: f64,
+        #[serde(default)]
+        radius: Option<u32>,
+    }
+    let input: TrafficInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid traffic input: {e}")),
+    };
+    let Some(client) = crate::info_tools::InfoToolsClient::from_env() else {
+        return tool_error("traffic unavailable: info tools client could not be built".to_owned());
+    };
+    match client
+        .traffic(input.lat, input.lon, input.radius.unwrap_or(5000))
+        .await
+    {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `news` tool — input JSON `{"category"?: String, "limit"?: u32}`. Returns the
+/// latest normalised news articles via information-core. Read-only.
+async fn execute_news(tool_input: &str) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct NewsInput {
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+    }
+    let input: NewsInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid news input: {e}")),
+    };
+    let Some(client) = crate::info_tools::InfoToolsClient::from_env() else {
+        return tool_error("news unavailable: info tools client could not be built".to_owned());
+    };
+    match client
+        .news(
+            input.category.as_deref().unwrap_or(""),
+            input.limit.unwrap_or(10),
+        )
+        .await
+    {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `track_shipment` tool — input JSON `{"tracking_number": String}`. Returns
+/// carrier status + recent events via information-core (Bring). Read-only.
+async fn execute_track_shipment(tool_input: &str) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct TrackInput {
+        tracking_number: String,
+    }
+    let input: TrackInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid track_shipment input: {e}")),
+    };
+    let Some(client) = crate::info_tools::InfoToolsClient::from_env() else {
+        return tool_error(
+            "track_shipment unavailable: info tools client could not be built".to_owned(),
+        );
+    };
+    match client.track_shipment(&input.tracking_number).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `company_lookup` tool — input JSON `{"query": String}`. A 9-digit query is an
+/// org number; otherwise a name search against the public Brønnøysund registry.
+/// Read-only, public, non-personal data.
+async fn execute_company_lookup(tool_input: &str) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct CompanyInput {
+        query: String,
+    }
+    let input: CompanyInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid company_lookup input: {e}")),
+    };
+    let Some(client) = crate::info_tools::InfoToolsClient::from_env() else {
+        return tool_error(
+            "company_lookup unavailable: info tools client could not be built".to_owned(),
+        );
+    };
+    match client.company_lookup(&input.query).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -301,7 +464,15 @@ mod tests {
 
     #[tokio::test]
     async fn deny_mode_blocks_shell_before_execution() {
-        let out = execute_step("shell", r#"{"program":"echo","args":["x"]}"#, "deny", "", "org_test", None).await;
+        let out = execute_step(
+            "shell",
+            r#"{"program":"echo","args":["x"]}"#,
+            "deny",
+            "",
+            "org_test",
+            None,
+        )
+        .await;
         assert_eq!(out.status, "permission_denied");
     }
 }

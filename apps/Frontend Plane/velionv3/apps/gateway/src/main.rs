@@ -1,9 +1,13 @@
 use std::{env, net::SocketAddr};
 
 use anyhow::Result;
-use axum::{routing::get, Json, Router};
+use axum::{
+    http::{header, HeaderValue},
+    routing::get,
+    Json, Router,
+};
 use serde_json::{json, Value};
-use tower_http::trace::TraceLayer;
+use tower_http::{set_header::SetResponseHeaderLayer, trace::TraceLayer};
 use tracing::info;
 
 mod audience_tokens;
@@ -16,11 +20,13 @@ mod envelope;
 mod middleware;
 mod onboarding;
 mod public_url;
+mod rate_limit;
 mod upstream;
 mod utils;
 
 use config::{build_cors_layer, build_state};
 use middleware::strip_inbound_identity_headers;
+use rate_limit::{rate_limit_middleware, RateLimiter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,8 +57,10 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::actions::router(state.clone()))
         .merge(domains::agent_actions::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
+        .merge(domains::agents_runs::router(state.clone()))
         .merge(domains::ag_ui::router(state.clone()))
         .merge(domains::ai::router(state.clone()))
+        .merge(domains::audit::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::billing::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
@@ -72,7 +80,30 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::settings::router(state.clone()))
         .merge(domains::social::router(state.clone()))
         .merge(domains::studio::router(state.clone()))
+        .merge(domains::tickets::router(state.clone()))
+        // Inbound rate limiting. Runs early — after identity-header stripping
+        // (so the validated `AuthenticatedUser` extension, when a downstream
+        // `require_session` route_layer has inserted it, is the key) and before
+        // CORS/tracing, so throttled requests do the least work. The
+        // `Extension(RateLimiter)` layer must sit OUTER of the middleware so the
+        // limiter is in extensions by the time `rate_limit_middleware` reads it.
+        // Per-instance / not distributed — see `rate_limit.rs`.
+        .layer(axum::middleware::from_fn(rate_limit_middleware))
+        .layer(axum::Extension(RateLimiter::from_env()))
         .layer(axum::middleware::from_fn(strip_inbound_identity_headers))
+        // Minimal security response headers on every API response. `if_not_present`
+        // never clobbers a value an upstream already set, and these are passive
+        // response headers — they do not touch CORS negotiation. The browser-facing
+        // CSP / X-Frame-Options live at nginx (it serves the SPA HTML); these two
+        // harden the JSON/SSE API surface the gateway owns directly.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
         .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -109,12 +140,14 @@ mod tests {
             billing_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
+            audit_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),
             quarry_control_url: "http://127.0.0.1:1".into(),
             model_recommend_url: "http://127.0.0.1:1".into(),
             model_gateway_url: "http://127.0.0.1:1".into(),
+            model_gateway_dev_bearer: String::new(),
             inference_core_url: "http://127.0.0.1:1".into(),
             documents_api_url: "http://127.0.0.1:1".into(),
             retrieval_engine_url: "http://127.0.0.1:1".into(),
@@ -136,6 +169,7 @@ mod tests {
             zammad_api_token: String::new(),
             audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
             cache: crate::cache::ResultCache::disabled(),
+            chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             social_store: crate::domains::social::SocialStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers,
@@ -198,6 +232,33 @@ mod tests {
             }),
             Some(&headers),
             false,
+        );
+
+        assert_eq!(actor.user_id, "trusted-user");
+        assert_eq!(actor.user_email, "trusted@example.com");
+    }
+
+    #[test]
+    fn trusted_actor_headers_win_over_dev_body_actor() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-session-user-id",
+            HeaderValue::from_static("trusted-user"),
+        );
+        headers.insert(
+            "x-session-user-email",
+            HeaderValue::from_static("trusted@example.com"),
+        );
+
+        let actor = actor_from_request(
+            Some(&ActionActor {
+                user_id: "body-user".into(),
+                user_email: "body@example.com".into(),
+                user_name: "Body User".into(),
+                user_role: String::new(),
+            }),
+            Some(&headers),
+            true,
         );
 
         assert_eq!(actor.user_id, "trusted-user");

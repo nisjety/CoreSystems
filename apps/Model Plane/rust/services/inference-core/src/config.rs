@@ -111,7 +111,12 @@ impl InferenceConfig {
 
         // Velion intent layer — on unless explicitly disabled with a falsey value.
         let velion_intent_enabled = std::env::var("VELION_INTENT_ENABLED")
-            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .map(|v| {
+                !matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off" | "no"
+                )
+            })
             .unwrap_or(true);
 
         let cost_core_url = std::env::var("COST_CORE_URL")

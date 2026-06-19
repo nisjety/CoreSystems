@@ -1,4 +1,4 @@
-import type { BrandingSignals } from '@/features/onboarding/lib/api'
+import type { BrandingSignals, BrregEnhet } from '@/features/onboarding/lib/api'
 import type { OnboardingState, OrgSize, Step } from '@/features/onboarding/lib/model'
 import { onboardingCrawlPhases } from '@/features/onboarding/lib/model'
 
@@ -46,6 +46,81 @@ export function hasBrandSignals(branding: BrandingSignals | undefined): boolean 
       branding?.logoCandidate ||
       branding?.palette?.length,
   )
+}
+
+/**
+ * Derive a likely organization name to seed the Brreg lookup from the website
+ * crawl — the detected brand/site name first, falling back to the registrable
+ * label of the host (e.g. `www.aquatiq.com` → `Aquatiq`). Ported from velion v2
+ * so the organization step auto-fills suggestions from the website findings.
+ */
+export function inferOrganizationQuery(website: OnboardingState['website']): string {
+  const brandName = cleanBrandName(website.branding?.siteName)
+  if (brandName) return brandName
+
+  const rawUrl = website.url?.trim()
+  if (!rawUrl) return ''
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`)
+    const labels = parsed.hostname.replace(/^www\./i, '').split('.').filter(Boolean)
+    const candidate = labels.length > 1 ? labels[labels.length - 2] : labels[0]
+    return cleanBrandName(candidate?.replace(/[-_]+/g, ' ') ?? '')
+  } catch {
+    return cleanBrandName(rawUrl.replace(/^https?:\/\//i, '').split(/[/?#]/)[0] ?? '')
+  }
+}
+
+function cleanBrandName(value: string | undefined): string {
+  if (!value) return ''
+  const firstPart = value
+    .replace(/\s+/g, ' ')
+    .split(/\s[|·\-–—]\s/)
+    .at(0)
+    ?.trim()
+  return firstPart && firstPart.length >= 2 ? titleCase(firstPart).slice(0, 80) : ''
+}
+
+function titleCase(value: string): string {
+  if (/[A-ZÆØÅ]/.test(value.slice(1))) return value
+  return value.replace(/\b[\p{L}\p{N}]/gu, (char) => char.toLocaleUpperCase('nb-NO'))
+}
+
+/**
+ * Rank Brreg matches against the query: exact/prefix/substring name hits score
+ * highest, with small boosts for a matching website host and headcount. Bankrupt
+ * or dissolving entities are dropped. Ported from velion v2.
+ */
+export function rankBrregSuggestions(results: BrregEnhet[], query: string): BrregEnhet[] {
+  const needle = normalizeSearch(query)
+  return [...results]
+    .filter((item) => !item.konkurs && !item.underAvvikling)
+    .filter((item) => scoreBrreg(item, needle) > 0)
+    .sort((a, b) => scoreBrreg(b, needle) - scoreBrreg(a, needle))
+}
+
+function scoreBrreg(item: BrregEnhet, needle: string): number {
+  const name = normalizeSearch(item.navn)
+  let score = 0
+  if (name === needle) score += 100
+  if (name.startsWith(needle)) score += 50
+  if (name.includes(needle)) score += 25
+  if (item.hjemmeside && normalizeSearch(item.hjemmeside).includes(needle)) score += 20
+  if (item.antallAnsatte && item.antallAnsatte > 0) {
+    score += Math.min(10, Math.log10(item.antallAnsatte + 1) * 3)
+  }
+  return score
+}
+
+function normalizeSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/æ/g, 'ae')
+    .replace(/ø/g, 'o')
+    .replace(/å/g, 'a')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 }
 
 export function sizeFromEmployees(count?: number): OrgSize {

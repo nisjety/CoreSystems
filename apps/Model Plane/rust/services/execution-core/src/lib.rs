@@ -7,6 +7,7 @@ pub mod executor;
 pub mod grpc;
 pub mod hook;
 pub mod http_health;
+pub mod info_tools;
 pub mod knowledge_tools;
 pub mod llm_planner;
 pub mod permission;

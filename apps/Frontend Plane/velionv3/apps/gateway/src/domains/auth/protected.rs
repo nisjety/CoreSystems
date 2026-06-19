@@ -1,7 +1,7 @@
 use axum::{
     extract::{Extension, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
@@ -11,10 +11,10 @@ use crate::{
     config::AppState,
     envelope::{error, ok, unwrap_data},
     middleware::AuthenticatedUser,
-    upstream::proxy_json,
+    upstream::{browser_origin, proxy_auth, proxy_json},
 };
 
-use super::shared::actor_for;
+use super::shared::{actor_for, cookie_header};
 
 pub(super) async fn session_current(
     State(state): State<AppState>,
@@ -212,6 +212,90 @@ pub(super) async fn get_session_context(
             "orgs": orgs,
         }))),
     )
+}
+
+// --- Two-factor (TOTP) enrollment ---------------------------------------
+//
+// Enrollment is session-bound: the user is already authenticated (require_session
+// runs first) and Better Auth's two-factor plugin endpoints operate on the live
+// session. `proxy_auth` forwards the session cookie, returns any Set-Cookie, and
+// strips session tokens from the response body — so the QR/secret and backup codes
+// reach the SPA but the session secret never leaks into JS-readable JSON.
+
+/// Begin TOTP enrollment: returns `{ totpURI, backupCodes }` for the user to
+/// scan. Requires the account password (re-auth) per Better Auth's plugin.
+pub(super) async fn two_factor_enable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    proxy_two_factor(&state, &headers, "/api/auth/two-factor/enable", Some(body)).await
+}
+
+/// Fetch the otpauth:// TOTP URI for the (already-enabled, unverified) factor.
+/// Used to (re)render the QR / manual key without re-running enable.
+pub(super) async fn two_factor_get_totp_uri(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    proxy_two_factor(
+        &state,
+        &headers,
+        "/api/auth/two-factor/get-totp-uri",
+        Some(body),
+    )
+    .await
+}
+
+/// Confirm enrollment by verifying a TOTP code from the authenticator app.
+pub(super) async fn two_factor_verify_totp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    proxy_two_factor(
+        &state,
+        &headers,
+        "/api/auth/two-factor/verify-totp",
+        Some(body),
+    )
+    .await
+}
+
+/// (Re)generate single-use backup codes. Returns `{ backupCodes }`.
+pub(super) async fn two_factor_generate_backup_codes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    proxy_two_factor(
+        &state,
+        &headers,
+        "/api/auth/two-factor/generate-backup-codes",
+        Some(body),
+    )
+    .await
+}
+
+async fn proxy_two_factor(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    body: Option<Value>,
+) -> Response {
+    let url = format!("{}{}", state.auth_core_url, path);
+    let cookie = cookie_header(headers);
+    let origin = browser_origin(headers);
+    proxy_auth(
+        state,
+        Method::POST,
+        &url,
+        body,
+        Some(&cookie),
+        origin.as_deref(),
+    )
+    .await
 }
 
 fn merge_session_user_profile(body: &mut Value, user: &AuthenticatedUser) {

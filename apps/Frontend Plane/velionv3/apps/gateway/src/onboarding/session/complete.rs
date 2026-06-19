@@ -36,6 +36,12 @@ pub(crate) async fn complete_onboarding(
 
     if status.is_success() {
         persist_org_onboarding_completion(&state, &input).await;
+        crate::upstream::invalidate_session_context_cache(
+            &state,
+            &actor.user_id,
+            input.org_id.as_deref(),
+        )
+        .await;
     }
 
     let clear_state = json!({ "step": "", "state": Value::Null });

@@ -1,6 +1,6 @@
 //! gRPC server implementing `SessionCore` on :9091.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use mp_contracts::dataplane::graph_v1::{
     self as graph_pb, graph_service_client::GraphServiceClient,
 };
@@ -32,9 +32,63 @@ const THREAD_CREATED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.Thread
 const MESSAGE_APPENDED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.MessageAppended";
 const CONTEXT_MESSAGE_LIMIT: i64 = 20;
 const CONTEXT_MEMORY_LIMIT: i64 = 64;
+const DEFAULT_THREAD_LIST_LIMIT: i64 = 80;
+const MAX_THREAD_LIST_LIMIT: i64 = 200;
+const THREAD_TITLE_MAX_CHARS: usize = 96;
+const THREAD_PREVIEW_MAX_CHARS: usize = 180;
+
+/// EU data-residency default for Model-Plane processing (P0.4). Sweden Central
+/// is the explicit EU region; runs are stamped with this unless an operator
+/// overrides `MODEL_PLANE_RESIDENCY`.
+const DEFAULT_RESIDENCY: &str = "swedencentral";
+
+/// The configured Model-Plane data-residency region, stamped onto each run at
+/// `StartRun`. Defaults to the EU region [`DEFAULT_RESIDENCY`].
+fn configured_residency() -> String {
+    resolve_residency(std::env::var("MODEL_PLANE_RESIDENCY").ok())
+}
+
+/// Pure residency resolution: an explicit non-blank value wins, otherwise the
+/// EU default [`DEFAULT_RESIDENCY`]. Split out so it is testable without env
+/// mutation (the workspace forbids `unsafe`, which `std::env::set_var` requires).
+fn resolve_residency(env_value: Option<String>) -> String {
+    env_value
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_RESIDENCY.to_owned())
+}
 
 fn nanos_to_i32(nanos: u32) -> i32 {
     i32::try_from(nanos).unwrap_or(i32::MAX)
+}
+
+fn to_proto_timestamp(ts: DateTime<Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: ts.timestamp(),
+        nanos: nanos_to_i32(ts.timestamp_subsec_nanos()),
+    }
+}
+
+fn clamp_thread_limit(limit: u32) -> i64 {
+    if limit == 0 {
+        return DEFAULT_THREAD_LIST_LIMIT;
+    }
+    i64::from(limit).clamp(1, MAX_THREAD_LIST_LIMIT)
+}
+
+fn compact_thread_text(value: Option<String>, fallback: &str, max_chars: usize) -> String {
+    let text = value
+        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_owned());
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated = truncated.trim_end().to_owned();
+    format!("{truncated}...")
 }
 
 fn record_metrics(method: &'static str, started: Instant, is_ok: bool) {
@@ -87,6 +141,10 @@ pub struct SessionService {
     graph_client: Option<GraphServiceClient<Channel>>,
     knowledge_client: Option<KnowledgeServiceClient<Channel>>,
     letta_memory: Option<LettaMemoryAdapter>,
+    /// Best-effort publisher for `velion.audit.v1.model.tool_action` events when
+    /// a tool `STEP_COMPLETED` is recorded. `None` when NATS is unreachable —
+    /// the run still completes; only the audit fan-out is skipped.
+    audit_publisher: Option<std::sync::Arc<crate::audit_publisher::NatsAuditPublisher>>,
 }
 
 /// Insert the `THREAD_CREATED` event row for a freshly created thread, within
@@ -297,9 +355,12 @@ async fn start_run_inner(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
+    // P0.4 residency: stamp the configured Model-Plane region (EU default,
+    // Sweden Central) onto the run so its processing region is auditable.
+    let residency = configured_residency();
     sqlx::query(
-        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, created_at, updated_at)
-         VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $9)",
+        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at)
+         VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10)",
     )
     .bind(&run_id)
     .bind(&req.thread_id)
@@ -309,6 +370,7 @@ async fn start_run_inner(
     .bind(&req.mode)
     .bind(&req.org_id)
     .bind(&req.user_id)
+    .bind(&residency)
     .bind(now)
     .execute(&mut *tx)
     .await
@@ -437,6 +499,7 @@ async fn record_run_terminal(
 /// run-terminal event + status flip, all in one tx.
 async fn complete_step_inner(
     pool: &PgPool,
+    audit_publisher: Option<&crate::audit_publisher::NatsAuditPublisher>,
     req: pb::CompleteStepRequest,
 ) -> Result<Response<pb::CompleteStepResponse>, Status> {
     let mut tx = pool
@@ -523,10 +586,60 @@ async fn complete_step_inner(
         }
     }
 
+    // GDPR audit fan-out for tool steps (best-effort; never fails the step).
+    maybe_publish_tool_action(pool, audit_publisher, &req).await;
+
     let step_index =
         u32::try_from(row.0).map_err(|_| Status::internal("step index out of range"))?;
 
     Ok(Response::new(pb::CompleteStepResponse { step_index }))
+}
+
+/// Best-effort `velion.audit.v1.model.tool_action` publish for a recorded step.
+///
+/// execution-core's governed multi-tool loop prefixes each per-tool step with
+/// `[data_category=… zdr=…]`. When that prefix is present, this looks up the
+/// run's org/user and publishes the audit event so audit-core durably records
+/// the agentic tool call. A missing publisher, an org/user lookup miss, or a
+/// publish error is logged and swallowed — it never fails step completion.
+async fn maybe_publish_tool_action(
+    pool: &PgPool,
+    audit_publisher: Option<&crate::audit_publisher::NatsAuditPublisher>,
+    req: &pb::CompleteStepRequest,
+) {
+    let (Some(publisher), Some(detail)) = (
+        audit_publisher,
+        crate::audit_publisher::parse_tool_action_detail(&req.output, &req.error),
+    ) else {
+        return;
+    };
+
+    match sqlx::query_as::<_, (String, String)>("SELECT org_id, user_id FROM runs WHERE id = $1")
+        .bind(&req.run_id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some((org_id, user_id))) => {
+            let tool = crate::audit_publisher::tool_name_from_step_id(&req.step_id);
+            let body = crate::audit_publisher::build_tool_action_body(
+                &org_id,
+                &user_id,
+                &req.run_id,
+                &req.step_id,
+                &req.status,
+                &tool,
+                &detail,
+                Utc::now(),
+            );
+            crate::audit_publisher::publish_tool_action(publisher, &body).await;
+        }
+        Ok(None) => {
+            tracing::debug!(run_id = %req.run_id, "tool_action audit skipped (run row not found)");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, run_id = %req.run_id, "tool_action audit org/user lookup failed (best-effort)");
+        }
+    }
 }
 
 /// One event row in the exact column order selected by `replay_thread_task`'s
@@ -867,7 +980,12 @@ impl SessionCore for SessionService {
         request: Request<pb::CompleteStepRequest>,
     ) -> Result<Response<pb::CompleteStepResponse>, Status> {
         let started = Instant::now();
-        let result = complete_step_inner(&self.pool, request.into_inner()).await;
+        let result = complete_step_inner(
+            &self.pool,
+            self.audit_publisher.as_deref(),
+            request.into_inner(),
+        )
+        .await;
         record_metrics("complete_step", started, result.is_ok());
         result
     }
@@ -1228,6 +1346,93 @@ impl SessionCore for SessionService {
         }
         .await;
         record_metrics("list_conversation", started, result.is_ok());
+        result
+    }
+
+    async fn list_threads(
+        &self,
+        request: Request<pb::ListThreadsRequest>,
+    ) -> Result<Response<pb::ListThreadsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListThreadsResponse>, Status> = async {
+            let req = request.into_inner();
+            if req.org_id.is_empty() || req.user_id.is_empty() {
+                return Err(Status::invalid_argument("org_id and user_id are required"));
+            }
+            let limit = clamp_thread_limit(req.limit);
+            let rows: Vec<(
+                String,
+                String,
+                DateTime<Utc>,
+                Option<String>,
+                Option<String>,
+                DateTime<Utc>,
+            )> = sqlx::query_as(
+                "SELECT
+                    t.id,
+                    t.session_key,
+                    t.created_at,
+                    first_user.content AS title,
+                    last_message.content AS preview,
+                    COALESCE(last_message.created_at, t.created_at) AS updated_at
+                 FROM threads t
+                 LEFT JOIN LATERAL (
+                    SELECT content
+                    FROM messages
+                    WHERE thread_id = t.id AND role = 'user'
+                    ORDER BY sequence ASC
+                    LIMIT 1
+                 ) first_user ON TRUE
+                 LEFT JOIN LATERAL (
+                    SELECT content, created_at
+                    FROM messages
+                    WHERE thread_id = t.id
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                 ) last_message ON TRUE
+                 WHERE t.org_id = $1 AND t.user_id = $2
+                 ORDER BY COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
+                 LIMIT $3",
+            )
+            .bind(&req.org_id)
+            .bind(&req.user_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "list_threads failed");
+                Status::internal(e.to_string())
+            })?;
+
+            let threads = rows
+                .into_iter()
+                .map(
+                    |(thread_id, session_key, created_at, title, preview, updated_at)| {
+                        let fallback_title = if session_key.trim().is_empty() {
+                            "Velion Chat"
+                        } else {
+                            session_key.as_str()
+                        };
+                        let title =
+                            compact_thread_text(title, fallback_title, THREAD_TITLE_MAX_CHARS);
+                        let preview =
+                            compact_thread_text(preview, "", THREAD_PREVIEW_MAX_CHARS);
+                        pb::ThreadSummary {
+                            thread_id,
+                            session_key,
+                            title,
+                            preview,
+                            created_at: Some(to_proto_timestamp(created_at)),
+                            updated_at: Some(to_proto_timestamp(updated_at)),
+                        }
+                    },
+                )
+                .collect();
+
+            Ok(Response::new(pb::ListThreadsResponse { threads }))
+        }
+        .await;
+        record_metrics("list_threads", started, result.is_ok());
         result
     }
 
@@ -1823,6 +2028,23 @@ pub async fn serve(
     // `routing_policy` JSONB row in this same Postgres; the BFF writes and
     // inference-core polls it.
     let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone()).into_server();
+    // Run read model + cancel path for the runs-history UI. Owns the `runs` +
+    // `events` tables in this same Postgres (read-only here, plus the cancel
+    // status flip).
+    let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone()).into_server();
+
+    // Best-effort connect the audit publisher for `model.tool_action` events.
+    // A NATS hiccup must not block serving; on failure the field is `None` and
+    // tool-step audit fan-out is simply skipped (runs still complete).
+    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let audit_publisher = match crate::audit_publisher::NatsAuditPublisher::connect(&nats_url).await
+    {
+        Ok(p) => Some(std::sync::Arc::new(p)),
+        Err(error) => {
+            warn!(error = %error, "audit publisher NATS connect failed; tool_action audit disabled");
+            None
+        }
+    };
 
     tonic::transport::Server::builder()
         .add_service(SessionCoreServer::new(SessionService {
@@ -1831,11 +2053,13 @@ pub async fn serve(
             graph_client,
             knowledge_client,
             letta_memory,
+            audit_publisher,
         }))
         .add_service(orchestration)
         .add_service(finetune)
         .add_service(memory)
         .add_service(routing)
+        .add_service(runs)
         .serve(addr)
         .await?;
 
@@ -1844,9 +2068,32 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble_segments, pb, AssemblyInputs};
+    use super::{assemble_segments, pb, resolve_residency, AssemblyInputs, DEFAULT_RESIDENCY};
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
     use tonic::Request;
+
+    #[test]
+    fn residency_defaults_to_eu_region() {
+        // P0.4: the EU default is Sweden Central, used when MODEL_PLANE_RESIDENCY
+        // is unset or blank; an explicit value overrides it. Tested via the pure
+        // resolver so no env mutation (which needs `unsafe`, forbidden here).
+        assert_eq!(DEFAULT_RESIDENCY, "swedencentral");
+        assert_eq!(
+            resolve_residency(None),
+            "swedencentral",
+            "unset → EU default"
+        );
+        assert_eq!(
+            resolve_residency(Some("   ".to_owned())),
+            "swedencentral",
+            "blank → EU default"
+        );
+        assert_eq!(
+            resolve_residency(Some("northeurope".to_owned())),
+            "northeurope",
+            "explicit override wins"
+        );
+    }
 
     fn base() -> AssemblyInputs {
         AssemblyInputs {
@@ -2273,6 +2520,7 @@ mod tests {
             graph_client: None,
             knowledge_client: None,
             letta_memory: None,
+            audit_publisher: None,
         };
 
         assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
@@ -2418,6 +2666,7 @@ mod tests {
             graph_client: None,
             knowledge_client: None,
             letta_memory: None,
+            audit_publisher: None,
         };
         let addr: std::net::SocketAddr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()

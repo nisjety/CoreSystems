@@ -17,12 +17,22 @@ pub(crate) fn actor_from_request(
     headers: Option<&HeaderMap>,
     allow_dev_actor_headers: bool,
 ) -> ActionActor {
-    let header_actor = headers.map(|headers| actor_from_headers(headers, allow_dev_actor_headers));
-    actor_with_defaults(if allow_dev_actor_headers {
-        actor.or(header_actor.as_ref())
-    } else {
-        header_actor.as_ref()
-    })
+    if let Some(headers) = headers {
+        if let Some(trusted_actor) = trusted_actor_from_headers(headers) {
+            return actor_with_defaults(Some(&trusted_actor));
+        }
+
+        if allow_dev_actor_headers {
+            if actor.is_some() {
+                return actor_with_defaults(actor);
+            }
+
+            let dev_header_actor = actor_from_headers(headers, true);
+            return actor_with_defaults(Some(&dev_header_actor));
+        }
+    }
+
+    actor_with_defaults(if allow_dev_actor_headers { actor } else { None })
 }
 
 pub(crate) fn actor_from_headers(

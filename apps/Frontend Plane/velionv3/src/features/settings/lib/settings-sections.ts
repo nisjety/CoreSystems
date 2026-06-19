@@ -5,6 +5,7 @@ export const workspaceSettingsSectionIds = [
   'sso',
   'org-security',
   'integrations',
+  'trust',
   'router-policy',
   'finetune',
 ] as const
@@ -61,6 +62,14 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Integrations',
     description: 'Connect shared support, CRM, communication, and automation systems.',
     saveLabel: 'Save integrations',
+  },
+  {
+    id: 'trust',
+    label: 'Trust Center',
+    title: 'Trust Center',
+    description:
+      'See exactly what each connected app can access, what data the AI has fetched, and how it is retained.',
+    saveLabel: 'Save trust settings',
   },
   {
     id: 'router-policy',

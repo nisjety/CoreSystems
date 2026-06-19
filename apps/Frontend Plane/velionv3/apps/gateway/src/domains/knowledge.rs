@@ -2,6 +2,7 @@ mod diagnostics;
 mod documents;
 mod enhanced_fetch;
 mod imports;
+mod operating_map;
 mod products;
 mod quarry;
 mod retrieval;
@@ -68,6 +69,23 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/knowledge/retrieve/wiki",
             post(retrieval::wiki_retrieve),
+        )
+        // Operating Map — durable, Data Plane-owned AI rollout map surfaced inside Knowledge.
+        .route(
+            "/api/v1/knowledge/operating-map",
+            get(operating_map::get_operating_map),
+        )
+        .route(
+            "/api/v1/knowledge/operating-map/generate",
+            post(operating_map::generate_operating_map),
+        )
+        .route(
+            "/api/v1/knowledge/operating-map/runs/:run_id/events",
+            get(operating_map::operating_map_run_events),
+        )
+        .route(
+            "/api/v1/knowledge/operating-map/proposals/:proposal_id/review",
+            post(operating_map::review_operating_map_proposal),
         )
         // Wiki — canonical knowledge namespace. Static "by-path" must come
         // before the :id param route.

@@ -25,6 +25,7 @@ use crate::{
     config::AppState,
     domains::chat::shared::{model_token, proxy_model_json},
     middleware::{require_session, AuthenticatedUser},
+    rate_limit::rate_limit_middleware,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -73,6 +74,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/orchestration/runs/:run_id/cancel",
             post(cancel_run),
         )
+        // Per-org/user rate limiting on this high-risk human-in-the-loop group.
+        // Ordering: `require_session` (written last → outer) runs first and
+        // inserts `AuthenticatedUser`, so `rate_limit_middleware` (written first
+        // → inner) keys by the validated org/user rather than client IP. The
+        // shared `RateLimiter` is provided by the global `Extension` layer in
+        // `main.rs`, which is outer to this whole router.
+        .route_layer(axum::middleware::from_fn(rate_limit_middleware))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 

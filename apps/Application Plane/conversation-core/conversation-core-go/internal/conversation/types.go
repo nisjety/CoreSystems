@@ -25,6 +25,12 @@ const (
 	SubjectTagAdded            = "velion.application.conversation.tag.added"
 	SubjectTagRemoved          = "velion.application.conversation.tag.removed"
 	SubjectAIActionReviewed    = "velion.application.conversation.ai_action.reviewed"
+	SubjectTicketSuggested     = "velion.application.conversation.ticket.suggested"
+	SubjectTicketCreated       = "velion.application.conversation.ticket.created"
+	SubjectTicketUpdated       = "velion.application.conversation.ticket.updated"
+	SubjectTicketAssigned      = "velion.application.conversation.ticket.assigned"
+	SubjectTicketLinked        = "velion.application.conversation.ticket.linked"
+	SubjectTicketResolved      = "velion.application.conversation.ticket.resolved"
 )
 
 var (
@@ -32,6 +38,7 @@ var (
 	ErrInvalidInput   = errors.New("invalid input")
 	ErrForbidden      = errors.New("forbidden")
 	ErrAlreadyHandled = errors.New("event already handled")
+	ErrConflict       = errors.New("conversation resource conflict")
 )
 
 type EventPublisher interface {
@@ -49,6 +56,29 @@ type Repository interface {
 	AddTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
 	RemoveTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
 	ReviewAIAction(ctx context.Context, input AIActionReview) error
+	ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error)
+	GetTicket(ctx context.Context, orgID, ticketID string) (*Ticket, error)
+	GetTicketByConversation(ctx context.Context, orgID, conversationID string) (*Ticket, error)
+	CreateTicket(ctx context.Context, input CreateTicketInput) (*Ticket, error)
+	UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error)
+	LinkTicketResource(ctx context.Context, input LinkTicketResourceInput) (*TicketLinkedResource, error)
+	RecordTicketClassification(ctx context.Context, input TicketClassificationInput, payload map[string]any) (*TicketClassification, error)
+	ListTicketViews(ctx context.Context, orgID string) ([]TicketView, error)
+	CreateTicketView(ctx context.Context, input CreateTicketViewInput) (*TicketView, error)
+	UpdateTicketView(ctx context.Context, input UpdateTicketViewInput) (*TicketView, error)
+	ListTicketMacros(ctx context.Context, orgID string) ([]TicketMacro, error)
+	GetTicketMacro(ctx context.Context, orgID, macroID string) (*TicketMacro, error)
+	CreateTicketMacro(ctx context.Context, input CreateTicketMacroInput) (*TicketMacro, error)
+	UpdateTicketMacro(ctx context.Context, input UpdateTicketMacroInput) (*TicketMacro, error)
+	RecordTicketMacroRun(ctx context.Context, input TicketMacroRunInput) error
+	ListTicketAutomationRules(ctx context.Context, orgID string) ([]TicketAutomationRule, error)
+	CreateTicketAutomationRule(ctx context.Context, input CreateTicketAutomationRuleInput) (*TicketAutomationRule, error)
+	UpdateTicketAutomationRule(ctx context.Context, input UpdateTicketAutomationRuleInput) (*TicketAutomationRule, error)
+	ListSLAPolicies(ctx context.Context, orgID string) ([]SLAPolicy, error)
+	CreateSLAPolicy(ctx context.Context, input CreateSLAPolicyInput) (*SLAPolicy, error)
+	UpdateSLAPolicy(ctx context.Context, input UpdateSLAPolicyInput) (*SLAPolicy, error)
+	CreateTicketChecklist(ctx context.Context, input CreateTicketChecklistInput) (*TicketChecklist, error)
+	UpdateTicketChecklistItem(ctx context.Context, input UpdateTicketChecklistItemInput) (*TicketChecklist, error)
 }
 
 type Inbox struct {
@@ -90,6 +120,147 @@ type ConversationSummary struct {
 type ConversationDetail struct {
 	ConversationSummary
 	Messages []Message `json:"messages"`
+}
+
+type Ticket struct {
+	ID                  string                 `json:"id"`
+	OrgID               string                 `json:"org_id"`
+	ConversationID      string                 `json:"conversation_id"`
+	TicketKey           string                 `json:"ticket_key"`
+	Status              string                 `json:"status"`
+	Priority            string                 `json:"priority"`
+	Severity            string                 `json:"severity"`
+	Category            string                 `json:"category,omitempty"`
+	Intent              string                 `json:"intent,omitempty"`
+	AssigneeUserID      string                 `json:"assignee_user_id,omitempty"`
+	AssigneeName        string                 `json:"assignee_name,omitempty"`
+	TeamID              string                 `json:"team_id,omitempty"`
+	TeamName            string                 `json:"team_name,omitempty"`
+	DueAt               *time.Time             `json:"due_at,omitempty"`
+	Source              string                 `json:"source"`
+	AIConfidence        float64                `json:"ai_confidence,omitempty"`
+	AIReason            string                 `json:"ai_reason,omitempty"`
+	CreatedBy           string                 `json:"created_by,omitempty"`
+	WaitingSince        *time.Time             `json:"waiting_since,omitempty"`
+	LastCustomerReplyAt *time.Time             `json:"last_customer_reply_at,omitempty"`
+	FirstResponseAt     *time.Time             `json:"first_response_at,omitempty"`
+	ResolvedAt          *time.Time             `json:"resolved_at,omitempty"`
+	SnoozedUntil        *time.Time             `json:"snoozed_until,omitempty"`
+	SLAPolicyID         string                 `json:"sla_policy_id,omitempty"`
+	EscalationAt        *time.Time             `json:"escalation_at,omitempty"`
+	Labels              []string               `json:"labels"`
+	SLAState            string                 `json:"sla_state"`
+	Conversation        *ConversationSummary   `json:"conversation,omitempty"`
+	LinkedResources     []TicketLinkedResource `json:"linked_resources,omitempty"`
+	Checklists          []TicketChecklist      `json:"checklists,omitempty"`
+	CreatedAt           time.Time              `json:"created_at"`
+	UpdatedAt           time.Time              `json:"updated_at"`
+}
+
+type TicketLinkedResource struct {
+	ID              string         `json:"id"`
+	OrgID           string         `json:"org_id"`
+	TicketID        string         `json:"ticket_id"`
+	ConversationID  string         `json:"conversation_id"`
+	LinkType        string         `json:"link_type"`
+	ResourceKind    string         `json:"resource_kind"`
+	ResourceID      string         `json:"resource_id,omitempty"`
+	ResourceURL     string         `json:"resource_url,omitempty"`
+	Label           string         `json:"label,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	CreatedByUserID string         `json:"created_by_user_id,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+}
+
+type TicketClassification struct {
+	ID             string         `json:"id"`
+	OrgID          string         `json:"org_id"`
+	ConversationID string         `json:"conversation_id"`
+	Outcome        string         `json:"outcome"`
+	Confidence     float64        `json:"confidence"`
+	Reason         string         `json:"reason"`
+	Payload        map[string]any `json:"payload"`
+	Ticket         *Ticket        `json:"ticket,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+}
+
+type TicketView struct {
+	ID           string         `json:"id"`
+	OrgID        string         `json:"org_id"`
+	Name         string         `json:"name"`
+	Scope        string         `json:"scope"`
+	OwnerUserID  string         `json:"owner_user_id,omitempty"`
+	TeamID       string         `json:"team_id,omitempty"`
+	Visibility   string         `json:"visibility"`
+	Filter       map[string]any `json:"filter"`
+	Sort         map[string]any `json:"sort"`
+	GroupBy      string         `json:"group_by,omitempty"`
+	SidebarOrder int            `json:"sidebar_order"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+}
+
+type TicketMacro struct {
+	ID          string         `json:"id"`
+	OrgID       string         `json:"org_id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Visibility  string         `json:"visibility"`
+	TeamID      string         `json:"team_id,omitempty"`
+	Active      bool           `json:"active"`
+	Actions     map[string]any `json:"actions"`
+	Conditions  map[string]any `json:"conditions"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+type TicketAutomationRule struct {
+	ID         string         `json:"id"`
+	OrgID      string         `json:"org_id"`
+	Name       string         `json:"name"`
+	EventName  string         `json:"event_name"`
+	Active     bool           `json:"active"`
+	Conditions map[string]any `json:"conditions"`
+	Actions    map[string]any `json:"actions"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
+type SLAPolicy struct {
+	ID                   string         `json:"id"`
+	OrgID                string         `json:"org_id"`
+	Name                 string         `json:"name"`
+	Active               bool           `json:"active"`
+	Conditions           map[string]any `json:"conditions"`
+	CalendarRef          string         `json:"calendar_ref,omitempty"`
+	FirstResponseMinutes int            `json:"first_response_minutes"`
+	NextResponseMinutes  int            `json:"next_response_minutes"`
+	ResolutionMinutes    int            `json:"resolution_minutes"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+}
+
+type TicketChecklist struct {
+	ID              string                `json:"id"`
+	OrgID           string                `json:"org_id"`
+	TicketID        string                `json:"ticket_id"`
+	Name            string                `json:"name"`
+	TemplateID      string                `json:"template_id,omitempty"`
+	CreatedByUserID string                `json:"created_by_user_id,omitempty"`
+	Items           []TicketChecklistItem `json:"items"`
+	CreatedAt       time.Time             `json:"created_at"`
+	UpdatedAt       time.Time             `json:"updated_at"`
+}
+
+type TicketChecklistItem struct {
+	ID          string    `json:"id"`
+	OrgID       string    `json:"org_id"`
+	ChecklistID string    `json:"checklist_id"`
+	Label       string    `json:"label"`
+	Completed   bool      `json:"completed"`
+	Position    int       `json:"position"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Message struct {
@@ -172,6 +343,20 @@ type ListFilter struct {
 	CursorID      string
 }
 
+type TicketListFilter struct {
+	OrgID    string
+	Queue    string
+	Status   string
+	Assigned string
+	TeamID   string
+	Label    string
+	Priority string
+	Severity string
+	SLAState string
+	Query    string
+	Limit    int
+}
+
 type StatusUpdate struct {
 	OrgID          string
 	ConversationID string
@@ -194,6 +379,215 @@ type AIActionReview struct {
 	Decision   string
 	Comment    string
 	OccurredAt time.Time
+}
+
+type CreateTicketInput struct {
+	OrgID               string
+	ConversationID      string
+	Status              string
+	Priority            string
+	Severity            string
+	Category            string
+	Intent              string
+	AssigneeUserID      string
+	AssigneeName        string
+	TeamID              string
+	TeamName            string
+	DueAt               *time.Time
+	Source              string
+	AIConfidence        float64
+	AIReason            string
+	CreatedBy           string
+	WaitingSince        *time.Time
+	LastCustomerReplyAt *time.Time
+	FirstResponseAt     *time.Time
+	ResolvedAt          *time.Time
+	SnoozedUntil        *time.Time
+	SLAPolicyID         string
+	EscalationAt        *time.Time
+	Labels              []string
+	ActorUserID         string
+}
+
+type UpdateTicketInput struct {
+	OrgID               string
+	TicketID            string
+	Status              *string
+	Priority            *string
+	Severity            *string
+	Category            *string
+	Intent              *string
+	AssigneeUserID      *string
+	AssigneeName        *string
+	TeamID              *string
+	TeamName            *string
+	DueAt               *time.Time
+	Source              *string
+	AIConfidence        *float64
+	AIReason            *string
+	WaitingSince        *time.Time
+	LastCustomerReplyAt *time.Time
+	FirstResponseAt     *time.Time
+	ResolvedAt          *time.Time
+	SnoozedUntil        *time.Time
+	SLAPolicyID         *string
+	EscalationAt        *time.Time
+	Labels              *[]string
+	ActorUserID         string
+}
+
+type LinkTicketResourceInput struct {
+	OrgID           string
+	TicketID        string
+	LinkType        string
+	ResourceKind    string
+	ResourceID      string
+	ResourceURL     string
+	Label           string
+	Metadata        map[string]any
+	CreatedByUserID string
+}
+
+type TicketClassificationInput struct {
+	OrgID              string
+	ConversationID     string
+	Outcome            string
+	Confidence         float64
+	Reason             string
+	SuggestedFields    map[string]any
+	EvidenceMessageIDs []string
+	ActorUserID        string
+}
+
+type CreateTicketViewInput struct {
+	OrgID        string
+	Name         string
+	Scope        string
+	OwnerUserID  string
+	TeamID       string
+	Visibility   string
+	Filter       map[string]any
+	Sort         map[string]any
+	GroupBy      string
+	SidebarOrder int
+	ActorUserID  string
+}
+
+type UpdateTicketViewInput struct {
+	OrgID        string
+	ID           string
+	Name         *string
+	Scope        *string
+	OwnerUserID  *string
+	TeamID       *string
+	Visibility   *string
+	Filter       *map[string]any
+	Sort         *map[string]any
+	GroupBy      *string
+	SidebarOrder *int
+	ActorUserID  string
+}
+
+type CreateTicketMacroInput struct {
+	OrgID       string
+	Name        string
+	Description string
+	Visibility  string
+	TeamID      string
+	Active      bool
+	Actions     map[string]any
+	Conditions  map[string]any
+	ActorUserID string
+}
+
+type UpdateTicketMacroInput struct {
+	OrgID       string
+	ID          string
+	Name        *string
+	Description *string
+	Visibility  *string
+	TeamID      *string
+	Active      *bool
+	Actions     *map[string]any
+	Conditions  *map[string]any
+	ActorUserID string
+}
+
+type TicketMacroRunInput struct {
+	OrgID       string
+	TicketID    string
+	MacroID     string
+	ActorUserID string
+	Actions     map[string]any
+}
+
+type TicketMacroRunResult struct {
+	Ticket *Ticket     `json:"ticket"`
+	Macro  TicketMacro `json:"macro"`
+}
+
+type CreateTicketAutomationRuleInput struct {
+	OrgID       string
+	Name        string
+	EventName   string
+	Active      bool
+	Conditions  map[string]any
+	Actions     map[string]any
+	ActorUserID string
+}
+
+type UpdateTicketAutomationRuleInput struct {
+	OrgID       string
+	ID          string
+	Name        *string
+	EventName   *string
+	Active      *bool
+	Conditions  *map[string]any
+	Actions     *map[string]any
+	ActorUserID string
+}
+
+type CreateSLAPolicyInput struct {
+	OrgID                string
+	Name                 string
+	Active               bool
+	Conditions           map[string]any
+	CalendarRef          string
+	FirstResponseMinutes int
+	NextResponseMinutes  int
+	ResolutionMinutes    int
+	ActorUserID          string
+}
+
+type UpdateSLAPolicyInput struct {
+	OrgID                string
+	ID                   string
+	Name                 *string
+	Active               *bool
+	Conditions           *map[string]any
+	CalendarRef          *string
+	FirstResponseMinutes *int
+	NextResponseMinutes  *int
+	ResolutionMinutes    *int
+	ActorUserID          string
+}
+
+type CreateTicketChecklistInput struct {
+	OrgID           string
+	TicketID        string
+	Name            string
+	TemplateID      string
+	Items           []string
+	CreatedByUserID string
+}
+
+type UpdateTicketChecklistItemInput struct {
+	OrgID       string
+	TicketID    string
+	ChecklistID string
+	ItemID      string
+	Completed   bool
+	ActorUserID string
 }
 
 type LifecycleEvent struct {

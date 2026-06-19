@@ -7,9 +7,10 @@ import {
   type CheckoutSession,
   createEmptyPreviewResponse,
   getBrowserActor,
+  saveOnboardingState,
 } from '@/features/onboarding/lib/api'
 import { signOut } from '@/shared/api/auth-client'
-import { clearSession, getSession, loadSession } from '@/shared/session/session-store'
+import { clearSession, getSession, loadSession, markSessionOnboardingComplete } from '@/shared/session/session-store'
 import { createCrawlPreviewStream } from '@/features/onboarding/lib/crawl-preview'
 import {
   type GraphDisplayNode,
@@ -28,10 +29,17 @@ import {
 } from '@/features/onboarding/lib/queries'
 import {
   cloneOnboardingState,
+  createInitialOnboardingState,
   reconcileOnboardingState,
 } from '@/features/onboarding/lib/state'
 import { createOnboardingStepTransition } from '@/features/onboarding/lib/step-transition'
-import { graphNodePosition, sizeFromEmployees, stepNumberFor } from '@/features/onboarding/lib/view'
+import {
+  graphNodePosition,
+  inferOrganizationQuery,
+  rankBrregSuggestions,
+  sizeFromEmployees,
+  stepNumberFor,
+} from '@/features/onboarding/lib/view'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
 import { ConnectStepContent, ConnectStepVisual } from '@/features/onboarding/components/steps/ConnectStep'
 import { IntroStepContent, IntroStepVisual } from '@/features/onboarding/components/steps/IntroStep'
@@ -61,6 +69,7 @@ export default function OnboardingPage() {
   const [state, setState] = createOnboardingState(storageKey)
   const [searchResults, setSearchResults] = createSignal<BrregEnhet[]>([])
   const [searching, setSearching] = createSignal(false)
+  const [orgAutoInferred, setOrgAutoInferred] = createSignal(false)
   const [submittingOrg, setSubmittingOrg] = createSignal(false)
   const [connectingId, setConnectingId] = createSignal<string>()
   const [committingPlan, setCommittingPlan] = createSignal(false)
@@ -70,6 +79,7 @@ export default function OnboardingPage() {
   const [assemblyError, setAssemblyError] = createSignal<string>()
   const [error, setError] = createSignal<string>()
   const [hydratedFromServer, setHydratedFromServer] = createSignal(false)
+  const [finalizingOnboarding, setFinalizingOnboarding] = createSignal(false)
   const [viewportHeight, setViewportHeight] = createSignal<number | null>(
     typeof window === 'undefined' ? null : window.innerHeight,
   )
@@ -86,6 +96,7 @@ export default function OnboardingPage() {
   createOnboardingPersistence({
     actor: actions.actor,
     hydratedFromServer,
+    paused: finalizingOnboarding,
     state,
     storageKey,
   })
@@ -138,9 +149,34 @@ export default function OnboardingPage() {
       })
       .catch(() => setHydratedFromServer(true))
 
-    if (!state.introPlayed) {
-      introTimer = window.setTimeout(advanceFromIntro, 3000)
+  })
+
+  createEffect(() => {
+    if (typeof window === 'undefined') return
+    window.clearTimeout(introTimer)
+    introTimer = undefined
+
+    if (state.step !== 'post-signin') return
+    introTimer = window.setTimeout(advanceFromIntro, state.introPlayed ? 600 : 3000)
+  })
+
+  // On reaching the organization step, infer the org from the website crawl and
+  // pre-search Enhetsregisteret once, so verified matches appear without the
+  // user re-typing what the crawl already discovered.
+  createEffect(() => {
+    if (state.step !== 'organization') return
+    if (untrack(orgAutoInferred)) return
+    if (untrack(() => Boolean(state.organization.orgNumber || state.organization.id))) return
+    if (untrack(() => searchResults().length > 0)) return
+
+    const inferred = inferOrganizationQuery(state.website)
+    if (!inferred) return
+
+    setOrgAutoInferred(true)
+    if (!untrack(() => state.organization.name.trim())) {
+      setState('organization', 'name', inferred)
     }
+    void autoInferOrganizationFromWebsite(inferred)
   })
 
   onCleanup(() => {
@@ -183,7 +219,7 @@ export default function OnboardingPage() {
     },
     websites: state.website.url ? [{ url: state.website.url, agentBrief: state.website.brief }] : [],
     connectors: state.connectors.map((item) => ({ id: item.id, label: item.label })),
-    locale: 'en',
+    locale: 'nb',
     sourceCount: state.connectors.length + (state.website.url ? 1 : 0),
   }))
   const recommendationQuery = createPlanRecommendationQuery(
@@ -229,6 +265,13 @@ export default function OnboardingPage() {
     setState('organization', 'orgNumber', item.organisasjonsnummer)
     setState('organization', 'employeeCount', item.antallAnsatte)
     setState('organization', 'size', sizeFromEmployees(item.antallAnsatte))
+
+    // Pre-fill the website from the Brreg registry entry so a downstream ingest
+    // has a URL to crawl — but never clobber a site the user already entered or
+    // crawled in the website step. The website step stores the URL in
+    // `https://`-prefixed form, so normalize to match.
+    const site = (item.hjemmeside ?? '').trim().replace(/^https?:\/\//i, '').replace(/\s+/g, '')
+    if (site && !state.website.url.trim()) setState('website', 'url', `https://${site}`)
   }
 
   async function runWebsitePreview() {
@@ -294,6 +337,25 @@ export default function OnboardingPage() {
       setSearchResults(await actions.searchBrreg(state.organization.name))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not search Brreg.')
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  // Auto-fill the organization step from the website crawl findings: derive a
+  // likely org name from the detected brand/site (or the URL host), seed the
+  // name field, and pre-search Enhetsregisteret so verified matches surface
+  // without the user re-typing. Best-effort — manual search still works on
+  // failure. Mirrors velion v2's inferred-from-website suggestion flow.
+  async function autoInferOrganizationFromWebsite(query: string) {
+    setSearching(true)
+    try {
+      const results = await actions.searchBrreg(query)
+      const ranked = rankBrregSuggestions(results, query)
+      setSearchResults(ranked.length > 0 ? ranked : results)
+    } catch {
+      // Silent: the user did not explicitly trigger this, and the manual search
+      // box remains available.
     } finally {
       setSearching(false)
     }
@@ -520,6 +582,9 @@ export default function OnboardingPage() {
   }
 
   function finishOnboarding() {
+    if (finalizingOnboarding()) return
+
+    setFinalizingOnboarding(true)
     const completionSnapshot = cloneOnboardingState(untrack(() => state))
     const selectedPlan = activePlan()
 
@@ -571,15 +636,31 @@ export default function OnboardingPage() {
           },
         })
         if (!result.completed) {
+          setFinalizingOnboarding(false)
           setAssemblyError('Oppsett fullført, men noe gikk galt. Prøv igjen.')
           return
         }
         window.localStorage.removeItem(storageKey)
+        const currentSession = getSession()
+        const completedOrg =
+          currentSession.activeOrg ??
+          (orgId
+            ? {
+                id: orgId,
+                name: completionSnapshot.organization.name?.trim() || 'Min organisasjon',
+                role: 'owner',
+              }
+            : null)
+        markSessionOnboardingComplete(completedOrg)
         // Refresh the session so onboardingStatus flips to COMPLETED, then
         // SPA-navigate — no full reload, and the guards now allow /dashboard.
         await loadSession()
+        if (getSession().onboardingStatus !== 'COMPLETED') {
+          markSessionOnboardingComplete(completedOrg)
+        }
         navigate('/dashboard', { replace: true })
       } catch (reason) {
+        setFinalizingOnboarding(false)
         setAssemblyError(
           reason instanceof Error ? reason.message : 'Kunne ikke fullføre oppsett. Prøv igjen.',
         )
@@ -589,17 +670,37 @@ export default function OnboardingPage() {
 
   function back() {
     const previous = onboardingSteps[currentStepIndex() - 1]
-    if (previous) {
+    // `post-signin` is a transient intro splash that auto-advances forward, so
+    // stepping back into it just bounces. Treat it as "before the start": from
+    // the first interactive step (website) — or post-signin itself — "back"
+    // exits onboarding rather than landing on a screen that immediately skips.
+    if (previous && previous !== 'post-signin') {
       setState('step', previous)
       return
     }
-    // First step — sign out and return to login
-    void signOut()
-      .catch(() => undefined)
-      .finally(() => {
-        clearSession()
-        navigate('/login', { replace: true })
-      })
+    // Start of onboarding — "back" exits entirely: log out AND restore the
+    // session to zero, so the next sign-in starts from a clean slate rather
+    // than resuming half-finished progress. Order matters:
+    //   1. Pause persistence so no debounced write resurrects the old state.
+    //   2. Reset the in-memory store + wipe the local snapshot.
+    //   3. Reset the server-side onboarding snapshot (while the session is
+    //      still valid), so onMount's loadOnboardingState resumes from zero.
+    //   4. Sign out, clear the in-memory session, and return to login.
+    setFinalizingOnboarding(true)
+    setState(createInitialOnboardingState())
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(storageKey)
+    }
+    void (async () => {
+      await saveOnboardingState({
+        actor: actions.actor,
+        step: 'post-signin',
+        state: createInitialOnboardingState(),
+      }).catch(() => undefined)
+      await signOut().catch(() => undefined)
+      clearSession()
+      navigate('/login', { replace: true })
+    })()
   }
 
   function renderLeftStep(step: Step) {
@@ -757,6 +858,9 @@ export default function OnboardingPage() {
           error={error()}
           loadingRecommendation={recommendationQuery.isFetching}
           recommendation={state.recommendation}
+          onRefreshRecommendation={() => {
+            void recommendationQuery.refetch()
+          }}
           onSelectPlan={(planId) => {
             setCheckoutSession(undefined)
             setState('plan', planId)

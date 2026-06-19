@@ -208,14 +208,14 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       <Show when={workspace()?.source === 'fallback'}>
         <p class="velion-social-ops-state velion-social-ops-state--warning">
           <AlertCircle size={16} />
-          Showing fallback social data because the org-scoped social gateway is unavailable or no organization scope was resolved.
+          Social records are unavailable because the org-scoped social gateway is unavailable or no organization scope was resolved.
         </p>
       </Show>
 
       <Show when={sectionUsesDerivedData()}>
         <p class="velion-social-ops-state velion-social-ops-state--warning">
           <AlertCircle size={16} />
-          Using calendar-derived {config().title.toLowerCase()} data until the dedicated social endpoint is available.
+          No database-backed {config().title.toLowerCase()} records were loaded because the dedicated social endpoint is unavailable.
         </p>
       </Show>
 

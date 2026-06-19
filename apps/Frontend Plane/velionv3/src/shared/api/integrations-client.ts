@@ -7,6 +7,11 @@ export interface IntegrationProvider {
   description?: string
   logoUrl?: string
   requiresPlan?: string
+  /** integration-core groups providers by category (e.g. "source", "social"). */
+  category?: string
+  /** Declared capability labels, used as a permissions fallback when a connection
+   * exposes no granted scopes. integration-core returns objects keyed by `key`. */
+  capabilities?: Array<{ key: string; sensitive?: boolean }>
 }
 
 export interface IntegrationConnection {
@@ -17,6 +22,16 @@ export interface IntegrationConnection {
   lastSyncAt?: string
   createdAt: string
   metadata?: Record<string, unknown>
+  /** OAuth scopes granted on this connection (what the app is permitted to access). */
+  scopes?: string[]
+  /** Number of granted scopes, when the upstream summarizes rather than enumerates. */
+  scopeCount?: number
+  /** Capability labels active on this connection. */
+  capabilities?: string[]
+  /** Data classification for retention/handling (e.g. "public" | "organization" | "customer"). */
+  dataClass?: string
+  /** Retention label/policy for cached data, when the provider declares one. */
+  retention?: string
 }
 
 export interface ConnectSession {

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { Route, Router } from '@solidjs/router'
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import type { JSX } from 'solid-js'
@@ -16,11 +17,18 @@ function renderWithProviders(component: () => JSX.Element, path = '/agents') {
   })
 
   return render(() => (
-    <QueryClientProvider client={queryClient}>
-      <AgentsProvider>
-        {component()}
-      </AgentsProvider>
-    </QueryClientProvider>
+    <Router root={(props) => <>{props.children}</>}>
+      <Route
+        path="/*all"
+        component={() => (
+          <QueryClientProvider client={queryClient}>
+            <AgentsProvider>
+              {component()}
+            </AgentsProvider>
+          </QueryClientProvider>
+        )}
+      />
+    </Router>
   ))
 }
 

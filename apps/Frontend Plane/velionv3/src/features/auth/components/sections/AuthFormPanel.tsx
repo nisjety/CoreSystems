@@ -1,13 +1,25 @@
-import { Eye, KeyRound, Lock, Mail, UserRound } from 'lucide-solid'
-import { For, Show, type Accessor } from 'solid-js'
+import { Building2, CheckCircle2, ChevronDown, Eye, KeyRound, Lock, Mail, Phone, UserRound } from 'lucide-solid'
+import { createMemo, createSignal, For, onCleanup, onMount, Show, type Accessor } from 'solid-js'
 import type { AuthCopy, AuthMode, Locale } from '@/features/auth/lib/model'
 import type { SocialProvider } from '@/features/auth/lib/model'
+import { TurnstileChallenge } from '@/features/auth/components/sections/TurnstileChallenge'
 import { Button } from '@/shared/ui/Button'
 import { VelionBackButton } from '@/shared/ui/velion/VelionBackButton'
 import { VelionField } from '@/shared/ui/velion/VelionField'
 import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
 import { VelionLanguageButton } from '@/shared/ui/velion/VelionLanguageButton'
 import { VelionProviderButton } from '@/shared/ui/velion/VelionProviderButton'
+
+const PHONE_COUNTRY_OPTIONS = [
+  { iso: 'NO', dialCode: '+47', nameNb: 'Norge', nameEn: 'Norway', placeholder: '123 45 678' },
+  { iso: 'SE', dialCode: '+46', nameNb: 'Sverige', nameEn: 'Sweden', placeholder: '70 123 45 67' },
+  { iso: 'DK', dialCode: '+45', nameNb: 'Danmark', nameEn: 'Denmark', placeholder: '20 12 34 56' },
+  { iso: 'FI', dialCode: '+358', nameNb: 'Finland', nameEn: 'Finland', placeholder: '40 123 4567' },
+  { iso: 'US', dialCode: '+1', nameNb: 'USA', nameEn: 'United States', placeholder: '555 010 1234' },
+  { iso: 'GB', dialCode: '+44', nameNb: 'Storbritannia', nameEn: 'United Kingdom', placeholder: '7400 123456' },
+  { iso: 'DE', dialCode: '+49', nameNb: 'Tyskland', nameEn: 'Germany', placeholder: '151 23456789' },
+  { iso: 'FR', dialCode: '+33', nameNb: 'Frankrike', nameEn: 'France', placeholder: '6 12 34 56 78' },
+] as const
 
 type AuthFormPanelProps = {
   mode: Accessor<AuthMode>
@@ -16,33 +28,55 @@ type AuthFormPanelProps = {
   email: Accessor<string>
   password: Accessor<string>
   name: Accessor<string>
+  phoneCountryCode: Accessor<string>
+  phoneNumber: Accessor<string>
+  captchaSiteKey: Accessor<string>
   showPassword: Accessor<boolean>
+  submitting: Accessor<boolean>
   contentHeight?: number
   passkeyEnabled?: boolean
   socialProviders: readonly SocialProvider[]
   onSocialSignIn: (provider: SocialProvider) => void
+  ssoEmail: Accessor<string>
+  ssoSubmitting: Accessor<boolean>
+  onSsoEmailInput: (value: string) => void
+  onSsoSignIn: () => void
   onSetMode: (mode: AuthMode) => void
   onToggleLocale: () => void
   onEmailInput: (value: string) => void
   onPasswordInput: (value: string) => void
   onNameInput: (value: string) => void
+  onPhoneCountryChange: (dialCode: string) => void
+  onPhoneInput: (value: string) => void
+  onCaptchaToken: (value: string) => void
   onTogglePassword: () => void
+  onForgotPassword: () => void
   onCompleteAuth: () => void
   onSubmit: (event: SubmitEvent) => void
   onContentRef: (element: HTMLDivElement) => void
 }
 
 export function AuthFormPanel(props: AuthFormPanelProps) {
+  const selectedPhoneCountry = createMemo(() => (
+    PHONE_COUNTRY_OPTIONS.find((country) => country.dialCode === props.phoneCountryCode()) ?? PHONE_COUNTRY_OPTIONS[0]
+  ))
+
+  const primaryActionLabel = () => {
+    if (!props.submitting()) return props.copy().primaryAction
+    if (props.mode() === 'signin') return props.locale() === 'nb' ? 'Logger inn...' : 'Signing in...'
+    return props.locale() === 'nb' ? 'Oppretter konto...' : 'Creating account...'
+  }
+
   return (
     <div class="auth-card__content">
       <div class="auth-card__topbar">
         <VelionBackButton href="/" label={props.copy().back} class="auth-back-link" />
         <div class="auth-topbar__actions">
-          <VelionLanguageButton
-            code={props.locale().toUpperCase()}
-            class="auth-language-switcher"
-            onClick={() => props.onToggleLocale()}
-            ariaLabel="Switch language"
+          <AuthLanguageMenu
+            locale={props.locale()}
+            onSelect={(locale) => {
+              if (locale !== props.locale()) props.onToggleLocale()
+            }}
           />
           <span class="auth-topbar__dot" aria-hidden="true" />
         </div>
@@ -106,6 +140,30 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
               </div>
             </VelionField>
 
+            <Show when={props.mode() === 'signup'}>
+              <div class="auth-field">
+                <label for="auth-phone-number">{props.locale() === 'nb' ? 'Telefonnummer *' : 'Phone number *'}</label>
+                <div class="auth-field__control auth-field__control--phone">
+                  <PhoneCountryMenu
+                    locale={props.locale()}
+                    selected={selectedPhoneCountry()}
+                    value={props.phoneCountryCode()}
+                    onChange={props.onPhoneCountryChange}
+                  />
+                  <span class="auth-phone-prefix" aria-hidden="true">{props.phoneCountryCode()}</span>
+                  <input
+                    id="auth-phone-number"
+                    value={props.phoneNumber()}
+                    onInput={(event) => props.onPhoneInput(event.currentTarget.value)}
+                    type="tel"
+                    inputmode="tel"
+                    autocomplete="tel"
+                    placeholder={selectedPhoneCountry().placeholder}
+                  />
+                </div>
+              </div>
+            </Show>
+
             <VelionField class="auth-field" label={props.copy().passwordLabel}>
               <div class="auth-field__control">
                 <Lock size={18} />
@@ -129,8 +187,29 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
               </div>
             </VelionField>
 
-            <Button type="submit" variant="primary" size="lg" fullWidth>
-              {props.copy().primaryAction}
+            <Show when={props.mode() === 'signin'}>
+              <button
+                type="button"
+                class="auth-forgot-password"
+                disabled={props.submitting()}
+                onClick={() => props.onForgotPassword()}
+              >
+                {props.locale() === 'nb' ? 'Glemt passord?' : 'Forgot password?'}
+              </button>
+            </Show>
+
+            <Show when={props.mode() === 'signup' && props.captchaSiteKey()}>
+              {(siteKey) => (
+                <TurnstileChallenge
+                  siteKey={siteKey()}
+                  locale={props.locale()}
+                  onToken={props.onCaptchaToken}
+                />
+              )}
+            </Show>
+
+            <Button type="submit" variant="primary" size="lg" fullWidth disabled={props.submitting()}>
+              {primaryActionLabel()}
             </Button>
           </form>
 
@@ -150,6 +229,39 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
               )}
             </For>
           </div>
+
+          <Show when={props.mode() === 'signin'}>
+            <form
+              class="auth-sso"
+              onSubmit={(event) => {
+                event.preventDefault()
+                props.onSsoSignIn()
+              }}
+            >
+              <VelionField class="auth-field" label={props.copy().ssoTitle}>
+                <div class="auth-field__control">
+                  <Building2 size={18} />
+                  <input
+                    value={props.ssoEmail()}
+                    onInput={(event) => props.onSsoEmailInput(event.currentTarget.value)}
+                    type="email"
+                    autocomplete="email"
+                    inputmode="email"
+                    placeholder={props.copy().ssoPlaceholder}
+                  />
+                </div>
+              </VelionField>
+              <Button
+                type="submit"
+                variant="secondary"
+                size="lg"
+                fullWidth
+                disabled={props.ssoSubmitting() || props.ssoEmail().trim().length === 0}
+              >
+                <span>{props.ssoSubmitting() ? props.copy().ssoSubmitting : props.copy().ssoAction}</span>
+              </Button>
+            </form>
+          </Show>
 
           <Button
             type="button"
@@ -172,4 +284,144 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
       <p class="auth-support">{props.copy().support}</p>
     </div>
   )
+}
+
+type PhoneCountryOption = (typeof PHONE_COUNTRY_OPTIONS)[number]
+
+function AuthLanguageMenu(props: {
+  locale: Locale
+  onSelect: (locale: Locale) => void
+}) {
+  const [open, setOpen] = createSignal(false)
+  let rootRef: HTMLDivElement | undefined
+  const options: Array<{ code: Locale; label: string; shortLabel: string }> = [
+    { code: 'nb', label: 'Norsk bokmal', shortLabel: 'NB' },
+    { code: 'en', label: 'English', shortLabel: 'EN' },
+  ]
+
+  useAuthDropdownDismiss(() => rootRef, () => setOpen(false))
+
+  return (
+    <div ref={rootRef} class="auth-language-menu">
+      <VelionLanguageButton
+        code={props.locale.toUpperCase()}
+        class="auth-language-switcher"
+        onClick={() => setOpen((current) => !current)}
+        ariaLabel="Switch language"
+        ariaExpanded={open()}
+        ariaControls={open() ? 'auth-language-menu' : undefined}
+      />
+      <Show when={open()}>
+        <menu id="auth-language-menu" class="velion-popover auth-dropdown-menu auth-language-menu__menu" aria-label="Language options">
+          <For each={options}>
+            {(option) => {
+              const selected = () => option.code === props.locale
+              return (
+                <li role="presentation">
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selected()}
+                    class="auth-dropdown-option"
+                    classList={{ 'auth-dropdown-option--selected': selected() }}
+                    onClick={() => {
+                      props.onSelect(option.code)
+                      setOpen(false)
+                    }}
+                  >
+                    <span class="auth-dropdown-option__label">{option.label}</span>
+                    <span class="auth-dropdown-option__meta">{option.shortLabel}</span>
+                    <Show when={selected()}>
+                      <CheckCircle2 class="auth-dropdown-option__check" size={14} />
+                    </Show>
+                  </button>
+                </li>
+              )
+            }}
+          </For>
+        </menu>
+      </Show>
+    </div>
+  )
+}
+
+function PhoneCountryMenu(props: {
+  locale: Locale
+  selected: PhoneCountryOption
+  value: string
+  onChange: (dialCode: string) => void
+}) {
+  const [open, setOpen] = createSignal(false)
+  let rootRef: HTMLDivElement | undefined
+
+  useAuthDropdownDismiss(() => rootRef, () => setOpen(false))
+
+  const countryName = (country: PhoneCountryOption) => props.locale === 'nb' ? country.nameNb : country.nameEn
+
+  return (
+    <div ref={rootRef} class="auth-phone-country">
+      <button
+        type="button"
+        class="auth-phone-country__chrome"
+        aria-label={props.locale === 'nb' ? 'Landskode' : 'Country code'}
+        aria-haspopup="menu"
+        aria-expanded={open()}
+        aria-controls={open() ? 'auth-phone-country-menu' : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Phone size={14} />
+        <span>{props.selected.iso}</span>
+        <ChevronDown size={12} class={open() ? 'rotate-180' : undefined} />
+      </button>
+      <Show when={open()}>
+        <menu id="auth-phone-country-menu" class="velion-popover auth-dropdown-menu auth-phone-country__menu" aria-label={props.locale === 'nb' ? 'Landskode' : 'Country code'}>
+          <For each={PHONE_COUNTRY_OPTIONS}>
+            {(country) => {
+              const selected = () => country.dialCode === props.value
+              return (
+                <li role="presentation">
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selected()}
+                    class="auth-dropdown-option"
+                    classList={{ 'auth-dropdown-option--selected': selected() }}
+                    onClick={() => {
+                      props.onChange(country.dialCode)
+                      setOpen(false)
+                    }}
+                  >
+                    <span class="auth-dropdown-option__label">{countryName(country)}</span>
+                    <span class="auth-dropdown-option__meta">{country.iso} {country.dialCode}</span>
+                    <Show when={selected()}>
+                      <CheckCircle2 class="auth-dropdown-option__check" size={14} />
+                    </Show>
+                  </button>
+                </li>
+              )
+            }}
+          </For>
+        </menu>
+      </Show>
+    </div>
+  )
+}
+
+function useAuthDropdownDismiss(root: () => HTMLDivElement | undefined, close: () => void) {
+  onMount(() => {
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (root()?.contains(event.target as Node)) return
+      close()
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+    window.addEventListener('keydown', closeOnEscape)
+    onCleanup(() => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+      window.removeEventListener('keydown', closeOnEscape)
+    })
+  })
 }

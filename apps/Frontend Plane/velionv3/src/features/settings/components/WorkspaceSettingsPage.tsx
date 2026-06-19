@@ -2,6 +2,7 @@ import { MoreHorizontal } from 'lucide-solid'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js'
 import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
+import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import {
   confirmBillingCheckout,
@@ -114,13 +115,6 @@ type AuditEvent = {
   createdAt?: string
 }
 
-const fallbackIntegrationRows = [
-  { name: 'Microsoft 365', detail: 'SharePoint, OneDrive, Outlook, Teams', status: 'Loading', action: 'loading' as const },
-  { name: 'Google Workspace', detail: 'Drive, Gmail, Calendar', status: 'Loading', action: 'loading' as const },
-  { name: 'Slack', detail: 'Workspace metadata and channels', status: 'Loading', action: 'loading' as const },
-  { name: 'GitHub', detail: 'Repositories, README, issues', status: 'Loading', action: 'loading' as const },
-]
-
 const securityToggles = [
   {
     title: 'Require MFA for admins',
@@ -162,8 +156,9 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
     { label: 'Sync health', value: 'Healthy', detail: 'Last workspace sync finished 8 minutes ago.', tone: 'ok' },
     { label: 'Webhook errors', value: '0', detail: 'No failed deliveries in the last 24 hours.', tone: 'ok' },
   ],
-  // Router policy and fine-tune sections render their own dedicated pages
-  // (no shared status grid), so these stay empty.
+  // Trust Center renders its own live transparency cards, and router-policy /
+  // fine-tune render dedicated pages — so these carry no shared status grid.
+  trust: [],
   'router-policy': [],
   finetune: [],
 }
@@ -402,6 +397,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'integrations'}>
         <IntegrationsSection />
+      </Match>
+      <Match when={props.section === 'trust'}>
+        <TrustCenterSection />
       </Match>
     </Switch>
   )
@@ -1035,10 +1033,9 @@ function IntegrationsSection() {
   const socialStats = createMemo(() => buildSocialIntegrationStats(summary()))
 
   const runAction = async (
-    row: IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number],
+    row: IntegrationSettingsRow,
     action: 'connect' | 'disconnect' | 'reconnect' | 'sync',
   ) => {
-    if (!('provider' in row)) return
     const busyKey = `${row.provider.key}:${action}`
     setActionBusy(busyKey)
     setNotice(null)
@@ -1324,8 +1321,8 @@ function isSyncingIntegrationStatus(syncStatus: string, latestJobStatus?: string
   )
 }
 
-function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Array<IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number]> {
-  if (!summary) return fallbackIntegrationRows
+function buildIntegrationRows(summary: IntegrationSettingsSummary | null): IntegrationSettingsRow[] {
+  if (!summary) return []
 
   const connectionsByProvider = new Map(summary.connections.map((connection) => [connection.providerKey, connection]))
   return summary.providers.map((provider) => {
@@ -1378,8 +1375,8 @@ function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Array
   })
 }
 
-function isSocialIntegrationRow(row: IntegrationSettingsRow | (typeof fallbackIntegrationRows)[number]): row is IntegrationSettingsRow {
-  return 'provider' in row && row.provider.category === 'social'
+function isSocialIntegrationRow(row: IntegrationSettingsRow): boolean {
+  return row.provider.category === 'social'
 }
 
 function connectBundlesFor(provider: IntegrationSettingsProvider): string[] {

@@ -8,8 +8,22 @@ import {
   PanelLeftOpen,
   Trash2,
 } from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, Match, onMount, Show, Switch, type JSX } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
+import {
+  CHAT_ACTIVE_THREAD_CHANGED_EVENT,
+  CHAT_ACTIVE_THREAD_KEY,
+  CHAT_THREAD_HISTORY_CHANGED_EVENT,
+  CHAT_THREAD_HISTORY_KEY,
+  clearActiveChatThreadId,
+  clearChatThreadHistory,
+  readActiveChatThreadId,
+  readChatThreadTranscript,
+  readChatThreadHistory,
+  replaceChatThreadHistory,
+  selectChatThread,
+  type ChatThreadHistoryItem,
+} from '@/features/chat/lib/chat-thread-history'
 import { AgentsExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAgentsPanel'
 import { InboxExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarInboxPanel'
 import { KnowledgeExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarKnowledgePanel'
@@ -21,6 +35,7 @@ import {
   AccountExpandedSidebarPanel,
   SettingsExpandedSidebarPanel,
 } from '@/features/core/components/sidebar/CoreSidebarSettingsPanels'
+import { TicketingExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarTicketingPanel'
 import type { VelionRoute } from '@/features/core/lib/shell-data'
 import {
   getSidebarSectionForPath,
@@ -31,7 +46,7 @@ import {
   type SidebarPanelItem,
   type SidebarSection,
 } from '@/features/core/lib/sidebar-navigation'
-import { getThreadMessages } from '@/shared/api/chat-client'
+import { clearChatThreads, listChatThreads, saveChatThreadSnapshot } from '@/shared/api/chat-client'
 import { cn } from '@/shared/lib/cn'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
@@ -149,6 +164,7 @@ function ExpandedSidebarPanel(props: {
   const panelKind = createMemo(() => {
     if (props.activeSection.id === 'messages') return 'messages'
     if (props.activeSection.id === 'inbox') return 'inbox'
+    if (props.activeSection.id === 'ticketing') return 'ticketing'
     if (props.activeSection.id === 'agents') return 'agents'
     if (props.activeSection.id === 'knowledge') return 'knowledge'
     if (props.pathname === '/account' || props.pathname.startsWith('/account/')) return 'account'
@@ -181,6 +197,9 @@ function ExpandedSidebarPanel(props: {
       </Match>
       <Match when={panelKind() === 'inbox'}>
         <InboxExpandedSidebarPanel onCollapse={props.onCollapse} />
+      </Match>
+      <Match when={panelKind() === 'ticketing'}>
+        <TicketingExpandedSidebarPanel onCollapse={props.onCollapse} />
       </Match>
       <Match when={panelKind() === 'agents'}>
         <AgentsExpandedSidebarPanel onCollapse={props.onCollapse} />
@@ -243,52 +262,110 @@ function GenericSidebarPanel(props: {
 function ChatSidebarPanel(props: { onCollapse: () => void }) {
   const [error, setError] = createSignal<string | null>(null)
   const [loading, setLoading] = createSignal(false)
-  const [session, setSession] = createSignal<{
-    preview: string
-    threadId: string
-    title: string
-  } | null>(null)
+  const [sessions, setSessions] = createSignal<ChatThreadHistoryItem[]>([])
+  const [activeThreadId, setActiveThreadId] = createSignal<string | null>(null)
 
-  const loadStoredThread = async () => {
-    const threadId = window.sessionStorage.getItem('velion.chat.threadId')
-    if (!threadId) {
-      setSession(null)
-      return
-    }
+  const refreshLocalSessions = () => {
+    setActiveThreadId(readActiveChatThreadId())
+    setSessions(readChatThreadHistory())
+  }
 
-    setLoading(true)
+  const migrateLocalSessions = async (
+    localSessions: ChatThreadHistoryItem[],
+    serverSessions: ChatThreadHistoryItem[],
+  ) => {
+    const serverThreadIds = new Set(serverSessions.map((item) => item.threadId))
+    const unsynced = localSessions.filter((item) => !serverThreadIds.has(item.threadId))
+    if (unsynced.length === 0) return false
+
+    const results = await Promise.allSettled(unsynced.map((item) => {
+      const transcript = readChatThreadTranscript(item.threadId)
+      return saveChatThreadSnapshot(item.threadId, {
+        title: item.title,
+        preview: item.preview,
+        updatedAt: transcript?.updatedAt ?? item.updatedAt,
+        turns: transcript?.turns,
+        taskSteps: transcript?.taskSteps,
+      })
+    }))
+
+    return results.some((result) => result.status === 'fulfilled')
+  }
+
+  const refreshServerSessions = async () => {
+    const localSessions = readChatThreadHistory()
+    setLoading(localSessions.length === 0)
     setError(null)
     try {
-      const messages = await getThreadMessages(threadId)
-      const firstUserMessage = messages.find((message) => message.role === 'user')
-      const lastMessage = messages.at(-1)
-      setSession({
-        threadId,
-        title: truncateChatText(firstUserMessage?.content ?? 'Current chat thread', 48),
-        preview: truncateChatText(lastMessage?.content ?? 'Open live session', 64),
-      })
+      const serverSessions = await listChatThreads()
+      setActiveThreadId(readActiveChatThreadId())
+      setSessions(replaceChatThreadHistory([...serverSessions, ...localSessions]))
+
+      if (await migrateLocalSessions(localSessions, serverSessions)) {
+        const refreshedSessions = await listChatThreads().catch(() => serverSessions)
+        setSessions(replaceChatThreadHistory([...refreshedSessions, ...localSessions]))
+      }
     } catch (reason) {
-      setSession(null)
-      setError(reason instanceof Error ? reason.message : 'Chat thread unavailable.')
+      setError(reason instanceof Error ? reason.message : 'Could not load saved conversations.')
+      refreshLocalSessions()
     } finally {
       setLoading(false)
     }
   }
 
   onMount(() => {
-    void loadStoredThread()
+    refreshLocalSessions()
+    void refreshServerSessions()
+
+    const handleHistoryChange = () => {
+      refreshLocalSessions()
+    }
+    const handleStorageChange = (event: StorageEvent) => {
+      if (
+        event.key === CHAT_ACTIVE_THREAD_KEY ||
+        event.key === CHAT_THREAD_HISTORY_KEY ||
+        event.key === null
+      ) {
+        refreshLocalSessions()
+      }
+    }
+
+    window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
+    window.addEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
+    window.addEventListener('storage', handleStorageChange)
+    onCleanup(() => {
+      window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
+      window.removeEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
+      window.removeEventListener('storage', handleStorageChange)
+    })
   })
 
-  const clearLocalHistory = () => {
-    window.sessionStorage.removeItem('velion.chat.threadId')
-    setSession(null)
+  const clearHistory = () => {
+    clearChatThreadHistory()
+    clearActiveChatThreadId()
+    setSessions([])
+    setActiveThreadId(null)
     setError(null)
+    void clearChatThreads().catch(() => undefined)
     props.onCollapse()
   }
 
+  const openThread = (threadId: string) => {
+    selectChatThread(threadId)
+    setActiveThreadId(threadId)
+  }
+
+  const startNewChat = () => {
+    clearActiveChatThreadId()
+    setActiveThreadId(null)
+    setError(null)
+  }
+
+  const sessionCount = () => sessions().length
+
   return (
     <div class="core-chat-sidebar">
-      <A href="/chat" class="core-chat-sidebar__new">
+      <A href="/chat" class="core-chat-sidebar__new" onClick={startNewChat}>
         <span>
           <MessageSquarePlus class="size-[15px]" strokeWidth={1.75} />
         </span>
@@ -298,32 +375,43 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
       <nav class="core-chat-sidebar__sessions" aria-label="Chat conversations">
         <Show when={!loading()} fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">Loading conversations...</div>}>
           <Show
-            when={session()}
+            when={sessionCount() > 0}
             fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">{error() ?? 'Open chat to load real conversation history.'}</div>}
           >
-            {(item) => (
-              <A href="/chat" class="core-chat-session core-chat-session--active">
-                <span class="velion-sidebar-row-strong">{item().title}</span>
-                <small class="velion-sidebar-secondary">{item().preview}</small>
-                <em>Current thread</em>
-              </A>
-            )}
+            <For each={sessions()}>
+              {(item) => (
+                <button
+                  type="button"
+                  class="core-chat-session"
+                  classList={{ 'core-chat-session--active': item.threadId === activeThreadId() }}
+                  onClick={() => openThread(item.threadId)}
+                  aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
+                >
+                  <span class="velion-sidebar-row-strong" title={item.title}>{item.title}</span>
+                  <em>{formatChatUpdatedAt(item.updatedAt)}</em>
+                </button>
+              )}
+            </For>
           </Show>
         </Show>
       </nav>
 
-      <button type="button" class="core-chat-sidebar__clear" onClick={clearLocalHistory}>
+      <button type="button" class="core-chat-sidebar__clear" onClick={clearHistory}>
         <Trash2 class="size-3.5" />
-        Clear local history
+        Clear chat history
       </button>
     </div>
   )
 }
 
-function truncateChatText(value: string, maxLength: number) {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= maxLength) return normalized
-  return `${normalized.slice(0, maxLength - 3).trimEnd()}...`
+function formatChatUpdatedAt(value: string) {
+  const updatedAt = Date.parse(value)
+  if (Number.isNaN(updatedAt)) return 'Saved thread'
+  const ageMs = Date.now() - updatedAt
+  if (ageMs < 60_000) return 'Just now'
+  if (ageMs < 3_600_000) return `${Math.max(1, Math.round(ageMs / 60_000))}m ago`
+  if (ageMs < 86_400_000) return `${Math.max(1, Math.round(ageMs / 3_600_000))}h ago`
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(updatedAt))
 }
 
 function SidebarPanelNavigation(props: {

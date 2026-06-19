@@ -96,11 +96,26 @@ impl ResultCache {
 
     /// Store a fresh entry. Failures are ignored (degrade-safe).
     pub(crate) async fn store(&self, key: &str, data: &Value) {
+        self.store_for_secs(key, data, STORE_SECS).await;
+    }
+
+    /// Store a fresh entry with a caller-owned TTL. Failures are ignored
+    /// (degrade-safe). The payload shape matches [`Self::lookup`] so callers can
+    /// still use `lookup_within` with their own freshness window.
+    pub(crate) async fn store_for_secs(&self, key: &str, data: &Value, ttl_secs: u64) {
         let Some(mut conn) = self.conn.clone() else {
             return;
         };
         let payload = json!({ "cached_at": now_secs(), "data": data }).to_string();
-        let _: Result<(), redis::RedisError> = conn.set_ex(key, payload, STORE_SECS).await;
+        let _: Result<(), redis::RedisError> = conn.set_ex(key, payload, ttl_secs).await;
+    }
+
+    /// Delete a cached entry. Failures are ignored (degrade-safe).
+    pub(crate) async fn delete(&self, key: &str) {
+        let Some(mut conn) = self.conn.clone() else {
+            return;
+        };
+        let _: Result<(), redis::RedisError> = conn.del(key).await;
     }
 }
 

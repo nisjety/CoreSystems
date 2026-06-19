@@ -1,0 +1,49 @@
+name: Velion v3 Frontend Security
+
+# Dependency vulnerability scan for the Velion v3 SPA (apps/Frontend Plane/velionv3).
+# GitHub Actions only executes workflows from the repository-root .github/workflows,
+# so this lives at the monorepo root but is path-scoped to the v3 frontend so it
+# does not fire on unrelated plane changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/Frontend Plane/velionv3/**'
+      - '.github/workflows/velionv3-security.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/Frontend Plane/velionv3/**'
+      - '.github/workflows/velionv3-security.yml'
+  # Weekly catch for newly-disclosed advisories against an unchanged tree.
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: pnpm audit (high+)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Frontend Plane/velionv3'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: 'apps/Frontend Plane/velionv3/pnpm-lock.yaml'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies (fail on high or critical)
+        run: pnpm audit --audit-level=high

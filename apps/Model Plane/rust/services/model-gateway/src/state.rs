@@ -13,7 +13,8 @@ use mp_contracts::model_plane::v1::{
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient, memory_service_client::MemoryServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
-    sandbox_manager_client::SandboxManagerClient, session_core_client::SessionCoreClient,
+    run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
+    session_core_client::SessionCoreClient,
 };
 use mp_events::envelope::Envelope;
 use mp_events::publisher::{EventPublisher, InMemoryPublisher, PublishError};
@@ -68,6 +69,9 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub inference_client: InferenceCoreClient<Channel>,
     pub session_client: SessionCoreClient<Channel>,
+    /// Run read model + cancel path. Hosted by session-core on the same gRPC
+    /// server, so it reuses the session endpoint/channel.
+    pub run_client: RunServiceClient<Channel>,
     pub orchestration_client: OrchestrationCoreServiceClient<Channel>,
     /// execution-core (:9093). Used to resume a run after an approval is
     /// granted — the gateway is the approval decision point but does not drive
@@ -154,9 +158,11 @@ impl AppState {
     pub fn new() -> Self {
         let inference_channel = Endpoint::from_static("http://localhost:9092").connect_lazy();
         let session_channel = Endpoint::from_static("http://localhost:9091").connect_lazy();
-        // FinetuneJobs is hosted by session-core on the same gRPC server, so
-        // it reuses the session channel. Cheap clone — Channel is Arc<Inner>.
+        // FinetuneJobs + RunService are hosted by session-core on the same gRPC
+        // server, so they reuse the session channel. Cheap clone — Channel is
+        // Arc<Inner>.
         let finetune_channel = session_channel.clone();
+        let run_channel = session_channel.clone();
         let orchestration_channel = Endpoint::from_static("http://localhost:9080").connect_lazy();
         let execution_channel = Endpoint::from_static("http://localhost:9093").connect_lazy();
         let sandbox_channel = Endpoint::from_static("http://localhost:9094").connect_lazy();
@@ -173,6 +179,7 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             session_client: SessionCoreClient::new(session_channel),
+            run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             execution_client: ExecutionCoreClient::new(execution_channel),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
@@ -334,6 +341,12 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        // RunService is also hosted by session-core; reuses the session endpoint.
+        let run_client = RunServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         // Azure OpenAI fine-tuning client (Some only when env is set).
         let azure_finetune = AzureFinetuneClient::from_env(http_client.clone());
         if azure_finetune.is_some() {
@@ -376,6 +389,7 @@ impl AppState {
             let mut state = Self::with_nats(nats);
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.run_client = run_client;
             state.orchestration_client = orchestration_client;
             state.execution_client = execution_client.clone();
             state.sandbox_client = sandbox_client;
@@ -404,6 +418,7 @@ impl AppState {
             let mut state = Self::new();
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.run_client = run_client;
             state.orchestration_client = orchestration_client;
             state.execution_client = execution_client;
             state.sandbox_client = sandbox_client;

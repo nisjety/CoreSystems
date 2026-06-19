@@ -420,15 +420,44 @@ impl OpenAiSpeechProvider {
         let api_version_default = env_nonempty("AZURE_OPENAI_API_VERSION")
             .unwrap_or_else(|| DEFAULT_AZURE_OPENAI_API_VERSION.to_owned());
 
+        // P0.4 residency: the per-operation `AZURE_OPENAI_TTS_*` override points
+        // at a non-EU resource (e.g. gpt-4o-mini-tts in East US 2, which isn't
+        // available in Sweden Central). Honoring it silently egresses voice to
+        // the US. Gate it behind an explicit opt-in so the EU default
+        // (`AZURE_OPENAI_ENDPOINT`, Sweden Central) is used unless an operator
+        // accepts the cross-region transfer via `MODEL_PLANE_ALLOW_NON_EU_TTS`.
+        let allow_non_eu_tts = env_nonempty("MODEL_PLANE_ALLOW_NON_EU_TTS")
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"));
+        if !allow_non_eu_tts && env_nonempty("AZURE_OPENAI_TTS_ENDPOINT").is_some() {
+            warn!(
+                "AZURE_OPENAI_TTS_ENDPOINT set but MODEL_PLANE_ALLOW_NON_EU_TTS is off; \
+                 ignoring the non-EU TTS endpoint and using the EU AZURE_OPENAI_ENDPOINT \
+                 to keep voice within the EU residency boundary"
+            );
+        }
+        let tts_endpoint_override = if allow_non_eu_tts {
+            env_nonempty("AZURE_OPENAI_TTS_ENDPOINT")
+        } else {
+            None
+        };
+        let tts_key_override = if allow_non_eu_tts {
+            env_nonempty("AZURE_OPENAI_TTS_API_KEY")
+        } else {
+            None
+        };
+        let tts_api_version_override = if allow_non_eu_tts {
+            env_nonempty("AZURE_OPENAI_TTS_API_VERSION")
+        } else {
+            None
+        };
+
         let tts = AzureOpenAiOp {
-            endpoint: env_nonempty("AZURE_OPENAI_TTS_ENDPOINT")
+            endpoint: tts_endpoint_override
                 .unwrap_or_else(|| endpoint_default.clone())
                 .trim_end_matches('/')
                 .to_owned(),
-            api_key: env_nonempty("AZURE_OPENAI_TTS_API_KEY")
-                .unwrap_or_else(|| key_default.clone()),
-            api_version: env_nonempty("AZURE_OPENAI_TTS_API_VERSION")
-                .unwrap_or_else(|| api_version_default.clone()),
+            api_key: tts_key_override.unwrap_or_else(|| key_default.clone()),
+            api_version: tts_api_version_override.unwrap_or_else(|| api_version_default.clone()),
             deployment: env_nonempty("AZURE_OPENAI_TTS_DEPLOYMENT")
                 .unwrap_or_else(|| DEFAULT_AZURE_TTS_DEPLOYMENT.to_owned()),
         };
@@ -772,9 +801,9 @@ impl SpeechProvider for AzureSpeechProvider {
         // STT is served on the `.stt.` host; the configured endpoint is the
         // `.tts.` host, so swap it. (Falls through unchanged for custom
         // endpoints that don't match the regional TTS pattern.)
-        let stt_host = self
-            .endpoint
-            .replacen(".tts.speech.microsoft.com", ".stt.speech.microsoft.com", 1);
+        let stt_host =
+            self.endpoint
+                .replacen(".tts.speech.microsoft.com", ".stt.speech.microsoft.com", 1);
         let url = format!(
             "{}/speech/recognition/conversation/cognitiveservices/v1?language={}&format=detailed",
             stt_host.trim_end_matches('/'),
@@ -818,7 +847,10 @@ impl SpeechProvider for AzureSpeechProvider {
                 "azure speech stt recognition status: {status}"
             )));
         }
-        let top = json.get("NBest").and_then(|v| v.as_array()).and_then(|a| a.first());
+        let top = json
+            .get("NBest")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first());
         let text = top
             .and_then(|t| t.get("Display").and_then(serde_json::Value::as_str))
             .or_else(|| json.get("DisplayText").and_then(serde_json::Value::as_str))

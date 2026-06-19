@@ -1,12 +1,13 @@
 use axum::{
     body::Body,
-    http::{header::SET_COOKIE, StatusCode},
+    http::{header::SET_COOKIE, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use futures_util::StreamExt;
 use reqwest::Method;
 use serde_json::{json, Value};
+use url::Url;
 
 use crate::{
     auth::actor_with_defaults,
@@ -84,6 +85,28 @@ pub(crate) async fn resolve_session_context(state: &AppState, user: &Authenticat
     let context = crate::envelope::unwrap_data(&body);
     state.cache.store(&key, &context).await;
     context
+}
+
+pub(crate) async fn invalidate_session_context_cache(
+    state: &AppState,
+    user_id: &str,
+    active_org_id: Option<&str>,
+) {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return;
+    }
+
+    let primary_key = crate::cache::cache_key("session-context", &[user_id, ""]);
+    state.cache.delete(&primary_key).await;
+
+    if let Some(org_id) = active_org_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let scoped_key = crate::cache::cache_key("session-context", &[user_id, org_id]);
+        state.cache.delete(&scoped_key).await;
+    }
 }
 
 /// The authenticated user's authoritative org id, from the validated session /
@@ -194,11 +217,36 @@ pub(crate) async fn proxy_auth(
     url: &str,
     body: Option<Value>,
     cookie_header: Option<&str>,
+    browser_origin: Option<&str>,
+) -> Response {
+    proxy_auth_with_headers(state, method, url, body, cookie_header, browser_origin, &[]).await
+}
+
+/// Proxy an auth request to auth-core with an explicit, tiny allowlist of extra
+/// browser-originated headers. Keep this narrow: auth routes handle session
+/// cookies, so arbitrary client headers must not become upstream authority.
+pub(crate) async fn proxy_auth_with_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    cookie_header: Option<&str>,
+    browser_origin: Option<&str>,
+    extra_headers: &[(&'static str, String)],
 ) -> Response {
     let mut req = state.client.request(method, url);
 
     if let Some(cookie) = cookie_header.filter(|c| !c.is_empty()) {
         req = req.header("cookie", cookie);
+    }
+    if let Some(origin) = browser_origin.filter(|value| !value.trim().is_empty()) {
+        req = req.header("origin", origin.trim());
+    }
+    for (name, value) in extra_headers {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            req = req.header(*name, trimmed);
+        }
     }
 
     if let Some(body) = body {
@@ -237,6 +285,36 @@ pub(crate) async fn proxy_auth(
             Json(error("upstream_unavailable", e.to_string())),
         )
             .into_response(),
+    }
+}
+
+/// Normalize the browser origin for Better Auth's CSRF/origin checks.
+///
+/// Prefer the explicit `Origin` header. If the browser/proxy reports `null` or
+/// omits it, fall back to the request `Referer` origin. Auth-core still applies
+/// its own trusted-origin allowlist; this just preserves the public SPA origin
+/// across the same-origin BFF hop.
+pub(crate) fn browser_origin(headers: &HeaderMap) -> Option<String> {
+    header_origin(headers, "origin").or_else(|| header_origin(headers, "referer"))
+}
+
+fn header_origin(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(normalize_http_origin)
+}
+
+fn normalize_http_origin(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+
+    let parsed = Url::parse(trimmed).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => Some(parsed.origin().ascii_serialization()),
+        _ => None,
     }
 }
 
@@ -334,6 +412,7 @@ pub(crate) async fn proxy_bearer_json(
 /// Proxy an SSE stream from model-gateway to the browser without buffering.
 /// Injects a Bearer token and optional `Last-Event-ID` / ZDR headers before forwarding.
 /// Returns a proper JSON error envelope if the upstream returns a non-2xx status.
+#[allow(clippy::too_many_arguments)] // cohesive SSE-proxy request context
 pub(crate) async fn proxy_sse_stream(
     state: &AppState,
     method: Method,
@@ -341,12 +420,20 @@ pub(crate) async fn proxy_sse_stream(
     body: Option<Value>,
     bearer_token: Option<&str>,
     last_event_id: Option<&str>,
+    actor: Option<(&str, &str)>,
     zdr: bool,
 ) -> Response {
     let mut req = state.streaming_client.request(method, url);
 
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);
+    }
+
+    if let Some((user_id, org_id)) = actor {
+        req = req.header("x-user-id", user_id);
+        if !org_id.trim().is_empty() {
+            req = req.header("x-org-id", org_id);
+        }
     }
 
     if let Some(lei) = last_event_id.filter(|v| !v.is_empty()) {
@@ -424,6 +511,7 @@ pub(crate) async fn proxy_sse_stream(
 mod tests {
     use super::*;
     use crate::middleware::AuthenticatedUser;
+    use axum::http::{HeaderMap, HeaderValue};
 
     fn user_with_active_org(active: Option<&str>) -> AuthenticatedUser {
         AuthenticatedUser {
@@ -473,5 +561,44 @@ mod tests {
         assert_ne!(org_a, org_b);
         // A blank active org collapses onto the primary (None) key.
         assert_eq!(primary, key(&user_with_active_org(Some("  "))));
+    }
+
+    #[test]
+    fn browser_origin_prefers_explicit_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", HeaderValue::from_static("http://localhost:5173"));
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("http://localhost:5199/login"),
+        );
+
+        assert_eq!(
+            browser_origin(&headers),
+            Some("http://localhost:5173".to_owned())
+        );
+    }
+
+    #[test]
+    fn browser_origin_falls_back_to_referer_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", HeaderValue::from_static("null"));
+        headers.insert(
+            "referer",
+            HeaderValue::from_static("http://localhost:5173/login?next=/onboarding"),
+        );
+
+        assert_eq!(
+            browser_origin(&headers),
+            Some("http://localhost:5173".to_owned())
+        );
+    }
+
+    #[test]
+    fn browser_origin_ignores_non_http_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", HeaderValue::from_static("file:///tmp/index.html"));
+        headers.insert("referer", HeaderValue::from_static("about:blank"));
+
+        assert_eq!(browser_origin(&headers), None);
     }
 }

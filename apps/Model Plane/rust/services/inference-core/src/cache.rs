@@ -181,6 +181,44 @@ mod tests {
     }
 
     #[test]
+    fn zdr_request_never_persists_or_reads_durable_state() {
+        // ZDR contract for inference-core's only durable response sink: under
+        // `req.zdr == true` the prompt cache must neither write durable state
+        // (`put` is a no-op) nor read it back (`get` returns None). This pins
+        // the cache.rs short-circuits so a future change cannot silently
+        // reintroduce a Zero-Data-Retention leak through the cache.
+        let cache = PromptCache::new(300);
+        let mut req = sample_request();
+        req.zdr = true;
+        let resp = sample_response();
+
+        // Insert under ZDR — must write nothing durable.
+        cache.put(&req, &resp);
+        assert!(cache.is_empty(), "ZDR put must not persist any cache entry");
+
+        // Read under ZDR — must short-circuit to a miss even if state existed.
+        assert!(
+            cache.get(&req).is_none(),
+            "ZDR get must not read cached state"
+        );
+
+        // Even when a non-ZDR entry for the identical prompt is already present
+        // (same cache key — `zdr` is intentionally excluded from `cache_key`),
+        // a ZDR request must still refuse to read it.
+        let mut non_zdr = req.clone();
+        non_zdr.zdr = false;
+        cache.put(&non_zdr, &resp);
+        assert!(
+            cache.get(&non_zdr).is_some(),
+            "non-ZDR request should still hit the cache"
+        );
+        assert!(
+            cache.get(&req).is_none(),
+            "ZDR get must refuse to read even a pre-existing non-ZDR entry"
+        );
+    }
+
+    #[test]
     fn expired_entry_evicted() {
         let cache = PromptCache::new(0); // 0 second TTL
         let req = sample_request();

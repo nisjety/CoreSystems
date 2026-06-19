@@ -34,10 +34,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/finetune/jobs/:job_id",
             get(get_job).delete(cancel_job),
         )
-        .route(
-            "/api/v1/finetune/jobs/:job_id/deploy",
-            post(deploy_job),
-        )
+        .route("/api/v1/finetune/jobs/:job_id/deploy", post(deploy_job))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 

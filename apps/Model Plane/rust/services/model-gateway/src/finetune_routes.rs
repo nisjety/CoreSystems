@@ -907,7 +907,10 @@ pub async fn deploy_job(
     // The Azure management plane must be configured to provision a deployment.
     // Check before touching session-core so a misconfigured gateway returns a
     // clear 503 rather than mutating state it can't follow through on.
-    let azure = state.azure_finetune.as_ref().filter(|c| c.mgmt_configured());
+    let azure = state
+        .azure_finetune
+        .as_ref()
+        .filter(|c| c.mgmt_configured());
     let Some(azure) = azure else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,

@@ -22,12 +22,14 @@ pub(crate) struct AppState {
     pub(crate) billing_core_url: String,
     pub(crate) org_core_url: String,
     pub(crate) integration_core_url: String,
+    pub(crate) audit_core_url: String,
     pub(crate) user_core_url: String,
     pub(crate) graph_index_url: String,
     pub(crate) quarry_edge_url: String,
     pub(crate) quarry_control_url: String,
     pub(crate) model_recommend_url: String,
     pub(crate) model_gateway_url: String,
+    pub(crate) model_gateway_dev_bearer: String,
     pub(crate) inference_core_url: String,
     pub(crate) documents_api_url: String,
     pub(crate) retrieval_engine_url: String,
@@ -49,6 +51,7 @@ pub(crate) struct AppState {
     pub(crate) zammad_api_token: String,
     pub(crate) audience_token_cache: AudienceTokenCache,
     pub(crate) cache: crate::cache::ResultCache,
+    pub(crate) chat_history_store: crate::domains::chat::history::ChatHistoryStore,
     pub(crate) social_store: crate::domains::social::SocialStore,
     pub(crate) studio_store: crate::domains::studio::StudioStore,
     pub(crate) allow_dev_actor_headers: bool,
@@ -93,6 +96,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
         billing_core_url: env_url("BILLING_CORE_URL", "http://billing-core:3017"),
         org_core_url: env_url("ORG_CORE_URL", "http://org-core:8080"),
         integration_core_url: env_url("INTEGRATION_CORE_URL", "http://integration-api:3026"),
+        // audit-core (Control Plane) serves the audit read API the Trust Center
+        // aggregates over. Internal-key auth (X-Internal-Api-Key) like the other cores.
+        audit_core_url: env_url("AUDIT_CORE_URL", "http://audit-core:8187"),
         user_core_url: env_url("USER_CORE_URL", "http://user-core:3012"),
         graph_index_url: env_url("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203"),
         quarry_edge_url: env_url("QUARRY_EDGE_URL", "http://quarry-edge:8082"),
@@ -102,6 +108,10 @@ pub(crate) async fn build_state() -> Result<AppState> {
             "http://model-gateway:8080/v1/recommend/plan",
         ),
         model_gateway_url: env_url("MODEL_GATEWAY_URL", "http://model-gateway:8080"),
+        model_gateway_dev_bearer: env::var("MODEL_GATEWAY_DEV_BEARER")
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
         // inference-core's internal HTTP (health server, :8082) serves the
         // router-policy GET/PUT used by the admin UI. Must be reachable from the
         // gateway over the inter-plane-bus (like model-gateway).
@@ -142,6 +152,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .to_owned(),
         audience_token_cache: new_audience_token_cache(),
         cache,
+        chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
         social_store: crate::domains::social::SocialStore::new(),
         studio_store: crate::domains::studio::StudioStore::new(),
         allow_dev_actor_headers: env_bool("ALLOW_DEV_ACTOR_HEADERS", false),

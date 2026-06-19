@@ -1,10 +1,11 @@
 mod documents;
+pub(crate) mod history;
 mod json_handlers;
 pub(crate) mod shared;
 mod streams;
 
 use axum::{
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 
@@ -14,6 +15,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/chat/stream", post(streams::stream_chat))
         .route("/api/v1/chat/invoke", post(json_handlers::invoke_chat))
+        .route(
+            "/api/v1/chat/threads",
+            get(history::list_threads).delete(history::clear_threads),
+        )
+        .route(
+            "/api/v1/chat/threads/:thread_id",
+            put(history::save_thread).delete(history::delete_thread),
+        )
+        .route(
+            "/api/v1/chat/threads/:thread_id/transcript",
+            get(history::get_thread_transcript),
+        )
         .route(
             "/api/v1/chat/stream/resume/:request_id",
             get(streams::resume_stream),

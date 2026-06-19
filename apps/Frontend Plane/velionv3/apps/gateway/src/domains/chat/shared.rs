@@ -37,6 +37,10 @@ pub(crate) async fn model_token(
         return Some(token);
     }
 
+    if !state.model_gateway_dev_bearer.is_empty() {
+        return Some(state.model_gateway_dev_bearer.clone());
+    }
+
     dev_bypass_model_token(state, headers)
 }
 
@@ -60,10 +64,14 @@ pub(crate) async fn proxy_model_json(
     bearer_token: Option<&str>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let mut req = state
         .client
         .request(method, url)
         .header("x-user-id", &user.user_id);
+    if !org_id.trim().is_empty() {
+        req = req.header("x-org-id", org_id);
+    }
 
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);
@@ -105,12 +113,14 @@ mod tests {
             billing_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
+            audit_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),
             quarry_control_url: "http://127.0.0.1:1".into(),
             model_recommend_url: "http://127.0.0.1:1".into(),
             model_gateway_url: "http://127.0.0.1:1".into(),
+            model_gateway_dev_bearer: String::new(),
             inference_core_url: "http://127.0.0.1:1".into(),
             documents_api_url: "http://127.0.0.1:1".into(),
             retrieval_engine_url: "http://127.0.0.1:1".into(),
@@ -132,6 +142,7 @@ mod tests {
             zammad_api_token: String::new(),
             audience_token_cache: new_audience_token_cache(),
             cache: ResultCache::disabled(),
+            chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             social_store: crate::domains::social::SocialStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers: false,

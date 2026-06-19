@@ -23,6 +23,13 @@ func NewRepository(db *database.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// Ping verifies the database is reachable and this pool can authenticate, for
+// the /health probe. A stale DB password surfaces here — which a port-only
+// healthcheck silently misses while reads limp on stale pooled connections.
+func (r *Repository) Ping(ctx context.Context) error {
+	return r.db.Ping(ctx)
+}
+
 // Create creates a new user
 func (r *Repository) Create(ctx context.Context, params CreateUserParams, passwordHash string) (*User, error) {
 	query := `
@@ -744,6 +751,50 @@ func (r *Repository) GetUserOrgMembership(ctx context.Context, userID, orgID str
 	}
 
 	return out, nil
+}
+
+// ListUserOrgMembershipsForSubject returns ALL of a user's org memberships
+// (any status), for the GDPR DSAR (Art. 15) data-subject export. Unlike
+// GetPrimaryUserOrgMembership this is not limited to active rows — a data
+// subject is entitled to see removed/suspended memberships too.
+func (r *Repository) ListUserOrgMembershipsForSubject(ctx context.Context, userID string) ([]*UserOrgMembership, error) {
+	query := `
+		SELECT id, user_id, org_id, role, status, COALESCE(invited_by, ''), created_at, updated_at
+		FROM user_org_memberships
+		WHERE user_id = $1
+		ORDER BY created_at ASC
+	`
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list user org memberships: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*UserOrgMembership
+	for rows.Next() {
+		m := &UserOrgMembership{}
+		if err := rows.Scan(
+			&m.ID, &m.UserID, &m.OrgID, &m.Role, &m.Status,
+			&m.InvitedBy, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan user org membership: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("user org membership rows error: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteUserOrgMemberships hard-deletes all of a user's membership rows from
+// the local user_service DB. Part of the GDPR hard-erasure path (the user's
+// auth-DB rows are removed separately by gdpr_hard_delete_user).
+func (r *Repository) DeleteUserOrgMemberships(ctx context.Context, userID string) error {
+	if _, err := r.db.Pool.Exec(ctx, `DELETE FROM user_org_memberships WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("failed to delete user org memberships: %w", err)
+	}
+	return nil
 }
 
 // CountActiveOrgMemberships returns active membership count for role bootstrap rules.

@@ -298,7 +298,10 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
             "https://cloude-ai-resource.services.ai.azure.com".to_owned(),
         ),
         azure_anthropic_api_key: Some("azure-claude-key".to_owned()),
-        azure_anthropic_deployments: vec!["claude-haiku-4-5".to_owned(), "claude-opus-4-8".to_owned()],
+        azure_anthropic_deployments: vec![
+            "claude-haiku-4-5".to_owned(),
+            "claude-opus-4-8".to_owned(),
+        ],
         max_retries_per_provider: 1,
         cache_ttl_secs: 60,
         velion_intent_enabled: false,

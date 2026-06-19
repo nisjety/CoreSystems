@@ -21,6 +21,17 @@ describe('agent tool surface', () => {
       },
       required: ['sourceId'],
     })
+
+    const brreg = specs.find((tool) => tool.name === 'brreg.lookup_organization')
+    expect(brreg?.description).toContain('Owner plane: control')
+    expect(JSON.parse(brreg?.parametersJson ?? '{}')).toMatchObject({
+      type: 'object',
+      properties: {
+        q: { type: 'string' },
+        size: { type: 'integer' },
+      },
+      required: ['q', 'size'],
+    })
   })
 
   it('creates TanStack tool definitions with approval metadata', () => {

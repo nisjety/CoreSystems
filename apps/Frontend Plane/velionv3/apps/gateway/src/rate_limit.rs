@@ -1,0 +1,359 @@
+//! Inbound token-bucket rate limiter for the velionv3 BFF gateway.
+//!
+//! Ported from the Model Plane `model-gateway` limiter (per-key token bucket
+//! over a `DashMap`, configurable RPM, `429 TOO_MANY_REQUESTS` + `Retry-After`).
+//!
+//! ## Key selection
+//!
+//! 1. Validated session identity when present — `AuthenticatedUser` is inserted
+//!    into request extensions by [`crate::middleware::require_session`]. We key
+//!    by the session's active org (`active_org_id`) when set, otherwise the
+//!    trusted `user_id`. Both originate from auth-core, never the client.
+//! 2. Client IP for pre-auth routes (auth / onboarding) where no session exists,
+//!    read from a validated forwarded-for header. The browser cannot present an
+//!    `AuthenticatedUser` extension, so spoofing the key requires spoofing the
+//!    forwarded header — which only the trusted reverse proxy in front of the
+//!    gateway should be able to set.
+//! 3. A single shared `anonymous` bucket as a last resort when neither an
+//!    identity nor a parseable client IP is available, so an attacker cannot
+//!    escape the limiter by simply omitting the forwarded header.
+//!
+//! ## Caveat
+//!
+//! Buckets live in-process. This is per-instance, NOT distributed: each gateway
+//! replica enforces its own limit. Mirrors the `model-gateway` caveat; a
+//! distributed limiter (e.g. Dragonfly-backed) is a separate follow-up.
+
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use axum::{
+    extract::Request,
+    http::{HeaderMap, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use dashmap::DashMap;
+
+use crate::middleware::AuthenticatedUser;
+
+/// Default requests-per-minute when `GATEWAY_RATE_LIMIT_RPM` is unset/invalid.
+const DEFAULT_RPM: f64 = 120.0;
+
+/// Forwarded-for header values longer than this are rejected outright — a sane
+/// upper bound that defends against an unbounded-allocation key from a hostile
+/// proxy hop while comfortably fitting a realistic proxy chain.
+const MAX_FORWARDED_LEN: usize = 256;
+
+/// Tracks token count and last refill timestamp for a single bucket.
+struct TokenBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+/// Shared rate-limiter state keyed by caller identity (org / user / client IP).
+#[derive(Clone)]
+pub(crate) struct RateLimiter {
+    buckets: Arc<DashMap<String, TokenBucket>>,
+    rpm: f64,
+}
+
+impl RateLimiter {
+    /// Build a limiter from environment configuration.
+    ///
+    /// Reads `GATEWAY_RATE_LIMIT_RPM` (requests per minute), defaulting to
+    /// [`DEFAULT_RPM`]. A non-positive or unparseable value falls back to the
+    /// default rather than disabling the limiter.
+    pub(crate) fn from_env() -> Self {
+        let rpm = std::env::var("GATEWAY_RATE_LIMIT_RPM")
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(DEFAULT_RPM);
+
+        Self {
+            buckets: Arc::new(DashMap::new()),
+            rpm,
+        }
+    }
+
+    /// Try to consume one token for `key`. Returns `Ok(())` if allowed, or
+    /// `Err(retry_after_secs)` (>= 1) if the bucket is exhausted.
+    fn try_acquire(&self, key: &str) -> Result<(), u64> {
+        let now = Instant::now();
+        let refill_rate = self.rpm / 60.0; // tokens per second
+
+        let mut entry = self
+            .buckets
+            .entry(key.to_owned())
+            .or_insert_with(|| TokenBucket {
+                tokens: self.rpm,
+                last_refill: now,
+            });
+
+        let bucket = entry.value_mut();
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(self.rpm);
+        bucket.last_refill = now;
+
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            Ok(())
+        } else {
+            let deficit = 1.0 - bucket.tokens;
+            let retry_after = Duration::from_secs_f64((deficit / refill_rate).max(0.0)).as_secs();
+            Err(retry_after.max(1))
+        }
+    }
+}
+
+/// Derive the rate-limit key for a request, preferring validated identity.
+///
+/// `user` is the `AuthenticatedUser` extension when `require_session` ran before
+/// this layer; `None` on pre-auth routes. Returns an owned key plus a static
+/// label describing its source (for structured logging only — never the value).
+fn rate_limit_key(user: Option<&AuthenticatedUser>, headers: &HeaderMap) -> (String, &'static str) {
+    if let Some(user) = user {
+        if let Some(org) = user
+            .active_org_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return (format!("org:{org}"), "org");
+        }
+        if !user.user_id.trim().is_empty() {
+            return (format!("user:{}", user.user_id.trim()), "user");
+        }
+    }
+
+    match client_ip(headers) {
+        Some(ip) => (format!("ip:{ip}"), "ip"),
+        None => ("anonymous".to_owned(), "anonymous"),
+    }
+}
+
+/// Extract a validated client IP from the forwarded-for chain.
+///
+/// Prefers the first entry of `x-forwarded-for` (the original client per the de
+/// facto `client, proxy1, proxy2` convention), falling back to `x-real-ip`. The
+/// candidate must parse as a real `IpAddr`; anything else is rejected so a
+/// hostile value cannot become an arbitrary bucket key. The header itself is
+/// only trusted because untrusted inbound identity headers are stripped at
+/// ingress and the gateway sits behind a reverse proxy that sets it.
+fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    let from_forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() <= MAX_FORWARDED_LEN)
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(parse_ip);
+
+    from_forwarded.or_else(|| {
+        headers
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| value.len() <= MAX_FORWARDED_LEN)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(parse_ip)
+    })
+}
+
+/// Parse a forwarded-for entry into an `IpAddr`, tolerating a `[v6]:port` or
+/// `v4:port` suffix that some proxies append.
+fn parse_ip(candidate: &str) -> Option<IpAddr> {
+    if let Ok(ip) = candidate.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    // `[2001:db8::1]:443` form.
+    if let Some(inner) = candidate
+        .strip_prefix('[')
+        .and_then(|rest| rest.split(']').next())
+    {
+        if let Ok(ip) = inner.parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+    // `203.0.113.7:443` form — strip a trailing `:port` only for IPv4-looking
+    // values (an unbracketed colon in IPv6 is ambiguous, so leave those alone).
+    if let Some((host, _port)) = candidate.rsplit_once(':') {
+        if let Ok(ip @ IpAddr::V4(_)) = host.parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Axum middleware enforcing the per-key inbound rate limit.
+///
+/// Pass-through when no [`RateLimiter`] is present in extensions (limiter not
+/// wired) so the gateway fails open rather than rejecting all traffic on a
+/// wiring mistake.
+pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Response {
+    let Some(limiter) = request.extensions().get::<RateLimiter>().cloned() else {
+        return next.run(request).await;
+    };
+
+    let user = request.extensions().get::<AuthenticatedUser>().cloned();
+    let (key, source) = rate_limit_key(user.as_ref(), request.headers());
+
+    match limiter.try_acquire(&key) {
+        Ok(()) => next.run(request).await,
+        Err(retry_after) => {
+            // Log the key SOURCE, never the key value (it can be a user/org id).
+            tracing::warn!(
+                key_source = source,
+                retry_after = retry_after,
+                "inbound rate limit exceeded"
+            );
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", retry_after.to_string())],
+                "rate limit exceeded",
+            )
+                .into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn limiter(rpm: f64) -> RateLimiter {
+        RateLimiter {
+            buckets: Arc::new(DashMap::new()),
+            rpm,
+        }
+    }
+
+    #[test]
+    fn allows_requests_within_limit() {
+        let limiter = limiter(10.0);
+        for _ in 0..10 {
+            assert!(limiter.try_acquire("org:org_1").is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_when_exhausted_with_retry_after() {
+        let limiter = limiter(2.0);
+        assert!(limiter.try_acquire("user:u1").is_ok());
+        assert!(limiter.try_acquire("user:u1").is_ok());
+        let retry_after = limiter
+            .try_acquire("user:u1")
+            .expect_err("third request must be throttled");
+        assert!(retry_after >= 1, "Retry-After must be at least 1 second");
+    }
+
+    #[test]
+    fn isolates_keys() {
+        let limiter = limiter(1.0);
+        assert!(limiter.try_acquire("ip:1.1.1.1").is_ok());
+        assert!(limiter.try_acquire("ip:2.2.2.2").is_ok());
+        assert!(limiter.try_acquire("ip:1.1.1.1").is_err());
+    }
+
+    #[test]
+    fn refills_over_time() {
+        // rpm == 1 means the bucket starts with a single token and refills at
+        // 1/60 token per second. Exhaust it, rewind the refill clock by a full
+        // minute to simulate elapsed time, and confirm a token has returned.
+        let limiter = limiter(1.0);
+        assert!(limiter.try_acquire("org:refill").is_ok());
+        assert!(limiter.try_acquire("org:refill").is_err());
+
+        if let Some(mut bucket) = limiter.buckets.get_mut("org:refill") {
+            bucket.last_refill = Instant::now() - Duration::from_secs(60);
+        }
+        assert!(
+            limiter.try_acquire("org:refill").is_ok(),
+            "bucket should refill after elapsed time"
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_non_positive_and_keeps_default() {
+        // Set a bogus value; from_env must fall back to DEFAULT_RPM.
+        std::env::set_var("GATEWAY_RATE_LIMIT_RPM", "not-a-number");
+        let limiter = RateLimiter::from_env();
+        assert_eq!(limiter.rpm, DEFAULT_RPM);
+        std::env::remove_var("GATEWAY_RATE_LIMIT_RPM");
+    }
+
+    #[test]
+    fn prefers_org_then_user_over_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+
+        let with_org = AuthenticatedUser {
+            user_id: "u1".into(),
+            user_email: String::new(),
+            user_name: String::new(),
+            user_image: None,
+            email_verified: true,
+            auth_role: None,
+            active_org_id: Some("org_42".into()),
+        };
+        let (key, source) = rate_limit_key(Some(&with_org), &headers);
+        assert_eq!(key, "org:org_42");
+        assert_eq!(source, "org");
+
+        let no_org = AuthenticatedUser {
+            active_org_id: None,
+            ..with_org
+        };
+        let (key, source) = rate_limit_key(Some(&no_org), &headers);
+        assert_eq!(key, "user:u1");
+        assert_eq!(source, "user");
+    }
+
+    #[test]
+    fn falls_back_to_client_ip_pre_auth() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.9, 10.0.0.1, 10.0.0.2"),
+        );
+        let (key, source) = rate_limit_key(None, &headers);
+        assert_eq!(key, "ip:198.51.100.9");
+        assert_eq!(source, "ip");
+    }
+
+    #[test]
+    fn falls_back_to_real_ip_then_anonymous() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.42"));
+        let (key, _) = rate_limit_key(None, &headers);
+        assert_eq!(key, "ip:198.51.100.42");
+
+        let (key, source) = rate_limit_key(None, &HeaderMap::new());
+        assert_eq!(key, "anonymous");
+        assert_eq!(source, "anonymous");
+    }
+
+    #[test]
+    fn rejects_garbage_forwarded_for() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("not-an-ip; rm -rf"),
+        );
+        // Garbage candidate is rejected → no valid IP → anonymous bucket.
+        let (key, source) = rate_limit_key(None, &headers);
+        assert_eq!(key, "anonymous");
+        assert_eq!(source, "anonymous");
+    }
+
+    #[test]
+    fn strips_port_suffix() {
+        assert_eq!(parse_ip("203.0.113.7:443"), "203.0.113.7".parse().ok());
+        assert_eq!(parse_ip("[2001:db8::1]:443"), "2001:db8::1".parse().ok());
+        assert_eq!(parse_ip("2001:db8::1"), "2001:db8::1".parse().ok());
+    }
+}

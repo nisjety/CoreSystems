@@ -15,7 +15,14 @@ export async function fetchOnboardingStatus(): Promise<Record<string, unknown>> 
 }
 
 export async function searchBrreg(q: string): Promise<BrregEnhet[]> {
-  return requestJson(`/api/v1/onboarding/brreg/search?q=${encodeURIComponent(q)}&size=8`)
+  // The gateway (→ org-core Enhetsregisteret) returns `{ count, results }`, and
+  // requestJson only unwraps a top-level `data` key — so we must read `.results`
+  // ourselves, otherwise the caller gets an object and the result list renders
+  // empty.
+  const response = await requestJson<{ count?: number; results?: BrregEnhet[] }>(
+    `/api/v1/onboarding/brreg/search?q=${encodeURIComponent(q)}&size=8`,
+  )
+  return Array.isArray(response.results) ? response.results : []
 }
 
 export async function fetchGraphPreview(orgId: string | undefined): Promise<PreviewResponse> {

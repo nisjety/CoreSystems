@@ -246,7 +246,10 @@ mod tests {
             }
         }"#;
         let parsed: RoutingPolicy = serde_json::from_str(json).expect("parse external json");
-        assert_eq!(parsed.cell(VelionMode::Genius, Complexity::Complex), "claude-opus-4-8");
+        assert_eq!(
+            parsed.cell(VelionMode::Genius, Complexity::Complex),
+            "claude-opus-4-8"
+        );
         assert_eq!(parsed.complexity.keywords, vec!["prove", "derive"]);
     }
 
@@ -256,7 +259,11 @@ mod tests {
     fn default_matches_old_choose_for_all_cells() {
         let policy = RoutingPolicy::default();
         for mode in [VelionMode::Budget, VelionMode::Balance, VelionMode::Genius] {
-            for cx in [Complexity::Simple, Complexity::Moderate, Complexity::Complex] {
+            for cx in [
+                Complexity::Simple,
+                Complexity::Moderate,
+                Complexity::Complex,
+            ] {
                 assert_eq!(
                     policy.cell(mode, cx),
                     choose(&policy, mode, cx, BudgetPosture::Healthy),
@@ -271,14 +278,41 @@ mod tests {
     #[test]
     fn default_cells_match_documented_values() {
         let policy = RoutingPolicy::default();
-        assert_eq!(policy.cell(VelionMode::Budget, Complexity::Simple), "gpt-4o-mini");
-        assert_eq!(policy.cell(VelionMode::Budget, Complexity::Moderate), "model-router");
-        assert_eq!(policy.cell(VelionMode::Budget, Complexity::Complex), "model-router");
-        assert_eq!(policy.cell(VelionMode::Balance, Complexity::Simple), "gpt-4o-mini");
-        assert_eq!(policy.cell(VelionMode::Balance, Complexity::Moderate), "model-router");
-        assert_eq!(policy.cell(VelionMode::Balance, Complexity::Complex), "claude-sonnet-4-6");
-        assert_eq!(policy.cell(VelionMode::Genius, Complexity::Simple), "gpt-4o-mini");
-        assert_eq!(policy.cell(VelionMode::Genius, Complexity::Moderate), "claude-sonnet-4-6");
-        assert_eq!(policy.cell(VelionMode::Genius, Complexity::Complex), "claude-opus-4-8");
+        assert_eq!(
+            policy.cell(VelionMode::Budget, Complexity::Simple),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Budget, Complexity::Moderate),
+            "model-router"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Budget, Complexity::Complex),
+            "model-router"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Balance, Complexity::Simple),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Balance, Complexity::Moderate),
+            "model-router"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Balance, Complexity::Complex),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Genius, Complexity::Simple),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Genius, Complexity::Moderate),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            policy.cell(VelionMode::Genius, Complexity::Complex),
+            "claude-opus-4-8"
+        );
     }
 }

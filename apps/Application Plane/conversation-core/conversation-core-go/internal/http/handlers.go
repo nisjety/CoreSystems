@@ -51,6 +51,123 @@ type reviewBody struct {
 	Comment  string `json:"comment"`
 }
 
+type createTicketBody struct {
+	ConversationID      string   `json:"conversation_id"`
+	Status              string   `json:"status"`
+	Priority            string   `json:"priority"`
+	Severity            string   `json:"severity"`
+	Category            string   `json:"category"`
+	Intent              string   `json:"intent"`
+	AssigneeUserID      string   `json:"assignee_user_id"`
+	AssigneeName        string   `json:"assignee_name"`
+	TeamID              string   `json:"team_id"`
+	TeamName            string   `json:"team_name"`
+	DueAt               string   `json:"due_at"`
+	Source              string   `json:"source"`
+	AIConfidence        float64  `json:"ai_confidence"`
+	AIReason            string   `json:"ai_reason"`
+	CreatedBy           string   `json:"created_by"`
+	WaitingSince        string   `json:"waiting_since"`
+	LastCustomerReplyAt string   `json:"last_customer_reply_at"`
+	FirstResponseAt     string   `json:"first_response_at"`
+	ResolvedAt          string   `json:"resolved_at"`
+	SnoozedUntil        string   `json:"snoozed_until"`
+	SLAPolicyID         string   `json:"sla_policy_id"`
+	EscalationAt        string   `json:"escalation_at"`
+	Labels              []string `json:"labels"`
+}
+
+type patchTicketBody struct {
+	Status              *string   `json:"status"`
+	Priority            *string   `json:"priority"`
+	Severity            *string   `json:"severity"`
+	Category            *string   `json:"category"`
+	Intent              *string   `json:"intent"`
+	AssigneeUserID      *string   `json:"assignee_user_id"`
+	AssigneeName        *string   `json:"assignee_name"`
+	TeamID              *string   `json:"team_id"`
+	TeamName            *string   `json:"team_name"`
+	DueAt               *string   `json:"due_at"`
+	Source              *string   `json:"source"`
+	AIConfidence        *float64  `json:"ai_confidence"`
+	AIReason            *string   `json:"ai_reason"`
+	WaitingSince        *string   `json:"waiting_since"`
+	LastCustomerReplyAt *string   `json:"last_customer_reply_at"`
+	FirstResponseAt     *string   `json:"first_response_at"`
+	ResolvedAt          *string   `json:"resolved_at"`
+	SnoozedUntil        *string   `json:"snoozed_until"`
+	SLAPolicyID         *string   `json:"sla_policy_id"`
+	EscalationAt        *string   `json:"escalation_at"`
+	Labels              *[]string `json:"labels"`
+}
+
+type linkTicketResourceBody struct {
+	LinkType     string         `json:"link_type"`
+	ResourceKind string         `json:"resource_kind"`
+	ResourceID   string         `json:"resource_id"`
+	ResourceURL  string         `json:"resource_url"`
+	Label        string         `json:"label"`
+	Metadata     map[string]any `json:"metadata"`
+}
+
+type ticketClassificationBody struct {
+	Outcome            string         `json:"outcome"`
+	Confidence         float64        `json:"confidence"`
+	Reason             string         `json:"reason"`
+	SuggestedFields    map[string]any `json:"suggested_fields"`
+	EvidenceMessageIDs []string       `json:"evidence_message_ids"`
+}
+
+type ticketViewBody struct {
+	Name         *string         `json:"name"`
+	Scope        *string         `json:"scope"`
+	OwnerUserID  *string         `json:"owner_user_id"`
+	TeamID       *string         `json:"team_id"`
+	Visibility   *string         `json:"visibility"`
+	Filter       *map[string]any `json:"filter"`
+	Sort         *map[string]any `json:"sort"`
+	GroupBy      *string         `json:"group_by"`
+	SidebarOrder *int            `json:"sidebar_order"`
+}
+
+type ticketMacroBody struct {
+	Name        *string         `json:"name"`
+	Description *string         `json:"description"`
+	Visibility  *string         `json:"visibility"`
+	TeamID      *string         `json:"team_id"`
+	Active      *bool           `json:"active"`
+	Actions     *map[string]any `json:"actions"`
+	Conditions  *map[string]any `json:"conditions"`
+}
+
+type ticketAutomationRuleBody struct {
+	Name       *string         `json:"name"`
+	EventName  *string         `json:"event_name"`
+	Active     *bool           `json:"active"`
+	Conditions *map[string]any `json:"conditions"`
+	Actions    *map[string]any `json:"actions"`
+}
+
+type slaPolicyBody struct {
+	Name                 *string         `json:"name"`
+	Active               *bool           `json:"active"`
+	Conditions           *map[string]any `json:"conditions"`
+	CalendarRef          *string         `json:"calendar_ref"`
+	FirstResponseMinutes *int            `json:"first_response_minutes"`
+	NextResponseMinutes  *int            `json:"next_response_minutes"`
+	ResolutionMinutes    *int            `json:"resolution_minutes"`
+}
+
+type createTicketChecklistBody struct {
+	Name       string   `json:"name"`
+	TemplateID string   `json:"template_id"`
+	Items      []string `json:"items"`
+}
+
+type patchTicketChecklistItemBody struct {
+	Completed bool `json:"completed"`
+}
+
 func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "service": h.cfg.ServiceName})
 }
@@ -124,6 +241,617 @@ func (h *Handler) GetConversation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": detail})
+}
+
+func (h *Handler) ListTickets(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	tickets, err := h.service.ListTickets(c.Request.Context(), conversation.TicketListFilter{
+		OrgID:    orgID,
+		Queue:    c.Query("queue"),
+		Status:   c.Query("status"),
+		Assigned: c.Query("assigned"),
+		TeamID:   c.Query("team"),
+		Label:    c.Query("label"),
+		Priority: c.Query("priority"),
+		Severity: c.Query("severity"),
+		SLAState: c.Query("sla_state"),
+		Query:    c.Query("q"),
+		Limit:    limit,
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": tickets, "meta": gin.H{"limit": limit, "has_next": false, "next_cursor": nil}})
+}
+
+func (h *Handler) CreateTicket(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body createTicketBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	dueAt, err := parseOptionalTime(body.DueAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "due_at must be RFC3339 when provided."))
+		return
+	}
+	waitingSince, err := parseOptionalTime(body.WaitingSince)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "waiting_since must be RFC3339 when provided."))
+		return
+	}
+	lastCustomerReplyAt, err := parseOptionalTime(body.LastCustomerReplyAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "last_customer_reply_at must be RFC3339 when provided."))
+		return
+	}
+	firstResponseAt, err := parseOptionalTime(body.FirstResponseAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "first_response_at must be RFC3339 when provided."))
+		return
+	}
+	resolvedAt, err := parseOptionalTime(body.ResolvedAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "resolved_at must be RFC3339 when provided."))
+		return
+	}
+	snoozedUntil, err := parseOptionalTime(body.SnoozedUntil)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "snoozed_until must be RFC3339 when provided."))
+		return
+	}
+	escalationAt, err := parseOptionalTime(body.EscalationAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "escalation_at must be RFC3339 when provided."))
+		return
+	}
+	ticket, err := h.service.CreateTicket(c.Request.Context(), conversation.CreateTicketInput{
+		OrgID:               orgID,
+		ConversationID:      body.ConversationID,
+		Status:              body.Status,
+		Priority:            body.Priority,
+		Severity:            body.Severity,
+		Category:            body.Category,
+		Intent:              body.Intent,
+		AssigneeUserID:      body.AssigneeUserID,
+		AssigneeName:        body.AssigneeName,
+		TeamID:              body.TeamID,
+		TeamName:            body.TeamName,
+		DueAt:               dueAt,
+		Source:              body.Source,
+		AIConfidence:        body.AIConfidence,
+		AIReason:            body.AIReason,
+		CreatedBy:           body.CreatedBy,
+		WaitingSince:        waitingSince,
+		LastCustomerReplyAt: lastCustomerReplyAt,
+		FirstResponseAt:     firstResponseAt,
+		ResolvedAt:          resolvedAt,
+		SnoozedUntil:        snoozedUntil,
+		SLAPolicyID:         body.SLAPolicyID,
+		EscalationAt:        escalationAt,
+		Labels:              body.Labels,
+		ActorUserID:         actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": ticket})
+}
+
+func (h *Handler) GetTicket(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	ticket, err := h.service.GetTicket(c.Request.Context(), orgID, c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": ticket})
+}
+
+func (h *Handler) PatchTicket(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body patchTicketBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	dueAt, err := parseOptionalTimePtr(body.DueAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "due_at must be RFC3339 when provided."))
+		return
+	}
+	waitingSince, err := parseOptionalTimePtr(body.WaitingSince)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "waiting_since must be RFC3339 when provided."))
+		return
+	}
+	lastCustomerReplyAt, err := parseOptionalTimePtr(body.LastCustomerReplyAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "last_customer_reply_at must be RFC3339 when provided."))
+		return
+	}
+	firstResponseAt, err := parseOptionalTimePtr(body.FirstResponseAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "first_response_at must be RFC3339 when provided."))
+		return
+	}
+	resolvedAt, err := parseOptionalTimePtr(body.ResolvedAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "resolved_at must be RFC3339 when provided."))
+		return
+	}
+	snoozedUntil, err := parseOptionalTimePtr(body.SnoozedUntil)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "snoozed_until must be RFC3339 when provided."))
+		return
+	}
+	escalationAt, err := parseOptionalTimePtr(body.EscalationAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "escalation_at must be RFC3339 when provided."))
+		return
+	}
+	ticket, err := h.service.UpdateTicket(c.Request.Context(), conversation.UpdateTicketInput{
+		OrgID:               orgID,
+		TicketID:            c.Param("id"),
+		Status:              body.Status,
+		Priority:            body.Priority,
+		Severity:            body.Severity,
+		Category:            body.Category,
+		Intent:              body.Intent,
+		AssigneeUserID:      body.AssigneeUserID,
+		AssigneeName:        body.AssigneeName,
+		TeamID:              body.TeamID,
+		TeamName:            body.TeamName,
+		DueAt:               dueAt,
+		Source:              body.Source,
+		AIConfidence:        body.AIConfidence,
+		AIReason:            body.AIReason,
+		WaitingSince:        waitingSince,
+		LastCustomerReplyAt: lastCustomerReplyAt,
+		FirstResponseAt:     firstResponseAt,
+		ResolvedAt:          resolvedAt,
+		SnoozedUntil:        snoozedUntil,
+		SLAPolicyID:         body.SLAPolicyID,
+		EscalationAt:        escalationAt,
+		Labels:              body.Labels,
+		ActorUserID:         actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": ticket})
+}
+
+func (h *Handler) LinkTicketResource(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body linkTicketResourceBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	link, err := h.service.LinkTicketResource(c.Request.Context(), conversation.LinkTicketResourceInput{
+		OrgID:           orgID,
+		TicketID:        c.Param("id"),
+		LinkType:        body.LinkType,
+		ResourceKind:    body.ResourceKind,
+		ResourceID:      body.ResourceID,
+		ResourceURL:     body.ResourceURL,
+		Label:           body.Label,
+		Metadata:        body.Metadata,
+		CreatedByUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": link})
+}
+
+func (h *Handler) ClassifyConversationForTicket(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketClassificationBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	classification, err := h.service.RecordTicketClassification(c.Request.Context(), conversation.TicketClassificationInput{
+		OrgID:              orgID,
+		ConversationID:     c.Param("id"),
+		Outcome:            body.Outcome,
+		Confidence:         body.Confidence,
+		Reason:             body.Reason,
+		SuggestedFields:    body.SuggestedFields,
+		EvidenceMessageIDs: body.EvidenceMessageIDs,
+		ActorUserID:        actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": classification})
+}
+
+func (h *Handler) ListTicketViews(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListTicketViews(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) CreateTicketView(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketViewBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.CreateTicketView(c.Request.Context(), conversation.CreateTicketViewInput{
+		OrgID:        orgID,
+		Name:         stringValue(body.Name),
+		Scope:        stringValue(body.Scope),
+		OwnerUserID:  stringValue(body.OwnerUserID),
+		TeamID:       stringValue(body.TeamID),
+		Visibility:   stringValue(body.Visibility),
+		Filter:       mapValue(body.Filter),
+		Sort:         mapValue(body.Sort),
+		GroupBy:      stringValue(body.GroupBy),
+		SidebarOrder: intValue(body.SidebarOrder),
+		ActorUserID:  actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchTicketView(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketViewBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateTicketView(c.Request.Context(), conversation.UpdateTicketViewInput{
+		OrgID:        orgID,
+		ID:           c.Param("id"),
+		Name:         body.Name,
+		Scope:        body.Scope,
+		OwnerUserID:  body.OwnerUserID,
+		TeamID:       body.TeamID,
+		Visibility:   body.Visibility,
+		Filter:       body.Filter,
+		Sort:         body.Sort,
+		GroupBy:      body.GroupBy,
+		SidebarOrder: body.SidebarOrder,
+		ActorUserID:  actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) ListTicketMacros(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListTicketMacros(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) CreateTicketMacro(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketMacroBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	active := true
+	if body.Active != nil {
+		active = *body.Active
+	}
+	item, err := h.service.CreateTicketMacro(c.Request.Context(), conversation.CreateTicketMacroInput{
+		OrgID:       orgID,
+		Name:        stringValue(body.Name),
+		Description: stringValue(body.Description),
+		Visibility:  stringValue(body.Visibility),
+		TeamID:      stringValue(body.TeamID),
+		Active:      active,
+		Actions:     mapValue(body.Actions),
+		Conditions:  mapValue(body.Conditions),
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchTicketMacro(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketMacroBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateTicketMacro(c.Request.Context(), conversation.UpdateTicketMacroInput{
+		OrgID:       orgID,
+		ID:          c.Param("id"),
+		Name:        body.Name,
+		Description: body.Description,
+		Visibility:  body.Visibility,
+		TeamID:      body.TeamID,
+		Active:      body.Active,
+		Actions:     body.Actions,
+		Conditions:  body.Conditions,
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) RunTicketMacro(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	result, err := h.service.RunTicketMacro(c.Request.Context(), conversation.TicketMacroRunInput{
+		OrgID:       orgID,
+		TicketID:    c.Param("id"),
+		MacroID:     c.Param("macro_id"),
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+func (h *Handler) ListTicketAutomationRules(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListTicketAutomationRules(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) CreateTicketAutomationRule(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketAutomationRuleBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	active := true
+	if body.Active != nil {
+		active = *body.Active
+	}
+	item, err := h.service.CreateTicketAutomationRule(c.Request.Context(), conversation.CreateTicketAutomationRuleInput{
+		OrgID:       orgID,
+		Name:        stringValue(body.Name),
+		EventName:   stringValue(body.EventName),
+		Active:      active,
+		Conditions:  mapValue(body.Conditions),
+		Actions:     mapValue(body.Actions),
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchTicketAutomationRule(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketAutomationRuleBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateTicketAutomationRule(c.Request.Context(), conversation.UpdateTicketAutomationRuleInput{
+		OrgID:       orgID,
+		ID:          c.Param("id"),
+		Name:        body.Name,
+		EventName:   body.EventName,
+		Active:      body.Active,
+		Conditions:  body.Conditions,
+		Actions:     body.Actions,
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) ListSLAPolicies(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListSLAPolicies(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) CreateSLAPolicy(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body slaPolicyBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	active := true
+	if body.Active != nil {
+		active = *body.Active
+	}
+	item, err := h.service.CreateSLAPolicy(c.Request.Context(), conversation.CreateSLAPolicyInput{
+		OrgID:                orgID,
+		Name:                 stringValue(body.Name),
+		Active:               active,
+		Conditions:           mapValue(body.Conditions),
+		CalendarRef:          stringValue(body.CalendarRef),
+		FirstResponseMinutes: intValue(body.FirstResponseMinutes),
+		NextResponseMinutes:  intValue(body.NextResponseMinutes),
+		ResolutionMinutes:    intValue(body.ResolutionMinutes),
+		ActorUserID:          actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchSLAPolicy(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body slaPolicyBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateSLAPolicy(c.Request.Context(), conversation.UpdateSLAPolicyInput{
+		OrgID:                orgID,
+		ID:                   c.Param("id"),
+		Name:                 body.Name,
+		Active:               body.Active,
+		Conditions:           body.Conditions,
+		CalendarRef:          body.CalendarRef,
+		FirstResponseMinutes: body.FirstResponseMinutes,
+		NextResponseMinutes:  body.NextResponseMinutes,
+		ResolutionMinutes:    body.ResolutionMinutes,
+		ActorUserID:          actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) CreateTicketChecklist(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body createTicketChecklistBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	checklist, err := h.service.CreateTicketChecklist(c.Request.Context(), conversation.CreateTicketChecklistInput{
+		OrgID:           orgID,
+		TicketID:        c.Param("id"),
+		Name:            body.Name,
+		TemplateID:      body.TemplateID,
+		Items:           body.Items,
+		CreatedByUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": checklist})
+}
+
+func (h *Handler) PatchTicketChecklistItem(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body patchTicketChecklistItemBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	checklist, err := h.service.UpdateTicketChecklistItem(c.Request.Context(), conversation.UpdateTicketChecklistItemInput{
+		OrgID:       orgID,
+		TicketID:    c.Param("id"),
+		ChecklistID: c.Param("checklist_id"),
+		ItemID:      c.Param("item_id"),
+		Completed:   body.Completed,
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": checklist})
 }
 
 func (h *Handler) IngestEvent(c *gin.Context) {
@@ -337,6 +1065,26 @@ func requireOrgID(c *gin.Context) string {
 	return orgID
 }
 
+func parseOptionalTime(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, err
+	}
+	utc := parsed.UTC()
+	return &utc, nil
+}
+
+func parseOptionalTimePtr(value *string) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	return parseOptionalTime(*value)
+}
+
 func actorUserID(c *gin.Context) string {
 	userID := strings.TrimSpace(c.GetHeader("x-user-id"))
 	if userID == "" {
@@ -345,10 +1093,33 @@ func actorUserID(c *gin.Context) string {
 	return userID
 }
 
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func intValue(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func mapValue(value *map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	return *value
+}
+
 func writeServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, conversation.ErrNotFound):
 		c.JSON(http.StatusNotFound, errorPayload("not_found", "Conversation resource was not found."))
+	case errors.Is(err, conversation.ErrConflict):
+		c.JSON(http.StatusConflict, errorPayload("conflict", "Conversation resource already exists."))
 	case conversation.IsInvalidInput(err):
 		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", err.Error()))
 	default:

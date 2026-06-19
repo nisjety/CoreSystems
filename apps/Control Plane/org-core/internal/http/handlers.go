@@ -19,6 +19,21 @@ import (
 )
 
 func (s *Server) health(c *gin.Context) {
+	// Deep check: round-trip the DB so an unreachable/unauthenticated database
+	// (e.g. a stale DB password) makes this container report unhealthy instead
+	// of silently serving stale reads. Returning 503 fails the docker
+	// `wget --spider /health` healthcheck.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.orgService.Ping(ctx); err != nil {
+		log.Printf("health: database ping failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "unhealthy",
+			"service": "org-core",
+			"error":   "database unreachable",
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"service":   "org-core",
@@ -90,12 +105,16 @@ func (s *Server) createOrganization(c *gin.Context) {
 	}
 
 	if err := s.orgService.UpsertFromAuthEvent(c.Request.Context(), newOrg.ID, newOrg.Name, newOrg.Slug, newOrg.Metadata); err != nil {
+		// Log the underlying cause — the client only gets a generic message, so
+		// without this the real error (e.g. DB auth failure) is invisible.
+		log.Printf("createOrganization: failed to upsert org id=%s: %v", newOrg.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
 		return
 	}
 
 	// Add creator as owner member
 	if err := s.orgService.AddOrganizationMember(c.Request.Context(), newOrg.ID, userID, "owner"); err != nil {
+		log.Printf("createOrganization: failed to add member org=%s user=%s: %v", newOrg.ID, userID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add organization member"})
 		return
 	}

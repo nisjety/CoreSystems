@@ -507,17 +507,26 @@ impl PlanStore {
     }
 
     pub fn get(&self, plan_id: &str) -> Option<AgentPlan> {
-        let lock = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lock = self
+            .plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.get(plan_id).cloned()
     }
 
     pub fn update(&self, plan: AgentPlan) {
-        let mut lock = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut lock = self
+            .plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.insert(plan.config.plan_id.clone(), plan);
     }
 
     pub fn abort(&self, plan_id: &str) -> bool {
-        let mut lock = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut lock = self
+            .plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(plan) = lock.get_mut(plan_id) {
             if !plan.status.is_terminal() {
                 plan.status = PlanStatus::Aborted;

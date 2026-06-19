@@ -1,4 +1,4 @@
-import { For, Show } from 'solid-js'
+import { createMemo, For, Show } from 'solid-js'
 import type { CheckoutSession, PlanRecommendation } from '@/features/onboarding/lib/api'
 import { type PlanId, onboardingPlanCards } from '@/features/onboarding/lib/model'
 import { Button } from '@/shared/ui/Button'
@@ -15,12 +15,38 @@ type PaywallStepProps = {
   loadingRecommendation: boolean
   onConfirmCheckout: (payment: { paymentId?: string; clientSecret?: string; status: string }) => void | Promise<void>
   onCommitPlan: () => void | Promise<void>
+  onRefreshRecommendation?: () => void | Promise<void>
   onSelectPlan: (planId: PlanId) => void
   recommendation?: PlanRecommendation
 }
 
 export function PaywallStep(props: PaywallStepProps) {
+  const defaultPlan = onboardingPlanCards[0]!
+  const hasRecommendation = () => Boolean(props.recommendation)
   const recommendedPlanId = () => props.recommendation?.planId ?? 'trial'
+  const recommendedPlan = createMemo(() => (
+    onboardingPlanCards.find((plan) => plan.id === recommendedPlanId()) ?? defaultPlan
+  ))
+  const activePlan = createMemo(() => (
+    onboardingPlanCards.find((plan) => plan.id === props.activePlanId) ?? defaultPlan
+  ))
+  const proofPoints = createMemo(() => props.recommendation?.proofPoints?.filter(Boolean).slice(0, 3) ?? [])
+  const scopeSignals = createMemo(() => props.recommendation?.scopeSignals?.filter(Boolean).slice(0, 4) ?? [])
+  const opportunities = createMemo(() => props.recommendation?.opportunities?.filter(Boolean).slice(0, 2) ?? [])
+  const suggestionSummary = () => (
+    props.loadingRecommendation
+      ? 'Velion AI analyserer nettsted, organisasjon og kildene du har valgt.'
+      : props.recommendation?.summary ||
+        'Lite signal ennå. Gratis lar deg teste i 14 dager før Velion anbefaler en betalt plan.'
+  )
+  const suggestionTitle = () => {
+    if (props.loadingRecommendation) return 'Velion AI finner beste plan'
+    return `${recommendedPlan().name} anbefales`
+  }
+  const suggestionKicker = () => {
+    if (props.loadingRecommendation) return 'Analyserer'
+    return props.recommendation?.source === 'model' ? 'Velion AI-forslag' : 'Velion forslag'
+  }
 
   return (
     <section class="onboarding-paywall">
@@ -44,7 +70,7 @@ export function PaywallStep(props: PaywallStepProps) {
               class="onboarding-paywall-card"
               classList={{
                 'onboarding-paywall-card--active': props.activePlanId === plan.id,
-                'onboarding-paywall-card--recommended': recommendedPlanId() === plan.id,
+                'onboarding-paywall-card--recommended': hasRecommendation() && recommendedPlanId() === plan.id,
               }}
             >
               <div class="onboarding-paywall-card__head">
@@ -55,8 +81,13 @@ export function PaywallStep(props: PaywallStepProps) {
                       Aktiv prøve
                     </span>
                   </Show>
-                  <Show when={recommendedPlanId() === plan.id}>
-                    <span class="onboarding-paywall-card__badge">★ anbefalt</span>
+                  <Show when={hasRecommendation() && recommendedPlanId() === plan.id}>
+                    <span class="onboarding-paywall-card__badge">Velion foreslår</span>
+                  </Show>
+                  <Show when={props.activePlanId === plan.id && recommendedPlanId() !== plan.id}>
+                    <span class="onboarding-paywall-card__badge onboarding-paywall-card__badge--choice">
+                      Ditt valg
+                    </span>
                   </Show>
                 </span>
               </div>
@@ -85,14 +116,67 @@ export function PaywallStep(props: PaywallStepProps) {
         </For>
       </div>
 
-      <div class="onboarding-paywall__reason">
-        <strong>{recommendedPlanId() === 'trial' ? 'Gratis anbefales' : 'Velion anbefaler denne planen'}</strong>
-        <p>
-          {props.loadingRecommendation
-            ? 'Analyserer onboarding-signalene.'
-            : props.recommendation?.summary ||
-              'Lite signal ennå. Gratis lar deg teste i 14 dager før Velion anbefaler en betalt plan.'}
-        </p>
+      <div class="onboarding-paywall__suggestion" aria-live="polite">
+        <div class="onboarding-paywall__suggestion-main">
+          <span class="onboarding-paywall__suggestion-kicker">{suggestionKicker()}</span>
+          <strong>{suggestionTitle()}</strong>
+          <p>{suggestionSummary()}</p>
+          <Show when={props.recommendation?.reason}>
+            {(reason) => <small>{reason()}</small>}
+          </Show>
+        </div>
+
+        <div class="onboarding-paywall__suggestion-side">
+          <div>
+            <span>Valgt nå</span>
+            <strong>{activePlan().name}</strong>
+          </div>
+          <Show when={hasRecommendation()}>
+            <Show
+              when={props.activePlanId !== recommendedPlanId()}
+              fallback={<span class="onboarding-paywall__suggestion-confirmed">Forslaget er valgt</span>}
+            >
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={props.loadingRecommendation}
+                onClick={() => props.onSelectPlan(recommendedPlanId())}
+              >
+                Bruk anbefalingen
+              </Button>
+            </Show>
+          </Show>
+          <Show when={props.onRefreshRecommendation}>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={props.loadingRecommendation}
+              onClick={() => void props.onRefreshRecommendation?.()}
+            >
+              Oppdater forslag
+            </Button>
+          </Show>
+        </div>
+
+        <Show when={proofPoints().length || scopeSignals().length || opportunities().length}>
+          <div class="onboarding-paywall__suggestion-evidence">
+            <Show when={proofPoints().length}>
+              <ul>
+                <For each={proofPoints()}>{(item) => <li>{item}</li>}</For>
+              </ul>
+            </Show>
+            <Show when={scopeSignals().length}>
+              <div class="onboarding-paywall__suggestion-signals">
+                <For each={scopeSignals()}>{(item) => <span>{item}</span>}</For>
+              </div>
+            </Show>
+            <Show when={opportunities().length}>
+              <div class="onboarding-paywall__suggestion-opportunities">
+                <For each={opportunities()}>{(item) => <p>{item}</p>}</For>
+              </div>
+            </Show>
+          </div>
+        </Show>
       </div>
 
       <Show when={props.error}>

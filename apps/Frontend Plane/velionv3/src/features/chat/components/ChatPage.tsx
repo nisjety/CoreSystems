@@ -22,8 +22,12 @@ import {
   Clock3,
   Code2,
   Copy,
+  Download,
+  ExternalLink,
   FileCode2,
+  Globe2,
   GraduationCap,
+  Image as ImageIcon,
   Laptop,
   Link2,
   ListChecks,
@@ -46,6 +50,21 @@ import {
   X,
   type LucideProps,
 } from 'lucide-solid'
+import {
+  CHAT_ACTIVE_THREAD_CHANGED_EVENT,
+  clearActiveChatThreadId,
+  readActiveChatThreadId,
+  readChatThreadTranscript,
+  removeChatThreadHistoryItem,
+  removeChatThreadTranscript,
+  setActiveChatThreadId,
+  upsertChatThreadHistory,
+  upsertChatThreadTranscript,
+  type ChatThreadHistoryInput,
+  type ChatThreadTranscriptStep,
+  type ChatThreadTranscriptTurn,
+} from '@/features/chat/lib/chat-thread-history'
+import { withBrregLookupAction } from '@/features/chat/lib/brreg-action'
 import { consumePendingChatLaunch } from '@/features/chat/lib/pending-chat-launch'
 import { DashboardComposer, type DashboardComposerSubmitPayload } from '@/features/dashboard/home/DashboardComposer'
 import {
@@ -58,8 +77,11 @@ import {
 import {
   cancelInvocation,
   cheapDefaultModelId,
+  deleteChatThread,
+  getChatThreadTranscript,
   getThreadMessages,
   listModels,
+  saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
   VELION_BALANCE_MODE_ID,
@@ -67,7 +89,7 @@ import {
   type ChatMessage,
 } from '@/shared/api/chat-client'
 import { blobToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
-import { readClientValue, removeClientValue, writeClientValue } from '@/shared/session/client-storage'
+import { readClientValue, writeClientValue } from '@/shared/session/client-storage'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -107,6 +129,21 @@ type GeneratedFile = {
   mime: string
   size: number
   url: string
+}
+
+type GeneratedImagePreview = {
+  id: string
+  title: string
+  src: string
+  downloadName: string
+  size: number
+  artifactId?: string
+}
+
+type ArtifactPanelItem = {
+  artifact: ChatArtifact
+  file?: GeneratedFile
+  turn: ChatTurn
 }
 
 type ChatGroundingSource = {
@@ -192,6 +229,24 @@ type AgentTaskStep = {
   detail: string
   status: TaskStepStatus
   createdAt: string
+  expandedDetail?: string
+  evidence?: AgentTaskStepEvidence[]
+  turnId?: string
+  turnTitle?: string
+}
+
+type AgentTaskStepEvidence = {
+  id: string
+  label: string
+  value: string
+  href?: string
+}
+
+type AgentTaskStepSection = {
+  id: string
+  title: string
+  createdAt: string
+  steps: AgentTaskStep[]
 }
 
 type ChatStatus = 'idle' | 'streaming' | 'error'
@@ -234,8 +289,6 @@ type MarkdownBlock =
   | { kind: 'paragraph'; text: string }
   | { kind: 'quote'; text: string }
 
-const chatThreadKey = 'velion.chat.threadId'
-
 // ── Prompt chips ──────────────────────────────────────────────────────────────
 
 const PRIMARY_PROMPTS = [
@@ -261,6 +314,7 @@ const TOOL_LABELS: Record<ComposerToolId, string> = {
 }
 
 const PROSE_ARTIFACT_KINDS = new Set(['markdown', 'md', 'doc', 'text', 'report', 'prose'])
+const CHAT_BROWSE_WEB_KEY = 'velion.chat.browseWeb.v1'
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -284,6 +338,7 @@ export default function ChatPage() {
   const [showScrollDown, setShowScrollDown] = createSignal(false)
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanMode] = createSignal(false)
+  const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
   const [input, setInput] = createSignal('')
   let abortController: AbortController | undefined
   let messageListRef!: HTMLDivElement
@@ -293,48 +348,190 @@ export default function ChatPage() {
   const isStreaming = () => state.status === 'streaming'
   const evidenceSources = createMemo(() => collectEvidenceSources(state.turns))
   const latestGrounding = createMemo(() => collectLatestGrounding(state.turns))
-  const artifacts = createMemo(() => collectArtifacts(state.turns))
+  const artifactItems = createMemo(() => collectArtifactItems(state.turns))
+  const artifacts = createMemo(() => artifactItems().map((item) => item.artifact))
   const latestScreen = createMemo(() => selectLatestImageArtifact(state.turns))
   const title = () => createChatTitle(state.turns)
+  let serverSnapshotTimer: number | undefined
+  let pendingServerSnapshot: {
+    preview?: string
+    taskSteps: ChatThreadTranscriptStep[]
+    threadId: string
+    title?: string
+    turns: ChatThreadTranscriptTurn[]
+    updatedAt?: string
+  } | null = null
 
-  onMount(async () => {
-    const storedThread = readClientValue(chatThreadKey)
-    if (storedThread) {
-      setState('threadId', storedThread)
+  createEffect(() => {
+    writeBrowseWebPreference(browseWeb())
+  })
+
+  const flushServerThreadSnapshot = async () => {
+    if (serverSnapshotTimer !== undefined) {
+      window.clearTimeout(serverSnapshotTimer)
+      serverSnapshotTimer = undefined
+    }
+    const snapshot = pendingServerSnapshot
+    pendingServerSnapshot = null
+    if (!snapshot) return
+    await saveChatThreadSnapshot(snapshot.threadId, {
+      title: snapshot.title,
+      preview: snapshot.preview,
+      updatedAt: snapshot.updatedAt,
+      turns: snapshot.turns,
+      taskSteps: snapshot.taskSteps,
+    }).catch(() => undefined)
+  }
+
+  const queueServerThreadSnapshot = (snapshot: NonNullable<typeof pendingServerSnapshot>) => {
+    pendingServerSnapshot = snapshot
+    if (serverSnapshotTimer !== undefined) window.clearTimeout(serverSnapshotTimer)
+    serverSnapshotTimer = window.setTimeout(() => {
+      void flushServerThreadSnapshot()
+    }, 500)
+  }
+
+  onCleanup(() => {
+    if (serverSnapshotTimer !== undefined) window.clearTimeout(serverSnapshotTimer)
+  })
+
+  const writeThreadSnapshot = (
+    threadId: string,
+    turns: ChatTurn[],
+    overrides: Partial<ChatThreadHistoryInput> = {},
+    taskSteps: AgentTaskStep[] = state.taskSteps,
+    options: { persistServer?: boolean } = {},
+  ) => {
+    const firstUserTurn = turns.find((turn) => turn.role === 'user')
+    const lastTurn = turns.at(-1)
+    const title = overrides.title ?? (firstUserTurn ? createPreview(firstUserTurn.content, 48) : createChatTitle(turns))
+    const preview = overrides.preview ?? lastTurn?.content
+    const updatedAt = overrides.updatedAt ?? lastTurn?.createdAt
+    const transcriptTurns = turnsToTranscript(turns)
+    const transcriptTaskSteps = taskStepsToTranscript(taskSteps)
+    upsertChatThreadHistory({
+      threadId,
+      title,
+      preview,
+      updatedAt,
+    })
+    upsertChatThreadTranscript({
+      threadId,
+      taskSteps: transcriptTaskSteps,
+      turns: transcriptTurns,
+      updatedAt,
+    })
+    if (options.persistServer !== false) {
+      queueServerThreadSnapshot({
+        threadId,
+        title,
+        preview,
+        updatedAt,
+        turns: transcriptTurns,
+        taskSteps: transcriptTaskSteps,
+      })
+    }
+  }
+
+  const loadThread = async (threadId: string) => {
+    setState('threadId', threadId)
+    const localCached = readChatThreadTranscript(threadId)
+    const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
+    const cached = serverCached
+      ? {
+          threadId: serverCached.threadId,
+          turns: serverCached.turns as ChatThreadTranscriptTurn[],
+          taskSteps: serverCached.taskSteps as ChatThreadTranscriptStep[] | undefined,
+          updatedAt: serverCached.updatedAt,
+        }
+      : localCached
+    const cachedTurns = dedupeChatTurns(cached?.turns.map(transcriptTurnToChatTurn) ?? [])
+    const cachedTaskSteps = cached?.taskSteps?.map(transcriptStepToTaskStep) ?? []
+    try {
+      const history = await getThreadMessages(threadId)
+      const serverTurns = dedupeChatTurns(history.map(messageToTurn))
+      const turns = serverTurns.length > 0
+        ? mergeServerTurnsWithCachedMetadata(serverTurns, cachedTurns)
+        : cachedTurns
+      setState({ turns, taskSteps: cachedTaskSteps })
+      if (turns.length > 0) {
+        writeThreadSnapshot(threadId, turns, {}, cachedTaskSteps, { persistServer: false })
+      }
+    } catch {
+      const fallbackTurns = cachedTurns
+      setState({ turns: fallbackTurns, taskSteps: cachedTaskSteps })
+      if (fallbackTurns.length > 0) {
+        writeThreadSnapshot(threadId, fallbackTurns, {}, cachedTaskSteps, { persistServer: false })
+      }
+    }
+  }
+
+  createEffect(() => {
+    if (!state.threadId || state.turns.length === 0) return
+    writeThreadSnapshot(state.threadId, state.turns, {}, state.taskSteps, { persistServer: false })
+  })
+
+  const resetChatState = () => {
+    abortController?.abort()
+    setState({
+      turns: [],
+      taskSteps: [],
+      status: 'idle',
+      error: null,
+      requestId: null,
+      threadId: null,
+      activeModel: state.activeModel,
+      branchCount: 0,
+    })
+    setInput('')
+    setActiveTab('chat')
+  }
+
+  onMount(() => {
+    const handleActiveThreadChange = (event: Event) => {
+      const threadId = (event as CustomEvent<{ threadId: string | null }>).detail?.threadId
+      if (!threadId) {
+        resetChatState()
+        return
+      }
+      if (threadId && threadId !== state.threadId) void loadThread(threadId)
+    }
+    window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+    onCleanup(() => window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange))
+
+    const initializeChat = async () => {
+      const storedThread = readActiveChatThreadId()
+      if (storedThread) await loadThread(storedThread)
+
       try {
-        const history = await getThreadMessages(storedThread)
-        setState('turns', history.map(messageToTurn))
+        const available = await listModels()
+        // Default to the Velion Balance intent mode (cost-aware, resolved
+        // server-side), never the first (possibly expensive) catalog entry.
+        // cheapDefaultModelId is resilient: it always returns the balance mode id.
+        const cheapId = cheapDefaultModelId(available)
+        if (cheapId) setState('activeModel', cheapId)
       } catch {
-        removeClientValue(chatThreadKey)
-        setState('threadId', null)
+        // The chat can still run with the gateway default model.
+      }
+
+      const pending = consumePendingChatLaunch()
+      if (pending) {
+        if (pending.model) setState('activeModel', pending.model)
+        setBrowseWeb(Boolean(pending.tools?.includes('search') || pending.tools?.includes('research')))
+        const attachments = await toStreamAttachments(pending.attachments ?? [])
+        triggerLaunchMotion()
+        await sendContent(pending.text, pending.model, {
+          attachments: attachments.length > 0 ? attachments : undefined,
+          browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
+          displayAttachments: pending.attachments ?? [],
+          generateImage: pending.tools?.includes('image'),
+          tools: pending.tools ?? [],
+          actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+        })
       }
     }
 
-    try {
-      const available = await listModels()
-      // Default to the Velion Balance intent mode (cost-aware, resolved
-      // server-side), never the first (possibly expensive) catalog entry.
-      // cheapDefaultModelId is resilient: it always returns the balance mode id.
-      const cheapId = cheapDefaultModelId(available)
-      if (cheapId) setState('activeModel', cheapId)
-    } catch {
-      // The chat can still run with the gateway default model.
-    }
-
-    const pending = consumePendingChatLaunch()
-    if (pending) {
-      if (pending.model) setState('activeModel', pending.model)
-      const attachments = await toStreamAttachments(pending.attachments ?? [])
-      triggerLaunchMotion()
-      await sendContent(pending.text, pending.model, {
-        attachments: attachments.length > 0 ? attachments : undefined,
-        browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
-        displayAttachments: pending.attachments ?? [],
-        generateImage: pending.tools?.includes('image'),
-        tools: pending.tools ?? [],
-        actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
-      })
-    }
+    void initializeChat()
   })
 
   createEffect(() => {
@@ -413,48 +610,57 @@ export default function ChatPage() {
     const content = rawContent.trim()
     if (!content || state.status === 'streaming') return
 
-    let threadId = state.threadId
-    if (!threadId) {
-      threadId = createId('thread')
-      setState('threadId', threadId)
-      writeClientValue(chatThreadKey, threadId)
+    let activeThreadId = state.threadId ?? createId('thread')
+    if (!state.threadId) {
+      setState('threadId', activeThreadId)
+      setActiveChatThreadId(activeThreadId)
     }
 
     const submittedAt = options.createdAt ?? new Date().toISOString()
     const model = modelOverride ?? state.activeModel
     const assistantId = createId('asst')
+    const turnTitle = createPreview(content, 58)
+    const stepId = (id: string) => `${assistantId}:${id}`
     const tools = options.tools ?? []
     const displayAttachments = options.displayAttachments ?? []
     const appendUser = options.appendUser !== false
 
+    const userTurn: ChatTurn | null = appendUser
+      ? {
+          id: createId('user'),
+          role: 'user',
+          content,
+          createdAt: submittedAt,
+          streaming: false,
+          model,
+          tools,
+          attachments: displayAttachments,
+        }
+      : null
+    const assistantTurn: ChatTurn = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      streaming: true,
+      status: 'waiting',
+      model,
+      tools,
+      attachments: [],
+    }
+    const nextTurns = [
+      ...state.turns,
+      ...(userTurn ? [userTurn] : []),
+      assistantTurn,
+    ]
+
     setActiveTab('chat')
-    setState('turns', (turns) => [
-      ...turns,
-      ...(appendUser
-        ? [{
-            id: createId('user'),
-            role: 'user' as const,
-            content,
-            createdAt: submittedAt,
-            streaming: false,
-            model,
-            tools,
-            attachments: displayAttachments,
-          }]
-        : []),
-      {
-        id: assistantId,
-        role: 'assistant' as const,
-        content: '',
-        createdAt: new Date().toISOString(),
-        streaming: true,
-        status: 'waiting' as const,
-        model,
-        tools,
-        attachments: [],
-      },
+    setState('turns', nextTurns)
+    writeThreadSnapshot(activeThreadId, nextTurns, { preview: content, updatedAt: submittedAt })
+    setState('taskSteps', (steps) => [
+      ...steps,
+      ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
     ])
-    setState('taskSteps', buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate'))
     setInput('')
 
     const controller = new AbortController()
@@ -479,8 +685,8 @@ export default function ChatPage() {
         {
           content,
           model,
-          threadId,
-          sessionKey: threadId,
+          threadId: activeThreadId,
+          sessionKey: activeThreadId,
           browseWeb: options.browseWeb,
           generateImage: options.generateImage,
           attachments: options.attachments,
@@ -491,16 +697,28 @@ export default function ChatPage() {
           onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel }) => {
             captureRequestId(requestId)
             if (serverThreadId) {
+              if (serverThreadId !== activeThreadId) {
+                const provisionalThreadId = activeThreadId
+                removeChatThreadHistoryItem(provisionalThreadId)
+                removeChatThreadTranscript(provisionalThreadId)
+                void deleteChatThread(provisionalThreadId).catch(() => undefined)
+              }
+              activeThreadId = serverThreadId
               setState('threadId', serverThreadId)
-              writeClientValue(chatThreadKey, serverThreadId)
+              setActiveChatThreadId(serverThreadId)
+              writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
             }
             if (connectedModel) {
               setState('turns', (turn) => turn.id === assistantId, 'modelUsed', connectedModel)
             }
-            markStepDone('connect', 'Connected to the live agent stream.')
+            markStepDone(stepId('connect'), 'Connected to the live agent stream.')
+            if (connectedModel) {
+              upsertTaskStep(createTurnStep(assistantId, turnTitle, 'model', 'Model selected', prettyModel(connectedModel), 'done'))
+            }
           },
           onMessage: ({ content: delta, requestId }) => {
             captureRequestId(requestId)
+            upsertTaskStep(createTurnStep(assistantId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
             setState('turns', (turn) => turn.id === assistantId, 'content', (prev) => prev + delta)
           },
           onArtifact: (event) => {
@@ -516,19 +734,21 @@ export default function ChatPage() {
           onCitation: (event) => {
             const citation = normalizeCitation(event)
             if (!citation) return
-            setState('turns', (turn) => turn.id === assistantId, 'citations', (prev) => upsertCitation(prev ?? [], citation))
+            addAssistantCitation(assistantId, turnTitle, citation)
           },
           onGrounding: ({ value }) => {
             const grounding = normalizeGrounding(value)
             if (!grounding) return
             setState('turns', (turn) => turn.id === assistantId, 'grounding', grounding)
+            upsertTaskStep(createTurnStep(assistantId, turnTitle, 'grounding', 'Knowledge grounding', summarizeGrounding(grounding), 'done'))
           },
           onReasoning: ({ delta }) => {
             if (!delta) return
+            upsertTaskStep(createTurnStep(assistantId, turnTitle, 'reasoning', 'Reasoning trace', 'Received model reasoning tokens.', 'active'))
             setState('turns', (turn) => turn.id === assistantId, 'reasoning', (prev = '') => prev + delta)
           },
           onStep: (event) => {
-            const step = normalizeStep(event)
+            const step = normalizeStep(event, assistantId, turnTitle)
             if (step) upsertTaskStep(step)
             // Agentic HITL: the raw step carries the orchestration status before
             // it is coerced to a task-status. A `paused` run is awaiting human
@@ -545,23 +765,34 @@ export default function ChatPage() {
             const call = normalizeToolCall(event)
             if (!call) return
             setState('turns', (turn) => turn.id === assistantId, 'toolCalls', (prev) => upsertToolCall(prev ?? [], call))
+            markComposerToolStarted(assistantId, call.name, call.args)
             upsertTaskStep({
-              id: `tool-${call.id}`,
-              title: call.name,
-              detail: 'Tool call running.',
+              id: stepId(`tool-${call.id}`),
+              title: `Tool: ${humanizeToolName(call.name)}`,
+              detail: formatToolArgs(call.args) || 'Tool call running.',
               status: 'active',
               createdAt: new Date().toISOString(),
+              turnId: assistantId,
+              turnTitle,
             })
           },
           onToolResult: (event) => {
             if (!event.id) return
+            const toolName = toolNameForResult(state.turns.find((turn) => turn.id === assistantId)?.toolCalls ?? [], event.id)
             setState('turns', (turn) => turn.id === assistantId, 'toolCalls', (prev) => applyToolResult(prev ?? [], event))
+            const citations = extractCitationsFromToolOutput(event.output ?? '')
+            for (const citation of citations) {
+              addAssistantCitation(assistantId, turnTitle, citation)
+            }
+            markComposerToolCompleted(assistantId, toolName, event.error, event.output, citations.length)
             upsertTaskStep({
-              id: `tool-${event.id}`,
-              title: 'Tool result',
-              detail: event.error ?? event.output ?? 'Tool call completed.',
+              id: stepId(`tool-${event.id}`),
+              title: `Tool: ${humanizeToolName(toolName ?? 'tool')}`,
+              detail: summarizeToolResult(event),
               status: event.error ? 'error' : 'done',
               createdAt: new Date().toISOString(),
+              turnId: assistantId,
+              turnTitle,
             })
           },
           onUsage: (usage) => {
@@ -572,6 +803,7 @@ export default function ChatPage() {
               costUsd: usage.costUsd,
               confidence: usage.confidence,
             })
+            upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
           },
           onDone: ({ requestId, modelUsed, outputTokens }) => {
             settled = true
@@ -579,8 +811,10 @@ export default function ChatPage() {
             if (modelUsed) setState('turns', (turn) => turn.id === assistantId, 'modelUsed', modelUsed)
             if (outputTokens != null) setState('turns', (turn) => turn.id === assistantId, 'outputTokens', outputTokens)
             stopStreaming(undefined)
-            markOpenSteps('done', 'Completed.')
+            markOpenSteps('done', 'Completed.', assistantId)
+            addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
             setState('status', 'idle')
+            writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
           },
           onError: ({ message }) => {
             // Graceful model fallback: a pinned model (or Velion intent mode)
@@ -591,7 +825,9 @@ export default function ChatPage() {
             // never on a user-aborted stream.
             if (model && !controller.signal.aborted) {
               settled = true
+              markOpenSteps('stopped', 'Provider unavailable. Retrying with fallback model.', assistantId)
               setState('turns', (turns) => turns.filter((turn) => turn.id !== assistantId))
+              setState('status', 'idle')
               void sendContent(content, '', { ...options, appendUser: false })
               return
             }
@@ -600,7 +836,8 @@ export default function ChatPage() {
             setState('status', 'error')
             setState('turns', (turn) => turn.id === assistantId, 'content', (prev) => prev || message)
             stopStreaming('error')
-            markOpenSteps('error', message)
+            markOpenSteps('error', message, assistantId)
+            writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
           },
         },
         controller.signal,
@@ -608,19 +845,23 @@ export default function ChatPage() {
 
       if (!settled) {
         stopStreaming(undefined)
-        markOpenSteps('done', 'Completed.')
+        markOpenSteps('done', 'Completed.', assistantId)
+        addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
         setState('status', 'idle')
+        writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
       }
     } catch {
       stopStreaming(controller.signal.aborted ? 'stopped' : 'error')
       if (controller.signal.aborted) {
-        markOpenSteps('stopped', 'Stopped by the user.')
+        markOpenSteps('stopped', 'Stopped by the user.', assistantId)
         setState('status', 'idle')
+        writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
         return
       }
       setState('status', 'error')
       setState('error', 'Stream interrupted')
-      markOpenSteps('error', 'Stream interrupted')
+      markOpenSteps('error', 'Stream interrupted', assistantId)
+      writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
     }
   }
 
@@ -628,6 +869,10 @@ export default function ChatPage() {
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)
     const model = payload.model ?? state.activeModel
+    const actions = withBrregLookupAction(
+      payload.actions.map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+      payload.text,
+    )
     setState('activeModel', model)
     void sendContent(payload.text, model, {
       attachments: attachments.length > 0 ? attachments : undefined,
@@ -635,7 +880,7 @@ export default function ChatPage() {
       displayAttachments: payload.attachments,
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
-      actions: payload.actions.map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+      actions,
     })
   }
 
@@ -648,6 +893,81 @@ export default function ChatPage() {
     setState('turns', (turn) => turn.status === 'waiting', 'status', 'stopped')
     markOpenSteps('stopped', 'Stopped by the user.')
     setState('status', 'idle')
+    if (state.threadId) writeThreadSnapshot(state.threadId, state.turns)
+  }
+
+  const addAssistantCitation = (turnId: string, turnTitle: string, citation: Citation) => {
+    setState('turns', (turn) => turn.id === turnId, 'citations', (prev) => upsertCitation(prev ?? [], citation))
+    appendSearchEvidence(turnId, citation)
+    upsertTaskStep(createTurnStep(
+      turnId,
+      turnTitle,
+      `source-${citation.id}`,
+      'Source found',
+      `${citation.title || hostname(citation.url)} · ${hostname(citation.url)}`,
+      'done',
+    ))
+  }
+
+  const appendSearchEvidence = (turnId: string, citation: Citation) => {
+    updateTaskStep(`${turnId}:tool-search`, (step) => {
+      const evidence = upsertStepEvidence(step.evidence ?? [], citationEvidence(citation))
+      return {
+        ...step,
+        detail: `Web search captured ${evidence.length} source${evidence.length === 1 ? '' : 's'}.`,
+        evidence,
+        status: 'done',
+      }
+    })
+  }
+
+  const addAnswerVerificationStep = (turnId: string, turnTitle: string, searchRequested: boolean) => {
+    if (!searchRequested) return
+    const citations = state.turns.find((turn) => turn.id === turnId)?.citations ?? []
+    upsertTaskStep({
+      id: `${turnId}:verification`,
+      title: 'Answer verification',
+      detail: citations.length > 0
+        ? `Checked against ${citations.length} web source${citations.length === 1 ? '' : 's'} shown in Kilder.`
+        : 'Could not verify: no web source event was received for this answer.',
+      expandedDetail: citations.length > 0
+        ? undefined
+        : 'Search was active for this answer, but the stream did not include a web_search tool result or citation event. The answer may still contain the model response, but it should be treated as unverified until the backend emits searchable source evidence.',
+      evidence: citations.map(citationEvidence),
+      status: citations.length > 0 ? 'done' : 'stopped',
+      createdAt: new Date().toISOString(),
+      turnId,
+      turnTitle,
+    })
+  }
+
+  const markComposerToolStarted = (turnId: string, toolName: string, args?: unknown) => {
+    const composerTool = composerToolIdForToolName(toolName)
+    if (!composerTool) return
+    const query = composerTool === 'search' ? searchQueryFromArgs(args) : undefined
+    updateTaskStep(`${turnId}:tool-${composerTool}`, (step) => ({
+      ...step,
+      detail: query ? `Searching web for "${query}".` : `${humanizeToolName(toolName)} started by the Model Plane.`,
+      expandedDetail: formatToolArgs(args),
+      status: 'active',
+    }))
+  }
+
+  const markComposerToolCompleted = (
+    turnId: string,
+    toolName: string | undefined,
+    error?: string,
+    output?: string,
+    sourceCount = 0,
+  ) => {
+    const composerTool = composerToolIdForToolName(toolName)
+    if (!composerTool) return
+    updateTaskStep(`${turnId}:tool-${composerTool}`, (step) => ({
+      ...step,
+      detail: searchCompletionDetail(toolName ?? composerTool, Boolean(error), sourceCount, output),
+      expandedDetail: output || step.expandedDetail,
+      status: error ? 'error' : 'done',
+    }))
   }
 
   const copyTurn = async (turn: ChatTurn) => {
@@ -693,37 +1013,31 @@ export default function ChatPage() {
     if (index < 0) return
     abortController?.abort()
     const nextThreadId = createId('thread')
-    setState('turns', state.turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) })))
+    const branchTurns = state.turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
+    setState('turns', branchTurns)
     setState('threadId', nextThreadId)
     setState('status', 'idle')
     setState('requestId', null)
     setState('branchCount', 0)
     setState('taskSteps', [])
-    writeClientValue(chatThreadKey, nextThreadId)
+    writeThreadSnapshot(nextThreadId, branchTurns)
+    setActiveChatThreadId(nextThreadId)
     setActiveTab('chat')
   }
 
   const startNewChat = () => {
-    abortController?.abort()
-    removeClientValue(chatThreadKey)
-    setState({
-      turns: [],
-      taskSteps: [],
-      status: 'idle',
-      error: null,
-      requestId: null,
-      threadId: null,
-      activeModel: state.activeModel,
-      branchCount: 0,
-    })
-    setInput('')
-    setActiveTab('chat')
+    clearActiveChatThreadId()
+    resetChatState()
+  }
+
+  const updateTaskStep = (id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
+    setState('taskSteps', (steps) => steps.map((step) => (
+      step.id === id ? update(step) : step
+    )))
   }
 
   const markStepDone = (id: string, detail: string) => {
-    setState('taskSteps', (steps) => steps.map((step) => (
-      step.id === id ? { ...step, status: 'done' as const, detail } : step
-    )))
+    updateTaskStep(id, (step) => ({ ...step, status: 'done' as const, detail }))
   }
 
   const upsertTaskStep = (step: AgentTaskStep) => {
@@ -734,18 +1048,20 @@ export default function ChatPage() {
     })
   }
 
-  const markOpenSteps = (status: TaskStepStatus, detail: string) => {
+  const markOpenSteps = (status: TaskStepStatus, detail: string, turnId?: string) => {
     setState('taskSteps', (steps) => steps.map((step) => (
-      step.status === 'active' || step.status === 'waiting'
-        ? { ...step, status, detail }
+      (!turnId || step.turnId === turnId) && (step.status === 'active' || step.status === 'waiting')
+        ? missingSearchResultStep(step, status) ?? { ...step, status, detail }
         : step
     )))
   }
 
   const composer = () => (
     <DashboardComposer
+      browseWeb={browseWeb()}
       imageMode={imageMode()}
       message={input()}
+      onBrowseWebChange={setBrowseWeb}
       onImageModeChange={setImageMode}
       onMessageChange={setInput}
       onPlanModeChange={setPlanMode}
@@ -821,7 +1137,7 @@ export default function ChatPage() {
             <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
           </Match>
           <Match when={activeTab() === 'artifacts'}>
-            <ArtifactsPanel artifacts={artifacts()} />
+            <ArtifactsPanel items={artifactItems()} />
           </Match>
           <Match when={activeTab() === 'steps'}>
             <StepsPanel steps={state.taskSteps} screen={latestScreen()} onStopTask={handleStop} />
@@ -1047,10 +1363,10 @@ function WebSourceCard(props: { source: Citation & { kind: 'web' }; index: numbe
   )
 }
 
-function ArtifactsPanel(props: { artifacts: ChatArtifact[] }) {
+function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
   return (
     <Show
-      when={props.artifacts.length > 0}
+      when={props.items.length > 0}
       fallback={(
         <EmptyPanel
           icon={<FileCode2 size={20} />}
@@ -1061,8 +1377,8 @@ function ArtifactsPanel(props: { artifacts: ChatArtifact[] }) {
     >
       <div class="velion-chat-panel">
         <div class="velion-chat-panel__inner velion-chat-panel__inner--wide">
-          <For each={props.artifacts}>
-            {(artifact) => <ArtifactCard artifact={artifact} />}
+          <For each={props.items}>
+            {(item) => <ArtifactCard item={item} />}
           </For>
         </div>
       </div>
@@ -1070,20 +1386,29 @@ function ArtifactsPanel(props: { artifacts: ChatArtifact[] }) {
   )
 }
 
-function ArtifactCard(props: { artifact: ChatArtifact }) {
+function ArtifactCard(props: { item: ArtifactPanelItem }) {
   const [open, setOpen] = createSignal(true)
-  const kind = () => props.artifact.kind.toLowerCase()
+  const [dimensions, setDimensions] = createSignal<string | null>(null)
+  const artifact = () => props.item.artifact
+  const file = () => props.item.file
+  const turn = () => props.item.turn
+  const kind = () => artifact().kind.toLowerCase()
   const isImage = () => kind() === 'image'
   const isProse = () => PROSE_ARTIFACT_KINDS.has(kind())
+  const imageSrc = () => imageArtifactSrc(artifact().content)
+  const title = () => isImage()
+    ? generatedImageTitle(artifact().title, turn().content, file()?.name)
+    : artifact().title || artifact().kind
+  const imageSpecs = () => buildArtifactImageSpecs(props.item, dimensions())
 
   return (
     <article class="velion-chat-artifact-card">
       <button type="button" aria-expanded={open()} onClick={() => setOpen((value) => !value)}>
         <FileCode2 size={16} />
-        <span>{props.artifact.title || props.artifact.kind}</span>
-        <em>{props.artifact.kind}</em>
-        <Show when={props.artifact.version > 0}>
-          <small>v{props.artifact.version}</small>
+        <span>{title()}</span>
+        <em>{artifact().kind}</em>
+        <Show when={artifact().version > 0}>
+          <small>v{artifact().version}</small>
         </Show>
         <ChevronRight size={16} classList={{ 'velion-chat-rotate': open() }} />
       </button>
@@ -1092,10 +1417,29 @@ function ArtifactCard(props: { artifact: ChatArtifact }) {
           <Show
             when={isImage()}
             fallback={isProse()
-              ? <ChatMarkdown content={props.artifact.content} />
-              : <pre>{props.artifact.content}</pre>}
+              ? <ChatMarkdown content={artifact().content} />
+              : <pre>{artifact().content}</pre>}
           >
-            <img src={imageArtifactSrc(props.artifact.content)} alt={props.artifact.title || 'Generert bilde'} />
+            <div class="velion-chat-artifact-image">
+              <img
+                src={imageSrc()}
+                alt={title()}
+                onLoad={(event) => {
+                  const image = event.currentTarget
+                  setDimensions(`${image.naturalWidth} x ${image.naturalHeight}px`)
+                }}
+              />
+              <div class="velion-chat-artifact-specs" aria-label="Image specifications">
+                <For each={imageSpecs()}>
+                  {(spec) => (
+                    <div>
+                      <span>{spec.label}</span>
+                      <strong>{spec.value}</strong>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </div>
           </Show>
         </div>
       </Show>
@@ -1105,6 +1449,18 @@ function ArtifactCard(props: { artifact: ChatArtifact }) {
 
 function StepsPanel(props: { steps: AgentTaskStep[]; screen?: ChatArtifact | null; onStopTask: () => void }) {
   const activeTask = () => props.steps.some((step) => step.status === 'active' || step.status === 'waiting')
+  const sections = createMemo(() => groupTaskSteps(props.steps))
+  const [collapsedSections, setCollapsedSections] = createSignal<Set<string>>(new Set())
+  const isCollapsed = (id: string) => collapsedSections().has(id)
+  const toggleSection = (id: string) => {
+    setCollapsedSections((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   return (
     <Show
       when={props.steps.length > 0 || props.screen}
@@ -1136,9 +1492,34 @@ function StepsPanel(props: { steps: AgentTaskStep[]; screen?: ChatArtifact | nul
               </figure>
             )}
           </Show>
-          <div class="velion-chat-step-list">
-            <For each={props.steps}>
-              {(step, index) => <TaskStep step={step} isLast={index() === props.steps.length - 1} />}
+          <div class="velion-chat-step-groups">
+            <For each={sections()}>
+              {(section) => (
+                <section classList={{ 'velion-chat-step-group': true, 'is-collapsed': isCollapsed(section.id) }}>
+                  <button
+                    type="button"
+                    class="velion-chat-step-group__header"
+                    aria-expanded={!isCollapsed(section.id)}
+                    onClick={() => toggleSection(section.id)}
+                  >
+                    <span class="velion-chat-step-group__title">
+                      <ChevronRight size={14} classList={{ 'velion-chat-rotate': !isCollapsed(section.id) }} />
+                      <h3>{section.title}</h3>
+                    </span>
+                    <span class="velion-chat-step-group__meta">
+                      <em>{section.steps.length}</em>
+                      <time>{formatTime(section.createdAt)}</time>
+                    </span>
+                  </button>
+                  <Show when={!isCollapsed(section.id)}>
+                    <div class="velion-chat-step-list">
+                      <For each={section.steps}>
+                        {(step, index) => <TaskStep step={step} isLast={index() === section.steps.length - 1} />}
+                      </For>
+                    </div>
+                  </Show>
+                </section>
+              )}
             </For>
           </div>
         </div>
@@ -1180,7 +1561,15 @@ function AssistantMessage(props: {
   const errored = () => props.message.status === 'error'
   const stopped = () => props.message.status === 'stopped'
   const emptyWaiting = () => waiting() && !props.message.content && !props.message.reasoning
-  const artifactCount = () => props.message.artifacts?.length ?? 0
+  const files = () => props.message.files ?? []
+  const artifacts = () => props.message.artifacts ?? []
+  const imagePreviews = createMemo(() => buildGeneratedImagePreviews(files(), artifacts(), props.message.content))
+  const displayContent = createMemo(() => (
+    imagePreviews().length > 0 ? imageGenerationDisplayContent(props.message.content) : props.message.content
+  ))
+  const visibleFiles = createMemo(() => files().filter((file) => !isGeneratedImageFile(file)))
+  const visibleArtifacts = createMemo(() => artifacts().filter((artifact) => !isImageArtifact(artifact)))
+  const artifactCount = () => visibleArtifacts().length
 
   return (
     <article class="velion-chat-message velion-chat-message--assistant">
@@ -1204,8 +1593,8 @@ function AssistantMessage(props: {
             fallback={<ErrorNotice message={props.message.content || 'Stream error'} onRetry={props.onRegenerate} />}
           >
             <div classList={{ 'velion-chat-streaming': waiting() }}>
-              <Show when={props.message.content}>
-                <ChatMarkdown content={props.message.content} />
+              <Show when={displayContent()}>
+                {(content) => <ChatMarkdown content={content()} />}
               </Show>
               <Show when={stopped()}>
                 <span class="velion-chat-status-chip"><Square size={12} /> Stoppet</span>
@@ -1227,12 +1616,15 @@ function AssistantMessage(props: {
             onDecide={props.onApprovalDecision}
           />
         </Show>
-        <Show when={(props.message.files?.length ?? 0) > 0}>
-          <GeneratedFiles files={props.message.files ?? []} />
+        <Show when={imagePreviews().length > 0}>
+          <GeneratedImagePreviews previews={imagePreviews()} />
+        </Show>
+        <Show when={visibleFiles().length > 0}>
+          <GeneratedFiles files={visibleFiles()} />
         </Show>
         <Show when={artifactCount() > 0}>
           <div class="velion-chat-artifact-chips">
-            <For each={props.message.artifacts ?? []}>
+            <For each={visibleArtifacts()}>
               {(artifact) => (
                 <span>
                   <FileCode2 size={12} />
@@ -1643,11 +2035,26 @@ function ToolChips(props: { tools: ComposerToolId[] }) {
     <Show when={props.tools.length > 0}>
       <div class="velion-chat-tool-chips">
         <For each={props.tools}>
-          {(tool) => <span>{TOOL_LABELS[tool]}</span>}
+          {(tool) => {
+            const Icon = toolChipIcon(tool)
+            return (
+              <span role="img" aria-label={TOOL_LABELS[tool]} title={TOOL_LABELS[tool]}>
+                <Icon size={13} aria-hidden="true" />
+              </span>
+            )
+          }}
         </For>
       </div>
     </Show>
   )
+}
+
+function toolChipIcon(tool: ComposerToolId): IconComponent {
+  if (tool === 'search') return Globe2
+  if (tool === 'reason') return Brain
+  if (tool === 'research') return Sparkles
+  if (tool === 'image') return FileCode2
+  return Wrench
 }
 
 function AttachmentChips(props: { attachments: ComposerAttachment[]; tone: 'assistant' | 'user' }) {
@@ -1677,6 +2084,56 @@ function AttachmentItem(props: { attachment: ComposerAttachment; tone: 'assistan
         </span>
       )}
     </Show>
+  )
+}
+
+function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[] }) {
+  return (
+    <div class="velion-chat-image-previews">
+      <For each={props.previews}>
+        {(preview) => (
+          <figure class="velion-chat-image-preview">
+            <figcaption>
+              <span class="velion-chat-image-preview__title">
+                <ImageIcon size={14} />
+                <span>{preview.title}</span>
+              </span>
+              <Show when={preview.size > 0}>
+                <small>{formatBytes(preview.size)}</small>
+              </Show>
+              <div class="velion-chat-image-preview__actions">
+                <a
+                  href={preview.src}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Open ${preview.title}`}
+                  title="Open image"
+                >
+                  <ExternalLink size={14} />
+                </a>
+                <a
+                  href={preview.src}
+                  download={preview.downloadName}
+                  aria-label={`Download ${preview.title}`}
+                  title="Download image"
+                >
+                  <Download size={14} />
+                </a>
+              </div>
+            </figcaption>
+            <a
+              class="velion-chat-image-preview__media"
+              href={preview.src}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Open ${preview.title}`}
+            >
+              <img src={preview.src} alt={preview.title} loading="lazy" />
+            </a>
+          </figure>
+        )}
+      </For>
+    </div>
   )
 }
 
@@ -1809,18 +2266,59 @@ function ThinkingDots() {
 
 function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
   const icon = () => getTaskStepIcon(props.step.status)
+  const [open, setOpen] = createSignal(false)
+  const hasRichDetail = () => Boolean(props.step.expandedDetail?.trim()) || (props.step.evidence?.length ?? 0) > 0
+  const detailsId = () => domId(`step-details-${props.step.id}`)
   return (
-    <div class="velion-chat-step">
+    <div classList={{ 'velion-chat-step': true, 'velion-chat-step--expandable': true, 'is-open': open() }}>
       <Show when={!props.isLast}>
         <span class="velion-chat-step__line" />
       </Show>
       <span class={`velion-chat-step__icon ${icon().className}`}>{icon().node}</span>
       <div>
-        <p>
-          <strong>{props.step.title}</strong>
-          <time>{formatTime(props.step.createdAt)}</time>
-        </p>
-        <span>{props.step.detail}</span>
+        <button
+          type="button"
+          class="velion-chat-step__heading"
+          aria-expanded={open()}
+          aria-controls={detailsId()}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span>
+            <strong>{props.step.title}</strong>
+            <time>{formatTime(props.step.createdAt)}</time>
+          </span>
+          <ChevronRight size={13} classList={{ 'velion-chat-rotate': open() }} />
+        </button>
+        <span class="velion-chat-step__summary">{props.step.detail}</span>
+        <Show when={open()}>
+          <div id={detailsId()} class="velion-chat-step__details">
+            <Show when={(props.step.evidence?.length ?? 0) > 0}>
+              <div class="velion-chat-step__evidence">
+                <For each={props.step.evidence ?? []}>
+                  {(item) => (
+                    <Show
+                      when={item.href}
+                      fallback={<span><strong>{item.label}</strong><em>{item.value}</em></span>}
+                    >
+                      {(href) => (
+                        <a href={href()} target="_blank" rel="noopener noreferrer">
+                          <strong>{item.label}</strong>
+                          <em>{item.value}</em>
+                        </a>
+                      )}
+                    </Show>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <Show when={props.step.expandedDetail?.trim()}>
+              {(detail) => <pre>{detail()}</pre>}
+            </Show>
+            <Show when={!hasRichDetail()}>
+              <p class="velion-chat-step__detail-copy">{props.step.detail || 'No additional detail captured.'}</p>
+            </Show>
+          </div>
+        </Show>
       </div>
     </div>
   )
@@ -1915,6 +2413,267 @@ function messageToTurn(msg: ChatMessage): ChatTurn {
   }
 }
 
+function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[] {
+  return turns
+    .filter((turn) => turn.role === 'user' || turn.role === 'assistant')
+    .map((turn) => ({
+      id: turn.id,
+      role: turn.role,
+      content: turn.content,
+      createdAt: turn.createdAt,
+      model: turn.model,
+      modelUsed: turn.modelUsed,
+      requestId: turn.requestId,
+      status: turn.status,
+      inputTokens: turn.inputTokens,
+      outputTokens: turn.outputTokens,
+      latencyMs: turn.latencyMs,
+      costUsd: turn.costUsd,
+      confidence: turn.confidence,
+      reasoning: turn.reasoning,
+      citations: turn.citations,
+      toolCalls: turn.toolCalls,
+      artifacts: turn.artifacts,
+      files: turn.files,
+      grounding: turn.grounding,
+      tools: turn.tools,
+      attachments: turn.attachments,
+    }))
+}
+
+function taskStepsToTranscript(steps: AgentTaskStep[]): ChatThreadTranscriptStep[] {
+  return steps.map((step) => ({
+    id: step.id,
+    title: step.title,
+    detail: step.detail,
+    status: step.status,
+    createdAt: step.createdAt,
+    expandedDetail: step.expandedDetail,
+    evidence: step.evidence,
+    turnId: step.turnId,
+    turnTitle: step.turnTitle,
+  }))
+}
+
+function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTurn {
+  return {
+    id: turn.id,
+    role: turn.role,
+    content: turn.content,
+    createdAt: turn.createdAt,
+    streaming: false,
+    model: turn.model,
+    modelUsed: turn.modelUsed,
+    requestId: turn.requestId,
+    status: turn.status,
+    inputTokens: turn.inputTokens,
+    outputTokens: turn.outputTokens,
+    latencyMs: turn.latencyMs,
+    costUsd: turn.costUsd,
+    confidence: turn.confidence,
+    reasoning: turn.reasoning,
+    citations: (turn.citations ?? []).filter(isCitation),
+    toolCalls: (turn.toolCalls ?? []).filter(isChatToolCall),
+    artifacts: (turn.artifacts ?? []).filter(isChatArtifact),
+    files: (turn.files ?? []).filter(isGeneratedFile),
+    grounding: isChatKnowledgeGrounding(turn.grounding) ? turn.grounding : undefined,
+    tools: (turn.tools ?? []).filter(isComposerToolId),
+    attachments: (turn.attachments ?? []).filter(isComposerAttachment),
+  }
+}
+
+function transcriptStepToTaskStep(step: ChatThreadTranscriptStep): AgentTaskStep {
+  return {
+    id: step.id,
+    title: step.title,
+    detail: step.detail,
+    status: step.status,
+    createdAt: step.createdAt,
+    expandedDetail: step.expandedDetail,
+    evidence: step.evidence,
+    turnId: step.turnId,
+    turnTitle: step.turnTitle,
+  }
+}
+
+function dedupeChatTurns(turns: ChatTurn[]): ChatTurn[] {
+  return turns.reduce<ChatTurn[]>((next, turn) => {
+    const previous = next.at(-1)
+    if (
+      previous &&
+      previous.role === turn.role &&
+      previous.content === turn.content &&
+      timestampsAreClose(previous.createdAt, turn.createdAt)
+    ) {
+      return next
+    }
+    return [...next, turn]
+  }, [])
+}
+
+function timestampsAreClose(left: string, right: string): boolean {
+  const leftTime = Date.parse(left)
+  const rightTime = Date.parse(right)
+  if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) return false
+  return Math.abs(leftTime - rightTime) < 60_000
+}
+
+function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cachedTurns: ChatTurn[]): ChatTurn[] {
+  if (cachedTurns.length === 0) return serverTurns
+  const usedCachedIds = new Set<string>()
+  const roleOffsets: Record<ChatTurn['role'], number> = { assistant: 0, user: 0 }
+
+  return serverTurns.map((serverTurn) => {
+    const roleIndex = roleOffsets[serverTurn.role]
+    roleOffsets[serverTurn.role] += 1
+    const cachedTurn = selectCachedTurnForServerTurn(serverTurn, cachedTurns, usedCachedIds, roleIndex)
+    if (!cachedTurn) return serverTurn
+    usedCachedIds.add(cachedTurn.id)
+    return {
+      ...serverTurn,
+      model: serverTurn.model ?? cachedTurn.model,
+      modelUsed: serverTurn.modelUsed ?? cachedTurn.modelUsed,
+      requestId: serverTurn.requestId ?? cachedTurn.requestId,
+      status: serverTurn.status ?? cachedTurn.status,
+      inputTokens: serverTurn.inputTokens ?? cachedTurn.inputTokens,
+      outputTokens: serverTurn.outputTokens ?? cachedTurn.outputTokens,
+      latencyMs: serverTurn.latencyMs ?? cachedTurn.latencyMs,
+      costUsd: serverTurn.costUsd ?? cachedTurn.costUsd,
+      confidence: serverTurn.confidence ?? cachedTurn.confidence,
+      reasoning: serverTurn.reasoning ?? cachedTurn.reasoning,
+      citations: metadataArray(serverTurn.citations, cachedTurn.citations),
+      toolCalls: metadataArray(serverTurn.toolCalls, cachedTurn.toolCalls),
+      artifacts: metadataArray(serverTurn.artifacts, cachedTurn.artifacts),
+      files: metadataArray(serverTurn.files, cachedTurn.files),
+      grounding: serverTurn.grounding ?? cachedTurn.grounding,
+      tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
+      attachments: serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
+    }
+  })
+}
+
+function metadataArray<T>(serverItems: T[] | undefined, cachedItems: T[] | undefined): T[] | undefined {
+  return serverItems && serverItems.length > 0 ? serverItems : cachedItems
+}
+
+function selectCachedTurnForServerTurn(
+  serverTurn: ChatTurn,
+  cachedTurns: ChatTurn[],
+  usedCachedIds: Set<string>,
+  roleIndex: number,
+): ChatTurn | undefined {
+  const unusedSameRole = cachedTurns.filter((turn) => turn.role === serverTurn.role && !usedCachedIds.has(turn.id))
+  return unusedSameRole.find((turn) => turn.id === serverTurn.id)
+    ?? unusedSameRole.find((turn) => turnsProbablyMatch(serverTurn, turn))
+    ?? unusedSameRole[roleIndex]
+    ?? (serverTurn.role === 'assistant' ? [...unusedSameRole].reverse().find(hasCachedTurnMetadata) : undefined)
+}
+
+function turnsProbablyMatch(left: ChatTurn, right: ChatTurn): boolean {
+  const leftContent = normalizeTurnContentForMatch(left.content)
+  const rightContent = normalizeTurnContentForMatch(right.content)
+  if (!leftContent || !rightContent) return false
+  if (leftContent === rightContent) return true
+  const leftSnippet = leftContent.slice(0, 120)
+  const rightSnippet = rightContent.slice(0, 120)
+  return leftSnippet.length > 40 && rightContent.includes(leftSnippet)
+    ? true
+    : rightSnippet.length > 40 && leftContent.includes(rightSnippet)
+}
+
+function normalizeTurnContentForMatch(content: string): string {
+  return content.replace(/\s+/g, ' ').trim()
+}
+
+function hasCachedTurnMetadata(turn: ChatTurn): boolean {
+  return (
+    (turn.citations?.length ?? 0) > 0 ||
+    (turn.toolCalls?.length ?? 0) > 0 ||
+    (turn.artifacts?.length ?? 0) > 0 ||
+    (turn.files?.length ?? 0) > 0 ||
+    Boolean(turn.grounding) ||
+    Boolean(turn.reasoning)
+  )
+}
+
+function isComposerToolId(value: string): value is ComposerToolId {
+  return value === 'image' || value === 'reason' || value === 'research' || value === 'search'
+}
+
+function isCitation(value: unknown): value is Citation {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    typeof record.title === 'string' &&
+    typeof record.url === 'string' &&
+    typeof record.snippet === 'string'
+  )
+}
+
+function isChatToolCall(value: unknown): value is ChatToolCall {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    typeof record.name === 'string' &&
+    (record.args === undefined || typeof record.args === 'object') &&
+    (record.status === undefined || typeof record.status === 'string') &&
+    (record.output === undefined || typeof record.output === 'string') &&
+    (record.error === undefined || typeof record.error === 'string')
+  )
+}
+
+function isChatArtifact(value: unknown): value is ChatArtifact {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    typeof record.kind === 'string' &&
+    typeof record.content === 'string' &&
+    typeof record.title === 'string' &&
+    typeof record.version === 'number'
+  )
+}
+
+function isGeneratedFile(value: unknown): value is GeneratedFile {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    typeof record.name === 'string' &&
+    typeof record.mime === 'string' &&
+    typeof record.size === 'number' &&
+    typeof record.url === 'string'
+  )
+}
+
+function isChatKnowledgeGrounding(value: unknown): value is ChatKnowledgeGrounding {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    (record.mode === 'retrieve' || record.mode === 'hybrid') &&
+    typeof record.query === 'string' &&
+    typeof record.lowConfidence === 'boolean' &&
+    typeof record.factCount === 'number' &&
+    typeof record.sourceCount === 'number' &&
+    Array.isArray(record.facts) &&
+    Array.isArray(record.sources)
+  )
+}
+
+function isComposerAttachment(value: unknown): value is ComposerAttachment {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    typeof record.name === 'string' &&
+    typeof record.size === 'number' &&
+    typeof record.type === 'string' &&
+    typeof record.url === 'string'
+  )
+}
+
 async function toStreamAttachments(
   attachments: DashboardComposerSubmitPayload['attachments'],
 ): Promise<StreamAttachment[]> {
@@ -1943,20 +2702,59 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function buildTaskSteps(content: string, tools: ComposerToolId[], mode: 'submit' | 'regenerate'): AgentTaskStep[] {
+function buildTaskSteps(
+  content: string,
+  tools: ComposerToolId[],
+  mode: 'submit' | 'regenerate',
+  turnId: string,
+  actions: ChatAction[] = [],
+): AgentTaskStep[] {
   const now = new Date().toISOString()
+  const turnTitle = createPreview(content, 58)
   const intro = mode === 'regenerate' ? 'Regenerating latest response.' : `Preparing "${createPreview(content)}".`
   return [
-    { id: 'connect', title: 'Connect stream', detail: intro, status: 'active', createdAt: now },
+    { id: `${turnId}:connect`, title: 'Connect stream', detail: intro, status: 'active', createdAt: now, turnId, turnTitle },
     ...tools.map((tool) => ({
-      id: `tool-${tool}`,
+      id: `${turnId}:tool-${tool}`,
       title: TOOL_LABELS[tool],
-      detail: `${TOOL_LABELS[tool]} is enabled for this turn.`,
+      detail: tool === 'search'
+        ? 'The web_search tool will be sent for this answer.'
+        : `${TOOL_LABELS[tool]} is enabled for this answer.`,
       status: 'waiting' as const,
       createdAt: now,
+      turnId,
+      turnTitle,
     })),
-    { id: 'answer', title: 'Compose response', detail: 'Waiting for model output.', status: 'waiting', createdAt: now },
+    ...actions.map((action) => ({
+      id: `${turnId}:action-${action.id}`,
+      title: `${capitalize(action.kind)}: ${action.name || action.id}`,
+      detail: `Selected action ${action.id}.`,
+      status: 'waiting' as const,
+      createdAt: now,
+      turnId,
+      turnTitle,
+    })),
+    { id: `${turnId}:answer`, title: 'Compose response', detail: 'Waiting for model output.', status: 'waiting', createdAt: now, turnId, turnTitle },
   ]
+}
+
+function createTurnStep(
+  turnId: string,
+  turnTitle: string,
+  id: string,
+  title: string,
+  detail: string,
+  status: TaskStepStatus,
+): AgentTaskStep {
+  return {
+    id: `${turnId}:${id}`,
+    title,
+    detail,
+    status,
+    createdAt: new Date().toISOString(),
+    turnId,
+    turnTitle,
+  }
 }
 
 function normalizeArtifact(event: { id?: string; kind?: string; title?: string; content?: string; version?: number }): ChatArtifact | null {
@@ -1999,14 +2797,21 @@ function normalizeCitation(event: { id?: string; title?: string; url?: string; s
   }
 }
 
-function normalizeStep(event: { id?: string; title?: string; detail?: string; status?: string }): AgentTaskStep | null {
+function normalizeStep(
+  event: { id?: string; title?: string; detail?: string; status?: string },
+  turnId?: string,
+  turnTitle?: string,
+): AgentTaskStep | null {
   if (!event.id && !event.title) return null
+  const rawId = event.id ?? createId('step')
   return {
-    id: event.id ?? createId('step'),
+    id: turnId ? `${turnId}:event-${rawId}` : rawId,
     title: event.title ?? 'Agent step',
     detail: event.detail ?? event.status ?? 'Updated.',
     status: normalizeTaskStatus(event.status),
     createdAt: new Date().toISOString(),
+    turnId,
+    turnTitle,
   }
 }
 
@@ -2039,6 +2844,141 @@ function applyToolResult(calls: ChatToolCall[], event: { id?: string; output?: s
     : call)
 }
 
+function toolNameForResult(calls: ChatToolCall[], id: string): string | undefined {
+  return calls.find((call) => call.id === id)?.name ?? (id.includes('web-search') ? 'web_search' : undefined)
+}
+
+function composerToolIdForToolName(name?: string): ComposerToolId | null {
+  if (name === 'web_search') return 'search'
+  if (name === 'image') return 'image'
+  if (name === 'reason' || name === 'reasoning') return 'reason'
+  if (name === 'research' || name === 'deep_research') return 'research'
+  return null
+}
+
+function humanizeToolName(name: string): string {
+  if (name === 'web_search') return 'Web search'
+  if (name === 'fetch_url') return 'Fetch URL'
+  if (name === 'knowledge_search') return 'Knowledge search'
+  return name
+    .replace(/^mcp__/, 'MCP ')
+    .replace(/[_.:-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\w/, (match) => match.toUpperCase()) || 'Tool'
+}
+
+function summarizeToolResult(event: { output?: string; error?: string; status?: string }): string {
+  if (event.error) return truncateText(event.error, 260)
+  if (event.output) return truncateText(event.output, 260)
+  if (event.status) return `Tool completed with status ${event.status}.`
+  return 'Tool call completed.'
+}
+
+function summarizeGrounding(grounding: ChatKnowledgeGrounding): string {
+  const parts = [
+    `${grounding.sourceCount} source${grounding.sourceCount === 1 ? '' : 's'}`,
+    `${grounding.factCount} fact${grounding.factCount === 1 ? '' : 's'}`,
+  ]
+  if (grounding.traceId) parts.push(`trace ${grounding.traceId}`)
+  return parts.join(' · ')
+}
+
+function formatUsageSummary(usage: {
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
+  latencyMs?: number
+  confidence?: number
+}): string {
+  const parts: string[] = []
+  if (usage.inputTokens != null || usage.outputTokens != null) {
+    parts.push(`${usage.inputTokens ?? 0} in / ${usage.outputTokens ?? 0} out tokens`)
+  }
+  if (usage.latencyMs != null) parts.push(formatLatency(usage.latencyMs))
+  if (usage.costUsd != null) parts.push(`$${usage.costUsd.toFixed(4)}`)
+  if (usage.confidence != null) parts.push(`${Math.round(usage.confidence * 100)}% confidence`)
+  return parts.join(' · ') || 'Usage metadata received.'
+}
+
+function extractCitationsFromToolOutput(output: string): Citation[] {
+  const trimmed = output.trim()
+  if (!trimmed) return []
+
+  const jsonCitations = extractJsonCitations(trimmed)
+  if (jsonCitations.length > 0) return jsonCitations
+
+  const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const citations: Citation[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (!line) continue
+    const match = line.match(/https?:\/\/[^\s)"'<>,]+/i)
+    if (!match) continue
+    const url = match[0].replace(/[)\].,;]+$/, '')
+    if (!isValidUrl(url) || citations.some((citation) => citation.url === url)) continue
+    const previous = lines[index - 1]?.replace(/^\d+[.)]\s*/, '').trim()
+    const nextLine = lines[index + 1]
+    const next = nextLine && !/^https?:\/\//i.test(nextLine)
+      ? nextLine
+      : ''
+    citations.push({
+      id: `web-${citations.length + 1}-${url}`,
+      title: previous || hostname(url),
+      url,
+      snippet: next,
+    })
+    if (citations.length >= 8) break
+  }
+  return citations
+}
+
+function extractJsonCitations(output: string): Citation[] {
+  try {
+    const parsed = JSON.parse(output) as unknown
+    const root = objectValue(parsed)
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(root?.results)
+        ? root.results
+        : Array.isArray(root?.citations)
+          ? root.citations
+          : []
+    const direct = citationFromUnknown(parsed, 0)
+    if (direct) return [direct]
+    return list
+      .map(citationFromUnknown)
+      .filter((citation): citation is Citation => Boolean(citation))
+      .slice(0, 8)
+  } catch {
+    return []
+  }
+}
+
+function citationFromUnknown(value: unknown, index: number): Citation | null {
+  const item = objectValue(value)
+  if (!item) return null
+  const url = stringValue(item.url) ?? stringValue(item.href) ?? stringValue(item.final_url) ?? stringValue(item.finalUrl)
+  if (!url || !isValidUrl(url)) return null
+  const title = stringValue(item.title) ?? hostname(url)
+  const snippet = stringValue(item.snippet) ?? stringValue(item.description) ?? ''
+  if (isFailedFetchCitation(item, title, snippet)) return null
+  return {
+    id: stringValue(item.id) ?? `web-${index + 1}-${url}`,
+    title,
+    url,
+    snippet,
+  }
+}
+
+function isFailedFetchCitation(item: Record<string, unknown>, title: string, snippet: string): boolean {
+  const status = Number(item.status ?? item.status_code ?? item.statusCode)
+  if (status === 404) return true
+  const content = stringValue(item.content) ?? stringValue(item.markdown) ?? stringValue(item.text) ?? ''
+  const label = `${title} ${snippet}`.toLowerCase()
+  return !content.trim() && (label.includes('404') || label.includes('content not found') || label.includes('not found'))
+}
+
 function upsertToolCall(calls: ChatToolCall[], call: ChatToolCall): ChatToolCall[] {
   const index = calls.findIndex((item) => item.id === call.id)
   if (index < 0) return [...calls, call]
@@ -2064,15 +3004,86 @@ function upsertCitation(citations: Citation[], citation: Citation): Citation[] {
   return [...citations, citation]
 }
 
-function collectArtifacts(turns: ChatTurn[]): ChatArtifact[] {
-  const byId = new Map<string, ChatArtifact>()
+function upsertStepEvidence(evidence: AgentTaskStepEvidence[], item: AgentTaskStepEvidence): AgentTaskStepEvidence[] {
+  if (evidence.some((existing) => existing.id === item.id || existing.href === item.href)) return evidence
+  return [...evidence, item]
+}
+
+function citationEvidence(citation: Citation): AgentTaskStepEvidence {
+  return {
+    id: citation.id || citation.url,
+    label: citation.title || hostname(citation.url),
+    value: hostname(citation.url),
+    href: citation.url,
+  }
+}
+
+function missingSearchResultStep(step: AgentTaskStep, status: TaskStepStatus): AgentTaskStep | null {
+  if (status !== 'done' || !step.id.endsWith(':tool-search') || step.status !== 'waiting') return null
+  return {
+    ...step,
+    detail: 'No web_search tool event was received before the answer completed. This answer is not web-verified.',
+    expandedDetail: 'Search was requested by the composer, but the stream completed without a web_search tool_call/tool_result event. This usually means the backend did not execute the search path or did not emit the tool event family for this turn.',
+    status: 'stopped',
+  }
+}
+
+function readBrowseWebPreference(): boolean {
+  return readClientValue(CHAT_BROWSE_WEB_KEY) === '1'
+}
+
+function writeBrowseWebPreference(enabled: boolean): void {
+  writeClientValue(CHAT_BROWSE_WEB_KEY, enabled ? '1' : '0')
+}
+
+function searchCompletionDetail(toolName: string, failed: boolean, sourceCount: number, output?: string): string {
+  if (failed) return `${humanizeToolName(toolName)} failed.`
+  if (sourceCount > 0) return `Web search returned ${sourceCount} source${sourceCount === 1 ? '' : 's'}.`
+  if (output?.trim()) return 'Web search returned raw output.'
+  return 'Web search completed, but no source payload was received.'
+}
+
+function searchQueryFromArgs(args: unknown): string | undefined {
+  const direct = objectValue(args)
+  if (direct) return stringValue(direct.query)
+  if (typeof args !== 'string') return undefined
+  try {
+    return stringValue(objectValue(JSON.parse(args))?.query)
+  } catch {
+    return undefined
+  }
+}
+
+function collectArtifactItems(turns: ChatTurn[]): ArtifactPanelItem[] {
+  const byId = new Map<string, ArtifactPanelItem>()
   for (const turn of turns) {
     for (const artifact of turn.artifacts ?? []) {
       const existing = byId.get(artifact.id)
-      if (!existing || artifact.version >= existing.version) byId.set(artifact.id, artifact)
+      const item = {
+        artifact,
+        file: selectGeneratedFileForArtifact(artifact, turn),
+        turn,
+      }
+      if (!existing || artifact.version >= existing.artifact.version) byId.set(artifact.id, item)
     }
   }
   return [...byId.values()]
+}
+
+function collectArtifacts(turns: ChatTurn[]): ChatArtifact[] {
+  return collectArtifactItems(turns).map((item) => item.artifact)
+}
+
+function selectGeneratedFileForArtifact(artifact: ChatArtifact, turn: ChatTurn): GeneratedFile | undefined {
+  const imageFiles = (turn.files ?? []).filter(isGeneratedImageFile)
+  if (imageFiles.length === 0) return undefined
+  const exact = imageFiles.find((file) => file.id === artifact.id || file.url === artifact.content)
+  if (exact) return exact
+  if (!isImageArtifact(artifact)) return undefined
+  const imageArtifacts = (turn.artifacts ?? []).filter(isImageArtifact)
+  const imageIndex = imageArtifacts.findIndex((item) => item.id === artifact.id)
+  if (imageFiles.length === imageArtifacts.length && imageIndex >= 0) return imageFiles[imageIndex]
+  return imageFiles.length === 1 ? imageFiles[0] : undefined
 }
 
 function collectEvidenceSources(turns: ChatTurn[]): EvidenceSource[] {
@@ -2095,6 +3106,25 @@ function collectEvidenceSources(turns: ChatTurn[]): EvidenceSource[] {
   return result
 }
 
+function groupTaskSteps(steps: AgentTaskStep[]): AgentTaskStepSection[] {
+  const sections = new Map<string, AgentTaskStepSection>()
+  for (const step of steps) {
+    const id = step.turnId ?? 'session'
+    const existing = sections.get(id)
+    if (existing) {
+      existing.steps = [...existing.steps, step]
+      continue
+    }
+    sections.set(id, {
+      id,
+      title: step.turnTitle ? `Answer: ${step.turnTitle}` : 'Session activity',
+      createdAt: step.createdAt,
+      steps: [step],
+    })
+  }
+  return [...sections.values()]
+}
+
 function collectLatestGrounding(turns: ChatTurn[]): ChatKnowledgeGrounding | null {
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const grounding = turns[index]?.grounding
@@ -2106,6 +3136,190 @@ function collectLatestGrounding(turns: ChatTurn[]): ChatKnowledgeGrounding | nul
 function selectLatestImageArtifact(turns: ChatTurn[]): ChatArtifact | null {
   const images = collectArtifacts(turns).filter((artifact) => artifact.kind.toLowerCase() === 'image')
   return images.at(-1) ?? null
+}
+
+function buildGeneratedImagePreviews(
+  files: GeneratedFile[],
+  artifacts: ChatArtifact[],
+  content: string,
+): GeneratedImagePreview[] {
+  const imageFiles = files.filter(isGeneratedImageFile)
+  const imageArtifacts = artifacts.filter(isImageArtifact)
+  const filePreviews = imageFiles.map((file, index) => {
+    const pairedArtifact = imageArtifacts.find((artifact) => artifact.id === file.id) ?? (
+      imageArtifacts.length === imageFiles.length || imageArtifacts.length === 1
+        ? imageArtifacts[index] ?? imageArtifacts[0]
+        : undefined
+    )
+    const title = generatedImageTitle(pairedArtifact?.title, content, file.name)
+    return {
+      id: `file:${file.id}`,
+      title,
+      src: file.url,
+      downloadName: generatedImageDownloadName(title, file, file.url),
+      size: file.size,
+      artifactId: pairedArtifact?.id,
+    }
+  })
+  const pairedArtifactIds = filePreviews
+    .map((preview) => preview.artifactId)
+    .filter((id): id is string => Boolean(id))
+  const artifactPreviews = imageArtifacts
+    .filter((artifact) => !pairedArtifactIds.includes(artifact.id))
+    .map((artifact) => {
+      const src = imageArtifactSrc(artifact.content)
+      const title = generatedImageTitle(artifact.title, content)
+      return {
+        id: `artifact:${artifact.id}`,
+        title,
+        src,
+        downloadName: generatedImageDownloadName(title, undefined, src),
+        size: 0,
+        artifactId: artifact.id,
+      }
+    })
+  return [...filePreviews, ...artifactPreviews]
+}
+
+function isGeneratedImageFile(file: GeneratedFile): boolean {
+  return file.mime.toLowerCase().startsWith('image/') || isImageUrl(file.url) || imageFileExtension(file.name) !== null
+}
+
+function isImageArtifact(artifact: ChatArtifact): boolean {
+  return artifact.kind.toLowerCase() === 'image' || inferArtifactKind(artifact.content) === 'image'
+}
+
+function buildArtifactImageSpecs(item: ArtifactPanelItem, dimensions: string | null): Array<{ label: string; value: string }> {
+  const src = imageArtifactSrc(item.artifact.content)
+  const mime = item.file?.mime || dataUrlMime(src)
+  const estimatedSize = item.file?.size ?? estimateDataUrlBytes(src)
+  const model = item.turn.modelUsed ?? item.turn.model
+  return [
+    { label: 'Prompt', value: generatedImageTitle(item.artifact.title, item.turn.content, item.file?.name) },
+    { label: 'Dimensions', value: dimensions ?? 'Loading...' },
+    { label: 'File size', value: estimatedSize > 0 ? formatBytes(estimatedSize) : 'Not reported' },
+    { label: 'Format', value: imageFormatLabel(mime, item.file?.name) },
+    { label: 'MIME type', value: mime ?? 'Not reported' },
+    { label: 'Model', value: model ? prettyModel(model) : 'Not reported' },
+    { label: 'Quality', value: imageQualityLabel(item.turn) },
+    { label: 'Version', value: `v${Math.max(1, item.artifact.version)}` },
+    { label: 'Created', value: formatRelative(item.turn.createdAt) },
+    ...(item.turn.latencyMs != null ? [{ label: 'Latency', value: formatLatency(item.turn.latencyMs) }] : []),
+  ]
+}
+
+function generatedImageTitle(artifactTitle?: string, content?: string, fileName?: string): string {
+  return (
+    meaningfulImageTitle(artifactTitle) ??
+    extractGeneratedImagePrompt(content) ??
+    meaningfulImageTitle(fileName ? titleFromFileName(fileName) : undefined) ??
+    'Generated image'
+  )
+}
+
+function imageGenerationDisplayContent(content: string): string {
+  const trimmed = content.trim()
+  return /^(?:i\s+)?generated an image artifact:\s*\S+\s+for prompt:\s*.+$/i.test(trimmed) ? '' : content
+}
+
+function meaningfulImageTitle(value?: string): string | null {
+  const title = value?.trim()
+  if (!title) return null
+  return isGenericImageTitle(title) ? null : title
+}
+
+function isGenericImageTitle(value: string): boolean {
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'image' ||
+    normalized === 'artifact' ||
+    normalized === 'generated image' ||
+    normalized === 'generated-image' ||
+    normalized === 'generated-image.png'
+}
+
+function extractGeneratedImagePrompt(content?: string): string | null {
+  const prompt = content?.match(/\bfor prompt:\s*(.+)$/i)?.[1]?.trim()
+  return prompt ? prompt.replace(/^["']|["']$/g, '') : null
+}
+
+function titleFromFileName(name: string): string {
+  return name
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[-_]+/g, ' ')
+    .trim()
+}
+
+function generatedImageDownloadName(title: string, file?: GeneratedFile, src?: string): string {
+  return `${slugFileName(title)}.${imageDownloadExtension(file, src)}`
+}
+
+function slugFileName(value: string): string {
+  const slug = value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+  return slug || 'generated-image'
+}
+
+function imageDownloadExtension(file?: GeneratedFile, src?: string): string {
+  const mimeExtension = imageMimeExtension(file?.mime)
+  if (mimeExtension) return mimeExtension
+  const fileExtension = file ? imageFileExtension(file.name) : null
+  if (fileExtension) return fileExtension
+  const dataUrlExtension = src?.match(/^data:image\/([^;,]+)/i)?.[1]?.toLowerCase()
+  if (dataUrlExtension) return normalizeImageExtension(dataUrlExtension)
+  return 'png'
+}
+
+function imageFormatLabel(mime?: string | null, fileName?: string): string {
+  const extension = imageMimeExtension(mime ?? undefined) ?? (fileName ? imageFileExtension(fileName) : null)
+  return extension ? extension.toUpperCase() : 'Not reported'
+}
+
+function imageQualityLabel(turn: ChatTurn): string {
+  for (const call of turn.toolCalls ?? []) {
+    const args = objectValue(call.args)
+    const quality = stringValue(args?.quality) ?? stringValue(args?.image_quality)
+    if (quality) return capitalize(quality)
+  }
+  return 'Not reported'
+}
+
+function dataUrlMime(src: string): string | null {
+  return src.match(/^data:([^;,]+)/i)?.[1]?.toLowerCase() ?? null
+}
+
+function estimateDataUrlBytes(src: string): number {
+  const base64 = src.match(/^data:[^,]+;base64,(.+)$/i)?.[1]
+  if (!base64) return 0
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding)
+}
+
+function imageMimeExtension(mime?: string): string | null {
+  const subtype = mime?.toLowerCase().match(/^image\/([^;]+)/)?.[1]
+  return subtype ? normalizeImageExtension(subtype) : null
+}
+
+function imageFileExtension(name: string): string | null {
+  const extension = name.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase()
+  return extension && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif'].includes(extension)
+    ? normalizeImageExtension(extension)
+    : null
+}
+
+function normalizeImageExtension(extension: string): string {
+  if (extension === 'jpeg') return 'jpg'
+  if (extension === 'svg+xml') return 'svg'
+  const sanitized = extension.replace(/[^a-z0-9]/g, '')
+  return sanitized || 'png'
+}
+
+function isImageUrl(url: string): boolean {
+  return /^data:image\//i.test(url) || /^blob:/i.test(url) || /^https?:\/\/\S+\.(?:png|jpe?g|gif|webp|svg|avif)(?:[?#]\S*)?$/i.test(url)
 }
 
 function normalizeGrounding(value: unknown): ChatKnowledgeGrounding | undefined {
@@ -2224,6 +3438,19 @@ function imageArtifactSrc(content: string) {
   return `data:image/png;base64,${content}`
 }
 
+function isValidUrl(url: string): boolean {
+  try {
+    new URL(url)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function domId(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]+/g, '-')
+}
+
 function hostname(url: string): string {
   try {
     return new URL(url).hostname.replace(/^www\./, '')
@@ -2241,6 +3468,15 @@ function createChatTitle(turns: ChatTurn[]) {
 function createPreview(content: string, max = 34) {
   const clean = content.replace(/\s+/g, ' ').trim()
   return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean
+}
+
+function truncateText(content: string, max: number): string {
+  const clean = content.replace(/\s+/g, ' ').trim()
+  return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean
+}
+
+function capitalize(value: string): string {
+  return value ? `${value[0]?.toUpperCase() ?? ''}${value.slice(1)}` : value
 }
 
 function shouldShowDateDivider(previous: ChatTurn | undefined, current: ChatTurn) {
@@ -2283,6 +3519,8 @@ function formatLatency(ms: number) {
 
 function prettyModel(model: string) {
   const lower = model.toLowerCase()
+  if (lower.includes('gpt-image-1')) return 'GPT Image 1'
+  if (lower.includes('gpt-image')) return 'GPT Image'
   if (lower.includes('gpt-4o-mini')) return 'GPT-4o Mini'
   if (lower.includes('gpt-4.1')) return 'GPT-4.1'
   if (lower.includes('gpt-4o')) return 'GPT-4o'

@@ -21,6 +21,13 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
+// Ping verifies the database is reachable and this pool can authenticate, for
+// the /health probe. A stale DB password surfaces here — which a port-only
+// healthcheck silently misses while reads limp on stale pooled connections.
+func (r *Repository) Ping(ctx context.Context) error {
+	return r.pool.Ping(ctx)
+}
+
 func (r *Repository) UpsertAccount(ctx context.Context, account Account) error {
 	products, err := json.Marshal(account.Products)
 	if err != nil {

@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
       POSTGRES_DB: ${DB_NAME:-controlplane}
       POSTGRES_INITDB_ARGS: --encoding=UTF8
     ports:
@@ -197,6 +197,10 @@ services:
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
       # G26: silence gin's debug-mode banner + enable release-mode perf paths.
       GIN_MODE: release
+      # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
+      # user-core needs both its own DB and a secondary auth_service connection.
+      DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
+      AUTH_DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/auth_service?sslmode=disable
     ports:
       - "3012:3012"
       - "50012:50012"
@@ -228,7 +232,10 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 10s
     healthcheck:
-      test: ["CMD", "sh", "-c", "nc -z 127.0.0.1 50012 || exit 1"]
+      # Deep check: /health round-trips the DB (returns 503 on auth/conn failure)
+      # so a stale DB password makes this container unhealthy instead of a bare
+      # port-open check (was `nc -z 50012`) that misses DB-auth drift.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3012/health"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -250,6 +257,10 @@ services:
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
       # G26: silence gin's debug-mode banner + enable release-mode perf paths.
       GIN_MODE: release
+      # Single-source the DB password: assembled here from ${DB_PASSWORD} in .env
+      # (compose `environment:` overrides env_file), so the credential lives in
+      # exactly ONE place. No per-service .env.docker copy to drift out of sync.
+      DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
     ports:
       - "18080:8080"   # HTTP — host 18080 avoids collision with Model Plane model-gateway (host 8080)
       - "19090:9090"   # gRPC — host 19090 avoids collision with Model Plane model-gateway gRPC (host 9090)
@@ -306,6 +317,8 @@ services:
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
       # G26: silence gin's debug-mode banner + enable release-mode perf paths.
       GIN_MODE: release
+      # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
+      DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
     ports:
       - "3014:3014"
       - "50013:50013"
@@ -359,9 +372,9 @@ services:
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
       DB_USER: ${DB_USER}
-      PGPASSWORD: ${DB_PASSWORD}
+      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
       DATABASE_USER: ${DB_USER}
-      DATABASE_PASSWORD: ${DB_PASSWORD}
+      DATABASE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
       NATS_TOKEN: ${NATS_TOKEN}
       NATS_SHARED_URL: ${VELION_NATS_URL}
       NATS_SHARED_TOKEN: ${VELION_NATS_TOKEN}
@@ -424,9 +437,13 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
       NATS_URL: nats://velion-nats:4222
       NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      # Aggregate the model-plane bus (reachable via inter-plane-bus) where
+      # session-core publishes velion.audit.v1.model.tool_action — audit-core
+      # is the single sink across planes. Comma-separate for more buses.
+      EXTRA_NATS_URLS: ${AUDIT_EXTRA_NATS_URLS:-nats://model-plane-nats-1:4222}
       HTTP_PORT: "8187"
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
     ports:

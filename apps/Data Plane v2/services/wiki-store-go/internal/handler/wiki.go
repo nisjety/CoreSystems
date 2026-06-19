@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -346,7 +347,7 @@ type diffResult struct {
 }
 
 type diffHunk struct {
-	Op    string `json:"op"` // "add" | "remove" | "equal"
+	Op    string   `json:"op"` // "add" | "remove" | "equal"
 	Lines []string `json:"lines"`
 }
 
@@ -551,6 +552,97 @@ func (h *WikiHandler) MaintenanceSweep(w http.ResponseWriter, r *http.Request) {
 		"rejected": rejected,
 		"errors":   errs,
 	})
+}
+
+func (h *WikiHandler) GetOperatingMap(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	snapshot, err := h.repo.GetOperatingMapSnapshot(r.Context(), orgID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load operating map")
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (h *WikiHandler) SubmitOperatingMapProposal(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	var input model.SubmitOperatingMapProposalInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	input.OrgID = orgID
+
+	proposal, err := h.repo.SubmitOperatingMapProposal(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit operating map proposal")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"proposal": proposal})
+}
+
+func (h *WikiHandler) RefreshOperatingMap(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	var input model.RefreshOperatingMapInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	input.OrgID = orgID
+
+	proposal, err := h.repo.RefreshOperatingMap(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to refresh operating map")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"proposal": proposal,
+		"run_id":   proposal.GeneratedByRunID,
+		"status":   "proposal_created",
+	})
+}
+
+func (h *WikiHandler) ReviewOperatingMapProposal(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	proposalID := chi.URLParam(r, "proposalID")
+
+	var input model.ReviewOperatingMapProposalInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	input.OrgID = orgID
+	input.ProposalID = proposalID
+	if input.ReviewedBy == "" {
+		input.ReviewedBy = "velion"
+	}
+
+	proposal, version, err := h.repo.ReviewOperatingMapProposal(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to review operating map proposal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"proposal":    proposal,
+		"new_version": version,
+	})
+}
+
+func (h *WikiHandler) CreateOperatingMapBlueprintSuggestion(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	var input model.CreateOperatingMapBlueprintSuggestionInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	input.OrgID = orgID
+
+	suggestion, err := h.repo.CreateOperatingMapBlueprintSuggestion(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to create operating map blueprint suggestion")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"suggestion": suggestion})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

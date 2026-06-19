@@ -202,12 +202,15 @@ export function fallbackSocialOperations(
   calendar: SocialCalendar,
   adapters: readonly SocialPlatformAdapter[],
 ): Pick<SocialWorkspace, 'approvals' | 'campaigns' | 'competitors' | 'evergreen' | 'trends'> {
+  void calendar
+  void adapters
+
   return {
-    approvals: fallbackSocialApprovals(calendar),
-    campaigns: fallbackSocialCampaigns(calendar),
-    competitors: fallbackSocialCompetitorWatch(calendar.accounts),
-    evergreen: fallbackSocialEvergreen(calendar.posts, adapters),
-    trends: fallbackSocialTrends(calendar.posts, adapters),
+    approvals: [],
+    campaigns: [],
+    competitors: [],
+    evergreen: [],
+    trends: [],
   }
 }
 
@@ -411,142 +414,12 @@ function slugId(value: string) {
 }
 
 export function fallbackSocialCalendar(orgLabel = 'Velion'): SocialCalendar {
+  void orgLabel
+
   return {
-    accounts: [
-      {
-        id: 'fallback_linkedin',
-        providerKey: 'linkedin',
-        label: 'LinkedIn Company Page',
-        handle: 'linkedin.com/company/velion',
-        status: 'needs_oauth',
-        capabilities: ['social.profile.read', 'social.post.write'],
-        accent: '#0a66c2',
-      },
-      {
-        id: 'fallback_x',
-        providerKey: 'x',
-        label: 'X account',
-        handle: '@velion',
-        status: 'needs_oauth',
-        capabilities: ['social.profile.read', 'social.post.write', 'social.inbox.read'],
-        accent: '#111111',
-      },
-      {
-        id: 'fallback_instagram',
-        providerKey: 'instagram',
-        label: 'Instagram brand',
-        handle: '@velion.ai',
-        status: 'manual_review',
-        capabilities: ['social.profile.read', 'social.media.upload'],
-        accent: '#d9468f',
-      },
-      {
-        id: 'fallback_facebook',
-        providerKey: 'facebook',
-        label: 'Facebook Page',
-        handle: 'facebook.com/velion',
-        status: 'needs_oauth',
-        capabilities: ['social.profile.read', 'social.post.write', 'social.media.upload', 'social.inbox.read'],
-        accent: '#1877f2',
-      },
-      {
-        id: 'fallback_tiktok',
-        providerKey: 'tiktok',
-        label: 'TikTok creator',
-        handle: '@velionstudio',
-        status: 'manual_review',
-        capabilities: ['social.profile.read', 'social.media.upload'],
-        accent: '#00a6a6',
-      },
-      {
-        id: 'fallback_snapchat',
-        providerKey: 'snapchat',
-        label: 'Snapchat marketing',
-        handle: 'Snap Ads',
-        status: 'manual_review',
-        capabilities: ['social.profile.read', 'social.ads.manage', 'social.analytics.read'],
-        accent: '#facc15',
-      },
-    ],
-    posts: [
-      {
-        id: 'fallback_social_post_1',
-        title: 'How support signals become product content',
-        body: 'Every support conversation contains a growth signal. Velion turns repeated customer questions into approved posts, docs, and follow-up workflows.',
-        status: 'scheduled',
-        scheduledAt: '2026-06-16T08:30:00.000Z',
-        platforms: ['linkedin', 'x', 'facebook'],
-        source: {
-          kind: 'inbox',
-          label: 'Inbox trend: shipping delays',
-          href: '/inbox?view=social',
-        },
-        approval: {
-          required: true,
-          state: 'approved',
-        },
-        media: [{ kind: 'image', label: '1:1 visual', status: 'ready' }],
-        previews: [],
-      },
-      {
-        id: 'fallback_social_post_2',
-        title: 'Weekly knowledge graph update',
-        body: 'This week the knowledge graph found new product gaps across onboarding, billing, and handoff flows.',
-        status: 'draft',
-        scheduledAt: '2026-06-18T11:00:00.000Z',
-        platforms: ['linkedin'],
-        source: {
-          kind: 'knowledge',
-          label: orgLabel,
-          href: '/knowledge',
-        },
-        approval: {
-          required: true,
-          state: 'not_requested',
-        },
-        media: [],
-        previews: [],
-      },
-      {
-        id: 'fallback_social_post_3',
-        title: 'Short-form launch note',
-        body: 'A concise product update for channels that need video-first creative and a tighter hook.',
-        status: 'draft',
-        scheduledAt: '2026-06-19T13:00:00.000Z',
-        platforms: ['instagram', 'tiktok', 'snapchat'],
-        source: {
-          kind: 'campaign',
-          label: 'Launch calendar',
-          href: null,
-        },
-        approval: {
-          required: true,
-          state: 'not_requested',
-        },
-        media: [],
-        previews: [],
-      },
-    ],
-    recommendedWindows: [
-      {
-        id: 'fallback_tue_morning',
-        label: 'Tue morning',
-        startsAt: '2026-06-16T08:30:00.000Z',
-        reason: 'Best fit for LinkedIn education posts.',
-      },
-      {
-        id: 'fallback_wed_lunch',
-        label: 'Wed lunch',
-        startsAt: '2026-06-17T10:45:00.000Z',
-        reason: 'Good overlap for X and community replies.',
-      },
-      {
-        id: 'fallback_fri_video',
-        label: 'Fri video',
-        startsAt: '2026-06-19T13:00:00.000Z',
-        reason: 'Reserved for visual-first Instagram/TikTok content.',
-      },
-    ],
+    accounts: [],
+    posts: [],
+    recommendedWindows: [],
   }
 }
 

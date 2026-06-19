@@ -10,6 +10,7 @@ import (
 	"time"
 
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -49,6 +50,9 @@ type SharedPublisher interface {
 	PublishUserRegistered(ctx context.Context, userID, email, name, provider string)
 	PublishUserUpdated(ctx context.Context, userID, email string, changes map[string]any)
 	PublishUserDeleted(ctx context.Context, userID, email string)
+	// PublishPlain emits a raw subject+payload (used for GDPR audit + the
+	// cross-plane erasure fan-out). Satisfied by *nats.SharedPublisher.
+	PublishPlain(subject string, payload map[string]any)
 	PublishProviderLinked(ctx context.Context, userID, email, provider, tenantID string)
 	PublishProviderReadyForIntegration(
 		ctx context.Context,
@@ -74,6 +78,7 @@ type Service struct {
 	eventPublisher   interface{}        // NATS publisher (optional, can be nil)
 	sharedPublisher  SharedPublisher    // cross-plane events on velion-nats
 	cache            *rediscache.Client // optional, nil if Redis disabled
+	authPool         *pgxpool.Pool      // secondary pool to auth_service DB for GDPR procs (nil if unset)
 }
 
 // NewService creates a new user service
@@ -94,6 +99,11 @@ func NewService(repo *Repository, betterAuthClient interface{}, eventPublisher i
 // SetSharedPublisher wires the cross-plane NATS publisher for controlplane.user.* subjects.
 func (s *Service) SetSharedPublisher(sp SharedPublisher) {
 	s.sharedPublisher = sp
+}
+
+// Ping checks database connectivity + authentication for the /health probe.
+func (s *Service) Ping(ctx context.Context) error {
+	return s.repo.Ping(ctx)
 }
 
 // CreateUser creates a new user with hashed password
@@ -923,27 +933,30 @@ func (s *Service) GetSessionContext(ctx context.Context, userID, email, name, av
 		return nil, err
 	}
 
-	ctxOut := &SessionContext{
-		UserID:           user.ID,
-		OnboardingStatus: "PROFILE_READY",
-	}
-
-	if user.OnboardingComplete {
-		ctxOut.OnboardingStatus = "COMPLETED"
-	}
+	ctxOut := &SessionContext{UserID: user.ID}
 
 	membership, err := s.resolveSessionMembership(ctx, user.ID, orgID)
 	if err != nil {
 		return nil, err
 	}
+	ctxOut.OnboardingStatus = sessionOnboardingStatus(user.OnboardingComplete, membership)
 	if membership == nil {
-		ctxOut.OnboardingStatus = "CREATED"
 		return ctxOut, nil
 	}
 
 	ctxOut.OrgID = membership.OrgID
 	ctxOut.Role = membership.Role
 	return ctxOut, nil
+}
+
+func sessionOnboardingStatus(onboardingComplete bool, membership *UserOrgMembership) string {
+	if onboardingComplete {
+		return "COMPLETED"
+	}
+	if membership == nil {
+		return "CREATED"
+	}
+	return "PROFILE_READY"
 }
 
 // resolveSessionMembership picks the membership the session context should

@@ -59,6 +59,11 @@ func (s *Service) SetSharedPublisher(sp SharedPublisher) {
 	s.sharedPublisher = sp
 }
 
+// Ping checks database connectivity + authentication for the /health probe.
+func (s *Service) Ping(ctx context.Context) error {
+	return s.repo.Ping(ctx)
+}
+
 func (s *Service) GetOrganization(ctx context.Context, id string) (*Organization, error) {
 	if id == "" {
 		return nil, fmt.Errorf("organization id is required")
@@ -427,21 +432,95 @@ func (s *Service) UpdateBrregVerification(ctx context.Context, id, orgNumber str
 	return nil
 }
 
-// HardDelete performs GDPR-compliant hard delete of organization
-func (s *Service) HardDelete(ctx context.Context, orgID string) error {
-	if orgID == "" {
-		return fmt.Errorf("organization id is required")
+// HardDelete performs an irreversible GDPR hard delete of an organization by
+// invoking the gdpr_hard_delete_organization stored procedure (parameterized).
+// It publishes the org.deleted domain event first (so subscribers see the org
+// name before it is gone), then returns the proc's JSONB receipt. Erasure
+// auditing + the cross-plane fan-out are emitted by the caller (see gdpr.go).
+func (s *Service) HardDelete(ctx context.Context, orgID string) (json.RawMessage, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, fmt.Errorf("organization id is required")
 	}
 
-	// Publish deletion event before deleting
-	org, err := s.repo.GetOrganization(ctx, orgID)
-	if err == nil {
+	// Capture the org name for the domain event before the row is deleted.
+	if org, err := s.repo.GetOrganization(ctx, orgID); err == nil {
 		s.publishOrganizationDeleted(ctx, orgID, org.Name)
 	}
 
-	// For now, we'll just soft-delete by marking deleted_at
-	// since we don't have HardDeleteOrganization method
-	return nil
+	receipt, err := s.repo.GDPRHardDeleteOrganization(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+	}
+	return receipt, nil
+}
+
+// SoftDelete marks an organization deleted (reversible until purged) by
+// invoking the soft_delete_organization stored procedure (parameterized).
+// Returns the proc's JSONB receipt.
+func (s *Service) SoftDelete(ctx context.Context, orgID string) (json.RawMessage, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	receipt, err := s.repo.SoftDeleteOrganization(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+	}
+	return receipt, nil
+}
+
+// PurgeDeletedOrganizations hard-deletes organizations soft-deleted more than
+// daysThreshold days ago by invoking purge_old_deleted_organizations (param).
+// Used by the retention cron. Returns the proc's JSONB receipt.
+func (s *Service) PurgeDeletedOrganizations(ctx context.Context, daysThreshold int) (json.RawMessage, error) {
+	if daysThreshold < 1 {
+		daysThreshold = 1
+	}
+	return s.repo.PurgeOldDeletedOrganizations(ctx, daysThreshold)
+}
+
+// CallerRole returns the caller's role within an org (e.g. "owner", "admin"),
+// or "" when the caller is not an active member. Used to owner-gate erasure.
+func (s *Service) CallerRole(ctx context.Context, orgID, userID string) (string, error) {
+	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(userID) == "" {
+		return "", nil
+	}
+	members, err := s.repo.ListOrganizationMembers(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	for _, m := range members {
+		if m.UserID == userID && m.Status == "active" {
+			return m.Role, nil
+		}
+	}
+	return "", nil
+}
+
+// IsActiveMember reports whether userID is an active member of orgID. It is the
+// DB-backed second layer behind the internal-API-key gate: even a caller that
+// holds the internal key must prove the path-supplied org belongs to the acting
+// user before a mutation is allowed. Backed by an indexed point query (not a
+// full member-list scan) since the guard fires on every mutation. Empty org/user
+// IDs are non-members (never an error); callers (the guard) pre-validate the IDs
+// and this path only guarantees fail-closed behavior for any direct caller.
+func (s *Service) IsActiveMember(ctx context.Context, orgID, userID string) (bool, error) {
+	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(userID) == "" {
+		return false, nil
+	}
+	return s.repo.IsActiveMember(ctx, orgID, userID)
+}
+
+// SharedPub exposes the cross-plane publisher so the GDPR handlers can emit
+// erasure audit + fan-out events. Returns nil when shared NATS is disabled.
+func (s *Service) SharedPub() SharedPublisher {
+	return s.sharedPublisher
 }
 
 // Event publishing methods

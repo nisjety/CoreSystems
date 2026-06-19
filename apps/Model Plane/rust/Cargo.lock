@@ -840,6 +840,7 @@ dependencies = [
  "anyhow",
  "axum",
  "dashmap",
+ "futures",
  "metrics",
  "metrics-exporter-prometheus",
  "mp-contracts",

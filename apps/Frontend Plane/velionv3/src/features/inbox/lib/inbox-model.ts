@@ -18,6 +18,15 @@ export type InboxSidebarView =
   | 'view-social'
   | 'manage'
 
+export type SupportTicketReference = {
+  id: string
+  ticket_key: string
+  status: string
+  source?: string
+  ai_confidence?: number
+  ai_reason?: string
+}
+
 export type ZammadTicket = {
   id: number
   number: string
@@ -33,6 +42,7 @@ export type ZammadTicket = {
   article_count?: number
   channel?: string
   agentState?: string
+  supportTicket?: SupportTicketReference | null
 }
 
 export type ZammadArticle = {

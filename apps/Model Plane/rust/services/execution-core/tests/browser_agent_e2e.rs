@@ -60,7 +60,11 @@ async fn browser_agent_drives_real_quarry_loop() {
         observations.len()
     );
 
-    assert_ne!(status, PlanStatus::Failed, "browser-agent loop failed: {summary}");
+    assert_ne!(
+        status,
+        PlanStatus::Failed,
+        "browser-agent loop failed: {summary}"
+    );
     assert!(
         !observations.is_empty(),
         "expected at least one observation from the real Quarry browser"

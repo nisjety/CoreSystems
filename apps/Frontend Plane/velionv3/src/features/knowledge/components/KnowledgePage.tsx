@@ -9,6 +9,7 @@ import {
   Globe2,
   Grid2X2,
   Link2,
+  Map as MapIcon,
   Network,
   RefreshCw,
   Search,
@@ -19,6 +20,8 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, 
 import { Dynamic } from 'solid-js/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
 import { KnowledgeDiagnosticsPanel } from '@/features/knowledge/components/KnowledgeDiagnosticsPanel'
+import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
+import { executeAction } from '@/shared/actions/action-client'
 import {
   loadKnowledgeSources,
   type LiveKnowledgeCollection,
@@ -32,6 +35,15 @@ import {
   type LiveKnowledgeSourceType,
   type LiveKnowledgeWebSource,
 } from '@/shared/api/knowledge-live-client'
+import {
+  generateOperatingMap,
+  loadOperatingMap,
+  reviewOperatingMapProposal,
+  streamOperatingMapRunEvents,
+  type OperatingMapAgentBlueprint,
+  type OperatingMapProposal,
+  type OperatingMapSnapshot,
+} from '@/shared/api/operating-map-client'
 import { getSessionContext } from '@/shared/api/auth-client'
 import { requestForm, requestJson } from '@/shared/api/http'
 import { Button } from '@/shared/ui/Button'
@@ -40,7 +52,7 @@ import { VelionSegmented, VelionSegmentedButton } from '@/shared/ui/velion/Velio
 import { VelionSelect } from '@/shared/ui/velion/VelionSelect'
 import { cn } from '@/shared/lib/cn'
 
-type KnowledgeView = 'overview' | 'graph' | 'chunks'
+type KnowledgeView = 'overview' | 'operating-map' | 'graph' | 'chunks'
 type KnowledgeIcon = Component<LucideProps>
 
 type Notice = {
@@ -193,13 +205,17 @@ export default function KnowledgePage() {
   const [selectedGraphNodeId, setSelectedGraphNodeId] = createSignal<string | null>(null)
   const [searchQuery, setSearchQuery] = createSignal('')
   const [liveKnowledge, setLiveKnowledge] = createSignal<LiveKnowledgePayload | null>(null)
+  const [operatingMap, setOperatingMap] = createSignal<OperatingMapSnapshot | null>(null)
   const [loading, setLoading] = createSignal(true)
+  const [operatingMapLoading, setOperatingMapLoading] = createSignal(true)
   const [busyAction, setBusyAction] = createSignal<string | null>(null)
+  const [operatingMapEvents, setOperatingMapEvents] = createSignal<string[]>([])
   const [notice, setNotice] = createSignal<Notice | null>(null)
   const [addSourceOpen, setAddSourceOpen] = createSignal(false)
   // Resolved once on mount and stable for the page lifetime — a plain value, not
   // reactive UI state, so handlers and the connect-poll can read it freely.
   let activeOrgId = ''
+  let activeUserId = ''
 
   const visibleKnowledge = createMemo(() => {
     const payload = liveKnowledge()
@@ -224,11 +240,15 @@ export default function KnowledgePage() {
     void (async () => {
       try {
         const ctx = await getSessionContext()
-        activeOrgId = ctx.orgs?.[0]?.id ?? ''
+        activeOrgId = ctx.orgId ?? ctx.orgs?.[0]?.id ?? ''
+        activeUserId = ctx.userId
       } catch {
         // Leave org empty; loadKnowledgeSources resolves it from the session itself.
       }
-      await loadKnowledgeWorkspace(controller.signal)
+      await Promise.all([
+        loadKnowledgeWorkspace(controller.signal),
+        loadOperatingMapWorkspace(controller.signal),
+      ])
     })()
     onCleanup(() => controller.abort())
   })
@@ -266,6 +286,22 @@ export default function KnowledgePage() {
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function loadOperatingMapWorkspace(signal?: AbortSignal) {
+    setOperatingMapLoading(true)
+    try {
+      setOperatingMap(await loadOperatingMap(activeOrgId, signal))
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      setOperatingMap(null)
+      setNotice({
+        tone: 'warn',
+        message: error instanceof Error ? error.message : 'Operating Map could not be loaded.',
+      })
+    } finally {
+      setOperatingMapLoading(false)
     }
   }
 
@@ -418,6 +454,90 @@ export default function KnowledgePage() {
     }
   }
 
+  async function handleGenerateOperatingMap() {
+    setBusyAction('operating-map')
+    setNotice(null)
+    setOperatingMapEvents(['Generating Operating Map proposal from Knowledge evidence...'])
+    try {
+      const result = await generateOperatingMap(activeOrgId)
+      setOperatingMapEvents((events) => [...events, `Proposal ${result.proposal.id} created.`])
+      if (result.runId) {
+        await streamOperatingMapRunEvents(activeOrgId, result.runId, {
+          onEvent: (event) => setOperatingMapEvents((events) => [...events, event.detail]),
+        }).catch((error) => {
+          setOperatingMapEvents((events) => [...events, error instanceof Error ? error.message : 'Operating Map event stream failed.'])
+        })
+      }
+      await loadOperatingMapWorkspace()
+      setNotice({ tone: 'good', message: 'Operating Map proposal is ready for review.' })
+    } catch (error) {
+      setNotice({
+        tone: 'warn',
+        message: error instanceof Error ? error.message : 'Operating Map generation could not be started.',
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  async function handleReviewOperatingMapProposal(proposal: OperatingMapProposal, decision: 'accept' | 'reject') {
+    setBusyAction(`operating-map-${decision}`)
+    setNotice(null)
+    try {
+      await reviewOperatingMapProposal(activeOrgId, proposal.id, decision)
+      await loadOperatingMapWorkspace()
+      setNotice({
+        tone: 'good',
+        message: decision === 'accept'
+          ? 'Operating Map accepted and published into Knowledge wiki.'
+          : 'Operating Map proposal rejected.',
+      })
+    } catch (error) {
+      setNotice({
+        tone: 'warn',
+        message: error instanceof Error ? error.message : 'Operating Map proposal could not be reviewed.',
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  async function handleCreateAgentBlueprint(blueprint: OperatingMapAgentBlueprint) {
+    setBusyAction(`blueprint-${blueprint.id}`)
+    setNotice(null)
+    try {
+      const version = operatingMap()?.currentVersion
+      if (!version?.id) {
+        throw new Error('Accept an Operating Map before creating an agent blueprint suggestion.')
+      }
+      await executeAction(
+        'operating_map.create_agent_blueprint',
+        { type: 'human', userId: activeUserId, orgId: activeOrgId },
+        {
+          versionId: version.id,
+          blueprintId: blueprint.id,
+          role: normalizeBlueprintRole(blueprint.role),
+          sourceWorkflowId: blueprint.sourceWorkflowId,
+          name: blueprint.name,
+          payload: {
+            source: 'operating-map',
+            mapId: version.mapId,
+            sourceWorkflowId: blueprint.sourceWorkflowId,
+          },
+        },
+      )
+      await loadOperatingMapWorkspace()
+      setNotice({ tone: 'good', message: `${blueprint.name} blueprint suggestion saved for Agents review.` })
+    } catch (error) {
+      setNotice({
+        tone: 'warn',
+        message: error instanceof Error ? error.message : 'Agent blueprint could not be queued.',
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   return (
     <div class="knowledge-page-surface">
       <div class="knowledge-page-container">
@@ -453,6 +573,18 @@ export default function KnowledgePage() {
               liveKnowledge={visibleKnowledge()!}
               searchQuery={searchQuery()}
               onSearchChange={setSearchQuery}
+            />
+          </Show>
+          <Show when={activeView() === 'operating-map'}>
+            <KnowledgeOperatingMapCanvas
+              busy={busyAction()?.startsWith('operating-map') || busyAction()?.startsWith('blueprint') || false}
+              events={operatingMapEvents()}
+              liveKnowledge={visibleKnowledge()!}
+              loading={operatingMapLoading()}
+              operatingMap={operatingMap()}
+              onCreateBlueprint={(blueprint) => void handleCreateAgentBlueprint(blueprint)}
+              onGenerate={() => void handleGenerateOperatingMap()}
+              onReviewProposal={(proposal, decision) => void handleReviewOperatingMapProposal(proposal, decision)}
             />
           </Show>
           <Show when={activeView() === 'graph'}>
@@ -544,6 +676,7 @@ function SegmentedView(props: {
 }) {
   const views: Array<{ Icon: KnowledgeIcon; id: KnowledgeView; label: string }> = [
     { id: 'overview', label: 'Overview', Icon: Grid2X2 },
+    { id: 'operating-map', label: 'AI Map', Icon: MapIcon },
     { id: 'graph', label: 'Graph', Icon: Network },
     { id: 'chunks', label: 'Chunks', Icon: Table2 },
   ]
@@ -1151,4 +1284,11 @@ async function uploadKnowledgeFiles(files: File[], orgId: string) {
 
 function formatGraphGroup(group: string) {
   return group.replace(/[_:-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase())
+}
+
+function normalizeBlueprintRole(role: string): 'service' | 'sales' | 'ecommerce' | 'chatbot' | 'workflow' {
+  if (role === 'service' || role === 'sales' || role === 'ecommerce' || role === 'chatbot' || role === 'workflow') {
+    return role
+  }
+  return 'workflow'
 }

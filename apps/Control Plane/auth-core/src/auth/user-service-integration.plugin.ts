@@ -6,8 +6,11 @@
  */
 
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
-import { createAuthMiddleware } from 'better-auth/api';
+import { APIError, createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
+import { sql } from 'drizzle-orm';
+import { db } from '../db';
+import * as schema from '../db/schema';
 import { AuthIntegrationService } from '../internal/auth-integration.service';
 
 let authIntegrationService: AuthIntegrationService | null = null;
@@ -251,6 +254,31 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
       ],
 
       before: [
+        // Sign-up (email/password)
+        {
+          matcher: ({ path }) => path === '/sign-up/email',
+          handler: createAuthMiddleware(async (ctx) => {
+            const email = normalizeEmail(
+              (ctx.body as { email?: unknown })?.email,
+            );
+            if (!email) return;
+
+            const [existingUser] = await db
+              .select({ id: schema.user.id })
+              .from(schema.user)
+              .where(sql`lower(${schema.user.email}) = ${email}`)
+              .limit(1);
+
+            if (!existingUser) return;
+
+            throw new APIError('CONFLICT', {
+              code: 'USER_ALREADY_EXISTS',
+              message:
+                'An account with this email already exists. Sign in with the existing password or reset it.',
+            });
+          }),
+        },
+
         // Sign-out
         {
           matcher: ({ path }) => path === '/sign-out',
@@ -282,6 +310,12 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
       ],
     },
   };
+}
+
+function normalizeEmail(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const email = value.trim().toLowerCase();
+  return email.length > 0 ? email : null;
 }
 
 /**

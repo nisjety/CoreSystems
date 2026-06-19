@@ -7,15 +7,15 @@ use std::convert::Infallible;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::sse::{Event, Sse},
+    response::sse::{Event, KeepAlive, Sse},
     Extension, Json,
 };
 use chrono::Utc;
 use futures::Stream;
 use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, ChatMessage, ContextSegment,
-    GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState, StreamRunEventsRequest,
-    SubagentRole, TodoState, ToolDefinition,
+    GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState, RunAgentRequest,
+    StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -244,6 +244,11 @@ pub async fn invoke_stream_sse(
     // execution-core under its sandbox. Falls back to a direct answer if the
     // run produces nothing (e.g. no live worker), so a reply is always returned.
     if features.iter().any(|f| f == "agentic") {
+        // GDPR ZDR: carry the chat request's Zero-Data-Retention flag into the
+        // agentic run so execution-core threads it through every inference round
+        // and onto each tool step's audit detail. No org-level ZDR default is
+        // readily available in this scope, so this is the request flag only;
+        // OR-in an org default here once one is plumbed to the gateway.
         return agentic_run_stream(
             state.clone(),
             request_id,
@@ -252,6 +257,7 @@ pub async fn invoke_stream_sse(
             model,
             req.content.clone(),
             features,
+            req.zdr,
             idem_guard,
         );
     }
@@ -335,6 +341,8 @@ pub async fn invoke_stream_sse(
     // infer → execute via gateway handlers → inject results), then stream the
     // final answer with tools withheld. Reuses gateway tool handlers — no new
     // runtime. Inference outage degrades to a normal ungrounded answer.
+    let client_requested_web_search =
+        req.browse_web || req.tools.iter().any(|tool| tool.name == "web_search");
     let mut tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
         let mut defs: Vec<ToolDefinition> = req
             .tools
@@ -345,10 +353,13 @@ pub async fn invoke_stream_sse(
                 parameters_json: t.parameters_json.clone(),
             })
             .collect();
-        // Always advertise the gateway's built-in agent tools (web_search,
-        // fetch_url, knowledge_search) so the model can use them without the
-        // client declaring them. Dedupe by name — a client-declared spec wins.
+        // Advertise the gateway's built-in agent tools, but keep public web
+        // search behind the explicit Search toggle. Dedupe by name — a
+        // client-declared spec wins.
         for builtin in crate::tool_loop::builtin_tool_defs() {
+            if builtin.name == "web_search" && !client_requested_web_search {
+                continue;
+            }
             if !defs.iter().any(|d| d.name == builtin.name) {
                 defs.push(builtin);
             }
@@ -357,9 +368,17 @@ pub async fn invoke_stream_sse(
     } else {
         Vec::new()
     };
+    if client_requested_web_search && !tool_defs.iter().any(|tool| tool.name == "web_search") {
+        if let Some(web_search) = crate::tool_loop::builtin_tool_defs()
+            .into_iter()
+            .find(|tool| tool.name == "web_search")
+        {
+            tool_defs.push(web_search);
+        }
+    }
     let mut tool_events = Vec::new();
     if tool_defs.iter().any(|tool| tool.name == "web_search") {
-        if crate::tool_loop::should_force_web_search(&req.content) {
+        if client_requested_web_search || crate::tool_loop::should_force_web_search(&req.content) {
             let forced = crate::tool_loop::run_forced_web_search(
                 &state,
                 &request_id,
@@ -1562,16 +1581,21 @@ pub async fn invoke_resume_sse(
 
 /// Streams orchestration run events as Server-Sent Events.
 ///
-/// # Errors
-///
-/// Returns an `HttpJsonError` if opening the upstream `stream_run_events` gRPC
-/// stream fails.
+/// The SSE response head (200 + `text/event-stream`) is committed
+/// immediately and the upstream `stream_run_events` gRPC stream is opened
+/// inside the spawned forwarder task. This guarantees a browser
+/// `EventSource` receives the response head right away — even when the
+/// upstream is slow or blocks on an idle run with no worker emitting events —
+/// instead of hanging on a never-returned handler. If opening the upstream
+/// stream fails, a single SSE `error` event is emitted and the stream closes
+/// cleanly. A keep-alive comment is sent periodically while waiting for the
+/// first event.
 pub async fn run_events_sse(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     headers: HeaderMap,
     Extension(_claims): Extension<Claims>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, HttpJsonError> {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Resume cursor: the browser's EventSource auto-sends `Last-Event-Id` on
     // reconnect. Forward it so session-core replays buffered events after that
     // id, then tails live (docs/HARNESS_PHASE1.md §3a). Absent on first connect.
@@ -1581,20 +1605,38 @@ pub async fn run_events_sse(
         .unwrap_or("")
         .to_owned();
 
-    let response = state
-        .orchestration_client
-        .clone()
-        .stream_run_events(StreamRunEventsRequest {
-            run_id: run_id.clone(),
-            after_event_id,
-        })
-        .await
-        .map_err(|e| grpc_status_to_http(&e))?;
-
-    let mut grpc_stream = response.into_inner();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     tokio::spawn(async move {
+        // Open the upstream stream INSIDE the task so the response head above is
+        // already committed; a slow/blocking upstream can no longer stall the
+        // handler return.
+        let response = match state
+            .orchestration_client
+            .clone()
+            .stream_run_events(StreamRunEventsRequest {
+                run_id: run_id.clone(),
+                after_event_id,
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, run_id = %run_id, "failed to open orchestration run event stream");
+                let _ = tx
+                    .send(Ok(Event::default().event("error").data(
+                        json!({
+                            "code": "run_events_unavailable",
+                            "message": error.message(),
+                        })
+                        .to_string(),
+                    )))
+                    .await;
+                return;
+            }
+        };
+
+        let mut grpc_stream = response.into_inner();
         while let Some(result) = grpc_stream.next().await {
             match result {
                 Ok(event) => {
@@ -1624,7 +1666,7 @@ pub async fn run_events_sse(
         }
     });
 
-    Ok(Sse::new(ReceiverStream::new(rx)))
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
 
 /// Read the latest assistant message in a thread (the run's answer, if it
@@ -1657,6 +1699,7 @@ async fn direct_infer(
     org_id: &str,
     model: &str,
     content: &str,
+    zdr: bool,
 ) -> Option<String> {
     let mut client = state.inference_client.clone();
     client
@@ -1673,12 +1716,64 @@ async fn direct_infer(
             temperature: 0.7,
             max_tokens: 1024,
             structured_output_schema: String::new(),
-            zdr: false,
+            // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
+            // fallback inference (was hardcoded false, ignoring the run's ZDR).
+            zdr,
             ..Default::default()
         }))
         .await
         .ok()
         .map(|r| r.into_inner().content)
+}
+
+/// Dispatch a prepared run to execution-core's agent driver (`RunAgent`).
+///
+/// This is the missing link: `session-core.StartRun` durably records the run as
+/// `'queued'` but nothing drove it, so no orchestration events flowed and no
+/// answer was persisted. The driver emits `PlanTransitioned` events (observed
+/// by the `StreamRunEvents` tail) and appends the assistant answer (returned by
+/// `read_latest_assistant`). Spawned so the stream tail starts observing
+/// immediately. On transport error the run isn't driven; the
+/// `read_latest_assistant` / `direct_infer` fallback still returns a reply, so
+/// the stream is never failed.
+fn spawn_run_dispatch(
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    org_id: &str,
+    user_id: &str,
+    model: &str,
+    content: &str,
+    zdr: bool,
+) {
+    let mut execution_client = state.execution_client.clone();
+    let run_agent_req = RunAgentRequest {
+        run_id: run.run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        goal: content.to_owned(),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        model: model.to_owned(),
+        // Deployed agents default to the `ask` posture: the governed multi-tool
+        // loop gates risky/destructive tools (e.g. `shell`) behind a human
+        // approval. Read-only tools still auto-allow. `auto` would silently run
+        // risky tools, so it is never the default for the agentic run path.
+        mode: "ask".to_owned(),
+        max_rounds: 4,
+        // GDPR ZDR: the run's Zero-Data-Retention flag (from the chat request),
+        // threaded into execution-core so every inference round + tool audit
+        // detail honors it.
+        zdr,
+    };
+    let dispatch_run_id = run.run_id.clone();
+    tokio::spawn(async move {
+        if let Err(error) = execution_client.run_agent(run_agent_req).await {
+            tracing::warn!(
+                %error,
+                run_id = %dispatch_run_id,
+                "execution-core run_agent dispatch failed; relying on direct_infer fallback"
+            );
+        }
+    });
 }
 
 /// chat-parity Phase 3 — agentic run stream. The chat turn becomes a
@@ -1698,16 +1793,12 @@ fn agentic_run_stream(
     model: String,
     content: String,
     features: Vec<String>,
+    zdr: bool,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
         let _idem_guard = idem_guard;
-        let _ = tx
-            .send(Ok(Event::default()
-                .event("connected")
-                .data("{\"ok\":true}")))
-            .await;
 
         // 1. Spawn the run (session-core StartRun; also persists the user turn).
         let run =
@@ -1725,6 +1816,25 @@ fn agentic_run_stream(
                     return;
                 }
             };
+
+        // The run exists — surface its ids so the SPA can drive durable
+        // observation (GET /v1/runs/{run_id}/events) and approvals.
+        let connected = json!({
+            "ok": true,
+            "run_id": run.run_id,
+            "thread_id": run.thread_id,
+            "request_id": request_id,
+        });
+        let _ = tx
+            .send(Ok(Event::default()
+                .event("connected")
+                .data(connected.to_string())))
+            .await;
+
+        // 1b. Dispatch the run to execution-core's agent driver (RunAgent) —
+        //     the missing link that actually drives the queued run. The run's
+        //     ZDR flag rides along so execution-core honors it durably.
+        spawn_run_dispatch(&state, &run, &org_id, &user_id, &model, &content, zdr);
 
         // 2. Stream the run's orchestration events as step_update, bounded by an
         //    idle timeout (stop once the run goes quiet / ends / errors).
@@ -1757,7 +1867,7 @@ fn agentic_run_stream(
             .filter(|a| !a.trim().is_empty());
         let final_text = match answer {
             Some(a) => a,
-            None => direct_infer(&state, &request_id, &org_id, &model, &content)
+            None => direct_infer(&state, &request_id, &org_id, &model, &content, zdr)
                 .await
                 .unwrap_or_else(|| "The agent run produced no output.".to_owned()),
         };
@@ -1851,21 +1961,6 @@ fn build_usage_envelope(
         }),
         zdr: false,
     }
-}
-
-fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
-    let status = match error.code() {
-        tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
-        tonic::Code::NotFound => StatusCode::NOT_FOUND,
-        tonic::Code::FailedPrecondition => StatusCode::PRECONDITION_FAILED,
-        tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
-        tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
-        tonic::Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
-        tonic::Code::Unavailable => StatusCode::BAD_GATEWAY,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-
-    (status, Json(json!({ "error": error.message() })))
 }
 
 fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {

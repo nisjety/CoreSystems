@@ -7,7 +7,6 @@ import {
   Mail,
   Megaphone,
   MessageCircle,
-  MoreHorizontal,
   Paperclip,
   PenLine,
   Plus,
@@ -15,6 +14,7 @@ import {
   Sparkles,
   Star,
   Tag,
+  TicketCheck,
   X,
   Zap,
   type LucideProps,
@@ -59,12 +59,15 @@ export function ConversationPanel(props: {
   groups: Group[]
   notice: string | null
   onAddTag: (tag: string) => void
+  onCreateTicket: () => void
+  onLinkExistingTicket: () => void
   onOpenModal: (modal: InboxModalRequest) => void
   onPatchTicket: (patch: Record<string, unknown>) => void
   onRemoveTag: (tag: string) => void
   onCreateSocialFollowUp: () => void
   onSendReply: (text: string, internal: boolean) => void
   onSuggestReply: () => void
+  onViewTicket: () => void
   replyText: string
   replySending: boolean
   selectedTicket: ZammadTicket | null
@@ -94,9 +97,12 @@ export function ConversationPanel(props: {
               contactReason={contactReason()}
               groups={props.groups}
               onAddTag={props.onAddTag}
+              onCreateTicket={props.onCreateTicket}
+              onLinkExistingTicket={props.onLinkExistingTicket}
               onOpenModal={props.onOpenModal}
               onPatchTicket={props.onPatchTicket}
               onRemoveTag={props.onRemoveTag}
+              onViewTicket={props.onViewTicket}
               selectedTicket={ticket()}
               sentiment={props.sentiment}
             />
@@ -146,12 +152,16 @@ function ConversationHeader(props: {
   contactReason: string
   groups: Group[]
   onAddTag: (tag: string) => void
+  onCreateTicket: () => void
+  onLinkExistingTicket: () => void
   onOpenModal: (modal: InboxModalRequest) => void
   onPatchTicket: (patch: Record<string, unknown>) => void
   onRemoveTag: (tag: string) => void
+  onViewTicket: () => void
   selectedTicket: ZammadTicket
   sentiment: TicketSentiment | null
 }) {
+  const supportTicket = () => props.selectedTicket.supportTicket ?? null
   return (
     <div class="velion-inbox-conversation-header">
       <div class="velion-inbox-conversation-header__top">
@@ -181,17 +191,28 @@ function ConversationHeader(props: {
           >
             <Star class="size-4" />
           </HeaderIconButton>
-          <HeaderIconButton
-            label="More conversation actions"
-            onClick={() => props.onOpenModal({
-              type: 'work',
-              title: 'Conversation actions',
-              description: 'Run assignment, status, priority, tags, side conversations, and audit actions in-place without leaving the inbox.',
-              primaryAction: 'Save action',
-            })}
+            <HeaderIconButton
+              label="Link to existing ticket"
+              onClick={props.onLinkExistingTicket}
+            >
+              <Link2 class="size-4" />
+            </HeaderIconButton>
+          <Show
+            when={supportTicket()}
+            fallback={(
+              <button type="button" onClick={props.onCreateTicket} class="velion-inbox-button velion-inbox-button--secondary velion-inbox-button--xs">
+                <Plus class="size-3.5" />
+                Create ticket
+              </button>
+            )}
           >
-            <MoreHorizontal class="size-4" />
-          </HeaderIconButton>
+            {(ticket) => (
+              <button type="button" onClick={props.onViewTicket} class="velion-inbox-button velion-inbox-button--secondary velion-inbox-button--xs">
+                <TicketCheck class="size-3.5" />
+                {ticket().ticket_key}
+              </button>
+            )}
+          </Show>
           <button type="button" onClick={() => props.onPatchTicket({ state_id: 4 })} class="velion-inbox-button velion-inbox-button--primary velion-inbox-button--xs">
             <CheckCheck class="size-3.5" />
             Close
@@ -212,6 +233,7 @@ function ConversationHeader(props: {
         <div>
           <span>Contact reason:</span>
           <strong>{props.contactReason}</strong>
+          <TicketDecisionChip ticket={props.selectedTicket} />
         </div>
         <button
           type="button"
@@ -227,6 +249,28 @@ function ConversationHeader(props: {
       </div>
     </div>
   )
+}
+
+function TicketDecisionChip(props: { ticket: ZammadTicket }) {
+  const supportTicket = () => props.ticket.supportTicket ?? null
+  const label = () => {
+    const ticket = supportTicket()
+    if (!ticket) return 'No ticket needed'
+    if (ticket.status === 'suggested') {
+      const confidence = ticket.ai_confidence ? ` · ${Math.round(ticket.ai_confidence * 100)}%` : ''
+      return `Suggested ticket${confidence}`
+    }
+    if (ticket.source === 'ai') return 'Auto-created ticket'
+    return 'Ticket created'
+  }
+  const tone = () => {
+    const ticket = supportTicket()
+    if (!ticket) return 'none'
+    if (ticket.status === 'suggested') return 'suggested'
+    if (ticket.source === 'ai') return 'auto'
+    return 'manual'
+  }
+  return <span class={`velion-inbox-ticket-decision velion-inbox-ticket-decision--${tone()}`}>{label()}</span>
 }
 
 function ConversationToolbar(props: {

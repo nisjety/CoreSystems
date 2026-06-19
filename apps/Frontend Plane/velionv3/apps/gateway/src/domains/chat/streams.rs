@@ -19,6 +19,7 @@ pub(super) async fn stream_chat(
     Json(body): Json<Value>,
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let url = format!("{}/v1/invoke/stream", state.model_gateway_url);
     proxy_sse_stream(
         &state,
@@ -27,6 +28,7 @@ pub(super) async fn stream_chat(
         Some(body),
         token.as_deref(),
         None,
+        Some((&user.user_id, org_id.as_str())),
         shared::zdr_flag(&headers),
     )
     .await
@@ -39,6 +41,7 @@ pub(super) async fn resume_stream(
     Path(request_id): Path<String>,
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
@@ -55,6 +58,7 @@ pub(super) async fn resume_stream(
         None,
         token.as_deref(),
         last_event_id.as_deref(),
+        Some((&user.user_id, org_id.as_str())),
         false,
     )
     .await
@@ -67,6 +71,7 @@ pub(super) async fn run_events_stream(
     Path(run_id): Path<String>,
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/v1/runs/{}/events",
         state.model_gateway_url,
@@ -79,6 +84,7 @@ pub(super) async fn run_events_stream(
         None,
         token.as_deref(),
         None,
+        Some((&user.user_id, org_id.as_str())),
         false,
     )
     .await

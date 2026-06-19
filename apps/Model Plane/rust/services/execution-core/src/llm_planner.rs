@@ -60,8 +60,8 @@ impl LlmPlanner {
             .or_else(|_| std::env::var("INFERENCE_CORE_ADDR"))
             .unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
         let channel = Channel::from_shared(url).ok()?.connect_lazy();
-        let model =
-            std::env::var("QUARRY_BROWSER_AGENT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+        let model = std::env::var("QUARRY_BROWSER_AGENT_MODEL")
+            .unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
         Some(Self {
             client: InferenceCoreClient::new(channel),
             model,
@@ -122,8 +122,12 @@ impl LlmPlanner {
             .map_err(|e| format!("inference infer rpc failed: {e}"))?
             .into_inner();
 
-        let parsed: NextAction = serde_json::from_str(response.content.trim())
-            .map_err(|e| format!("could not parse action JSON ({e}); content={}", response.content))?;
+        let parsed: NextAction = serde_json::from_str(response.content.trim()).map_err(|e| {
+            format!(
+                "could not parse action JSON ({e}); content={}",
+                response.content
+            )
+        })?;
         Ok(parsed.into_browser_action())
     }
 }

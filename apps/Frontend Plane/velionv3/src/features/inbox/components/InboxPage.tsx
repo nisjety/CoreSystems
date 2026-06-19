@@ -28,6 +28,7 @@ import {
   type LiveTicket,
 } from '@/shared/api/inbox-client'
 import { createSocialDraftFromInbox } from '@/shared/api/social-client'
+import { createTicket, listTickets, type SupportTicket } from '@/shared/api/tickets-client'
 
 async function loadInboxContext() {
   const [session, ctx] = await Promise.all([getAuthSession(), getSessionContext()])
@@ -62,7 +63,19 @@ export default function InboxPage() {
   const [ticketsRes, { mutate: mutateTickets }] = createResource(orgId, (id) =>
     id ? listConversations(id, { limit: 50 }).then((result) => result.tickets) : Promise.resolve([] as LiveTicket[]),
   )
-  const tickets = () => ticketsRes() ?? []
+  const baseTickets = () => ticketsRes() ?? []
+  const [supportTicketsRes, { mutate: mutateSupportTickets }] = createResource(orgId, (id) =>
+    id ? listTickets(id, { limit: 100 }) : Promise.resolve([] as SupportTicket[]),
+  )
+  const supportTickets = () => {
+    const value = supportTicketsRes()
+    return Array.isArray(value) ? value : []
+  }
+  const supportTicketByConversation = createMemo(() => new Map(supportTickets().map((ticket) => [ticket.conversation_id, ticket])))
+  const tickets = () => baseTickets().map((ticket) => ({
+    ...ticket,
+    supportTicket: supportTicketByConversation().get(ticket.conversationId) ?? null,
+  }))
 
   const groupsRes = createResource(orgId, (id) => (id ? listInboxesAsGroups(id) : Promise.resolve([])))
   const groups = () => groupsRes[0]() ?? []
@@ -126,9 +139,13 @@ export default function InboxPage() {
 
     try {
       const detail = await getConversationDetail(orgId(), live.conversationId)
+      const updatedTicket = {
+        ...detail.ticket,
+        supportTicket: supportTicketByConversation().get(detail.ticket.conversationId) ?? null,
+      }
       setArticles(detail.articles)
-      setSelectedTicket(detail.ticket)
-      mutateTickets((items) => (items ?? []).map((item) => (item.id === detail.ticket.id ? detail.ticket : item)))
+      setSelectedTicket(updatedTicket)
+      mutateTickets((items) => (items ?? []).map((item) => (item.id === updatedTicket.id ? updatedTicket : item)))
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : 'Conversation could not be loaded.')
     } finally {
@@ -139,6 +156,19 @@ export default function InboxPage() {
   const replaceTicket = (updated: LiveTicket) => {
     mutateTickets((items) => (items ?? []).map((item) => (item.id === updated.id ? updated : item)))
     setSelectedTicket(updated)
+  }
+
+  const replaceSupportTicket = (ticket: SupportTicket) => {
+    mutateSupportTickets((items) => {
+      const current = items ?? []
+      if (current.some((item) => item.id === ticket.id)) {
+        return current.map((item) => (item.id === ticket.id ? ticket : item))
+      }
+      return [ticket, ...current]
+    })
+    setSelectedTicket((current) => current && current.conversationId === ticket.conversation_id
+      ? { ...current, supportTicket: ticket }
+      : current)
   }
 
   const patchSelectedTicket = async (patch: Record<string, unknown>) => {
@@ -184,7 +214,11 @@ export default function InboxPage() {
         if (group) updated = { ...updated, group }
       }
 
-      replaceTicket({ ...updated, updated_at: new Date().toISOString() })
+      replaceTicket({
+        ...updated,
+        supportTicket: current.supportTicket ?? supportTicketByConversation().get(current.conversationId) ?? null,
+        updated_at: new Date().toISOString(),
+      })
       setNotice('Conversation details updated.')
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : 'Update could not be saved.')
@@ -250,6 +284,8 @@ export default function InboxPage() {
       const result = await createSocialDraftFromInbox(orgId(), {
         ticketId: String(ticket.id),
         ticketTitle: ticket.title,
+        supportTicketId: ticket.supportTicket?.id,
+        conversationId: ticket.conversationId,
         customerName: customerName(ticket),
         channel: ticket.channel,
         excerpt: latestArticle?.body,
@@ -259,6 +295,37 @@ export default function InboxPage() {
     } catch (reason) {
       setNotice(reason instanceof Error ? reason.message : 'Social draft could not be created.')
     }
+  }
+
+  const createSupportTicket = async () => {
+    const ticket = selectedTicket()
+    if (!ticket || !orgId()) return
+    if (ticket.supportTicket) {
+      navigate(`/tickets?ticketId=${ticket.supportTicket.id}`)
+      return
+    }
+    setNotice(null)
+    try {
+      const supportTicket = await createTicket(orgId(), {
+        conversation_id: ticket.conversationId,
+        priority: ticket.priority?.name ?? 'normal',
+        severity: ticket.priority?.name === 'high' ? 'high' : 'medium',
+        category: ticket.tags?.[0] ?? '',
+        intent: 'customer_follow_up',
+        source: 'manual',
+        created_by: ctx()?.userId ?? '',
+      })
+      replaceSupportTicket(supportTicket)
+      setNotice('Ticket created.')
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : 'Ticket could not be created.')
+    }
+  }
+
+  const viewSupportTicket = () => {
+    const supportTicket = selectedTicket()?.supportTicket
+    if (!supportTicket) return
+    navigate(`/tickets?ticketId=${supportTicket.id}`)
   }
 
   return (
@@ -286,12 +353,20 @@ export default function InboxPage() {
             groups={groups()}
             notice={notice()}
             onAddTag={addTag}
+            onCreateTicket={() => void createSupportTicket()}
             onOpenModal={setModal}
             onPatchTicket={(patch) => void patchSelectedTicket(patch)}
+            onLinkExistingTicket={() => setModal({
+              type: 'work',
+              title: 'Link existing ticket',
+              description: 'Connect this conversation to an existing ticket and preserve the conversation as the message source.',
+              primaryAction: 'Link ticket',
+            })}
             onRemoveTag={removeTag}
             onSendReply={(text, internal) => void sendReply(text, internal)}
             onCreateSocialFollowUp={() => void createSocialFollowUp()}
             onSuggestReply={suggestReply}
+            onViewTicket={viewSupportTicket}
             replyText={replyText()}
             replySending={replySending()}
             selectedTicket={selectedTicket()}

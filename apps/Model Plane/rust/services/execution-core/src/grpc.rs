@@ -16,13 +16,19 @@ use crate::state::{RunSnapshot, RunStatus, StateStore};
 pub struct ExecutionService {
     state: StateStore,
     session_channel: tonic::transport::Channel,
+    inference_channel: tonic::transport::Channel,
 }
 
 impl ExecutionService {
-    pub fn new(state: StateStore, session_channel: tonic::transport::Channel) -> Self {
+    pub fn new(
+        state: StateStore,
+        session_channel: tonic::transport::Channel,
+        inference_channel: tonic::transport::Channel,
+    ) -> Self {
         Self {
             state,
             session_channel,
+            inference_channel,
         }
     }
 
@@ -34,6 +40,11 @@ impl ExecutionService {
     /// shares the same channel.
     fn orchestration_client(&self) -> OrchestrationCoreServiceClient<tonic::transport::Channel> {
         OrchestrationCoreServiceClient::new(self.session_channel.clone())
+    }
+
+    /// Channel to inference-core for the agent run driver's `Infer` round.
+    fn inference_channel(&self) -> tonic::transport::Channel {
+        self.inference_channel.clone()
     }
 }
 
@@ -197,6 +208,34 @@ impl ExecutionCore for ExecutionService {
 
         Ok(Response::new(pb::CancelRunResponse { cancelled }))
     }
+
+    /// Drive a whole agent run to a terminal answer (MVP no-tool slice).
+    ///
+    /// Delegates to [`runtime_loop::agent::run_agent`], which transitions the
+    /// run's draft plan to executing, runs a single `InferenceCore.Infer`
+    /// round, persists the assistant answer, and finalizes the run with one
+    /// terminal `CompleteStep`. A run is never left `'queued'`: failures take
+    /// the graceful path and still produce a terminal `"failed"` outcome.
+    async fn run_agent(
+        &self,
+        request: Request<pb::RunAgentRequest>,
+    ) -> Result<Response<pb::RunAgentResponse>, Status> {
+        let req = request.into_inner();
+        info!(
+            run_id = %req.run_id,
+            thread_id = %req.thread_id,
+            mode = %req.mode,
+            "run_agent: driving agent run (no-tool slice)"
+        );
+        let response = runtime_loop::agent::run_agent(
+            &self.state,
+            self.session_channel.clone(),
+            self.inference_channel(),
+            req,
+        )
+        .await;
+        Ok(Response::new(response))
+    }
 }
 
 /// Start the gRPC server on :9093.
@@ -214,12 +253,21 @@ pub async fn serve(state: StateStore) -> anyhow::Result<()> {
         .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
         .unwrap_or_else(|_| "http://localhost:9091".to_owned());
     let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
+
+    // inference-core backs the agent run driver's single Infer round (RunAgent).
+    // Same dual env-name convention as session-core: compose wires
+    // `INFERENCE_CORE_ADDR`, `INFERENCE_CORE_URL` is the documented primary.
+    let inference_url = std::env::var("INFERENCE_CORE_URL")
+        .or_else(|_| std::env::var("INFERENCE_CORE_ADDR"))
+        .unwrap_or_else(|_| "http://inference-core:9092".to_owned());
+    let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
     info!("gRPC listening on :9093");
 
     tonic::transport::Server::builder()
         .add_service(ExecutionCoreServer::new(ExecutionService::new(
             state,
             session_channel,
+            inference_channel,
         )))
         .serve(addr)
         .await?;

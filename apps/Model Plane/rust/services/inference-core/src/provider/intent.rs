@@ -233,7 +233,12 @@ pub async fn resolve(
     let posture = match budget {
         Some(client) => {
             client
-                .posture(org_id, user_id, policy.budget_cap_usd, policy.constrained_fraction)
+                .posture(
+                    org_id,
+                    user_id,
+                    policy.budget_cap_usd,
+                    policy.constrained_fraction,
+                )
                 .await
         }
         None => BudgetPosture::Unknown,
@@ -323,7 +328,9 @@ impl BudgetClient {
             return BudgetPosture::Unknown;
         }
         match resp.json::<BudgetCheckResponse>().await {
-            Ok(parsed) => classify_posture(parsed.allowed, parsed.current_cost_usd, cap_usd, fraction),
+            Ok(parsed) => {
+                classify_posture(parsed.allowed, parsed.current_cost_usd, cap_usd, fraction)
+            }
             Err(error) => {
                 warn!(%error, "budget check parse failed; posture Unknown");
                 BudgetPosture::Unknown
@@ -375,24 +382,43 @@ mod tests {
             assert_eq!(parse_mode(m), Some(VelionMode::Balance), "{m:?}");
         }
         // Pinned models and the legacy sentinels bypass the intent layer.
-        for m in ["", "default", "gpt-4o-mini", "claude-opus-4-8", "model-router"] {
+        for m in [
+            "",
+            "default",
+            "gpt-4o-mini",
+            "claude-opus-4-8",
+            "model-router",
+        ] {
             assert_eq!(parse_mode(m), None, "{m:?}");
         }
     }
 
     #[test]
     fn classify_trivial_prompt_is_simple() {
-        assert_eq!(classify(&policy(), &[user("hi")], &[], "auto"), Complexity::Simple);
+        assert_eq!(
+            classify(&policy(), &[user("hi")], &[], "auto"),
+            Complexity::Simple
+        );
     }
 
     #[test]
     fn classify_code_or_keywords_lift_to_moderate() {
         assert_eq!(
-            classify(&policy(), &[user("please refactor this function")], &[], "auto"),
+            classify(
+                &policy(),
+                &[user("please refactor this function")],
+                &[],
+                "auto"
+            ),
             Complexity::Moderate
         );
         assert_eq!(
-            classify(&policy(), &[user("here is code\n```rust\nfn x(){}\n```")], &[], "auto"),
+            classify(
+                &policy(),
+                &[user("here is code\n```rust\nfn x(){}\n```")],
+                &[],
+                "auto"
+            ),
             Complexity::Moderate
         );
     }
@@ -405,7 +431,12 @@ mod tests {
             Complexity::Simple
         );
         assert_eq!(
-            classify(&policy(), &[user("can you approve the change")], &[], "auto"),
+            classify(
+                &policy(),
+                &[user("can you approve the change")],
+                &[],
+                "auto"
+            ),
             Complexity::Simple
         );
         // A real whole-word keyword still lifts complexity.
@@ -420,7 +451,10 @@ mod tests {
         // 700 Norwegian 2-byte chars = 1400 bytes but only 700 chars — must stay
         // under the 1200-char "moderate" bar (would trip on byte length).
         let nordic = "å".repeat(700);
-        assert_eq!(classify(&policy(), &[user(&nordic)], &[], "auto"), Complexity::Simple);
+        assert_eq!(
+            classify(&policy(), &[user(&nordic)], &[], "auto"),
+            Complexity::Simple
+        );
     }
 
     #[test]
@@ -432,7 +466,12 @@ mod tests {
         }];
         // Tool use (+2) plus a reasoning keyword (+1) clears the Complex bar.
         assert_eq!(
-            classify(&policy(), &[user("analyze the architecture")], &tools, "auto"),
+            classify(
+                &policy(),
+                &[user("analyze the architecture")],
+                &tools,
+                "auto"
+            ),
             Complexity::Complex
         );
     }
@@ -440,18 +479,31 @@ mod tests {
     #[test]
     fn classify_long_prompt_is_complex() {
         let long = "x".repeat(4100);
-        assert_eq!(classify(&policy(), &[user(&long)], &[], "auto"), Complexity::Complex);
+        assert_eq!(
+            classify(&policy(), &[user(&long)], &[], "auto"),
+            Complexity::Complex
+        );
     }
 
     #[test]
     fn choose_budget_prefers_cheap() {
         let p = policy();
         assert_eq!(
-            choose(&p, VelionMode::Budget, Complexity::Simple, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Budget,
+                Complexity::Simple,
+                BudgetPosture::Healthy
+            ),
             "gpt-4o-mini"
         );
         assert_eq!(
-            choose(&p, VelionMode::Budget, Complexity::Complex, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Budget,
+                Complexity::Complex,
+                BudgetPosture::Healthy
+            ),
             "model-router"
         );
     }
@@ -460,15 +512,30 @@ mod tests {
     fn choose_balance_scales_with_complexity() {
         let p = policy();
         assert_eq!(
-            choose(&p, VelionMode::Balance, Complexity::Simple, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Balance,
+                Complexity::Simple,
+                BudgetPosture::Healthy
+            ),
             "gpt-4o-mini"
         );
         assert_eq!(
-            choose(&p, VelionMode::Balance, Complexity::Moderate, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Balance,
+                Complexity::Moderate,
+                BudgetPosture::Healthy
+            ),
             "model-router"
         );
         assert_eq!(
-            choose(&p, VelionMode::Balance, Complexity::Complex, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Balance,
+                Complexity::Complex,
+                BudgetPosture::Healthy
+            ),
             "claude-sonnet-4-6"
         );
     }
@@ -477,11 +544,21 @@ mod tests {
     fn choose_genius_reaches_for_the_best() {
         let p = policy();
         assert_eq!(
-            choose(&p, VelionMode::Genius, Complexity::Complex, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Genius,
+                Complexity::Complex,
+                BudgetPosture::Healthy
+            ),
             "claude-opus-4-8"
         );
         assert_eq!(
-            choose(&p, VelionMode::Genius, Complexity::Moderate, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Genius,
+                Complexity::Moderate,
+                BudgetPosture::Healthy
+            ),
             "claude-sonnet-4-6"
         );
     }
@@ -490,8 +567,15 @@ mod tests {
     fn exhausted_budget_forces_cheap_fallback() {
         let p = policy();
         for mode in [VelionMode::Budget, VelionMode::Balance, VelionMode::Genius] {
-            for cx in [Complexity::Simple, Complexity::Moderate, Complexity::Complex] {
-                assert_eq!(choose(&p, mode, cx, BudgetPosture::Exhausted), CHEAP_FALLBACK);
+            for cx in [
+                Complexity::Simple,
+                Complexity::Moderate,
+                Complexity::Complex,
+            ] {
+                assert_eq!(
+                    choose(&p, mode, cx, BudgetPosture::Exhausted),
+                    CHEAP_FALLBACK
+                );
             }
         }
     }
@@ -501,12 +585,22 @@ mod tests {
         let p = policy();
         // Genius+Complex normally → opus; constrained → behaves as Balance+Complex → sonnet.
         assert_eq!(
-            choose(&p, VelionMode::Genius, Complexity::Complex, BudgetPosture::Constrained),
+            choose(
+                &p,
+                VelionMode::Genius,
+                Complexity::Complex,
+                BudgetPosture::Constrained
+            ),
             "claude-sonnet-4-6"
         );
         // Balance+Complex normally → sonnet; constrained → Budget+Complex → router.
         assert_eq!(
-            choose(&p, VelionMode::Balance, Complexity::Complex, BudgetPosture::Constrained),
+            choose(
+                &p,
+                VelionMode::Balance,
+                Complexity::Complex,
+                BudgetPosture::Constrained
+            ),
             "model-router"
         );
     }
@@ -515,8 +609,18 @@ mod tests {
     fn unknown_posture_routes_like_healthy() {
         let p = policy();
         assert_eq!(
-            choose(&p, VelionMode::Genius, Complexity::Complex, BudgetPosture::Unknown),
-            choose(&p, VelionMode::Genius, Complexity::Complex, BudgetPosture::Healthy)
+            choose(
+                &p,
+                VelionMode::Genius,
+                Complexity::Complex,
+                BudgetPosture::Unknown
+            ),
+            choose(
+                &p,
+                VelionMode::Genius,
+                Complexity::Complex,
+                BudgetPosture::Healthy
+            )
         );
     }
 
@@ -526,12 +630,22 @@ mod tests {
         let mut p = policy();
         "deepseek-v3-2".clone_into(&mut p.table.genius.complex);
         assert_eq!(
-            choose(&p, VelionMode::Genius, Complexity::Complex, BudgetPosture::Healthy),
+            choose(
+                &p,
+                VelionMode::Genius,
+                Complexity::Complex,
+                BudgetPosture::Healthy
+            ),
             "deepseek-v3-2"
         );
         // Default still resolves to opus, proving the change was the policy's.
         assert_eq!(
-            choose(&policy(), VelionMode::Genius, Complexity::Complex, BudgetPosture::Healthy),
+            choose(
+                &policy(),
+                VelionMode::Genius,
+                Complexity::Complex,
+                BudgetPosture::Healthy
+            ),
             "claude-opus-4-8"
         );
     }
@@ -539,26 +653,60 @@ mod tests {
     #[test]
     fn classify_posture_thresholds() {
         let frac = policy().constrained_fraction;
-        assert_eq!(classify_posture(false, 0.0, 50.0, frac), BudgetPosture::Exhausted);
-        assert_eq!(classify_posture(true, 10.0, 50.0, frac), BudgetPosture::Healthy);
+        assert_eq!(
+            classify_posture(false, 0.0, 50.0, frac),
+            BudgetPosture::Exhausted
+        );
+        assert_eq!(
+            classify_posture(true, 10.0, 50.0, frac),
+            BudgetPosture::Healthy
+        );
         // 80% of the cap is the Constrained boundary.
-        assert_eq!(classify_posture(true, 40.0, 50.0, frac), BudgetPosture::Constrained);
-        assert_eq!(classify_posture(true, 39.99, 50.0, frac), BudgetPosture::Healthy);
+        assert_eq!(
+            classify_posture(true, 40.0, 50.0, frac),
+            BudgetPosture::Constrained
+        );
+        assert_eq!(
+            classify_posture(true, 39.99, 50.0, frac),
+            BudgetPosture::Healthy
+        );
         // No cap configured → never Constrained.
-        assert_eq!(classify_posture(true, 999.0, 0.0, frac), BudgetPosture::Healthy);
+        assert_eq!(
+            classify_posture(true, 999.0, 0.0, frac),
+            BudgetPosture::Healthy
+        );
     }
 
     #[tokio::test]
     async fn resolve_returns_none_for_pinned_model() {
-        let d = resolve(&policy(), "gpt-4o-mini", &[user("hi")], &[], "auto", "org1", "u1", None).await;
+        let d = resolve(
+            &policy(),
+            "gpt-4o-mini",
+            &[user("hi")],
+            &[],
+            "auto",
+            "org1",
+            "u1",
+            None,
+        )
+        .await;
         assert!(d.is_none());
     }
 
     #[tokio::test]
     async fn resolve_velion_balance_without_budget_is_unknown_posture() {
-        let d = resolve(&policy(), "velion-balance", &[user("hi")], &[], "auto", "", "", None)
-            .await
-            .expect("velion mode resolves");
+        let d = resolve(
+            &policy(),
+            "velion-balance",
+            &[user("hi")],
+            &[],
+            "auto",
+            "",
+            "",
+            None,
+        )
+        .await
+        .expect("velion mode resolves");
         assert_eq!(d.mode, VelionMode::Balance);
         assert_eq!(d.complexity, Complexity::Simple);
         assert_eq!(d.posture, BudgetPosture::Unknown);

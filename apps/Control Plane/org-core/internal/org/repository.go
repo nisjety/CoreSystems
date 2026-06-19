@@ -57,6 +57,14 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
+// Ping verifies the database is reachable and this pool can authenticate, by
+// round-tripping a trivial query. A stale DB password surfaces here — which a
+// port-only healthcheck (`nc -z`) silently misses while the pool limps on old
+// connections for reads but fails every new connection for writes.
+func (r *Repository) Ping(ctx context.Context) error {
+	return r.pool.Ping(ctx)
+}
+
 func (r *Repository) GetOrganization(ctx context.Context, id string) (*Organization, error) {
 	const q = `
 SELECT id, name, COALESCE(slug, ''), plan, status, COALESCE(primary_domain, ''), COALESCE(region, 'eu'), COALESCE(default_locale, 'nb-NO'), metadata, created_at, updated_at,
@@ -392,6 +400,23 @@ ORDER BY COALESCE(joined_at, created_at) ASC`
 	return members, nil
 }
 
+// IsActiveMember reports whether userID is an ACTIVE member of orgID using a
+// single indexed point query (idx_org_members_user_status covers this), so the
+// membership-recheck guard does not pay an O(N) member-list scan on every
+// mutation. Parameterized — orgID/userID are never interpolated.
+func (r *Repository) IsActiveMember(ctx context.Context, orgID, userID string) (bool, error) {
+	const q = `
+SELECT EXISTS (
+  SELECT 1 FROM organization_members
+  WHERE org_id = $1 AND user_id = $2 AND status = 'active'
+)`
+	var exists bool
+	if err := r.pool.QueryRow(ctx, q, orgID, userID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check active membership: %w", err)
+	}
+	return exists, nil
+}
+
 // RemoveOrganizationMember soft-removes a member from an organization.
 func (r *Repository) RemoveOrganizationMember(ctx context.Context, orgID, userID string) error {
 	const q = `
@@ -403,4 +428,47 @@ WHERE org_id = $1 AND user_id = $2`
 		return fmt.Errorf("remove organization member: %w", err)
 	}
 	return nil
+}
+
+// ============================================
+// GDPR ERASURE — call the stored procedures defined in
+// migrations/003_gdpr_hard_delete.up.sql. All calls are parameterized
+// ($1) — the org id is NEVER string-interpolated into the SQL.
+// ============================================
+
+// GDPRHardDeleteOrganization invokes gdpr_hard_delete_organization($1), which
+// cascades a DELETE across all org-owned tables and returns a JSONB receipt.
+// The receipt is returned verbatim to the caller (it records exactly which
+// rows were removed — the GDPR erasure audit trail).
+func (r *Repository) GDPRHardDeleteOrganization(ctx context.Context, orgID string) (json.RawMessage, error) {
+	var receipt []byte
+	err := r.pool.QueryRow(ctx, `SELECT gdpr_hard_delete_organization($1)`, orgID).Scan(&receipt)
+	if err != nil {
+		return nil, fmt.Errorf("gdpr_hard_delete_organization: %w", err)
+	}
+	return json.RawMessage(receipt), nil
+}
+
+// SoftDeleteOrganization invokes soft_delete_organization($1), which sets
+// deleted_at + status='deleted' so the row is purged later by the retention
+// sweep. Returns the proc's JSONB receipt verbatim.
+func (r *Repository) SoftDeleteOrganization(ctx context.Context, orgID string) (json.RawMessage, error) {
+	var receipt []byte
+	err := r.pool.QueryRow(ctx, `SELECT soft_delete_organization($1)`, orgID).Scan(&receipt)
+	if err != nil {
+		return nil, fmt.Errorf("soft_delete_organization: %w", err)
+	}
+	return json.RawMessage(receipt), nil
+}
+
+// PurgeOldDeletedOrganizations invokes purge_old_deleted_organizations($1),
+// hard-deleting organizations soft-deleted more than daysThreshold days ago.
+// Returns the proc's JSONB receipt ({ purged_count, org_ids, ... }) verbatim.
+func (r *Repository) PurgeOldDeletedOrganizations(ctx context.Context, daysThreshold int) (json.RawMessage, error) {
+	var receipt []byte
+	err := r.pool.QueryRow(ctx, `SELECT purge_old_deleted_organizations($1)`, daysThreshold).Scan(&receipt)
+	if err != nil {
+		return nil, fmt.Errorf("purge_old_deleted_organizations: %w", err)
+	}
+	return json.RawMessage(receipt), nil
 }

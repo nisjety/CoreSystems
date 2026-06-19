@@ -188,6 +188,8 @@ export type CreateSocialPostInput = {
 export type CreateSocialDraftFromInboxInput = {
   ticketId: string
   ticketTitle: string
+  supportTicketId?: string
+  conversationId?: string
   customerName?: string
   channel?: string
   excerpt?: string

@@ -7,6 +7,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -64,6 +65,49 @@ func (s *Store) InsertUsage(ctx context.Context, ev *events.UsageEvent) (int64, 
 		ev.TokensIn, ev.TokensOut, ev.BytesIn, ev.BytesOut, ev.CostCents,
 		nilIfEmpty(ev.RequestID), metadata).Scan(&id)
 	return id, err
+}
+
+// PurgeResult reports how many rows each append-only table shed during a
+// single retention sweep.
+type PurgeResult struct {
+	AuditDeleted int64
+	UsageDeleted int64
+}
+
+// Purge enforces data retention by deleting events older than retentionDays
+// from both append-only tables. This is the ONLY delete the store performs —
+// the tables are otherwise insert-only.
+//
+// The cutoff is parameterized (`NOW() - ($1 * INTERVAL '1 day')`) so the
+// retention window is never interpolated into the SQL string. retentionDays
+// must be >= 1; a non-positive value is a programming error and is rejected
+// rather than silently purging everything.
+func (s *Store) Purge(ctx context.Context, retentionDays int) (PurgeResult, error) {
+	if retentionDays < 1 {
+		return PurgeResult{}, fmt.Errorf("retentionDays must be >= 1, got %d", retentionDays)
+	}
+
+	var res PurgeResult
+
+	auditTag, err := s.pool.Exec(ctx, `
+		DELETE FROM audit_events
+		WHERE ingested_at < NOW() - ($1 * INTERVAL '1 day')
+	`, retentionDays)
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("purge audit_events: %w", err)
+	}
+	res.AuditDeleted = auditTag.RowsAffected()
+
+	usageTag, err := s.pool.Exec(ctx, `
+		DELETE FROM usage_events
+		WHERE ingested_at < NOW() - ($1 * INTERVAL '1 day')
+	`, retentionDays)
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("purge usage_events: %w", err)
+	}
+	res.UsageDeleted = usageTag.RowsAffected()
+
+	return res, nil
 }
 
 // AuditFilter constrains the audit-list query. Every field except OrgID

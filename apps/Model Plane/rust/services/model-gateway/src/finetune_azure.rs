@@ -594,9 +594,7 @@ impl AzureFinetuneClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{
-        body_json, body_string_contains, header, method, path, query_param,
-    };
+    use wiremock::matchers::{body_json, body_string_contains, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client_for(server: &MockServer) -> AzureFinetuneClient {
@@ -831,7 +829,11 @@ mod tests {
         let server = MockServer::start().await;
         let c = client_for(&server); // no mgmt config attached
         let err = c
-            .create_deployment("acme-support-v1", "gpt-4o-mini.ft-xyz", DeploymentTier::Developer)
+            .create_deployment(
+                "acme-support-v1",
+                "gpt-4o-mini.ft-xyz",
+                DeploymentTier::Developer,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, AzureError::MgmtNotConfigured));

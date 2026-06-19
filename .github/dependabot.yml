@@ -1,0 +1,51 @@
+version: 2
+
+# Dependency update automation. Lives at the repository root because Dependabot
+# only reads .github/dependabot.yml from the default branch root. Each ecosystem
+# is scoped to a specific package manifest directory.
+updates:
+  # Velion v3 frontend SPA (npm/pnpm).
+  - package-ecosystem: "npm"
+    directory: "/apps/Frontend Plane/velionv3"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "velionv3"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      # Batch low-risk minor/patch bumps into one PR to cut review noise; majors
+      # still open individually so breaking changes are reviewed in isolation.
+      velionv3-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Velion v3 BFF gateway (Rust/Cargo).
+  - package-ecosystem: "cargo"
+    directory: "/apps/Frontend Plane/velionv3/apps/gateway"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "velion-gateway-rs"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Keep the GitHub Actions used by this repo's workflows patched.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"

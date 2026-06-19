@@ -28,5 +28,6 @@ reqwest = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = "0.1"
+futures = { workspace = true }
 mp-slo = { path = "../../crates/mp-slo" }
 wiremock = "0.6"

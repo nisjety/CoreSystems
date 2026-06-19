@@ -369,7 +369,10 @@ impl QuarryAgentClient {
     /// Release a run and its browser lease. Best-effort; non-2xx is surfaced.
     pub async fn close_run(&self, run_id: &str, org_id: &str) -> Result<(), AgentClientError> {
         let req = self
-            .auth(self.http.delete(self.url(&format!("/v1/agent/runs/{run_id}"))))
+            .auth(
+                self.http
+                    .delete(self.url(&format!("/v1/agent/runs/{run_id}"))),
+            )
             .header("x-quarry-org", org_id);
         let resp = req
             .send()

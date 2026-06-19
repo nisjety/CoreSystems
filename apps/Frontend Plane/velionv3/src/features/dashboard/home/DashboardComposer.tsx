@@ -50,14 +50,17 @@ import {
 } from '@/shared/api/chat-actions-client'
 import { loadComposerSettingsItems, type ComposerSettingsItem } from '@/shared/api/composer-settings-client'
 import { searchNavbar } from '@/shared/api/navbar-client'
+import { selectChatThread } from '@/features/chat/lib/chat-thread-history'
 import { writePendingChatLaunch } from '@/features/chat/lib/pending-chat-launch'
 import {
   groupChatModels,
   isExpensiveModel,
+  listChatThreads,
   listModels,
   velionModeById,
   VELION_BALANCE_MODE_ID,
   VELION_MODES,
+  type ChatThreadSession,
   type ModelGroup,
   type ModelInfo,
 } from '@/shared/api/chat-client'
@@ -92,6 +95,15 @@ type ComposerTurn = {
   files: string[]
   model: string
   responseMode: ResponseMode
+}
+
+type HistoryPanelItem = {
+  fallbackTime: string
+  id: string
+  meta: string
+  threadId?: string
+  title: string
+  updatedAt: string
 }
 
 type ComposerSettings = {
@@ -292,8 +304,10 @@ function pastedImageFiles(event: ClipboardEvent) {
 }
 
 export function DashboardComposer(props: {
+  browseWeb?: boolean
   imageMode?: boolean
   message: string
+  onBrowseWebChange?: (value: boolean) => void
   onImageModeChange?: (value: boolean) => void
   onMessageChange: (value: string) => void
   onPlanModeChange?: (value: boolean) => void
@@ -316,7 +330,13 @@ export function DashboardComposer(props: {
   let mediaRecorder: MediaRecorder | undefined
   let audioChunks: Blob[] = []
   let pendingFilePosition: number | null = null
-  const [browseWeb, setBrowseWeb] = createSignal(true)
+  const [internalBrowseWeb, setInternalBrowseWeb] = createSignal(false)
+  const browseWeb = () => props.browseWeb ?? internalBrowseWeb()
+  const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
+    const value = typeof next === 'function' ? next(browseWeb()) : next
+    if (props.browseWeb === undefined) setInternalBrowseWeb(value)
+    props.onBrowseWebChange?.(value)
+  }
   const [autocomplete, setAutocomplete] = createSignal<AutocompleteState | null>(null)
   const [autocompleteIndex, setAutocompleteIndex] = createSignal(0)
   const [deepSearch, setDeepSearch] = createSignal(false)
@@ -324,6 +344,9 @@ export function DashboardComposer(props: {
   const [entities, setEntities] = createSignal<EntityToken[]>([])
   const [files, setFiles] = createSignal<ComposerFile[]>([])
   const [historyPanelPosition, setHistoryPanelPosition] = createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 })
+  const [historyThreads, setHistoryThreads] = createSignal<ChatThreadSession[]>([])
+  const [historyLoading, setHistoryLoading] = createSignal(false)
+  const [historyError, setHistoryError] = createSignal<string | null>(null)
   const [historyOpen, setHistoryOpen] = createSignal(false)
   const [modeAnnouncement, setModeAnnouncement] = createSignal<string | null>(null)
   const [modelOpen, setModelOpen] = createSignal(false)
@@ -657,6 +680,27 @@ export function DashboardComposer(props: {
     })
   }
 
+  let historyRequestSeq = 0
+  const refreshChatHistory = async () => {
+    const requestSeq = ++historyRequestSeq
+    setHistoryLoading(true)
+    setHistoryError(null)
+    try {
+      const sessions = await listChatThreads()
+      if (requestSeq === historyRequestSeq) setHistoryThreads(sessions)
+    } catch {
+      if (requestSeq === historyRequestSeq) setHistoryError('Could not load conversations.')
+    } finally {
+      if (requestSeq === historyRequestSeq) setHistoryLoading(false)
+    }
+  }
+
+  const openChatThread = (threadId: string) => {
+    selectChatThread(threadId)
+    setHistoryOpen(false)
+    if (window.location.pathname !== '/chat') navigateToChat(navigate)
+  }
+
   const resetComposerDraft = () => {
     batch(() => {
       props.onMessageChange('')
@@ -669,7 +713,8 @@ export function DashboardComposer(props: {
   }
 
   const openHistoryPanel = () => {
-    if (!historyOpen()) {
+    const nextOpen = !historyOpen()
+    if (nextOpen) {
       const rect = historyTriggerRef?.getBoundingClientRect()
       if (rect) {
         setHistoryPanelPosition({
@@ -678,9 +723,10 @@ export function DashboardComposer(props: {
           right: window.innerWidth - rect.right,
         })
       }
+      void refreshChatHistory()
     }
 
-    setHistoryOpen((current) => !current)
+    setHistoryOpen(nextOpen)
     setSettingsOpen(false)
     setModelOpen(false)
     setSuggestionsOpen(false)
@@ -1361,7 +1407,15 @@ export function DashboardComposer(props: {
           would otherwise become their containing block and mis-place them. */}
       <Show when={historyOpen()}>
         <Portal>
-          <HistoryPanel position={historyPanelPosition()} turns={turns()} onClose={() => setHistoryOpen(false)} />
+          <HistoryPanel
+            error={historyError()}
+            loading={historyLoading()}
+            position={historyPanelPosition()}
+            threads={historyThreads()}
+            turns={turns()}
+            onClose={() => setHistoryOpen(false)}
+            onThreadSelect={openChatThread}
+          />
         </Portal>
       </Show>
 
@@ -1881,11 +1935,19 @@ function TurnReceipt(props: { turn: ComposerTurn }) {
 }
 
 function HistoryPanel(props: {
+  error: string | null
+  loading: boolean
   onClose: () => void
+  onThreadSelect: (threadId: string) => void
   position: PanelPosition
+  threads: ChatThreadSession[]
   turns: ComposerTurn[]
 }) {
-  const groups = () => historyGroups(props.turns)
+  const items = createMemo(() => [
+    ...props.threads.map(threadToHistoryItem),
+    ...props.turns.map(turnToHistoryItem),
+  ])
+  const groups = createMemo(() => historyGroups(items()))
 
   return (
     <div
@@ -1894,30 +1956,35 @@ function HistoryPanel(props: {
       style={panelPositionStyle(props.position)}
     >
       <div class="dashboard-composer-floating-panel__scroll" style={{ 'max-height': `${props.position.maxHeight}px` }}>
-        <Show
-          when={props.turns.length > 0}
-          fallback={
-            <div class="dashboard-composer-history-empty">
-              <MessageSquare class="size-5" strokeWidth={1.5} />
-              <p>Open chat to load real conversation history.</p>
-            </div>
-          }
-        >
+        <Show when={props.loading}>
+          <div class="velion-menu-row dashboard-composer-history-row dashboard-composer-history-row--loading">
+            <Loader2 class="size-4 shrink-0 animate-spin" strokeWidth={1.7} />
+            <span>
+              <span class="velion-menu-label">Loading conversations...</span>
+              <span class="velion-menu-meta">Signed-in user history</span>
+            </span>
+          </div>
+        </Show>
+        <Show when={items().length > 0}>
           <For each={groups()}>
             {(group) => (
               <Show when={group.items.length > 0}>
                 <div>
                   <p class="dashboard-composer-history-group-label">{group.label}</p>
                   <For each={group.items}>
-                    {(turn) => (
-                      <button type="button" onClick={props.onClose} class="velion-menu-row dashboard-composer-history-row">
+                    {(item) => (
+                      <button
+                        type="button"
+                        onClick={() => item.threadId ? props.onThreadSelect(item.threadId) : props.onClose()}
+                        class="velion-menu-row dashboard-composer-history-row"
+                      >
                         <MessageSquare class="size-4 shrink-0" strokeWidth={1.7} />
                         <span>
-                          <span class="velion-menu-label">{turn.body || 'Untitled'}</span>
-                          <span class="velion-menu-meta">{turn.model}</span>
+                          <span class="velion-menu-label">{item.title || 'Untitled'}</span>
+                          <span class="velion-menu-meta">{item.meta}</span>
                         </span>
                         <span class="velion-menu-meta dashboard-composer-history-row__time">
-                          {formatTurnTime(turn, group.isToday)}
+                          {formatHistoryItemTime(item, group.isToday)}
                         </span>
                       </button>
                     )}
@@ -1926,6 +1993,12 @@ function HistoryPanel(props: {
               </Show>
             )}
           </For>
+        </Show>
+        <Show when={!props.loading && items().length === 0}>
+          <div class="dashboard-composer-history-empty">
+            <MessageSquare class="size-5" strokeWidth={1.5} />
+            <p>{props.error ?? 'No conversations found for this user.'}</p>
+          </div>
         </Show>
 
         <div class="dashboard-composer-menu-divider" />
@@ -2207,20 +2280,41 @@ function formatComposerTurnTime(date: Date) {
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
-function historyGroups(turns: ComposerTurn[]) {
+function threadToHistoryItem(thread: ChatThreadSession): HistoryPanelItem {
+  return {
+    fallbackTime: thread.updatedAt,
+    id: thread.threadId,
+    meta: thread.preview || 'Chat thread',
+    threadId: thread.threadId,
+    title: thread.title || 'Untitled',
+    updatedAt: thread.updatedAt,
+  }
+}
+
+function turnToHistoryItem(turn: ComposerTurn): HistoryPanelItem {
+  return {
+    fallbackTime: turn.createdAt,
+    id: turn.id,
+    meta: turn.model,
+    title: turn.body || 'Untitled',
+    updatedAt: turn.createdAtIso,
+  }
+}
+
+function historyGroups(items: HistoryPanelItem[]) {
   const now = new Date()
   const today = now.toDateString()
   const yesterday = new Date(now.getTime() - 86_400_000).toDateString()
-  const groups = turns.reduce<{
-    today: ComposerTurn[]
-    yesterday: ComposerTurn[]
-    earlier: ComposerTurn[]
+  const groups = items.reduce<{
+    today: HistoryPanelItem[]
+    yesterday: HistoryPanelItem[]
+    earlier: HistoryPanelItem[]
   }>(
-    (accumulator, turn) => {
-      const date = new Date(turn.createdAtIso).toDateString()
-      if (date === today) return { ...accumulator, today: [...accumulator.today, turn] }
-      if (date === yesterday) return { ...accumulator, yesterday: [...accumulator.yesterday, turn] }
-      return { ...accumulator, earlier: [...accumulator.earlier, turn] }
+    (accumulator, item) => {
+      const date = new Date(item.updatedAt).toDateString()
+      if (date === today) return { ...accumulator, today: [...accumulator.today, item] }
+      if (date === yesterday) return { ...accumulator, yesterday: [...accumulator.yesterday, item] }
+      return { ...accumulator, earlier: [...accumulator.earlier, item] }
     },
     { today: [], yesterday: [], earlier: [] },
   )
@@ -2232,9 +2326,9 @@ function historyGroups(turns: ComposerTurn[]) {
   ] as const
 }
 
-function formatTurnTime(turn: ComposerTurn, isToday: boolean) {
-  const date = new Date(turn.createdAtIso)
-  if (Number.isNaN(date.getTime())) return turn.createdAt
+function formatHistoryItemTime(item: HistoryPanelItem, isToday: boolean) {
+  const date = new Date(item.updatedAt)
+  if (Number.isNaN(date.getTime())) return item.fallbackTime
 
   return isToday
     ? date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })

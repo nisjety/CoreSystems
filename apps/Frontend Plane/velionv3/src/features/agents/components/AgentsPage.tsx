@@ -7,10 +7,13 @@ import {
   type JSX,
 } from 'solid-js'
 import {
+  ChevronRight,
+  Gauge,
   Play,
   Rocket,
   Sparkles,
 } from 'lucide-solid'
+import { A } from '@solidjs/router'
 import { Button } from '@/shared/ui/Button'
 import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
 import { cn } from '@/shared/lib/cn'
@@ -104,6 +107,7 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
       </header>
 
       <section aria-labelledby="agent-role-heading" class="agents-overview-section">
+        <TaskConsoleEntry />
         <div class="agents-role-grid">
           <For each={agentBlueprints}>
             {(role) => (
@@ -117,6 +121,26 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
         </div>
       </section>
     </>
+  )
+}
+
+function TaskConsoleEntry() {
+  return (
+    <A href="/agents/runs" class={cn('agents-task-console-entry', controlFocusClass)} aria-label="Open the Agent Run Console to run and approve agent tasks">
+      <span class="agents-task-console-entry__icon">
+        <Gauge class="size-5" strokeWidth={2.1} />
+      </span>
+      <span class="agents-task-console-entry__copy">
+        <span class="agents-task-console-entry__title">Task Console — run &amp; approve agent tasks</span>
+        <span class="agents-task-console-entry__desc">
+          Launch an autonomous run, watch the live plan, tools, and browser steps, and approve risky actions before they happen.
+        </span>
+      </span>
+      <span class="agents-task-console-entry__cta">
+        Open console
+        <ChevronRight class="size-4" strokeWidth={2.2} />
+      </span>
+    </A>
   )
 }
 

@@ -849,6 +849,7 @@ pub(super) async fn crawl_run_events(
         None,
         token.as_deref(),
         headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+        None,
         false,
     )
     .await

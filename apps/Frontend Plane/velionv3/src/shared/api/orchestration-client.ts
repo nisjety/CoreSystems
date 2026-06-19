@@ -91,3 +91,84 @@ export async function cancelRun(runId: string, signal?: AbortSignal): Promise<vo
     signal,
   })
 }
+
+// ── Run console reads ─────────────────────────────────────────────────────────
+// Point-in-time snapshots for the agentic run console (plans/todos/lineage).
+// The live `step_update`/`*_transitioned` stream comes from run-console-client;
+// these GETs hydrate the initial state and reconcile after a resume.
+
+type RawPlan = Record<string, unknown>
+type RawTodo = Record<string, unknown>
+
+/** A run's plan as reported by model-gateway's orchestration API. */
+export type Plan = {
+  id: string
+  runId?: string
+  /** Lifecycle state (uppercased provider enum name), rendered as-is. */
+  state?: string
+  /** Free-form human-friendly summary of the plan, when present. */
+  summary?: string
+}
+
+/** A thread's todo as reported by model-gateway's orchestration API. */
+export type Todo = {
+  id: string
+  threadId?: string
+  /** Lifecycle state (uppercased provider enum name), rendered as-is. */
+  state?: string
+  /** Human-friendly todo title/description, when present. */
+  title?: string
+}
+
+function normalizePlan(raw: RawPlan): Plan | null {
+  const id = str(raw.id) ?? str(raw.plan_id) ?? str(raw.planId)
+  if (!id) return null
+  return {
+    id,
+    runId: str(raw.run_id) ?? str(raw.runId),
+    state: str(raw.state) ?? str(raw.status),
+    summary: str(raw.summary) ?? str(raw.detail) ?? str(raw.description),
+  }
+}
+
+function normalizeTodo(raw: RawTodo): Todo | null {
+  const id = str(raw.id) ?? str(raw.todo_id) ?? str(raw.todoId)
+  if (!id) return null
+  return {
+    id,
+    threadId: str(raw.thread_id) ?? str(raw.threadId),
+    state: str(raw.state) ?? str(raw.status),
+    title: str(raw.title) ?? str(raw.summary) ?? str(raw.detail) ?? str(raw.description),
+  }
+}
+
+/** List a run's plans (initial hydration for the run console). */
+export async function listPlans(runId: string, signal?: AbortSignal): Promise<Plan[]> {
+  const payload = await requestJson<{ plans?: RawPlan[] }>(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/plans`,
+    { signal },
+  )
+  const list = Array.isArray(payload.plans) ? payload.plans : []
+  return list.map(normalizePlan).filter((p): p is Plan => p !== null)
+}
+
+/** List a thread's todos (initial hydration for the run console). */
+export async function listTodos(threadId: string, signal?: AbortSignal): Promise<Todo[]> {
+  const payload = await requestJson<{ todos?: RawTodo[] }>(
+    `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/todos`,
+    { signal },
+  )
+  const list = Array.isArray(payload.todos) ? payload.todos : []
+  return list.map(normalizeTodo).filter((t): t is Todo => t !== null)
+}
+
+/**
+ * Fetch a thread's sub-agent lineage tree. The shape is provider-defined and
+ * rendered by the console as-is, so we return the raw payload unparsed.
+ */
+export async function getLineage(threadId: string, signal?: AbortSignal): Promise<unknown> {
+  return requestJson<unknown>(
+    `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/lineage`,
+    { signal },
+  )
+}

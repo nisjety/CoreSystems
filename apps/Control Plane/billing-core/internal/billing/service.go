@@ -66,6 +66,11 @@ func (s *Service) SetPublisher(publisher EventPublisher) {
 	s.publisher = publisher
 }
 
+// Ping checks database connectivity + authentication for the /health probe.
+func (s *Service) Ping(ctx context.Context) error {
+	return s.repo.Ping(ctx)
+}
+
 // SetSharedPublisher wires the cross-plane NATS publisher for controlplane.billing.* subjects.
 // SharedEventPublisher is defined in this package to avoid an import cycle.
 func (s *Service) SetSharedPublisher(sp SharedEventPublisher) {

@@ -171,10 +171,9 @@ impl FallbackChain {
                     // surface. Fall through to the direct provider only when
                     // Azure Anthropic is not configured.
                     let mut registered_azure_anthropic = false;
-                    if let (Some(endpoint), Some(key)) = (
-                        &cfg.azure_anthropic_endpoint,
-                        &cfg.azure_anthropic_api_key,
-                    ) {
+                    if let (Some(endpoint), Some(key)) =
+                        (&cfg.azure_anthropic_endpoint, &cfg.azure_anthropic_api_key)
+                    {
                         if let Ok(p) = AnthropicProvider::new_azure(
                             key.clone(),
                             endpoint.clone(),
@@ -257,7 +256,11 @@ impl FallbackChain {
         // When session-core is reachable, build the policy client and start a
         // periodic refresh loop. A successful fetch hot-swaps the live policy;
         // an empty/unreachable store leaves the seed in place (fail-soft).
-        let policy_client = cfg.session_core_url.as_deref().and_then(PolicyClient::from_url).map(Arc::new);
+        let policy_client = cfg
+            .session_core_url
+            .as_deref()
+            .and_then(PolicyClient::from_url)
+            .map(Arc::new);
         if let Some(client) = policy_client.clone() {
             let policy_handle = policy.clone();
             let refresh = Duration::from_secs(cfg.router_policy_refresh_secs.max(1));
@@ -693,7 +696,10 @@ mod resolution_tests {
 
     #[test]
     fn anthropic_hint_matches_azure_anthropic() {
-        assert!(FallbackChain::provider_matches("azure-anthropic", "anthropic"));
+        assert!(FallbackChain::provider_matches(
+            "azure-anthropic",
+            "anthropic"
+        ));
         assert!(FallbackChain::provider_matches("azure-anthropic", "claude"));
         assert!(FallbackChain::provider_matches("anthropic", "claude"));
         assert!(FallbackChain::provider_matches("azure-openai", "azure"));
@@ -750,7 +756,10 @@ mod resolution_tests {
             Some(crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL)
         );
         // model_used reflects the resolved model, not the empty request.
-        assert_eq!(resp.model_used, crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL);
+        assert_eq!(
+            resp.model_used,
+            crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL
+        );
     }
 
     #[tokio::test]
@@ -778,8 +787,9 @@ mod resolution_tests {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
         });
-        let chain = FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
-            .with_intent_enabled(true);
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
+                .with_intent_enabled(true);
         let req = InferRequest {
             request_id: "r3".to_owned(),
             model: "velion-budget".to_owned(),

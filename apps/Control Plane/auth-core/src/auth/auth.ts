@@ -2,6 +2,7 @@ import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import {
   emailOTP,
+  captcha,
   twoFactor,
   phoneNumber,
   organization,
@@ -59,6 +60,24 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+type CaptchaProvider =
+  | 'cloudflare-turnstile'
+  | 'google-recaptcha'
+  | 'hcaptcha'
+  | 'captchafox';
+
+function normalizeCaptchaProvider(value?: string): CaptchaProvider {
+  switch (value) {
+    case 'google-recaptcha':
+    case 'hcaptcha':
+    case 'captchafox':
+    case 'cloudflare-turnstile':
+      return value;
+    default:
+      return 'cloudflare-turnstile';
+  }
+}
+
 if (isProductionLike && process.env.RATE_LIMIT_ENABLED === 'false') {
   throw new Error('RATE_LIMIT_ENABLED=false is not allowed in production');
 }
@@ -95,6 +114,61 @@ const trustedOrigins = uniqueOrigins([
   process.env.BETTER_AUTH_TRUSTED_ORIGINS,
   process.env.AUTH_ALLOWED_ORIGINS,
 ]);
+
+const captchaSecretKey =
+  process.env.CAPTCHA_SECRET_KEY?.trim() ||
+  process.env.TURNSTILE_SECRET_KEY?.trim() ||
+  '';
+const captchaEnabled = envFlag('CAPTCHA_ENABLED', Boolean(captchaSecretKey));
+if (captchaEnabled && !captchaSecretKey) {
+  throw new Error(
+    'CAPTCHA_SECRET_KEY or TURNSTILE_SECRET_KEY is required when CAPTCHA_ENABLED=true',
+  );
+}
+
+function captchaAuthPlugins() {
+  if (!captchaEnabled) return [];
+
+  const endpoints = ['/sign-up/email'];
+  const provider = normalizeCaptchaProvider(process.env.CAPTCHA_PROVIDER);
+  const allowedHostnames = splitEnvList(process.env.CAPTCHA_ALLOWED_HOSTNAMES);
+  const expectedAction = process.env.CAPTCHA_EXPECTED_ACTION || 'signup';
+  const common = {
+    endpoints,
+    secretKey: captchaSecretKey,
+  };
+
+  if (provider === 'google-recaptcha') {
+    return [
+      captcha({
+        ...common,
+        provider,
+        expectedAction,
+        minScore: Number(process.env.RECAPTCHA_MIN_SCORE ?? 0.5),
+        allowedHostnames: allowedHostnames.length ? allowedHostnames : undefined,
+      }),
+    ];
+  }
+
+  if (provider === 'hcaptcha' || provider === 'captchafox') {
+    return [
+      captcha({
+        ...common,
+        provider,
+        siteKey: process.env.CAPTCHA_SITE_KEY?.trim() || undefined,
+      }),
+    ];
+  }
+
+  return [
+    captcha({
+      ...common,
+      provider: 'cloudflare-turnstile',
+      expectedAction,
+      allowedHostnames: allowedHostnames.length ? allowedHostnames : undefined,
+    }),
+  ];
+}
 
 // Define interface for SMS service
 interface SmsServiceInterface {
@@ -682,6 +756,10 @@ export const auth: any = betterAuth({
   plugins: [
     // Sprint 4: Audit logging for authentication events
     ...(process.env.AUDIT_ENABLED === 'true' ? [auditPlugin()] : []),
+
+    // Human verification on account creation. Better Auth validates the
+    // x-captcha-response token before sign-up/email runs.
+    ...captchaAuthPlugins(),
 
     // Multi-session plugin for device session management (Sprint 4)
     multiSession({

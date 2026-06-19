@@ -53,6 +53,12 @@ services:
       INFORMATION_CORE_URL: ${INFORMATION_CORE_URL:-http://information-core:3190}
       CONVERSATION_CORE_URL: ${CONVERSATION_CORE_URL:-http://conversation-core-go:3160}
       SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # audit-core (Control Plane) is dual-homed on inter-plane-bus and binds
+      # HTTP_PORT 8187; insight-core (Application Plane, registry-only — no DB/NATS)
+      # binds 3163. Both were omitted here, so the gateway silently fell back to
+      # its config.rs default (audit) / left insight unwired. Pin them explicitly.
+      AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:8187}
+      INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
       GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}
       DOCUMENTS_API_URL: ${DOCUMENTS_API_URL:-http://dpv2-documents-api:8010}
       WIKI_STORE_URL: ${WIKI_STORE_URL:-http://dpv2-wiki-store:8011}
@@ -75,6 +81,7 @@ services:
       # gateway default "imports-core" has no alias here → connection refused).
       IMPORTS_API_URL: ${IMPORTS_API_URL:-http://imports-api:3025}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
+      MODEL_GATEWAY_DEV_BEARER: ${MODEL_GATEWAY_DEV_BEARER:-dev-bypass}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
@@ -90,7 +97,7 @@ services:
       SCRAPE_ENHANCED_API_KEY: ${SCRAPE_ENHANCED_API_KEY:-}
       SCRAPE_ENHANCED_ZONE: ${SCRAPE_ENHANCED_ZONE:-}
       SCRAPE_ENHANCED_COUNTRY: ${SCRAPE_ENHANCED_COUNTRY:-no}
-      ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-1}
+      ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
       RUST_LOG: ${RUST_LOG:-info}
       VELION_ALLOWED_ORIGINS: ${VELION_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
     ports:
@@ -136,7 +143,8 @@ services:
       # host-run `pnpm dev`). NOT VITE_-prefixed, so it stays out of the client
       # bundle — the browser keeps calling same-origin /api (first-party cookie).
       GATEWAY_PROXY_TARGET: ${GATEWAY_PROXY_TARGET:-http://velion-gateway-rs:3185}
-      VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-true}
+      VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
+      VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:5173 >/dev/null || exit 1"]
       interval: 30s

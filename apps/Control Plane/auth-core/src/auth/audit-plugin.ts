@@ -54,9 +54,25 @@ function publishVelionAudit(evt: VelionAuditEvent): void {
   sharedNats.publishPlain(subject, evt as unknown as Record<string, unknown>);
 }
 
-// Mock audit logger for development
+// Dev-only fallback: when NATS is unconfigured the event can't reach
+// audit-core, so we at least surface it on stdout. When NATS IS configured
+// this is a no-op — the durable record goes to velion.audit.v1.control.<event>.
 function logAuditEvent(event: AuditEvent): void {
-  console.log('[AUDIT]', JSON.stringify(event, null, 2));
+  if (sharedNats) return;
+  console.log('[AUDIT:dev-fallback]', JSON.stringify(event, null, 2));
+}
+
+/**
+ * Resolve the active org from the Better Auth session. audit-core REQUIRES
+ * org_id, so events without an active org are dropped at publish time.
+ */
+function activeOrgFrom(ctx: {
+  context: { session?: unknown };
+}): string | undefined {
+  const session = ctx.context.session as
+    | { activeOrganizationId?: string }
+    | undefined;
+  return session?.activeOrganizationId;
 }
 
 // Create audit plugin with simplified implementation
@@ -83,29 +99,53 @@ export function auditPlugin(): BetterAuthPlugin {
             const session = ctx.context.newSession;
 
             if (user && session) {
+              const method = ctx.path.includes('oauth') ? 'oauth' : 'email';
+              const provider = ctx.path.includes('oauth')
+                ? ctx.path.split('/').pop()
+                : 'email';
+              const ipAddress =
+                ctx.request?.headers.get('x-forwarded-for') ||
+                ctx.request?.headers.get('x-real-ip') ||
+                'unknown';
+              const userAgent =
+                ctx.request?.headers.get('user-agent') || 'unknown';
+
               logAuditEvent({
                 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
                 userId: user.id,
-
                 sessionId: session.session?.id || 'unknown',
                 action: 'SIGN_IN',
                 resource: 'authentication',
                 details: {
-                  method: ctx.path.includes('oauth') ? 'oauth' : 'email',
-                  provider: ctx.path.includes('oauth')
-                    ? ctx.path.split('/').pop()
-                    : 'email',
+                  method,
+                  provider,
                   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
                   userEmail: user.email,
                 },
-                ipAddress:
-                  ctx.request?.headers.get('x-forwarded-for') ||
-                  ctx.request?.headers.get('x-real-ip') ||
-                  'unknown',
-                userAgent: ctx.request?.headers.get('user-agent') || 'unknown',
+                ipAddress,
+                userAgent,
                 timestamp: new Date().toISOString(),
                 success: true,
               });
+
+              // Durable audit — no-ops when no active org is selected.
+              const orgId = activeOrgFrom(ctx);
+              if (orgId) {
+                publishVelionAudit({
+                  occurred_at: new Date().toISOString(),
+                  org_id: orgId,
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  user_id: user.id as string,
+                  plane: 'control',
+                  event: 'sign_in',
+                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+                  subject: user.email as string,
+                  outcome: 'ok',
+                  details: { method, provider },
+                  ip_address: ipAddress,
+                  user_agent: userAgent,
+                });
+              }
 
               // Ensure async compliance for middleware
               await Promise.resolve();
@@ -156,9 +196,7 @@ export function auditPlugin(): BetterAuthPlugin {
               // Publish to velion.audit.v1.control.* only when org context is known.
               // Better Auth sets activeOrganizationId on the session when the user has
               // selected an active org; without it audit-core would reject the event.
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
-              const orgId: string | undefined = (ctx.context.session as any)
-                ?.activeOrganizationId;
+              const orgId = activeOrgFrom(ctx);
               if (orgId) {
                 const eventName =
                   action === 'ENABLE'
@@ -233,9 +271,7 @@ export function auditPlugin(): BetterAuthPlugin {
               });
 
               // Publish to velion.audit.v1.control.* only when org context is known.
-              // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment
-              const orgId: string | undefined = (ctx.context.session as any)
-                ?.activeOrganizationId;
+              const orgId = activeOrgFrom(ctx);
               if (orgId) {
                 publishVelionAudit({
                   occurred_at: new Date().toISOString(),

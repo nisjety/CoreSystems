@@ -107,6 +107,14 @@ func (s *Server) setupRoutes() {
 
 			// GET /api/v1/users/:id - Get user by ID (admin) (AFTER specific routes)
 			users.GET("/:id", s.getUserByID)
+
+			// GDPR erasure + DSAR (admin or self-gated; call the
+			// gdpr_hard_delete_user / gdpr_anonymize_user stored procedures on
+			// the auth_service DB). Hard erasure is irreversible and requires
+			// { "confirm": true }. DSAR export is GDPR Art. 15.
+			users.DELETE("/:id/gdpr/erase", s.hardEraseUser)
+			users.POST("/:id/gdpr/anonymize", s.anonymizeUser)
+			users.GET("/:id/gdpr/export", s.dsarExport)
 		}
 
 		// Session context for post-login routing
@@ -240,8 +248,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// healthCheck returns service health status
+// healthCheck returns service health status. Deep check: round-trips the DB so
+// an unreachable/unauthenticated database (e.g. a stale DB password) reports
+// unhealthy instead of silently serving stale reads — the docker healthcheck
+// hits this endpoint, so a 503 marks the container unhealthy.
 func (s *Server) healthCheck(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.userService.Ping(ctx); err != nil {
+		log.Error().Err(err).Msg("health: database ping failed")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "unhealthy",
+			"service": "user-service",
+			"error":   "database unreachable",
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"service":   "user-service",

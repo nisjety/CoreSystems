@@ -8,13 +8,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use tracing::info;
 
 use crate::provider::policy_client::PolicyClient;

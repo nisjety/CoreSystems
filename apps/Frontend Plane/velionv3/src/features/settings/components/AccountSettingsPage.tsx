@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, onMount, Show } from 'solid-js'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
+import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
 import {
   SectionHeader,
   SettingsButton,
@@ -243,6 +244,7 @@ export default function AccountSettingsPage() {
       <PreferencesSection form={form} onField={updateField} />
       <AvailabilitySection form={form} onField={updateField} />
       <ConnectedAccountsSection profile={profile} />
+      <TwoFactorEnrollmentSection />
       <PasskeySecuritySection />
       <PrivacySection />
       <SettingsSaveActions

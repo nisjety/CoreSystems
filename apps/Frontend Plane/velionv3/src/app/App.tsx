@@ -8,7 +8,9 @@ const DashboardPage = lazy(() => import('@/features/dashboard/components/Dashboa
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
 const StudioPage = lazy(() => import('@/features/studio/components/StudioPage'))
 const InboxPage = lazy(() => import('@/features/inbox/components/InboxPage'))
+const TicketingPage = lazy(() => import('@/features/tickets/components/TicketingPage'))
 const AgentsPage = lazy(() => import('@/features/agents/components/AgentsPage'))
+const AgentRunConsole = lazy(() => import('@/features/agents/components/AgentRunConsole'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
 const SocialOperationsPage = lazy(() => import('@/features/social/components/SocialOperationsPage'))
 const InsightsPage = lazy(() => import('@/features/insights/components/InsightsPage'))
@@ -119,6 +121,7 @@ export default function App() {
     <Router root={AppShell}>
       <Route path="/auth" component={AuthPage} />
       <Route path="/login" component={AuthPage} />
+      <Route path="/reset-password" component={AuthPage} />
       <Route
         path="/onboarding"
         component={() => (
@@ -139,6 +142,7 @@ export default function App() {
         <Route path="/studio/campaigns" component={() => <StudioPage section="campaigns" />} />
         <Route path="/studio/templates" component={() => <StudioPage section="templates" />} />
         <Route path="/inbox" component={InboxPage} />
+        <Route path="/tickets" component={TicketingPage} />
         <Route path="/social" component={SocialCalendarPage} />
         <Route path="/social/accounts" component={() => <SocialOperationsPage section="accounts" />} />
         <Route path="/social/calendar" component={SocialCalendarPage} />
@@ -156,6 +160,7 @@ export default function App() {
         <Route path="/insights/campaigns" component={() => <InsightsPage section="campaigns" />} />
         <Route path="/insights/experiments" component={() => <InsightsPage section="experiments" />} />
         <Route path="/agents" component={AgentsPage} />
+        <Route path="/agents/runs" component={AgentRunConsole} />
         <Route path="/ingestions" component={VelionIngestionsPage} />
         <Route path="/knowledge" component={KnowledgePage} />
         <Route path="/account" component={AccountSettingsPage} />

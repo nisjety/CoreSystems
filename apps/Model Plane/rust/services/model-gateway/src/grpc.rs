@@ -733,11 +733,8 @@ impl ModelGateway for GatewayService {
             // Close the human-in-the-loop loop: a granted approval resumes the
             // run on execution-core (flips AwaitingApproval → Running) so the
             // agent proceeds without manual intervention. Best-effort.
-            approvals::resume_run_if_approved(
-                &mut self.state.execution_client.clone(),
-                approval,
-            )
-            .await;
+            approvals::resume_run_if_approved(&mut self.state.execution_client.clone(), approval)
+                .await;
         }
         Ok(Response::new(resp))
     }
@@ -1991,6 +1988,15 @@ mod tests {
         {
             Err(Status::unimplemented(
                 "list_conversation not needed in test",
+            ))
+        }
+
+        async fn list_threads(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ListThreadsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListThreadsResponse>, Status> {
+            Ok(Response::new(
+                mp_contracts::model_plane::v1::ListThreadsResponse { threads: vec![] },
             ))
         }
     }

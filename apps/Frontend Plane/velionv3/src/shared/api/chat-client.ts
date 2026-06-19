@@ -53,7 +53,14 @@ export type ChatInvokeRequest = {
 
 // ── SSE events (mapped from model-gateway's real event names) ────────────────
 
-export type ChatConnectedEvent = { ok?: boolean; requestId?: string; threadId?: string; model?: string }
+export type ChatConnectedEvent = {
+  ok?: boolean
+  requestId?: string
+  threadId?: string
+  model?: string
+  /** Present on agentic runs — the orchestration run id to stream console events for. */
+  runId?: string
+}
 export type ChatMessageEvent = { content: string; requestId?: string }
 export type ChatDoneEvent = { requestId?: string; modelUsed?: string; outputTokens?: number }
 export type ChatErrorEvent = { code: string; message: string; retryable?: boolean }
@@ -95,6 +102,28 @@ export type ChatMessage = {
   content: string
   model?: string
   createdAt: string
+}
+
+export type ChatThreadSession = {
+  preview: string
+  threadId: string
+  title: string
+  updatedAt: string
+}
+
+export type ChatThreadTranscriptSnapshot = {
+  taskSteps?: unknown[]
+  threadId: string
+  turns: unknown[]
+  updatedAt: string
+}
+
+export type SaveChatThreadSnapshotRequest = {
+  preview?: string
+  taskSteps?: unknown[]
+  title?: string
+  turns?: unknown[]
+  updatedAt?: string
 }
 
 export type ModelModality = 'chat' | 'image' | 'video' | 'audio' | 'embedding' | 'other'
@@ -170,13 +199,38 @@ export type ModelInfo = {
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
-const DEFAULT_FEATURES = ['usage', 'citations', 'reasoning', 'steps', 'tools', 'artifacts']
+const DEFAULT_FEATURES = ['usage', 'citations', 'reasoning', 'steps', 'artifacts']
 function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+function strOrJson(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (value == null) return undefined
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return undefined
+  }
+}
+
 function num(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
+  const payload = objectValue(value)
+  if (!payload) return
+  handlers.onCitation?.({
+    id: str(payload.id),
+    title: str(payload.title),
+    url: str(payload.url) ?? str(payload.href),
+    snippet: str(payload.snippet) ?? str(payload.description),
+  })
 }
 
 type WireToolSpec = { name: string; description: string; parameters_json: string }
@@ -209,6 +263,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     profile: request.profile ?? 'chat',
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
+    browse_web: request.browseWeb ?? false,
     generate_image: request.generateImage ?? false,
     attachments: request.attachments ?? [],
     features: [...features],
@@ -233,6 +288,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         requestId: str(payload.request_id),
         threadId: str(payload.thread_id),
         model: str(payload.model_used) ?? str(payload.model),
+        runId: str(payload.run_id),
       })
       break
     case 'chunk': {
@@ -280,24 +336,33 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       handlers.onReasoning?.({ delta: str(payload.delta) ?? '' })
       break
     case 'tool_call':
-      handlers.onToolCall?.({ id: str(payload.id), name: str(payload.name), args: payload.args })
+      handlers.onToolCall?.({
+        id: str(payload.id) ?? str(payload.tool_call_id) ?? str(payload.call_id),
+        name: str(payload.name) ?? str(payload.tool) ?? str(payload.function_name),
+        args: payload.args ?? payload.arguments,
+      })
       break
     case 'tool_result':
       handlers.onToolResult?.({
-        id: str(payload.id) ?? str(payload.tool_call_id),
-        output: str(payload.output) ?? str(payload.result),
-        error: str(payload.error),
+        id: str(payload.id) ?? str(payload.tool_call_id) ?? str(payload.call_id),
+        output: strOrJson(payload.output) ?? strOrJson(payload.result) ?? strOrJson(payload.data),
+        error: strOrJson(payload.error),
         status: str(payload.status),
       })
       break
     case 'citation':
-      handlers.onCitation?.({
-        id: str(payload.id),
-        title: str(payload.title),
-        url: str(payload.url) ?? str(payload.href),
-        snippet: str(payload.snippet) ?? str(payload.description),
-      })
+      emitCitation(payload, handlers)
       break
+    case 'citations':
+    case 'search_results': {
+      const citations = Array.isArray(payload.citations)
+        ? payload.citations
+        : Array.isArray(payload.results)
+          ? payload.results
+          : []
+      for (const citation of citations) emitCitation(citation, handlers)
+      break
+    }
     case 'grounding':
       handlers.onGrounding?.({ value: payload.grounding ?? payload })
       break
@@ -386,6 +451,46 @@ export async function getThreadMessages(threadId: string): Promise<ChatMessage[]
   return normalizeThreadMessages(raw)
 }
 
+export async function listChatThreads(): Promise<ChatThreadSession[]> {
+  const raw = await requestJson<unknown>('/api/v1/chat/threads')
+  return normalizeChatThreadSessions(raw)
+}
+
+export async function saveChatThreadSnapshot(
+  threadId: string,
+  snapshot: SaveChatThreadSnapshotRequest,
+): Promise<ChatThreadSession | null> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(snapshot),
+    },
+  )
+  const record = objectValue(raw)
+  return normalizeChatThreadSession(record?.session)
+}
+
+export async function getChatThreadTranscript(threadId: string): Promise<ChatThreadTranscriptSnapshot | null> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/transcript`,
+  )
+  const record = objectValue(raw)
+  return normalizeChatThreadTranscript(record?.transcript)
+}
+
+export async function deleteChatThread(threadId: string): Promise<ChatThreadSession[]> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}`,
+    { method: 'DELETE' },
+  )
+  return normalizeChatThreadSessions(raw)
+}
+
+export async function clearChatThreads(): Promise<void> {
+  await requestJson('/api/v1/chat/threads', { method: 'DELETE' })
+}
+
 function normalizeThreadMessages(raw: unknown): ChatMessage[] {
   const source = Array.isArray(raw)
     ? raw
@@ -402,6 +507,57 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       model: str(item.model) ?? str(item.model_used),
       createdAt: str(item.created_at) ?? str(item.createdAt) ?? '',
     }))
+}
+
+function normalizeChatThreadSessions(raw: unknown): ChatThreadSession[] {
+  const source = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === 'object' && Array.isArray((raw as { sessions?: unknown }).sessions)
+      ? (raw as { sessions: unknown[] }).sessions
+      : []
+
+  return source
+    .map(normalizeChatThreadSession)
+    .filter((item): item is ChatThreadSession => Boolean(item))
+}
+
+function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
+  const item = objectValue(raw)
+  if (!item) return null
+  const threadId = str(item.threadId) ?? str(item.thread_id)
+  const title = str(item.title)
+  if (!threadId || !title) return null
+  return {
+    threadId,
+    title,
+    preview: str(item.preview) ?? '',
+    updatedAt: normalizeIsoTimestamp(str(item.updatedAt) ?? str(item.updated_at)),
+  }
+}
+
+function normalizeChatThreadTranscript(raw: unknown): ChatThreadTranscriptSnapshot | null {
+  const item = objectValue(raw)
+  if (!item) return null
+  const threadId = str(item.threadId) ?? str(item.thread_id)
+  const turns = Array.isArray(item.turns) ? item.turns : null
+  if (!threadId || !turns) return null
+  const taskSteps = Array.isArray(item.taskSteps)
+    ? item.taskSteps
+    : Array.isArray(item.task_steps)
+      ? item.task_steps
+      : undefined
+  return {
+    threadId,
+    turns,
+    taskSteps,
+    updatedAt: normalizeIsoTimestamp(str(item.updatedAt) ?? str(item.updated_at)),
+  }
+}
+
+function normalizeIsoTimestamp(value: string | undefined): string {
+  if (!value) return new Date().toISOString()
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString()
 }
 
 // ── Model catalog normalization ──────────────────────────────────────────────

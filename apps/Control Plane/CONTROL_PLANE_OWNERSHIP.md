@@ -436,6 +436,57 @@ Both are published simultaneously. Consumers should gradually migrate to new sim
 
 ---
 
+## 🔒 GDPR Erasure + DSAR
+
+GDPR right-to-erasure (Art. 17) and data-subject access (Art. 15) are wired by
+invoking the GDPR stored procedures that already ship in the migrations.
+
+### Endpoints
+
+| Operation | Service | Endpoint | Proc called (DB) | Gating |
+|-----------|---------|----------|------------------|--------|
+| User hard erase (irreversible) | user-core | `DELETE /api/v1/users/:id/gdpr/erase` (body `{ "confirm": true }`) | `gdpr_hard_delete_user($1)` (auth_service) + local `users`/memberships delete | admin **or** self |
+| User anonymize (softer) | user-core | `POST /api/v1/users/:id/gdpr/anonymize` | `gdpr_anonymize_user($1)` (auth_service) | admin **or** self |
+| User DSAR export (Art. 15) | user-core | `GET /api/v1/users/:id/gdpr/export` | — (assembles profile + memberships + API-key metadata) | admin **or** self |
+| Org hard erase (irreversible) | org-core | `DELETE /orgs/:id/gdpr/erase` (body `{ "confirm": true }`) | `gdpr_hard_delete_organization($1)` (org_core) | org **owner** or platform admin |
+| Org soft delete (reversible) | org-core | `DELETE /orgs/:id/gdpr/soft-delete` | `soft_delete_organization($1)` (org_core) | org **owner** or platform admin |
+| Org purge (retention cron) | org-core | daily goroutine (`ORG_PURGE_DAYS`, default 30) | `purge_old_deleted_organizations($1)` (org_core) | n/a (background) |
+
+All proc calls bind the id as `$1` — never string-interpolated. Irreversible
+operations require an explicit `confirm: true` body flag. `gdpr_hard_delete_user`
+/ `gdpr_anonymize_user` live in the **auth_service** DB, so user-core opens a
+second pool via `AUTH_DATABASE_URL` (disabled with a clear error when unset).
+
+### Audit (durable, via the shared bus → audit-core)
+
+Every erasure/DSAR op emits a `velion.audit.v1.control.*` event (mirrors
+auth-core's `publishVelionAudit` shape: `occurred_at, org_id, user_id,
+actor_role, plane:"control", event, subject, resource_id, outcome, details`):
+
+- `velion.audit.v1.control.erasure` — user/org hard erase + anonymize + org soft-delete
+- `velion.audit.v1.control.dsar_export` — DSAR export (read)
+
+### Cross-plane erasure fan-out (emit-only MVP)
+
+On an irreversible user/org erasure, the originating core publishes:
+
+```
+subject: velion.gdpr.erasure.requested
+payload: { subject_type, subject_id, org_id, requested_by, ts }
+          subject_type ∈ { "user", "organization" }
+```
+
+so downstream planes can purge their own copy of the subject's data.
+**Subscribers are a documented follow-up (not yet built):**
+
+- **Model Plane** — purge run history / sessions / conversations for the subject.
+- **Data Plane v2** — purge documents/chunks/embeddings/source-traces owned by the subject/org.
+
+Until those subscribers exist, the event is emitted but not consumed; the
+Control Plane-side erasure (auth + user + org rows) is already complete.
+
+---
+
 ## 📚 References
 
 - [Auth Core Schema](../auth-core/src/db/schema.ts)

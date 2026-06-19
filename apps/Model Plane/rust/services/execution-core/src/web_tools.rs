@@ -117,7 +117,10 @@ fn format_search_results(query: &str, envelope: &Value, results: &[Value]) -> St
     }
     let mut out = format!("Web results for \"{query}\":\n");
     for (i, r) in results.iter().take(MAX_SEARCH_RESULTS).enumerate() {
-        let title = r.get("title").and_then(Value::as_str).unwrap_or("(untitled)");
+        let title = r
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("(untitled)");
         let url = r.get("url").and_then(Value::as_str).unwrap_or("");
         let snippet = r
             .get("snippet")
@@ -209,7 +212,8 @@ mod tests {
 
     #[test]
     fn extract_empty_markdown_is_error() {
-        let value = json!({ "results": [{"url": "https://x", "status": "blocked", "markdown": ""}] });
+        let value =
+            json!({ "results": [{"url": "https://x", "status": "blocked", "markdown": ""}] });
         let err = extract_markdown("https://x", &value).expect_err("empty markdown errors");
         assert!(err.contains("no extractable content"));
         assert!(err.contains("status=blocked"));

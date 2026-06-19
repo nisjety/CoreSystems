@@ -30,8 +30,7 @@ async fn auto_mode_executes_tool() {
 #[tokio::test]
 async fn hook_can_block_step() {
     let hook_context = r#"{"block_execution": true}"#;
-    let outcome =
-        runtime_loop::execute_step("echo", "hello", "auto", hook_context, "", None).await;
+    let outcome = runtime_loop::execute_step("echo", "hello", "auto", hook_context, "", None).await;
     assert_eq!(outcome.status, "failed");
     assert!(outcome.error.contains("hook"));
 }

@@ -17,7 +17,7 @@ func clearEnv(t *testing.T) {
 		"VELION_NATS_URL", "VELION_NATS_TOKEN",
 		"NATS_SHARED_URL", "NATS_SHARED_TOKEN",
 		"AUTH_SERVICE_URL", "USER_SERVICE_URL",
-		"SERVICE_NAME",
+		"SERVICE_NAME", "DB_SSLMODE",
 		"DRAGONFLY_HOST", "DRAGONFLY_PORT", "DRAGONFLY_PASSWORD", "DRAGONFLY_DB", "DRAGONFLY_ENABLED",
 		"CACHE_HOST", "CACHE_PORT", "CACHE_PASSWORD", "CACHE_DB", "CACHE_ENABLED",
 		"REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD", "REDIS_DB", "REDIS_ENABLED",
@@ -217,3 +217,104 @@ func TestLoad_ServiceNameDefault(t *testing.T) {
 
 // Ensure t.Setenv properly restores on cleanup (Go 1.17+).
 var _ = os.Setenv
+
+// ---------------------------------------------------------------------------
+// Transit hardening: sslmode enforcement on the DSN.
+// ---------------------------------------------------------------------------
+
+func TestApplySSLMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		dsn      string
+		override string
+		want     string // substring that MUST be present in the result
+		absent   string // optional substring that must NOT be present
+	}{
+		{
+			name: "remote host defaults to require",
+			dsn:  "postgres://u:p@db.managed.example.com:5432/org_core",
+			want: "sslmode=require",
+		},
+		{
+			name: "localhost defaults to disable",
+			dsn:  "postgres://u:p@localhost:5432/org_core",
+			want: "sslmode=disable",
+		},
+		{
+			name: "docker service name defaults to disable",
+			dsn:  "postgres://aquatiq:pw@controlplane-postgres:5432/postgres",
+			want: "sslmode=disable",
+		},
+		{
+			name:   "explicit sslmode in DSN is preserved over inference",
+			dsn:    "postgres://u:p@db.managed.example.com:5432/org_core?sslmode=verify-full",
+			want:   "sslmode=verify-full",
+			absent: "sslmode=require",
+		},
+		{
+			name:     "DB_SSLMODE override wins when DSN has none",
+			dsn:      "postgres://u:p@localhost:5432/org_core",
+			override: "require",
+			want:     "sslmode=require",
+		},
+		{
+			name:     "DB_SSLMODE override does not clobber an explicit DSN sslmode",
+			dsn:      "postgres://u:p@localhost:5432/org_core?sslmode=disable",
+			override: "require",
+			want:     "sslmode=disable",
+		},
+		{
+			name:     "key-value DSN honors a valid override",
+			dsn:      "host=db.managed.example.com port=5432 dbname=org_core",
+			override: "require",
+			want:     "sslmode=require",
+		},
+		{
+			name:     "invalid override is rejected, not appended verbatim",
+			dsn:      "postgres://u:p@localhost:5432/org_core",
+			override: "require;DROP TABLE organizations",
+			want:     "sslmode=disable", // garbage override ignored; falls back to local inference
+			absent:   "DROP TABLE",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := applySSLMode(tc.dsn, tc.override)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("applySSLMode(%q, %q) = %q, want substring %q", tc.dsn, tc.override, got, tc.want)
+			}
+			if tc.absent != "" && strings.Contains(got, tc.absent) {
+				t.Errorf("applySSLMode(%q, %q) = %q, must NOT contain %q", tc.dsn, tc.override, got, tc.absent)
+			}
+		})
+	}
+}
+
+func TestLoad_AppliesSSLModeToDatabaseURL(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://u:p@db.managed.example.com:5432/org_core")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !containsStr(cfg.DatabaseURL, "sslmode=require") {
+		t.Errorf("DatabaseURL = %q, want sslmode=require appended for managed host", cfg.DatabaseURL)
+	}
+}
+
+func TestLoad_RespectsExplicitLocalDisable(t *testing.T) {
+	clearEnv(t)
+	// Local docker DSN already opts out of TLS — Load must not override it.
+	const dsn = "postgres://aquatiq:pw@controlplane-postgres:5432/postgres?sslmode=disable"
+	t.Setenv("DATABASE_URL", dsn)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.DatabaseURL != dsn {
+		t.Errorf("DatabaseURL = %q, want unchanged %q", cfg.DatabaseURL, dsn)
+	}
+}

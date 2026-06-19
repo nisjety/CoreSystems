@@ -8,6 +8,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{future::Future, time::Duration};
 use tracing::{info, warn};
 
+mod audit_publisher;
 mod compaction;
 mod dreaming;
 mod finetune_grpc;
@@ -20,6 +21,7 @@ mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
 mod routing_policy_grpc;
+mod run_service_grpc;
 mod store;
 
 #[tokio::main]

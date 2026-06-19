@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "pnpm typecheck && vite build",
+    "audit": "pnpm audit",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",

@@ -27,13 +27,13 @@ use mp_contracts::model_plane::v1::{
     GetVideoGenerationJobRequest, GetVideoGenerationJobResponse, InferChunk, InferRequest,
     InferResponse, LanguageAnalysisResult, ListAgentSkillsRequest, ListAgentSkillsResponse,
     ListConversationRequest, ListConversationResponse, ListModelsRequest, ListModelsResponse,
-    ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListTranslationLanguagesRequest,
-    ListTranslationLanguagesResponse, ModelInfo, ReplayThreadRequest, SaveCheckpointRequest,
-    SaveCheckpointResponse, SessionMessage, SpeechVoiceInfo, StartRunRequest, StartRunResponse,
-    StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse,
-    SynthesizeSpeechRequest, SynthesizeSpeechResponse, TranscribeSpeechRequest,
-    TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse, TranslationDetection,
-    TranslationLanguageInfo,
+    ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListThreadsRequest, ListThreadsResponse,
+    ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ModelInfo,
+    ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SessionMessage,
+    SpeechVoiceInfo, StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
+    StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
+    TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse,
+    TranslationDetection, TranslationLanguageInfo,
 };
 use mp_events::publisher::InMemoryPublisher;
 use std::pin::Pin;
@@ -869,6 +869,13 @@ impl SessionCore for MockSessionCore {
         Ok(Response::new(ListConversationResponse { messages }))
     }
 
+    async fn list_threads(
+        &self,
+        _: TReq<ListThreadsRequest>,
+    ) -> Result<Response<ListThreadsResponse>, Status> {
+        Ok(Response::new(ListThreadsResponse { threads: vec![] }))
+    }
+
     async fn replay_thread(
         &self,
         _: TReq<ReplayThreadRequest>,
@@ -1523,7 +1530,15 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
     assert!(search_body.contains("https://names.test/ima"));
 
     let captured = captured_messages.lock().unwrap();
-    assert_eq!(captured.len(), 2);
+    // A Search-enabled turn (`features: ["tools"]` + web_search) makes TWO model
+    // calls: the forced web_search injects results, then the remaining built-in
+    // agent tools (`fetch_url`, `knowledge_search`) are still advertised, so
+    // `run_tool_rounds` performs one unary infer (the model declines here)
+    // before the final streaming answer. With the preceding plain turn that is
+    // 3 captured infer requests in total. The tool-round infer and the final
+    // stream see the same messages, so `captured.last()` carries the full
+    // grounded context asserted below.
+    assert_eq!(captured.len(), 3);
     let search_messages = captured.last().expect("search answer should infer");
     assert!(search_messages
         .iter()
@@ -1549,6 +1564,68 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
             ("assistant".to_owned(), "thread-name-memory".to_owned()),
         ]
     );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .and(body_string_contains("Claude Opus 4.8 official"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "results": [{
+                    "url": "https://www.anthropic.com/claude/opus",
+                    "title": "Claude Opus",
+                    "snippet": "Claude Opus 4.8 is Anthropic's most capable model.",
+                    "source": "mock",
+                    "score": 0.99
+                }]
+            }
+        })))
+        .mount(&quarry)
+        .await;
+
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let (mock_session, _session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client);
+    state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: Duration::from_secs(5),
+    });
+    let app = build_router(state, None);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"Claude Opus 4.8 official","model":"m","thread_id":"thread-browse-flag","features":["citations"],"browse_web":true}"#,
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: citation"));
+    assert!(body.contains("https://www.anthropic.com/claude/opus"));
+
+    let captured = captured_messages.lock().unwrap();
+    let messages = captured.last().expect("search answer should infer");
+    assert!(messages
+        .iter()
+        .any(|(_, content)| content.contains("web_search →")));
+    assert!(messages
+        .iter()
+        .any(|(_, content)| content.contains("Claude Opus 4.8")));
 }
 
 #[tokio::test]
@@ -1687,7 +1764,12 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     assert!(followup_body.contains("event: done"));
 
     let captured = captured_messages.lock().unwrap();
-    assert_eq!(captured.len(), 2);
+    // Each Search-enabled turn makes two model calls (forced web_search → unary
+    // `run_tool_rounds` infer offering fetch_url/knowledge_search → final
+    // stream). The two search turns therefore contribute 4 captured infer
+    // requests; the image turn never reaches inference. captured[0]/[1] are the
+    // first search turn's tool-round + stream, [2]/[3] the follow-up's.
+    assert_eq!(captured.len(), 4);
     assert!(captured[0].iter().any(|(_, content)| {
         content.contains("Tool results") && content.contains("https://velion.test/model-plane")
     }));
@@ -1700,19 +1782,25 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     assert!(followup_messages.iter().any(|(role, content)| {
         role == "system" && content.contains("the assistant already generated an image artifact")
     }));
-    assert!(!followup_messages
+    // The follow-up also carries the web_search tool, so the Search gate forces
+    // a fresh web lookup for it too: its messages now include their own forced
+    // "Tool results" context, appended AFTER the user's follow-up question (so
+    // that context block, not the question, is the final message handed to
+    // inference).
+    assert!(followup_messages
         .iter()
         .any(|(_, content)| content.contains("Tool results")));
     assert!(followup_messages.iter().any(|(role, content)| {
         role == "user" && content.contains("kan du gi meg svaret på model plane")
     }));
-    assert_eq!(
-        followup_messages.last(),
-        Some(&(
-            "user".to_owned(),
-            "hva snakket vi om, og lagde vi et bilde?".to_owned(),
-        ))
-    );
+    assert!(followup_messages.iter().any(|(role, content)| {
+        role == "user" && content.contains("hva snakket vi om, og lagde vi et bilde?")
+    }));
+    let last = followup_messages
+        .last()
+        .expect("follow-up turn should infer");
+    assert_eq!(last.0.as_str(), "user");
+    assert!(last.1.contains("Tool results"));
     drop(captured);
 
     let appended = session_handles.append_captures.lock().unwrap();

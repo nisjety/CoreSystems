@@ -120,9 +120,9 @@ describe('SocialOperationsPage', () => {
 
     renderSocialOperations('competitors')
 
-    await waitForSocial(() => expect(screen.getByText('LinkedIn competitor lane')).toBeTruthy())
-    expect(screen.getAllByText(/endpoint pending/i).length).toBeGreaterThan(0)
-    expect(screen.getByText(/Using calendar-derived competitor watch data/)).toBeTruthy()
+    await waitForSocial(() => expect(screen.getByText(/No database-backed competitor watch records were loaded/)).toBeTruthy())
+    expect(screen.queryByText('LinkedIn competitor lane')).toBeNull()
+    expect(within(screen.getByLabelText('Competitor watch metrics')).getAllByText('0')).toHaveLength(2)
   })
 })
 

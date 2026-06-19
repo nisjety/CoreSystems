@@ -26,6 +26,22 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(public::verify_email),
         )
         .route(
+            "/api/v1/auth/email-verification/otp/send",
+            post(public::send_email_verification_otp),
+        )
+        .route(
+            "/api/v1/auth/email-verification/otp/verify",
+            post(public::verify_email_verification_otp),
+        )
+        .route(
+            "/api/v1/auth/phone-verification/otp/send",
+            post(public::send_phone_verification_otp),
+        )
+        .route(
+            "/api/v1/auth/phone-verification/otp/verify",
+            post(public::verify_phone_verification_otp),
+        )
+        .route(
             "/api/v1/auth/password/check-strength",
             post(public::check_password_strength),
         )
@@ -34,7 +50,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(public::send_password_reset),
         )
         .route("/api/v1/auth/password/reset", post(public::reset_password))
-        .route("/api/v1/auth/oauth/:provider", get(public::oauth_initiate));
+        .route("/api/v1/auth/oauth/:provider", get(public::oauth_initiate))
+        .route("/api/v1/auth/sso/initiate", get(public::sso_initiate));
 
     // Protected routes: session cookie must be valid.
     let protected_routes = Router::new()
@@ -46,6 +63,23 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/me/session-context",
             get(protected::get_session_context),
+        )
+        // Two-factor (TOTP) enrollment — session-bound, enable + confirm + codes.
+        .route(
+            "/api/v1/auth/2fa/enable",
+            post(protected::two_factor_enable),
+        )
+        .route(
+            "/api/v1/auth/2fa/get-totp-uri",
+            post(protected::two_factor_get_totp_uri),
+        )
+        .route(
+            "/api/v1/auth/2fa/verify-totp",
+            post(protected::two_factor_verify_totp),
+        )
+        .route(
+            "/api/v1/auth/2fa/generate-backup-codes",
+            post(protected::two_factor_generate_backup_codes),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session));
 

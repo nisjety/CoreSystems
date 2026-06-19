@@ -22,6 +22,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
@@ -279,6 +280,27 @@ func main() {
 	if sharedPublisher != nil {
 		userService.SetSharedPublisher(sharedPublisher)
 		log.Println("✅ user-core service connected to shared NATS for event publishing")
+	}
+
+	// Wire the secondary auth_service DB pool used by GDPR erasure to invoke
+	// gdpr_hard_delete_user / gdpr_anonymize_user (those procs live in the
+	// auth_service DB, not user-core's user_service DB). When AUTH_DATABASE_URL
+	// is unset the erasure endpoints return a clear "not configured" error
+	// rather than silently skipping auth-side data.
+	if authDSN := strings.TrimSpace(os.Getenv("AUTH_DATABASE_URL")); authDSN != "" {
+		authPool, apErr := pgxpool.New(ctx, authDSN)
+		if apErr != nil {
+			log.Printf("⚠️  GDPR: failed to open auth_service pool (AUTH_DATABASE_URL): %v", apErr)
+		} else if pingErr := authPool.Ping(ctx); pingErr != nil {
+			log.Printf("⚠️  GDPR: auth_service pool ping failed: %v", pingErr)
+			authPool.Close()
+		} else {
+			defer authPool.Close()
+			userService.SetAuthPool(authPool)
+			log.Println("✅ GDPR: connected to auth_service DB for gdpr_hard_delete_user / gdpr_anonymize_user")
+		}
+	} else {
+		log.Println("ℹ️  GDPR: AUTH_DATABASE_URL not set — user hard-erase/anonymize disabled (DSAR export still works)")
 	}
 
 	// Create gRPC server with NATS publisher and Better Auth client

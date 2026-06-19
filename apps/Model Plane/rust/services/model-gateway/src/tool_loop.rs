@@ -311,6 +311,147 @@ fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
     }
 }
 
+fn brreg_base_url() -> String {
+    std::env::var("BRREG_API_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://data.brreg.no/enhetsregisteret/api".to_owned())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn is_brreg_org_number_query(query: &str) -> Option<String> {
+    let digits: String = query.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() == 9
+        && query
+            .chars()
+            .all(|value| value.is_ascii_digit() || value.is_ascii_whitespace())
+    {
+        Some(digits)
+    } else {
+        None
+    }
+}
+
+fn normalize_brreg_entity(entity: &Value) -> Value {
+    serde_json::json!({
+        "organisasjonsnummer": entity.get("organisasjonsnummer").cloned().unwrap_or(Value::Null),
+        "navn": entity.get("navn").cloned().unwrap_or(Value::Null),
+        "organisasjonsform": entity.get("organisasjonsform").cloned().unwrap_or(Value::Null),
+        "forretningsadresse": entity.get("forretningsadresse").cloned().unwrap_or(Value::Null),
+        "postadresse": entity.get("postadresse").cloned().unwrap_or(Value::Null),
+        "registreringsdatoEnhetsregisteret": entity.get("registreringsdatoEnhetsregisteret").cloned().unwrap_or(Value::Null),
+        "naeringskode1": entity.get("naeringskode1").cloned().unwrap_or(Value::Null),
+        "antallAnsatte": entity.get("antallAnsatte").cloned().unwrap_or(Value::Null),
+        "hjemmeside": entity.get("hjemmeside").cloned().unwrap_or(Value::Null),
+        "konkurs": entity.get("konkurs").cloned().unwrap_or(Value::Bool(false)),
+        "underAvvikling": entity.get("underAvvikling").cloned().unwrap_or(Value::Bool(false)),
+    })
+}
+
+async fn dispatch_brreg_lookup_tool(state: &AppState, call: &ToolCall) -> ToolOutcome {
+    let query = {
+        let q = arg_str(&call.arguments_json, "q");
+        if q.trim().is_empty() {
+            arg_str(&call.arguments_json, "query")
+        } else {
+            q
+        }
+    };
+    let query = query.trim();
+    if query.is_empty() {
+        return err_outcome(
+            call,
+            "brreg_lookup_organization requires a non-empty 'q' argument",
+        );
+    }
+
+    let base_url = brreg_base_url();
+    let request = if let Some(org_number) = is_brreg_org_number_query(query) {
+        let url = format!("{base_url}/enheter/{org_number}");
+        match state
+            .http_client
+            .get(url)
+            .header("accept", "application/json")
+            .build()
+        {
+            Ok(request) => request,
+            Err(err) => return err_outcome(call, format!("brreg lookup request failed: {err}")),
+        }
+    } else {
+        let size = arg_i64(&call.arguments_json, "size")
+            .unwrap_or(8)
+            .clamp(1, 20);
+        let url = format!("{base_url}/enheter");
+        let size = size.to_string();
+        match state
+            .http_client
+            .get(url)
+            .query(&[("navn", query), ("size", size.as_str())])
+            .header("accept", "application/json")
+            .build()
+        {
+            Ok(request) => request,
+            Err(err) => return err_outcome(call, format!("brreg search request failed: {err}")),
+        }
+    };
+
+    let source_url = request.url().to_string();
+    let response = match state.http_client.execute(request).await {
+        Ok(response) => response,
+        Err(err) => return err_outcome(call, format!("brreg lookup failed: {err}")),
+    };
+
+    if response.status().as_u16() == 404 || response.status().as_u16() == 410 {
+        return ToolOutcome {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            output: serde_json::json!({
+                "query": query,
+                "count": 0,
+                "source": "Brønnøysundregistrene Enhetsregisteret",
+                "sourceUrl": source_url,
+                "results": [],
+            })
+            .to_string(),
+            error: None,
+        };
+    }
+
+    if !response.status().is_success() {
+        return err_outcome(
+            call,
+            format!("brreg lookup returned {}", response.status().as_u16()),
+        );
+    }
+
+    let body = match response.json::<Value>().await {
+        Ok(body) => body,
+        Err(err) => return err_outcome(call, format!("brreg response decode failed: {err}")),
+    };
+
+    let results = if let Some(items) = body.pointer("/_embedded/enheter").and_then(Value::as_array)
+    {
+        items.iter().map(normalize_brreg_entity).collect::<Vec<_>>()
+    } else {
+        vec![normalize_brreg_entity(&body)]
+    };
+
+    ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        output: serde_json::json!({
+            "query": query,
+            "count": results.len(),
+            "source": "Brønnøysundregistrene Enhetsregisteret",
+            "sourceUrl": source_url,
+            "results": results,
+        })
+        .to_string(),
+        error: None,
+    }
+}
+
 /// Execute a single model-requested tool call against the gateway's tool
 /// handlers. Unknown tools / bad args return an error outcome (the model is
 /// told, so it can recover). New tools plug in here (MCP proxy, etc.).
@@ -574,6 +715,9 @@ pub async fn dispatch_tool(
                 Err(e) => err_outcome(call, format!("knowledge_search failed: {}", e.message())),
             }
         }
+        "brreg_lookup_organization" | "brreg.lookup_organization" => {
+            dispatch_brreg_lookup_tool(state, call).await
+        }
         // MCP proxy: `mcp__<server_id>__<tool_name>` routes to a registered MCP
         // server via the existing registry (matrix §G2) — no new transport.
         mcp if mcp.starts_with("mcp__") => {
@@ -638,7 +782,7 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
 #[must_use]
 pub fn format_tool_context(outcomes: &[ToolOutcome]) -> String {
     let mut s = String::from(
-        "Tool results for your previous request (use these to answer; do not call the same tool again unless needed):\n",
+        "Tool results for your previous request (use these to answer; do not call the same tool again unless needed). Treat tool errors, empty results, and failed page fetches as inconclusive; never use them as proof that a current product, model, event, or claim does not exist:\n",
     );
     append_tool_outcomes(&mut s, outcomes);
     s
@@ -650,7 +794,7 @@ pub fn format_tool_context(outcomes: &[ToolOutcome]) -> String {
 #[must_use]
 pub fn format_forced_tool_context(user_request: &str, outcomes: &[ToolOutcome]) -> String {
     let mut s = String::from(
-        "Tool results for the user's current request. Use these results together with the prior conversation context to answer the current request; do not ask for information already present in the conversation.\n",
+        "Tool results for the user's current request. Use these results together with the prior conversation context to answer the current request; do not ask for information already present in the conversation. For Search-enabled answers, verify current factual claims from successful web_search results and citations. Treat missing results, empty snippets, 404s, and fetch errors as inconclusive; do not claim that a product, model, event, or deployment does not exist unless successful sources directly support that conclusion. If the available sources do not verify a claim, say that it could not be verified.\n",
     );
     let request = user_request.trim();
     if !request.is_empty() {
@@ -902,6 +1046,38 @@ mod tests {
     }
 
     #[test]
+    fn brreg_org_number_query_accepts_plain_or_spaced_digits() {
+        assert_eq!(
+            is_brreg_org_number_query("983515827"),
+            Some("983515827".to_owned())
+        );
+        assert_eq!(
+            is_brreg_org_number_query("983 515 827"),
+            Some("983515827".to_owned())
+        );
+        assert_eq!(is_brreg_org_number_query("Aquatiq 983515827"), None);
+        assert_eq!(is_brreg_org_number_query("1234"), None);
+    }
+
+    #[test]
+    fn normalizes_brreg_entity_fields_for_tool_output() {
+        let entity = serde_json::json!({
+            "organisasjonsnummer": "983515827",
+            "navn": "AQUATIQ AS",
+            "organisasjonsform": { "kode": "AS", "beskrivelse": "Aksjeselskap" },
+            "antallAnsatte": 42
+        });
+
+        let normalized = normalize_brreg_entity(&entity);
+
+        assert_eq!(normalized["organisasjonsnummer"], "983515827");
+        assert_eq!(normalized["navn"], "AQUATIQ AS");
+        assert_eq!(normalized["organisasjonsform"]["kode"], "AS");
+        assert_eq!(normalized["antallAnsatte"], 42);
+        assert_eq!(normalized["konkurs"], false);
+    }
+
+    #[test]
     fn format_tool_context_renders_outputs_and_errors() {
         let outcomes = vec![
             ToolOutcome {
@@ -920,6 +1096,22 @@ mod tests {
         let ctx = format_tool_context(&outcomes);
         assert!(ctx.contains("web_search → [{\"url\":\"x\"}]"));
         assert!(ctx.contains("unknown → ERROR: unknown tool 'unknown'"));
+        assert!(ctx.contains("failed page fetches as inconclusive"));
+    }
+
+    #[test]
+    fn forced_tool_context_requires_inconclusive_fetches_to_stay_unverified() {
+        let outcomes = vec![ToolOutcome {
+            call_id: "c1".into(),
+            name: "fetch_url".into(),
+            output: String::new(),
+            error: Some("fetch_url failed: 404".into()),
+        }];
+
+        let ctx = format_forced_tool_context("does this current model exist?", &outcomes);
+        assert!(ctx.contains("404s, and fetch errors as inconclusive"));
+        assert!(ctx.contains("could not be verified"));
+        assert!(ctx.contains("fetch_url → ERROR: fetch_url failed: 404"));
     }
 
     #[test]
@@ -1020,7 +1212,9 @@ mod tests {
         // Ordinary knowledge / how-to queries — let the model decide.
         assert!(!should_force_web_search("hva er model plane?"));
         assert!(!should_force_web_search("explain how rust ownership works"));
-        assert!(!should_force_web_search("kan du finne ut hva navnet mitt betyr?"));
+        assert!(!should_force_web_search(
+            "kan du finne ut hva navnet mitt betyr?"
+        ));
         assert!(!should_force_web_search("write me a poem about the sea"));
         assert!(!should_force_web_search("summarize this document for me"));
         // Old years must NOT trip the recent-year heuristic.

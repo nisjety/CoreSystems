@@ -440,7 +440,7 @@ fn now_ts() -> prost_types::Timestamp {
 
 /// Convert `serde_json::Value` to `prost_types::Struct` for proto `Struct`
 /// fields. Non-object values are wrapped under a single `value` key.
-fn json_to_struct(v: &JsonValue) -> Option<prost_types::Struct> {
+pub(crate) fn json_to_struct(v: &JsonValue) -> Option<prost_types::Struct> {
     match v {
         JsonValue::Object(map) => {
             let fields = map

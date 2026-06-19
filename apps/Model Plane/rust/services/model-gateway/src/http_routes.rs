@@ -19,12 +19,13 @@ use mp_contracts::model_plane::v1::{
     ApprovalState, BatchTranslateTextRequest, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest,
     ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
-    GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest, ListApprovalsRequest,
-    ListModelsRequest, ListPlansRequest, ListSpeechVoicesRequest, ListTodosRequest,
-    ListTranslationLanguagesRequest, Plan, PlanState, PlanStep, PlanStepState, ResumeRunRequest,
-    StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole, SynthesizeSpeechRequest,
-    Todo, TodoPriority, TodoState, TranscribeSpeechRequest, TransitionPlanRequest,
-    TransitionTodoRequest, TranslateTextRequest, TranslationInput,
+    GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
+    ListApprovalsRequest, ListModelsRequest, ListPlansRequest, ListRunsRequest,
+    ListSpeechVoicesRequest, ListTodosRequest, ListTranslationLanguagesRequest, Plan, PlanState,
+    PlanStep, PlanStepState, ResumeRunRequest, RunDetail, StreamVideoGenerationContentRequest,
+    SubagentLineage, SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState,
+    TranscribeSpeechRequest, TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest,
+    TranslationInput,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -79,6 +80,7 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         // chat-parity §4: cooperative stop/cancel of an in-flight stream.
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
         // chat-parity §1: reload a thread's conversation (cross-device resume).
+        .route("/v1/threads", get(list_threads))
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
@@ -90,6 +92,11 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .merge(orchestration_routes())
         // Operator feedback → skill-promotion signal (HARNESS_PHASE1 §6).
         .route("/v1/feedback", post(ingest_feedback))
+        // Run read model — list a thread's runs + a single run's detail (runs
+        // history UI). Org-scoped via the verified claims; backed by
+        // session-core's RunService.
+        .route("/v1/runs", get(list_runs))
+        .route("/v1/runs/:run_id", get(get_run))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // AI modality routes  /v1/ai/*
@@ -376,6 +383,16 @@ struct ApprovalsQuery {
     step_id: Option<String>,
 }
 
+/// Query params for `GET /v1/runs` (runs-history list). `thread_id` scopes the
+/// list to one conversation; the rest are optional filter/pagination knobs.
+#[derive(Debug, Default, Deserialize)]
+struct RunsQuery {
+    thread_id: Option<String>,
+    status: Option<String>,
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
 async fn list_plans(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -501,6 +518,63 @@ async fn get_subagent_lineage(
         .lineage
         .ok_or_else(|| not_found("subagent lineage not found"))?;
     Ok(Json(json!({ "lineage": lineage_value(&lineage) })))
+}
+
+// ============================================================================
+// Run read model (runs-history UI) — session-core RunService
+// ============================================================================
+
+/// `GET /v1/runs?thread_id&status&after&limit` — list a thread's runs,
+/// newest-first, for the runs-history rail. `thread_id` is required; `status`
+/// filters by run status, `after` is a ULID cursor, `limit` bounds the page.
+/// The verified claims gate access; session-core owns the run metadata.
+async fn list_runs(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    Query(query): Query<RunsQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = query.thread_id.unwrap_or_default();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id is required" })),
+        ));
+    }
+
+    let response = state
+        .run_client
+        .clone()
+        .list_runs(ListRunsRequest {
+            thread_id,
+            status_filter: query.status.unwrap_or_default(),
+            after_run_id: query.after.unwrap_or_default(),
+            limit: query.limit.unwrap_or(0),
+        })
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "runs": response.runs.iter().map(run_detail_value).collect::<Vec<_>>(),
+        "has_more": response.has_more,
+    })))
+}
+
+/// `GET /v1/runs/{run_id}` — one run's full detail for the telemetry panel.
+async fn get_run(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(GetRunRequest { run_id })
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({ "run": run_detail_value(&detail) })))
 }
 
 // ============================================================================
@@ -651,7 +725,9 @@ async fn decide_approval(
                 resumed = resp.into_inner().resumed,
                 "approval granted → execution-core resume_run"
             ),
-            Err(e) => warn!(error = %e, approval_id = %approval.id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)"),
+            Err(e) => {
+                warn!(error = %e, approval_id = %approval.id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)")
+            }
         }
     }
 
@@ -2584,6 +2660,67 @@ fn not_found(message: &str) -> HttpJsonError {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
 }
 
+/// Serialize a `RunDetail` for the runs-history UI. Snake_case wire keys match
+/// the rest of the orchestration surface; the SPA client normalizes to
+/// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
+/// the arbitrary `metadata` Struct is flattened to plain JSON.
+fn run_detail_value(run: &RunDetail) -> Value {
+    json!({
+        "run_id": run.run_id,
+        "thread_id": run.thread_id,
+        "parent_run_id": empty_to_null(&run.parent_run_id),
+        "agent_id": run.agent_id,
+        "status": run.status,
+        "mode": run.mode,
+        "goal": run.goal,
+        "final_output": empty_to_null(&run.final_output),
+        "error": empty_to_null(&run.error),
+        "checkpoint_index": run.checkpoint_index,
+        "steps_completed": run.steps_completed,
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "updated_at": run.updated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "metadata": run.metadata.as_ref().map_or(Value::Null, prost_struct_to_json),
+    })
+}
+
+/// Convert a prost `Timestamp` to an RFC3339 JSON string. An out-of-range value
+/// (it cannot occur for stored Postgres timestamps) falls back to null.
+fn prost_ts_to_rfc3339(ts: &prost_types::Timestamp) -> Value {
+    let nanos = u32::try_from(ts.nanos).unwrap_or(0);
+    match chrono::DateTime::from_timestamp(ts.seconds, nanos) {
+        Some(dt) => Value::String(dt.to_rfc3339()),
+        None => Value::Null,
+    }
+}
+
+/// Flatten a prost `Struct` into plain JSON for the wire envelope.
+fn prost_struct_to_json(s: &prost_types::Struct) -> Value {
+    let map = s
+        .fields
+        .iter()
+        .map(|(k, v)| (k.clone(), prost_value_to_json(v)))
+        .collect();
+    Value::Object(map)
+}
+
+fn prost_value_to_json(v: &prost_types::Value) -> Value {
+    use prost_types::value::Kind;
+    match &v.kind {
+        Some(Kind::NullValue(_)) | None => Value::Null,
+        Some(Kind::NumberValue(n)) => {
+            serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number)
+        }
+        Some(Kind::StringValue(s)) => Value::String(s.clone()),
+        Some(Kind::BoolValue(b)) => Value::Bool(*b),
+        Some(Kind::StructValue(inner)) => prost_struct_to_json(inner),
+        Some(Kind::ListValue(list)) => {
+            Value::Array(list.values.iter().map(prost_value_to_json).collect())
+        }
+    }
+}
+
 fn plan_value(plan: &Plan) -> Value {
     json!({
         "id": plan.id,
@@ -2781,6 +2918,11 @@ pub struct InvokeRequest {
     pub structured_output_schema: Option<String>,
     #[serde(default)]
     pub zdr: bool,
+    /// Explicit public-web search intent from chat clients. This duplicates the
+    /// `web_search` tool definition as a durable request flag so a UI Search
+    /// toggle cannot be lost by tool normalization or client/BFF drift.
+    #[serde(default)]
+    pub browse_web: bool,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
     #[serde(default)]
@@ -2983,6 +3125,78 @@ struct ThreadMessage {
 struct ListThreadMessagesResponse {
     thread_id: String,
     messages: Vec<ThreadMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListThreadsQuery {
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadSummaryResponse {
+    thread_id: String,
+    session_key: String,
+    title: String,
+    preview: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListThreadsResponse {
+    threads: Vec<ThreadSummaryResponse>,
+}
+
+async fn list_threads(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Query(query): Query<ListThreadsQuery>,
+) -> Result<Json<ListThreadsResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use mp_contracts::model_plane::v1::ListThreadsRequest;
+
+    let response = state
+        .session_client
+        .clone()
+        .list_threads(ListThreadsRequest {
+            org_id: claims.org_id.clone(),
+            user_id: claims.user_id.clone(),
+            limit: query.limit.unwrap_or(80),
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("session-core list_threads failed: {}", e.message()),
+                })),
+            )
+        })?
+        .into_inner();
+
+    let threads = response
+        .threads
+        .into_iter()
+        .map(|thread| ThreadSummaryResponse {
+            thread_id: thread.thread_id,
+            session_key: thread.session_key,
+            title: thread.title,
+            preview: thread.preview,
+            created_at: timestamp_to_rfc3339(thread.created_at),
+            updated_at: timestamp_to_rfc3339(thread.updated_at),
+        })
+        .collect();
+
+    Ok(Json(ListThreadsResponse { threads }))
+}
+
+fn timestamp_to_rfc3339(value: Option<prost_types::Timestamp>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let nanos = u32::try_from(value.nanos).unwrap_or_default();
+    chrono::DateTime::from_timestamp(value.seconds, nanos)
+        .map(|ts| ts.to_rfc3339())
+        .unwrap_or_default()
 }
 
 /// chat-parity §1 — reload a thread's conversation history (cross-device

@@ -246,7 +246,7 @@ PATCH /api/v1/preferences   - Update user preferences
 **Before (Hardcoded Secrets):**
 ```yaml
 - JWT_SECRET=dev-jwt-secret-change-in-production
-- DATABASE_URL=postgres://aquatiq:8rSqS08wB+mCg3ncw+Ag+9dyxGGozcXncvgpjZtALY0=@...
+- DATABASE_URL=postgres://aquatiq:<REDACTED-DB_PASSWORD>@...
 ```
 
 **After (Environment Variables):**

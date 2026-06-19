@@ -10,6 +10,52 @@ const ticketInput = z.object({
   responseTone: z.enum(['concise', 'warm', 'formal']),
 })
 
+const ticketCreateInput = z.object({
+  conversationId: z.string().min(1),
+  priority: z.enum(['low', 'normal', 'high', 'urgent']).default('normal'),
+  severity: z.enum(['low', 'medium', 'high', 'critical']).default('medium'),
+  category: z.string().trim().max(80).optional(),
+  intent: z.string().trim().max(120).optional(),
+})
+
+const ticketClassifyInput = z.object({
+  conversationId: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().trim().min(1).max(500),
+  suggestedFields: z.record(z.string(), z.unknown()).optional(),
+  evidenceMessageIds: z.array(z.string().min(1)).default([]),
+})
+
+const ticketUpdateInput = z.object({
+  ticketId: z.string().min(1),
+  status: z.enum(['suggested', 'open', 'waiting_customer', 'waiting_team', 'escalated', 'resolved']).optional(),
+  priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+  severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+  category: z.string().trim().max(80).optional(),
+  intent: z.string().trim().max(120).optional(),
+})
+
+const ticketAssignInput = z.object({
+  ticketId: z.string().min(1),
+  assigneeUserId: z.string().trim().optional(),
+  assigneeName: z.string().trim().optional(),
+  teamId: z.string().trim().optional(),
+  teamName: z.string().trim().optional(),
+})
+
+const ticketLinkResourceInput = z.object({
+  ticketId: z.string().min(1),
+  resourceKind: z.enum(['social_post', 'campaign', 'order', 'document', 'external']),
+  resourceId: z.string().trim().optional(),
+  resourceUrl: z.string().trim().optional(),
+  label: z.string().trim().optional(),
+})
+
+const ticketResolveInput = z.object({
+  ticketId: z.string().min(1),
+  resolution: z.string().trim().max(500).optional(),
+})
+
 const agentInput = z.object({
   agentId: z.string().min(1),
   channel: z.enum(['chatbot', 'email', 'social']),
@@ -67,6 +113,29 @@ const connectSourceInput = z.object({
   options: z.record(z.string(), z.unknown()).optional(),
 })
 
+const operatingMapGenerateInput = z.object({
+  generatedFrom: z.record(z.string(), z.unknown()).optional(),
+})
+
+const operatingMapReviewInput = z.object({
+  proposalId: z.string().trim().min(1),
+  decision: z.enum(['accept', 'reject']),
+})
+
+const operatingMapBlueprintInput = z.object({
+  versionId: z.string().trim().min(1),
+  blueprintId: z.string().trim().min(1),
+  role: z.enum(['service', 'sales', 'ecommerce', 'chatbot', 'workflow']),
+  sourceWorkflowId: z.string().trim().optional(),
+  name: z.string().trim().min(1),
+  payload: z.record(z.string(), z.unknown()).optional(),
+})
+
+const brregLookupInput = z.object({
+  q: z.string().trim().min(1).max(160),
+  size: z.number().int().min(1).max(20).default(8),
+})
+
 const httpUrl = z.string().trim().url().refine(
   (value) => {
     try {
@@ -114,9 +183,21 @@ const jobOutput = z.object({
   status: z.string(),
 })
 
+const brregLookupOutput = z.object({
+  query: z.string(),
+  count: z.number(),
+  sourceUrl: z.string(),
+  results: z.array(z.record(z.string(), z.unknown())),
+})
+
 const socialPostOutput = z.object({
   postId: z.string(),
   status: z.enum(['draft', 'pending_approval', 'scheduled', 'publishing', 'published', 'failed', 'blocked']),
+})
+
+const ticketOutput = z.object({
+  ticketId: z.string().optional(),
+  status: z.string(),
 })
 
 const scrapeOutput = z.object({
@@ -219,6 +300,61 @@ export const actionRegistry = [
     outputSchema: jobOutput,
   },
   {
+    id: 'operating_map.generate',
+    label: 'Generate Operating Map',
+    description: 'Ask Model Plane to synthesize an evidence-grounded AI Operating Map proposal from Velion Knowledge.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: operatingMapGenerateInput,
+    outputSchema: runOutput,
+  },
+  {
+    id: 'operating_map.refresh',
+    label: 'Refresh Operating Map',
+    description: 'Create a new durable Operating Map proposal from the latest Knowledge evidence.',
+    ownerPlane: 'data',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: operatingMapGenerateInput,
+    outputSchema: runOutput,
+  },
+  {
+    id: 'operating_map.review_proposal',
+    label: 'Review Operating Map proposal',
+    description: 'Accept or reject a generated Operating Map proposal. Accepted versions are published into the wiki knowledge path.',
+    ownerPlane: 'data',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: operatingMapReviewInput,
+    outputSchema: runOutput,
+  },
+  {
+    id: 'operating_map.create_agent_blueprint',
+    label: 'Create agent blueprint',
+    description: 'Queue an agent blueprint suggestion from an approved Operating Map workflow.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: operatingMapBlueprintInput,
+    outputSchema: runOutput,
+  },
+  {
+    id: 'brreg.lookup_organization',
+    label: 'Lookup Brreg organization',
+    description: 'Look up Norwegian organizations by name or 9-digit organization number in Brreg Enhetsregisteret. Use this for registered names, organization numbers, legal form, address, industry code, and employee count.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: brregLookupInput,
+    outputSchema: brregLookupOutput,
+  },
+  {
     id: 'security.check_url_reputation',
     label: 'Check URL reputation',
     description: 'Ask the gateway to check a URL against the approved Web Risk connector before crawl, import, or model use.',
@@ -250,6 +386,72 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: ticketInput,
     outputSchema: runOutput,
+  },
+  {
+    id: 'tickets.create',
+    label: 'Create ticket',
+    description: 'Create a durable support ticket from a conversation.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ticketCreateInput,
+    outputSchema: ticketOutput,
+  },
+  {
+    id: 'tickets.classify_conversation',
+    label: 'Classify conversation',
+    description: 'Classify whether a conversation should become a ticket using evidence and policy.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: ticketClassifyInput,
+    outputSchema: ticketOutput,
+  },
+  {
+    id: 'tickets.update',
+    label: 'Update ticket',
+    description: 'Update ticket status, priority, severity, category, or intent.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ticketUpdateInput,
+    outputSchema: ticketOutput,
+  },
+  {
+    id: 'tickets.assign',
+    label: 'Assign ticket',
+    description: 'Assign a ticket to an owner or team.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ticketAssignInput,
+    outputSchema: ticketOutput,
+  },
+  {
+    id: 'tickets.link_resource',
+    label: 'Link resource',
+    description: 'Link a ticket to a social post, campaign, order, document, or external record.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ticketLinkResourceInput,
+    outputSchema: ticketOutput,
+  },
+  {
+    id: 'tickets.resolve',
+    label: 'Resolve ticket',
+    description: 'Mark a ticket as resolved after the customer issue or follow-up is complete.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ticketResolveInput,
+    outputSchema: ticketOutput,
   },
   {
     id: 'social.create_draft',

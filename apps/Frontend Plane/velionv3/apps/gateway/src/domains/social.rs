@@ -380,6 +380,8 @@ struct CreatePostBody {
 struct InboxDraftBody {
     ticket_id: String,
     ticket_title: String,
+    support_ticket_id: Option<String>,
+    conversation_id: Option<String>,
     customer_name: Option<String>,
     channel: Option<String>,
     excerpt: Option<String>,
@@ -830,10 +832,14 @@ async fn create_draft_from_inbox(
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<InboxDraftBody>,
 ) -> axum::response::Response {
-    let customer = body.customer_name.unwrap_or_else(|| "Customer".to_owned());
-    let channel = body.channel.unwrap_or_else(|| "inbox".to_owned());
+    let customer = body
+        .customer_name
+        .clone()
+        .unwrap_or_else(|| "Customer".to_owned());
+    let channel = body.channel.clone().unwrap_or_else(|| "inbox".to_owned());
     let excerpt = body
         .excerpt
+        .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "Customer conversation requires a public follow-up.".to_owned());
     let title = format!("Follow-up from {}", body.ticket_title.trim());
@@ -856,6 +862,8 @@ async fn create_draft_from_inbox(
             "href": format!("/inbox?ticketId={}", body.ticket_id),
             "metadata": {
                 "ticket_id": body.ticket_id.clone(),
+                "support_ticket_id": body.support_ticket_id.clone(),
+                "conversation_id": body.conversation_id.clone(),
                 "channel": channel.clone(),
                 "customer_name": customer.clone()
             }
@@ -866,6 +874,7 @@ async fn create_draft_from_inbox(
     });
     match create_core_post(&state, &user, &org_id, core_body).await {
         CoreMutation::Ready(post) => {
+            link_social_post_to_ticket(&state, &user, &org_id, &body, &post).await;
             return (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response();
         }
         CoreMutation::Error(response) => return response,
@@ -890,6 +899,7 @@ async fn create_draft_from_inbox(
             ),
         )
         .await;
+    link_social_post_to_ticket(&state, &user, &org_id, &body, &post).await;
 
     (StatusCode::CREATED, Json(ok(PostMutation { post }))).into_response()
 }
@@ -947,7 +957,10 @@ async fn publish_post(
         CorePublish::Ready(post, result) => {
             return (
                 StatusCode::ACCEPTED,
-                Json(ok(PublishMutation { post: *post, result })),
+                Json(ok(PublishMutation {
+                    post: *post,
+                    result,
+                })),
             )
                 .into_response();
         }
@@ -1123,6 +1136,66 @@ async fn social_core_json(
     )
     .await;
     (status, body)
+}
+
+async fn conversation_core_json(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let url = format!("{}{}", state.conversation_core_url, path);
+    let (status, Json(body)) = proxy_json(
+        state,
+        method,
+        &url,
+        body,
+        Some(org_id),
+        Some(&actor_for(user)),
+        Some("application/json"),
+    )
+    .await;
+    (status, body)
+}
+
+async fn link_social_post_to_ticket(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    inbox: &InboxDraftBody,
+    post: &SocialPost,
+) {
+    let Some(ticket_id) = inbox
+        .support_ticket_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let path = format!("/api/v1/tickets/{}/links", urlencoding::encode(ticket_id));
+    let _ = conversation_core_json(
+        state,
+        user,
+        org_id,
+        Method::POST,
+        &path,
+        Some(json!({
+            "link_type": "related",
+            "resource_kind": "social_post",
+            "resource_id": post.id,
+            "resource_url": format!("/social/calendar?postId={}", post.id),
+            "label": post.title,
+            "metadata": {
+                "source": "inbox_social_follow_up",
+                "conversation_id": inbox.conversation_id,
+                "ticket_id": inbox.ticket_id
+            }
+        })),
+    )
+    .await;
 }
 
 async fn load_core_accounts(

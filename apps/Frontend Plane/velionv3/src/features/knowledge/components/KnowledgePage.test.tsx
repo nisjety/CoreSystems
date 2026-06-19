@@ -243,6 +243,114 @@ const knowledgePayload = {
   },
 }
 
+const emptyOperatingMapPayload = {
+  data: {
+    map: null,
+    current_version: null,
+    proposals: [],
+    blueprint_suggestions: [],
+  },
+}
+
+const operatingMapVersionPayload = {
+  version_id: 'version-1',
+  operating_map_id: 'map-1',
+  org_id: 'org-1',
+  summary: 'Generated from Knowledge evidence.',
+  confidence: 0.72,
+  departments: [
+    { id: 'support', name: 'Support', confidence: 0.8, evidence_refs: ['doc-returns'] },
+  ],
+  workflows: [
+    {
+      id: 'support-triage',
+      department_id: 'support',
+      name: 'Support triage',
+      phase: 'Assist',
+      risk: 'medium',
+      evidence_refs: ['doc-returns'],
+    },
+  ],
+  agent_blueprints: [
+    {
+      id: 'service-agent',
+      name: 'Service agent',
+      role: 'service',
+      source_workflow_id: 'support-triage',
+      requires_approval: true,
+    },
+  ],
+  rollout_phases: [
+    { id: 'assist', name: 'Assist', description: 'Human copilots and low-risk productivity support.' },
+    { id: 'ground', name: 'Ground', description: 'Shared knowledge and workflow memory.' },
+    { id: 'act', name: 'Act', description: 'Approved autonomous or semi-autonomous agents.' },
+  ],
+  risk_overlays: [
+    { id: 'human-review', label: 'Human review required', severity: 'medium' },
+  ],
+  learning_modules: [
+    { id: 'approval-patterns', title: 'Approval patterns', audience: 'operators' },
+  ],
+  roi_notes: [],
+  evidence_refs: ['doc-returns'],
+}
+
+const generatedOperatingMapPayload = {
+  data: {
+    proposal: {
+      proposal_id: 'proposal-1',
+      operating_map_id: 'map-1',
+      org_id: 'org-1',
+      proposal_status: 'pending',
+      generated_by_run_id: 'run-1',
+      evidence_refs: [],
+      created_at: '2026-06-18T12:00:00.000Z',
+      proposed_version: {
+        ...operatingMapVersionPayload,
+        version_id: '',
+      },
+    },
+    run_id: 'run-1',
+    status: 'proposal_created',
+  },
+}
+
+function acceptedOperatingMapPayload(suggested = false) {
+  return {
+    data: {
+      map: {
+        operating_map_id: 'map-1',
+        org_id: 'org-1',
+        status: 'published',
+        current_version_id: 'version-1',
+        generated_from: {},
+        created_at: '2026-06-18T12:00:00.000Z',
+        updated_at: '2026-06-18T12:00:00.000Z',
+      },
+      current_version: operatingMapVersionPayload,
+      proposals: [],
+      blueprint_suggestions: suggested
+        ? [
+            {
+              suggestion_id: 'suggestion-1',
+              operating_map_id: 'map-1',
+              version_id: 'version-1',
+              org_id: 'org-1',
+              blueprint_id: 'service-agent',
+              role: 'service',
+              source_workflow_id: 'support-triage',
+              name: 'Service agent',
+              suggestion_status: 'suggested',
+              payload: {},
+              created_at: '2026-06-18T12:01:00.000Z',
+              updated_at: '2026-06-18T12:01:00.000Z',
+            },
+          ]
+        : [],
+    },
+  }
+}
+
 function renderKnowledgePage() {
   window.history.pushState(null, '', '/knowledge')
   return render(() => (
@@ -293,6 +401,107 @@ describe('KnowledgePage', () => {
 
     expect(screen.getByRole('heading', { name: /^sources$/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /returns policy/i })).toBeTruthy()
+  })
+
+  it('renders the Operating Map tab and generates a reviewable proposal', async () => {
+    let generated = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/knowledge/operating-map') {
+        if (!generated) return makeFetchResponse(emptyOperatingMapPayload)
+        return makeFetchResponse({
+          data: {
+            map: {
+              operating_map_id: 'map-1',
+              org_id: 'org-1',
+              status: 'draft',
+              current_version_id: null,
+              generated_from: {},
+              created_at: '2026-06-18T12:00:00.000Z',
+              updated_at: '2026-06-18T12:00:00.000Z',
+            },
+            current_version: null,
+            proposals: [generatedOperatingMapPayload.data.proposal],
+          },
+        })
+      }
+      if (url === '/api/v1/knowledge/operating-map/generate') {
+        generated = true
+        return makeFetchResponse(generatedOperatingMapPayload, 202)
+      }
+      if (url === '/api/v1/knowledge/operating-map/runs/run-1/events') {
+        return new Response('event: status\ndata: {"status":"completed","detail":"Operating Map proposal is ready."}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+          status: 200,
+        })
+      }
+      return makeFetchResponse(knowledgePayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderKnowledgePage()
+
+    await screen.findByRole('heading', { name: /^folders$/i })
+    fireEvent.click(screen.getByRole('button', { name: /ai map/i }))
+
+    expect(screen.getByRole('heading', { name: /evidence-grounded ai rollout map/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /no operating map yet/i })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /generate map/i }))
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: /proposal awaiting review/i })).toBeTruthy())
+    expect(screen.getByRole('heading', { name: /support triage/i })).toBeTruthy()
+    expect(screen.getByText(/returns policy/i)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /view evidence/i }))
+    expect(screen.getByRole('region', { name: /evidence for support triage/i })).toBeTruthy()
+    expect(screen.getByText(/graph: support workspace/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /accept/i })).toBeTruthy()
+  })
+
+  it('creates a durable blueprint suggestion from an accepted Operating Map', async () => {
+    let suggested = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/knowledge/operating-map') {
+        return makeFetchResponse(acceptedOperatingMapPayload(suggested))
+      }
+      if (url === '/api/v1/actions/execute') {
+        const body = JSON.parse(String(init?.body))
+        expect(body.actionId).toBe('operating_map.create_agent_blueprint')
+        expect(body.input).toMatchObject({
+          versionId: 'version-1',
+          blueprintId: 'service-agent',
+          role: 'service',
+          sourceWorkflowId: 'support-triage',
+          name: 'Service agent',
+        })
+        suggested = true
+        return makeFetchResponse({
+          data: {
+            actionId: 'operating_map.create_agent_blueprint',
+            runId: 'agent_blueprint_service-agent_user-1',
+            status: 'completed',
+            auditId: 'audit-agent-blueprint',
+            result: {
+              suggestion: acceptedOperatingMapPayload(true).data.blueprint_suggestions[0],
+            },
+          },
+        })
+      }
+      return makeFetchResponse(knowledgePayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderKnowledgePage()
+
+    await screen.findByRole('heading', { name: /^folders$/i })
+    fireEvent.click(screen.getByRole('button', { name: /ai map/i }))
+
+    expect(await screen.findByRole('heading', { name: /accepted operating map/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /create blueprint/i }))
+
+    await waitFor(() => expect(screen.getByText(/blueprint suggestion saved for agents review/i)).toBeTruthy())
+    expect((screen.getByRole('button', { name: /suggested/i }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('opens the add source modal', async () => {

@@ -17,7 +17,7 @@ export type SseOptions = {
 
 function applyDevAuth(headers: Headers): void {
   if (headers.has('Authorization')) return
-  if (!import.meta.env.DEV && import.meta.env.VITE_ALLOW_DEV_AUTH_BYPASS !== 'true') return
+  if (import.meta.env.VITE_ALLOW_DEV_AUTH_BYPASS !== 'true') return
   headers.set('Authorization', 'Bearer dev-bypass')
 }
 

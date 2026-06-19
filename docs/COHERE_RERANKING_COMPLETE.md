@@ -39,7 +39,7 @@ response = httpx.post(url, headers=headers, json=payload, timeout=30.0)
 
 **Environment Variables:**
 ```
-COHERE_API_KEY=5pzigEF3jY7494b4gEcZohzOB3gcAG8AOLlJOSoav1JEQvEQoFXqJQQJ99CAACfhMk5XJ3w3AAAAACOGAN6c
+COHERE_API_KEY=${COHERE_API_KEY}   # set via local .env / secret manager — never commit the real value
 COHERE_BASE_URL=https://core-ai-rg.services.ai.azure.com/providers/cohere/v2
 COHERE_RERANK_MODEL=Cohere-rerank-v4.0-pro
 ```
@@ -210,7 +210,7 @@ async def retrieve(
 
 ### Environment Variables (`.env`)
 ```
-COHERE_API_KEY=5pzigEF3jY7494b4gEcZohzOB3gcAG8AOLlJOSoav1JEQvEQoFXqJQQJ99CAACfhMk5XJ3w3AAAAACOGAN6c
+COHERE_API_KEY=${COHERE_API_KEY}   # set via local .env / secret manager — never commit the real value
 COHERE_BASE_URL=https://core-ai-rg.services.ai.azure.com/providers/cohere/v2
 COHERE_RERANK_MODEL=Cohere-rerank-v4.0-pro
 ```

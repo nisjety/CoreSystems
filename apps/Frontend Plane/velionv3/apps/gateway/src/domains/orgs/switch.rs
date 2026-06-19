@@ -2,7 +2,10 @@ use axum::{extract::State, http::HeaderMap, response::Response, Json};
 use reqwest::Method;
 use serde_json::Value;
 
-use crate::{config::AppState, upstream::proxy_auth};
+use crate::{
+    config::AppState,
+    upstream::{browser_origin, proxy_auth},
+};
 
 use super::shared::cookie_header;
 
@@ -12,6 +15,15 @@ pub(super) async fn switch_active_org(
     body: Option<Json<Value>>,
 ) -> Response {
     let cookie = cookie_header(&headers);
+    let origin = browser_origin(&headers);
     let url = format!("{}/api/auth/organization/set-active", state.auth_core_url);
-    proxy_auth(&state, Method::POST, &url, body.map(|b| b.0), Some(&cookie)).await
+    proxy_auth(
+        &state,
+        Method::POST,
+        &url,
+        body.map(|b| b.0),
+        Some(&cookie),
+        origin.as_deref(),
+    )
+    .await
 }

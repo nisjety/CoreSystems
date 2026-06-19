@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -133,6 +135,13 @@ func main() {
 		}
 	}
 
+	// GDPR retention sweep: hard-delete organizations soft-deleted more than
+	// ORG_PURGE_DAYS days ago (default 30) by calling the
+	// purge_old_deleted_organizations stored procedure. Runs once at startup,
+	// then daily, and exits when ctx is cancelled. Mirrors audit-core's
+	// retention cron shape.
+	go runOrgPurge(ctx, orgService, orgPurgeDays())
+
 	server := httpserver.NewServer(cfg.HTTPPort, orgService, rbacRepo, cfg.AuthServiceURL, cfg.UserServiceURL)
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
 	metricsServer := metricsserver.NewServer(cfg.MetricsPort)
@@ -174,5 +183,61 @@ func main() {
 	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown error: %v", err)
+	}
+}
+
+// orgPurgeInterval is how often the GDPR retention sweep runs. Daily by design
+// — purging is a maintenance task, not a hot path.
+const orgPurgeInterval = 24 * time.Hour
+
+// orgPurgeDays reads ORG_PURGE_DAYS (default 30). Values below 1 are clamped to
+// 1 so a misconfiguration can never purge everything on the next sweep.
+func orgPurgeDays() int {
+	days := 30
+	if v := strings.TrimSpace(os.Getenv("ORG_PURGE_DAYS")); v != "" {
+		var d int
+		if _, err := fmt.Sscanf(v, "%d", &d); err == nil && d > 0 {
+			days = d
+		} else {
+			log.Printf("warning: invalid ORG_PURGE_DAYS=%q; using default %d", v, days)
+		}
+	}
+	if days < 1 {
+		days = 1
+	}
+	return days
+}
+
+// runOrgPurge invokes purge_old_deleted_organizations(days) once immediately,
+// then daily, logging the purged count. Returns when ctx is cancelled.
+func runOrgPurge(ctx context.Context, svc *orgcore.Service, days int) {
+	purge := func() {
+		// Bound each sweep so a slow purge can't block shutdown indefinitely.
+		sweepCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+
+		receipt, err := svc.PurgeDeletedOrganizations(sweepCtx, days)
+		if err != nil {
+			log.Printf("org GDPR purge failed (days=%d): %v", days, err)
+			return
+		}
+		var parsed struct {
+			PurgedCount int `json:"purged_count"`
+		}
+		_ = json.Unmarshal(receipt, &parsed)
+		log.Printf("org GDPR purge complete: purged_count=%d days=%d", parsed.PurgedCount, days)
+	}
+
+	purge() // immediate sweep at startup
+	ticker := time.NewTicker(orgPurgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("org GDPR purge loop stopping")
+			return
+		case <-ticker.C:
+			purge()
+		}
 	}
 }

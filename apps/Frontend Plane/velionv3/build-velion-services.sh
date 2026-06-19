@@ -150,7 +150,7 @@ POST_BUILD_HOOKS=(
   ""
   "ensure_finspo_database"
   ""
-  "seed_dev_account"
+  "seed_dev_account,verify_controlplane_db_auth"
   "wait_for_convex_gateway_ready"
   ""
 )
@@ -744,6 +744,77 @@ seed_dev_account() {
       "UPDATE \"user\" SET role='superadmin', email_verified=true WHERE email='$email';" >/dev/null 2>&1; then
     printf '[seed] WARN: could not promote %s to superadmin (continuing)\n' "$email" >&2
   fi
+}
+
+# verify_controlplane_db_auth — after the Control Plane is up, confirm each
+# DB-backed core can actually AUTHENTICATE to Postgres by hitting its DEEP
+# /health endpoint (which round-trips the DB). This is the net for the
+# stale-DB-password drift that silently broke create-org on 2026-06-18: a core
+# limping on old pooled connections looks "up" (port open) but fails every new
+# write. If a core is unhealthy, force-recreate it once so it picks up the
+# current single-sourced ${DB_PASSWORD} config, then re-check.
+#
+# Tolerant by default (warns, never aborts the build) — set STRICT_DB_AUTH=1 to
+# fail the build when a core still cannot reach its DB (recommended for CI).
+# Skip entirely with VERIFY_DB_AUTH=0.
+verify_controlplane_db_auth() {
+  if [[ "${VERIFY_DB_AUTH:-1}" == "0" ]]; then
+    log "Control Plane DB-auth verification disabled (VERIFY_DB_AUTH=0)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[db-auth] dry-run: would probe Control Plane core /health endpoints\n'
+    return 0
+  fi
+
+  local compose_file="$CORE_ROOT/apps/Control Plane/docker-compose.yml"
+  # compose-service:host-port — /health on these cores is a DEEP check (DB ping).
+  local checks=("org-core:18080" "user-core:3012" "billing-core:3014")
+  local failed=()
+  local entry svc port code attempt
+
+  probe() { # $1=port → echoes final HTTP code after up to ~30s
+    local p="$1" c=000 i
+    for ((i = 0; i < 15; i++)); do
+      c="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$p/health" 2>/dev/null)"
+      [[ -z "$c" ]] && c="000"
+      [[ "$c" == "200" ]] && break
+      sleep 2
+    done
+    printf '%s' "$c"
+  }
+
+  log "Verifying Control Plane cores can authenticate to Postgres (deep /health)"
+  for entry in "${checks[@]}"; do
+    svc="${entry%%:*}"
+    port="${entry##*:}"
+    code="$(probe "$port")"
+    if [[ "$code" == "200" ]]; then
+      printf '[db-auth] %-12s OK (/health 200 — DB reachable + authenticated)\n' "$svc"
+      continue
+    fi
+
+    printf '[db-auth] WARN: %s /health=%s — DB unreachable/unauthenticated; force-recreating to pick up current config…\n' "$svc" "$code" >&2
+    run docker compose -f "$compose_file" up -d --force-recreate --no-deps "$svc"
+    code="$(probe "$port")"
+    if [[ "$code" == "200" ]]; then
+      printf '[db-auth] %-12s recovered after recreate (/health 200)\n' "$svc"
+    else
+      printf '[db-auth] ERROR: %s still /health=%s after recreate — likely a DB password mismatch (compare ${DB_PASSWORD} in .env against the running Postgres).\n' "$svc" "$code" >&2
+      docker compose -f "$compose_file" logs --tail 8 "$svc" 2>&1 \
+        | grep -iE "password authentication|database ping|connect database" | sed 's/^/[db-auth]   /' || true
+      failed+=("$svc")
+    fi
+  done
+
+  if (( ${#failed[@]} > 0 )); then
+    printf '[db-auth] FAILED: %s cannot authenticate to Postgres.\n' "${failed[*]}" >&2
+    if [[ "${STRICT_DB_AUTH:-0}" == "1" ]]; then
+      return 1
+    fi
+    printf '[db-auth] Continuing (set STRICT_DB_AUTH=1 to fail the build here).\n' >&2
+  fi
+  return 0
 }
 
 # prune_all — tear down every plane's compose project, prune any

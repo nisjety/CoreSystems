@@ -151,6 +151,7 @@ mod tests {
             thread_id: None,
             structured_output_schema: None,
             zdr: false,
+            browse_web: false,
             max_cost_usd: None,
             max_tokens: None,
             profile: None,

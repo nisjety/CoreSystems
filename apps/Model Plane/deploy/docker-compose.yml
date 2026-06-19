@@ -206,6 +206,12 @@ services:
       # different Azure resource than chat (e.g. gpt-4o-mini-tts in
       # eastus2 while everything else is in swedencentral). Empty / unset
       # → falls through to AZURE_OPENAI_ENDPOINT / _API_KEY / _API_VERSION.
+      #
+      # P0.4 residency: the eastus2 TTS resource egresses voice to the US.
+      # speech.rs IGNORES the AZURE_OPENAI_TTS_* override (falling back to the
+      # EU AZURE_OPENAI_ENDPOINT) unless MODEL_PLANE_ALLOW_NON_EU_TTS=true.
+      # Default off so voice stays EU-resident.
+      MODEL_PLANE_ALLOW_NON_EU_TTS: ${MODEL_PLANE_ALLOW_NON_EU_TTS:-false}
       AZURE_OPENAI_TTS_ENDPOINT: ${AZURE_OPENAI_TTS_ENDPOINT:-}
       AZURE_OPENAI_TTS_API_KEY: ${AZURE_OPENAI_TTS_API_KEY:-}
       AZURE_OPENAI_TTS_API_VERSION: ${AZURE_OPENAI_TTS_API_VERSION:-}
@@ -277,6 +283,9 @@ services:
       OTEL_SERVICE_NAME: session-core
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
+      # P0.4 residency: region stamped onto every run record at StartRun.
+      # Defaults to the EU region (Sweden Central).
+      MODEL_PLANE_RESIDENCY: ${MODEL_PLANE_RESIDENCY:-swedencentral}
       LETTA_MEMORY_ADDR: ${LETTA_MEMORY_ADDR:-http://model-plane-letta-bridge-1:9096}
     depends_on:
       postgres:
@@ -431,6 +440,8 @@ services:
       OTEL_SERVICE_NAME: execution-core
       SESSION_CORE_ADDR: http://session-core:9091
       INFERENCE_CORE_ADDR: http://inference-core:9092
+      # Documented primary for the agent run driver (RunAgent) Infer round.
+      INFERENCE_CORE_URL: http://inference-core:9092
       CAPABILITY_CORE_ADDR: http://capability-core:9097
       # Quarry-v2 edge (Ingestion Plane) — backs the real web_search / web_fetch
       # agentic tools and the browser-agent loop. Cross-plane reach is via the

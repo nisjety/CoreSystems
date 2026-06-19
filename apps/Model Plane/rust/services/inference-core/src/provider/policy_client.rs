@@ -75,8 +75,7 @@ impl PolicyClient {
             .await
             .map_err(|status| format!("session-core set_policy: {status}"))?
             .into_inner();
-        serde_json::from_str(&resp.config_json)
-            .map_err(|e| format!("parse stored policy: {e}"))
+        serde_json::from_str(&resp.config_json).map_err(|e| format!("parse stored policy: {e}"))
     }
 }
 

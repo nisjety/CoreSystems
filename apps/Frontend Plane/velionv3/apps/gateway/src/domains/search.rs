@@ -600,6 +600,7 @@ async fn search_answer_stream(
         Some(payload),
         token.as_deref(),
         None,
+        None,
         false,
     )
     .await

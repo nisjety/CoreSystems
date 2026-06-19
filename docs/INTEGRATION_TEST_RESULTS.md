@@ -136,7 +136,7 @@ dial tcp [::1]:3011: connect: connection refused
 Auth Service now has all required variables:
 ```bash
 EMAIL_PASSWORD_ENABLED=true
-BETTER_AUTH_SECRET=LrG2Huk0jmPA2e+epK7w1gODEYtjdOp7olZRR30r+Lk=
+BETTER_AUTH_SECRET=<REDACTED-rotate-and-set-via-.env>
 BETTER_AUTH_URL=http://localhost:3000
 DATABASE_URL=postgres://...@aquatiq-postgres-local:5432/auth_service
 REDIS_URL=redis://:redis@aquatiq-redis-local:6379/3

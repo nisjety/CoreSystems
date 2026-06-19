@@ -152,7 +152,7 @@ NATS_TOKEN=${NATS_TOKEN:-nats}  # Use env var with fallback
 ```yaml
 environment:
   - JWT_SECRET=dev-jwt-secret-change-in-production
-  - BETTER_AUTH_SECRET=LrG2Huk0jmPA2e+epK7w1gODEYtjdOp7olZRR30r+Lk=
+  - BETTER_AUTH_SECRET=<REDACTED-rotate-and-set-via-.env>
 ```
 
 **After (CORRECT):**

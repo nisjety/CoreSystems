@@ -8,6 +8,7 @@ type OnboardingPersistenceOptions = {
   actor: ActionActor
   hydratedFromServer: Accessor<boolean>
   localDebounceMs?: number
+  paused?: Accessor<boolean>
   remoteDebounceMs?: number
   state: OnboardingState
   storageKey: string
@@ -18,6 +19,14 @@ export function createOnboardingPersistence(options: OnboardingPersistenceOption
   let remoteTimer: number | undefined
 
   createEffect(() => {
+    if (options.paused?.()) {
+      if (typeof window !== 'undefined') {
+        window.clearTimeout(localTimer)
+        window.clearTimeout(remoteTimer)
+      }
+      return
+    }
+
     const snapshot = createPersistedOnboardingState(options.state)
 
     if (typeof window !== 'undefined') {

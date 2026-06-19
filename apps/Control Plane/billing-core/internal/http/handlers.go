@@ -1,6 +1,8 @@
 package http
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +13,21 @@ import (
 )
 
 func (s *Server) health(c *gin.Context) {
+	// Deep check: round-trip the DB so an unreachable/unauthenticated database
+	// (e.g. a stale DB password) reports unhealthy instead of silently serving
+	// stale reads. The docker healthcheck hits /health, so a 503 marks the
+	// container unhealthy.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.billingCore.Ping(ctx); err != nil {
+		log.Printf("health: database ping failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "unhealthy",
+			"service": "billing-core",
+			"error":   "database unreachable",
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"service":   "billing-core",

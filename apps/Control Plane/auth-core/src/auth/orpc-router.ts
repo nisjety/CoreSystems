@@ -6,7 +6,7 @@ import * as schema from '../db/schema';
 import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import {
   publishOrganizationCreated,
-  publishOrganizationMemberAdded,
+  publishRoleChangeAudit,
 } from './organization-hooks';
 import { redisSecondaryStorage } from '../db/redis';
 import { createHash, randomBytes } from 'crypto';
@@ -1404,6 +1404,18 @@ const sendPhoneOtpProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
+      const [existingUser] = await db
+        .select({ id: schema.user.id })
+        .from(schema.user)
+        .where(eq(schema.user.phoneNumber, input.phoneNumber))
+        .limit(1);
+
+      if (!existingUser) {
+        return {
+          success: false,
+          error: 'No account is registered with this phone number',
+        };
+      }
 
       const sendPhoneNumberOTP = getAuthApiMethod('sendPhoneNumberOTP');
       await sendPhoneNumberOTP({
@@ -1440,6 +1452,18 @@ const verifyPhoneOtpProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
+      const [existingUser] = await db
+        .select({ id: schema.user.id })
+        .from(schema.user)
+        .where(eq(schema.user.phoneNumber, input.phoneNumber))
+        .limit(1);
+
+      if (!existingUser) {
+        return {
+          success: false,
+          error: 'No account is registered with this phone number',
+        };
+      }
 
       const verifyPhoneNumber = getAuthApiMethod('verifyPhoneNumber');
       const { headers: respHeaders, response } = await verifyPhoneNumber({
@@ -3666,6 +3690,28 @@ const adminSetRoleProcedure = os
           role: input.role,
         },
         headers: authorization.headers,
+      });
+
+      // Durable audit trail for the privileged role change. The actor is the
+      // authenticated admin; org_id comes from their active-org session and
+      // gates whether the event reaches audit-core.
+      const actor = authorization.session?.user;
+      const actorSession = authorization.session?.session as
+        | { activeOrganizationId?: string }
+        | undefined;
+      const actorRole = Array.isArray(actor?.role)
+        ? actor?.role.join(',')
+        : (actor?.role ?? undefined);
+      const newRole = Array.isArray(input.role)
+        ? input.role.join(',')
+        : input.role;
+      publishRoleChangeAudit({
+        orgId: actorSession?.activeOrganizationId,
+        actorUserId: actor?.id,
+        actorRole: actorRole ?? undefined,
+        targetUserId: input.userId,
+        newRole,
+        outcome: 'ok',
       });
 
       return { success: true };

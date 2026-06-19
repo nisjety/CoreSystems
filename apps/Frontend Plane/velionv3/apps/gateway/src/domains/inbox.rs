@@ -8,8 +8,8 @@
 
 use axum::{
     extract::{Extension, Path, State},
-    http::{HeaderMap, Uri},
-    response::IntoResponse,
+    http::{StatusCode, Uri},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Json, Router,
 };
@@ -19,8 +19,9 @@ use serde_json::Value;
 use crate::{
     config::AppState,
     contracts::ActionActor,
+    envelope::error,
     middleware::{require_session, AuthenticatedUser},
-    upstream::proxy_json,
+    upstream::{authorized_org_id, proxy_json},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -51,14 +52,6 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-fn org_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-velion-org-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.trim().is_empty())
-        .map(str::to_owned)
-}
-
 fn actor_for(user: &AuthenticatedUser) -> ActionActor {
     ActionActor {
         user_id: user.user_id.clone(),
@@ -66,6 +59,21 @@ fn actor_for(user: &AuthenticatedUser) -> ActionActor {
         user_name: user.user_name.clone(),
         user_role: user.auth_role.clone().unwrap_or_default(),
     }
+}
+
+async fn scoped_org_id(state: &AppState, user: &AuthenticatedUser) -> Result<String, Response> {
+    let org_id = authorized_org_id(state, user).await;
+    if !org_id.trim().is_empty() {
+        return Ok(org_id);
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(error(
+            "org_scope_required",
+            "An authorized organization scope is required.",
+        )),
+    )
+        .into_response())
 }
 
 fn qs(uri: &Uri) -> String {
@@ -80,27 +88,34 @@ fn qs(uri: &Uri) -> String {
 async fn list_inboxes(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Response {
+    let org_id = match scoped_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let url = format!("{}/api/v1/inboxes", state.conversation_core_url);
     proxy_json(
         &state,
         Method::GET,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(&org_id),
         Some(&actor_for(&user)),
         None,
     )
     .await
+    .into_response()
 }
 
 async fn list_conversations(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     uri: Uri,
-) -> impl IntoResponse {
+) -> Response {
+    let org_id = match scoped_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let url = format!(
         "{}/api/v1/conversations{}",
         state.conversation_core_url,
@@ -111,19 +126,23 @@ async fn list_conversations(
         Method::GET,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(&org_id),
         Some(&actor_for(&user)),
         None,
     )
     .await
+    .into_response()
 }
 
 async fn get_conversation(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> Response {
+    let org_id = match scoped_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let url = format!(
         "{}/api/v1/conversations/{}",
         state.conversation_core_url,
@@ -134,114 +153,68 @@ async fn get_conversation(
         Method::GET,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(&org_id),
         Some(&actor_for(&user)),
         None,
     )
     .await
+    .into_response()
 }
 
 async fn add_message(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
-    forward_conversation_write(
-        &state,
-        &user,
-        &headers,
-        Method::POST,
-        &id,
-        "messages",
-        Some(body),
-    )
-    .await
+) -> Response {
+    forward_conversation_write(&state, &user, Method::POST, &id, "messages", Some(body)).await
 }
 
 async fn add_note(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
-    forward_conversation_write(
-        &state,
-        &user,
-        &headers,
-        Method::POST,
-        &id,
-        "notes",
-        Some(body),
-    )
-    .await
+) -> Response {
+    forward_conversation_write(&state, &user, Method::POST, &id, "notes", Some(body)).await
 }
 
 async fn patch_status(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
-    forward_conversation_write(
-        &state,
-        &user,
-        &headers,
-        Method::PATCH,
-        &id,
-        "status",
-        Some(body),
-    )
-    .await
+) -> Response {
+    forward_conversation_write(&state, &user, Method::PATCH, &id, "status", Some(body)).await
 }
 
 async fn patch_assignment(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
-    forward_conversation_write(
-        &state,
-        &user,
-        &headers,
-        Method::PATCH,
-        &id,
-        "assignment",
-        Some(body),
-    )
-    .await
+) -> Response {
+    forward_conversation_write(&state, &user, Method::PATCH, &id, "assignment", Some(body)).await
 }
 
 async fn add_tag(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
-    forward_conversation_write(
-        &state,
-        &user,
-        &headers,
-        Method::POST,
-        &id,
-        "tags",
-        Some(body),
-    )
-    .await
+) -> Response {
+    forward_conversation_write(&state, &user, Method::POST, &id, "tags", Some(body)).await
 }
 
 async fn remove_tag(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Path((id, tag)): Path<(String, String)>,
-) -> impl IntoResponse {
+) -> Response {
+    let org_id = match scoped_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let url = format!(
         "{}/api/v1/conversations/{}/tags/{}",
         state.conversation_core_url,
@@ -253,22 +226,26 @@ async fn remove_tag(
         Method::DELETE,
         &url,
         None,
-        org_id_from_headers(&headers).as_deref(),
+        Some(&org_id),
         Some(&actor_for(&user)),
         None,
     )
     .await
+    .into_response()
 }
 
 async fn forward_conversation_write(
     state: &AppState,
     user: &AuthenticatedUser,
-    headers: &HeaderMap,
     method: Method,
     id: &str,
     sub: &str,
     body: Option<Value>,
-) -> (axum::http::StatusCode, Json<Value>) {
+) -> Response {
+    let org_id = match scoped_org_id(state, user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let url = format!(
         "{}/api/v1/conversations/{}/{}",
         state.conversation_core_url,
@@ -280,9 +257,10 @@ async fn forward_conversation_write(
         method,
         &url,
         body,
-        org_id_from_headers(headers).as_deref(),
+        Some(&org_id),
         Some(&actor_for(user)),
         None,
     )
     .await
+    .into_response()
 }

@@ -70,14 +70,15 @@ impl BrowserEventSink for OrchestrationEventSink {
         if config.run_id.is_empty() {
             return;
         }
-        let event =
-            orchestration_event::Event::BrowserActionDispatched(orchestration_event::BrowserActionDispatched {
+        let event = orchestration_event::Event::BrowserActionDispatched(
+            orchestration_event::BrowserActionDispatched {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
                 action_id: action.action_id.clone(),
                 action_type: action.action_type.as_str().to_owned(),
                 url: action.url.clone(),
-            });
+            },
+        );
         self.publish(&config.run_id, event).await;
     }
 

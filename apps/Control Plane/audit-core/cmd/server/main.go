@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,6 +71,33 @@ func main() {
 		log.Fatal().Err(err).Msg("subscriber start failed")
 	}
 
+	// Cross-plane audit aggregation: each plane runs its own NATS and
+	// audit-core is the single sink. The primary connection above is the
+	// control-plane bus (NATS_URL); EXTRA_NATS_URLS lists other plane buses
+	// (e.g. the model-plane NATS at model-plane-nats-1:4222, where session-core
+	// publishes velion.audit.v1.model.tool_action). Each extra bus is
+	// best-effort — an unreachable or token-less plane bus must never take down
+	// audit ingestion for the others, so failures are logged, not fatal.
+	for _, url := range cfg.ExtraNATSURLs {
+		extraNC, err := nats.Connect(url, nats.Name("audit-core-aggregator"))
+		if err != nil {
+			log.Warn().Err(err).Str("nats_url", url).Msg("extra nats bus connect failed; skipping")
+			continue
+		}
+		conn := extraNC
+		defer func() { _ = conn.Drain() }()
+		if err := subscriber.New(conn, st).Start(ctx); err != nil {
+			log.Warn().Err(err).Str("nats_url", url).Msg("extra nats subscriber start failed; skipping")
+			continue
+		}
+		log.Info().Str("nats_url", url).Msg("audit-core aggregating extra plane bus")
+	}
+
+	// Retention: enforce the AUDIT_RETENTION_DAYS window the velion settings
+	// UI advertises ("Audit retention 365 days"). The goroutine purges once at
+	// startup, then daily, and exits when ctx is cancelled on shutdown.
+	go runRetention(ctx, st, cfg.RetentionDays)
+
 	r := chi.NewRouter()
 	api.New(st, cfg.InternalAPIKey).Mount(r)
 
@@ -91,12 +119,53 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 }
 
+// retentionInterval is how often the retention sweep runs. The window is
+// coarse (daily) by design — purging is a maintenance task, not a hot path.
+const retentionInterval = 24 * time.Hour
+
+// runRetention purges audit + usage events older than retentionDays. It runs
+// one sweep immediately so a fresh boot reclaims any backlog, then ticks
+// daily. It returns when ctx is cancelled (graceful shutdown).
+func runRetention(ctx context.Context, st *store.Store, retentionDays int) {
+	purge := func() {
+		// Bound each sweep so a slow purge can't block shutdown indefinitely.
+		sweepCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		res, err := st.Purge(sweepCtx, retentionDays)
+		if err != nil {
+			log.Error().Err(err).Int("retention_days", retentionDays).Msg("retention purge failed")
+			return
+		}
+		log.Info().
+			Int("retention_days", retentionDays).
+			Int64("audit_deleted", res.AuditDeleted).
+			Int64("usage_deleted", res.UsageDeleted).
+			Msg("retention purge complete")
+	}
+
+	purge()
+
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("retention loop stopping")
+			return
+		case <-ticker.C:
+			purge()
+		}
+	}
+}
+
 type config struct {
 	DatabaseURL    string
 	NATSURL        string
 	NATSToken      string
 	HTTPPort       int
 	InternalAPIKey string
+	RetentionDays  int
+	ExtraNATSURLs  []string
 }
 
 func loadConfig() (*config, error) {
@@ -123,11 +192,38 @@ func loadConfig() (*config, error) {
 		return nil, fmt.Errorf("INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET is required")
 	}
 
+	// Retention window for both append-only tables. Defaults to 365 days to
+	// match the velion settings UI. Values below 1 are clamped to 1 so a
+	// misconfiguration can never purge everything on the next sweep.
+	retentionDays := 365
+	if v := os.Getenv("AUDIT_RETENTION_DAYS"); v != "" {
+		var d int
+		if _, err := fmt.Sscanf(v, "%d", &d); err == nil && d > 0 {
+			retentionDays = d
+		} else {
+			log.Warn().Str("AUDIT_RETENTION_DAYS", v).Int("default_days", retentionDays).
+				Msg("invalid AUDIT_RETENTION_DAYS; using default")
+		}
+	}
+
+	// Extra plane NATS buses to aggregate audit/usage events from (comma-
+	// separated). audit-core is the single sink; each plane runs its own NATS,
+	// so list the other plane buses here (e.g. nats://model-plane-nats-1:4222,
+	// the model-plane bus where session-core publishes tool_action events).
+	var extraNATS []string
+	for _, u := range strings.Split(os.Getenv("EXTRA_NATS_URLS"), ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			extraNATS = append(extraNATS, u)
+		}
+	}
+
 	return &config{
 		DatabaseURL:    dsn,
 		NATSURL:        natsURL,
 		NATSToken:      os.Getenv("NATS_TOKEN"),
 		HTTPPort:       port,
 		InternalAPIKey: internalAPIKey,
+		RetentionDays:  retentionDays,
+		ExtraNATSURLs:  extraNATS,
 	}, nil
 }

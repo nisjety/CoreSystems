@@ -18,6 +18,60 @@ service ExecutionCore {
 
   // Cancel an active run.
   rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+
+  // Drive a whole agent run to completion: plan → infer → persist → finalize.
+  // MVP no-tool slice — a single InferenceCore.Infer round persisted to the
+  // run's thread, with the run flipped to a terminal status. Dispatched by the
+  // gateway after StartRun so a chat turn produces a durable answer instead of
+  // stalling in `'queued'`.
+  rpc RunAgent(RunAgentRequest) returns (RunAgentResponse);
+}
+
+// RunAgentRequest — drive one agent run from goal to terminal answer.
+message RunAgentRequest {
+  // Run to drive (created by session-core StartRun).
+  string run_id = 1;
+
+  // Thread the run belongs to (assistant answer is appended here).
+  string thread_id = 2;
+
+  // User goal / prompt for this turn.
+  string goal = 3;
+
+  // Tenant identifier.
+  string org_id = 4;
+
+  // Acting user identifier.
+  string user_id = 5;
+
+  // Requested model (empty / "velion-*" lets inference-core's intent layer
+  // resolve a concrete model).
+  string model = 6;
+
+  // Run mode hint: "execute", etc.
+  string mode = 7;
+
+  // Maximum agent rounds (reserved for the multi-tool loop; the MVP no-tool
+  // slice executes a single round).
+  uint32 max_rounds = 8;
+
+  // Zero-Data-Retention flag for this run. When true, the driver threads it
+  // into every inference round and onto each tool step's GDPR audit detail so
+  // no run content is retained durably. Sourced from the chat request's `zdr`
+  // flag (model-gateway), OR'd with any org-level ZDR default.
+  bool zdr = 9;
+}
+
+// RunAgentResponse — terminal outcome of a driven agent run.
+message RunAgentResponse {
+  // Terminal status: "completed" or "failed".
+  string status = 1;
+
+  // The persisted assistant answer (or graceful error sentence on failure).
+  string final_output = 2;
+
+  // Number of agent rounds actually executed.
+  uint32 rounds_executed = 3;
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.

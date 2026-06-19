@@ -7,6 +7,7 @@ export type VelionRoute =
   | '/studio/campaigns'
   | '/studio/templates'
   | '/inbox'
+  | '/tickets'
   | '/social'
   | '/social/accounts'
   | '/social/calendar'
@@ -26,6 +27,7 @@ export type VelionRoute =
   | '/ingestions'
   | '/knowledge'
   | '/agents'
+  | '/agents/runs'
   | '/account'
   | '/settings'
   | '/settings/workspace'
@@ -34,6 +36,7 @@ export type VelionRoute =
   | '/settings/sso'
   | '/settings/org-security'
   | '/settings/integrations'
+  | '/settings/trust'
   | '/settings/router-policy'
   | '/settings/finetune'
 
@@ -99,6 +102,8 @@ export function getNavbarLabels(activeRoute: VelionRoute) {
       return { moduleLabel: 'Studio', tabLabel: 'Templates' }
     case '/inbox':
       return { moduleLabel: 'Inbox', tabLabel: 'Your inbox' }
+    case '/tickets':
+      return { moduleLabel: 'Ticketing', tabLabel: 'My tickets' }
     case '/social':
     case '/social/calendar':
       return { moduleLabel: 'Social', tabLabel: 'Calendar' }
@@ -133,6 +138,8 @@ export function getNavbarLabels(activeRoute: VelionRoute) {
       return { moduleLabel: 'Ingestions', tabLabel: 'Workspace' }
     case '/agents':
       return { moduleLabel: 'Agenter', tabLabel: 'Studio' }
+    case '/agents/runs':
+      return { moduleLabel: 'Agenter', tabLabel: 'Run Console' }
     case '/knowledge':
       return { moduleLabel: 'Kunnskap', tabLabel: 'Kilder' }
     case '/account':
@@ -144,6 +151,7 @@ export function getNavbarLabels(activeRoute: VelionRoute) {
     case '/settings/sso':
     case '/settings/org-security':
     case '/settings/integrations':
+    case '/settings/trust':
       return { moduleLabel: 'Innstillinger', tabLabel: 'Workspace' }
     case '/dashboard':
     default:
@@ -158,6 +166,7 @@ export function routeFromPath(pathname: string): VelionRoute {
   if (path.startsWith('/studio/templates')) return '/studio/templates'
   if (path.startsWith('/studio')) return '/studio/canvas'
   if (path.startsWith('/inbox')) return '/inbox'
+  if (path.startsWith('/tickets')) return '/tickets'
   if (path.startsWith('/social/accounts')) return '/social/accounts'
   if (path.startsWith('/social/drafts')) return '/social/drafts'
   if (path.startsWith('/social/approvals')) return '/social/approvals'
@@ -174,11 +183,15 @@ export function routeFromPath(pathname: string): VelionRoute {
   if (path.startsWith('/insights')) return '/insights/overview'
   if (path.startsWith('/ingestions')) return '/ingestions'
   if (path.startsWith('/knowledge')) return '/knowledge'
+  // The Run Console is a full-bleed surface — keep it out of the /agents config
+  // sub-sidebar by routing it to its own value (matched before the /agents catch).
+  if (path.startsWith('/agents/runs')) return '/agents/runs'
   if (path.startsWith('/agents')) return '/agents'
   if (path.startsWith('/account')) return '/account'
   if (path.startsWith('/settings/router-policy')) return '/settings/router-policy'
   if (path.startsWith('/settings/finetune')) return '/settings/finetune'
   if (path.startsWith('/settings/integrations')) return '/settings/integrations'
+  if (path.startsWith('/settings/trust')) return '/settings/trust'
   if (path.startsWith('/settings/org-security')) return '/settings/org-security'
   if (path.startsWith('/settings/billing')) return '/settings/billing'
   if (path.startsWith('/settings/members')) return '/settings/members'

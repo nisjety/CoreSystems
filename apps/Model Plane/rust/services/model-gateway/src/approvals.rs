@@ -28,7 +28,8 @@ use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient, ApprovalKind, ApprovalState,
     ApproveApprovalRequest, ApproveApprovalResponse, CreateApprovalRequest, DecideApprovalRequest,
     DenyApprovalRequest, DenyApprovalResponse, GatewayApproval, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, RequestApprovalRequest, RequestApprovalResponse, ResumeRunRequest,
+    ListPendingApprovalsResponse, RequestApprovalRequest, RequestApprovalResponse,
+    ResumeRunRequest,
 };
 use tonic::transport::Channel;
 
@@ -138,7 +139,9 @@ pub async fn resume_run_if_approved(
             resumed = resp.into_inner().resumed,
             "approval granted → execution-core resume_run"
         ),
-        Err(e) => warn!(error = %e, approval_id = %approval.approval_id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)"),
+        Err(e) => {
+            warn!(error = %e, approval_id = %approval.approval_id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)")
+        }
     }
 }
 

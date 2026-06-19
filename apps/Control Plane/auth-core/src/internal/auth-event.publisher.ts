@@ -704,6 +704,23 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       actorId: data.invitedBy ?? '',
       actorName: data.invitedBy ?? '',
     });
+
+    // Durable audit trail — actor is the inviter, subject is the added member.
+    this.publishVelionAudit({
+      org_id: data.organizationId,
+      user_id: data.invitedBy,
+      event: 'member_added',
+      subject: data.userEmail || data.userId,
+      resource_id: data.userId,
+      outcome: 'ok',
+      details: {
+        target_user_id: data.userId,
+        target_email: data.userEmail,
+        role: data.role,
+        invited_by: data.invitedBy,
+        org_name: data.organizationName,
+      },
+    });
   }
 
   /**
@@ -726,6 +743,22 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       user_email: data.userEmail,
       removed_by: data.removedBy,
       trace_id: traceId,
+    });
+
+    // Durable audit trail — actor is whoever removed the member.
+    this.publishVelionAudit({
+      org_id: data.organizationId,
+      user_id: data.removedBy,
+      event: 'member_removed',
+      subject: data.userEmail || data.userId,
+      resource_id: data.userId,
+      outcome: 'ok',
+      details: {
+        target_user_id: data.userId,
+        target_email: data.userEmail,
+        removed_by: data.removedBy,
+        org_name: data.organizationName,
+      },
     });
   }
 
@@ -755,6 +788,27 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       type: 'organization.plan.changed',
       traceId,
     } as OrganizationPlanChangedEvent);
+
+    // Durable audit trail for billing/plan state changes. NOTE: as of this
+    // change there is no caller for publishOrganizationPlanChanged in
+    // auth-core — billing lives in billing-core (proxied by the gateway), so
+    // the upstream plan-change handler must call this method (or emit the
+    // audit event directly) for plan_changed to reach audit-core.
+    this.publishVelionAudit({
+      org_id: data.organizationId,
+      user_id: data.changedBy,
+      event: 'plan_changed',
+      subject: data.organizationName || data.organizationId,
+      resource_id: data.organizationId,
+      outcome: 'ok',
+      details: {
+        previous_plan: data.previousPlan,
+        new_plan: data.newPlan,
+        changed_by: data.changedBy,
+        change_reason: data.changeReason,
+        org_name: data.organizationName,
+      },
+    });
   }
 
   private getSubjectForEvent(eventType: string): string {

@@ -16,13 +16,19 @@
 //! - `AUTH_CORE_JWKS_TTL_SECS`       — optional; default 300s.
 //! - `AUTH_CORE_JWT_LEEWAY_SECS`     — optional; default 30s. Clock-skew
 //!   tolerance applied to `exp` and `nbf` validation.
-//! - `MODEL_GATEWAY_AUTH_DEV_BYPASS` — `1`/`true` to accept any bearer and
-//!   inject a stub `Claims` for local dev.
+//! - `MODEL_GATEWAY_AUTH_DEV_BYPASS` — `1`/`true` to accept any bearer in local
+//!   dev and derive `Claims` from trusted gateway `x-user-id` / `x-org-id`
+//!   headers when present.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
+use axum::{
+    extract::Request,
+    http::{HeaderMap, StatusCode},
+    middleware::Next,
+    response::Response,
+};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -153,6 +159,31 @@ fn dev_bypass_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn dev_bypass_claims(headers: &HeaderMap) -> Claims {
+    let user_id = header_string(headers, "x-user-id", "user_placeholder");
+    let org_id = header_string(headers, "x-org-id", "org_placeholder");
+    Claims {
+        sub: user_id.clone(),
+        iss: "dev".to_owned(),
+        exp: i64::MAX,
+        org_id,
+        user_id,
+        nbf: None,
+        aud: None,
+        scopes: Vec::new(),
+    }
+}
+
+fn header_string(headers: &HeaderMap, name: &'static str, fallback: &'static str) -> String {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
 /// Axum middleware that verifies a Bearer JWT and injects [`Claims`].
 ///
 /// # Errors
@@ -177,16 +208,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
 
     if dev_bypass_enabled() {
         warn!("MODEL_GATEWAY_AUTH_DEV_BYPASS enabled — accepting bearer without verification");
-        let claims = Claims {
-            sub: "user_placeholder".to_owned(),
-            iss: "dev".to_owned(),
-            exp: i64::MAX,
-            org_id: "org_placeholder".to_owned(),
-            user_id: "user_placeholder".to_owned(),
-            nbf: None,
-            aud: None,
-            scopes: Vec::new(),
-        };
+        let claims = dev_bypass_claims(req.headers());
         req.extensions_mut().insert(claims);
         return Ok(next.run(req).await);
     }
@@ -490,6 +512,36 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"org_placeholder:user_placeholder");
+
+        std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn dev_bypass_uses_forwarded_actor_headers_when_present() {
+        async fn echo_claims(axum::Extension(claims): axum::Extension<Claims>) -> String {
+            format!("{}:{}", claims.org_id, claims.user_id)
+        }
+
+        clear_env();
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+
+        let app = Router::new()
+            .route("/", get(echo_claims))
+            .layer(middleware::from_fn(require_auth));
+
+        let req = HttpRequest::builder()
+            .uri("/")
+            .header("authorization", "Bearer whatever")
+            .header("x-org-id", "org-real")
+            .header("x-user-id", "user-real")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"org-real:user-real");
 
         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
     }
