@@ -24,6 +24,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Phase 0 fabrication guard: zero-tolerance allowlist asserting that the
+  # de-faked / security-fixed surfaces are not silently re-introduced.
+  fabrication-guard:
+    name: Fabrication guard (no fake "live" state)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert no fabricated state was re-introduced
+        run: |
+          set -uo pipefail
+          gw="apps/Frontend Plane/velionv3/apps/gateway/src"
+          spa="apps/Frontend Plane/velionv3/src"
+          fail=0
+          # PR-1: the cross-tenant IDOR helper must never return — org is derived
+          # server-side via crate::upstream::authorized_org_id.
+          if grep -rIl 'fn org_id_from_headers' "$gw" >/dev/null 2>&1; then
+            echo "::error::org_id_from_headers reintroduced — derive org via authorized_org_id"
+            grep -rIn 'fn org_id_from_headers' "$gw"; fail=1
+          fi
+          # PR-2: social demo data / in-memory store must stay gone.
+          if grep -rIlE 'demo_accounts|demo_posts|SocialStore' "$gw" >/dev/null 2>&1; then
+            echo "::error::social demo data / SocialStore reintroduced"
+            grep -rInE 'demo_accounts|demo_posts|SocialStore' "$gw"; fail=1
+          fi
+          # The dev-auth-bypass token may appear only in the two SPA API clients.
+          stray=$(grep -rIl 'Bearer dev-bypass' "$spa" 2>/dev/null | grep -vE '/shared/api/(http|sse)\.ts$' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::'Bearer dev-bypass' found outside src/shared/api/http.ts and sse.ts:"
+            echo "$stray"; fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "Fabrication guard passed."
+
   gateway-rust:
     name: Gateway — fmt + clippy + test
     runs-on: ubuntu-latest

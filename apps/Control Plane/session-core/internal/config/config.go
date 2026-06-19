@@ -108,7 +108,10 @@ func Load() *Config {
 			Host:           getEnv("DATABASE_HOST", "controlplane-postgres"),
 			Port:           getEnv("DATABASE_PORT", "5432"),
 			User:           getEnv("DATABASE_USER", "controlplane_user"),
-			Password:       getEnv("DATABASE_PASSWORD", "controlplane_pass"),
+			// No baked-in default: DATABASE_PASSWORD is the single source of truth,
+			// injected from the root Control Plane .env via compose ($DB_PASSWORD).
+			// A stale literal here drifts from the live hex and breaks DB auth.
+			Password:       getEnv("DATABASE_PASSWORD", ""),
 			Name:           getEnv("DATABASE_NAME", "session_core"),
 			SSLMode:        getEnv("DATABASE_SSL_MODE", "disable"),
 			MaxConnections: getEnvAsInt("DATABASE_MAX_CONNS", 20),

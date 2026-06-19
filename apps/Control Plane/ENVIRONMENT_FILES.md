@@ -1,5 +1,17 @@
 # Environment Configuration Structure
 
+## Secrets: `DB_PASSWORD` has a single source of truth
+
+`DB_PASSWORD` lives **only** in the root Control Plane `.env` (the live value).
+`docker-compose.yml` injects it into every service as `DATABASE_PASSWORD=${DB_PASSWORD}`.
+
+- Per-service `.env.docker` files **must not** define `DATABASE_PASSWORD` — a baked-in
+  literal silently drifts from the live value and breaks DB auth when a container is
+  recreated.
+- Service config defaults for `DATABASE_PASSWORD` are **empty** (e.g. session-core
+  `config.go`, user-core) so a missing value fails fast instead of connecting with a
+  stale fallback. Never copy the live hex into source or per-service env files.
+
 ## Overview
 
 Each service now has **4 environment files** for different deployment contexts:

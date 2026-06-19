@@ -6,6 +6,11 @@ This document defines the **clear data boundaries** between the Control Plane (s
 
 Companion privacy contract: [`../GDPR_SUMMARY.md`](../GDPR_SUMMARY.md). This ownership map defines authority; the GDPR summary defines the cross-plane retention, deletion, anonymization, processor, and ZDR obligations that follow authority decisions.
 
+> **Secret single-source rule:** `DB_PASSWORD` lives only in the root Control Plane
+> `.env` and is injected via compose as `DATABASE_PASSWORD=${DB_PASSWORD}`. Service
+> code defaults `DATABASE_PASSWORD` to empty (fail-fast) and per-service `.env.docker`
+> files must not redefine it — see [`ENVIRONMENT_FILES.md`](./ENVIRONMENT_FILES.md).
+
 ---
 
 ## 🏛️ Control Plane Ownership (Source of Truth)
