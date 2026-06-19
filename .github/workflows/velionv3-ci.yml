@@ -49,10 +49,27 @@ jobs:
             grep -rInE 'demo_accounts|demo_posts|SocialStore' "$gw"; fail=1
           fi
           # The dev-auth-bypass token may appear only in the two SPA API clients.
-          stray=$(grep -rIl 'Bearer dev-bypass' "$spa" 2>/dev/null | grep -vE '/shared/api/(http|sse)\.ts$' || true)
+          stray=$(grep -rIl 'Bearer dev-bypass' "$spa" 2>/dev/null | grep -vE '/shared/api/(http|sse)(\.test)?\.ts$' || true)
           if [ -n "$stray" ]; then
             echo "::error::'Bearer dev-bypass' found outside src/shared/api/http.ts and sse.ts:"
             echo "$stray"; fail=1
+          fi
+          # Phase 2 PR-0: no NEW gateway domain may read org from a client header.
+          # Org is derived server-side via crate::upstream::authorized_org_id; the
+          # client-supplied org headers are stripped at ingress (middleware.rs).
+          # (a) Both org headers must remain STRIPPED_HEADERS list entries.
+          for h in x-org-id x-velion-org-id; do
+            if ! grep -qE "^[[:space:]]*\"$h\"," "$gw/middleware.rs"; then
+              echo "::error::\"$h\" missing from STRIPPED_HEADERS in middleware.rs — the client org header must stay stripped at ingress"
+              fail=1
+            fi
+          done
+          # (b) No domain may READ a client/forwarded org header — that is the
+          # cross-tenant IDOR vector. Header reads only ever live in the
+          # ingress-strip regression tests (middleware.rs / main.rs), never under domains/.
+          if grep -rInE 'get\("x-(velion-)?org-id"' "$gw/domains" >/dev/null 2>&1; then
+            echo "::error::a gateway domain reads a client org header — derive org via authorized_org_id, never x-org-id/x-velion-org-id:"
+            grep -rInE 'get\("x-(velion-)?org-id"' "$gw/domains"; fail=1
           fi
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "Fabrication guard passed."

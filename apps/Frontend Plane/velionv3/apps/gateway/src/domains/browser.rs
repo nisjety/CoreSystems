@@ -551,7 +551,7 @@ fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadat
         .lock()
         .ok()
         .and_then(|runs| runs.get(session_id).cloned())
-        .unwrap_or_else(|| BrowserRunMetadata {
+        .unwrap_or(BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
             persistent_profile: false,
