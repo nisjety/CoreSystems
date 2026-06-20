@@ -147,10 +147,10 @@ OLD_PROJECTS=(
 # next stack). Keep entries short — long hooks belong in their own function.
 # Format: comma-separated function names; empty string skips.
 POST_BUILD_HOOKS=(
-  ""
+  "apply_dataplane_migrations"
   "ensure_finspo_database"
   ""
-  "seed_dev_account,verify_controlplane_db_auth"
+  "seed_dev_account,verify_controlplane_db_auth,verify_ownership_phase"
   "wait_for_convex_gateway_ready"
   ""
 )
@@ -630,6 +630,55 @@ wait_for_convex_gateway_ready() {
   wait_for_services_ready "$compose_file" "convex-gateway"
 }
 
+# apply_dataplane_migrations — idempotently apply the Per-User Data Ownership
+# schema migrations to the running dataplane DB.
+#
+# Why this hook exists (same class as ensure_finspo_database):
+#   `init.sql` only creates the schema on a FRESH `dpv2-postgres-data` volume.
+#   On an existing volume the ownership columns (documents.owner_id/visibility)
+#   and the document_acl drop never land, so the freshly-built documents-api /
+#   retrieval-engine would run against a stale schema and every ownership query
+#   would error. The standalone migrator can't help here: this DB is bootstrapped
+#   by init.sql (not the migrator), so `migrator up` replays from zero and fails
+#   on pre-init.sql migrations (e.g. retrieval_traces). We therefore apply the
+#   ownership migration files DIRECTLY — they are idempotent (ADD COLUMN IF NOT
+#   EXISTS / DROP TABLE IF EXISTS / DROP-then-ADD constraint), so this is safe on
+#   fresh volumes (init.sql already added them → no-ops) and re-runs.
+#
+# Skip with APPLY_DPV2_OWNERSHIP=0.
+apply_dataplane_migrations() {
+  if [[ "${APPLY_DPV2_OWNERSHIP:-1}" == "0" ]]; then
+    log "Data Plane ownership migration apply disabled (APPLY_DPV2_OWNERSHIP=0)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[dpv2-migrate] dry-run: would apply ownership migrations to dataplane\n'
+    return 0
+  fi
+
+  local container="${DPV2_PG_CONTAINER:-dpv2-postgres}"
+  local user="${DPV2_PG_USER:-dataplane}"
+  local db="${DPV2_PG_DB:-dataplane}"
+  local mig_dir="$CORE_ROOT/apps/Data Plane v2/infra/postgres/migrations"
+
+  if ! docker ps --format '{{.Names}}' | grep -qx "$container"; then
+    printf '[dpv2-migrate] WARN: %s not running; skipping ownership migration apply\n' "$container" >&2
+    return 0
+  fi
+
+  log "Applying Data Plane ownership migrations (owner_id/visibility + drop document_acl)"
+  local f
+  for f in "20260620130000_add_document_ownership.sql" "20260620120000_drop_document_acl.sql"; do
+    if [[ -f "$mig_dir/$f" ]]; then
+      if docker exec -i "$container" psql -v ON_ERROR_STOP=1 -U "$user" -d "$db" < "$mig_dir/$f" >/dev/null 2>&1; then
+        printf '[dpv2-migrate] applied %s\n' "$f"
+      else
+        printf '[dpv2-migrate] WARN: applying %s failed; documents ownership schema may be stale\n' "$f" >&2
+      fi
+    fi
+  done
+}
+
 # ensure_finspo_database — idempotently CREATE DATABASE finspo on the
 # running ingestion-postgres container.
 #
@@ -813,6 +862,78 @@ verify_controlplane_db_auth() {
       return 1
     fi
     printf '[db-auth] Continuing (set STRICT_DB_AUTH=1 to fail the build here).\n' >&2
+  fi
+  return 0
+}
+
+# verify_ownership_phase — after Control + Data planes are up, confirm the
+# Per-User Data Ownership & Sharing migrations actually applied. Like the finspo
+# hook, this nets the "old DB volume predates the schema" case: a core can look
+# "up" (port open) while running against a Postgres that never got
+# resource_grants / documents.owner_id, which would make every ownership query
+# fail at runtime. Checks:
+#   - user_service.resource_grants  (Control Plane — user-core migration 012)
+#   - documents.owner_id + visibility (Data Plane — migration 20260620130000)
+#   - the shared NATS bus is reachable (the grant-revoke evictor + the GDPR
+#     ownership-transfer subscriber ride velion-nats; without it revocation
+#     falls back to the 5-min TTL and erasure-transfer won't run).
+#
+# Tolerant by default (warns, never aborts) — set STRICT_OWNERSHIP_CHECK=1 to
+# fail the build when the schema is missing. Skip with VERIFY_OWNERSHIP=0.
+verify_ownership_phase() {
+  if [[ "${VERIFY_OWNERSHIP:-1}" == "0" ]]; then
+    log "Ownership-phase verification disabled (VERIFY_OWNERSHIP=0)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[ownership] dry-run: would verify resource_grants + documents.owner_id schema\n'
+    return 0
+  fi
+
+  local cp_container="${SEED_PG_CONTAINER:-controlplane-postgres}"
+  local cp_user="${CONTROLPLANE_PG_USER:-aquatiq}"
+  local dp_container="${DPV2_PG_CONTAINER:-dpv2-postgres}"
+  local dp_user="${DPV2_PG_USER:-dataplane}"
+  local dp_db="${DPV2_PG_DB:-dataplane}"
+  local failed=()
+
+  log "Verifying Per-User Data Ownership schema (resource_grants + documents.owner_id)"
+
+  # 1) resource_grants in user_service (Control Plane).
+  local rg
+  rg="$(docker exec "$cp_container" psql -U "$cp_user" -d user_service -tAc \
+    "SELECT to_regclass('public.resource_grants') IS NOT NULL" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$rg" == "t" ]]; then
+    printf '[ownership] user_service.resource_grants OK\n'
+  else
+    printf '[ownership] WARN: user_service.resource_grants MISSING — user-core migration 012 did not apply (old volume?). Restart user-core or re-run migrations.\n' >&2
+    failed+=("resource_grants")
+  fi
+
+  # 2) documents.owner_id + visibility in dataplane (Data Plane).
+  local cols
+  cols="$(docker exec "$dp_container" psql -U "$dp_user" -d "$dp_db" -tAc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_name='documents' AND column_name IN ('owner_id','visibility')" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$cols" == "2" ]]; then
+    printf '[ownership] documents.owner_id + visibility OK\n'
+  else
+    printf '[ownership] WARN: documents.owner_id/visibility MISSING (found %s/2) — Data Plane migration 20260620130000 did not apply (old volume?).\n' "${cols:-0}" >&2
+    failed+=("documents.owner_id")
+  fi
+
+  # 3) shared NATS bus (best-effort signal, never fatal).
+  if docker ps --format '{{.Names}}' | grep -qx "velion-nats"; then
+    printf '[ownership] shared bus velion-nats present (grant-revoke evictor + GDPR ownership-transfer subscriber can attach)\n'
+  else
+    printf '[ownership] NOTE: velion-nats not found; revoke-eviction falls back to the 5-min TTL and erasure-transfer will not run until the shared bus is up.\n' >&2
+  fi
+
+  if (( ${#failed[@]} > 0 )); then
+    printf '[ownership] FAILED: missing schema: %s\n' "${failed[*]}" >&2
+    if [[ "${STRICT_OWNERSHIP_CHECK:-0}" == "1" ]]; then
+      return 1
+    fi
+    printf '[ownership] Continuing (set STRICT_OWNERSHIP_CHECK=1 to fail the build here).\n' >&2
   fi
   return 0
 }
