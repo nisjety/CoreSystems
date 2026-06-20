@@ -96,12 +96,12 @@ pub(crate) async fn require_session(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if let Some(user) = dev_bypass_user(&state, request.headers()) {
-        stamp_trusted_identity(&mut request, &user);
-        request.extensions_mut().insert(user);
-        return next.run(request).await;
-    }
-
+    // A real, validated Better Auth session is ALWAYS authoritative and is
+    // resolved first. The dev-auth bypass must never override a logged-in user:
+    // if it did, a `Bearer dev-bypass` header (which the SPA injects whenever
+    // VITE_ALLOW_DEV_AUTH_BYPASS is on) would collapse every caller — including
+    // real, distinct-tenant logins — onto the single shared dev identity, so
+    // different organizations would read each other's data (cross-tenant leak).
     let cookie_header = request
         .headers()
         .get("cookie")
@@ -109,18 +109,26 @@ pub(crate) async fn require_session(
         .unwrap_or("")
         .to_owned();
 
-    match validate_session_cookie(&state, &cookie_header).await {
-        Some(user) => {
-            stamp_trusted_identity(&mut request, &user);
-            request.extensions_mut().insert(user);
-            next.run(request).await
-        }
-        None => (
-            StatusCode::UNAUTHORIZED,
-            Json(error("unauthorized", "Authentication required")),
-        )
-            .into_response(),
+    if let Some(user) = validate_session_cookie(&state, &cookie_header).await {
+        stamp_trusted_identity(&mut request, &user);
+        request.extensions_mut().insert(user);
+        return next.run(request).await;
     }
+
+    // Dev-only fallback: applies ONLY when there is no valid session and
+    // ALLOW_DEV_AUTH_BYPASS is explicitly enabled (see `dev_bypass_user`). It
+    // can never downgrade or impersonate an authenticated user.
+    if let Some(user) = dev_bypass_user(&state, request.headers()) {
+        stamp_trusted_identity(&mut request, &user);
+        request.extensions_mut().insert(user);
+        return next.run(request).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(error("unauthorized", "Authentication required")),
+    )
+        .into_response()
 }
 
 fn dev_bypass_user(state: &AppState, headers: &axum::http::HeaderMap) -> Option<AuthenticatedUser> {

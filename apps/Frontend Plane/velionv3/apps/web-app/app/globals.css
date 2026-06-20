@@ -1,24 +1,46 @@
 @import "tailwindcss";
 
+@font-face {
+	font-family: Arbeit;
+	font-style: normal;
+	font-weight: 300;
+	src: url("/fonts/arbeit-pro-light/arbeit-pro-light.woff") format("woff");
+	font-display: swap;
+}
+
+@font-face {
+	font-family: Arbeit;
+	font-style: normal;
+	font-weight: 400;
+	src: url("/fonts/arbeit-pro-book/arbeit-pro-book.woff") format("woff");
+	font-display: swap;
+}
+
+@font-face {
+	font-family: Protokoll;
+	font-style: normal;
+	font-weight: 300;
+	src:
+		url("/wp-content/themes/stingray/_/dist/ProtokollLight-Web.woff2") format("woff2"),
+		url("/wp-content/themes/stingray/_/dist/ProtokollLight-Web.woff") format("woff");
+	font-display: swap;
+}
+
 :root {
 	color: var(--foreground);
 	background: var(--background);
 	font-family:
-		Inter,
+		var(--font-geist-sans),
+		"Helvetica Neue",
 		ui-sans-serif,
 		system-ui,
-		-apple-system,
-		BlinkMacSystemFont,
-		"Segoe UI",
 		sans-serif;
 	font-synthesis: none;
 	line-height: 1.5;
 	text-rendering: optimizeLegibility;
 	-webkit-font-smoothing: antialiased;
 
-	/* ==================================================
-     BASE — shadcn / SaaS structure
-  ================================================== */
+	/* Base */
 	--background: #f8f8f7;
 	--foreground: #1a1a1a;
 	--card: #ffffff;
@@ -40,9 +62,7 @@
 	--ring: #ee7a50;
 	--radius: 0.75rem;
 
-	/* ==================================================
-     VELION BRAND CORE
-  ================================================== */
+	/* Velion brand core */
 	--velion-bg: #f8f8f7;
 	--velion-bg-soft: #f3f3f2;
 	--velion-bg-cream: #f8f8f7;
@@ -72,9 +92,7 @@
 	--velion-coral-deep: #793819;
 	--velion-coral-soft: #fff1e7;
 
-	/* ==================================================
-     LINEAR / INTERCOM INSPIRED NEUTRALS
-  ================================================== */
+	/* Neutrals */
 	--velion-linear-bg: #f8f8f7;
 	--velion-linear-panel: #ffffff;
 	--velion-linear-panel-soft: #f4f4f3;
@@ -89,9 +107,7 @@
 	--velion-sidebar-muted: #a3a6b3;
 	--velion-sidebar-accent: #ee7a50;
 
-	/* ==================================================
-     STANDARD PALETTE — A to J
-  ================================================== */
+	/* Standard palette A-J */
 	--velion-a-earth: #793819;
 	--velion-a-accent: #ee7a50;
 	--velion-b-apricot: #f7c8a8;
@@ -128,8 +144,39 @@
 	}
 }
 
+html {
+	scroll-behavior: smooth;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
 body {
+	margin: 0;
+	overflow-x: hidden;
 	background: var(--background);
 	color: var(--foreground);
-	font-family: Arial, Helvetica, sans-serif;
+	font-family:
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+}
+
+body.velion-menu-open {
+	overflow: hidden;
+}
+
+button,
+input {
+	font: inherit;
+}
+
+a {
+	color: inherit;
+	text-decoration: none;
 }

@@ -409,4 +409,71 @@ mod tests {
             );
         }
     }
+
+    /// Regression (cross-tenant chat leak): a real validated Better Auth session
+    /// MUST win over a `Bearer dev-bypass` header. If dev-bypass took precedence
+    /// it would collapse every caller onto the shared dev identity, so distinct
+    /// tenants would read each other's chat/data. Here a real Triodelab session
+    /// is present alongside a dev-bypass header — the real identity must be used.
+    #[tokio::test]
+    async fn real_session_is_authoritative_over_dev_bypass() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "real-user-ima", "email": "ima@triodelab.no", "emailVerified": true },
+                "session": { "activeOrganizationId": "triodelab-org" }
+            })))
+            .mount(&auth)
+            .await;
+
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/internal/v1/router-policy"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&upstream)
+            .await;
+
+        // Dev-bypass ENABLED, but a real session cookie is present.
+        let mut state = test_state(true);
+        state.auth_core_url = auth.uri();
+        state.inference_core_url = upstream.uri();
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/router-policy")
+                    .header("authorization", "Bearer dev-bypass")
+                    .header("cookie", "better-auth.session_token=real")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.into_body().collect().await.unwrap();
+
+        let received = upstream.received_requests().await.unwrap();
+        assert!(!received.is_empty(), "router-policy must proxy upstream");
+        let req = &received[0];
+        assert_eq!(
+            req.headers.get("x-user-id").and_then(|v| v.to_str().ok()),
+            Some("real-user-ima"),
+            "the real session user must be used, not the shared dev-bypass identity"
+        );
+        assert_eq!(
+            req.headers.get("x-org-id").and_then(|v| v.to_str().ok()),
+            Some("triodelab-org"),
+            "the real session's org must be forwarded, not the dev user's"
+        );
+    }
 }
