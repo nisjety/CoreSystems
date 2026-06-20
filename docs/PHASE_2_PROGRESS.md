@@ -280,6 +280,34 @@ go/no-go + the formal Track-C-merged-and-green review (C1 edge `--features postg
 C3 SPA tab). If the team chooses to override the date gate given this positive signal, that is a deliberate
 scope decision — the plan as written defers to 2026-07-05.
 
+### W2 recon (date gate overridden by request 2026-06-20) — root cause + remaining build
+Pinned the decode mismatch:
+- `store.Schedule` (quarry-control `internal/store/store.go:122`) = `{ID, Cron, TargetKind(scrape|crawl|batch),
+  TargetRef, Enabled, CreatedAt}` — **no `org_id`, no `Workflow`/`Args`**.
+- `schedules.ScheduleSpec` (quarry-orchestrator `internal/schedules/schedules.go:34`) = `{ID, Name, Cron,
+  Workflow, Args, Paused}`.
+- The orchestrator decodes Control-Plane Schedules into ScheduleSpec, but the JSON keys don't line up
+  (`target_kind`/`target_ref` vs `workflow`/`args`), so `Workflow=""` → the Temporal reconciler creates a
+  schedule with no workflow. AND **`ChangeMonitorWF` does not exist** (only 3 workflows are registered in
+  `cmd/orchestrator/main.go`). The change STORE (`quarry-runtime/postgres_baseline_store.rs`:
+  save_baseline/compare_snapshot/create_diff_record) and the on-demand `/v1/change/check` DO exist (Phase-1 C).
+
+Remaining W2 build (the recurring layer on top of Phase-1 C's on-demand check), spanning 3 services:
+1. quarry-control: add `org_id` to `store.Schedule` + a `TargetKind→(Workflow,Args)` mapping so a
+   `change`-kind schedule serializes to `Workflow="ChangeMonitorWF", Args=[org_id, url]`.
+2. quarry-orchestrator: create **ChangeMonitorWF** + an activity that runs the change-check for a source on
+   the preset, register it in `cmd/orchestrator/main.go`, and make the reconciler map the decoded spec; confirm
+   orphan-reaping is org-scoped (two coexisting orgs test).
+3. `quarry_sources` durable CRUD (org_id) replacing the `/v1/sources` stub.
+4. change → run-event-log → existing `fanoutWebhooks` + one in-product notification; gateway monitoring read
+   surface + minimal v3 tab (fixed hourly/daily/weekly presets only).
+
+**Status: NOT built.** Per the plan's absolute rule ("never half-ship W2 — fully persists+alerts with cross-org
+isolation, OR cleanly deferred"), this multi-service Temporal engine + its live DoD (a real source on a daily
+preset persists a baseline + writes a diff on change + fires webhook + notification, cross-org isolated) require
+a focused build + a live Temporal/Quarry-stack verification — not safely completable as a no-half-ship unit in
+this session's tail. The recon above is the precise build plan for that focused session.
+
 ## No-new-fakeness audit (final)
 Every rendered value traces to real per-org data today or is explicitly labelled, and several fabrications were
 *removed* or *refused* rather than added: W4 "Applied" only after a live approve→execute round-trip; W3 briefs
