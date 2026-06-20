@@ -116,6 +116,23 @@ func TestAnonymizeUnavailableWhenAuthPoolUnset(t *testing.T) {
 	}
 }
 
+// TestHardEraseAdminCanTargetAnotherUser proves the admin path: an admin may
+// erase a DIFFERENT user, not just themselves. The admin/self gate passes, so the
+// request reaches the capability check (503 here, auth-DB unset) — distinguishing
+// it from the 403 a non-admin non-self caller gets in TestHardEraseRejectsNonSelfNonAdmin.
+func TestHardEraseAdminCanTargetAnotherUser(t *testing.T) {
+	s := &Server{userService: &users.Service{}} // non-nil service, authPool unset
+
+	c, w := newGDPRTestContext(t, http.MethodDelete, "/api/v1/users/u_target/gdpr/erase", `{"confirm":true}`, "admin_1", "admin")
+	c.Params = gin.Params{{Key: "id", Value: "u_target"}}
+
+	s.hardEraseUser(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (admin passed authz on another user, auth-DB unset), got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
 // TestActorRole covers the audit actor_role labelling.
 func TestActorRole(t *testing.T) {
 	if got := actorRole(true, false); got != "admin" {

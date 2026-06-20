@@ -146,6 +146,18 @@ type DSARExport struct {
 	Notes       []string         `json:"notes"`
 }
 
+// DSARControlPlaneDisclosure is the verbatim Art. 15 scope notice attached to
+// every DSAR export. It states plainly that the export covers Control-Plane data
+// ONLY — Model-Plane run history/conversations and Data-Plane documents are
+// handled via the cross-plane erasure fan-out, not assembled here. This honesty
+// boundary (never imply "exported/erased everywhere") is pinned verbatim by a
+// test; do not weaken it without updating that test.
+var DSARControlPlaneDisclosure = []string{
+	"Control Plane export: profile + org memberships + API key metadata.",
+	"Audit events for this subject are retained by audit-core (velion.audit.v1.control.*).",
+	"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
+}
+
 // BuildDSARExport gathers the data Control Plane owns for a subject. It never
 // includes secrets (password hashes, raw API key material) — only metadata.
 func (s *Service) BuildDSARExport(ctx context.Context, userID string) (*DSARExport, error) {
@@ -176,11 +188,9 @@ func (s *Service) BuildDSARExport(ctx context.Context, userID string) (*DSARExpo
 		},
 		Memberships: []map[string]any{},
 		APIKeys:     []map[string]any{},
-		Notes: []string{
-			"Control Plane export: profile + org memberships + API key metadata.",
-			"Audit events for this subject are retained by audit-core (velion.audit.v1.control.*).",
-			"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
-		},
+		// Copy the pinned disclosure so a caller mutating export.Notes can never
+		// alter the shared package-level contract.
+		Notes: append([]string(nil), DSARControlPlaneDisclosure...),
 	}
 
 	// Extended profile (bio/phone/location/...), best-effort.

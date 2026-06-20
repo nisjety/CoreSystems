@@ -114,10 +114,25 @@ per-connection column stays honestly "Attribution unavailable" until connection-
 fabricating it.** (Path to real per-connection: connection-bound MCP tools + a `source`/connection field on
 the audit detail — deferred, not faked.)
 
-### Remaining (PR-2, substantial) — admin Control-Plane erasure
-The self-service erasure (Phase-1 D) already ships confirm + step-up + the CP-only DSAR disclosure. The
-admin variant (an org admin erasing another user's CP account data) needs: an RBAC-gated endpoint over
-user-core's existing hard_delete/anonymize (gdpr.go), typed-confirm + step-up re-auth, honest copy ("CP
-account data; Model/Data purge pending" — never "erased everywhere"), gateway proxy + admin UI, and the CP
-`.env` DB_PASSWORD-drift reconcile before the erase path runs (never change the live hex). Scoped as the
-next PR-2 increment.
+### Done — admin Control-Plane erasure: backend confirmed + disclosure pinned
+On inspection the **admin erasure backend already ships** (Phase-1 D, `user-core/internal/http/gdpr_handlers.go`):
+`hardEraseUser`/`anonymizeUser`/`dsarExport` are gated by `resolveErasureActor` = **admin OR self**, so an
+admin can erase another user; hard-erase requires `confirm:true`; the `ErasureAvailable()` 503 gate fires
+when AUTH_DATABASE_URL is unset; every op emits a CP audit event + (on erase) the `velion.gdpr.erasure.requested`
+cross-plane fan-out. Added this increment:
+- **DSAR disclosure pinned verbatim**: extracted the Art. 15 CP-only scope notice to
+  `users.DSARControlPlaneDisclosure` (used by `BuildDSARExport`) + `TestDSARDisclosureVerbatim` pins the exact
+  three lines — guards "Control-Plane data only; Model/Data via fan-out", never "erased/exported everywhere".
+- **Positive admin-authz test**: `TestHardEraseAdminCanTargetAnotherUser` proves an admin passes the gate to
+  erase a *different* user (reaches the 503 capability check, not the 403 a non-admin non-self gets).
+- Evidence: `go build ./...` ok; `go test ./internal/users ./internal/http` → ok (incl. both new tests).
+
+### Remaining (PR-2) — admin erasure PRODUCT surface (scoped, security-sensitive)
+What is NOT yet built is the admin-erases-another-user **product path** through the gateway + SPA. The gateway
+`privacy.rs` is deliberately **self-scoped** (no client-supplied id → IDOR-safe). An admin route must:
+(1) verify the caller is an **org admin**, (2) **org-scope the target** (confirm the target user is a member of
+the admin's org before forwarding — else it reintroduces the cross-tenant IDOR Phase 0 closed),
+(3) enforce **step-up re-auth**, (4) forward to user-core `/users/:id/gdpr/erase` with honest CP-only UI copy.
+Also reconcile the CP `.env` DB_PASSWORD drift before the erase path runs in a live deploy (never change the
+live hex). Deferred deliberately rather than rushed — a cross-org admin route is exactly the surface that must
+be org-scoped + negative-tested before shipping.

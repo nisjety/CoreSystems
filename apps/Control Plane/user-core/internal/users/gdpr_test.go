@@ -22,6 +22,27 @@ func TestGDPRSubjectContract(t *testing.T) {
 	}
 }
 
+// TestDSARDisclosureVerbatim pins the Art. 15 CP-only scope notice word-for-word.
+// The export must always disclose it covers Control-Plane data ONLY and that
+// Model/Data-Plane purge happens via the cross-plane fan-out — it must never
+// imply "exported/erased everywhere". Changing this copy is a deliberate act that
+// must update this test in the same change.
+func TestDSARDisclosureVerbatim(t *testing.T) {
+	want := []string{
+		"Control Plane export: profile + org memberships + API key metadata.",
+		"Audit events for this subject are retained by audit-core (velion.audit.v1.control.*).",
+		"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
+	}
+	if len(DSARControlPlaneDisclosure) != len(want) {
+		t.Fatalf("disclosure has %d notes, want %d", len(DSARControlPlaneDisclosure), len(want))
+	}
+	for i, w := range want {
+		if DSARControlPlaneDisclosure[i] != w {
+			t.Errorf("disclosure[%d] = %q, want %q", i, DSARControlPlaneDisclosure[i], w)
+		}
+	}
+}
+
 // TestHardEraseRequiresAuthPool proves the auth-DB dependency is explicit: with
 // no AUTH_DATABASE_URL pool wired, hard erase/anonymize fail loudly rather than
 // silently skipping auth-side data.
