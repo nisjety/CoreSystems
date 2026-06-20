@@ -71,6 +71,13 @@ jobs:
             echo "::error::a gateway domain reads a client org header — derive org via authorized_org_id, never x-org-id/x-velion-org-id:"
             grep -rInE 'get\("x-(velion-)?org-id"' "$gw/domains"; fail=1
           fi
+          # Phase 2 PR-6: the fabricated "US region default" residency/timezone option
+          # must not return. Real IANA timezones (Europe/Oslo, America/New_York) are
+          # fine; a synthetic "region default" conflating residency with a timezone is not.
+          if grep -rInE 'region default' "$spa" >/dev/null 2>&1; then
+            echo "::error::fabricated 'region default' residency option found in the SPA — use a real IANA timezone, never a labelled US/non-EU region:"
+            grep -rInE 'region default' "$spa"; fail=1
+          fi
           if [ "$fail" -ne 0 ]; then exit 1; fi
           echo "Fabrication guard passed."
 

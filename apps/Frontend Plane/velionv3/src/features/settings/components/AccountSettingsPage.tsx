@@ -412,7 +412,6 @@ function PreferencesSection(props: {
             { value: 'UTC', label: 'UTC' },
             { value: 'America/New_York', label: 'America/New York' },
             { value: 'Europe/London', label: 'Europe/London' },
-            { value: 'US', label: 'US region default' },
           ]}
         />
         <SettingsSelect

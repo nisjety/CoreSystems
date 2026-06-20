@@ -185,3 +185,25 @@ is provisioned:
 - Scope note: the Quarry-change + model-gateway-summary (citations) legs are additive enrichment on the same
   envelope (follow-up); the Preview gate already protects the honesty invariant. A thin SPA brief surface
   consuming `/api/v1/briefs` is the remaining UI piece.
+
+---
+
+## PR-6 — W6 design-partner slice + mandatory de-fakes (the JOIN, last)
+**Status:** mandatory honesty de-fakes done; the full vertical slice + i18n centralization scoped.
+
+### Done — mandatory de-fakes (honesty-critical, unblocked, shipped first)
+- **US-region fabrication removed**: `AccountSettingsPage.tsx` dropped the synthetic
+  `{ value: 'US', label: 'US region default' }` timezone option (it conflated residency with a timezone and
+  `'US'` is not a valid IANA zone). Real IANA zones (Europe/Oslo, UTC, America/New_York, Europe/London) remain.
+- **Grep guard added**: `velionv3-ci.yml` fabrication-guard now fails on any `region default` string in the SPA.
+  Verified: passes on the cleaned tree; **red on a deliberate re-introduction**.
+- **No orphaned nav**: confirmed the SPA nav (`app/shell/navigation.ts`, `features/core/lib/sidebar-navigation.ts`)
+  does not point at the unbuilt engines (leads/briefs/monitoring) — nothing to remove.
+- Evidence: `pnpm verify` green (156 tests, build ok); guard red-on-violation verified.
+
+### Remaining (PR-6) — the vertical-slice JOIN + i18n
+- The thinnest coherent slice scoped to what shipped (Brreg resolve → AI proposes → human approves →
+  executes via W4 → audited in-region via E5, + brief from W3) run end-to-end for one real Norwegian org —
+  depends on PR-5 (leads) + the live stack; the "join" is finalized last by design.
+- Centralize Norwegian i18n — a cross-cutting consistency refactor (not a fakeness fix); scoped to avoid a
+  rushed sweep.
