@@ -207,3 +207,33 @@ is provisioned:
   depends on PR-5 (leads) + the live stack; the "join" is finalized last by design.
 - Centralize Norwegian i18n — a cross-cutting consistency refactor (not a fakeness fix); scoped to avoid a
   rushed sweep.
+
+---
+
+## PR-5 — W1 Brreg lead-builder (metered, company-data-only) — built last
+**Status:** filtered Brreg client (the novel core) done + verified; the rest of leads-core scoped.
+
+### Done — NEW filtered Brreg client (the "real net-new work")
+NEW Application-Plane module `apps/Application Plane/leads-core` (separate Go module, social-core template) with
+`internal/brreg/client.go` — a filtered Enhetsregisteret client distinct from org-core's navn-only size-20 client
+(which is left untouched):
+- Filters: `naeringskode`, `kommunenummer`, `organisasjonsform`, `fra/tilAntallAnsatte`,
+  `fra/tilRegistreringsdatoEnhetsregisteret`, page+size.
+- **Real API contract verified against the live Brreg docs** (and it corrects the plan): `/enheter` uses
+  **page+size with a hard 10 000 window** (`(page+1)*size > 10000` → HTTP 400) — there is **no `searchAfter`**
+  for this endpoint. Guarded with a typed `ErrDeepPagingLimit`.
+- **1–4 employee band**: Enhetsregisteret v2 rejects `fra/tilAntallAnsatte` values 1–4 (HTTP 400; `antallAnsatte`
+  is null for 0–4 employees). Guarded client-side with a typed `ErrEmployeeBandUnsupported` so the caller never
+  hits an opaque 400.
+- **Company data ONLY**: calls only `/enheter`, never `/roller`. The `Company` record carries no person/role/
+  contact/birth-number field.
+- Evidence: `go build` + `go vet` + `go test` green — 6 tests: facet query building, empty-facet omission,
+  **1–4 band → typed error**, **10k cap → typed error**, fixture parse maps company fields only, and TWO no-PII
+  assertions (a serialization-leak test feeding a fixture with `roller`/`fodselsnummer`/`epostadresse` proves
+  none leak into the serialized `Company`, plus a structural field-name test).
+
+### Remaining (PR-5, scoped) — the rest of leads-core (substantial)
+leads-core service scaffold (Postgres + migration + repo + handlers + internal-key, social-core template) for
+saved lead lists; gateway `/leads` domain (`authorized_org_id` + `proxy_json`); v3 `features/leads`
+(search → save named list → table → CSV export); metering via a billing-core entitlement; per-export audit
+event. The filtered client above is the load-bearing novel piece; the rest is service plumbing on proven templates.
