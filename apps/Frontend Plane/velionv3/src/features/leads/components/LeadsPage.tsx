@@ -1,4 +1,5 @@
 import { createResource, createSignal, For, Show } from 'solid-js'
+import { no } from '@/shared/i18n/no'
 import {
   createLeadList,
   deleteLeadList,
@@ -10,11 +11,12 @@ import {
   type SavedLeadList,
 } from '@/shared/api/leads-client'
 
+const t = no.leads
+
 /** Lead-builder: filtered Enhetsregisteret company search → save a named list →
  *  table → metered CSV export. Company data only; no person/role data is ever
- *  fetched or shown. */
+ *  fetched or shown. Norwegian copy is centralized in shared/i18n/no.ts. */
 export function LeadsPage() {
-  // ── Search filters ──────────────────────────────────────────────────────
   const [naeringskode, setNaeringskode] = createSignal('')
   const [kommunenummer, setKommunenummer] = createSignal('')
   const [organisasjonsform, setOrganisasjonsform] = createSignal('')
@@ -58,7 +60,7 @@ export function LeadsPage() {
     } catch (err) {
       // Enhetsregisteret rejects employee filters in the 1–4 band and deep paging
       // beyond 10k — the gateway surfaces these as a clear message (422).
-      setSearchError(err instanceof Error ? err.message : 'Search failed. Please adjust the filters and retry.')
+      setSearchError(err instanceof Error ? err.message : t.searchError)
       setResults([])
     } finally {
       setSearching(false)
@@ -84,17 +86,17 @@ export function LeadsPage() {
     setSaveMessage(null)
     const companies = Object.values(selected())
     if (!listName().trim() || companies.length === 0) {
-      setSaveMessage('Name the list and select at least one company.')
+      setSaveMessage(t.saveValidation)
       return
     }
     try {
       const list = await createLeadList(listName().trim(), companies)
-      setSaveMessage(`Saved “${list.name}” (${list.company_count} companies).`)
+      setSaveMessage(t.saved(list.name, list.company_count))
       setListName('')
       setSelected({})
       await refetchLists()
     } catch (err) {
-      setSaveMessage(err instanceof Error ? err.message : 'Could not save the list. Please retry.')
+      setSaveMessage(err instanceof Error ? err.message : t.saveError)
     }
   }
 
@@ -113,34 +115,31 @@ export function LeadsPage() {
   }
 
   return (
-    <section class="velion-leads" aria-label="Lead builder">
+    <section class="velion-leads" aria-label={t.title}>
       <header class="velion-leads__head">
-        <h1>Leads</h1>
-        <p class="velion-leads__sub">
-          Find Norwegian companies in Enhetsregisteret by industry, location, and size. Company data only —
-          no contacts or named persons.
-        </p>
+        <h1>{t.title}</h1>
+        <p class="velion-leads__sub">{t.subtitle}</p>
       </header>
 
       <form class="velion-leads__filters" onSubmit={runSearch}>
         <label>
-          Næringskode<input value={naeringskode()} onInput={(e) => setNaeringskode(e.currentTarget.value)} placeholder="e.g. 10.209" />
+          {t.naeringskode}<input value={naeringskode()} onInput={(e) => setNaeringskode(e.currentTarget.value)} placeholder="f.eks. 10.209" />
         </label>
         <label>
-          Kommunenummer<input value={kommunenummer()} onInput={(e) => setKommunenummer(e.currentTarget.value)} placeholder="e.g. 4601" />
+          {t.kommunenummer}<input value={kommunenummer()} onInput={(e) => setKommunenummer(e.currentTarget.value)} placeholder="f.eks. 4601" />
         </label>
         <label>
-          Organisasjonsform<input value={organisasjonsform()} onInput={(e) => setOrganisasjonsform(e.currentTarget.value)} placeholder="e.g. AS" />
+          {t.organisasjonsform}<input value={organisasjonsform()} onInput={(e) => setOrganisasjonsform(e.currentTarget.value)} placeholder="f.eks. AS" />
         </label>
         <label>
-          Min. ansatte<input type="number" min="0" value={fraAnsatte()} onInput={(e) => setFraAnsatte(e.currentTarget.value)} placeholder="0 or ≥5" />
+          {t.minEmployees}<input type="number" min="0" value={fraAnsatte()} onInput={(e) => setFraAnsatte(e.currentTarget.value)} placeholder="0 eller ≥5" />
         </label>
         <label>
-          Maks. ansatte<input type="number" min="0" value={tilAnsatte()} onInput={(e) => setTilAnsatte(e.currentTarget.value)} />
+          {t.maxEmployees}<input type="number" min="0" value={tilAnsatte()} onInput={(e) => setTilAnsatte(e.currentTarget.value)} />
         </label>
-        <button type="submit" disabled={searching()}>{searching() ? 'Searching…' : 'Search'}</button>
+        <button type="submit" disabled={searching()}>{searching() ? t.searching : t.search}</button>
       </form>
-      <p class="velion-leads__hint">Enhetsregisteret cannot filter employee counts of 1–4; use 0 or 5+.</p>
+      <p class="velion-leads__hint">{t.employeeBandHint}</p>
 
       <Show when={searchError()}>
         <p class="velion-leads__error" role="alert">{searchError()}</p>
@@ -149,19 +148,19 @@ export function LeadsPage() {
       <Show when={searched() && !searching() && !searchError()}>
         <Show
           when={results().length > 0}
-          fallback={<p class="velion-leads__muted">No companies matched these filters.</p>}
+          fallback={<p class="velion-leads__muted">{t.noResults}</p>}
         >
           <form class="velion-leads__save" onSubmit={saveList}>
-            <input value={listName()} onInput={(e) => setListName(e.currentTarget.value)} placeholder="Name this list" aria-label="List name" />
-            <button type="submit" disabled={selectedCount() === 0}>Save {selectedCount()} as list</button>
+            <input value={listName()} onInput={(e) => setListName(e.currentTarget.value)} placeholder={t.nameList} aria-label={t.nameList} />
+            <button type="submit" disabled={selectedCount() === 0}>{t.saveSelected(selectedCount())}</button>
             <Show when={saveMessage()}><span class="velion-leads__note" role="status">{saveMessage()}</span></Show>
           </form>
 
           <table class="velion-leads__table">
             <thead>
               <tr>
-                <th aria-label="Select" />
-                <th>Navn</th><th>Org.nr</th><th>Form</th><th>Næring</th><th>Sted</th><th>Ansatte</th>
+                <th aria-label="Velg" />
+                <th>{t.columns.navn}</th><th>{t.columns.orgnr}</th><th>{t.columns.form}</th><th>{t.columns.naering}</th><th>{t.columns.sted}</th><th>{t.columns.ansatte}</th>
               </tr>
             </thead>
             <tbody>
@@ -173,7 +172,7 @@ export function LeadsPage() {
                         type="checkbox"
                         checked={!!selected()[c.organisasjonsnummer]}
                         onChange={() => toggle(c)}
-                        aria-label={`Select ${c.navn}`}
+                        aria-label={`Velg ${c.navn}`}
                       />
                     </td>
                     <td>{c.navn}</td>
@@ -190,10 +189,10 @@ export function LeadsPage() {
         </Show>
       </Show>
 
-      <section class="velion-leads__lists" aria-label="Saved lists">
-        <h2>Saved lists</h2>
-        <Show when={!lists.loading} fallback={<p class="velion-leads__muted">Loading…</p>}>
-          <Show when={(lists() ?? []).length > 0} fallback={<p class="velion-leads__muted">No saved lists yet.</p>}>
+      <section class="velion-leads__lists" aria-label={t.savedLists}>
+        <h2>{t.savedLists}</h2>
+        <Show when={!lists.loading} fallback={<p class="velion-leads__muted">{t.loading}</p>}>
+          <Show when={(lists() ?? []).length > 0} fallback={<p class="velion-leads__muted">{t.noSavedLists}</p>}>
             <ul class="velion-leads__listrows">
               <For each={lists()}>
                 {(list) => (
@@ -203,8 +202,8 @@ export function LeadsPage() {
                     </button>
                     <div class="velion-leads__listactions">
                       {/* Metered: the gateway gates this on the org's billing entitlement. */}
-                      <a class="velion-leads__btn" href={leadExportHref(list.id)} download={`${list.name}.csv`}>Export CSV</a>
-                      <button type="button" class="velion-leads__btn velion-leads__btn--danger" onClick={() => remove(list)}>Delete</button>
+                      <a class="velion-leads__btn" href={leadExportHref(list.id)} download={`${list.name}.csv`}>{t.exportCsv}</a>
+                      <button type="button" class="velion-leads__btn velion-leads__btn--danger" onClick={() => remove(list)}>{t.delete}</button>
                     </div>
                   </li>
                 )}
@@ -216,9 +215,9 @@ export function LeadsPage() {
         <Show when={openList()}>
           {(list) => (
             <div class="velion-leads__viewer">
-              <h3>{list().name} — {list().company_count} companies</h3>
+              <h3>{list().name} — {t.companies(list().company_count)}</h3>
               <table class="velion-leads__table">
-                <thead><tr><th>Navn</th><th>Org.nr</th><th>Sted</th><th>Ansatte</th></tr></thead>
+                <thead><tr><th>{t.columns.navn}</th><th>{t.columns.orgnr}</th><th>{t.columns.sted}</th><th>{t.columns.ansatte}</th></tr></thead>
                 <tbody>
                   <For each={list().companies ?? []}>
                     {(c) => (
