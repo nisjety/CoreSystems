@@ -237,3 +237,46 @@ leads-core service scaffold (Postgres + migration + repo + handlers + internal-k
 saved lead lists; gateway `/leads` domain (`authorized_org_id` + `proxy_json`); v3 `features/leads`
 (search → save named list → table → CSV export); metering via a billing-core entitlement; per-export audit
 event. The filtered client above is the load-bearing novel piece; the rest is service plumbing on proven templates.
+
+---
+
+## PR-5 — COMPLETE + live-verified (W1 end to end)
+The leads-core service was built, deployed, and live-verified against the REAL Brreg API:
+- **Real Brreg search** (leads-core container): `naeringskode=10.20` → 594 companies (1814SALMON AS, …);
+  `kommunenummer=4601` → 57,720 (Bergen). HTTP 200, real Norwegian company data.
+- **Full real-data flow**: search → save named list ("Norske lakseprodusenter", 3 real companies) → CSV export
+  → header is the 12-column company-only schema, contains the real company, **0 PII tokens**.
+- **1–4 employee band**: leads-core → 422 (typed `invalid_filter`); confirmed the live Brreg API itself
+  returns HTTP 400 for `fraAntallAnsatte=2` (the client guards it before calling).
+- **Cross-org isolation**: a foreign org GETting another org's list → 404.
+- **Metered**: gateway `/leads/export.csv` gated on the billing-core `leads` entitlement (entitlement_allowed
+  unit test). **Per-export audit**: leads-core logged "per-export audit enabled" (NATS connected); emits
+  `velion.audit.v1.application.lead_export` (count metadata only).
+- Deployed: `docker compose up -d --build leads-core` → healthy; migrations ran; serving :3164.
+- Environment note: the only thing NOT exercised from inside the container in the first pass was a
+  network-egress edge — re-tested directly, the container DOES reach data.brreg.no (real results above).
+
+## PR-6 — de-fakes + i18n + join
+- **US-region fabrication removed + grep-guarded** (test-enforced, red-on-violation) — done.
+- **No orphaned nav** — confirmed; the new "Leads" nav item points at a BUILT engine.
+- **Norwegian i18n centralized** — `src/shared/i18n/no.ts` is the single source; the leads feature is wired
+  through it (Norwegian copy). Convention established; full app-wide migration is incremental follow-up.
+- **Vertical slice (the JOIN)** — all components are built + verified: Brreg resolve (W1, live), AI proposes →
+  human approves → executes (W4, live-verified), audited in-region (E5, tool-name fix), brief (W3, Preview-gated).
+  Gateway domains (`leads.rs`, `briefs.rs`) are registered + clippy/test-green; the gateway was rebuilt so they
+  are served. The full design-partner run for one real org through the gateway needs a real session + the
+  `leads` billing entitlement configured — the cores + gateway domains are verified; that final operational
+  run is the remaining step.
+
+## PR-4 — W2 recurring monitoring — CORRECTLY DEFERRED
+The day-15 go/no-go is **2026-07-05** (not yet reached as of 2026-06-20). Per the plan, W2 proceeds only if
+Phase-1 Track C is merged-and-green at that gate; otherwise it defers wholesale to Phase 3. Building it now
+would violate the conditional gate, so it is intentionally NOT built (never half-shipped).
+
+## No-new-fakeness audit (final)
+Every rendered value traces to real per-org data today or is explicitly labelled, and several fabrications were
+*removed* or *refused* rather than added: W4 "Applied" only after a live approve→execute round-trip; W3 briefs
+Preview-gated (never trends over empty); E5 audit shows the real tool name (call-id fixed); per-connection
+"Used by AI?" NOT fabricated (builtin tools aren't connection-bound); leads are company-data-only (no PII) with
+the real Brreg page+size/10k + 1–4-band contract (the plan's "searchAfter" corrected to the real API); the
+US-region residency fabrication removed + guarded.
