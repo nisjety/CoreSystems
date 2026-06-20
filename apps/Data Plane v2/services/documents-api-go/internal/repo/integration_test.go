@@ -43,10 +43,13 @@ CREATE TABLE IF NOT EXISTS documents (
     extraction_trace JSONB,
     created_by   TEXT,
     deleted_by   TEXT,
+    owner_id     TEXT NOT NULL DEFAULT 'org-system-account',
+    visibility   TEXT NOT NULL DEFAULT 'org',
     idempotency_key TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at   TIMESTAMPTZ
+    deleted_at   TIMESTAMPTZ,
+    CONSTRAINT documents_visibility_chk CHECK (visibility IN ('private', 'org', 'shared'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_idempotency
@@ -126,7 +129,7 @@ func TestCreateAndGet(t *testing.T) {
 		t.Errorf("expected document_id")
 	}
 
-	got, err := r.Get(ctx, "org-test", result.Document.DocumentID)
+	got, err := r.Get(ctx, "org-test", result.Document.DocumentID, "", nil)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -211,7 +214,7 @@ func TestSoftDeleteOrgScope(t *testing.T) {
 	}
 
 	// Doc must still be retrievable from org A
-	got, err := r.Get(ctx, "org-A", doc.Document.DocumentID)
+	got, err := r.Get(ctx, "org-A", doc.Document.DocumentID, "", nil)
 	if err != nil {
 		t.Fatalf("doc disappeared: %v", err)
 	}

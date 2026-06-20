@@ -27,6 +27,13 @@ pub struct RetrievalRequest {
     /// agent_id is the "what defaults should I use" knob.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Org-admin super-visibility (`org:data:read_all`). When true the ownership
+    /// post-filter is bypassed org-wide (still org-scoped, never cross-org) and
+    /// the bypass is audited. Set ONLY from a verified JWT scope on the HTTP path
+    /// — the agent/api-key path leaves it false, so admin bypass is EXCLUDED from
+    /// agent grounding by construction.
+    #[serde(default)]
+    pub admin_read_all: bool,
 }
 
 /// Per-query hybrid-retrieval blend weights. Recorded in `retrieval_runs.mode_mix`

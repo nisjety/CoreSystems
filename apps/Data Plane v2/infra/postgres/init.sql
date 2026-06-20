@@ -23,10 +23,16 @@ CREATE TABLE IF NOT EXISTS documents (
     extraction_trace  JSONB,
     created_by    TEXT,
     deleted_by    TEXT,
+    -- Per-User Data Ownership & Sharing: owner + visibility. Default 'org'
+    -- (org-shared) so the platform is non-breaking; Private is an explicit
+    -- opt-in. owner_id defaults to the system account for non-API writers.
+    owner_id      TEXT         NOT NULL DEFAULT 'org-system-account',
+    visibility    TEXT         NOT NULL DEFAULT 'org',
     idempotency_key TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    deleted_at    TIMESTAMPTZ
+    deleted_at    TIMESTAMPTZ,
+    CONSTRAINT documents_visibility_chk CHECK (visibility IN ('private', 'org', 'shared'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_idempotency
@@ -36,6 +42,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_idempotency
 CREATE INDEX IF NOT EXISTS idx_documents_org_id     ON documents (org_id);
 CREATE INDEX IF NOT EXISTS idx_documents_status     ON documents (status);
 CREATE INDEX IF NOT EXISTS idx_documents_org_status ON documents (org_id, status);
+CREATE INDEX IF NOT EXISTS idx_documents_owner      ON documents (org_id, owner_id);
 CREATE INDEX IF NOT EXISTS idx_documents_type       ON documents (org_id, type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_crawl_url_dedup
     ON documents (org_id, (metadata->>'url'))
@@ -125,19 +132,12 @@ CREATE INDEX IF NOT EXISTS idx_ku_embedding_status ON knowledge_units (embedding
 CREATE INDEX IF NOT EXISTS idx_ku_content_hash     ON knowledge_units (content_hash);
 CREATE INDEX IF NOT EXISTS idx_ku_text_fts         ON knowledge_units USING GIN(to_tsvector('english', text));
 
--- ── document_acl ─────────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS document_acl (
-    acl_id           TEXT         PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
-    org_id           TEXT         NOT NULL,
-    document_id      TEXT         NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
-    user_id          TEXT         NOT NULL,
-    permission_level TEXT         NOT NULL DEFAULT 'read',
-    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_document_acl_user_org  ON document_acl (user_id, org_id);
-CREATE INDEX IF NOT EXISTS idx_document_acl_document  ON document_acl (document_id);
+-- ── document_acl REMOVED (Per-User Data Ownership & Sharing phase) ────────────
+-- The dormant, duplicated document_acl table was consolidated into user-core's
+-- resource_grants — the single grant authority for the whole platform. It is
+-- dropped by migration 20260620120000_drop_document_acl.sql. Do NOT recreate it
+-- here: retrieval enforces ownership via the documents.owner_id/visibility
+-- columns plus user-core's resource_grants, never a Data-Plane-local ACL copy.
 
 -- ── retrieval_runs (trace audit) ─────────────────────────────────────────────
 

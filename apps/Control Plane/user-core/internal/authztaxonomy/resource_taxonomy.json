@@ -1,0 +1,17 @@
+{
+  "_comment": "SINGLE SOURCE OF TRUTH for the ownable-vs-team resource taxonomy. Go embeds this file (authztaxonomy package); the retrieval-engine Rust mirror and scripts/lint-resource-taxonomy.sh assert parity against it. Keep lists sorted. A visibility-bearing resource type MUST appear in exactly one set.",
+  "ownable": [
+    "document"
+  ],
+  "team_shared": [
+    "audit_log",
+    "billing",
+    "capability_registry",
+    "conversation",
+    "inbox",
+    "org_settings",
+    "quarry_run",
+    "quarry_source",
+    "ticket"
+  ]
+}

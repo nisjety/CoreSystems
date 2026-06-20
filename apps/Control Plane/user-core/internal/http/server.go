@@ -23,14 +23,16 @@ type Server struct {
 	router      *gin.Engine
 	server      *http.Server
 	userService *users.Service
+	aclRepo     *users.AclRepository
 	port        string
 	httpClient  *http.Client
 	orgService  string
 	internalKey string
 }
 
-// NewServer creates a new HTTP server
-func NewServer(userService *users.Service, port string) *Server {
+// NewServer creates a new HTTP server. aclRepo backs the per-user authz facade
+// (ListVisible/Check) consumed cross-plane by documents-api and retrieval.
+func NewServer(userService *users.Service, aclRepo *users.AclRepository, port string) *Server {
 	router := gin.New()
 
 	// Global middleware
@@ -43,6 +45,7 @@ func NewServer(userService *users.Service, port string) *Server {
 	s := &Server{
 		router:      router,
 		userService: userService,
+		aclRepo:     aclRepo,
 		port:        port,
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		orgService:  strings.TrimRight(strings.TrimSpace(os.Getenv("ORG_SERVICE_URL")), "/"),
@@ -220,6 +223,17 @@ func (s *Server) setupRoutes() {
 		{
 			internal.POST("/memberships/ensure", s.ensureMembership)
 			internal.POST("/users/enrich-from-provider", s.enrichUserFromProvider)
+
+			// Per-user authz facade — the single internal surface Data Plane
+			// services (documents-api, retrieval) call to resolve a viewer's
+			// explicit resource grants. Internal-key ONLY (a user Bearer token
+			// must not be able to enumerate another subject's grants).
+			authz := internal.Group("/authz")
+			authz.Use(s.requireInternalKeyOnly)
+			{
+				authz.GET("/visible", s.authzVisible)
+				authz.GET("/check", s.authzCheck)
+			}
 		}
 	}
 
@@ -455,6 +469,7 @@ func authContextMiddleware() gin.HandlerFunc {
 				if identity := resolveIdentityFromBearer(c.Request.Context(), bearer, authURL); identity.userID != "" {
 					// G9: never log raw user_id at info; debug only.
 					log.Debug().Str("auth_method", "bearer").Msg("Auth middleware: resolved user from Bearer")
+					c.Set("auth_method", "bearer")
 					c.Set("user_id", identity.userID)
 					if strings.TrimSpace(identity.role) != "" {
 						c.Set("user_role", identity.role)
@@ -471,6 +486,7 @@ func authContextMiddleware() gin.HandlerFunc {
 		}
 
 		log.Debug().Str("auth_method", "internal_key").Msg("Auth middleware: API key matched")
+		c.Set("auth_method", "internal_key")
 
 		userID := strings.TrimSpace(c.GetHeader("X-User-Id"))
 		if userID != "" {

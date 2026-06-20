@@ -173,9 +173,18 @@ impl AuthContext {
         if !self.org_id.is_empty() {
             req.org_id = self.org_id.clone();
         }
-        if self.user_id.is_some() && req.user_id.is_none() {
+        // The authenticated principal's user_id OVERRIDES any caller-supplied
+        // body value — a client must never be able to set the viewer identity
+        // the ownership post-filter enforces against by putting a different
+        // user_id in the request JSON.
+        if self.user_id.is_some() {
             req.user_id = self.user_id.clone();
         }
+
+        // Org-admin super-visibility derives ONLY from a verified scope. This is
+        // reached only on the JWT HTTP path; the api-key/agent path carries no
+        // scopes, so admin bypass can never leak into agent grounding.
+        req.admin_read_all = self.scopes.iter().any(|s| s == "org:data:read_all");
     }
 }
 

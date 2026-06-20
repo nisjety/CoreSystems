@@ -1,3 +1,6 @@
+// See lib.rs — pre-existing clippy-1.94 cosmetic doc lint in untouched modules.
+#![allow(clippy::doc_overindented_list_items)]
+
 mod agent_config;
 mod api;
 mod audit;
@@ -163,6 +166,21 @@ async fn main() -> anyhow::Result<()> {
         "sparse search backend selected"
     );
 
+    // Per-User Data Ownership & Sharing — resolves a viewer's explicit document
+    // grants from user-core's resource_grants facade. ALWAYS-ON (not gated by
+    // CONTROL_PLANE_ENFORCEMENT); fail-open to empty when user-core is
+    // unreachable so owner + org/shared visibility still apply.
+    let user_core_url =
+        std::env::var("USER_CORE_HTTP_URL").unwrap_or_else(|_| "http://user-core:8080".into());
+    let visibility: std::sync::Arc<dyn authz::VisibilityClient> = std::sync::Arc::new(
+        authz::HttpVisibilityClient::new(user_core_url, cfg.internal_api_key.clone()),
+    );
+    // Evict the visibility cache on grant revoke so a revoke takes effect within
+    // one query (5-min TTL is the backstop). Subscribes to the shared bus.
+    if let Some(ref nats) = nats_client {
+        authz::visibility::spawn_grant_invalidator(nats.clone(), visibility.clone());
+    }
+
     let pipeline = Arc::new(RetrievalPipeline {
         pool: pool.clone(),
         qdrant,
@@ -171,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         cache: cache_layer,
         config: cfg.clone(),
         policy,
+        visibility,
         nats: nats_client,
         sparse_backend,
     });

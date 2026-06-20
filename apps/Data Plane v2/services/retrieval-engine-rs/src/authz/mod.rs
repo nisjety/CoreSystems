@@ -29,6 +29,8 @@
 pub mod context;
 pub mod jwks;
 pub mod policy;
+pub mod taxonomy;
+pub mod visibility;
 
 pub use context::{AuthContext, AuthMethod, Claims, EffectiveAcl};
 pub use jwks::JwksCache;
@@ -37,3 +39,5 @@ pub use jwks::JwksCache;
 pub use policy::{
     EnforcementMode, HttpPolicyClient, NoopPolicyClient, PolicyClient, PolicyDecision,
 };
+#[allow(unused_imports)]
+pub use visibility::{HttpVisibilityClient, NoopVisibilityClient, VisibilityClient};

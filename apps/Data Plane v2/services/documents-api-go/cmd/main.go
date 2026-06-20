@@ -19,10 +19,12 @@ import (
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/config"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/events"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/gdpr"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/handler"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/metrics"
 	apmotel "github.com/triodelab/dataplane/services/documents-api-go/internal/otel"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/userauthz"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/usagepub"
 )
@@ -34,6 +36,9 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal().Err(err).Msg("config load failed")
+	}
+	if cfg.InternalAPIKey == "" {
+		log.Warn().Msg("INTERNAL_API_KEY is empty — the documents API is UNAUTHENTICATED; set it in any non-local deployment")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -65,6 +70,29 @@ func main() {
 	docRepo := repo.NewDocumentRepo(pool)
 	sourceObjectRepo := repo.NewSourceObjectRepo(pool)
 	publisher := events.NewPublisher(nc)
+
+	// Per-User Data Ownership (GDPR): subscribe to the cross-plane erasure
+	// fan-out on the SHARED bus and transfer an erased user's owned documents to
+	// the org system account (emitting velion.gdpr.ownership.transferred). The
+	// fan-out is published by user-core on velion-nats, not the Data-Plane bus, so
+	// this uses a separate shared connection. Best-effort: a missing shared bus
+	// just means the transfer doesn't run here (logged), never a startup failure.
+	if cfg.SharedNatsURL != "" {
+		sharedOpts := []nats.Option{nats.Name("documents-api-gdpr-sub")}
+		if cfg.SharedNatsToken != "" {
+			sharedOpts = append(sharedOpts, nats.Token(cfg.SharedNatsToken))
+		}
+		if sharedNc, sErr := nats.Connect(cfg.SharedNatsURL, sharedOpts...); sErr != nil {
+			log.Warn().Err(sErr).Str("url", cfg.SharedNatsURL).Msg("shared NATS connect failed; GDPR ownership-transfer subscriber disabled")
+		} else {
+			defer sharedNc.Close()
+			if subErr := gdpr.StartSubscriber(sharedNc, docRepo); subErr != nil {
+				log.Warn().Err(subErr).Msg("GDPR ownership-transfer subscriber failed to start")
+			}
+		}
+	} else {
+		log.Warn().Msg("NATS_SHARED_URL unset; GDPR ownership-transfer subscriber disabled")
+	}
 	// Phase A · A1.5 — usage + audit publisher. Logs-only on connect
 	// failure (the existing nc above is already required, so failure
 	// here is structurally unreachable). The handler can keep a pointer
@@ -73,7 +101,10 @@ func main() {
 	_ = usagePublisher // wired into handler in a follow-up commit; the
 	// publisher is created here so the wiring is reviewable today even
 	// though no call site forwards it yet.
-	docHandler := handler.NewDocumentHandler(docRepo, publisher)
+	// Per-user authz facade client (user-core). Resolves a viewer's explicit
+	// document grants so List/Get can enforce ownership at the source.
+	authzClient := userauthz.New(cfg.UserCoreURL, cfg.InternalAPIKey)
+	docHandler := handler.NewDocumentHandler(docRepo, publisher, authzClient)
 	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo, docRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`

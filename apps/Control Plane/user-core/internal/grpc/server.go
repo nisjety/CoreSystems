@@ -31,14 +31,17 @@ type Server struct {
 	db               *database.DB
 	userService      *users.Service
 	publisher        *nats.Publisher
+	sharedPublisher  *nats.SharedPublisher
 	betterAuthClient *clients.BetterAuthClient
 	userRepo         *users.Repository
 	grpcServer       *grpc.Server
 	internalKeys     []string
 }
 
-// NewServer creates a new gRPC server instance
-func NewServer(cfg *config.Config, db *database.DB, publisher *nats.Publisher, betterAuthClient *clients.BetterAuthClient) *Server {
+// NewServer creates a new gRPC server instance. sharedPublisher (may be nil)
+// emits cross-plane grant-change events so the Data Plane retrieval cache evicts
+// on revoke — closing the previously nil-wired DocumentAclHandler publisher.
+func NewServer(cfg *config.Config, db *database.DB, publisher *nats.Publisher, sharedPublisher *nats.SharedPublisher, betterAuthClient *clients.BetterAuthClient) *Server {
 	// Create repositories
 	userRepo := users.NewRepository(db)
 
@@ -50,6 +53,7 @@ func NewServer(cfg *config.Config, db *database.DB, publisher *nats.Publisher, b
 		db:               db,
 		userService:      userService,
 		publisher:        publisher,
+		sharedPublisher:  sharedPublisher,
 		betterAuthClient: betterAuthClient,
 		userRepo:         userRepo,
 		internalKeys:     configuredInternalKeys(),
@@ -85,7 +89,7 @@ func (s *Server) Start(ctx context.Context) error {
 	})
 
 	aclRepo := users.NewAclRepository(s.db)
-	dAclHandler := handlers.NewDocumentAclHandler(aclRepo, s.publisher, nil)
+	dAclHandler := handlers.NewDocumentAclHandler(aclRepo, s.publisher, s.sharedPublisher)
 	pb.RegisterDocumentAccessServiceServer(s.grpcServer, dAclHandler)
 
 	// Enable reflection for grpcurl

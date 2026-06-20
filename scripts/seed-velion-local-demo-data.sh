@@ -437,6 +437,19 @@ ON CONFLICT (id) DO UPDATE
 SET settings = EXCLUDED.settings,
     updated_at = now();
 
+-- Per-User Ownership & Sharing: resource_grants is the SINGLE grant authority
+-- (migration 012). These are explicit document SHARES on top of ownership.
+-- Document ownership itself is documents.owner_id, seeded in the Data Plane
+-- block (PR-2); the 'owner' rows from the legacy document_acl seed are not
+-- grants and are intentionally not reproduced here.
+INSERT INTO resource_grants (grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by, granted_at)
+VALUES
+  ('grant_velion_admin_doc_normal',  :'org_id', 'document', 'doc_velion_admin_runbook',        'user', :'normal_user_id', 'view', :'admin_user_id',  now() - interval '3 days'),
+  ('grant_velion_support_doc_admin', :'org_id', 'document', 'doc_velion_normal_support_guide', 'user', :'admin_user_id',  'edit', :'normal_user_id', now() - interval '2 days'),
+  ('grant_velion_brand_doc_admin',   :'org_id', 'document', 'doc_velion_editor_brand_voice',   'user', :'admin_user_id',  'edit', :'editor_user_id', now() - interval '1 day')
+ON CONFLICT (org_id, resource_type, resource_id, subject_type, subject_id) DO UPDATE
+SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by, granted_at = EXCLUDED.granted_at;
+
 COMMIT;
 SQL
 }
@@ -1499,16 +1512,10 @@ SET text = EXCLUDED.text,
     metadata = EXCLUDED.metadata,
     updated_at = now();
 
-INSERT INTO document_acl (acl_id, org_id, document_id, user_id, permission_level, created_at)
-VALUES
-  ('acl_velion_admin_doc_admin', :'org_id', 'doc_velion_admin_runbook', :'admin_user_id', 'owner', now() - interval '3 days'),
-  ('acl_velion_admin_doc_normal', :'org_id', 'doc_velion_admin_runbook', :'normal_user_id', 'read', now() - interval '3 days'),
-  ('acl_velion_support_doc_normal', :'org_id', 'doc_velion_normal_support_guide', :'normal_user_id', 'owner', now() - interval '2 days'),
-  ('acl_velion_support_doc_admin', :'org_id', 'doc_velion_normal_support_guide', :'admin_user_id', 'write', now() - interval '2 days'),
-  ('acl_velion_brand_doc_editor', :'org_id', 'doc_velion_editor_brand_voice', :'editor_user_id', 'owner', now() - interval '1 day'),
-  ('acl_velion_brand_doc_admin', :'org_id', 'doc_velion_editor_brand_voice', :'admin_user_id', 'write', now() - interval '1 day')
-ON CONFLICT (acl_id) DO UPDATE
-SET permission_level = EXCLUDED.permission_level;
+-- document_acl removed (Per-User Ownership phase). The Data-Plane ACL copy was
+-- dropped; the single grant authority is user-core's resource_grants (seeded in
+-- the user_service block above). Document OWNERSHIP becomes documents.owner_id
+-- (seeded in PR-2). Do not seed an ACL table here.
 
 INSERT INTO wiki_pages (
   page_id,

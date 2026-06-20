@@ -14,6 +14,9 @@ type Config struct {
 	SharedNatsURL  string
 	SharedNatsToken string
 	InternalAPIKey string
+	// UserCoreURL is the user-core base URL used to resolve a viewer's explicit
+	// resource grants (the per-user authz facade). Per-user ownership filtering.
+	UserCoreURL string
 }
 
 func Load() (*Config, error) {
@@ -25,6 +28,7 @@ func Load() (*Config, error) {
 		SharedNatsURL:   envOr("NATS_SHARED_URL", ""),
 		SharedNatsToken: envOr("VELION_NATS_TOKEN", ""),
 		InternalAPIKey:  envOr("INTERNAL_API_KEY", ""),
+		UserCoreURL:     envOr("USER_CORE_URL", "http://user-core:8080"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL required")

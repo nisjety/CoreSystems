@@ -119,6 +119,20 @@ func (s *Server) hardEraseUser(c *gin.Context) {
 	}
 
 	s.userService.PublishErasureAudit(orgID, "user", targetID, callerID, role, "ok", receipt)
+
+	// Per-User Ownership (GDPR): revoke every inbound resource grant the erased
+	// user held so their shared-with access disappears with them. Best-effort —
+	// erasure already succeeded; a revoke failure is logged, not fatal. (Transfer
+	// of the user's OWNED documents to an org admin is the Data Plane half of the
+	// erasure flow.)
+	if s.aclRepo != nil {
+		if n, rerr := s.aclRepo.RevokeAllGrantsForUser(c.Request.Context(), targetID); rerr != nil {
+			log.Error().Err(rerr).Str("subject_id", targetID).Msg("gdpr: failed to revoke erased user's resource grants")
+		} else if n > 0 {
+			log.Info().Int64("grants_revoked", n).Str("subject_id", targetID).Msg("gdpr: revoked erased user's inbound resource grants")
+		}
+	}
+
 	c.JSON(http.StatusOK, receipt)
 }
 

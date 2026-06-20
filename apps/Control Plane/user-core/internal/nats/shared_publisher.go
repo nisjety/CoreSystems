@@ -179,16 +179,37 @@ func (sp *SharedPublisher) PublishProviderLinked(ctx context.Context, userID, em
 	})
 }
 
-// PublishDocumentAclChanged publishes aqencia.controlplane.acl.document.changed.
-func (sp *SharedPublisher) PublishDocumentAclChanged(ctx context.Context, aclID, orgID, documentID, userID, permissionLevel, action string) {
-	sp.Publish(ctx, "aqencia.controlplane.acl.document.changed", map[string]any{
-		"acl_id":           aclID,
-		"org_id":           orgID,
-		"document_id":      documentID,
-		"user_id":          userID,
-		"permission_level": permissionLevel,
-		"action":           action,
+// PublishResourceGrantsChanged publishes aqencia.controlplane.acl.resource_grants.changed.
+//
+// This is the generalized grant-change event. Retrieval (Data Plane) subscribes
+// to it to evict the affected (subject_id, org_id) authorization-cache key on
+// revoke so a revoke takes effect within one query (the TTL is the backstop).
+// action is "grant" or "revoke".
+func (sp *SharedPublisher) PublishResourceGrantsChanged(
+	ctx context.Context,
+	grantID, orgID, resourceType, resourceID, subjectType, subjectID, role, action string,
+) {
+	sp.Publish(ctx, "aqencia.controlplane.acl.resource_grants.changed", map[string]any{
+		"grant_id":      grantID,
+		"org_id":        orgID,
+		"resource_type": resourceType,
+		"resource_id":   resourceID,
+		"subject_type":  subjectType,
+		"subject_id":    subjectID,
+		"role":          role,
+		"action":        action,
 	})
+}
+
+// PublishDocumentAclChanged is the document-scoped back-compat wrapper around
+// PublishResourceGrantsChanged. permission_level is normalized to a role.
+func (sp *SharedPublisher) PublishDocumentAclChanged(ctx context.Context, aclID, orgID, documentID, userID, permissionLevel, action string) {
+	role := "view"
+	switch strings.ToLower(strings.TrimSpace(permissionLevel)) {
+	case "write", "edit", "admin", "owner":
+		role = "edit"
+	}
+	sp.PublishResourceGrantsChanged(ctx, aclID, orgID, "document", documentID, "user", userID, role, action)
 }
 
 // PublishPlain sends a plain NATS core message (not JetStream) to a subject.

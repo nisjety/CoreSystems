@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
 )
@@ -19,14 +20,27 @@ func NewDocumentRepo(pool *pgxpool.Pool) *DocumentRepo {
 	return &DocumentRepo{pool: pool}
 }
 
-func (r *DocumentRepo) Get(ctx context.Context, orgID, documentID string) (*model.Document, error) {
+// documentColumns is the canonical projection — kept in one place so every read
+// path and the scanners stay in lockstep (owner_id/visibility were added by the
+// Per-User Data Ownership phase).
+const documentColumns = `document_id, org_id, source, type, title, content, status, metadata,
+	       error_message, zdr_classification, zdr_reason, extraction_trace,
+	       created_by, deleted_by, created_at, updated_at, deleted_at, owner_id, visibility`
+
+// Get returns a single document, enforcing ownership when a viewer is supplied.
+// The viewer filter is a single static predicate so the tenant-isolation lint
+// still sees org_id in the same literal: when viewerID is empty (no identity —
+// legacy/back-compat) the `$3 = ''` branch short-circuits to the org-scoped
+// behaviour; when present, only the owner, org/shared-visible docs, or docs
+// explicitly granted to the viewer (grantedIDs from user-core resource_grants)
+// are returned. A filtered-out doc returns pgx.ErrNoRows → 404.
+func (r *DocumentRepo) Get(ctx context.Context, orgID, documentID, viewerID string, grantedIDs []string) (*model.Document, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT document_id, org_id, source, type, title, content, status, metadata,
-		       error_message, zdr_classification, zdr_reason, extraction_trace,
-		       created_by, deleted_by, created_at, updated_at, deleted_at
+		SELECT `+documentColumns+`
 		FROM documents
 		WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL
-	`, documentID, orgID)
+		  AND ($3 = '' OR owner_id = $3 OR visibility IN ('org', 'shared') OR document_id = ANY($4))
+	`, documentID, orgID, viewerID, normalizeGranted(grantedIDs))
 	return scanDocument(row)
 }
 
@@ -35,22 +49,29 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
+	granted := normalizeGranted(input.GrantedIDs)
 
 	// Static queries (one per filter shape) keep the static tenant-isolation
-	// check effective and make the SQL audit-friendly.
+	// check effective and make the SQL audit-friendly. The ownership predicate
+	// is the same parameterized clause in every shape; an empty ViewerID makes
+	// it a no-op (org-scoped legacy behaviour).
 	var total int
 	if input.Type == "" {
 		err := r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM documents WHERE org_id = $1 AND deleted_at IS NULL`,
-			input.OrgID,
+			`SELECT COUNT(*) FROM documents
+			 WHERE org_id = $1 AND deleted_at IS NULL
+			   AND ($2 = '' OR owner_id = $2 OR visibility IN ('org', 'shared') OR document_id = ANY($3))`,
+			input.OrgID, input.ViewerID, granted,
 		).Scan(&total)
 		if err != nil {
 			return nil, fmt.Errorf("count documents: %w", err)
 		}
 	} else {
 		err := r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM documents WHERE org_id = $1 AND deleted_at IS NULL AND type = $2`,
-			input.OrgID, input.Type,
+			`SELECT COUNT(*) FROM documents
+			 WHERE org_id = $1 AND deleted_at IS NULL AND type = $2
+			   AND ($3 = '' OR owner_id = $3 OR visibility IN ('org', 'shared') OR document_id = ANY($4))`,
+			input.OrgID, input.Type, input.ViewerID, granted,
 		).Scan(&total)
 		if err != nil {
 			return nil, fmt.Errorf("count documents: %w", err)
@@ -61,24 +82,22 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 	var err error
 	if input.Type == "" {
 		rows, err = r.pool.Query(ctx, `
-			SELECT document_id, org_id, source, type, title, content, status, metadata,
-			       error_message, zdr_classification, zdr_reason, extraction_trace,
-			       created_by, deleted_by, created_at, updated_at, deleted_at
+			SELECT `+documentColumns+`
 			FROM documents
 			WHERE org_id = $1 AND deleted_at IS NULL
+			  AND ($2 = '' OR owner_id = $2 OR visibility IN ('org', 'shared') OR document_id = ANY($3))
 			ORDER BY created_at DESC
-			LIMIT $2 OFFSET $3
-		`, input.OrgID, limit, input.Offset)
+			LIMIT $4 OFFSET $5
+		`, input.OrgID, input.ViewerID, granted, limit, input.Offset)
 	} else {
 		rows, err = r.pool.Query(ctx, `
-			SELECT document_id, org_id, source, type, title, content, status, metadata,
-			       error_message, zdr_classification, zdr_reason, extraction_trace,
-			       created_by, deleted_by, created_at, updated_at, deleted_at
+			SELECT `+documentColumns+`
 			FROM documents
-			WHERE org_id = $1 AND deleted_at IS NULL AND type = $4
+			WHERE org_id = $1 AND deleted_at IS NULL AND type = $2
+			  AND ($3 = '' OR owner_id = $3 OR visibility IN ('org', 'shared') OR document_id = ANY($4))
 			ORDER BY created_at DESC
-			LIMIT $2 OFFSET $3
-		`, input.OrgID, limit, input.Offset, input.Type)
+			LIMIT $5 OFFSET $6
+		`, input.OrgID, input.Type, input.ViewerID, granted, limit, input.Offset)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
@@ -160,6 +179,18 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 		trace = json.RawMessage(`{}`)
 	}
 
+	// Stamp ownership: explicit owner wins, else the creator, else the system
+	// account (matches the column default + grandfather sentinel). Visibility
+	// defaults to 'org' — Private is an explicit opt-in.
+	ownerID := input.OwnerID
+	if ownerID == "" {
+		ownerID = input.CreatedBy
+	}
+	if ownerID == "" {
+		ownerID = ownerSystemAccount
+	}
+	visibility := normalizeVisibility(input.Visibility)
+
 	// Idempotency: if key supplied and a non-deleted row exists for (org, key),
 	// return that row instead of inserting. We do the lookup BEFORE insert so the
 	// hot path stays cheap when no key is supplied.
@@ -182,13 +213,11 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 	}
 
 	row := r.pool.QueryRow(ctx, `
-		INSERT INTO documents (org_id, source, type, title, content, metadata, zdr_classification, extraction_trace, created_by, idempotency_key, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
-		RETURNING document_id, org_id, source, type, title, content, status, metadata,
-		          error_message, zdr_classification, zdr_reason, extraction_trace,
-		          created_by, deleted_by, created_at, updated_at, deleted_at
+		INSERT INTO documents (org_id, source, type, title, content, metadata, zdr_classification, extraction_trace, created_by, owner_id, visibility, idempotency_key, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')
+		RETURNING `+documentColumns+`
 	`, input.OrgID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace,
-		nilIfEmpty(input.CreatedBy), nilIfEmpty(input.IdempotencyKey))
+		nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey))
 
 	doc, err := scanDocument(row)
 	if err != nil {
@@ -221,7 +250,8 @@ func documentContentUnchanged(existing *model.Document, input model.CreateDocume
 // updateContent refreshes an existing document in place with re-ingested
 // content and resets it to 'pending' so the chunking/embedding pipeline
 // reprocesses it. deleted_at is cleared so a re-ingest also resurrects a
-// previously soft-deleted document.
+// previously soft-deleted document. Ownership + visibility are intentionally
+// left untouched — a re-ingest must not silently re-open a privately-scoped doc.
 func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID string, input model.CreateDocumentInput) (*model.Document, error) {
 	meta := input.Metadata
 	if meta == nil {
@@ -242,9 +272,7 @@ func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID stri
 		       zdr_classification = $8, extraction_trace = $9, status = 'pending',
 		       error_message = NULL, deleted_at = NULL, updated_at = NOW()
 		 WHERE org_id = $1 AND document_id = $2
-		RETURNING document_id, org_id, source, type, title, content, status, metadata,
-		          error_message, zdr_classification, zdr_reason, extraction_trace,
-		          created_by, deleted_by, created_at, updated_at, deleted_at
+		RETURNING `+documentColumns+`
 	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace)
 
 	return scanDocument(row)
@@ -252,9 +280,7 @@ func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID stri
 
 func (r *DocumentRepo) findByIdempotencyKey(ctx context.Context, orgID, key string) (*model.Document, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT document_id, org_id, source, type, title, content, status, metadata,
-		       error_message, zdr_classification, zdr_reason, extraction_trace,
-		       created_by, deleted_by, created_at, updated_at, deleted_at
+		SELECT `+documentColumns+`
 		FROM documents
 		WHERE org_id = $1 AND idempotency_key = $2 AND deleted_at IS NULL
 	`, orgID, key)
@@ -319,6 +345,32 @@ func (r *DocumentRepo) EnqueueOutbox(ctx context.Context, orgID, eventType strin
 	return nil
 }
 
+// TransferOwnership reassigns every document owned by fromOwner in an org to
+// toOwner. Used by the GDPR erasure subscriber: when a user is erased their
+// owned documents move to the org system account (or an admin), so no orphaned
+// owner_id remains and no human silently inherits the erased user's private
+// docs (org-visible docs keep their visibility; private docs become system-owned
+// and thus visible to no human until an admin re-shares them). Idempotent:
+// re-running after the first transfer matches zero rows. Returns the count moved.
+func (r *DocumentRepo) TransferOwnership(ctx context.Context, orgID, fromOwner, toOwner string) (int64, error) {
+	if fromOwner == "" || toOwner == "" {
+		return 0, fmt.Errorf("transfer ownership requires non-empty from/to owner")
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE documents
+		   SET owner_id = $3, updated_at = NOW()
+		 WHERE org_id = $1 AND owner_id = $2
+	`, orgID, fromOwner, toOwner)
+	if err != nil {
+		return 0, fmt.Errorf("transfer document ownership: %w", err)
+	}
+	n := tag.RowsAffected()
+	if n > 0 {
+		r.bumpOrgVersion(ctx, orgID)
+	}
+	return n, nil
+}
+
 // bumpOrgVersion increments the per-org cache-busting counter. Called
 // from every mutating path. The Postgres UPSERT pattern handles both
 // "first mutation for this org" and "Nth mutation" without branching.
@@ -331,9 +383,8 @@ func (r *DocumentRepo) bumpOrgVersion(ctx context.Context, orgID string) {
 			    bumped_at = NOW()
 	`, orgID)
 	if err != nil {
-		// Don't fail the request — just log.
-		// (caller observes via the underlying log facility)
-		fmt.Printf("warn: org_version bump failed for %s: %v\n", orgID, err)
+		// Don't fail the request — the cache still ages out via TTL.
+		log.Warn().Err(err).Str("org_id", orgID).Msg("org_version bump failed")
 	}
 }
 
@@ -343,6 +394,7 @@ func scanDocument(row pgx.Row) (*model.Document, error) {
 		&d.DocumentID, &d.OrgID, &d.Source, &d.Type, &d.Title, &d.Content,
 		&d.Status, &d.Metadata, &d.ErrorMessage, &d.ZDRClassification, &d.ZDRReason,
 		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
+		&d.OwnerID, &d.Visibility,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan document: %w", err)
@@ -356,6 +408,7 @@ func scanDocumentFromRows(rows pgx.Rows) (*model.Document, error) {
 		&d.DocumentID, &d.OrgID, &d.Source, &d.Type, &d.Title, &d.Content,
 		&d.Status, &d.Metadata, &d.ErrorMessage, &d.ZDRClassification, &d.ZDRReason,
 		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
+		&d.OwnerID, &d.Visibility,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan document row: %w", err)
@@ -368,4 +421,28 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// ownerSystemAccount is the sentinel owner for grandfathered/non-API documents.
+// Matches the documents.owner_id column DEFAULT.
+const ownerSystemAccount = "org-system-account"
+
+// normalizeVisibility clamps an incoming visibility to the allowed domain,
+// defaulting to 'org' (the non-breaking, org-shared default).
+func normalizeVisibility(v string) string {
+	switch v {
+	case "private", "org", "shared":
+		return v
+	default:
+		return "org"
+	}
+}
+
+// normalizeGranted guarantees a non-nil slice so `= ANY($n)` binds to an empty
+// text[] (matching nothing) rather than NULL.
+func normalizeGranted(ids []string) []string {
+	if ids == nil {
+		return []string{}
+	}
+	return ids
 }

@@ -273,6 +273,7 @@ async fn run_agent_with_tools(
                 permission_wire,
                 "",
                 &req.org_id,
+                &req.user_id,
                 None,
             )
             .await;

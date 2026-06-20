@@ -18,6 +18,38 @@ use crate::trace;
 
 pub type AppState = Arc<RetrievalPipeline>;
 
+/// Resolve the viewer identity + their explicit document grants for the by-id
+/// retrieval endpoints (chunks/sources/freshness). The viewer comes only from the
+/// authenticated `AuthContext` — never a request body — and grants come from the
+/// visibility client (fail-open to empty). Returns `(None, [])` for unauthenticated
+/// callers, which makes the ownership predicate a no-op (legacy org-scoped path).
+async fn resolve_viewer_grants(
+    pipeline: &AppState,
+    auth: Option<&axum::extract::Extension<crate::authz::AuthContext>>,
+    org_id: &str,
+) -> (Option<String>, Vec<String>) {
+    // Org-admin super-visibility (`org:data:read_all`): viewer=None makes the
+    // ownership predicate a no-op (org-scoped) — audited. Only a verified JWT
+    // carries scopes, so api-key/agent callers never get the bypass here.
+    if let Some(ext) = auth {
+        if ext.scopes.iter().any(|s| s == "org:data:read_all") {
+            tracing::warn!(
+                org_id = %org_id,
+                actor = ext.user_id.as_deref().unwrap_or("unknown"),
+                reason = "admin_bypass:read_all",
+                "org-admin super-visibility on by-id retrieval (org-scoped, audited)"
+            );
+            return (None, Vec::new());
+        }
+    }
+    let viewer = auth.and_then(|ext| ext.user_id.clone());
+    let granted = match &viewer {
+        Some(uid) => pipeline.visibility.visible_documents(org_id, uid).await,
+        None => Vec::new(),
+    };
+    (viewer, granted)
+}
+
 /// Wave 3 §15 — full auth + AuthContext + policy + audit-log middleware.
 ///
 /// Flow:
@@ -73,10 +105,40 @@ async fn auth_middleware(
 
     // The AuthContext we'll build varies by which path admits the request.
     let auth_ctx: AuthContext = if api_key_ok {
-        // API-key path: no user identity, org_id taken from header (trusted
-        // until §15-A2 ships a "header must match a server-side mapping").
+        // API-key path. org_id from header (trusted internal caller). When the
+        // gateway forwards x-user-id alongside the internal key, thread the
+        // viewer identity so retrieval grounds AS that user — per-user OWNERSHIP
+        // enforcement is ALWAYS-ON when a user_id is present, decoupled from
+        // CONTROL_PLANE_ENFORCEMENT. Without x-user-id, fall back to org-scoped.
         let org_id = header_org_id.clone().unwrap_or_default();
-        AuthContext::org_scoped(org_id, AuthMethod::ApiKey, request_id.clone())
+        let header_user_id = req
+            .headers()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        match header_user_id {
+            Some(uid) => {
+                let mut ctx = AuthContext {
+                    user_id: Some(uid.clone()),
+                    org_id: org_id.clone(),
+                    auth_method: AuthMethod::ApiKey,
+                    scopes: vec![],
+                    acl: crate::authz::EffectiveAcl::allow_all(),
+                    request_id: request_id.clone(),
+                };
+                // Coarse org-axis ACL stays gated by CONTROL_PLANE_ENFORCEMENT via
+                // the policy client; resolve it when membership is known. We do
+                // NOT deny on the api-key path (trusted internal caller) — per-user
+                // ownership is enforced at the step-6 post-filter regardless.
+                let decision = state.policy.resolve(&uid, &org_id).await;
+                if decision.is_member {
+                    ctx.acl = decision.acl;
+                }
+                ctx
+            }
+            None => AuthContext::org_scoped(org_id, AuthMethod::ApiKey, request_id.clone()),
+        }
     } else if let Some(token) = bearer_token(req.headers()) {
         match verify_jwt(&token).await {
             Ok(claims) => {
@@ -177,6 +239,7 @@ async fn auth_middleware(
 
 /// Helper: write a denial row to the audit log for requests we reject in
 /// the middleware itself (before `next.run`).
+#[allow(clippy::too_many_arguments)] // pre-existing arity; clippy 1.94 -D warnings
 async fn audit_unauthorized(
     state: &AppState,
     request_id: &str,
@@ -608,8 +671,15 @@ fn default_pack_format() -> String {
 
 async fn retrieve_pack(
     State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
     Json(req): Json<PackRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Thread the authenticated viewer so the step-6 ownership gate applies to the
+    // context-pack path too (it runs through pipeline.retrieve). Without this the
+    // pack endpoint would ground on every org-visible doc regardless of owner.
+    let viewer = auth
+        .as_ref()
+        .and_then(|axum::extract::Extension(ctx)| ctx.user_id.clone());
     let retrieval_req = RetrievalRequest {
         query: req.query,
         org_id: req.org_id,
@@ -619,11 +689,17 @@ async fn retrieve_pack(
         context_budget_tokens: Some(req.context_budget_tokens),
         context_format: Some(req.context_format),
         zdr_mode: None,
-        user_id: None,
+        user_id: viewer,
         query_expansion: None,
         reranker_model: None,
         mode_mix: None,
         agent_id: None,
+        admin_read_all: auth
+            .as_ref()
+            .map(|axum::extract::Extension(ctx)| {
+                ctx.scopes.iter().any(|s| s == "org:data:read_all")
+            })
+            .unwrap_or(false),
     };
     let resp = pipeline.retrieve(retrieval_req).await?;
     Ok(Json(serde_json::json!({
@@ -642,18 +718,24 @@ struct SourcesRequest {
 
 async fn retrieve_sources(
     State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
     Json(req): Json<SourcesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if req.document_ids.is_empty() {
         return Ok(Json(serde_json::json!({"sources": []})));
     }
+    // Per-user ownership: only return metadata for docs the viewer may see.
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
         "SELECT document_id, title, source, type, status, zdr_classification
          FROM documents
-         WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL",
+         WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+           AND ($3::text IS NULL OR owner_id = $3 OR visibility IN ('org','shared') OR document_id = ANY($4))",
     )
     .bind(&req.document_ids)
     .bind(&req.org_id)
+    .bind(&viewer)
+    .bind(&granted)
     .fetch_all(&pipeline.pool)
     .await?;
 
@@ -683,15 +765,20 @@ struct FreshnessRequest {
 
 async fn retrieve_freshness(
     State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
     Json(req): Json<FreshnessRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     let rows = sqlx::query_as::<_, (String, String, String, String)>(
         "SELECT document_id, title, updated_at::TEXT, status
          FROM documents
-         WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL",
+         WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+           AND ($3::text IS NULL OR owner_id = $3 OR visibility IN ('org','shared') OR document_id = ANY($4))",
     )
     .bind(&req.document_ids)
     .bind(&req.org_id)
+    .bind(&viewer)
+    .bind(&granted)
     .fetch_all(&pipeline.pool)
     .await?;
 
@@ -772,8 +859,12 @@ fn default_chunks_limit() -> i32 {
 
 async fn retrieve_chunks(
     State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
     Json(req): Json<ChunksRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Per-user ownership: gate at the SQL level so chunk TEXT for a document the
+    // viewer cannot see is never even fetched (this endpoint returns raw content).
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     if let Some(kids) = &req.knowledge_ids {
         if !kids.is_empty() {
             let rows = sqlx::query_as::<_, (String, String, String, i32, String, String)>(
@@ -781,10 +872,13 @@ async fn retrieve_chunks(
                  FROM knowledge_units ku
                  JOIN documents d ON d.document_id = ku.document_id
                  WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
+                   AND ($3::text IS NULL OR d.owner_id = $3 OR d.visibility IN ('org','shared') OR d.document_id = ANY($4))
                  ORDER BY ku.chunk_index"
             )
             .bind(kids)
             .bind(&req.org_id)
+            .bind(&viewer)
+            .bind(&granted)
             .fetch_all(&pipeline.pool)
             .await?;
 
@@ -809,12 +903,15 @@ async fn retrieve_chunks(
              FROM knowledge_units ku
              JOIN documents d ON d.document_id = ku.document_id
              WHERE ku.document_id = $1 AND ku.org_id = $2 AND d.deleted_at IS NULL
+               AND ($5::text IS NULL OR d.owner_id = $5 OR d.visibility IN ('org','shared') OR d.document_id = ANY($6))
              ORDER BY ku.chunk_index LIMIT $3 OFFSET $4"
         )
         .bind(did)
         .bind(&req.org_id)
         .bind(req.limit)
         .bind(req.offset)
+        .bind(&viewer)
+        .bind(&granted)
         .fetch_all(&pipeline.pool)
         .await?;
 
@@ -847,6 +944,7 @@ struct CompareRequest {
 
 async fn retrieve_compare(
     State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
     Json(req): Json<CompareRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     match req.compare_type.as_str() {
@@ -895,12 +993,18 @@ async fn retrieve_compare(
             })))
         }
         "documents" => {
+            // Per-user ownership: only compare docs the viewer may see.
+            let (viewer, granted) =
+                resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
             let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
                 "SELECT document_id, title, source, type, status, updated_at::TEXT, zdr_classification
-                 FROM documents WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL"
+                 FROM documents WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+                   AND ($3::text IS NULL OR owner_id = $3 OR visibility IN ('org','shared') OR document_id = ANY($4))"
             )
             .bind(&req.ids)
             .bind(&req.org_id)
+            .bind(&viewer)
+            .bind(&granted)
             .fetch_all(&pipeline.pool)
             .await?;
 

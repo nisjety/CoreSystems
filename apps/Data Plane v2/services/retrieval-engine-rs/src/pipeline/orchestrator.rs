@@ -30,6 +30,12 @@ pub struct RetrievalPipeline {
     /// `org-core.GetUserPermissions`, abstracted so local dev can use
     /// `NoopPolicyClient` while prod uses `HttpPolicyClient`.
     pub policy: std::sync::Arc<dyn crate::authz::PolicyClient>,
+    /// Per-User Data Ownership & Sharing — resolves a viewer's explicit document
+    /// grants from user-core's resource_grants. ALWAYS-ON when a user_id is
+    /// present, decoupled from `CONTROL_PLANE_ENFORCEMENT` (which gates only the
+    /// coarse org axis via `policy`). The post-filter unions this with the
+    /// owner_id/visibility columns on `documents`.
+    pub visibility: std::sync::Arc<dyn crate::authz::VisibilityClient>,
     /// Wave 3.1 §15-G — publish `dataplane.cost.ledger` events on rerank
     /// (embedding worker handles embeds). Optional: degrades silently when
     /// NATS isn't reachable.
@@ -264,17 +270,35 @@ impl RetrievalPipeline {
         let sparse_ms = sparse_start.elapsed().as_millis() as u64;
         let candidate_count_fused = fused_candidates.len();
 
-        // Trim to top_k before rerank
-        let pre_rerank: Vec<ScoredCandidate> = fused_candidates.into_iter().take(top_k).collect();
+        // Over-fetch when a viewer is present so the step-6 ownership gate has
+        // headroom and the response doesn't silently undershoot top_n after
+        // filtering. Bounded at 1000 (`k_fetch = min(top_k*4, 1000)`). The
+        // no-viewer (legacy org-scoped) path keeps its exact prior sizing.
+        let overfetch = req.user_id.is_some();
+        let fetch_k = if overfetch {
+            (top_k.saturating_mul(4)).min(1000).max(top_k)
+        } else {
+            top_k
+        };
+        let rerank_out_n = if overfetch {
+            (top_n.saturating_mul(4)).min(1000).max(top_n)
+        } else {
+            top_n
+        };
+
+        // Trim to the (possibly over-fetched) candidate pool before rerank
+        let pre_rerank: Vec<ScoredCandidate> = fused_candidates.into_iter().take(fetch_k).collect();
 
         // 5. Rerank
         let rerank_start = Instant::now();
         let (reranked, rerank_used_count) = if let Some(ref reranker) = self.reranker {
             let input_count = pre_rerank.len();
-            let out = reranker.rerank(&req.query, &pre_rerank, top_n).await?;
+            let out = reranker
+                .rerank(&req.query, &pre_rerank, rerank_out_n)
+                .await?;
             (out, input_count)
         } else {
-            (pre_rerank.into_iter().take(top_n).collect(), 0usize)
+            (pre_rerank.into_iter().take(rerank_out_n).collect(), 0usize)
         };
         let rerank_ms = rerank_start.elapsed().as_millis() as u64;
 
@@ -301,11 +325,41 @@ impl RetrievalPipeline {
             }
         }
 
-        // 6. Canonical visibility gate. Quickwit and Qdrant are rebuildable
-        // read models, so stale hits can exist briefly after a Postgres
-        // tombstone. Filter through canonical Postgres before applying ZDR
-        // and joining sources.
-        let reranked = self.filter_live_candidates(reranked).await?;
+        // 6. Canonical visibility gate (liveness + per-user ownership). Quickwit
+        // and Qdrant are rebuildable read models, so stale hits can exist briefly
+        // after a Postgres tombstone. Filter through canonical Postgres — and,
+        // when a viewer is present, through the ownership predicate — before
+        // applying ZDR and joining sources.
+        //
+        // Resolve the viewer's explicit grants first (always-on when a user_id is
+        // present, decoupled from CONTROL_PLANE_ENFORCEMENT; fail-open to empty so
+        // owner + org/shared visibility still apply). Then truncate the
+        // over-fetched pool to top_n — counts/scores derive from this post-filter
+        // set only, never from a pre-filter total or a non-visible backfill.
+        // Org-admin super-visibility: when the verified `org:data:read_all` scope
+        // is present, bypass the ownership predicate org-wide (still org-scoped,
+        // never cross-org) and audit it. This is reached only on the human HTTP
+        // path — the agent/api-key path never sets admin_read_all — so admin
+        // bypass is EXCLUDED from agent grounding by construction.
+        let (effective_viewer, granted_docs): (Option<&str>, Vec<String>) = if req.admin_read_all {
+            tracing::warn!(
+                org_id = %req.org_id,
+                actor = req.user_id.as_deref().unwrap_or("unknown"),
+                reason = "admin_bypass:read_all",
+                "org-admin super-visibility: ownership post-filter bypassed (org-scoped, audited)"
+            );
+            (None, Vec::new())
+        } else {
+            let granted = match req.user_id.as_deref() {
+                Some(uid) => self.visibility.visible_documents(&req.org_id, uid).await,
+                None => Vec::new(),
+            };
+            (req.user_id.as_deref(), granted)
+        };
+        let reranked = self
+            .filter_live_candidates(reranked, effective_viewer, &granted_docs)
+            .await?;
+        let reranked: Vec<ScoredCandidate> = reranked.into_iter().take(top_n).collect();
 
         // 7. ZDR enforcement — filter out restricted documents.
         // §16.1.3 — also record what we actually did, so the audit trail can
@@ -532,9 +586,27 @@ impl RetrievalPipeline {
             .collect())
     }
 
+    /// Step-6 canonical visibility gate. Runs POST-fusion + POST-rerank over the
+    /// unified dense+sparse+wiki candidate list, so it gates every retrieval arm
+    /// uniformly (closing the sparse leak for free). Two passes:
+    ///
+    ///   1. Liveness — drop candidates absent from canonical `documents`
+    ///      (Qdrant/Quickwit are rebuildable read models that can lag a delete).
+    ///   2. Per-user OWNERSHIP — when `viewer` is present, keep a document only
+    ///      if `owner_id = viewer OR visibility IN ('org','shared') OR it is in
+    ///      `granted_ids` (explicit resource_grants). Always-on when a viewer is
+    ///      present, decoupled from `CONTROL_PLANE_ENFORCEMENT`. When `viewer` is
+    ///      `None` the ownership predicate is a no-op (legacy org-scoped path).
+    ///
+    /// Published wiki pages stay via their own branch — wiki is org-shared
+    /// knowledge, not an ownable resource type. This NEVER backfills with
+    /// non-visible docs; it only removes, so a low-visibility user honestly
+    /// undershoots rather than seeing someone else's data.
     async fn filter_live_candidates(
         &self,
         candidates: Vec<ScoredCandidate>,
+        viewer: Option<&str>,
+        granted_ids: &[String],
     ) -> anyhow::Result<Vec<ScoredCandidate>> {
         let doc_ids: Vec<String> = candidates
             .iter()
@@ -547,15 +619,24 @@ impl RetrievalPipeline {
             return Ok(candidates);
         }
 
+        // Pass 1 + 2 fused into one query: liveness AND (when a viewer is
+        // present) per-user ownership. The `$2::text IS NULL` branch makes the
+        // ownership predicate a no-op for the no-viewer legacy path.
         let mut live: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
             r#"
             SELECT document_id
             FROM documents
             WHERE document_id = ANY($1)
               AND deleted_at IS NULL
+              AND ($2::text IS NULL
+                   OR owner_id = $2
+                   OR visibility IN ('org', 'shared')
+                   OR document_id = ANY($3))
             "#,
         )
         .bind(&doc_ids)
+        .bind(viewer)
+        .bind(granted_ids)
         .fetch_all(&self.pool)
         .await?
         .into_iter()
@@ -595,11 +676,26 @@ impl RetrievalPipeline {
             .into_iter()
             .filter(|c| live.contains(&c.document_id))
             .collect();
-        tracing::warn!(
-            before,
-            after = filtered.len(),
-            "filtered retrieval candidates missing from canonical live documents"
-        );
+        // Raw-vs-survivor on the trace. When a viewer is present and a large
+        // fraction was dropped, flag potential top-k starvation (the response
+        // will honestly undershoot rather than backfill non-visible docs).
+        let after = filtered.len();
+        let viewer_present = viewer.is_some();
+        if viewer_present && after * 2 < before {
+            tracing::warn!(
+                before,
+                after,
+                viewer_present,
+                "ownership/liveness gate dropped >50% of candidates — possible top-k starvation; result honestly undershoots"
+            );
+        } else {
+            tracing::debug!(
+                before,
+                after,
+                viewer_present,
+                "step-6 visibility gate applied"
+            );
+        }
         Ok(filtered)
     }
 }

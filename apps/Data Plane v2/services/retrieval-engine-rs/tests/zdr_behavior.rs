@@ -114,6 +114,7 @@ fn make_request(zdr_mode: &str) -> RetrievalRequest {
         reranker_model: None,
         mode_mix: None,
         agent_id: None,
+        admin_read_all: false,
     }
 }
 

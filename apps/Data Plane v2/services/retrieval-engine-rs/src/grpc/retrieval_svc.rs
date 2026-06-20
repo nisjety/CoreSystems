@@ -126,6 +126,7 @@ impl RetrievalService for RetrievalSvc {
             context_format: req.context_format,
             // §16.1.4 — agent_id now on the proto contract (field 13).
             agent_id: req.agent_id,
+            admin_read_all: false,
         };
 
         let resp = self
@@ -466,5 +467,6 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> PipelineReq {
         context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
         context_format: req.context_format,
         agent_id: req.agent_id,
+        admin_read_all: false,
     }
 }

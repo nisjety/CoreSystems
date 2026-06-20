@@ -15,6 +15,7 @@ use crate::pipeline::types::*;
         zdr_mode = zdr_mode,
     ),
 )]
+#[allow(clippy::too_many_arguments)] // pre-existing arity; clippy 1.94 -D warnings
 pub async fn persist_trace(
     pool: &PgPool,
     req: &RetrievalRequest,

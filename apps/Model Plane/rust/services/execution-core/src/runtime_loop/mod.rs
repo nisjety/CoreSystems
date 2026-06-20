@@ -87,6 +87,7 @@ pub async fn execute_step(
     permission_mode: &str,
     hook_context: &str,
     org_id: &str,
+    user_id: &str,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
 ) -> StepOutcome {
     if hook::is_blocked(hook_context) {
@@ -117,7 +118,7 @@ pub async fn execute_step(
     } else if tool_name == WEB_FETCH_TOOL {
         execute_web_fetch(tool_input).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
-        execute_knowledge_search(tool_input, org_id).await
+        execute_knowledge_search(tool_input, org_id, user_id).await
     } else if tool_name == YR_WEATHER_TOOL {
         execute_yr_weather(tool_input).await
     } else if tool_name == TRAFFIC_TOOL {
@@ -236,7 +237,11 @@ async fn execute_web_fetch(tool_input: &str) -> tool_bridge::ToolExecution {
 /// Retrieves the org's own ingested knowledge (RAG) via Data Plane v2. `org_id`
 /// comes from the run context (verified), never the model's input, so a tool
 /// call cannot cross tenant boundaries. Read-only (no approval gate).
-async fn execute_knowledge_search(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+async fn execute_knowledge_search(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct KnowledgeInput {
         query: String,
@@ -255,8 +260,10 @@ async fn execute_knowledge_search(tool_input: &str, org_id: &str) -> tool_bridge
             "knowledge_search unavailable: DATAPLANE_RETRIEVAL_URL not configured".to_owned(),
         );
     };
+    // Per-User Data Ownership: ground AS the run's verified user so the
+    // retrieval post-filter hides documents this user cannot see.
     match client
-        .search(org_id, &input.query, input.top_k.unwrap_or(5))
+        .search(org_id, user_id, &input.query, input.top_k.unwrap_or(5))
         .await
     {
         Ok(output) => tool_bridge::ToolExecution {
@@ -428,6 +435,7 @@ mod tests {
             "auto",
             "",
             "org_test",
+            "user_test",
             None,
         )
         .await;
@@ -437,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_tool_invalid_json_fails() {
-        let out = execute_step("shell", "not json", "auto", "", "org_test", None).await;
+        let out = execute_step("shell", "not json", "auto", "", "org_test", "user_test", None).await;
         assert_eq!(out.status, "failed");
     }
 
@@ -449,6 +457,7 @@ mod tests {
             "auto",
             "",
             "org_test",
+            "user_test",
             None,
         )
         .await;
@@ -457,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_shell_tool_still_uses_the_deterministic_bridge() {
-        let out = execute_step("echo", "hello-bridge", "auto", "", "org_test", None).await;
+        let out = execute_step("echo", "hello-bridge", "auto", "", "org_test", "user_test", None).await;
         assert_eq!(out.status, "completed");
         assert!(out.output.contains("hello-bridge"));
     }
@@ -470,6 +479,7 @@ mod tests {
             "deny",
             "",
             "org_test",
+            "user_test",
             None,
         )
         .await;

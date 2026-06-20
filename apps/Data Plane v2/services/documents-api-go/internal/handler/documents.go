@@ -5,29 +5,63 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/events"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/userauthz"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/validate"
+	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 )
 
 type DocumentHandler struct {
 	repo      *repo.DocumentRepo
 	publisher *events.Publisher
+	// authz resolves a viewer's explicit document grants from user-core. May be
+	// nil (grant resolution disabled — owner + org/shared visibility still apply).
+	authz *userauthz.Client
 }
 
-func NewDocumentHandler(r *repo.DocumentRepo, p *events.Publisher) *DocumentHandler {
-	return &DocumentHandler{repo: r, publisher: p}
+func NewDocumentHandler(r *repo.DocumentRepo, p *events.Publisher, authz *userauthz.Client) *DocumentHandler {
+	return &DocumentHandler{repo: r, publisher: p, authz: authz}
+}
+
+// viewerID returns the requesting user's id: a verified authctx JWT claim wins;
+// otherwise the X-User-Id header forwarded by the gateway (the route is already
+// behind the internal-key gate, so the header is from a trusted caller). Empty
+// → ownership filtering is skipped (legacy org-scoped behaviour).
+func viewerID(r *http.Request) string {
+	if claims, ok := authctx.FromContext(r.Context()); ok && claims.UserID != "" {
+		return claims.UserID
+	}
+	return strings.TrimSpace(r.Header.Get("X-User-Id"))
+}
+
+// grantedDocs resolves the viewer's explicit document grants. Fails OPEN: on any
+// error it returns nil so the viewer still sees owned + org/shared docs (never a
+// leak — at worst a doc shared specifically to them is briefly hidden).
+func (h *DocumentHandler) grantedDocs(r *http.Request, orgID, viewer string) []string {
+	if viewer == "" || h.authz == nil {
+		return nil
+	}
+	ids, err := h.authz.ListVisibleDocuments(r.Context(), orgID, viewer)
+	if err != nil {
+		log.Warn().Err(err).Msg("documents: failed to resolve viewer grants; failing open to owner+org/shared")
+		return nil
+	}
+	return ids
 }
 
 func (h *DocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	docID := chi.URLParam(r, "documentID")
 
-	doc, err := h.repo.Get(r.Context(), orgID, docID)
+	viewer := viewerID(r)
+	doc, err := h.repo.Get(r.Context(), orgID, docID, viewer, h.grantedDocs(r, orgID, viewer))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
@@ -59,11 +93,14 @@ func (h *DocumentHandler) List(w http.ResponseWriter, r *http.Request) {
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	docType := r.URL.Query().Get("type")
 
+	viewer := viewerID(r)
 	result, err := h.repo.List(r.Context(), model.ListDocumentsInput{
-		OrgID:  orgID,
-		Type:   docType,
-		Limit:  limit,
-		Offset: offset,
+		OrgID:      orgID,
+		Type:       docType,
+		Limit:      limit,
+		Offset:     offset,
+		ViewerID:   viewer,
+		GrantedIDs: h.grantedDocs(r, orgID, viewer),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list documents")
@@ -81,6 +118,14 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.OrgID = orgID
+	// Stamp the creator as owner when an interactive viewer is present and the
+	// caller did not specify one. Server-to-server ingests (no viewer) fall back
+	// to created_by / the system account in the repo.
+	if input.OwnerID == "" {
+		if v := viewerID(r); v != "" {
+			input.OwnerID = v
+		}
+	}
 
 	if err := validate.OrgID(orgID); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -140,7 +185,17 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	docID := chi.URLParam(r, "documentID")
 
-	if err := h.repo.SoftDelete(r.Context(), orgID, docID, ""); err != nil {
+	// Ownership gate: a caller may only delete a document they can actually see.
+	// Without this, any org member could delete a private doc they cannot read by
+	// guessing its id (confused deputy). A no-viewer (service) caller keeps the
+	// legacy org-scoped behaviour. deletedBy records who performed the deletion.
+	viewer := viewerID(r)
+	if _, err := h.repo.Get(r.Context(), orgID, docID, viewer, h.grantedDocs(r, orgID, viewer)); err != nil {
+		writeError(w, http.StatusNotFound, "document not found")
+		return
+	}
+
+	if err := h.repo.SoftDelete(r.Context(), orgID, docID, viewer); err != nil {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
 	}
@@ -185,10 +240,14 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	rejectionReasons := []string{}
 
+	bulkViewer := viewerID(r)
 	var reused int
 	var updated int
 	for i, input := range req.Documents {
 		input.OrgID = orgID
+		if input.OwnerID == "" && bulkViewer != "" {
+			input.OwnerID = bulkViewer
+		}
 		if err := validate.CreateDocument(&input); err != nil {
 			rejected++
 			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: %s", i, err.Error()))

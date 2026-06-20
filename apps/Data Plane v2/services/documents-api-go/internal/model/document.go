@@ -23,6 +23,11 @@ type Document struct {
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
 	DeletedAt         *time.Time      `json:"deleted_at,omitempty"`
+	// Per-User Data Ownership & Sharing. OwnerID is the creator (or the system
+	// account for grandfathered/non-API rows). Visibility is one of
+	// 'private' | 'org' | 'shared'.
+	OwnerID    string `json:"owner_id"`
+	Visibility string `json:"visibility"`
 }
 
 type CreateDocumentInput struct {
@@ -37,6 +42,10 @@ type CreateDocumentInput struct {
 	CreatedBy         string          `json:"created_by,omitempty"`
 	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
 	IngestPolicy      *IngestPolicy   `json:"ingest_policy,omitempty"`
+	// OwnerID, when set, stamps the document's owner; otherwise it falls back to
+	// CreatedBy, then the org-system account. Visibility defaults to 'org'.
+	OwnerID    string `json:"owner_id,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
 }
 
 // IngestPolicy mirrors `dataplane.documents.v2.IngestPolicy`. When
@@ -61,6 +70,12 @@ type ListDocumentsInput struct {
 	Type   string
 	Limit  int
 	Offset int
+	// ViewerID is the requesting user. When empty, the list is org-scoped only
+	// (legacy/back-compat). When set, ownership is enforced: a doc is visible if
+	// owner_id == ViewerID, visibility IN ('org','shared'), or its id is in
+	// GrantedIDs (explicit shares resolved from user-core's resource_grants).
+	ViewerID   string
+	GrantedIDs []string
 }
 
 type ListDocumentsResult struct {

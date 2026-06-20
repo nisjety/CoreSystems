@@ -55,12 +55,25 @@ impl KnowledgeClient {
     /// within `org_id` (the run's verified tenant). Returns a ranked,
     /// agent-readable list. An empty result set is a successful, informative
     /// response (not an error).
-    pub async fn search(&self, org_id: &str, query: &str, top_k: i32) -> Result<String, String> {
+    pub async fn search(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        query: &str,
+        top_k: i32,
+    ) -> Result<String, String> {
         let top_k = top_k.clamp(1, MAX_TOP_K);
         let mut request = tonic::Request::new(RetrieveRequest {
             org_id: org_id.to_owned(),
             query: query.to_owned(),
             top_k,
+            // Per-user ownership: the retrieval post-filter grounds AS this user.
+            // Empty → org-scoped fallback (never cross-user).
+            user_id: if user_id.is_empty() {
+                None
+            } else {
+                Some(user_id.to_owned())
+            },
             ..Default::default()
         });
         if let Some(key) = &self.api_key {

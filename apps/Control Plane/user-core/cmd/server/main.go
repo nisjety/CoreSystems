@@ -304,7 +304,7 @@ func main() {
 	}
 
 	// Create gRPC server with NATS publisher and Better Auth client
-	grpcServer := grpc.NewServer(cfg, db, natsPublisher, betterAuthClient)
+	grpcServer := grpc.NewServer(cfg, db, natsPublisher, sharedPublisher, betterAuthClient)
 
 	// Create HTTP/REST server (Phase 4: Frontend compatibility)
 	httpPort := os.Getenv("HTTP_PORT")
@@ -312,7 +312,10 @@ func main() {
 		httpPort = "3012"
 	}
 	log.Printf("🌐 Initializing HTTP/REST server on port %s (Phase 4: Frontend parity)", httpPort)
-	httpServer := httpserver.NewServer(userService, httpPort)
+	// Per-user authz facade (ListVisible/Check) is served over HTTP so Data
+	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
+	aclRepo := users.NewAclRepository(db)
+	httpServer := httpserver.NewServer(userService, aclRepo, httpPort)
 
 	// Handle shutdown gracefully
 	sigChan := make(chan os.Signal, 1)

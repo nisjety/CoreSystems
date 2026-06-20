@@ -459,6 +459,7 @@ async fn dispatch_brreg_lookup_tool(state: &AppState, call: &ToolCall) -> ToolOu
 pub async fn dispatch_tool(
     state: &AppState,
     org_id: &str,
+    user_id: &str,
     thread_id: &str,
     call: &ToolCall,
 ) -> ToolOutcome {
@@ -685,10 +686,19 @@ pub async fn dispatch_tool(
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
+            // Per-User Data Ownership: the agent grounds AS the run's verified
+            // user — threading user_id makes the retrieval post-filter drop any
+            // document this user cannot see. Empty user_id (no run identity)
+            // falls back to org-scoped, never cross-user.
             let request = crate::retrieval::authorize(tonic::Request::new(RetrieveRequest {
                 org_id: org_id.to_owned(),
                 query,
                 top_k,
+                user_id: if user_id.is_empty() {
+                    None
+                } else {
+                    Some(user_id.to_owned())
+                },
                 ..Default::default()
             }));
             match state.retrieval_client.clone().retrieve(request).await {
@@ -834,6 +844,7 @@ pub async fn run_forced_web_search(
     state: &AppState,
     request_id: &str,
     org_id: &str,
+    user_id: &str,
     thread_id: &str,
     base_messages: Vec<ChatMessage>,
     query: &str,
@@ -850,7 +861,7 @@ pub async fn run_forced_web_search(
         arguments_json: args.to_string(),
         ..Default::default()
     };
-    let outcome = dispatch_tool(state, org_id, thread_id, &call).await;
+    let outcome = dispatch_tool(state, org_id, user_id, thread_id, &call).await;
     let mut events = vec![
         ChatEvent::ToolCall {
             id: call.id,
@@ -929,6 +940,7 @@ pub async fn run_tool_rounds(
     state: &AppState,
     request_id: &str,
     org_id: &str,
+    user_id: &str,
     thread_id: &str,
     model: &str,
     base_messages: Vec<ChatMessage>,
@@ -974,7 +986,7 @@ pub async fn run_tool_rounds(
                 name: call.name.clone(),
                 args,
             });
-            let outcome = dispatch_tool(state, org_id, thread_id, call).await;
+            let outcome = dispatch_tool(state, org_id, user_id, thread_id, call).await;
             events.push(ChatEvent::ToolResult {
                 id: outcome.call_id.clone(),
                 status: if outcome.error.is_some() {
