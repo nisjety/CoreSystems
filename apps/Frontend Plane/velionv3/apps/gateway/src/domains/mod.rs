@@ -7,6 +7,7 @@ pub mod ai;
 pub mod audit;
 pub mod auth;
 pub mod billing;
+pub mod briefs;
 pub mod browser;
 pub mod chat;
 pub mod finetune;

@@ -171,14 +171,17 @@ is provisioned:
 - Evidence: `go build` + `go vet` + `go test ./internal/consumers ./internal/insights` green — covers
   known-event→metric mapping, stable-id-on-duplicate-delivery, unknown-type skip, missing-org skip, recorder-error retry.
 
-### Remaining (PR-3) — gateway briefs.rs ⛔ BLOCKED on concurrent gateway edits
-> Blocker: `apps/Frontend Plane/velionv3/apps/gateway/src/main.rs` (router registration) is uncommitted-dirty
-> with the parallel Ownership-phase work. A new gateway domain must register its router in `main.rs`, and a
-> clean commit can't stage that without sweeping in the concurrent edits. Resolve by committing/settling the
-> gateway edits first; then `briefs.rs` (+ PR-5 `/leads`) can be added cleanly. (Same blocker for any new
-> gateway domain.)
-
-- Gateway `briefs.rs` (`authorized_org_id` + `proxy_json`) fan-in over insight rollups + Quarry change +
-  model-gateway summary with citations; **refuses-or-labels "Preview" below a real-event threshold** — never
-  trends over empty data; empty-org test proves it refuses/labels. (Deferred to keep this increment coherent +
-  verified; the foundation above renders nothing, so no fakeness is introduced by landing it first.)
+### Done — gateway briefs.rs (Preview-gated)
+(Unblocked: the concurrent gateway `main.rs`/`middleware.rs` edits were committed to main as a WIP snapshot
+`8c2940fe`, so the router registration could be added cleanly.)
+- `domains/briefs.rs` — `GET /api/v1/briefs`, org resolved via `authorized_org_id` (never a client header),
+  fans in insight-core's `/insights/overview` via `proxy_json`. **Preview gate**: sums the real per-surface
+  `total_events`; `>= BRIEF_MIN_EVENTS (5)` → `state:"live"`, else `state:"preview"` + a disclosure. Surfaces /
+  scorecards pass through verbatim — **never a fabricated trend**; empty-org → preview over an empty overview.
+- Registered in `domains/mod.rs` + `main.rs` router.
+- Evidence: gateway `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test briefs`
+  all green — 3 tests pin the gate: below-threshold→preview+disclosure, at-threshold→live (no disclosure),
+  empty-overview→preview & never fabricates (surfaces/scorecards empty).
+- Scope note: the Quarry-change + model-gateway-summary (citations) legs are additive enrichment on the same
+  envelope (follow-up); the Preview gate already protects the honesty invariant. A thin SPA brief surface
+  consuming `/api/v1/briefs` is the remaining UI piece.

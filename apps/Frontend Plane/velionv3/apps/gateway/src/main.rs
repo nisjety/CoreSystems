@@ -64,6 +64,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
         .merge(domains::billing::router(state.clone()))
+        .merge(domains::briefs::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
         .merge(domains::finetune::router(state.clone()))
         .merge(domains::inbox::router(state.clone()))
