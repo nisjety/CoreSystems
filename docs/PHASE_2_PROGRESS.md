@@ -136,3 +136,35 @@ the admin's org before forwarding — else it reintroduces the cross-tenant IDOR
 Also reconcile the CP `.env` DB_PASSWORD drift before the erase path runs in a live deploy (never change the
 live hex). Deferred deliberately rather than rushed — a cross-org admin route is exactly the surface that must
 be org-scoped + negative-tested before shipping.
+
+---
+
+## PR-3 — W3 insight-core Postgres + subscriber + gateway briefs.rs (Preview-gated)
+**Status:** durable metric store (foundation) done + verified; subscriber + briefs.rs scoped next.
+
+### Done — insight-core durable metric store (safe, renders nothing)
+Phase-1 A shipped insight-core registry-only with an in-memory metric repo (`replicas: 1`). This increment
+adds OPTIONAL Postgres persistence (mirrors social-core), gated so Phase-1 behaviour is unchanged until a DB
+is provisioned:
+- `internal/database/{database.go,migrate.go}` + `migrations/001_insight_core.{up,down}.sql` — embedded
+  migration runner + `insight_metric_events` table (id PK, org_id, surface, metric, value, unit, source,
+  connector_type, dimensions jsonb, occurred_at) + org/surface/time index.
+- `internal/insights/pg_repository.go` — `PGRepository` implements the `Repository` contract:
+  `RecordMetricEvent` (idempotent `ON CONFLICT (id) DO NOTHING` — duplicate JetStream delivery never
+  double-counts), `ListMetricEvents` (org + `surface = ANY` + window), `ListConnectorSlots` (static registry).
+- `config.go` + `main.go`: `DATABASE_URL` empty → in-memory (unchanged Phase-1); set → connect + migrate +
+  `PGRepository`. `NATS_URL`/`NATS_TOKEN` added (for the upcoming subscriber). Compose should drop `replicas:1`
+  when a DB is wired.
+- Evidence: `go build ./...` ok; `go test ./...` green; **live SQL smoke** against `application-postgres`:
+  migration applies, inserting the same id twice yields one row (idempotency), the `ANY(text[])` + window
+  query round-trips.
+
+### Remaining (PR-3, scoped) — subscriber + gateway briefs.rs
+- insight-core **JetStream subscriber** on `velion.application.>` (reuse the PR-1 `DurableConsumer` pattern;
+  insight-core is a separate module so mirror, don't import) mapping cc-go inbox/ai-action events
+  (`ai_action.executed`, `ai_action.reviewed`, conversation/message events) → `MetricEvent`s with a stable
+  derived id (idempotent). This is what makes metrics REAL (the producer Phase-1 deferred to Phase-2).
+- Gateway `briefs.rs` (`authorized_org_id` + `proxy_json`) fan-in over insight rollups + Quarry change +
+  model-gateway summary with citations; **refuses-or-labels "Preview" below a real-event threshold** — never
+  trends over empty data; empty-org test proves it refuses/labels. (Deferred to keep this increment coherent +
+  verified; the foundation above renders nothing, so no fakeness is introduced by landing it first.)

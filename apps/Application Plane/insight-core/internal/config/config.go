@@ -17,6 +17,13 @@ type Config struct {
 	ConnectorTokenLeaseAudience   string
 	GoogleAnalyticsAPIBaseURL     string
 	GoogleSearchConsoleAPIBaseURL string
+
+	// W3 (PR-3), all OPTIONAL. When DatabaseURL is empty insight-core keeps the
+	// Phase-1 in-memory metric repo; when NATSURL is empty the metric subscriber
+	// is not started. This preserves the registry-only Phase-1 deployment.
+	DatabaseURL string
+	NATSURL     string
+	NATSToken   string
 }
 
 func Load() (*Config, error) {
@@ -30,6 +37,9 @@ func Load() (*Config, error) {
 		ConnectorTokenLeaseAudience:   strings.TrimSpace(getEnv("INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE", "insight-core")),
 		GoogleAnalyticsAPIBaseURL:     strings.TrimRight(strings.TrimSpace(getEnv("GOOGLE_ANALYTICS_DATA_API_BASE_URL", "https://analyticsdata.googleapis.com")), "/"),
 		GoogleSearchConsoleAPIBaseURL: strings.TrimRight(strings.TrimSpace(getEnv("GOOGLE_SEARCH_CONSOLE_API_BASE_URL", "https://www.googleapis.com/webmasters/v3")), "/"),
+		DatabaseURL:                   strings.TrimSpace(getEnv("DATABASE_URL", "")),
+		NATSURL:                       strings.TrimSpace(getEnv("NATS_URL", "")),
+		NATSToken:                     strings.TrimSpace(getEnv("NATS_TOKEN", "")),
 	}
 
 	if cfg.InternalAPIKey == "" {
