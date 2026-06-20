@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/config"
+	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/database"
 	apphttp "github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/http"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/insights"
+	appnats "github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/nats"
 )
 
 func main() {
@@ -47,6 +49,25 @@ func main() {
 		log.Printf("insight-core: in-memory metric store (set DATABASE_URL for durable metrics)")
 	}
 	service := insights.NewService(repository)
+
+	// W3: when NATS is wired, consume conversation-core application events and
+	// record them as metrics — the real producer behind the metrics view. No-op
+	// when NATS_URL is empty (Phase-1 behaviour: metrics stay an empty-state).
+	if cfg.NATSURL != "" {
+		natsClient, err := appnats.NewClient(appnats.Config{URL: cfg.NATSURL, Token: cfg.NATSToken, Name: cfg.ServiceName})
+		if err != nil {
+			log.Printf("insight-core: NATS disabled: %v", err)
+		} else {
+			defer natsClient.Close()
+			subscriber := consumers.NewMetricSubscriber(natsClient.JS, service)
+			if err := subscriber.Start(context.Background()); err != nil {
+				log.Printf("insight-core: metric subscriber: %v", err)
+			} else {
+				defer subscriber.Stop()
+			}
+		}
+	}
+
 	handler := apphttp.NewHandler(cfg, service)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
 

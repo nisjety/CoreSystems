@@ -159,11 +159,25 @@ is provisioned:
   migration applies, inserting the same id twice yields one row (idempotency), the `ANY(text[])` + window
   query round-trips.
 
-### Remaining (PR-3, scoped) — subscriber + gateway briefs.rs
-- insight-core **JetStream subscriber** on `velion.application.>` (reuse the PR-1 `DurableConsumer` pattern;
-  insight-core is a separate module so mirror, don't import) mapping cc-go inbox/ai-action events
-  (`ai_action.executed`, `ai_action.reviewed`, conversation/message events) → `MetricEvent`s with a stable
-  derived id (idempotent). This is what makes metrics REAL (the producer Phase-1 deferred to Phase-2).
+### Done — insight-core metric subscriber (the real producer)
+- `internal/nats/client.go` + `internal/consumers/{consumer.go,metric_subscriber.go}` — a `DurableConsumer`
+  scaffold mirroring PR-1 (insight-core is a separate module, so mirrored not imported) + `MetricSubscriber`
+  on `velion.application.>`. Maps conversation-core `LifecycleEvent`s by `type` →
+  (surface=inbox, metric): `ai_action.executed`/`reviewed`, `ticket.created`/`suggested`/`resolved`,
+  `conversation.created`, `message.received`/`sent`. Unknown types + missing-org are skipped (no fabricated
+  metric). Idempotent: the metric id is derived from the source event id (`ins_evt_<id>_<metric>`), so a
+  duplicate delivery hits the repo's `ON CONFLICT DO NOTHING`.
+- `main.go`: starts the subscriber only when `NATS_URL` is set (no-op otherwise — Phase-1 empty-state preserved).
+- Evidence: `go build` + `go vet` + `go test ./internal/consumers ./internal/insights` green — covers
+  known-event→metric mapping, stable-id-on-duplicate-delivery, unknown-type skip, missing-org skip, recorder-error retry.
+
+### Remaining (PR-3) — gateway briefs.rs ⛔ BLOCKED on concurrent gateway edits
+> Blocker: `apps/Frontend Plane/velionv3/apps/gateway/src/main.rs` (router registration) is uncommitted-dirty
+> with the parallel Ownership-phase work. A new gateway domain must register its router in `main.rs`, and a
+> clean commit can't stage that without sweeping in the concurrent edits. Resolve by committing/settling the
+> gateway edits first; then `briefs.rs` (+ PR-5 `/leads`) can be added cleanly. (Same blocker for any new
+> gateway domain.)
+
 - Gateway `briefs.rs` (`authorized_org_id` + `proxy_json`) fan-in over insight rollups + Quarry change +
   model-gateway summary with citations; **refuses-or-labels "Preview" below a real-event threshold** — never
   trends over empty data; empty-org test proves it refuses/labels. (Deferred to keep this increment coherent +
