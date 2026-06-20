@@ -79,7 +79,7 @@ func TestExportCSVIsCompanyOnly(t *testing.T) {
 	}}
 	svc := NewService(repo, nil)
 
-	csvBytes, list, err := svc.ExportCSV(context.Background(), "org-1", "list_1")
+	csvBytes, list, err := svc.ExportCSV(context.Background(), "org-1", "list_1", "user-1")
 	if err != nil {
 		t.Fatalf("ExportCSV error: %v", err)
 	}

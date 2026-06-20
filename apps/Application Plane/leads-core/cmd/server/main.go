@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/audit"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/brreg"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/database"
@@ -35,6 +36,19 @@ func main() {
 
 	repository := leads.NewRepository(db.Pool)
 	service := leads.NewService(repository, brreg.NewClient())
+
+	// Optional best-effort per-export audit → NATS → audit-core.
+	if cfg.NATSURL != "" {
+		publisher, perr := audit.Connect(cfg.NATSURL, cfg.NATSToken, cfg.ServiceName)
+		if perr != nil {
+			log.Printf("leads-core: audit publisher disabled: %v", perr)
+		} else {
+			defer publisher.Close()
+			service.SetAudit(publisher)
+			log.Printf("leads-core: per-export audit enabled")
+		}
+	}
+
 	handler := apphttp.NewHandler(cfg, service)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
 

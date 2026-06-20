@@ -73,6 +73,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::insights::router(state.clone()))
         .merge(domains::integrations::router(state.clone()))
         .merge(domains::knowledge::router(state.clone()))
+        .merge(domains::leads::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
         .merge(domains::navbar::router(state.clone()))
         .merge(domains::notifications::router(state.clone()))
@@ -147,6 +148,7 @@ mod tests {
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
+            leads_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),

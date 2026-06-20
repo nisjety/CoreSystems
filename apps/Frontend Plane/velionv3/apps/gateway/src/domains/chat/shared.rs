@@ -115,6 +115,7 @@ mod tests {
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
+            leads_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),

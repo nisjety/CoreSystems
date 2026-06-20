@@ -162,7 +162,7 @@ func (h *Handler) ExportCSV(c *gin.Context) {
 		return
 	}
 	listID := c.Param("id")
-	csvBytes, list, err := h.service.ExportCSV(c.Request.Context(), orgID, listID)
+	csvBytes, list, err := h.service.ExportCSV(c.Request.Context(), orgID, listID, actorUserID(c))
 	if err != nil {
 		writeServiceError(c, err)
 		return

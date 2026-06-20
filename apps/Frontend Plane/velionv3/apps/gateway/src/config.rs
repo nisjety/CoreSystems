@@ -24,6 +24,7 @@ pub(crate) struct AppState {
     pub(crate) integration_core_url: String,
     pub(crate) audit_core_url: String,
     pub(crate) insight_core_url: String,
+    pub(crate) leads_core_url: String,
     pub(crate) user_core_url: String,
     pub(crate) graph_index_url: String,
     pub(crate) quarry_edge_url: String,
@@ -103,6 +104,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // insight-core (Application Plane, registry-only) serves the connector
         // registry. Internal-key auth + x-org-id header, like the other cores.
         insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
+        leads_core_url: env_url("LEADS_CORE_URL", "http://leads-core:3164"),
         user_core_url: env_url("USER_CORE_URL", "http://user-core:3012"),
         graph_index_url: env_url("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203"),
         quarry_edge_url: env_url("QUARRY_EDGE_URL", "http://quarry-edge:8082"),

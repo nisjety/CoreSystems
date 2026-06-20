@@ -13,16 +13,36 @@ import (
 
 const maxListCompanies = 10_000
 
+// LeadExportAudit is the per-export audit record (company-level metadata only —
+// no company data, no PII).
+type LeadExportAudit struct {
+	OrgID    string
+	ListID   string
+	ListName string
+	UserID   string
+	Count    int
+}
+
+// AuditSink records a per-export audit event. Implemented by internal/audit over
+// NATS; nil/absent in tests and when NATS is not wired (export still works).
+type AuditSink interface {
+	PublishLeadExport(ctx context.Context, ev LeadExportAudit)
+}
+
 // Service is the lead-builder business logic: filtered Brreg search + saved
 // org-scoped company lists + CSV export.
 type Service struct {
 	repo  Repository
 	brreg *brreg.Client
+	audit AuditSink
 }
 
 func NewService(repo Repository, client *brreg.Client) *Service {
 	return &Service{repo: repo, brreg: client}
 }
+
+// SetAudit wires the optional per-export audit sink (best-effort).
+func (s *Service) SetAudit(a AuditSink) { s.audit = a }
 
 // Search runs a filtered Enhetsregisteret company search. Company data only.
 func (s *Service) Search(ctx context.Context, filter brreg.SearchFilter) (*brreg.SearchPage, error) {
@@ -94,8 +114,9 @@ func companyRow(c brreg.Company) []string {
 }
 
 // ExportCSV renders a saved list as CSV of COMPANY fields only and returns the
-// bytes plus the list (for audit metadata). Org-scoped.
-func (s *Service) ExportCSV(ctx context.Context, orgID, listID string) ([]byte, *SavedList, error) {
+// bytes plus the list (for audit metadata). Org-scoped. Emits a best-effort
+// per-export audit event (company-count metadata only — no company data, no PII).
+func (s *Service) ExportCSV(ctx context.Context, orgID, listID, actorUserID string) ([]byte, *SavedList, error) {
 	list, err := s.GetList(ctx, orgID, listID)
 	if err != nil {
 		return nil, nil, err
@@ -113,6 +134,16 @@ func (s *Service) ExportCSV(ctx context.Context, orgID, listID string) ([]byte, 
 	w.Flush()
 	if err := w.Error(); err != nil {
 		return nil, nil, err
+	}
+
+	if s.audit != nil {
+		s.audit.PublishLeadExport(ctx, LeadExportAudit{
+			OrgID:    orgID,
+			ListID:   list.ID,
+			ListName: list.Name,
+			UserID:   actorUserID,
+			Count:    list.CompanyCount,
+		})
 	}
 	return buf.Bytes(), list, nil
 }

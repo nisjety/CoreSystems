@@ -12,6 +12,10 @@ type Config struct {
 	ServiceName    string
 	InternalAPIKey string
 	DatabaseURL    string
+	// Optional: when set, per-export audit events are published to NATS
+	// (best-effort). Empty disables audit publishing (export still works).
+	NATSURL   string
+	NATSToken string
 }
 
 func Load() (*Config, error) {
@@ -20,6 +24,8 @@ func Load() (*Config, error) {
 		ServiceName:    getEnv("SERVICE_NAME", "leads-core"),
 		InternalAPIKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
 		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		NATSURL:        strings.TrimSpace(os.Getenv("NATS_URL")),
+		NATSToken:      strings.TrimSpace(os.Getenv("NATS_TOKEN")),
 	}
 	if cfg.InternalAPIKey == "" {
 		return nil, fmt.Errorf("INTERNAL_API_KEY is required")

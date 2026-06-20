@@ -17,6 +17,7 @@ pub mod ingestions;
 pub mod insights;
 pub mod integrations;
 pub mod knowledge;
+pub mod leads;
 pub mod monitoring;
 pub mod navbar;
 pub mod notifications;
