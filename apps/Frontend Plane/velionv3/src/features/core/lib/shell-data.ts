@@ -26,6 +26,7 @@ export type VelionRoute =
   | '/insights/experiments'
   | '/ingestions'
   | '/knowledge'
+  | '/leads'
   | '/agents'
   | '/agents/runs'
   | '/account'

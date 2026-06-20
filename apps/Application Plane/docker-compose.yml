@@ -584,6 +584,49 @@ services:
       retries: 3
       start_period: 20s
 
+  leads-core:
+    build:
+      context: ./leads-core
+      dockerfile: Dockerfile
+    container_name: leads-core
+    restart: unless-stopped
+    # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
+    # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
+    # event on the inter-plane bus (audit-core subscribes velion.audit.v1.>).
+    environment:
+      PORT: "3164"
+      SERVICE_NAME: leads-core
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
+      NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+    ports:
+      - "${LEADS_CORE_HOST_PORT:-3164}:3164"
+    depends_on:
+      application-postgres:
+        condition: service_healthy
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 32M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3164/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   information-core:
     build:
       context: ./information-core

@@ -15,6 +15,7 @@ const SocialCalendarPage = lazy(() => import('@/features/social/components/Socia
 const SocialOperationsPage = lazy(() => import('@/features/social/components/SocialOperationsPage'))
 const InsightsPage = lazy(() => import('@/features/insights/components/InsightsPage'))
 const KnowledgePage = lazy(() => import('@/features/knowledge/components/KnowledgePage'))
+const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
 const VelionIngestionsPage = lazy(() => import('@/features/ingestions/components/VelionIngestionsPage'))
 const AuthPage = lazy(() => import('@/features/auth/components/AuthPage'))
 const OnboardingPage = lazy(() => import('@/features/onboarding/components/OnboardingPage'))
@@ -163,6 +164,7 @@ export default function App() {
         <Route path="/agents/runs" component={AgentRunConsole} />
         <Route path="/ingestions" component={VelionIngestionsPage} />
         <Route path="/knowledge" component={KnowledgePage} />
+        <Route path="/leads" component={LeadsPage} />
         <Route path="/account" component={AccountSettingsPage} />
         <Route path="/settings" component={() => <RequireWorkspaceAdmin><SettingsPage /></RequireWorkspaceAdmin>} />
         <Route path="/settings/:section" component={() => <RequireWorkspaceAdmin><SettingsPage /></RequireWorkspaceAdmin>} />

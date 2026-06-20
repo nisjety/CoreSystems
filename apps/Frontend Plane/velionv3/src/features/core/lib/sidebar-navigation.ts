@@ -101,6 +101,7 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'overview-social', label: 'Social', href: '/social/calendar', icon: CalendarDays, description: 'Planlegg postkalender, godkjenninger og kanaler.', tabId: 'shared' },
           { id: 'overview-knowledge', label: 'Kunnskap', href: '/knowledge', icon: BookOpen, description: 'Indekserte kilder, status og datakvalitet.', tabId: 'shared' },
           { id: 'overview-insights', label: 'Insights', href: '/insights/overview', icon: BarChart3, description: 'Mål sosialt, inbox, agenter, kampanjer og eksperimenter.', tabId: 'shared' },
+          { id: 'overview-leads', label: 'Leads', href: '/leads', icon: Search, description: 'Finn norske bedrifter i Enhetsregisteret etter bransje, sted og størrelse.', tabId: 'shared' },
           { id: 'overview-agents', label: 'Agenter', href: '/agents', icon: Bot, description: 'Roller, handlinger og operasjonelle grenser.', tabId: 'shared' },
         ],
       },
