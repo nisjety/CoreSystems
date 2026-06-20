@@ -273,6 +273,13 @@ The day-15 go/no-go is **2026-07-05** (not yet reached as of 2026-06-20). Per th
 Phase-1 Track C is merged-and-green at that gate; otherwise it defers wholesale to Phase 3. Building it now
 would violate the conditional gate, so it is intentionally NOT built (never half-shipped).
 
+Pre-flight signal (read-only, recorded for the 2026-07-05 decision): quarry-edge `POST /v1/change/check`
+returns **401 (mounted, auth-gated) — NOT 501**, so Track C's change endpoint appears deployed (the plan's
+"`/v1/change` returns 501 → cannot build" pre-flight is NOT triggered). The remaining gate is purely the dated
+go/no-go + the formal Track-C-merged-and-green review (C1 edge `--features postgres-queue` + C2 monitoring.rs +
+C3 SPA tab). If the team chooses to override the date gate given this positive signal, that is a deliberate
+scope decision — the plan as written defers to 2026-07-05.
+
 ## No-new-fakeness audit (final)
 Every rendered value traces to real per-org data today or is explicitly labelled, and several fabrications were
 *removed* or *refused* rather than added: W4 "Applied" only after a live approve→execute round-trip; W3 briefs
