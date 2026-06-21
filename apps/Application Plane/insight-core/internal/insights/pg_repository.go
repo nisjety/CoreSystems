@@ -3,6 +3,7 @@ package insights
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -81,4 +82,28 @@ ORDER BY occurred_at DESC`,
 // ListConnectorSlots returns the static connector registry (org-independent).
 func (r *PGRepository) ListConnectorSlots(_ context.Context, _ string) ([]ConnectorSlot, error) {
 	return copyConnectorSlots(r.connectors), nil
+}
+
+// ListOrgIDsWithMetricsSince returns the distinct org_ids that recorded at least
+// one metric event at or after `since`, ordered for deterministic iteration.
+func (r *PGRepository) ListOrgIDsWithMetricsSince(ctx context.Context, since time.Time) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT DISTINCT org_id
+FROM insight_metric_events
+WHERE occurred_at >= $1
+ORDER BY org_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	orgIDs := []string{}
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, err
+		}
+		orgIDs = append(orgIDs, orgID)
+	}
+	return orgIDs, rows.Err()
 }

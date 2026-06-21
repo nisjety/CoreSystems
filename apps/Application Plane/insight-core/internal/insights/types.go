@@ -25,6 +25,12 @@ type Repository interface {
 	RecordMetricEvent(ctx context.Context, event MetricEvent) (*MetricEvent, error)
 	ListMetricEvents(ctx context.Context, query OverviewQuery) ([]MetricEvent, error)
 	ListConnectorSlots(ctx context.Context, orgID string) ([]ConnectorSlot, error)
+	// ListOrgIDsWithMetricsSince returns the distinct org_ids that have at least
+	// one recorded metric event at or after `since`. It is the server-side org
+	// discovery the scheduled-brief delivery iterates — orgs are derived from the
+	// real recorded data, never from client input, so brief delivery stays
+	// IDOR-clean (no cross-tenant fan-out, no fabricated recipients).
+	ListOrgIDsWithMetricsSince(ctx context.Context, since time.Time) ([]string, error)
 }
 
 type OverviewQuery struct {

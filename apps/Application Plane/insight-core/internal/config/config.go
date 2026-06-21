@@ -19,11 +19,25 @@ type Config struct {
 	GoogleSearchConsoleAPIBaseURL string
 
 	// W3 (PR-3), all OPTIONAL. When DatabaseURL is empty insight-core keeps the
-	// Phase-1 in-memory metric repo; when NATSURL is empty the metric subscriber
-	// is not started. This preserves the registry-only Phase-1 deployment.
+	// in-memory metric repo (registry-only); when NATSURL is empty the
+	// conversation/social metric subscriber is not started.
 	DatabaseURL string
 	NATSURL     string
 	NATSToken   string
+
+	// W3 (PR-5) — model-plane-agents producer leg, OPTIONAL. The Model Plane
+	// runs on an ISOLATED NATS cluster (the model-plane bus), so the agent
+	// subscriber dual-connects here. When empty the agents producer is not
+	// started (mirrors notification-core's MODEL_PLANE_NATS_URL bridge).
+	ModelPlaneNATSURL   string
+	ModelPlaneNATSToken string
+
+	// W3 (PR-5) — scheduled brief delivery, OPTIONAL. When NotificationCoreURL
+	// is set AND a durable metric store is enabled, insight-core runs the daily
+	// brief scheduler that POSTs a `daily_brief` notification (carrying the
+	// Preview gate) to notification-core's existing Novu adapter. When empty the
+	// scheduler is not started.
+	NotificationCoreURL string
 }
 
 func Load() (*Config, error) {
@@ -40,6 +54,9 @@ func Load() (*Config, error) {
 		DatabaseURL:                   strings.TrimSpace(getEnv("DATABASE_URL", "")),
 		NATSURL:                       strings.TrimSpace(getEnv("NATS_URL", "")),
 		NATSToken:                     strings.TrimSpace(getEnv("NATS_TOKEN", "")),
+		ModelPlaneNATSURL:             strings.TrimSpace(getEnv("MODEL_PLANE_NATS_URL", "")),
+		ModelPlaneNATSToken:           strings.TrimSpace(getEnv("MODEL_PLANE_NATS_TOKEN", "")),
+		NotificationCoreURL:           strings.TrimRight(strings.TrimSpace(getEnv("NOTIFICATION_CORE_URL", "")), "/"),
 	}
 
 	if cfg.InternalAPIKey == "" {

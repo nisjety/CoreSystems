@@ -76,6 +76,18 @@ func (s *Service) ListConnectorSlots(ctx context.Context, orgID string) ([]Conne
 	return s.repository.ListConnectorSlots(ctx, orgID)
 }
 
+// OrgsWithRecentMetrics returns the org_ids that recorded at least one metric
+// event within the trailing `window` (measured from the service clock). It is
+// the server-side org discovery the scheduled-brief delivery iterates: orgs are
+// derived from real recorded data only, never from caller input.
+func (s *Service) OrgsWithRecentMetrics(ctx context.Context, window time.Duration) ([]string, error) {
+	if window <= 0 {
+		return nil, fmt.Errorf("%w: window must be positive", ErrInvalidInput)
+	}
+	since := s.now().UTC().Add(-window)
+	return s.repository.ListOrgIDsWithMetricsSince(ctx, since)
+}
+
 func normalizeMetricEvent(input IngestMetricEventInput, now func() time.Time) (MetricEvent, error) {
 	orgID := strings.TrimSpace(input.OrgID)
 	surface := normalizeSurface(input.Surface)
