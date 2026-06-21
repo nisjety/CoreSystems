@@ -219,18 +219,45 @@ pub(crate) fn build_cors_layer() -> CorsLayer {
 }
 
 fn internal_api_key() -> Result<String> {
-    if let Ok(value) = env::var("INTERNAL_API_KEY") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() && trimmed != "change-me" {
-            return Ok(trimmed.to_owned());
+    match env::var("INTERNAL_API_KEY") {
+        Ok(value) => {
+            let trimmed = value.trim();
+            // Reject the ENTIRE `change-me*` placeholder family (case-insensitive),
+            // not just the exact string "change-me". A value like
+            // `change-me-internal-service-secret` authenticates to no core, so a
+            // gateway that boots with it silently 401s every internal-key call
+            // (Brreg, /me/session-context, audit, …). Treat any change-me* / empty
+            // value as "not configured".
+            let is_placeholder =
+                trimmed.is_empty() || trimmed.to_ascii_lowercase().starts_with("change-me");
+            if !is_placeholder {
+                return Ok(trimmed.to_owned());
+            }
+            // A placeholder was EXPLICITLY set — this is the silent-401 trap.
+            // Fail loudly unless the operator explicitly opts into insecure dev
+            // defaults, so a misconfigured key surfaces at boot, not as a fleet of
+            // mysterious 401s once requests start flowing.
+            if !trimmed.is_empty() && env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) {
+                eprintln!(
+                    "WARN: INTERNAL_API_KEY is a `change-me*` placeholder; internal-key \
+                     calls to cores WILL 401 (running anyway: ALLOW_INSECURE_DEV_DEFAULTS=1)"
+                );
+                return Ok(trimmed.to_owned());
+            }
+            anyhow::bail!(
+                "INTERNAL_API_KEY is empty or a `change-me*` placeholder; set the real \
+                 shared internal key (or ALLOW_INSECURE_DEV_DEFAULTS=1 to override)"
+            );
+        }
+        Err(_) => {
+            // No INTERNAL_API_KEY at all: keep prior dev ergonomics — a debug build
+            // (or explicit opt-in) boots with the canonical fake key.
+            if cfg!(debug_assertions) || env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) {
+                return Ok("change-me".into());
+            }
+            anyhow::bail!("INTERNAL_API_KEY must be set and cannot be a change-me* placeholder");
         }
     }
-
-    if cfg!(debug_assertions) || env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) {
-        return Ok("change-me".into());
-    }
-
-    anyhow::bail!("INTERNAL_API_KEY must be set and cannot be change-me");
 }
 
 fn env_bool(key: &str, fallback: bool) -> bool {

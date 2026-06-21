@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1.7
 FROM rust:1.89-bookworm AS chef
 WORKDIR /app
+# Pin cargo-chef (and use --locked) so an unpinned install can't pull a newer
+# transitive dep that demands a rustc newer than this base image. Matches the
+# Data Plane v2 Rust Dockerfiles.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-chef
+    cargo install cargo-chef --locked --version 0.1.77
 
 # Planner: produce the dependency recipe from the manifests only.
 FROM chef AS planner
