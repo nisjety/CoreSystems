@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.4
+# syntax=docker/dockerfile:1.7
 #
 # Multi-stage build for orchestrator-core.
 #
@@ -13,7 +13,8 @@
 # upstream issues don't fail the build. Module hashes are still verified
 # against go.sum locally.
 FROM golang:1.25-alpine AS builder
-RUN apk --no-cache add git ca-certificates
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add git ca-certificates
 WORKDIR /workspace
 COPY . .
 WORKDIR /workspace/services/orchestrator-core
@@ -35,6 +36,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /service ./cmd/
 
 FROM alpine:3.20
-RUN apk --no-cache add ca-certificates
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add ca-certificates
 COPY --from=builder /service /usr/local/bin/service
 ENTRYPOINT ["service"]

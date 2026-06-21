@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM golang:1.25-bookworm AS build
 
 WORKDIR /src
@@ -7,20 +8,26 @@ ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 
 COPY go.mod go.sum* ./
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     if [ -f go.sum ]; then go mod download; else go mod download && go mod tidy; fi
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -o /out/social-core ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w" -o /out/social-core ./cmd/server
 
 FROM debian:bookworm-slim
 
 WORKDIR /app
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
+    rm -f /etc/apt/apt.conf.d/docker-clean; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update -qq; \
     apt-get install -y -qq --no-install-recommends ca-certificates wget; \
-    rm -rf /var/lib/apt/lists/*; \
     groupadd --gid 10001 appuser; \
     useradd --uid 10001 --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser; \
     chown -R appuser:appuser /app

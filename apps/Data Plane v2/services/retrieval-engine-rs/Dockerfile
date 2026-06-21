@@ -13,7 +13,9 @@
 
 FROM rust:1-bookworm AS chef
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -22,12 +24,13 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/apt-install.log
 # tonic-build invokes protoc, which needs to resolve `google/protobuf/*.proto`
 # imports. libprotobuf-dev installs them under /usr/include/google/protobuf/.
 ENV PROTOC_INCLUDE=/usr/include
-RUN cargo install cargo-chef --locked --version 0.1.77
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 # ─── Stage 1: planner ──────────────────────────────────────────────────────
@@ -40,7 +43,10 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ─── Stage 2: cook deps (cached layer) ─────────────────────────────────────
 FROM chef AS cooker
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json
 
 # ─── Stage 3: build binary ─────────────────────────────────────────────────
 FROM cooker AS builder
@@ -48,12 +54,20 @@ COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY services/ services/
 COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
-RUN cargo build --release --bin retrieval-engine
+# target/ is a cache mount, so the compiled binary lives inside the cache and is
+# NOT in the image layer — copy it out to a non-cache path within the same RUN.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --release --bin retrieval-engine \
+    && cp target/release/retrieval-engine /usr/local/bin/retrieval-engine
 
 # ─── Stage 4: runtime ──────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -62,14 +76,13 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/apt-install.log
 
 # Run as non-root for defense in depth.
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
 USER dpv2
 
-COPY --from=builder /build/target/release/retrieval-engine /usr/local/bin/retrieval-engine
+COPY --from=builder /usr/local/bin/retrieval-engine /usr/local/bin/retrieval-engine
 
 EXPOSE 8004 50052
 

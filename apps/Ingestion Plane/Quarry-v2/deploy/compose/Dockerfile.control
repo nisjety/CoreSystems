@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # quarry-control-go (Go durable plane: jobs/schedules/profiles/webhooks/Postgres)
 #
 # Three local module deps live in pkg/:
@@ -19,7 +20,8 @@ COPY pkg ./pkg
 COPY services/quarry-control ./services/quarry-control
 
 WORKDIR /src/services/quarry-control
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
         if go mod download; then \
             exit 0; \
@@ -28,14 +30,17 @@ RUN set -e; \
         sleep 8; \
     done; \
     exit 1
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
         -ldflags="-s -w -extldflags=-static" \
         -o /out/control ./cmd/control
 
 # ---- Runtime image -----------------------------------------------------------
 # bookworm-slim with wget for Docker healthchecks; adds ~25 MB over distroless.
 FROM debian:bookworm-slim
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -47,7 +52,6 @@ RUN set -e; \
         exit 1; \
     fi; \
     rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*; \
     echo 'quarry:x:65532:' >> /etc/group; \
     echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
 

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # =============================================================
 # user-core — Go service (with gRPC / protobuf generation)
 # Build: golang:1.25-alpine (builder) → alpine:3.22 (runtime)
@@ -6,8 +7,9 @@
 # ── Builder ──────────────────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
-RUN set -e; \
-    if ! apk add --no-cache --quiet git make protobuf protobuf-dev \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -e; \
+    if ! apk add --quiet git make protobuf protobuf-dev \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \
@@ -20,7 +22,8 @@ WORKDIR /build
 COPY go.mod go.sum ./
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
         if go mod download; then \
             exit 0; \
@@ -32,7 +35,8 @@ RUN set -e; \
 
 # Install protoc plugins in a separate cached layer
 # Keep codegen deterministic and retry transient module proxy failures.
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
         if go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 && \
            go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0; then \
@@ -53,7 +57,8 @@ RUN protoc --go_out=. --go_opt=paths=source_relative \
 
 # Build — removed -a flag (forces full rebuild every time, defeating cache)
 # -ldflags="-s -w" strips debug; -trimpath removes host path info
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w" \
     -trimpath \
     -o user-service ./cmd/server/main.go
@@ -63,8 +68,9 @@ FROM alpine:3.22
 
 # Pinned from alpine:latest — deterministic builds
 # Merge apk layers and create non-root user
-RUN set -e; \
-    if ! apk add --no-cache --quiet ca-certificates postgresql-client \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -e; \
+    if ! apk add --quiet ca-certificates postgresql-client \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \

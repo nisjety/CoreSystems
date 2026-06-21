@@ -200,7 +200,7 @@ services:
         max-file: "3"
     depends_on:
       nats:
-        condition: service_started
+        condition: service_healthy
       convex-backend:
         condition: service_healthy
 

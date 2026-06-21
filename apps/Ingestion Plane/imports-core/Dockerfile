@@ -9,7 +9,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 
 # Install dependencies in a dedicated layer — only rebuilds when requirements.txt changes
 COPY requirements.txt .
-RUN pip install --no-cache-dir --quiet --no-warn-script-location --user -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --quiet --no-warn-script-location --user -r requirements.txt
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 FROM python:3.11-slim

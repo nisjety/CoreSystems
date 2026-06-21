@@ -18,6 +18,14 @@ services:
       - "16379:16379" # tx-dragonfly listener
     networks:
       - aquatiq-local
+    healthcheck:
+      # toxiproxy-cli ships in the image; `list` hits the :8474 control plane,
+      # so a 0 exit confirms the chaos proxy is up and ready for injection.
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
 networks:
   aquatiq-local:

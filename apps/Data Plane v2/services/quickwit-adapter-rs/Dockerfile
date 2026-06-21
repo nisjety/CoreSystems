@@ -3,7 +3,9 @@
 
 FROM rust:1-bookworm AS chef
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -12,9 +14,10 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked --version 0.1.77
+    rm -f /tmp/apt-install.log
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 FROM chef AS planner
@@ -25,18 +28,27 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS cooker
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json
 
 FROM cooker AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY services/ services/
 COPY infra/quickwit/ infra/quickwit/
-RUN cargo build --release --bin quickwit-adapter
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --release --bin quickwit-adapter \
+    && cp target/release/quickwit-adapter /usr/local/bin/quickwit-adapter
 
 FROM debian:bookworm-slim AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -45,11 +57,10 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/apt-install.log
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
 WORKDIR /app
-COPY --from=builder /build/target/release/quickwit-adapter /usr/local/bin/quickwit-adapter
+COPY --from=builder /usr/local/bin/quickwit-adapter /usr/local/bin/quickwit-adapter
 COPY --from=builder /build/infra/quickwit/ /app/infra/quickwit/
 USER dpv2
 

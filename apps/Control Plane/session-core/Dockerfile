@@ -1,13 +1,17 @@
+# syntax=docker/dockerfile:1.7
 # ── Build stage ───────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git ca-certificates
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add git ca-certificates
 
 WORKDIR /build
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 COPY go.mod go.sum ./
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
         if go mod download; then \
             exit 0; \
@@ -18,13 +22,16 @@ RUN set -e; \
     exit 1
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /session-core ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /session-core ./cmd/server
 
 # ── Runtime stage ─────────────────────────────────────
 FROM alpine:3.21
 
-RUN set -e; \
-    if ! apk add --no-cache --quiet ca-certificates curl postgresql16-client bash \
+RUN --mount=type=cache,target=/var/cache/apk \
+    set -e; \
+    if ! apk add --quiet ca-certificates curl postgresql16-client bash \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \

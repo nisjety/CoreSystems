@@ -134,7 +134,10 @@ services:
     networks:
       - app-net
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'npx convex dev' || pgrep -f 'node' || exit 1"]
+      # The gateway image installs wget/curl and serves the dev server on
+      # :3000 (see Dockerfile EXPOSE 3000 + its own HEALTHCHECK). An actual
+      # HTTP probe is far more reliable than matching a process name.
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:3000 || curl -fsS http://127.0.0.1:3000 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -215,6 +218,15 @@ services:
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 15s
+    # Node transport listening on :1234 (HOST/PORT env below). A pure-Node
+    # TCP connect probe avoids assuming curl/wget exist in the image and
+    # makes depends_on: condition: service_healthy usable for consumers.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('net').connect(1234,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     ports:
       - "1234:1234"
     environment:

@@ -109,6 +109,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      # /health is served on :3185 (src/main.rs). curl is installed in the
+      # runtime stage of apps/gateway/Dockerfile for exactly this check.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3185/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   frontend:
     build:
@@ -123,7 +131,7 @@ services:
       - inter-plane-bus
     depends_on:
       gateway:
-        condition: service_started
+        condition: service_healthy
     volumes:
       # Mount entire app directory for hot reload
       - .:/app

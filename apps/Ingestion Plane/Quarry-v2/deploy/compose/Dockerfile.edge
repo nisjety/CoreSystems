@@ -10,7 +10,10 @@
 # - protobuf-compiler: tonic-build (gRPC clients, gated behind `grpc`)
 # - cmake/perl/clang/build-essential: boring-sys2 (BoringSSL via wreq)
 
-FROM rust:1-slim-bookworm AS build
+# ---- Base toolchain stage ----------------------------------------------------
+# Shared base for the cargo-chef planner/cooker/builder stages so the apt
+# layer and cargo-chef install are computed once and reused.
+FROM rust:1-slim-bookworm AS chef-base
 WORKDIR /src
 
 # System dependencies for our crate graph:
@@ -23,7 +26,11 @@ WORKDIR /src
 #                                            time. Without these the build
 #                                            panics at boring-sys2/build/main.rs:571
 #                                            with "No such file or directory".
-RUN set -e; \
+# apt lists are kept on a cache mount, so we drop the "rm -rf .../lists" that
+# would otherwise defeat the cache.
+RUN --mount=type=cache,id=quarry-edge-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=quarry-edge-apt-lib,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -35,15 +42,25 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/apt-install.log
 
-# Copy workspace manifests first so cargo can resolve deps in a cached layer.
-# We then copy source last for maximum cache hit rate on incremental rebuilds.
+# cargo-chef computes a dependency-only "recipe" so the heavy dependency
+# compile is cached independently of first-party source churn.
+RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --locked
+
+# ---- Planner stage -----------------------------------------------------------
+# Reads the full workspace and emits recipe.json (the dependency graph only).
+FROM chef-base AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo ./.cargo
 COPY crates ./crates
 COPY lab ./lab
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ---- Builder stage -----------------------------------------------------------
+FROM chef-base AS build
 
 # Wave 7 — reqwest 0.13's http3 surface is gated behind
 # `--cfg reqwest_unstable`. The `.cargo/config.toml` copied above sets
@@ -81,6 +98,29 @@ ENV CARGO_BUILD_RUSTFLAGS="--cfg=reqwest_unstable"
 # core and can OOM (which silently kills the build with exit 101).
 ENV CARGO_BUILD_JOBS=2
 ARG QUARRY_EDGE_FEATURES=grpc,http3,postgres-queue
+
+# Cook dependencies only, from the recipe. This is the expensive layer and it
+# is invalidated only when the dependency graph (Cargo.toml/Cargo.lock) changes,
+# not on first-party source edits. Feature flags must match the final build so
+# the cooked dependency artifacts are reused. The cooked artifacts land in
+# /src/target, which is the shared target cache mount reused by the build below.
+COPY --from=planner /src/recipe.json recipe.json
+RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \
+    if [ -n "${QUARRY_EDGE_FEATURES}" ]; then \
+        cargo chef cook --release --recipe-path recipe.json -p quarry-edge --features "${QUARRY_EDGE_FEATURES}"; \
+    else \
+        cargo chef cook --release --recipe-path recipe.json -p quarry-edge; \
+    fi
+
+# Copy first-party source last so the cook layer above stays cache-hot on
+# source-only changes.
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+COPY lab ./lab
+
 RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \

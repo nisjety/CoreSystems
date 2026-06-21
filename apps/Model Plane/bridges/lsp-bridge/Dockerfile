@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Reference LSP bridge.
 #
 # Operators run one per workspace; the model-gateway proxies via
@@ -25,9 +26,12 @@ WORKDIR /app
 
 # Each step in its own RUN so a failure surfaces the actual culprit.
 # pip-installed deps cache poorly when chained behind apk in alpine.
-RUN apk add --no-cache nodejs npm
-RUN pip install --no-cache-dir 'python-lsp-server[all]'
-RUN npm install -g typescript typescript-language-server
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add nodejs npm
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir 'python-lsp-server[all]'
+RUN --mount=type=cache,target=/root/.npm \
+    npm install -g typescript typescript-language-server
 
 COPY server.py ./
 EXPOSE 9202

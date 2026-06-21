@@ -1,11 +1,12 @@
-# syntax=docker/dockerfile:1.4
+# syntax=docker/dockerfile:1.7
 #
 # Multi-stage build for sandbox-manager.
 #
 # Build context is the Go workspace root `apps/Model Plane/go/` because
 # `go.mod` carries a local `replace ../../gen` directive.
 FROM golang:1.25-alpine AS builder
-RUN apk --no-cache add git ca-certificates
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add git ca-certificates
 WORKDIR /workspace
 COPY . .
 WORKDIR /workspace/services/sandbox-manager
@@ -27,6 +28,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /service ./cmd/
 
 FROM alpine:3.20
-RUN apk --no-cache add ca-certificates curl
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add ca-certificates curl
 COPY --from=builder /service /usr/local/bin/service
 ENTRYPOINT ["service"]

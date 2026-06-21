@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # =============================================================
 # org-core — Go service
 # Build: golang:1.25-alpine (builder) → alpine:3.22 (runtime)
@@ -6,7 +7,8 @@
 # ── Builder ──────────────────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add git
 
 WORKDIR /build
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
@@ -14,7 +16,9 @@ ENV GOSUMDB=sum.golang.org
 
 # Copy both go.mod AND go.sum — layer only invalidated when deps change
 COPY go.mod go.sum ./
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
         if go mod download; then \
             exit 0; \
@@ -27,7 +31,9 @@ RUN set -e; \
 COPY . .
 # -ldflags="-s -w" strips debug symbols; -trimpath removes local path references
 # Results in ~30% smaller binary
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w" \
     -trimpath \
     -o org-core ./cmd/server
@@ -36,8 +42,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 FROM alpine:3.22
 
 # Merge all apk installs into one layer
-RUN set -e; \
-    if ! apk add --no-cache --quiet ca-certificates postgresql-client \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -e; \
+    if ! apk add --quiet ca-certificates postgresql-client \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \

@@ -1,11 +1,12 @@
-# syntax=docker/dockerfile:1.4
+# syntax=docker/dockerfile:1.7
 #
 # Multi-stage build for capability-core.
 #
 # Build context is the Go workspace root `apps/Model Plane/go/` because
 # `go.mod` carries a local `replace ../../gen` directive.
 FROM golang:1.25-alpine AS builder
-RUN apk --no-cache add git ca-certificates
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add git ca-certificates
 WORKDIR /workspace
 COPY . .
 WORKDIR /workspace/services/capability-core
@@ -27,8 +28,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /service ./cmd/
 
 FROM alpine:3.20
-RUN set -e; \
-    if ! apk add --no-cache --quiet ca-certificates curl postgresql-client \
+RUN --mount=type=cache,target=/var/cache/apk \
+    set -e; \
+    if ! apk add --quiet ca-certificates curl postgresql-client \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \

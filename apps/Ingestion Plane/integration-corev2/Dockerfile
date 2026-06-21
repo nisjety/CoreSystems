@@ -1,15 +1,19 @@
+# syntax=docker/dockerfile:1.7
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/integration-corev2 ./cmd/api && \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/integration-corev2 ./cmd/api && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/finspo-worker ./cmd/finspo-worker
 
 FROM alpine:3.21
-RUN addgroup -S app && adduser -S app -G app
+RUN --mount=type=cache,target=/var/cache/apk \
+    addgroup -S app && adduser -S app -G app
 USER app
 WORKDIR /app
 COPY --from=build /out/integration-corev2 /app/integration-corev2

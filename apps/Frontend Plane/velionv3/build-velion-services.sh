@@ -57,6 +57,29 @@ fi
 
 export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-4}"
 
+# ── Build-speed env (safe defaults; all caller-overridable) ─────────────────
+# BuildKit is required for the `RUN --mount=type=cache` steps in the per-plane
+# Dockerfiles to actually persist their caches between builds. Enable it for
+# both the `docker build` path and the Compose-driven build path. These are
+# honored only if the caller has not already set them.
+export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-1}"
+
+# COMPOSE_BAKE=true delegates multi-service builds to `docker buildx bake`,
+# which builds a stack's services in parallel and is more cache-aware than the
+# legacy sequential builder. It requires the `buildx` plugin, so gate it behind
+# a buildx-availability probe and let the caller force it off with
+# COMPOSE_BAKE=false (or pin any value of their own).
+if [[ -z "${COMPOSE_BAKE:-}" ]]; then
+  if docker buildx version >/dev/null 2>&1; then
+    export COMPOSE_BAKE=true
+  else
+    export COMPOSE_BAKE=false
+  fi
+else
+  export COMPOSE_BAKE
+fi
+
 MODE="build"
 DRY_RUN=false
 NO_CACHE=false

@@ -492,6 +492,11 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+    # alpine final image has no curl (only ca-certificates); use busybox wget.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8084/healthz"]
+      interval: 10s
+      retries: 3
 
   capability-core:
     build:
@@ -512,6 +517,10 @@ services:
         condition: service_healthy
       dragonfly:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/healthz"]
+      interval: 10s
+      retries: 3
 
   sandbox-manager:
     build:
@@ -528,6 +537,10 @@ services:
     depends_on:
       dragonfly:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/healthz"]
+      interval: 10s
+      retries: 3
 
   browser-broker:
     build:
@@ -536,6 +549,10 @@ services:
     ports:
       - "8087:8087"   # HTTP health
       - "9095:9095"   # gRPC
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/healthz"]
+      interval: 10s
+      retries: 3
 
   letta-bridge:
     build:
@@ -560,6 +577,10 @@ services:
     depends_on:
       agent-memory-server:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/healthz"]
+      interval: 10s
+      retries: 3
 
   # Long-term agent-memory backend: agent-memory-server (REST, LiteLLM) on a
   # dedicated local Redis Stack (RediSearch vector index). letta-bridge points

@@ -64,9 +64,12 @@ x-shared:
       - zammad-backup:/var/tmp/zammad:ro
       - zammad-storage:/opt/zammad/storage
     depends_on:
-      - zammad-memcached
-      - zammad-postgresql
-      - zammad-dragonfly
+      zammad-memcached:
+        condition: service_healthy
+      zammad-postgresql:
+        condition: service_healthy
+      zammad-dragonfly:
+        condition: service_healthy
     networks:
       - zammad-net
     logging:
@@ -96,6 +99,12 @@ services:
       - elasticsearch-data:/usr/share/elasticsearch/data
     networks:
       - zammad-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     logging:
       driver: json-file
       options:
@@ -108,10 +117,14 @@ services:
     restart: on-failure
     user: "0:0"
     depends_on:
-      - zammad-postgresql
-      - zammad-dragonfly
-      - zammad-memcached
-      - zammad-elasticsearch
+      zammad-postgresql:
+        condition: service_healthy
+      zammad-dragonfly:
+        condition: service_healthy
+      zammad-memcached:
+        condition: service_healthy
+      zammad-elasticsearch:
+        condition: service_healthy
 
   zammad-memcached:
     image: memcached:${MEMCACHE_VERSION:-1.6.41-alpine}
@@ -120,6 +133,12 @@ services:
     init: true
     networks:
       - zammad-net
+    healthcheck:
+      test: ["CMD-SHELL", "echo -e 'stats\\nquit' | timeout 3 nc -w 2 127.0.0.1 11211 | grep -q uptime"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     logging:
       driver: json-file
       options:
@@ -132,7 +151,8 @@ services:
     ports:
       - "${ZAMMAD_EXPOSE_PORT:-8088}:${NGINX_PORT:-8080}"
     depends_on:
-      - zammad-railsserver
+      zammad-railsserver:
+        condition: service_healthy
     networks:
       - zammad-net
       - velion-net
@@ -149,6 +169,12 @@ services:
       - postgresql-data:/var/lib/postgresql/data
     networks:
       - zammad-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zammad} -d ${POSTGRES_DB:-zammad_production}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     logging:
       driver: json-file
       options:
@@ -159,10 +185,17 @@ services:
     <<: *zammad-service
     command: ["zammad-railsserver"]
     depends_on:
-      - zammad-init
+      zammad-init:
+        condition: service_completed_successfully
     networks:
       - zammad-net
       - velion-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/v1/getting_started || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
 
   zammad-dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
@@ -193,7 +226,8 @@ services:
     <<: *zammad-service
     command: ["zammad-scheduler"]
     depends_on:
-      - zammad-init
+      zammad-init:
+        condition: service_completed_successfully
     networks:
       - zammad-net
       - velion-net
@@ -202,7 +236,8 @@ services:
     <<: *zammad-service
     command: ["zammad-websocket"]
     depends_on:
-      - zammad-init
+      zammad-init:
+        condition: service_completed_successfully
     networks:
       - zammad-net
       - velion-net

@@ -289,9 +289,9 @@ services:
       controlplane-nats:
         condition: service_healthy
       auth-core:
-        condition: service_started
+        condition: service_healthy
       user-core:
-        condition: service_started
+        condition: service_healthy
     stop_signal: SIGTERM
     stop_grace_period: 10s
     healthcheck:

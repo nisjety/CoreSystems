@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # =============================================================
 # billing-core — Go service
 # Build: golang:1.25-alpine (builder) → alpine:3.22 (runtime)
@@ -6,7 +7,8 @@
 # ── Builder ──────────────────────────────────────────────────
 FROM golang:1.25-alpine AS builder
 
-RUN apk add --no-cache git
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add git
 
 WORKDIR /build
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
@@ -40,8 +42,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.22
 
 # Merge all apk installs into one layer
-RUN set -e; \
-    if ! apk add --no-cache --quiet ca-certificates postgresql-client \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -e; \
+    if ! apk add --quiet ca-certificates postgresql-client \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \

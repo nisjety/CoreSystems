@@ -139,6 +139,10 @@ services:
       QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
       QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
+      # W2: deliver the one in-product change notification to notification-core
+      # (Application Plane) over the shared inter-plane-bus network.
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+      NOTIFICATION_CORE_INTERNAL_KEY: ${NOTIFICATION_CORE_INTERNAL_KEY:-}
       # G33: dispatch newly-created jobs onto the orchestrator's task queue.
       TEMPORAL_ADDR: temporal:7233
       TEMPORAL_NAMESPACE: default
@@ -157,7 +161,7 @@ services:
       postgres:
         condition: service_healthy
       temporal:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8081:8081"
     networks:
@@ -474,7 +478,7 @@ services:
       postgres:
         condition: service_healthy
       nats:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "3130:3130"
     networks:
@@ -687,6 +691,14 @@ services:
       - "--dir=/data"
     networks:
       - ingestion-net
+    # No --requirepass on this instance, so the ping needs no -a auth flag
+    # (unlike the main `dragonfly` service). Enables service_healthy gating
+    # for connector-runtime-engine below.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   connector-runtime-engine:
     profiles: ["legacy-nango"]
@@ -726,7 +738,7 @@ services:
       connector-runtime-db:
         condition: service_healthy
       connector-runtime-dragonfly:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "3003:3003"
       - "3009:3009"

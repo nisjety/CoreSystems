@@ -8,6 +8,12 @@ services:
     ports: ["5432:5432"]
     volumes:
       - quarry_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quarry -d quarry"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
@@ -20,6 +26,13 @@ services:
     # network as `dragonfly:6379`.
     # Keeps the stack from clashing with any cache you already run on the host.
     expose: ["6379"]
+    healthcheck:
+      # Dragonfly ships redis-cli; PING returns PONG once it is serving.
+      test: ["CMD-SHELL", "redis-cli -p 6379 ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   temporal:
     image: temporalio/auto-setup:1.24
@@ -29,8 +42,17 @@ services:
       - POSTGRES_USER=quarry
       - POSTGRES_PWD=quarry
       - POSTGRES_SEEDS=postgres
-    depends_on: [postgres]
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports: ["7233:7233"]
+    healthcheck:
+      # tctl ships in the auto-setup image; cluster health gates dependents.
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health 2>/dev/null | grep -q SERVING"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
 
   quarry-edge:
     build:
@@ -52,7 +74,11 @@ services:
       # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
       QUARRY_BROWSER_NO_SANDBOX: "1"
     ports: ["8080:8080"]
-    depends_on: [quarry-control, searxng]
+    depends_on:
+      quarry-control:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
 
   quarry-control:
     build:
@@ -65,7 +91,18 @@ services:
       # the workflow emits.
       QUARRY_CONTROL_API_KEY: "devsecret"
     ports: ["8081:8081"]
-    depends_on: [postgres, dragonfly]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    healthcheck:
+      # Control serves HTTP on :8081; the listing endpoint gates dependents.
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8081/v1/runs || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
 
   quarry-orchestrator:
     build:
@@ -83,7 +120,19 @@ services:
       # non-empty value is accepted when QUARRY_EDGE_AUTH_DEV_BYPASS is
       # on (dev compose default).
       RUNTIME_AUTH_TOKEN: "devsecret"
-    depends_on: [temporal, quarry-control]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      quarry-control:
+        condition: service_healthy
+    healthcheck:
+      # Temporal worker — no HTTP listener. Liveness proven via the process,
+      # matching the HEALTHCHECK baked into Dockerfile.orchestrator.
+      test: ["CMD-SHELL", "pgrep -f orchestrator >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # SearXNG — Quarry-v2's web-search backend. quarry-runtime's SmartRouter
   # calls it (format=json) as the free primary provider. Bundled here so the

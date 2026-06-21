@@ -7,7 +7,8 @@ WORKDIR /app
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 COPY go.mod go.sum ./
-RUN set -e; \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
     for i in 1 2 3 4 5; do \
         if go mod download; then \
             exit 0; \
@@ -17,12 +18,15 @@ RUN set -e; \
     done; \
     exit 1
 COPY . .
-RUN CGO_ENABLED=0 GOFLAGS="-trimpath" \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOFLAGS="-trimpath" \
     go build -ldflags="-s -w" -o /data-orchestrator ./cmd
 
 FROM debian:bookworm-slim AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends ca-certificates curl \
@@ -30,8 +34,7 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/apt-install.log
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
 USER dpv2
 

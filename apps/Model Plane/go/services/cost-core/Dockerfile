@@ -1,9 +1,11 @@
+# syntax=docker/dockerfile:1.7
 # Multi-stage build for cost-core.
 #
 # Build context is this service directory (apps/Model Plane/go/services/cost-core)
 # — cost-core's go.mod has no local replace directives, so it builds standalone.
 FROM golang:1.25-alpine AS builder
-RUN apk --no-cache add git ca-certificates
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add git ca-certificates
 WORKDIR /app
 COPY . .
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
@@ -23,7 +25,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -o /service ./cmd/
 
 FROM alpine:3.20
-RUN apk --no-cache add ca-certificates curl postgresql-client
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add ca-certificates curl postgresql-client
 COPY --from=builder /service /usr/local/bin/service
 COPY migrations /app/migrations
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

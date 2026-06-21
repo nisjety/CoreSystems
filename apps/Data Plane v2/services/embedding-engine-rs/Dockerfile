@@ -5,7 +5,9 @@
 
 FROM rust:1-bookworm AS chef
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -14,9 +16,10 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked --version 0.1.77
+    rm -f /tmp/apt-install.log
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --locked --version 0.1.77
 WORKDIR /build
 
 FROM chef AS planner
@@ -27,18 +30,27 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS cooker
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json
 
 FROM cooker AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY services/ services/
 COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
-RUN cargo build --release --bin embedding-engine
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --release --bin embedding-engine \
+    && cp target/release/embedding-engine /usr/local/bin/embedding-engine
 
 FROM debian:bookworm-slim AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
-RUN set -e; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
@@ -47,12 +59,11 @@ RUN set -e; \
         cat /tmp/apt-install.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apt-install.log; \
-    rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/apt-install.log
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
 USER dpv2
 
-COPY --from=builder /build/target/release/embedding-engine /usr/local/bin/embedding-engine
+COPY --from=builder /usr/local/bin/embedding-engine /usr/local/bin/embedding-engine
 
 EXPOSE 9202
 
