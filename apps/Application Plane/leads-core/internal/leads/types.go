@@ -37,6 +37,22 @@ type CreateListInput struct {
 	Companies []brreg.Company
 }
 
+// BuildListInput is the request for the governed `leads.build_list` agent tool:
+// run a filtered Brreg search, optionally fold in each hit's sub-entities
+// (branches), de-duplicate on the canonical organisasjonsnummer, and persist the
+// result as a named, org-scoped saved list.
+//
+// OrgID and CreatedBy are resolved server-side from the authorized identity by
+// the caller (the gateway/agent loop) — they are NEVER taken from a client- or
+// model-supplied field, so the tool is IDOR-clean.
+type BuildListInput struct {
+	OrgID           string
+	Name            string
+	CreatedBy       string
+	Filter          brreg.SearchFilter
+	IncludeBranches bool
+}
+
 // Repository persists saved lead lists. All operations are org-scoped.
 type Repository interface {
 	CreateList(ctx context.Context, input CreateListInput) (*SavedList, error)

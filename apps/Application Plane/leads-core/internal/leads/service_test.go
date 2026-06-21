@@ -3,6 +3,9 @@ package leads
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -20,7 +23,7 @@ func (f *fakeRepo) CreateList(_ context.Context, in CreateListInput) (*SavedList
 }
 func (f *fakeRepo) ListLists(_ context.Context, _ string) ([]SavedList, error) { return nil, nil }
 func (f *fakeRepo) GetList(_ context.Context, _, _ string) (*SavedList, error) { return f.list, nil }
-func (f *fakeRepo) DeleteList(_ context.Context, _, _ string) error           { return nil }
+func (f *fakeRepo) DeleteList(_ context.Context, _, _ string) error            { return nil }
 
 func intPtr(v int) *int { return &v }
 
@@ -109,4 +112,168 @@ func TestExportCSVIsCompanyOnly(t *testing.T) {
 			t.Errorf("CSV leaked forbidden PII token %q:\n%s", forbidden, csvBytes)
 		}
 	}
+}
+
+// brregStub returns an httptest server that serves a single /enheter page with
+// the given companies, salted with person-ish fields the endpoint never returns,
+// plus /underenheter branches keyed by parent orgnr.
+func brregStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/enheter":
+			_, _ = w.Write([]byte(`{
+              "_embedded": { "enheter": [
+                { "organisasjonsnummer": "923609016", "navn": "AQUATIQ AS",
+                  "organisasjonsform": { "kode": "AS" },
+                  "roller": [{ "person": { "fodselsnummer": "01017012345", "navn": "Ola Nordmann" } }] },
+                { "organisasjonsnummer": "111111111", "navn": "BETA AS",
+                  "organisasjonsform": { "kode": "AS" } }
+              ]},
+              "page": { "number": 0, "size": 20, "totalPages": 1, "totalElements": 2 }
+            }`))
+		case "/underenheter":
+			parent := r.URL.Query().Get("overordnetEnhet")
+			if parent == "923609016" {
+				// One branch, plus a DUPLICATE of the parent's own orgnr to prove
+				// dedupe collapses cross-list overlap.
+				_, _ = w.Write([]byte(`{ "_embedded": { "underenheter": [
+                    { "organisasjonsnummer": "929432827", "navn": "AQUATIQ BRANCH",
+                      "organisasjonsform": { "kode": "BEDR" }, "overordnetEnhet": "923609016",
+                      "kontaktperson": { "fodselsnummer": "02028023456" } },
+                    { "organisasjonsnummer": "923609016", "navn": "AQUATIQ AS (dup of parent)",
+                      "organisasjonsform": { "kode": "AS" }, "overordnetEnhet": "923609016" }
+                ]}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{ "_embedded": { "underenheter": [] }}`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestBuildListSearchesDedupesAndSaves(t *testing.T) {
+	srv := brregStub(t)
+	defer srv.Close()
+	repo := &fakeRepo{}
+	svc := NewService(repo, brreg.NewClientWithBaseURL(srv.URL))
+
+	_, err := svc.BuildList(context.Background(), BuildListInput{
+		OrgID:           "org-1",
+		Name:            "Fish processors",
+		CreatedBy:       "user-1",
+		IncludeBranches: true,
+		Filter:          brreg.SearchFilter{Naeringskode: "10.209"},
+	})
+	if err != nil {
+		t.Fatalf("BuildList error: %v", err)
+	}
+	if repo.created == nil {
+		t.Fatal("BuildList did not persist a list")
+	}
+	if repo.created.OrgID != "org-1" || repo.created.CreatedBy != "user-1" {
+		t.Errorf("persisted org/creator wrong: %+v", repo.created)
+	}
+	// 2 search hits + 1 unique branch; the branch list's duplicate of the parent
+	// orgnr (923609016) is collapsed by the orgnr-canonical dedupe.
+	got := orgnrs(repo.created.Companies)
+	want := []string{"923609016", "111111111", "929432827"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("built list orgnrs = %v, want %v (dedup by orgnr, stable order)", got, want)
+	}
+}
+
+// TestBuildListCompanyOnlyInvariant is the company-only invariant for the
+// build_list action: the persisted list — even when upstream Brreg fixtures are
+// salted with roller/person/fødselsnummer fields — must contain NO PII anywhere
+// in its serialized form.
+func TestBuildListCompanyOnlyInvariant(t *testing.T) {
+	srv := brregStub(t)
+	defer srv.Close()
+	repo := &fakeRepo{}
+	svc := NewService(repo, brreg.NewClientWithBaseURL(srv.URL))
+
+	if _, err := svc.BuildList(context.Background(), BuildListInput{
+		OrgID:           "org-1",
+		Name:            "All",
+		IncludeBranches: true,
+		Filter:          brreg.SearchFilter{Naeringskode: "10.209"},
+	}); err != nil {
+		t.Fatalf("BuildList error: %v", err)
+	}
+	if repo.created == nil {
+		t.Fatal("BuildList did not persist a list")
+	}
+	blob, err := json.Marshal(repo.created.Companies)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	lower := strings.ToLower(string(blob))
+	for _, forbidden := range []string{
+		"fodselsnummer", "fødselsnummer", "roller", "rolle", "person",
+		"kontaktperson", "epost", "telefon", "fnr",
+		"01017012345", "02028023456", "ola nordmann",
+	} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("built list leaked forbidden PII token %q:\n%s", forbidden, blob)
+		}
+	}
+}
+
+// TestBuildListIsIDORClean is the cross-tenant regression: the saved list is
+// always scoped to the server-resolved OrgID passed by the caller, and there is
+// no input path (search filter or otherwise) by which a client/model could
+// redirect the write to another tenant. Two builds under different orgs never
+// cross-contaminate.
+func TestBuildListIsIDORClean(t *testing.T) {
+	srv := brregStub(t)
+	defer srv.Close()
+
+	repoA := &fakeRepo{}
+	if _, err := NewService(repoA, brreg.NewClientWithBaseURL(srv.URL)).BuildList(context.Background(), BuildListInput{
+		OrgID:  "org-A",
+		Name:   "A list",
+		Filter: brreg.SearchFilter{Naeringskode: "10.209"},
+	}); err != nil {
+		t.Fatalf("BuildList(org-A) error: %v", err)
+	}
+	repoB := &fakeRepo{}
+	if _, err := NewService(repoB, brreg.NewClientWithBaseURL(srv.URL)).BuildList(context.Background(), BuildListInput{
+		OrgID:  "org-B",
+		Name:   "B list",
+		Filter: brreg.SearchFilter{Naeringskode: "10.209"},
+	}); err != nil {
+		t.Fatalf("BuildList(org-B) error: %v", err)
+	}
+
+	if repoA.created.OrgID != "org-A" {
+		t.Errorf("org-A build persisted to org %q, want org-A", repoA.created.OrgID)
+	}
+	if repoB.created.OrgID != "org-B" {
+		t.Errorf("org-B build persisted to org %q, want org-B", repoB.created.OrgID)
+	}
+}
+
+func TestBuildListRejectsMissingOrgOrName(t *testing.T) {
+	svc := NewService(&fakeRepo{}, brreg.NewClient())
+	cases := []BuildListInput{
+		{Name: "L", Filter: brreg.SearchFilter{Naeringskode: "10"}},      // no org
+		{OrgID: "org-1", Filter: brreg.SearchFilter{Naeringskode: "10"}}, // no name
+	}
+	for i, in := range cases {
+		if _, err := svc.BuildList(context.Background(), in); err == nil {
+			t.Errorf("case %d: expected ErrInvalidInput, got nil", i)
+		}
+	}
+}
+
+func orgnrs(cs []brreg.Company) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.Organisasjonsnummer)
+	}
+	return out
 }
