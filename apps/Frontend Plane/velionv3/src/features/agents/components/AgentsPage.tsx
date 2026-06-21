@@ -26,6 +26,7 @@ import {
   StageReadinessPanel,
   StageSystemCard,
 } from '@/features/agents/components/AgentsWorkspacePrimitives'
+import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import { WorkflowBuilder } from '@/features/agents/components/WorkflowBuilder'
 import { agentBlueprints } from '@/features/agents/lib/velion-agent-blueprints'
 import {
@@ -214,8 +215,13 @@ function SelectedAgentWorkspace(props: {
                   </span>
                 </div>
                 <p class="mt-3 text-[12px] leading-5 text-[#626873] dark:text-[#AEB4C0]">{view().operatingModel.activationSummary}</p>
+                {/* Phase 3 PR-1 (honesty sweep): agent activation/readiness has no
+                    deploy backend yet (no agent-activation substrate). Marked as a
+                    design preview and the activate/readiness controls are disabled
+                    so neither implies a working deploy path. */}
+                <DesignPreviewBadge class="mt-3" />
                 <div class="mt-4 flex gap-2">
-                  <Button variant="primary" size="md" shape="pill" class={cn('min-h-8 flex-1 px-4 text-[12px] font-semibold', controlFocusClass)}>
+                  <Button variant="primary" size="md" shape="pill" disabled class={cn('min-h-8 flex-1 px-4 text-[12px] font-semibold', controlFocusClass)}>
                     <Rocket class="size-3.5" />
                     {view().operatingModel.activationLabel}
                   </Button>
@@ -223,6 +229,7 @@ function SelectedAgentWorkspace(props: {
                     type="button"
                     size="md"
                     shape="circle"
+                    disabled
                     aria-label={`Run ${view().role.shortTitle} readiness test`}
                     class={cn('border border-[#E2E3E8] bg-white dark:border-[#2B2D33] dark:bg-[#17181C]', controlFocusClass)}
                   >

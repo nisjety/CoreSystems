@@ -24,4 +24,25 @@ describe('WorkflowBuilder', () => {
     expect(screen.getByRole('heading', { name: 'Update Status' })).toBeTruthy()
     expect(screen.getAllByText('Google Sheets').length).toBeGreaterThan(0)
   })
+
+  it('is labelled a design preview with no live execution/publish controls (PR-1 honesty)', () => {
+    window.history.pushState(null, '', '/agents?agent=workflow')
+
+    render(() => (
+      <AgentsProvider>
+        <WorkflowBuilder />
+      </AgentsProvider>
+    ))
+
+    // Visible "Design preview" label is present.
+    expect(screen.getByText('Design preview')).toBeTruthy()
+
+    // The dead Test Run / Publish controls are gone (no backend implied).
+    expect(screen.queryByRole('button', { name: 'Test Run' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Publish' })).toBeNull()
+
+    // The prompt composer is inert: no working "Generate" affordance.
+    expect((screen.getByRole('textbox', { name: 'Workflow prompt' }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Generate workflow' }) as HTMLButtonElement).disabled).toBe(true)
+  })
 })

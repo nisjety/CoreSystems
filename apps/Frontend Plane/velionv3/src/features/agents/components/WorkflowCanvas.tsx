@@ -4,16 +4,15 @@ import {
   Loader2,
   Maximize2,
   Mic,
-  Play,
   Send,
   Sparkles,
 } from 'lucide-solid'
 import { For } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
-import { Button } from '@/shared/ui/Button'
 import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
 import { cn } from '@/shared/lib/cn'
 import type { WorkflowBuilderToolId } from '@/features/agents/lib/agent-roles'
+import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import { WorkflowBrandMark } from '@/features/agents/components/WorkflowBrandMark'
 import {
   type CanvasNodeId,
@@ -40,14 +39,15 @@ export function WorkflowTopBar() {
           </div>
         </div>
 
+        {/*
+          Phase 3 PR-1 (honesty): the WorkflowBuilder is a static design preview
+          with no execution/publish substrate (the model plane is an LLM agent
+          loop, not an n8n DAG runner). The dead "Test Run" / "Publish" controls
+          are removed and replaced with a non-interactive Design preview badge so
+          no control implies a backend that does not exist.
+        */}
         <div class="flex shrink-0 items-center gap-2">
-          <Button variant="secondary" size="xs" shape="pill">
-            <Play class="size-3.5 fill-current" strokeWidth={1.8} />
-            <span>Test Run</span>
-          </Button>
-          <Button variant="primary" size="xs" shape="pill">
-            Publish
-          </Button>
+          <DesignPreviewBadge />
         </div>
       </div>
     </header>
@@ -159,15 +159,19 @@ export function WorkflowPromptComposer() {
       class="absolute bottom-6 left-4 right-4 z-20 mx-auto flex h-12 max-w-[660px] items-center gap-2 rounded-full border border-white/82 bg-white/82 px-3.5 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_18px_48px_rgba(42,44,50,0.13)] backdrop-blur-xl dark:border-white/10 dark:bg-[#17181C]/86"
       onSubmit={(event) => event.preventDefault()}
     >
+      {/* Phase 3 PR-1: composer is inert in the design preview — workflow
+          generation has no backend, so the input + action buttons are disabled
+          rather than presenting a "Generate" affordance that does nothing. */}
       <input
         aria-label="Workflow prompt"
-        placeholder="Describe your workflow to Aira"
-        class="min-w-0 flex-1 bg-transparent text-[13px] font-medium text-[#2E3138] outline-none placeholder:text-[#A7ABB3] dark:text-white dark:placeholder:text-[#797F8A]"
+        disabled
+        placeholder="Workflow generation is a design preview"
+        class="min-w-0 flex-1 bg-transparent text-[13px] font-medium text-[#2E3138] outline-none placeholder:text-[#A7ABB3] disabled:cursor-not-allowed dark:text-white dark:placeholder:text-[#797F8A]"
       />
-      <VelionIconButton type="button" size="sm" shape="circle" aria-label="Expand composer" class="shrink-0">
+      <VelionIconButton type="button" size="sm" shape="circle" aria-label="Expand composer" disabled class="shrink-0">
         <Maximize2 class="size-3.5" strokeWidth={2} />
       </VelionIconButton>
-      <VelionIconButton type="button" size="sm" shape="circle" aria-label="Dictate workflow prompt" class="shrink-0">
+      <VelionIconButton type="button" size="sm" shape="circle" aria-label="Dictate workflow prompt" disabled class="shrink-0">
         <Mic class="size-4" strokeWidth={2} />
       </VelionIconButton>
       <VelionIconButton
@@ -176,6 +180,7 @@ export function WorkflowPromptComposer() {
         tone="primary"
         shape="circle"
         aria-label="Generate workflow"
+        disabled
         class="shrink-0"
       >
         <Send class="size-3.5" strokeWidth={2.1} />
