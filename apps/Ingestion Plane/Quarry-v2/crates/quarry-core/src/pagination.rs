@@ -33,19 +33,14 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 25;
 
 /// Direction for sort. `Newest`/`Oldest` are convenience aliases for
 /// `Desc`/`Asc` on `created_at`; the underlying SQL is identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {
+    #[default]
     Newest,
     Oldest,
     Asc,
     Desc,
-}
-
-impl Default for SortDirection {
-    fn default() -> Self {
-        Self::Newest
-    }
 }
 
 impl SortDirection {
