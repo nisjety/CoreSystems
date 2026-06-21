@@ -243,6 +243,9 @@ services:
       QUICKWIT_INDEX_ID: ${QUICKWIT_INDEX_ID:-dataplane-corpus}
       QUICKWIT_SEARCH_TIMEOUT_MS: ${QUICKWIT_SEARCH_TIMEOUT_MS:-1500}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      # Per-user ownership: resolve viewer grants from user-core's resource_grants
+      # facade (reached over inter-plane-bus). HTTP/facade port is 3012, NOT 8080.
+      USER_CORE_HTTP_URL: ${USER_CORE_HTTP_URL:-http://user-core:3012}
       # Tower middleware tuning (v2.1)
       GRPC_TIMEOUT_SECS: ${GRPC_TIMEOUT_SECS:-30}
       GRPC_MAX_CONCURRENT: ${GRPC_MAX_CONCURRENT:-256}
@@ -443,6 +446,9 @@ services:
       NATS_SHARED_URL: ${NATS_SHARED_URL:-}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      # Per-user ownership: filter-at-source needs the viewer's granted doc-set
+      # from user-core's resource_grants facade. HTTP/facade port is 3012, NOT 8080.
+      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       HTTP_PORT: "8010"
     networks:
       - dpv2-net
