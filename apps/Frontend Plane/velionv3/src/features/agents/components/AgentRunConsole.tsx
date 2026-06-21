@@ -835,11 +835,12 @@ function Launcher(props: {
                     tabindex={selected() ? 0 : -1}
                     disabled={props.isActive}
                     onClick={() => props.onBlueprint(item.id)}
-                    onKeyDown={(event) =>
+                    onKeyDown={(event) => {
+                      const onBlueprint = props.onBlueprint
                       radioGroupKeyDown(event, agentBlueprints.length, index(), (next) =>
-                        props.onBlueprint(agentBlueprints[next]!.id),
+                        onBlueprint(agentBlueprints[next]!.id),
                       )
-                    }
+                    }}
                     class={cn(
                       'velion-run-blueprint',
                       selected() && 'velion-run-blueprint--active',
@@ -874,11 +875,12 @@ function Launcher(props: {
                     tabindex={selected() ? 0 : -1}
                     disabled={props.isActive}
                     onClick={() => props.onMode(item.id)}
-                    onKeyDown={(event) =>
+                    onKeyDown={(event) => {
+                      const onMode = props.onMode
                       radioGroupKeyDown(event, VELION_MODES.length, index(), (next) =>
-                        props.onMode(VELION_MODES[next]!.id),
+                        onMode(VELION_MODES[next]!.id),
                       )
-                    }
+                    }}
                     class={cn(
                       'velion-run-mode',
                       selected() && 'velion-run-mode--active',
