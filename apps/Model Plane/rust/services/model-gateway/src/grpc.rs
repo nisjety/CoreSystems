@@ -701,15 +701,17 @@ impl ModelGateway for GatewayService {
             request.into_inner(),
         )
         .await?;
-        // Durable write-through (matrix §4.1): persist to session-core's
-        // canonical store, best-effort. The in-memory store already holds the
-        // authoritative response, so a backend failure never blocks the gate.
+        // Durable-FIRST write of record (D-1): persist to session-core's
+        // canonical store and PROPAGATE failure as Status::unavailable BEFORE
+        // returning OK. The in-memory store minted the id and serves reads, but
+        // it is never the path of record — if the durable write fails the RPC
+        // does not report the gate as created.
         if let Some(approval) = &resp.approval {
             approvals::persist_approval_request(
                 &mut self.state.orchestration_client.clone(),
                 approval,
             )
-            .await;
+            .await?;
         }
         Ok(Response::new(resp))
     }
@@ -725,14 +727,18 @@ impl ModelGateway for GatewayService {
         )
         .await?;
         if let Some(approval) = &resp.approval {
+            // Durable-FIRST decision of record (D-1): propagate a session-core
+            // write failure before returning OK so a decision is never reported
+            // as recorded while only living in memory.
             approvals::persist_approval_decision(
                 &mut self.state.orchestration_client.clone(),
                 approval,
             )
-            .await;
+            .await?;
             // Close the human-in-the-loop loop: a granted approval resumes the
             // run on execution-core (flips AwaitingApproval → Running) so the
-            // agent proceeds without manual intervention. Best-effort.
+            // agent proceeds without manual intervention. Best-effort — the
+            // decision is already durable by this point.
             approvals::resume_run_if_approved(&mut self.state.execution_client.clone(), approval)
                 .await;
         }
@@ -750,11 +756,12 @@ impl ModelGateway for GatewayService {
         )
         .await?;
         if let Some(approval) = &resp.approval {
+            // Durable-FIRST decision of record (D-1): propagate failure before OK.
             approvals::persist_approval_decision(
                 &mut self.state.orchestration_client.clone(),
                 approval,
             )
-            .await;
+            .await?;
         }
         Ok(Response::new(resp))
     }
@@ -763,8 +770,13 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListPendingApprovalsRequest>,
     ) -> Result<Response<ListPendingApprovalsResponse>, Status> {
-        approvals::handle_list_pending_approvals(&self.state.approvals, request.into_inner())
-            .map(Response::new)
+        approvals::handle_list_pending_approvals(
+            &self.state.approvals,
+            &mut self.state.orchestration_client.clone(),
+            request.into_inner(),
+        )
+        .await
+        .map(Response::new)
     }
 
     // ------------------------------------------------------------------

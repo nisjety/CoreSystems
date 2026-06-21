@@ -39,6 +39,15 @@ service OrchestrationCoreService {
   // List approvals for a run (and optionally scoped to a step).
   rpc ListApprovals(ListApprovalsRequest) returns (ListApprovalsResponse);
 
+  // List all PENDING (state = REQUESTED) approvals, optionally scoped to one
+  // org. An empty org_id returns every pending approval across all orgs and is
+  // INTERNAL-ONLY — used by model-gateway to rehydrate its in-memory approval
+  // cache on boot so a restart never silently drops a pending HITL gate. A
+  // non-empty org_id scopes the result to that tenant (IDOR-safe read-through).
+  // (D-1) The request/response messages are org-suffixed to avoid colliding
+  // with the gateway-service ListPendingApprovals* messages in this package.
+  rpc ListPendingApprovals(OrgPendingApprovalsRequest) returns (OrgPendingApprovalsResponse);
+
   // Fetch a single approval by id.
   rpc GetApproval(GetApprovalRequest) returns (GetApprovalResponse);
 
@@ -279,6 +288,11 @@ message Approval {
 
   // Hard deadline for the approval.
   google.protobuf.Timestamp expires_at = 12;
+
+  // Owning tenant. Carried so a cross-org boot-rehydrate of pending approvals
+  // (ListPendingApprovals with empty org_id) can re-scope each entry to its
+  // tenant in the consumer's cache (D-1, IDOR-safe).
+  string org_id = 13;
 }
 
 // A durable todo record.
@@ -473,6 +487,12 @@ message CreateApprovalRequest {
   // ApprovalStore) keep its id aligned with the durable record so a later
   // DecideApproval can target it. Empty = server mints (matrix §4.1).
   string client_approval_id = 9;
+
+  // Optional idempotency key. When set, the durable INSERT is a no-op on
+  // conflict with an existing (org_id, idempotency_key) row — so a retried
+  // request (e.g. the gateway re-asserting a pending gate) never creates a
+  // duplicate durable approval. Empty = no idempotency guard (D-1).
+  string idempotency_key = 10;
 }
 
 message CreateApprovalResponse {
@@ -492,6 +512,20 @@ message ListApprovalsRequest {
 
 message ListApprovalsResponse {
   // Approvals ordered by request time ascending.
+  repeated Approval approvals = 1;
+}
+
+// --- ListPendingApprovals (org-scoped; D-1 HITL durability) ---
+
+message OrgPendingApprovalsRequest {
+  // Tenant filter. Empty → ALL pending approvals across every org (the
+  // internal-only boot-rehydrate path). Non-empty → only this org's pending
+  // approvals (IDOR-safe read-through for a client-facing list).
+  string org_id = 1;
+}
+
+message OrgPendingApprovalsResponse {
+  // Pending (state = REQUESTED) approvals ordered by request time ascending.
   repeated Approval approvals = 1;
 }
 

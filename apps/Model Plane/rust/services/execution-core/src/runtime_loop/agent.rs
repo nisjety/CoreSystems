@@ -543,6 +543,10 @@ async fn pause_for_approval(
             expires_in_seconds: 3600,
             // Let session-core mint the durable approval id (matrix §4.1).
             client_approval_id: String::new(),
+            // Stable per-(run, step) idempotency key (D-1): a re-paused step
+            // collapses onto the existing durable approval instead of creating
+            // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
+            idempotency_key: format!("{}:{step_id}", req.run_id),
         })
         .await
     {
@@ -1185,6 +1189,13 @@ mod tests {
             _: Request<pb::ListApprovalsRequest>,
         ) -> Result<Response<pb::ListApprovalsResponse>, Status> {
             Err(Status::unimplemented("list_approvals not used"))
+        }
+
+        async fn list_pending_approvals(
+            &self,
+            _: Request<pb::OrgPendingApprovalsRequest>,
+        ) -> Result<Response<pb::OrgPendingApprovalsResponse>, Status> {
+            Err(Status::unimplemented("list_pending_approvals not used"))
         }
 
         async fn get_approval(

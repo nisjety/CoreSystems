@@ -12,7 +12,8 @@ use mp_contracts::model_plane::v1::{
     GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse,
     GetTodoRequest, GetTodoResponse, LineageEdge, ListApprovalsRequest, ListApprovalsResponse,
     ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
-    Plan, PlanState, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
+    OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
+    StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
     TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
 };
 use std::{
@@ -244,6 +245,35 @@ impl OrchestrationCoreService for MockOrchestration {
                 requested_at: None,
                 decided_at: None,
                 expires_at: None,
+                org_id: "org-1".into(),
+            }],
+        }))
+    }
+
+    async fn list_pending_approvals(
+        &self,
+        request: TonicRequest<OrgPendingApprovalsRequest>,
+    ) -> Result<Response<OrgPendingApprovalsResponse>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(OrgPendingApprovalsResponse {
+            approvals: vec![Approval {
+                id: "appr-pending-1".into(),
+                run_id: "run-1".into(),
+                step_id: String::new(),
+                kind: 1,
+                state: ApprovalState::Requested as i32,
+                requested_of: "reviewer-1".into(),
+                decided_by: String::new(),
+                decision_reason: String::new(),
+                context: None,
+                requested_at: None,
+                decided_at: None,
+                expires_at: None,
+                org_id: if request.org_id.is_empty() {
+                    "org-1".into()
+                } else {
+                    request.org_id
+                },
             }],
         }))
     }
@@ -268,6 +298,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 requested_at: None,
                 decided_at: None,
                 expires_at: None,
+                org_id: "org-1".into(),
             }),
         }))
     }
@@ -291,6 +322,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 requested_at: None,
                 decided_at: None,
                 expires_at: None,
+                org_id: request.org_id,
             }),
         }))
     }
@@ -320,6 +352,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 requested_at: None,
                 decided_at: None,
                 expires_at: None,
+                org_id: "org-1".into(),
             }),
         }))
     }

@@ -102,6 +102,10 @@ impl ExecutionCore for ExecutionService {
                     // execution-core has no upstream cache id to align — let
                     // session-core mint the durable approval id (matrix §4.1).
                     client_approval_id: String::new(),
+                    // Stable per-(run, step) idempotency key (D-1): a re-paused
+                    // step collapses onto the existing durable approval via the
+                    // (org_id, idempotency_key) ON CONFLICT guard.
+                    idempotency_key: format!("{run_id}:{step_id}"),
                 })
                 .await
             {
