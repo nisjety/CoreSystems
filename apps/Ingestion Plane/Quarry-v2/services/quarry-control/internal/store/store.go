@@ -120,12 +120,28 @@ type BrowserProfile struct {
 }
 
 type Schedule struct {
-	ID         quarrycontracts.ID `json:"id"`
+	ID quarrycontracts.ID `json:"id"`
+	// OrgID is the tenant that owns this schedule. Stamped server-side
+	// from the edge's verified JWT (never trusted from a client body),
+	// it rides into the Temporal workflow Args so every change-monitor
+	// run, baseline, and diff stays org-scoped. NOT NULL in the DB.
+	OrgID      string             `json:"org_id"`
 	Cron       string             `json:"cron"`
-	TargetKind string             `json:"target_kind"` // scrape | crawl | batch
+	TargetKind string             `json:"target_kind"` // scrape | crawl | batch | change_monitor
 	TargetRef  string             `json:"target_ref"`  // url | job template id
 	Enabled    bool               `json:"enabled"`
 	CreatedAt  int64              `json:"created_at"`
+	// CreatedBy is the user_id of whoever created the schedule (stamped
+	// server-side from the edge's verified JWT). It rides into the
+	// change-monitor workflow so the in-product notification on a detected
+	// change reaches the person who set the monitor up. Empty for legacy
+	// rows / non-user-initiated schedules.
+	CreatedBy string `json:"created_by,omitempty"`
+	// Preset is INPUT-ONLY for change_monitor schedules: the caller sends
+	// a fixed cadence ("hourly"|"daily"|"weekly") which Validate maps to a
+	// literal 5-field cron. It is never persisted (no DB column) — only
+	// the resolved Cron is stored.
+	Preset string `json:"preset,omitempty"`
 }
 
 type Webhook struct {

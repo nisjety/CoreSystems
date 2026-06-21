@@ -21,6 +21,7 @@ import (
 	"github.com/triodelab/quarry-v2/pkg/quarryotel"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/dispatcher"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/resources"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store/pg"
@@ -45,6 +46,17 @@ func main() {
 	addr := envOr("QUARRY_CONTROL_ADDR", ":8081")
 	dsn := os.Getenv("QUARRY_CONTROL_DSN")
 	apiKey := os.Getenv("QUARRY_CONTROL_API_KEY")
+
+	// W2: the one in-product notification on a detected change is delivered
+	// to notification-core (Application Plane) over HTTP. Unset URL → the
+	// notify leg is inert (nil sink); change tracking + webhooks still work.
+	var notifySink notify.Sink
+	if u := strings.TrimSpace(os.Getenv("NOTIFICATION_CORE_URL")); u != "" {
+		notifySink = notify.NewHTTPSink(u, os.Getenv("NOTIFICATION_CORE_INTERNAL_KEY"))
+		log.Info().Str("url", u).Msg("notification-core sink wired for change notifications")
+	} else {
+		log.Warn().Msg("NOTIFICATION_CORE_URL unset — change notifications disabled (change tracking + webhooks unaffected)")
+	}
 	envName := strings.ToLower(strings.TrimSpace(os.Getenv("ENVIRONMENT")))
 	isProd := envName == "prod" || envName == "production"
 
@@ -143,7 +155,7 @@ func main() {
 		resources.MountArtifacts(r, db)
 		resources.MountProfiles(r, db)
 		resources.MountSchedules(r, db)
-		resources.MountEvents(r, db, apiKey)
+		resources.MountEvents(r, db, apiKey, notifySink)
 		resources.MountWebhooks(r, db)
 		resources.MountBlocklists(r, db)
 		resources.MountWebhookDeliveries(r, db)

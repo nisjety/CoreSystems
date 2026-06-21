@@ -57,7 +57,7 @@ func TestCreateSchedule_Valid_Returns201(t *testing.T) {
 	t.Parallel()
 	h, _ := newSchedulesServer(t)
 
-	body := `{"cron":"*/5 * * * *","target_kind":"scrape","target_ref":"https://example.com","enabled":true}`
+	body := `{"org_id":"org_test","cron":"*/5 * * * *","target_kind":"scrape","target_ref":"https://example.com","enabled":true}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -82,7 +82,7 @@ func TestCreateSchedule_Valid_Returns201(t *testing.T) {
 
 func createSchedule(t *testing.T, h http.Handler) string {
 	t.Helper()
-	body := `{"cron":"*/5 * * * *","target_kind":"scrape","target_ref":"https://example.com","enabled":true}`
+	body := `{"org_id":"org_test","cron":"*/5 * * * *","target_kind":"scrape","target_ref":"https://example.com","enabled":true}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -274,5 +274,110 @@ func TestScheduleRuns_CursorPagination(t *testing.T) {
 	}
 	if seen != 3 {
 		t.Fatalf("paged through %d items, want 3", seen)
+	}
+}
+
+// --- W2: org_id + change_monitor preset → orchestrator wire contract -------
+
+func postSchedule(t *testing.T, h http.Handler, body string) (int, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/schedules", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Code, decodeEnvelope(t, w.Body.Bytes())
+}
+
+func TestCreateSchedule_MissingOrgID_Returns400(t *testing.T) {
+	t.Parallel()
+	h, _ := newSchedulesServer(t)
+	code, env := postSchedule(t, h,
+		`{"cron":"*/5 * * * *","target_kind":"scrape","target_ref":"https://example.com"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; env=%v", code, env)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != "BAD_REQUEST" {
+		t.Fatalf("expected BAD_REQUEST, got %v", env)
+	}
+}
+
+// TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs is the load-bearing W2
+// test: a preset-driven change_monitor schedule must serialize to the
+// orchestrator with Workflow=ChangeMonitorWF, Args carrying org_id+url, the
+// preset mapped to a literal 5-field cron, and paused == !enabled.
+func TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs(t *testing.T) {
+	t.Parallel()
+	h, _ := newSchedulesServer(t)
+
+	code, env := postSchedule(t, h,
+		`{"org_id":"org_velion","target_kind":"change_monitor","target_ref":"https://example.com/pricing","preset":"daily","enabled":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("status=%d, want 201; env=%v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("missing data; env=%v", env)
+	}
+	if data["workflow"] != "ChangeMonitorWF" {
+		t.Fatalf("workflow=%v, want ChangeMonitorWF", data["workflow"])
+	}
+	if data["cron"] != "0 9 * * *" {
+		t.Fatalf("cron=%v, want daily preset '0 9 * * *'", data["cron"])
+	}
+	if data["paused"] != false {
+		t.Fatalf("paused=%v, want false (enabled schedule)", data["paused"])
+	}
+	args, _ := data["args"].([]any)
+	if len(args) != 1 {
+		t.Fatalf("args len=%d, want 1; data=%v", len(args), data)
+	}
+	arg0, _ := args[0].(map[string]any)
+	if arg0["org_id"] != "org_velion" || arg0["url"] != "https://example.com/pricing" {
+		t.Fatalf("args[0]=%v, want {org_id:org_velion, url:.../pricing}", arg0)
+	}
+
+	// The list view (what the reconciler reads) must carry the same shape.
+	req := httptest.NewRequest(http.MethodGet, "/v1/schedules", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	listEnv := decodeEnvelope(t, w.Body.Bytes())
+	list, _ := listEnv["data"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("list len=%d, want 1; env=%v", len(list), listEnv)
+	}
+	first, _ := list[0].(map[string]any)
+	if first["workflow"] != "ChangeMonitorWF" {
+		t.Fatalf("list[0].workflow=%v, want ChangeMonitorWF", first["workflow"])
+	}
+}
+
+func TestCreateSchedule_ChangeMonitor_BadPreset_Returns400(t *testing.T) {
+	t.Parallel()
+	h, _ := newSchedulesServer(t)
+	code, env := postSchedule(t, h,
+		`{"org_id":"org_velion","target_kind":"change_monitor","target_ref":"https://example.com","preset":"every-minute"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; env=%v", code, env)
+	}
+	errObj, _ := env["error"].(map[string]any)
+	if errObj == nil || errObj["code"] != "BAD_REQUEST" {
+		t.Fatalf("expected BAD_REQUEST, got %v", env)
+	}
+}
+
+// Non-change_monitor schedules are intentionally NOT mapped to a Temporal
+// workflow in the W2 MVP — the reconciler skips empty-workflow specs.
+func TestCreateSchedule_Scrape_EmptyWorkflow(t *testing.T) {
+	t.Parallel()
+	h, _ := newSchedulesServer(t)
+	code, env := postSchedule(t, h,
+		`{"org_id":"org_test","cron":"*/5 * * * *","target_kind":"scrape","target_ref":"https://example.com","enabled":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("status=%d, want 201; env=%v", code, env)
+	}
+	data, _ := env["data"].(map[string]any)
+	if data["workflow"] != "" {
+		t.Fatalf("scrape workflow=%v, want empty (unmapped in MVP)", data["workflow"])
 	}
 }
