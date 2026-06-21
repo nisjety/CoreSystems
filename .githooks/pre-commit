@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Velion CoreSystem — local secret pre-commit gate (Phase 3 PR-0a).
+#
+# Opt in once per clone:
+#     git config core.hooksPath .githooks
+#
+# Scans ONLY the staged diff (`gitleaks protect --staged`), so it never trips on
+# pre-existing tracked findings — it stops a secret in the change you're about
+# to commit. Uses a local gitleaks binary if present, otherwise falls back to
+# the official Docker image. If neither is available it warns and allows the
+# commit (CI is the backstop) so the hook never hard-blocks a machine without
+# tooling.
+set -euo pipefail
+
+CONFIG=".gitleaks.toml"
+COMMON_ARGS=(protect --staged --redact --no-banner)
+[ -f "$CONFIG" ] && COMMON_ARGS+=(--config "$CONFIG")
+
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks "${COMMON_ARGS[@]}"
+  exit $?
+fi
+
+if command -v docker >/dev/null 2>&1; then
+  docker run --rm -v "$(git rev-parse --show-toplevel)":/repo -w /repo \
+    ghcr.io/gitleaks/gitleaks:latest "${COMMON_ARGS[@]}"
+  exit $?
+fi
+
+echo "pre-commit: gitleaks not found and docker unavailable — skipping local scan." >&2
+echo "            CI secret-scan will still gate this change. Install gitleaks to scan locally." >&2
+exit 0

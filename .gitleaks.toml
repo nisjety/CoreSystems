@@ -1,0 +1,41 @@
+# Velion CoreSystem — gitleaks configuration
+# Purpose (Phase 3 PR-0a): prevent NEW secrets from being committed/pushed.
+# Scope decision: we do NOT scrub history or fail on the pre-existing tracked
+# findings (those are rotated at push time, per the maintainer). The CI gate
+# (.github/workflows/secret-scan.yml) scans only the commits in a push/PR, so
+# this config governs what counts as a finding in NEW changes.
+
+title = "Velion CoreSystem secret-scan"
+
+[extend]
+# Start from gitleaks' built-in rule set (AWS, Azure, GCP, generic-api-key,
+# JWTs, private keys, curl auth headers, etc.), then layer the allowlist below.
+useDefault = true
+
+[allowlist]
+description = "Build artifacts, lockfiles, vendored code, and obvious placeholders"
+
+# Paths that never contain real secrets we control (regex, matched against path).
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)target/''',
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+  '''(^|/)\.next/''',
+  '''(^|/)\.turbo/''',
+  '''(^|/)\.git/''',
+  '''(^|/)vendor/''',
+  '''(^|/)testdata/''',
+  '''Cargo\.lock$''',
+  '''go\.sum$''',
+  '''pnpm-lock\.yaml$''',
+  '''package-lock\.json$''',
+  '''yarn\.lock$''',
+]
+
+# Placeholder / template / fixture values are not secrets. Matched against the
+# detected secret string. Kept deliberately narrow so a real key that merely
+# *contains* one of these words is still caught only if it is dominated by it.
+regexes = [
+  '''(?i)\b(your[-_ ]?(api[-_ ]?)?(key|token|secret|password)|change[-_ ]?me|placeholder|replace[-_ ]?me|example[-_ ]?(key|token|secret)?|dummy|sample|redacted|todo|tbd|<[a-z0-9_ -]+>|\$\{[^}]+\}|xxxxx+|token[-_ ]?here|secret[-_ ]?here)\b''',
+]
