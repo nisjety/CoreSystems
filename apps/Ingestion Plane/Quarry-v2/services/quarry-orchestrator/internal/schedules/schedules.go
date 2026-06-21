@@ -97,6 +97,15 @@ func (m *Manager) reconcile(ctx context.Context) error {
 
 	// Create or update.
 	for id, spec := range desiredSet {
+		// Defensive: never materialize a workflowless Temporal schedule.
+		// quarry-control only maps target kinds it can run as recurring
+		// workflows (today: change_monitor); unmapped kinds serialize with
+		// an empty Workflow. Skip them — but they STAY in desiredSet so the
+		// orphan-reap loop below doesn't delete anything on their behalf.
+		if spec.Workflow == "" {
+			m.log.Debug().Str("id", id).Msg("skipping schedule with no mapped workflow")
+			continue
+		}
 		if _, ok := existing[id]; !ok {
 			if err := m.create(ctx, sc, spec); err != nil {
 				m.log.Error().Err(err).Str("id", id).Msg("create schedule failed")
