@@ -42,7 +42,7 @@ services:
     init: true
     environment:
       PORT: 3185
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me-internal-service-secret}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}

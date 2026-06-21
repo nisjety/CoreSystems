@@ -983,7 +983,7 @@ services:
     container_name: ingestion-qdrant
     restart: unless-stopped
     environment:
-      QDRANT_API_KEY: ${QDRANT_API_KEY:-change-me}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set (no change-me default)}
       QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER: 2
       QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
     volumes:
@@ -1133,7 +1133,7 @@ services:
       # unmodified. db 7 keeps it clear of quarry-edge's db 6. Password matches
       # the dragonfly service's --requirepass.
       SEARXNG_REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/7
-      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-searxng-secret-32chars!!}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET must be set (no change-me default)}
     volumes:
       # Bundled settings enable the JSON output format SmartRouter requires.
       - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro

@@ -10,7 +10,7 @@ services:
     environment:
       PORT: "${PORT:-3190}"
       SERVICE_NAME: "${SERVICE_NAME:-information-core}"
-      INTERNAL_API_KEY: "${INTERNAL_API_KEY:-change-me}"
+      INTERNAL_API_KEY: "${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}"
       INFORMATION_CORE_USER_AGENT: "${INFORMATION_CORE_USER_AGENT:-VelionInformationCore/1.0 (ops@velion.local)}"
     ports:
       - "${INFORMATION_CORE_HOST_PORT:-3190}:3190"

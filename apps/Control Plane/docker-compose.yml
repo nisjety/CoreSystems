@@ -61,7 +61,7 @@ services:
     container_name: controlplane-dragonfly
     restart: unless-stopped
     command: >
-      --requirepass=${DRAGONFLY_PASSWORD:-change-me-dragonfly-password}
+      --requirepass=${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}
       --cache_mode=true
       --maxmemory=256mb
       --proactor_threads=1
@@ -85,7 +85,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${DRAGONFLY_PASSWORD:-change-me-dragonfly-password}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5

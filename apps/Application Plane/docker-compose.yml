@@ -171,7 +171,7 @@ services:
     environment:
       # Cross-plane NATS bus and Convex URL — NATS_URL/NATS_TOKEN come from env_file above
       CONVEX_BACKEND_URL: http://convex-backend:3210
-      CONVEX_API_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-${INTERNAL_API_KEY:-change-me-internal-service-secret}}
+      CONVEX_API_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}}
       NATS_URL: nats://velion-nats:4222    # inter-plane-bus shared bus — all ingestion/org events publish here
       # W4-2 (ui-ux-velion-gap.md §13): Model Plane orchestrator-core
       # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
@@ -416,7 +416,7 @@ services:
       PORT: "3160"
       SERVICE_NAME: conversation-core-go
       DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       NATS_URL: nats://nats:4222
       VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
@@ -458,7 +458,7 @@ services:
     environment:
       PORT: "3161"
       CONVERSATION_CORE_URL: http://conversation-core-go:3160
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       conversation-core-go:
@@ -497,7 +497,7 @@ services:
       PORT: "3162"
       SERVICE_NAME: social-core
       DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       NATS_URL: nats://nats:4222
       VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
@@ -556,7 +556,7 @@ services:
       SERVICE_NAME: insight-core
       # Must equal the gateway's forwarded x-internal-api-key (config.go hard-fails
       # if empty). Resolves from the shared ${INTERNAL_API_KEY} like the other cores.
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       # Explicit (config.go hard-fails on empty) — audience for connector token leases.
       INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE: ${INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE:-insight-core}
@@ -597,7 +597,7 @@ services:
       PORT: "3164"
       SERVICE_NAME: leads-core
       DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
       NATS_TOKEN: ${VELION_NATS_TOKEN:-}
     ports:
@@ -636,7 +636,7 @@ services:
     environment:
       PORT: "3190"
       SERVICE_NAME: information-core
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-change-me}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       INFORMATION_CORE_USER_AGENT: ${INFORMATION_CORE_USER_AGENT:-VelionInformationCore/1.0 (ops@velion.local)}
     ports:
       - "${INFORMATION_CORE_HOST_PORT:-3190}:3190"
