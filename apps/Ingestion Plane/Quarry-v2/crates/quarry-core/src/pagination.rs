@@ -196,7 +196,7 @@ mod tests {
     fn default_limit_falls_in_safe_range() {
         let f = ListFilter::default();
         let n = f.effective_limit();
-        assert!(n >= 1 && n <= MAX_PAGE_LIMIT);
+        assert!((1..=MAX_PAGE_LIMIT).contains(&n));
         assert_eq!(n, DEFAULT_PAGE_LIMIT);
     }
 

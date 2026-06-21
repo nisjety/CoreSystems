@@ -397,13 +397,13 @@ mod tests {
     fn integer_accepted_where_number_expected() {
         let schema = json!({"type": "number"});
         assert!(is_valid(&json!(42), &schema));
-        assert!(is_valid(&json!(3.14), &schema));
+        assert!(is_valid(&json!(3.5), &schema));
     }
 
     #[test]
     fn float_rejected_where_integer_expected() {
         let schema = json!({"type": "integer"});
-        assert!(!is_valid(&json!(3.14), &schema));
+        assert!(!is_valid(&json!(3.5), &schema));
     }
 
     #[test]
