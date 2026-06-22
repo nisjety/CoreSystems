@@ -48,6 +48,7 @@ import {
 } from '@/features/agents/lib/velion-chatbot-studio-data'
 import { useAgentSelection, useChatbotAddOn, useChatbotBuilderSection } from '@/features/agents/lib/use-agent-selection'
 import { ChatbotPlaygroundSurface } from '@/features/agents/components/ChatbotPlayground'
+import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import {
   ActionCard,
   ChannelCard,
@@ -227,8 +228,9 @@ function AnalyticsPage() {
       <SectionHeader
         title="Analytics"
         description="Measure chatbot volume, topic distribution, and sentiment signals."
+        preview
         action={(
-          <Button shape="rounded" size="md">
+          <Button shape="rounded" size="md" disabled>
             <CalendarDays class="size-4" />
             Live event window
           </Button>
@@ -271,8 +273,9 @@ function InsightsPage() {
       <SectionHeader
         title="Insights"
         description="Review the signals that should shape chatbot improvements."
+        preview
         action={(
-          <Button shape="rounded" size="md">
+          <Button shape="rounded" size="md" disabled>
             <CalendarDays class="size-4" />
             Live event window
           </Button>
@@ -342,8 +345,13 @@ function FineTuningPage() {
         />
 
         <div class="velion-panel mt-12 p-7">
-          <div class="flex items-center justify-between">
-            <h2 class="text-[23px] font-semibold">Add files</h2>
+          {/* Phase 4 honesty sweep: dataset upload has no backend yet (the real
+              wired action on this surface is the "Open fine-tune jobs" link). */}
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-3">
+              <h2 class="text-[23px] font-semibold">Add files</h2>
+              <DesignPreviewBadge />
+            </div>
             <ChevronDown class="size-5 rotate-180 text-[#7C828C]" />
           </div>
           <div class="mt-7 flex min-h-11 items-center gap-3 rounded-[8px] border border-[#F1DCA6] bg-[#FFF9DF] px-4 text-[14px] font-semibold text-[#BA5A16]">
@@ -352,7 +360,8 @@ function FineTuningPage() {
           </div>
           <button
             type="button"
-            class="mt-6 grid min-h-[250px] w-full place-items-center rounded-[10px] border border-dashed border-[#D6D8DD] bg-[#FCFCFD] text-center transition-colors hover:bg-[#FAFAFB] dark:border-[#303238] dark:bg-[#111216] dark:hover:bg-[#17181C]"
+            disabled
+            class="mt-6 grid min-h-[250px] w-full place-items-center rounded-[10px] border border-dashed border-[#D6D8DD] bg-[#FCFCFD] text-center transition-colors hover:bg-[#FAFAFB] disabled:cursor-not-allowed dark:border-[#303238] dark:bg-[#111216] dark:hover:bg-[#17181C]"
           >
             <span>
               <Upload class="mx-auto size-8 text-[#767C86]" />
@@ -379,7 +388,7 @@ function FineTuningPage() {
               <input type="checkbox" class="size-5 rounded border-[#D8DADE]" />
               Select all
             </label>
-            <button type="button" class="inline-flex items-center gap-2 text-[16px] font-semibold text-[#5D626C]">
+            <button type="button" disabled class="inline-flex items-center gap-2 text-[16px] font-semibold text-[#5D626C] disabled:cursor-not-allowed disabled:opacity-70">
               Sort by: <span class="text-[#111111] dark:text-white">Default</span>
               <ChevronDown class="size-4" />
             </button>
@@ -431,6 +440,7 @@ function ToolsPage(props: { supportStatus: SupportIntegrationStatus }) {
       <SectionHeader
         title="Tools"
         description="Configure the tools the chatbot can call and the skills it can perform. Integrations provide data access; tools decide what the bot may do with it."
+        preview
         action={(
           <div class="flex min-w-0 flex-1 justify-end gap-3">
             <div class="relative w-full max-w-[470px]">
@@ -441,7 +451,7 @@ function ToolsPage(props: { supportStatus: SupportIntegrationStatus }) {
                 class="pl-12 pr-4 text-[13px]"
               />
             </div>
-            <Button variant="primary" shape="rounded" size="md" class="shrink-0">
+            <Button variant="primary" shape="rounded" size="md" disabled class="shrink-0">
               <Plus class="size-5" />
               Create tool
             </Button>
@@ -469,7 +479,10 @@ function InstallPage() {
 
   return (
     <section class="mx-auto max-w-[1280px] px-6 py-7">
-      <h1 class="text-[30px] font-semibold tracking-normal">All channels</h1>
+      <div class="flex flex-wrap items-center gap-3">
+        <h1 class="text-[30px] font-semibold tracking-normal">All channels</h1>
+        <DesignPreviewBadge />
+      </div>
       <div class="mt-12 grid gap-5 xl:grid-cols-2">
         <ChannelHeroCard displayName={chatbotDisplayName} type="widget" />
         <ChannelHeroCard displayName={chatbotDisplayName} type="help" />
@@ -499,8 +512,9 @@ function IntegrationsPage(props: { supportStatus: SupportIntegrationStatus }) {
       <SectionHeader
         title="Integrations"
         description="Connect the systems the chatbot can fetch data from. Tools then define the allowed option pool over those integrations."
+        preview
         action={(
-          <Button variant="primary" shape="rounded" size="md">
+          <Button variant="primary" shape="rounded" size="md" disabled>
             <Plus class="size-4" />
             Add integration
           </Button>
@@ -521,8 +535,9 @@ function LeadsPage() {
       <SectionHeader
         title="Leads"
         description="Review lead submissions collected by chatbot skills and export them for follow-up."
+        preview
         action={(
-          <Button variant="primary" shape="rounded" size="md">
+          <Button variant="primary" shape="rounded" size="md" disabled>
             Export
             <Download class="size-4" />
           </Button>
@@ -540,11 +555,15 @@ function ChatLogsPage() {
     <section class="grid min-h-full lg:grid-cols-[480px_minmax(0,1fr)]">
       <aside class="border-r border-[#E3E4E8] bg-white px-6 py-8 dark:border-[#2A2C31] dark:bg-[#101114]">
         <div class="flex items-center justify-between gap-4">
-          <h1 class="text-[30px] font-semibold tracking-normal">Chat logs</h1>
+          <div class="flex flex-wrap items-center gap-3">
+            <h1 class="text-[30px] font-semibold tracking-normal">Chat logs</h1>
+            <DesignPreviewBadge />
+          </div>
+          {/* Phase 4 honesty sweep: chat-log filter/refresh/download have no backend yet. */}
           <div class="flex items-center gap-2">
-            <SquareIconButton label="Filter chat logs" Icon={Settings2} />
-            <SquareIconButton label="Refresh chat logs" Icon={RefreshCw} />
-            <VelionIconButton size="lg" shape="rounded" tone="primary" aria-label="Download chat logs">
+            <SquareIconButton disabled label="Filter chat logs" Icon={Settings2} />
+            <SquareIconButton disabled label="Refresh chat logs" Icon={RefreshCw} />
+            <VelionIconButton size="lg" shape="rounded" tone="primary" disabled aria-label="Download chat logs">
               <Download class="size-5" />
             </VelionIconButton>
           </div>
@@ -567,7 +586,7 @@ function ChatLogsPage() {
               <span class="pb-4 text-[#6F747D]">Details</span>
             </div>
           </div>
-          <SquareIconButton label="Open chat log menu" Icon={MoreHorizontal} />
+          <SquareIconButton disabled label="Open chat log menu" Icon={MoreHorizontal} />
         </div>
         <div class="mx-auto max-w-[820px] p-8">
           <EmptyStateCard
@@ -637,7 +656,7 @@ function LeadsCard(props: { hideHeaderAction?: boolean }) {
           <p class="mt-2 text-[15px] text-[#6F747D] dark:text-[#AEB4C0]">Submitted from lead collection skills.</p>
         </div>
         <Show when={!props.hideHeaderAction}>
-          <Button variant="primary" shape="rounded" size="md">
+          <Button variant="primary" shape="rounded" size="md" disabled>
             Export
             <Download class="size-4" />
           </Button>
