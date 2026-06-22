@@ -111,6 +111,11 @@ pub struct EmbedRequest {
     pub provider_hint: String,
     pub text: String,
     pub model: String,
+    /// Zero Data Retention. Threaded from the gRPC request so a future EU/ZDR
+    /// provider can honor it; inference-core's provider is Azure today, so
+    /// residency enforcement here is a Phase-4 concern — this just carries the
+    /// signal end-to-end (it does NOT by itself satisfy residency).
+    pub zdr: bool,
 }
 
 /// Unified embedding response.

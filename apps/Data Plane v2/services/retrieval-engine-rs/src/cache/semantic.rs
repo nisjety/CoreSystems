@@ -124,6 +124,7 @@ pub async fn search(
     org_id: &str,
     model: &str,
     prompt: &str,
+    zdr: bool,
 ) -> anyhow::Result<Option<SemanticHit>> {
     if !cfg.semantic_cache_enabled {
         return Ok(None);
@@ -135,8 +136,10 @@ pub async fn search(
     }
 
     let namespace = embedder.cache_namespace();
+    // ZDR prompts must not egress to a retaining embedding provider; the embed
+    // layer's egress guard enforces it on the direct-Azure backend.
     let vector = embedder
-        .embed_query(org_id, prompt)
+        .embed_query(org_id, prompt, zdr)
         .await
         .context("embed prompt for semantic-cache search")?;
 
@@ -184,6 +187,10 @@ pub async fn search(
 /// Store a prompt/response pair for future semantically-near hits. Best-effort;
 /// lazily creates the collection sized to the embedding dimension. A no-op when
 /// the cache is disabled or the response is empty.
+// Adding the ZDR egress flag pushes this to 8 params; the function is an
+// internal best-effort cache helper with two call sites and each arg is a
+// distinct concern — a params struct would add indirection without value.
+#[allow(clippy::too_many_arguments)]
 pub async fn store(
     qdrant: &Qdrant,
     embedder: &EmbeddingClient,
@@ -192,14 +199,17 @@ pub async fn store(
     model: &str,
     prompt: &str,
     response: &str,
+    zdr: bool,
 ) -> anyhow::Result<()> {
     if !cfg.semantic_cache_enabled || response.is_empty() {
         return Ok(());
     }
     let collection = &cfg.semantic_cache_collection;
     let namespace = embedder.cache_namespace();
+    // ZDR prompts must not egress to a retaining embedding provider; the embed
+    // layer's egress guard enforces it on the direct-Azure backend.
     let vector = embedder
-        .embed_query(org_id, prompt)
+        .embed_query(org_id, prompt, zdr)
         .await
         .context("embed prompt for semantic-cache store")?;
     ensure_collection(qdrant, collection, vector.len() as u64).await?;

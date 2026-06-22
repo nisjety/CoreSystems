@@ -17,6 +17,11 @@ pub struct BatchItem {
     pub org_id: String,
     pub chunk_index: i32,
     pub text: String,
+    /// True when the owning document is `zdr_classification = 'restricted'`
+    /// (Zero Data Retention). Sourced from the `documents` row at enqueue time
+    /// (see `stream`). Drives the embed egress guard: a restricted doc must not
+    /// egress to a retaining (direct-Azure) embedding provider.
+    pub zdr: bool,
 }
 
 pub async fn process_batch(
@@ -84,7 +89,7 @@ pub async fn process_batch(
 
     // 5. Publish cost ledger event
     let cost_idempotency_key =
-        make_idempotency_key("embed.cost", &kid_list.join(","), &provider.model_name());
+        make_idempotency_key("embed.cost", &kid_list.join(","), provider.model_name());
     let cost_event = serde_json::json!({
         "event_type": "embedding",
         "model": provider.model_name(),
@@ -114,18 +119,21 @@ async fn embed_items_by_org(
     items: &[BatchItem],
     provider: &EmbeddingProvider,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
-    let mut groups: HashMap<&str, Vec<(usize, String)>> = HashMap::new();
+    // Group by (org_id, zdr) so a restricted-doc batch carries the ZDR signal
+    // distinctly from a non-restricted batch for the same org — the embed
+    // egress guard then fires only for the restricted group.
+    let mut groups: HashMap<(&str, bool), Vec<(usize, String)>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         groups
-            .entry(item.org_id.as_str())
+            .entry((item.org_id.as_str(), item.zdr))
             .or_default()
             .push((index, item.text.clone()));
     }
 
     let mut vectors_by_index: Vec<Option<Vec<f32>>> = vec![None; items.len()];
-    for (org_id, group) in groups {
+    for ((org_id, zdr), group) in groups {
         let texts: Vec<String> = group.iter().map(|(_, text)| text.clone()).collect();
-        let vectors = provider.embed_batch(org_id, &texts).await?;
+        let vectors = provider.embed_batch(org_id, &texts, zdr).await?;
         if vectors.len() != group.len() {
             anyhow::bail!(
                 "embedding provider returned {} vectors for {} texts",

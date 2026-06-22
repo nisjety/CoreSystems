@@ -145,28 +145,53 @@ impl EmbeddingProvider {
         &self,
         org_id: &str,
         texts: &[String],
+        zdr: bool,
     ) -> anyhow::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
 
         match &self.inner {
-            EmbeddingBackend::ModelPlane(client) => client.embed_batch(org_id, texts).await,
-            EmbeddingBackend::AzureOpenAi(client) => client.embed_batch(texts).await,
+            EmbeddingBackend::ModelPlane(client) => client.embed_batch(org_id, texts, zdr).await,
+            EmbeddingBackend::AzureOpenAi(client) => client.embed_batch(texts, zdr).await,
         }
     }
 }
 
 impl ModelPlaneEmbeddingClient {
-    async fn embed_batch(&self, org_id: &str, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn embed_batch(
+        &self,
+        org_id: &str,
+        texts: &[String],
+        zdr: bool,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
-            vectors.push(self.embed_one(org_id, text).await?);
+            vectors.push(self.embed_one(org_id, text, zdr).await?);
         }
         Ok(vectors)
     }
 
-    async fn embed_one(&self, org_id: &str, text: &str) -> anyhow::Result<Vec<f32>> {
+    /// Build the gRPC embedding request. Split out so a unit test can assert the
+    /// ZDR signal is faithfully carried onto the wire request without a live
+    /// inference-core.
+    fn build_request(
+        &self,
+        org_id: &str,
+        text: &str,
+        zdr: bool,
+    ) -> model_plane::v1::CreateEmbeddingRequest {
+        model_plane::v1::CreateEmbeddingRequest {
+            request_id: Uuid::new_v4().to_string(),
+            org_id: org_id.to_string(),
+            text: text.to_string(),
+            model: self.model.clone(),
+            provider_hint: self.provider.clone(),
+            zdr,
+        }
+    }
+
+    async fn embed_one(&self, org_id: &str, text: &str, zdr: bool) -> anyhow::Result<Vec<f32>> {
         let mut last_err = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -176,13 +201,7 @@ impl ModelPlaneEmbeddingClient {
                 tokio::time::sleep(backoff).await;
             }
 
-            let request = model_plane::v1::CreateEmbeddingRequest {
-                request_id: Uuid::new_v4().to_string(),
-                org_id: org_id.to_string(),
-                text: text.to_string(),
-                model: self.model.clone(),
-                provider_hint: self.provider.clone(),
-            };
+            let request = self.build_request(org_id, text, zdr);
             let mut request = tonic::Request::new(request);
             if let Some(key) = self.internal_api_key.as_deref() {
                 request
@@ -220,7 +239,16 @@ impl ModelPlaneEmbeddingClient {
 }
 
 impl AzureOpenAiEmbeddingClient {
-    async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+    async fn embed_batch(&self, texts: &[String], zdr: bool) -> anyhow::Result<Vec<Vec<f32>>> {
+        // ZDR egress guard: the direct-Azure path is a *retaining* provider, so
+        // documents classified restricted (Zero Data Retention) must never leave
+        // on it. Fail closed BEFORE any network call. (An EU/ZDR embedding
+        // provider is a Phase-4 prerequisite; until then restricted docs have no
+        // compliant embedding path and must error here.)
+        if zdr {
+            anyhow::bail!("ZDR content must not egress to the direct-Azure embedding path");
+        }
+
         let url = format!(
             "{}/openai/deployments/{}/embeddings?api-version=2024-02-01",
             self.endpoint, self.deployment
@@ -332,6 +360,76 @@ mod tests {
         assert!(
             err.to_string().contains("AZURE_OPENAI_ENDPOINT"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// ZDR egress guard on the doc-embedding path: a restricted document must
+    /// fail closed on the direct-Azure provider BEFORE any network call (Azure
+    /// is a retaining provider). The unreachable endpoint guarantees a regressed
+    /// guard would surface a connection error, not the ZDR error asserted here.
+    #[tokio::test]
+    async fn azure_openai_egress_guard_rejects_zdr() {
+        let provider = EmbeddingProvider::azure_openai(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "text-embedding-3-large",
+        )
+        .expect("direct Azure provider");
+        let err = provider
+            .embed_batch("org-1", &["restricted doc chunk".to_string()], true)
+            .await
+            .expect_err("restricted (ZDR) content must not egress to direct-Azure");
+        assert!(
+            err.to_string()
+                .contains("must not egress to the direct-Azure embedding path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Non-restricted docs still embed on the direct-Azure path (guard trips
+    /// only for ZDR=true). The unreachable endpoint yields a network error, NOT
+    /// the egress error — proving the guard is not constant-on.
+    #[tokio::test]
+    async fn azure_openai_allows_non_zdr() {
+        let provider = EmbeddingProvider::azure_openai(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "text-embedding-3-large",
+        )
+        .expect("direct Azure provider");
+        let err = provider
+            .embed_batch("org-1", &["public doc chunk".to_string()], false)
+            .await
+            .expect_err("unreachable endpoint should error");
+        assert!(
+            !err.to_string()
+                .contains("must not egress to the direct-Azure embedding path"),
+            "non-ZDR content must not hit the egress guard: {err}"
+        );
+    }
+
+    /// ModelPlane path: the ZDR signal is faithfully placed on the wire request
+    /// (both true and false round-trip from the caller's argument).
+    #[tokio::test]
+    async fn model_plane_request_carries_zdr() {
+        let provider = EmbeddingProvider::model_plane(
+            "http://inference-core:9092",
+            "text-embedding-3-large",
+            "azure_openai",
+            30_000,
+            None,
+        )
+        .expect("model-plane provider");
+        let EmbeddingBackend::ModelPlane(inner) = &provider.inner else {
+            panic!("expected a model-plane backend");
+        };
+        assert!(
+            inner.build_request("org-1", "hi", true).zdr,
+            "zdr=true must propagate"
+        );
+        assert!(
+            !inner.build_request("org-1", "hi", false).zdr,
+            "zdr=false must propagate"
         );
     }
 }

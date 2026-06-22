@@ -170,6 +170,13 @@ pub struct RetrievalResponse {
     pub trace_id: String,
     pub index_version: String,
     pub zdr_mode: String,
+    /// §16.1.3 — the ZDR enforcement actions actually applied to THIS retrieval
+    /// (e.g. `reject_mode_filtered_restricted`, `reject_mode_no_restricted_found`,
+    /// `ephemeral_no_trace_persist`). The same value is persisted on the trace;
+    /// surfaced here so callers (and the e2e) can observe enforcement directly
+    /// on the response without a follow-up trace fetch. Empty when ZDR is off.
+    #[serde(default)]
+    pub zdr_actions_applied: Vec<String>,
     pub low_confidence: bool,
     pub context_pack: Option<ContextPack>,
     /// Agent retrieval planner hints (D4+D5 spec §3). Lists which follow-up

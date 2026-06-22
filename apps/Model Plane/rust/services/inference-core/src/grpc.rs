@@ -157,6 +157,10 @@ impl InferenceCore for InferenceService {
             provider_hint: req.provider_hint,
             text: req.text,
             model: req.model,
+            // Carry the ZDR signal through; inference-core's provider is Azure
+            // today so residency enforcement is Phase-4 — this just threads it
+            // so a future EU/ZDR provider can honor it.
+            zdr: req.zdr,
         };
 
         let result = self

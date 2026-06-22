@@ -19,6 +19,15 @@ use crate::trace::persist_trace;
 /// Must match `embedding_engine_rs::wiki_consumer::WIKI_COLLECTION`.
 const WIKI_COLLECTION: &str = "wiki_block_embeddings";
 
+/// Map the ZDR session mode to the embed-path egress flag. `ephemeral` is the
+/// zero-data-retention session mode: the query is ZDR content, so its embedding
+/// must not egress to a retaining provider. Every other mode (`reject`,
+/// `disabled`, unset) is non-ZDR for the embed hop — `reject` filters restricted
+/// *documents* from results but the *query* itself is not ZDR content.
+fn embed_zdr_for_mode(zdr_mode: &str) -> bool {
+    zdr_mode == "ephemeral"
+}
+
 pub struct RetrievalPipeline {
     pub pool: PgPool,
     pub qdrant: Qdrant,
@@ -78,6 +87,11 @@ impl RetrievalPipeline {
             .zdr_mode
             .clone()
             .unwrap_or_else(|| "disabled".to_string());
+        // ephemeral = the zero-data-retention session mode. The query text is
+        // ZDR content, so its embedding must not egress to a retaining provider:
+        // this drives the embed-path egress guard (the direct-Azure backend
+        // fails closed when true).
+        let embed_zdr = embed_zdr_for_mode(&zdr_mode);
 
         // Resolve the mode-mix weights FIRST so they can drive engine routing
         // (D4+D5 spec §7) and so captured-on-trace == used-for-scoring.
@@ -137,13 +151,18 @@ impl RetrievalPipeline {
                     cached
                 } else {
                     crate::metrics::record_embed_request();
-                    let vec = self.embedder.embed_query(&req.org_id, &req.query).await?;
+                    let vec = self
+                        .embedder
+                        .embed_query(&req.org_id, &req.query, embed_zdr)
+                        .await?;
                     cache.set_embedding(&model_ver, &query_hash, &vec).await;
                     vec
                 }
             } else {
                 crate::metrics::record_embed_request();
-                self.embedder.embed_query(&req.org_id, &req.query).await?
+                self.embedder
+                    .embed_query(&req.org_id, &req.query, embed_zdr)
+                    .await?
             };
 
             // Validate embedding response: empty or wrong-dimension vectors
@@ -518,6 +537,12 @@ impl RetrievalPipeline {
             trace_id,
             index_version,
             zdr_mode,
+            // Surface the SAME enforcement actions already persisted on the
+            // trace (§16.1.3) — the real computed value, not a synthesized one.
+            zdr_actions_applied: zdr_actions_applied
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             low_confidence,
             context_pack,
             suggested_next_tools,
@@ -706,4 +731,24 @@ struct SourceRow {
     title: String,
     source: String,
     r#type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::embed_zdr_for_mode;
+
+    #[test]
+    fn ephemeral_mode_drives_embed_zdr_true() {
+        assert!(embed_zdr_for_mode("ephemeral"));
+    }
+
+    #[test]
+    fn non_ephemeral_modes_are_non_zdr_for_embed() {
+        // `reject` filters restricted documents from results, but the *query*
+        // text is not ZDR content — only `ephemeral` makes the embed hop ZDR.
+        assert!(!embed_zdr_for_mode("reject"));
+        assert!(!embed_zdr_for_mode("disabled"));
+        assert!(!embed_zdr_for_mode(""));
+        assert!(!embed_zdr_for_mode("Ephemeral")); // case-sensitive on purpose
+    }
 }
