@@ -2,7 +2,9 @@ package insights
 
 import (
 	"context"
+	"sort"
 	"sync"
+	"time"
 )
 
 type MemoryRepository struct {
@@ -60,4 +62,24 @@ func (r *MemoryRepository) ListConnectorSlots(_ context.Context, _ string) ([]Co
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return copyConnectorSlots(r.connectors), nil
+}
+
+func (r *MemoryRepository) ListOrgIDsWithMetricsSince(_ context.Context, since time.Time) ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	seen := map[string]struct{}{}
+	orgIDs := []string{}
+	for _, event := range r.events {
+		if event.OccurredAt.Before(since) {
+			continue
+		}
+		if _, ok := seen[event.OrgID]; ok {
+			continue
+		}
+		seen[event.OrgID] = struct{}{}
+		orgIDs = append(orgIDs, event.OrgID)
+	}
+	sort.Strings(orgIDs)
+	return orgIDs, nil
 }

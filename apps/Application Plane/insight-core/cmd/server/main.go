@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/briefs"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/database"
@@ -30,8 +31,9 @@ func main() {
 		TokenLeaseAudience:            cfg.ConnectorTokenLeaseAudience,
 	})
 
-	// W3: durable metric store when DATABASE_URL is set; otherwise the Phase-1
-	// in-memory repo (registry-only, metrics surfaced as an explicit empty-state).
+	// W3: durable metric store when DATABASE_URL is set; otherwise the in-memory
+	// repo (registry-only — recorded metrics do not survive a restart and the
+	// scheduled brief cannot run without it).
 	var repository insights.Repository = insights.NewMemoryRepository(connectors)
 	if cfg.DatabaseURL != "" {
 		ctx := context.Background()
@@ -50,9 +52,9 @@ func main() {
 	}
 	service := insights.NewService(repository)
 
-	// W3: when NATS is wired, consume conversation-core application events and
-	// record them as metrics — the real producer behind the metrics view. No-op
-	// when NATS_URL is empty (Phase-1 behaviour: metrics stay an empty-state).
+	// W3 (PR-5): when the shared application NATS is wired, consume conversation-core
+	// AND social-core application events and record them as metrics — two of the real
+	// producers behind the metrics view. No-op when NATS_URL is empty.
 	if cfg.NATSURL != "" {
 		natsClient, err := appnats.NewClient(appnats.Config{URL: cfg.NATSURL, Token: cfg.NATSToken, Name: cfg.ServiceName})
 		if err != nil {
@@ -66,6 +68,44 @@ func main() {
 				defer subscriber.Stop()
 			}
 		}
+	}
+
+	// W3 (PR-5): the model-plane-agents producer leg. The Model Plane runs on an
+	// isolated NATS cluster, so the agent subscriber dual-connects via the
+	// model-plane-nats bridge and records run/tool/approval lifecycle events as
+	// surface=agents metrics — the third real producer. No-op when
+	// MODEL_PLANE_NATS_URL is empty.
+	if cfg.ModelPlaneNATSURL != "" {
+		mpNATS, err := appnats.NewClient(appnats.Config{URL: cfg.ModelPlaneNATSURL, Token: cfg.ModelPlaneNATSToken, Name: cfg.ServiceName + "-agents"})
+		if err != nil {
+			log.Printf("insight-core: model-plane NATS disabled: %v", err)
+		} else {
+			defer mpNATS.Close()
+			agentSub := consumers.NewAgentSubscriber(mpNATS.JS, service)
+			if err := agentSub.Start(context.Background()); err != nil {
+				log.Printf("insight-core: agent subscriber: %v", err)
+			} else {
+				defer agentSub.Stop()
+				log.Printf("insight-core: model-plane-agents producer enabled")
+			}
+		}
+	}
+
+	// W3 (PR-5): scheduled brief DELIVERY. When notification-core is reachable and
+	// a durable metric store is enabled, run the daily-brief scheduler. It discovers
+	// active orgs server-side from the recorded metric store (IDOR-clean — never
+	// from client input) and POSTs a `daily_brief` notification carrying the Preview
+	// gate to notification-core's existing Novu adapter (in_app + email). No-op when
+	// NOTIFICATION_CORE_URL is empty or the store is in-memory.
+	if cfg.NotificationCoreURL != "" && cfg.DatabaseURL != "" {
+		notifier := briefs.NewHTTPNotificationClient(cfg.NotificationCoreURL, cfg.InternalAPIKey)
+		scheduler := briefs.NewScheduler(service, notifier)
+		schedCtx, cancelSched := context.WithCancel(context.Background())
+		defer cancelSched()
+		go scheduler.Run(schedCtx)
+		log.Printf("insight-core: daily_brief scheduler enabled (delivery via notification-core)")
+	} else {
+		log.Printf("insight-core: daily_brief scheduler disabled (set NOTIFICATION_CORE_URL + DATABASE_URL to enable)")
 	}
 
 	handler := apphttp.NewHandler(cfg, service)
