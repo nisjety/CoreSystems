@@ -162,10 +162,10 @@ func main() {
 		resources.MountPresets(r)
 
 		// Cycle 23 additions — REST resource breadth part 2 +
-		// schedule lifecycle aliases. Empty / stub implementations
-		// where the underlying schema isn't ready yet; the contract
-		// is in place so the Rust edge forwards work end-to-end.
-		resources.MountSources(r)
+		// schedule lifecycle aliases. /v1/sources is now a real,
+		// org-scoped CRUD over `quarry_sources` (PR-7); benchmarks +
+		// request-queues stay stub-shaped where the schema isn't ready.
+		resources.MountSources(r, db)
 		resources.MountBenchmarks(r)
 		resources.MountRequestQueues(r, db)
 		resources.MountTeam(r, db)

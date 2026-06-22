@@ -19,6 +19,7 @@ type DB interface {
 	Artifacts() ResourceStore[Artifact]
 	Profiles() ResourceStore[BrowserProfile]
 	Schedules() SchedulesStore
+	Sources() SourcesStore
 	Webhooks() ResourceStore[Webhook]
 	WebhookDeliveries() WebhookDeliveryStore
 	Blocklists() ResourceStore[BlocklistEntry]
@@ -41,6 +42,28 @@ type WebhookDeliveryStore interface {
 type SchedulesStore interface {
 	ResourceStore[Schedule]
 	UpdateEnabled(id quarrycontracts.ID, enabled bool) error
+}
+
+// SourcesStore is the durable registry of recurring ingestion targets a
+// tenant has registered (Cycle 23 `quarry_sources`, migration 005). Every
+// method is ORG-SCOPED: the org id is a verified value the edge stamps from
+// the JWT, so a caller can never read or mutate another tenant's sources.
+// Soft-delete only (set deleted_at) — list never returns soft-deleted rows.
+type SourcesStore interface {
+	// ListByOrg returns the org's non-deleted sources, newest-first, with an
+	// opaque keyset cursor.
+	ListByOrg(orgID string, limit int, cursor string) ([]Source, string)
+	// Create inserts a new source. The caller mints the org-prefixed id and
+	// stamps the org id; Create does not derive either.
+	Create(s Source) error
+	// GetByOrg returns a single non-deleted source scoped to the org. The org
+	// guard means a cross-tenant id returns (Source{}, false), never another
+	// org's row.
+	GetByOrg(orgID string, id quarrycontracts.ID) (Source, bool)
+	// SoftDeleteByOrg sets deleted_at on a source the org owns. Returns
+	// ErrNotFound when no live row matches BOTH the id AND the org — a
+	// cross-tenant delete attempt is indistinguishable from "missing".
+	SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error
 }
 
 type JobsStore interface {
@@ -144,6 +167,24 @@ type Schedule struct {
 	Preset string `json:"preset,omitempty"`
 }
 
+// Source is a user-registered recurring ingestion target (Cycle 23
+// `quarry_sources`). It mirrors the Rust edge's `quarry_core::resources::Source`
+// field-for-field so the edge's `forward_list::<Source>` deserializer round-trips
+// without a Go-flavor envelope. OrgID is stamped server-side from the verified
+// JWT and is NOT NULL in the DB; the JSON tag carries it on the wire so the edge
+// surfaces it. CreatedAt/UpdatedAt are unix-millis to match the rest of the store.
+type Source struct {
+	ID        quarrycontracts.ID `json:"source_id"`
+	OrgID     string             `json:"org_id"`
+	Name      string             `json:"name"`
+	URL       string             `json:"url"`
+	Kind      string             `json:"kind"`   // crawl | scrape | search
+	Status    string             `json:"status"` // active | paused | deleted
+	Config    map[string]any     `json:"config,omitempty"`
+	CreatedAt int64              `json:"created_at"`
+	UpdatedAt int64              `json:"updated_at"`
+}
+
 type Webhook struct {
 	ID        quarrycontracts.ID `json:"id"`
 	URL       string             `json:"url"`
@@ -182,6 +223,7 @@ type memDB struct {
 	arts         *genericStore[Artifact]
 	profiles     *genericStore[BrowserProfile]
 	schedules    *genericStore[Schedule]
+	sources      *memSources
 	webhooks     *genericStore[Webhook]
 	whDeliveries *genericStore[WebhookDelivery]
 	blocklists   *genericStore[BlocklistEntry]
@@ -196,6 +238,7 @@ func NewMemory() DB {
 		arts:         newGeneric[Artifact](func(a Artifact) quarrycontracts.ID { return a.ID }),
 		profiles:     newGeneric[BrowserProfile](func(p BrowserProfile) quarrycontracts.ID { return p.ID }),
 		schedules:    newGeneric[Schedule](func(s Schedule) quarrycontracts.ID { return s.ID }),
+		sources:      newMemSources(),
 		webhooks:     newGeneric[Webhook](func(w Webhook) quarrycontracts.ID { return w.ID }),
 		whDeliveries: newGeneric[WebhookDelivery](func(d WebhookDelivery) quarrycontracts.ID { return d.ID }),
 		blocklists:   newGeneric[BlocklistEntry](func(b BlocklistEntry) quarrycontracts.ID { return b.ID }),
@@ -209,6 +252,7 @@ func (d *memDB) Snapshots() ResourceStore[Snapshot]      { return d.snaps }
 func (d *memDB) Artifacts() ResourceStore[Artifact]      { return d.arts }
 func (d *memDB) Profiles() ResourceStore[BrowserProfile] { return d.profiles }
 func (d *memDB) Schedules() SchedulesStore               { return &memSchedules{d.schedules} }
+func (d *memDB) Sources() SourcesStore                   { return d.sources }
 func (d *memDB) Webhooks() ResourceStore[Webhook]        { return d.webhooks }
 func (d *memDB) WebhookDeliveries() WebhookDeliveryStore {
 	return &memWebhookDeliveries{d.whDeliveries}
@@ -227,6 +271,85 @@ func (m *memSchedules) UpdateEnabled(id quarrycontracts.ID, enabled bool) error 
 	}
 	it.Enabled = enabled
 	m.items[id] = it
+	return nil
+}
+
+// memSources is the dev-only in-memory SourcesStore. Unlike genericStore it
+// MUST enforce the org guard + soft-delete in every method, because those are
+// the security invariants the pg store relies on the SQL WHERE clause for.
+type memSources struct {
+	mu    sync.RWMutex
+	items map[quarrycontracts.ID]Source
+	order []quarrycontracts.ID // insertion order; we list newest-first
+	// deleted records the soft-delete tombstone set (id present == deleted_at set).
+	deleted map[quarrycontracts.ID]bool
+}
+
+func newMemSources() *memSources {
+	return &memSources{
+		items:   make(map[quarrycontracts.ID]Source),
+		deleted: make(map[quarrycontracts.ID]bool),
+	}
+}
+
+func (m *memSources) Create(s Source) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.items[s.ID]; exists {
+		return ErrConflict
+	}
+	m.items[s.ID] = s
+	m.order = append(m.order, s.ID)
+	return nil
+}
+
+func (m *memSources) GetByOrg(orgID string, id quarrycontracts.ID) (Source, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.items[id]
+	// Org guard + soft-delete filter: a mismatched org or a tombstoned row is
+	// reported as "not found" — identical to a genuinely missing id.
+	if !ok || m.deleted[id] || s.OrgID != orgID {
+		return Source{}, false
+	}
+	return s, true
+}
+
+func (m *memSources) ListByOrg(orgID string, limit int, _ string) ([]Source, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Source, 0, limit)
+	// Newest-first: walk insertion order in reverse.
+	for i := len(m.order) - 1; i >= 0; i-- {
+		id := m.order[i]
+		if m.deleted[id] {
+			continue
+		}
+		s := m.items[id]
+		if s.OrgID != orgID {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, s)
+	}
+	return out, ""
+}
+
+func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.items[id]
+	if !ok || m.deleted[id] || s.OrgID != orgID {
+		return ErrNotFound
+	}
+	m.deleted[id] = true
+	s.Status = "deleted"
+	m.items[id] = s
 	return nil
 }
 

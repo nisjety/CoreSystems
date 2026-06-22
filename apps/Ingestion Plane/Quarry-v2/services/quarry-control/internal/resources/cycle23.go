@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -64,16 +65,157 @@ func emptyPage(w http.ResponseWriter, r *http.Request) {
 // reads via a typed store.
 // =============================================================================
 
-// MountSources registers the /v1/sources routes. Today the store is a
-// no-op shim because the Sources table is freshly defined; cycle 24
-// wires the pg-backed store.
-func MountSources(r chi.Router) {
-	r.Get("/v1/sources", func(w http.ResponseWriter, r *http.Request) {
-		// TODO(cycle 24): populate from `quarry_sources` (migration 005).
-		// For now: return an empty page so the edge gets a typed shape
-		// rather than 502.
-		emptyPage(w, r)
-	})
+// sourceCreateBody is the POST /v1/sources request shape. org_id is NOT read
+// from the body — the edge stamps the verified org as the `?org_id` query
+// param (mirroring the list/forward_json contract), so a client can never
+// register a source under another tenant.
+type sourceCreateBody struct {
+	Name string         `json:"name"`
+	URL  string         `json:"url"`
+	Kind string         `json:"kind"` // crawl | scrape | search
+	// Monitor, when true, also registers a recurring change_monitor schedule
+	// (preset-driven) so the orchestrator reconcile materializes a Temporal
+	// schedule for this source. Sources without it are durable records only.
+	Monitor bool           `json:"monitor,omitempty"`
+	Preset  string         `json:"preset,omitempty"` // hourly|daily|weekly when Monitor
+	Config  map[string]any `json:"config,omitempty"`
+}
+
+var validSourceKinds = map[string]bool{"crawl": true, "scrape": true, "search": true}
+
+// MountSources registers the /v1/sources CRUD routes backed by the durable
+// `quarry_sources` table (migration 005). EVERY op is org-scoped: the org id
+// is the verified `?org_id` the edge stamps from the JWT, never a body field,
+// so there is no cross-tenant IDOR vector.
+//
+//   - GET    /v1/sources      — list the org's live sources (Page<Source>).
+//   - POST   /v1/sources      — create a source (mints src_<ulid>); optionally
+//     registers a change_monitor schedule so the orchestrator drives recurring
+//     refresh through Temporal.
+//   - DELETE /v1/sources/{id} — soft-delete (sets deleted_at), org-scoped.
+func MountSources(r chi.Router, db store.DB) {
+	r.Get("/v1/sources", listSourcesHandler(db))
+	r.Post("/v1/sources", createSourceHandler(db))
+	r.Delete("/v1/sources/{id}", deleteSourceHandler(db))
+}
+
+// orgFromQuery reads the verified org the edge stamped as `?org_id`. Empty is
+// rejected by callers — an unscoped sources query must never succeed.
+func orgFromQuery(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("org_id"))
+}
+
+func listSourcesHandler(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = 50
+		}
+		items, next := db.Sources().ListByOrg(org, limit, r.URL.Query().Get("cursor"))
+		if items == nil {
+			items = []store.Source{}
+		}
+		var nextPtr *string
+		if next != "" {
+			nextPtr = &next
+		}
+		writePage(w, r, items, nil, nextPtr)
+	}
+}
+
+func createSourceHandler(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		var body sourceCreateBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		body.Name = strings.TrimSpace(body.Name)
+		body.URL = strings.TrimSpace(body.URL)
+		body.Kind = strings.TrimSpace(body.Kind)
+		if body.Name == "" || body.URL == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "name and url are required", nil)
+			return
+		}
+		if !validSourceKinds[body.Kind] {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "kind must be one of crawl|scrape|search", nil)
+			return
+		}
+		now := time.Now().UnixMilli()
+		src := store.Source{
+			ID:        quarrycontracts.NewID(quarrycontracts.KindSource),
+			OrgID:     org,
+			Name:      body.Name,
+			URL:       body.URL,
+			Kind:      body.Kind,
+			Status:    "active",
+			Config:    body.Config,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := db.Sources().Create(src); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeConflict, err.Error(), nil)
+			return
+		}
+		// Optionally register a recurring change_monitor schedule for this
+		// source. The orchestrator reconcile (org-scoped) then materializes a
+		// Temporal schedule; on a detected change the W2 notify leg fires. We
+		// stamp the SAME verified org so the schedule + source stay tenant-aligned.
+		if body.Monitor {
+			preset := strings.TrimSpace(body.Preset)
+			if preset == "" {
+				preset = "daily"
+			}
+			sched := store.Schedule{
+				OrgID:      org,
+				TargetKind: store.TargetKindChangeMonitor,
+				TargetRef:  body.URL,
+				Enabled:    true,
+				Preset:     preset,
+			}
+			if err := sched.Validate(); err != nil {
+				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "monitor: "+err.Error(), nil)
+				return
+			}
+			if err := db.Schedules().Create(sched); err != nil {
+				httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "monitor schedule: "+err.Error(), nil)
+				return
+			}
+		}
+		httpx.WriteJSON(w, r, http.StatusCreated, src)
+	}
+}
+
+func deleteSourceHandler(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if err := id.MustKind(quarrycontracts.KindSource); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		if err := db.Sources().SoftDeleteByOrg(org, id); err != nil {
+			// ErrNotFound covers BOTH a genuinely missing id AND a cross-tenant
+			// delete attempt — they are indistinguishable by design.
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // =============================================================================
