@@ -1,11 +1,13 @@
 //! Lead-builder (W1) surface — metered + audited.
 //!
-//! Filtered Enhetsregisteret company search + saved org-scoped lists + CSV
-//! export, proxied to leads-core. The org is resolved server-side via
-//! `authorized_org_id` (never a client header). The CSV export is METERED: it is
-//! gated on the org's billing-core `leads` entitlement and 402s when not entitled
-//! (leads-core emits the per-export audit event). COMPANY DATA ONLY — leads-core
-//! never returns person/role/birth-number data.
+//! Filtered Enhetsregisteret company search + sub-entity/branch + financials
+//! enrichment + the governed `leads.build_list` action + saved org-scoped lists
+//! + CSV export, proxied to leads-core. The org is resolved server-side via
+//! `authorized_org_id` (never a client header), so every route is IDOR-clean.
+//! The CSV export and `build_list` are METERED: both are gated on the org's
+//! billing-core `leads` entitlement and 402 when not entitled (leads-core emits
+//! the per-action audit event). COMPANY DATA ONLY — leads-core never returns
+//! person/role/birth-number data.
 
 use axum::{
     extract::{Extension, Path, State},
@@ -30,6 +32,9 @@ const LEADS_FEATURE: &str = "leads";
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/leads/search", post(search))
+        .route("/api/v1/leads/companies/:orgnr/branches", get(branches))
+        .route("/api/v1/leads/companies/:orgnr/financials", get(financials))
+        .route("/api/v1/leads/build_list", post(build_list))
         .route("/api/v1/leads/lists", get(list_lists).post(create_list))
         .route("/api/v1/leads/lists/:id", get(get_list).delete(delete_list))
         .route("/api/v1/leads/lists/:id/export.csv", get(export_csv))
@@ -63,6 +68,44 @@ fn entitlement_allowed(status: StatusCode, body: &Value) -> bool {
             .unwrap_or(false)
 }
 
+/// Fail-closed metering gate for the `leads` add-on. Returns `Ok(())` when the
+/// org is entitled, or a ready-to-send 402 response otherwise. The org is the
+/// server-resolved `authorized_org_id` — never a client value.
+async fn require_leads_entitlement(
+    state: &AppState,
+    org_id: &str,
+    actor: &ActionActor,
+) -> Result<(), Response> {
+    let ent_url = format!(
+        "{}/api/v1/billing/orgs/{}/entitlements/{}",
+        state.billing_core_url,
+        org_id.trim(),
+        LEADS_FEATURE
+    );
+    let (ent_status, Json(ent_body)) = proxy_json(
+        state,
+        Method::GET,
+        &ent_url,
+        None,
+        Some(org_id),
+        Some(actor),
+        None,
+    )
+    .await;
+    if entitlement_allowed(ent_status, &ent_body) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({
+                "error": { "code": "entitlement_required", "message": "The lead-builder add-on is required for this action." },
+                "billing": ent_body,
+            })),
+        )
+            .into_response())
+    }
+}
+
 async fn search(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -80,6 +123,97 @@ async fn search(
         Some(body),
         Some(&org_id),
         Some(&actor_for(&user)),
+        None,
+    )
+    .await
+    .into_response()
+}
+
+/// `branches` — a company's sub-entities (`/underenheter`). Read-only, company
+/// data only. Org resolved server-side.
+async fn branches(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(orgnr): Path<String>,
+) -> Response {
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return no_active_org();
+    }
+    let url = format!(
+        "{}/api/v1/leads/companies/{}/branches",
+        state.leads_core_url, orgnr
+    );
+    proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor_for(&user)),
+        None,
+    )
+    .await
+    .into_response()
+}
+
+/// `financials` — a company's filed annual accounts (`/regnskap`). Read-only,
+/// aggregate company figures only. Org resolved server-side.
+async fn financials(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(orgnr): Path<String>,
+) -> Response {
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return no_active_org();
+    }
+    let url = format!(
+        "{}/api/v1/leads/companies/{}/financials",
+        state.leads_core_url, orgnr
+    );
+    proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor_for(&user)),
+        None,
+    )
+    .await
+    .into_response()
+}
+
+/// `build_list` — the governed lead-builder action: search → (branch enrich) →
+/// dedupe → save an org-scoped list. METERED (gated on the `leads` entitlement)
+/// and AUDITED (leads-core records the action via the proxied actor). The org is
+/// the server-resolved `authorized_org_id` and is forwarded as `x-org-id` by
+/// `proxy_json`; leads-core ignores any org in the body — so a client/model can
+/// never redirect the write to another tenant (IDOR-clean).
+async fn build_list(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(body): Json<Value>,
+) -> Response {
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return no_active_org();
+    }
+    let actor = actor_for(&user);
+
+    if let Err(resp) = require_leads_entitlement(&state, &org_id, &actor).await {
+        return resp;
+    }
+
+    let url = format!("{}/api/v1/leads/build_list", state.leads_core_url);
+    proxy_json(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        Some(&org_id),
+        Some(&actor),
         None,
     )
     .await
@@ -189,31 +323,8 @@ async fn export_csv(
     let actor = actor_for(&user);
 
     // Metering: gate the export on the org's billing-core `leads` entitlement.
-    let ent_url = format!(
-        "{}/api/v1/billing/orgs/{}/entitlements/{}",
-        state.billing_core_url,
-        org_id.trim(),
-        LEADS_FEATURE
-    );
-    let (ent_status, Json(ent_body)) = proxy_json(
-        &state,
-        Method::GET,
-        &ent_url,
-        None,
-        Some(&org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    if !entitlement_allowed(ent_status, &ent_body) {
-        return (
-            StatusCode::PAYMENT_REQUIRED,
-            Json(json!({
-                "error": { "code": "entitlement_required", "message": "The lead export add-on is required to export this list." },
-                "billing": ent_body,
-            })),
-        )
-            .into_response();
+    if let Err(resp) = require_leads_entitlement(&state, &org_id, &actor).await {
+        return resp;
     }
 
     // Raw CSV passthrough (proxy_json would mangle the non-JSON body). leads-core

@@ -52,6 +52,9 @@ func newRouter(handler *Handler, internalKey string) *gin.Engine {
 	{
 		api := gated.Group("/api/v1/leads")
 		api.POST("/search", handler.Search)
+		api.GET("/companies/:orgnr/branches", handler.Branches)
+		api.GET("/companies/:orgnr/financials", handler.Financials)
+		api.POST("/build_list", handler.BuildList)
 		api.GET("/lists", handler.ListLists)
 		api.POST("/lists", handler.CreateList)
 		api.GET("/lists/:id", handler.GetList)

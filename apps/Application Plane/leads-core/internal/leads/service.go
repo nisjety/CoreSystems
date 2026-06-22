@@ -49,6 +49,92 @@ func (s *Service) Search(ctx context.Context, filter brreg.SearchFilter) (*brreg
 	return s.brreg.Search(ctx, filter)
 }
 
+// Branches returns a company's sub-entities/branches (/underenheter). Company
+// data only.
+func (s *Service) Branches(ctx context.Context, orgnr string) ([]brreg.Branch, error) {
+	return s.brreg.Branches(ctx, strings.TrimSpace(orgnr))
+}
+
+// Financials returns a company's filed annual accounts (/regnskap). Aggregate
+// company figures only.
+func (s *Service) Financials(ctx context.Context, orgnr string) ([]brreg.Financials, error) {
+	return s.brreg.Financials(ctx, strings.TrimSpace(orgnr))
+}
+
+// branchAsCompany maps a sub-entity to the company-only list record. A branch
+// has its own organisasjonsnummer, so it is itself a valid lead; it carries no
+// PII either.
+func branchAsCompany(b brreg.Branch) brreg.Company {
+	return brreg.Company{
+		Organisasjonsnummer: b.Organisasjonsnummer,
+		Navn:                b.Navn,
+		Organisasjonsform:   b.Organisasjonsform,
+		Naeringskode:        b.Naeringskode,
+		NaeringBeskrivelse:  b.NaeringBeskrivelse,
+		Kommunenummer:       b.Kommunenummer,
+		Poststed:            b.Poststed,
+		AntallAnsatte:       b.AntallAnsatte,
+		Registreringsdato:   b.Registreringsdato,
+	}
+}
+
+// BuildList is the governed `leads.build_list` action: run a filtered Brreg
+// company search, optionally fold in each hit's sub-entities/branches, de-dupe
+// on the canonical organisasjonsnummer, and persist the result as a named,
+// org-scoped saved list. COMPANY DATA ONLY.
+//
+// The org and creator are taken from the input (the caller resolves them
+// server-side from the authorized identity), never from the search filter or
+// any client/model-supplied field — so this action is IDOR-clean.
+func (s *Service) BuildList(ctx context.Context, input BuildListInput) (*SavedList, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.Name = strings.TrimSpace(input.Name)
+	input.CreatedBy = strings.TrimSpace(input.CreatedBy)
+	if input.OrgID == "" || input.Name == "" {
+		return nil, fmt.Errorf("%w: org_id and name are required", ErrInvalidInput)
+	}
+	if err := input.Filter.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+
+	page, err := s.brreg.Search(ctx, input.Filter)
+	if err != nil {
+		return nil, err
+	}
+
+	lists := [][]brreg.Company{page.Companies}
+	if input.IncludeBranches {
+		for _, c := range page.Companies {
+			branches, berr := s.brreg.Branches(ctx, c.Organisasjonsnummer)
+			if berr != nil {
+				// Enrichment is best-effort: a branch lookup failure must not
+				// discard the primary search result.
+				continue
+			}
+			companyBranches := make([]brreg.Company, 0, len(branches))
+			for _, b := range branches {
+				companyBranches = append(companyBranches, branchAsCompany(b))
+			}
+			lists = append(lists, companyBranches)
+		}
+	}
+
+	companies := brreg.DedupeCompanies(lists...)
+	if len(companies) == 0 {
+		return nil, fmt.Errorf("%w: the search returned no companies to save", ErrInvalidInput)
+	}
+	if len(companies) > maxListCompanies {
+		companies = companies[:maxListCompanies]
+	}
+
+	return s.repo.CreateList(ctx, CreateListInput{
+		OrgID:     input.OrgID,
+		Name:      input.Name,
+		CreatedBy: input.CreatedBy,
+		Companies: companies,
+	})
+}
+
 // CreateList persists a named, org-scoped list of companies. The companies are
 // already company-only (brreg.Company carries no PII); empty names/orgs and
 // over-large lists are rejected.

@@ -90,6 +90,92 @@ func (h *Handler) Search(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": page})
 }
 
+// Branches returns a company's sub-entities/branches (/underenheter). Org is
+// resolved server-side from x-org-id (set by the gateway), never from the body.
+func (h *Handler) Branches(c *gin.Context) {
+	if requireOrgID(c) == "" {
+		return
+	}
+	branches, err := h.service.Branches(c.Request.Context(), c.Param("orgnr"))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, errorPayload("brreg_error", "Enhetsregisteret sub-entity lookup failed."))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": branches, "meta": gin.H{"count": len(branches)}})
+}
+
+// Financials returns a company's filed annual accounts (/regnskap). Aggregate
+// company figures only. Org is resolved server-side from x-org-id.
+func (h *Handler) Financials(c *gin.Context) {
+	if requireOrgID(c) == "" {
+		return
+	}
+	fins, err := h.service.Financials(c.Request.Context(), c.Param("orgnr"))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, errorPayload("brreg_error", "Regnskapsregisteret lookup failed."))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": fins, "meta": gin.H{"count": len(fins)}})
+}
+
+type buildListBody struct {
+	Name            string `json:"name"`
+	IncludeBranches bool   `json:"include_branches"`
+	Filter          struct {
+		Naeringskode         string `json:"naeringskode"`
+		Kommunenummer        string `json:"kommunenummer"`
+		Organisasjonsform    string `json:"organisasjonsform"`
+		FraAntallAnsatte     *int   `json:"fra_antall_ansatte"`
+		TilAntallAnsatte     *int   `json:"til_antall_ansatte"`
+		FraRegistreringsdato string `json:"fra_registreringsdato"`
+		TilRegistreringsdato string `json:"til_registreringsdato"`
+		Page                 int    `json:"page"`
+		Size                 int    `json:"size"`
+	} `json:"filter"`
+}
+
+// BuildList is the governed `leads.build_list` action surface: search → (branch
+// enrich) → dedupe → save an org-scoped list. The org is resolved server-side
+// from x-org-id (set by the gateway after authorizing the session); it is never
+// read from the request body, so the action is IDOR-clean.
+func (h *Handler) BuildList(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body buildListBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	list, err := h.service.BuildList(c.Request.Context(), leads.BuildListInput{
+		OrgID:           orgID,
+		Name:            body.Name,
+		CreatedBy:       actorUserID(c),
+		IncludeBranches: body.IncludeBranches,
+		Filter: brreg.SearchFilter{
+			Naeringskode:         body.Filter.Naeringskode,
+			Kommunenummer:        body.Filter.Kommunenummer,
+			Organisasjonsform:    body.Filter.Organisasjonsform,
+			FraAntallAnsatte:     body.Filter.FraAntallAnsatte,
+			TilAntallAnsatte:     body.Filter.TilAntallAnsatte,
+			FraRegistreringsdato: body.Filter.FraRegistreringsdato,
+			TilRegistreringsdato: body.Filter.TilRegistreringsdato,
+			Page:                 body.Filter.Page,
+			Size:                 body.Filter.Size,
+		},
+	})
+	if err != nil {
+		if errors.Is(err, brreg.ErrEmployeeBandUnsupported) || errors.Is(err, brreg.ErrDeepPagingLimit) {
+			c.JSON(http.StatusUnprocessableEntity, errorPayload("invalid_filter", err.Error()))
+			return
+		}
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": list})
+}
+
 type createListBody struct {
 	Name      string          `json:"name"`
 	Companies []brreg.Company `json:"companies"`
