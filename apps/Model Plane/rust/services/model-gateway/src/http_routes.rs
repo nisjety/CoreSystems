@@ -1264,6 +1264,10 @@ async fn ai_embeddings(
             text: req.input,
             model: req.model,
             provider_hint: req.provider.unwrap_or_default(),
+            // This gateway primitive carries no ZDR signal (AiEmbeddingRequest
+            // has no zdr field); the ZDR egress guard lives in the Data Plane.
+            // Phase 3 PR-3 added CreateEmbeddingRequest.zdr — false here is honest.
+            zdr: false,
         })
         .await
         .map_err(|e| grpc_status_to_http(&e))?
