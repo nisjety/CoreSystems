@@ -3,6 +3,7 @@
 package resources
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +13,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
@@ -43,10 +46,90 @@ func MountProfiles(r chi.Router, db store.DB) {
 }
 func MountSchedules(r chi.Router, db store.DB) {
 	s := db.Schedules()
-	mountSimple[store.Schedule](r, "/v1/schedules", s)
+	// Schedules use explicit handlers (not mountSimple) because the
+	// list/get responses must carry the DERIVED orchestrator contract
+	// fields (workflow/args/paused) via scheduleWire — the reconciler
+	// reads GET /v1/schedules to learn which Temporal workflow to run.
+	r.Route("/v1/schedules", func(r chi.Router) {
+		r.Get("/", listSchedulesHandler(s))
+		r.Post("/", createScheduleHandler(s))
+		r.Get("/{id}", getScheduleHandler(s))
+		r.Delete("/{id}", deleteScheduleHandler(s))
+	})
 	r.Post("/v1/schedules/{id}/enable", scheduleSetEnabled(s, true))
 	r.Post("/v1/schedules/{id}/disable", scheduleSetEnabled(s, false))
 	r.Get("/v1/schedules/{id}/runs", scheduleRuns(db))
+}
+
+// listSchedulesHandler returns the schedule list projected through
+// scheduleWire so the orchestrator reconciler sees workflow/args/paused.
+func listSchedulesHandler(s store.SchedulesStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = 50
+		}
+		items, _ := s.List(limit, r.URL.Query().Get("cursor"))
+		out := make([]scheduleWire, 0, len(items))
+		for _, it := range items {
+			out = append(out, toScheduleWire(it))
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, out)
+	}
+}
+
+func getScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		v, ok := s.Get(id)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, toScheduleWire(v))
+	}
+}
+
+// deleteScheduleHandler soft-removes a schedule. The orchestrator reconciler
+// reaps the matching Temporal schedule on its next pass (the deleted row drops
+// out of desiredSet). Restores the DELETE the generic mountSimple used to
+// provide before MountSchedules moved to explicit wire-shaped handlers.
+func deleteScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if err := s.Delete(id); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+				return
+			}
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// createScheduleHandler decodes + validates a schedule (mapping the
+// change_monitor preset to a 5-field cron and requiring org_id) and returns
+// the created record in wire shape. org_id is expected to already be stamped
+// from the edge's verified JWT — Validate rejects an empty org_id.
+func createScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var v store.Schedule
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		if err := v.Validate(); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		if err := s.Create(v); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeConflict, err.Error(), nil)
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusCreated, toScheduleWire(v))
+	}
 }
 
 // scheduleRuns returns the run history (jobs) triggered by a schedule.
@@ -92,7 +175,7 @@ func scheduleSetEnabled(s store.SchedulesStore, enabled bool) http.HandlerFunc {
 	}
 }
 
-func MountEvents(r chi.Router, db store.DB, apiKey string) {
+func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 	r.Get("/v1/runs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		runID := quarrycontracts.ID(chi.URLParam(r, "id"))
 		if err := runID.MustKind(quarrycontracts.KindRun); err != nil {
@@ -164,9 +247,32 @@ func MountEvents(r chi.Router, db store.DB, apiKey string) {
 			}
 			markJobTerminalIfNeeded(db, batch[i])
 			fanoutWebhooks(db, batch[i])
+			notifyOnChange(sink, batch[i])
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, map[string]any{"accepted": len(batch)})
 	})
+}
+
+// notifyOnChange delivers the ONE in-product notification for a detected
+// change. The recipient is the schedule's creator (payload.created_by, set by
+// ChangeMonitorWF). Best-effort + synchronous so it isn't lost on shutdown,
+// but it never fails the event append: a notification-core outage must not
+// block change tracking or webhook fanout. Idempotent on event_id so the
+// idempotent-replay path (ErrConflict → continue) never double-notifies.
+func notifyOnChange(sink notify.Sink, ev quarrycontracts.Event) {
+	if sink == nil || ev.Type != quarrycontracts.EvtChangeDetected {
+		return
+	}
+	recipient, _ := ev.Payload["created_by"].(string)
+	if strings.TrimSpace(recipient) == "" {
+		// No creator recorded (legacy schedule / non-user path) — honest skip.
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sink.NotifyChange(ctx, recipient, string(ev.EventID), ev.Payload); err != nil {
+		log.Warn().Err(err).Str("event_id", string(ev.EventID)).Msg("change notification delivery failed")
+	}
 }
 
 func markJobTerminalIfNeeded(db store.DB, ev quarrycontracts.Event) {

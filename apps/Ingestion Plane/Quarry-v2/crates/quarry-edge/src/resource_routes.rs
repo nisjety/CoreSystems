@@ -299,6 +299,215 @@ pub async fn list_sources(
     Ok(Json(Envelope::ok(request_id, page)))
 }
 
+// =============================================================================
+// /v1/sources — create + delete (Cycle 23 / cluster #4 — durable CRUD).
+//
+// The list path forwards a typed `ListFilter`; create/delete forward a JSON
+// body (POST) or empty body (DELETE) to the same Control-Plane owner. org_id
+// always comes from the verified JWT claim and rides as the `?org_id` query
+// param — NEVER from the client body — so a caller can't register or delete a
+// source under another tenant (control's handler reads the query param only).
+// =============================================================================
+
+/// `POST /v1/sources` request body. Mirrors quarry-control's `sourceCreateBody`
+/// (`services/quarry-control/internal/resources/cycle23.go`). `org_id` is
+/// intentionally ABSENT — control derives org from the `?org_id` query param
+/// the edge stamps from the verified JWT, so the body can never smuggle a
+/// foreign tenant.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct CreateSourceRequest {
+    pub name: String,
+    pub url: String,
+    /// `"crawl" | "scrape" | "search"`.
+    pub kind: String,
+    /// When true, control also registers a recurring `change_monitor`
+    /// schedule for this source so the orchestrator reconcile materializes a
+    /// Temporal schedule.
+    #[serde(default)]
+    pub monitor: bool,
+    /// `"hourly" | "daily" | "weekly"` — honoured by control only when
+    /// `monitor` is set (defaults to `daily` there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Free-form per-source config (max_pages, include_patterns, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+const VALID_SOURCE_KINDS: [&str; 3] = ["crawl", "scrape", "search"];
+
+/// Forward a mutating JSON request (POST body / DELETE empty) to the
+/// Control-Plane owner, HMAC-signing the canonical `(method, path?org_id,
+/// body_hash, ts, nonce)`. Returns the parsed JSON response (control's create
+/// returns the created `store.Source`; DELETE returns 204 / no body).
+///
+/// We forward the create response as an untyped `serde_json::Value` rather
+/// than the strongly-typed [`Source`]: control serializes `created_at` /
+/// `updated_at` as Unix-millis integers (`store.Source` json tags), which do
+/// not round-trip into [`Source`]'s `DateTime<Utc>` fields. The surface
+/// callers (gateway → SPA) read string fields only, so an honest passthrough
+/// is both correct and avoids a lossy re-encode.
+async fn forward_mutation(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    org_id: &str,
+    body_bytes: &[u8],
+) -> Result<serde_json::Value, QuarryError> {
+    if state.control_base_url.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "control plane URL not configured; source CRUD routes are inert",
+        ));
+    }
+    let url = format!("{}{}", state.control_base_url.trim_end_matches('/'), path);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+
+    let mut req = client
+        .request(method.clone(), &url)
+        .query(&[("org_id", org_id)]);
+    if !body_bytes.is_empty() {
+        req = req
+            .header("content-type", "application/json")
+            .body(body_bytes.to_vec());
+    }
+
+    // D3 / cluster #14 — Idempotency-Key on every mutating call so a network
+    // retry doesn't double-execute (control dedupes (org_id, key, route)).
+    let idem_key: RequestKind = quarry_core::ids::Id::new();
+    req = req.header("Idempotency-Key", idem_key.to_string());
+
+    // D2 / cluster #14 — sign the canonical string. POST signs the JSON body
+    // bytes; DELETE has an empty body (`b""`). The path-with-query MUST match
+    // exactly what control verifies — `?org_id=<org>` only (the
+    // Idempotency-Key header is not part of the canonical string).
+    if let Some(signer) = state.internal_signer.as_ref() {
+        let path_q = format!("{path}?org_id={org_id}");
+        let signed =
+            crate::internal_auth::apply_to_request(signer, method.as_str(), &path_q, body_bytes);
+        req = req
+            .header(crate::internal_auth::HEADER_SIG, signed.signature)
+            .header(crate::internal_auth::HEADER_TS, signed.timestamp)
+            .header(crate::internal_auth::HEADER_NONCE, signed.nonce);
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        QuarryError::new(
+            ErrorCode::DriverFailed,
+            format!("control-plane {method} {path} failed: {e}"),
+        )
+    })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let code = match status.as_u16() {
+            404 => ErrorCode::NotFound,
+            400 => ErrorCode::BadRequest,
+            401 | 403 => ErrorCode::Forbidden,
+            409 => ErrorCode::Conflict,
+            _ => ErrorCode::DriverFailed,
+        };
+        return Err(QuarryError::new(
+            code,
+            format!("control-plane {method} {path} returned {status}: {body}"),
+        ));
+    }
+    // 204 No Content (DELETE) carries an empty body — surface JSON null.
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::Value::Null);
+    }
+    let text = resp.text().await.map_err(|e| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            format!("control-plane {method} {path} read: {e}"),
+        )
+    })?;
+    if text.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str(&text).map_err(|e| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            format!("control-plane {method} {path} parse: {e}"),
+        )
+    })
+}
+
+pub async fn create_source(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<CreateSourceRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+
+    let name = req.name.trim();
+    let url = req.url.trim();
+    if name.is_empty() || url.is_empty() {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "name and url are required"),
+        ));
+    }
+    let kind = req.kind.trim();
+    if !VALID_SOURCE_KINDS.contains(&kind) {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                "kind must be one of crawl|scrape|search",
+            ),
+        ));
+    }
+    // Re-build the control-facing body from validated, trimmed fields. We
+    // never forward a client-supplied org_id — it isn't part of the request
+    // shape and control reads org from the `?org_id` query param exclusively.
+    let body = CreateSourceRequest {
+        name: name.to_string(),
+        url: url.to_string(),
+        kind: kind.to_string(),
+        monitor: req.monitor,
+        preset: req
+            .preset
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        config: req.config.clone(),
+    };
+    let body_bytes = serde_json::to_vec(&body).map_err(|e| {
+        err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::Internal, format!("encode body: {e}")),
+        )
+    })?;
+    let created = forward_mutation(
+        &state,
+        reqwest::Method::POST,
+        "/v1/sources",
+        &claims.org_id,
+        &body_bytes,
+    )
+    .await
+    .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, created)))
+}
+
+pub async fn delete_source(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+    let path = format!("/v1/sources/{id}");
+    forward_mutation(&state, reqwest::Method::DELETE, &path, &claims.org_id, b"")
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn list_snapshots(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -721,5 +930,57 @@ mod tests {
         };
         let err = q.into_filter().unwrap_err();
         assert_eq!(err.code, ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn create_source_request_decodes_minimal_shape() {
+        // The minimal create body is name + url + kind; monitor/preset/config
+        // are optional and absent here.
+        let req: CreateSourceRequest = serde_json::from_value(serde_json::json!({
+            "name": "Acme pricing",
+            "url": "https://acme.example/pricing",
+            "kind": "scrape"
+        }))
+        .unwrap();
+        assert_eq!(req.name, "Acme pricing");
+        assert_eq!(req.kind, "scrape");
+        assert!(!req.monitor);
+        assert!(req.preset.is_none());
+        assert!(req.config.is_none());
+    }
+
+    #[test]
+    fn create_source_request_never_serializes_org_id() {
+        // IDOR invariant at the edge: the control-facing create body carries
+        // NO org_id — org is stamped as the `?org_id` query param from the
+        // verified JWT claim, so a client body can never smuggle a foreign
+        // tenant. Even if a client POSTs an `org_id` field, it deserializes
+        // into nothing (the struct has no such field) and re-serializes away.
+        let req: CreateSourceRequest = serde_json::from_value(serde_json::json!({
+            "name": "x",
+            "url": "https://x.example/",
+            "kind": "crawl",
+            "org_id": "org_attacker",
+            "monitor": true,
+            "preset": "daily"
+        }))
+        .unwrap();
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(
+            !wire.contains("org_id"),
+            "create body MUST NOT carry org_id; got {wire}"
+        );
+        assert!(!wire.contains("org_attacker"));
+        assert!(wire.contains("\"monitor\":true"));
+        assert!(wire.contains("\"preset\":\"daily\""));
+    }
+
+    #[test]
+    fn valid_source_kinds_match_control_contract() {
+        // Pin the kind allow-list against quarry-control's validSourceKinds.
+        assert!(VALID_SOURCE_KINDS.contains(&"crawl"));
+        assert!(VALID_SOURCE_KINDS.contains(&"scrape"));
+        assert!(VALID_SOURCE_KINDS.contains(&"search"));
+        assert!(!VALID_SOURCE_KINDS.contains(&"agent"));
     }
 }

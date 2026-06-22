@@ -28,6 +28,7 @@ const (
 	KindWebhookDelivery IDKind = "whkd_"
 	KindBlocklist       IDKind = "block_"
 	KindRequest         IDKind = "req_"
+	KindSource          IDKind = "src_"
 )
 
 // ID is a prefixed ULID. Stringly typed — kind tag is the prefix itself.
@@ -43,6 +44,7 @@ func (id ID) Kind() (IDKind, bool) {
 		KindRun, KindQueue, KindCheckpoint, KindSchedule, KindStore,
 		KindSnapshot, KindArtifact, KindLease, KindProfile, KindJob,
 		KindEvent, KindWebhook, KindWebhookDelivery, KindBlocklist, KindRequest,
+		KindSource,
 	} {
 		if strings.HasPrefix(string(id), string(k)) {
 			return k, true

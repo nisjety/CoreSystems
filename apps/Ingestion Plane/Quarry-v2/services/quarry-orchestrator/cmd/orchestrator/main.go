@@ -45,8 +45,19 @@ func main() {
 	namespace := envOr("TEMPORAL_NAMESPACE", "default")
 	runtimeURL := envOr("RUNTIME_BASE_URL", "http://quarry-runtime:8082")
 	controlURL := envOr("CONTROL_BASE_URL", "http://quarry-control:8081")
+	// The baseline/diff store is served by quarry-edge alongside run_page, so
+	// the change-record endpoint defaults to the same base URL as the runtime
+	// (in the monorepo deployment the edge IS the runtime, on :8082).
+	edgeURL := envOr("EDGE_BASE_URL", runtimeURL)
 	runtimeToken := os.Getenv("RUNTIME_AUTH_TOKEN")
 	controlToken := os.Getenv("CONTROL_AUTH_TOKEN")
+	// quarry-edge's internal change-record endpoint shares the runtime
+	// service token by default (both are internal-auth peers); override
+	// with EDGE_AUTH_TOKEN if the edge is keyed separately.
+	edgeToken := os.Getenv("EDGE_AUTH_TOKEN")
+	if edgeToken == "" {
+		edgeToken = runtimeToken
+	}
 
 	c, err := client.Dial(client.Options{HostPort: hostPort, Namespace: namespace})
 	if err != nil {
@@ -59,6 +70,8 @@ func main() {
 		ControlBaseURL:   controlURL,
 		RuntimeAuthToken: runtimeToken,
 		ControlAuthToken: controlToken,
+		EdgeBaseURL:      edgeURL,
+		EdgeAuthToken:    edgeToken,
 	})
 
 	w := worker.New(c, TaskQueue, worker.Options{})
@@ -89,6 +102,12 @@ func main() {
 			return workflows.BatchJobWF(ctx, in, acts)
 		},
 		workflow.RegisterOptions{Name: "BatchJobWF"},
+	)
+	w.RegisterWorkflowWithOptions(
+		func(ctx workflow.Context, in workflows.ChangeMonitorInput) error {
+			return workflows.ChangeMonitorWF(ctx, in, acts)
+		},
+		workflow.RegisterOptions{Name: "ChangeMonitorWF"},
 	)
 	w.RegisterActivity(acts)
 

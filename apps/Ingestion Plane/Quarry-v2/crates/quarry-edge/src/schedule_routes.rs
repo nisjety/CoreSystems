@@ -43,8 +43,13 @@ use crate::state::AppState;
 /// must be set — the backend enforces the constraint.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateScheduleRequest {
+    #[serde(default)]
     pub name: String,
-    pub kind: JobResourceKind,
+    /// Job kind for the legacy cron/schedule_at path. Optional because a
+    /// W2 change-monitor create (signalled by `preset`) isn't a
+    /// job-resource kind — it maps to the `change_monitor` target kind.
+    #[serde(default)]
+    pub kind: Option<JobResourceKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,11 +60,39 @@ pub struct CreateScheduleRequest {
     pub catchup_window_s: u64,
     #[serde(default)]
     pub pause_on_failure: bool,
+    /// W2 recurring change-monitoring. When `preset` is set the request is
+    /// a change-monitor create: `target_ref` (the URL to watch) is
+    /// required and the cron is derived server-side from the preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<String>,
     /// Per-kind payload (seed URL + max_pages for crawl, query for
     /// search, etc.). Mirrors the inline request body the schedule
     /// would otherwise be triggering.
     #[serde(default)]
     pub config: serde_json::Value,
+}
+
+/// Control-plane-facing schedule create body. Matches the Go
+/// `store.Schedule` json tags exactly — including `org_id`, which control's
+/// Validate requires in the BODY (the ?org_id query param is advisory). We
+/// stamp org_id from the verified JWT claim, never the client body.
+#[derive(Debug, Serialize)]
+struct ControlScheduleCreate {
+    org_id: String,
+    /// user_id of the creator (verified JWT). Control rides this into the
+    /// change-monitor workflow so the in-product notification on a detected
+    /// change reaches the person who set up the monitor.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    created_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cron: Option<String>,
+    target_kind: String,
+    target_ref: String,
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<String>,
 }
 
 /// `POST /v1/schedules/:id/backfill` body. The Temporal `backfill`
@@ -186,6 +219,68 @@ pub async fn create_schedule(
     Json(req): Json<CreateScheduleRequest>,
 ) -> Result<Json<Envelope<ScheduleSummary>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+
+    // W2 change-monitoring path: `preset` signals a recurring change
+    // monitor. We build a control-facing store.Schedule body with org_id
+    // stamped from the verified JWT (never the client body) and the URL in
+    // target_ref. The cron is derived from the preset on the control side.
+    if let Some(preset) = req.preset.as_deref() {
+        const PRESETS: [&str; 3] = ["hourly", "daily", "weekly"];
+        if !PRESETS.contains(&preset) {
+            return Err(err_response(
+                &request_id,
+                QuarryError::new(
+                    ErrorCode::BadRequest,
+                    "preset must be one of hourly|daily|weekly",
+                ),
+            ));
+        }
+        let target_ref = req
+            .target_ref
+            .clone()
+            .or_else(|| {
+                req.config
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                err_response(
+                    &request_id,
+                    QuarryError::new(
+                        ErrorCode::BadRequest,
+                        "change-monitor schedule requires target_ref (url)",
+                    ),
+                )
+            })?;
+        if url::Url::parse(&target_ref).is_err() {
+            return Err(err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::BadRequest, "target_ref must be a valid url"),
+            ));
+        }
+        let body = ControlScheduleCreate {
+            org_id: claims.org_id.clone(),
+            created_by: claims.user_id.clone(),
+            cron: None,
+            target_kind: "change_monitor".to_string(),
+            target_ref,
+            enabled: true,
+            preset: Some(preset.to_string()),
+        };
+        let summary = forward_json::<ControlScheduleCreate, ScheduleSummary>(
+            &state,
+            reqwest::Method::POST,
+            "/v1/schedules",
+            &claims.org_id,
+            Some(&body),
+        )
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+        return Ok(Json(Envelope::ok(request_id, summary)));
+    }
+
     if req.cron.is_some() == req.schedule_at.is_some() {
         return Err(err_response(
             &request_id,
@@ -341,18 +436,56 @@ mod tests {
         // is the one that says "exactly one".)
         let r = CreateScheduleRequest {
             name: "n".into(),
-            kind: JobResourceKind::Crawl,
+            kind: Some(JobResourceKind::Crawl),
             cron: Some("0 3 * * *".into()),
             schedule_at: Some(chrono::Utc::now()),
             overlap_policy: OverlapPolicy::Skip,
             catchup_window_s: 0,
             pause_on_failure: false,
+            preset: None,
+            target_ref: None,
             config: serde_json::json!({}),
         };
         // Body still serializes — the route layer rejects, not serde.
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"cron\":"));
         assert!(s.contains("\"schedule_at\":"));
+    }
+
+    #[test]
+    fn change_monitor_request_decodes_preset_and_target_ref() {
+        // W2 shape: a change-monitor create carries preset + target_ref and
+        // omits kind/cron/schedule_at.
+        let r: CreateScheduleRequest = serde_json::from_value(serde_json::json!({
+            "preset": "daily",
+            "target_ref": "https://example.com/pricing"
+        }))
+        .unwrap();
+        assert_eq!(r.preset.as_deref(), Some("daily"));
+        assert_eq!(r.target_ref.as_deref(), Some("https://example.com/pricing"));
+        assert!(r.kind.is_none());
+        assert!(r.cron.is_none());
+    }
+
+    #[test]
+    fn control_schedule_create_serializes_store_schedule_shape() {
+        let body = ControlScheduleCreate {
+            org_id: "org_velion".into(),
+            created_by: "user_42".into(),
+            cron: None,
+            target_kind: "change_monitor".into(),
+            target_ref: "https://example.com".into(),
+            enabled: true,
+            preset: Some("daily".into()),
+        };
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains("\"org_id\":\"org_velion\""));
+        assert!(s.contains("\"created_by\":\"user_42\""));
+        assert!(s.contains("\"target_kind\":\"change_monitor\""));
+        assert!(s.contains("\"target_ref\":\"https://example.com\""));
+        assert!(s.contains("\"preset\":\"daily\""));
+        // cron omitted (derived server-side from preset).
+        assert!(!s.contains("\"cron\":"));
     }
 
     #[test]

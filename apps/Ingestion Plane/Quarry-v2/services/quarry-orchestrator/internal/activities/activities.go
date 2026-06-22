@@ -30,7 +30,13 @@ type Config struct {
 	ControlBaseURL   string
 	RuntimeAuthToken string
 	ControlAuthToken string
-	HTTPTimeout      time.Duration
+	// EdgeBaseURL + EdgeAuthToken target quarry-edge's internal change
+	// endpoint (/v1/internal/change/record). The baseline+diff store is
+	// Rust and edge-local, so the Go change-monitor activity persists
+	// through the edge rather than calling the store in-process.
+	EdgeBaseURL   string
+	EdgeAuthToken string
+	HTTPTimeout   time.Duration
 }
 
 // Activities wires HTTP calls into Temporal activity methods.
@@ -203,6 +209,104 @@ func (a *Activities) EmitEvent(ctx context.Context, runID string, event quarryco
 		return errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
 	}
 	return nil
+}
+
+// CheckChangeInput drives a single change-monitor probe.
+type CheckChangeInput struct {
+	RunID string `json:"run_id"`
+	OrgID string `json:"org_id"`
+	URL   string `json:"url"`
+}
+
+// CheckChangeResult is the outcome of comparing a fresh fetch against the
+// org's stored baseline for the URL. Status is one of new|unchanged|changed.
+type CheckChangeResult struct {
+	Status          string `json:"status"`
+	Changed         bool   `json:"changed"`
+	Fingerprint     string `json:"fingerprint"`
+	PrevFingerprint string `json:"prev_fingerprint,omitempty"`
+	BaselineID      string `json:"baseline_id,omitempty"`
+	DiffID          string `json:"diff_id,omitempty"`
+}
+
+// changeRecordRequest is the body POSTed to quarry-edge's internal
+// /v1/internal/change/record endpoint. The edge owns the Rust baseline
+// store, so it runs compare→save_baseline→(on change)create_diff in-process
+// and returns the populated result.
+type changeRecordRequest struct {
+	OrgID            string `json:"org_id"`
+	URL              string `json:"url"`
+	FreshFingerprint string `json:"fresh_fingerprint"`
+	RunID            string `json:"run_id"`
+}
+
+// CheckChange fetches the URL fresh (via the runtime), then asks the edge to
+// compare it against the stored baseline and persist a new baseline (+ diff
+// on change). Returns whether the page changed plus the persisted ids.
+//
+// Two upstream calls: (1) runtime /v1/internal/run_page for the fresh
+// fingerprint (the runtime owns page execution; it has no change endpoint),
+// (2) edge /v1/internal/change/record for the compare+persist (the edge owns
+// the Rust baseline store). Go can't touch the Rust in-process store, so the
+// persisting step MUST route through the edge.
+func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (CheckChangeResult, error) {
+	const op = "activities.CheckChange"
+
+	// 1) Fresh fetch via the runtime — reuse RunPage's classified HTTP path.
+	page, err := a.RunPage(ctx, RunPageInput{RunID: in.RunID, URL: in.URL})
+	if err != nil {
+		return CheckChangeResult{}, err
+	}
+	if page.Fingerprint == "" {
+		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, fmt.Errorf("runtime returned empty fingerprint for %s", in.URL)).Temporal()
+	}
+
+	// 2) Compare + persist via the edge's Rust-owned baseline store.
+	body, err := json.Marshal(changeRecordRequest{
+		OrgID:            in.OrgID,
+		URL:              in.URL,
+		FreshFingerprint: page.Fingerprint,
+		RunID:            in.RunID,
+	})
+	if err != nil {
+		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
+	}
+
+	url := strings.TrimRight(a.cfg.EdgeBaseURL, "/") + "/v1/internal/change/record"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", idempotencyKey(in.RunID, in.URL, page.Fingerprint))
+	setAuth(req, a.cfg.EdgeAuthToken)
+
+	resp, err := a.http.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return CheckChangeResult{}, err
+		}
+		cat := errs.CategoryNetwork
+		if errors.Is(err, context.DeadlineExceeded) {
+			cat = errs.CategoryTimeout
+		}
+		return CheckChangeResult{}, errs.New(cat, op, err).Temporal()
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return CheckChangeResult{}, errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
+	}
+
+	var out CheckChangeResult
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return CheckChangeResult{}, errs.New(errs.CategoryValidation, op, fmt.Errorf("decode change record: %w", err)).Temporal()
+	}
+	if out.Fingerprint == "" {
+		out.Fingerprint = page.Fingerprint
+	}
+	return out, nil
 }
 
 // setAuth attaches a bearer token if non-empty.

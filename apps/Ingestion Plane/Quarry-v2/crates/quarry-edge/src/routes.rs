@@ -94,6 +94,17 @@ pub fn router(state: AppState) -> Router {
         .route("/graphql/schema", get(crate::graphql::introspection))
         .route("/graphql/playground", get(crate::graphql::playground));
 
+    // Internal service surface — authenticated by a shared service token
+    // (QUARRY_EDGE_INTERNAL_TOKEN), NOT a per-tenant JWT, so it lives
+    // OUTSIDE require_auth. The W2 change-monitor activity (quarry-orchestrator,
+    // Go) persists baselines/diffs here on behalf of MANY tenants; org_id
+    // travels in the request body (verified at schedule-creation) rather than
+    // a JWT claim. The handler enforces the token itself.
+    let internal = Router::new().route(
+        "/v1/internal/change/record",
+        post(crate::change_routes::record_internal),
+    );
+
     // Protected surface — every /v1/* route. The auth middleware
     // verifies an `Authorization: Bearer <jwt>` against the Control
     // Plane's `auth-core` JWKS (or dev-bypass), then inserts `Claims`
@@ -140,7 +151,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/artifacts/:id",
             get(crate::resource_routes::get_artifact),
         )
-        .route("/v1/sources", get(crate::resource_routes::list_sources))
+        .route(
+            "/v1/sources",
+            get(crate::resource_routes::list_sources).post(crate::resource_routes::create_source),
+        )
+        .route(
+            "/v1/sources/:id",
+            delete(crate::resource_routes::delete_source),
+        )
         .route("/v1/snapshots", get(crate::resource_routes::list_snapshots))
         .route("/v1/:kind/jobs", get(crate::resource_routes::list_jobs))
         // Cycle 23 / cluster #4 part 2 — request-queues, benchmarks, team/*
@@ -224,6 +242,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(public)
+        .merge(internal)
         .merge(protected)
         .layer(TraceLayer::new_for_http())
         .layer(body_limit)

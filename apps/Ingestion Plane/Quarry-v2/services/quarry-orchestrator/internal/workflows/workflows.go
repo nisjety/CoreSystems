@@ -35,6 +35,24 @@ type ScrapeJobInput struct {
 	Policy Policy `json:"policy,omitempty"`
 }
 
+// ChangeMonitorInput drives a single recurring change-monitor probe.
+//
+// RunID/JobID are empty for SCHEDULED fires (Temporal mints a fresh
+// execution per cron tick, and there's no control-plane job record). The
+// workflow derives a per-execution run_id from its own Temporal execution in
+// that case — see ChangeMonitorWF. They're populated only for ad-hoc
+// triggers that already carry a run/job id.
+type ChangeMonitorInput struct {
+	RunID string `json:"run_id,omitempty"`
+	JobID string `json:"job_id,omitempty"`
+	OrgID string `json:"org_id"`
+	URL   string `json:"url"`
+	// CreatedBy is the user_id of the schedule's creator. It rides into
+	// the change_detected event payload so quarry-control can deliver the
+	// one in-product notification to the right user. Empty = no notify.
+	CreatedBy string `json:"created_by,omitempty"`
+}
+
 // BatchJobInput drives a fan-out over a bounded URL list.
 type BatchJobInput struct {
 	RunID  string   `json:"run_id"`
@@ -201,6 +219,68 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 		"pages_visited": 1,
 		"pages_failed":  0,
 	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+}
+
+// ChangeMonitorWF fetches a URL, compares it to the org's stored baseline,
+// and emits change_detected / change_unchanged. It is the workflow a
+// change_monitor schedule fires on each cron tick.
+//
+// RUN ID: scheduled fires arrive with an empty RunID (the schedule's Args
+// carry only org_id+url). We derive a fresh, replay-safe run_id from the
+// Temporal workflow execution so every fire gets its own run timeline and
+// its own deterministic event idempotency keys — otherwise repeated daily
+// fires would all collapse onto one run id and the second fire's events
+// would be deduped away. workflow.GetInfo is deterministic across replays.
+func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.Activities) error {
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOpts())
+
+	runID := in.RunID
+	if runID == "" {
+		execRunID := workflow.GetInfo(ctx).WorkflowExecution.RunID
+		runID = "run_" + strings.ReplaceAll(execRunID, "-", "")
+	}
+	ids := runIDs{RunID: runID, JobID: in.JobID}
+
+	if err := emitEvent(ctx, a, ids, quarrycontracts.EvtRunStarted, map[string]any{
+		"kind": "change_monitor",
+		"url":  in.URL,
+	}, runID, string(quarrycontracts.EvtRunStarted)); err != nil {
+		return err
+	}
+
+	var res activities.CheckChangeResult
+	err := workflow.ExecuteActivity(ctx, a.CheckChange, activities.CheckChangeInput{
+		RunID: runID,
+		OrgID: in.OrgID,
+		URL:   in.URL,
+	}).Get(ctx, &res)
+	if err != nil {
+		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
+			"url":   in.URL,
+			"error": err.Error(),
+		}, runID, string(quarrycontracts.EvtRunFailed))
+		return err
+	}
+
+	evt := quarrycontracts.EvtChangeUnchanged
+	if res.Changed {
+		evt = quarrycontracts.EvtChangeDetected
+	}
+	_ = emitEvent(ctx, a, ids, evt, map[string]any{
+		"url":         in.URL,
+		"org_id":      in.OrgID,
+		"created_by":  in.CreatedBy,
+		"status":      res.Status,
+		"fingerprint": res.Fingerprint,
+		"diff_id":     res.DiffID,
+		"baseline_id": res.BaselineID,
+	}, runID, in.URL, string(evt))
+
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+		"pages_visited": 1,
+		"pages_failed":  0,
+		"changed":       res.Changed,
+	}, runID, string(quarrycontracts.EvtRunCompleted))
 }
 
 // BatchJobWF fans out page activities for each URL sequentially (bounded

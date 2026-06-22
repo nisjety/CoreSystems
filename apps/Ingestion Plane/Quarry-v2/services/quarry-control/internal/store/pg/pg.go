@@ -52,6 +52,7 @@ func New(ctx context.Context, dsn string) (store.DB, error) {
 	db.arts = &artifactsStore{pool: pool}
 	db.profiles = &profilesStore{pool: pool}
 	db.schedules = &schedulesStore{pool: pool}
+	db.sources = &sourcesStore{pool: pool}
 	db.webhooks = &webhooksStore{pool: pool}
 	db.webhookDeliveries = &webhookDeliveriesStore{pool: pool}
 	db.blocklists = &blocklistsStore{pool: pool}
@@ -67,6 +68,7 @@ type postgresDB struct {
 	arts              *artifactsStore
 	profiles          *profilesStore
 	schedules         *schedulesStore
+	sources           *sourcesStore
 	webhooks          *webhooksStore
 	webhookDeliveries *webhookDeliveriesStore
 	blocklists        *blocklistsStore
@@ -79,6 +81,7 @@ func (d *postgresDB) Snapshots() store.ResourceStore[store.Snapshot]      { retu
 func (d *postgresDB) Artifacts() store.ResourceStore[store.Artifact]      { return d.arts }
 func (d *postgresDB) Profiles() store.ResourceStore[store.BrowserProfile] { return d.profiles }
 func (d *postgresDB) Schedules() store.SchedulesStore                     { return d.schedules }
+func (d *postgresDB) Sources() store.SourcesStore                         { return d.sources }
 func (d *postgresDB) Events() store.EventLog                              { return d.events }
 
 func (d *postgresDB) Webhooks() store.ResourceStore[store.Webhook] { return d.webhooks }

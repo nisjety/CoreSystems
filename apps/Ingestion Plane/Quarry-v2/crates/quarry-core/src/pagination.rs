@@ -33,19 +33,14 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 25;
 
 /// Direction for sort. `Newest`/`Oldest` are convenience aliases for
 /// `Desc`/`Asc` on `created_at`; the underlying SQL is identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {
+    #[default]
     Newest,
     Oldest,
     Asc,
     Desc,
-}
-
-impl Default for SortDirection {
-    fn default() -> Self {
-        Self::Newest
-    }
 }
 
 impl SortDirection {
@@ -201,7 +196,7 @@ mod tests {
     fn default_limit_falls_in_safe_range() {
         let f = ListFilter::default();
         let n = f.effective_limit();
-        assert!(n >= 1 && n <= MAX_PAGE_LIMIT);
+        assert!((1..=MAX_PAGE_LIMIT).contains(&n));
         assert_eq!(n, DEFAULT_PAGE_LIMIT);
     }
 

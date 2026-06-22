@@ -3,6 +3,7 @@ package workflows
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -220,6 +221,84 @@ func TestCrawlJobWF_DropsDuplicateUrls(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
+}
+
+func TestChangeMonitorWF_ChangedEmitsChangeDetected(t *testing.T) {
+	env, a := newEnv(t)
+
+	env.OnActivity(a.CheckChange, mock.Anything, mock.Anything).Return(activities.CheckChangeResult{
+		Status:      "changed",
+		Changed:     true,
+		Fingerprint: "blake3:new",
+		BaselineID:  "bln_2",
+		DiffID:      "diff_1",
+	}, nil).Once()
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(ChangeMonitorWF, ChangeMonitorInput{
+		RunID: "run_cm_1",
+		OrgID: "org_a",
+		URL:   "https://example.com/pricing",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+}
+
+func TestChangeMonitorWF_UnchangedStillCompletes(t *testing.T) {
+	env, a := newEnv(t)
+
+	env.OnActivity(a.CheckChange, mock.Anything, mock.Anything).Return(activities.CheckChangeResult{
+		Status:      "unchanged",
+		Changed:     false,
+		Fingerprint: "blake3:same",
+	}, nil).Once()
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(ChangeMonitorWF, ChangeMonitorInput{
+		RunID: "run_cm_2",
+		OrgID: "org_a",
+		URL:   "https://example.com/pricing",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+}
+
+// A scheduled fire arrives with an empty RunID; the workflow must mint a
+// valid run_ id from its Temporal execution and still complete.
+func TestChangeMonitorWF_ScheduledFireMintsRunID(t *testing.T) {
+	env, a := newEnv(t)
+
+	env.OnActivity(a.CheckChange, mock.Anything, mock.MatchedBy(func(in activities.CheckChangeInput) bool {
+		return strings.HasPrefix(in.RunID, "run_") && in.OrgID == "org_a"
+	})).Return(activities.CheckChangeResult{Status: "new", Changed: false, Fingerprint: "blake3:first"}, nil).Once()
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(ChangeMonitorWF, ChangeMonitorInput{
+		OrgID: "org_a",
+		URL:   "https://example.com/pricing",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+}
+
+func TestChangeMonitorWF_ActivityFailureEmitsRunFailed(t *testing.T) {
+	env, a := newEnv(t)
+
+	checkErr := errs.New(errs.CategoryNetwork, "test", errors.New("unreachable")).Temporal()
+	env.OnActivity(a.CheckChange, mock.Anything, mock.Anything).Return(activities.CheckChangeResult{}, checkErr).Once()
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(ChangeMonitorWF, ChangeMonitorInput{
+		RunID: "run_cm_3",
+		OrgID: "org_a",
+		URL:   "https://broken.example",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
 }
 
 // emitCallCount returns the number of times EmitEvent was invoked. Temporal's

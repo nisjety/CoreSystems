@@ -19,9 +19,10 @@ use std::{
 };
 
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::HeaderMap,
     response::Response,
+    Json,
 };
 use futures_util::future::join_all;
 use reqwest::Method;
@@ -32,9 +33,14 @@ use crate::{
 };
 
 use super::shared::{
-    actor_for, authorized_org_id, cookie_header, fetch_internal_json, first_str, obj_or_empty,
-    okay, quarry_call, quarry_token, str_at,
+    actor_for, authorized_org_id, cookie_header, created, fetch_internal_json, first_str, forward,
+    normalize_target, obj_or_empty, okay, quarry_call, quarry_token, str_at, validation,
 };
+
+/// Source kinds quarry-control accepts. Mirrors `validSourceKinds` in
+/// `services/quarry-control/internal/resources/cycle23.go` and the edge's
+/// `VALID_SOURCE_KINDS`.
+const SOURCE_KINDS: [&str; 3] = ["crawl", "scrape", "search"];
 
 pub(super) async fn list_sources(
     State(state): State<AppState>,
@@ -114,6 +120,124 @@ fn to_quarry_source(source: &Value) -> Option<Value> {
         "updatedAt": str_at(source, "updated_at"),
         "config": obj_or_empty(source, "config"),
     }))
+}
+
+// ── Create + Delete (durable quarry_sources CRUD) ────────────────────────────
+
+/// `POST /api/ingestions/sources` — register a durable web source in Quarry.
+///
+/// Org scope is IDOR-clean by construction: the request goes to quarry-edge
+/// over the `quarry` audience bearer (minted server-side from the validated
+/// session), and the edge derives org from the token's verified `claims.org_id`
+/// — we never read a client header/body for org. The create body we forward
+/// carries ONLY `{name, url, kind, monitor?, preset?, config?}`; any client
+/// `org_id` field is dropped by [`build_create_source_body`].
+pub(super) async fn create_source(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+
+    let request = match build_create_source_body(&body) {
+        Ok(request) => request,
+        Err(message) => return validation(&message),
+    };
+
+    let (status, resp) = quarry_call(
+        &state,
+        Method::POST,
+        "/v1/sources",
+        Some(request),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, resp);
+    }
+
+    // Control returns the created `store.Source`; normalize to the SPA shape.
+    // If the upstream shape is unexpected, surface the raw payload rather than
+    // fabricating one.
+    let data = unwrap_data(&resp);
+    let source = to_quarry_source(&data).unwrap_or(data);
+    created(json!({ "source": source }))
+}
+
+/// `DELETE /api/ingestions/sources/:id` — soft-delete a durable source.
+///
+/// Org scope is enforced at the edge (and control) from the verified JWT — a
+/// cross-tenant id resolves to 404 there, never a foreign delete.
+pub(super) async fn delete_source(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return validation("A source id is required.");
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+
+    let path = format!("/v1/sources/{}", urlencoding::encode(trimmed));
+    let (status, resp) = quarry_call(
+        &state,
+        Method::DELETE,
+        &path,
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, resp);
+    }
+    okay(json!({ "deleted": true, "sourceId": trimmed }))
+}
+
+/// Build the quarry-edge create body from the SPA request. Validates name /
+/// url / kind, SSRF-guards the URL (it becomes a recurring fetch target), and
+/// carries through optional `monitor` / `preset` / `config`.
+///
+/// Critically, the returned body NEVER contains `org_id` — even if the client
+/// supplies one — so there is no cross-tenant write vector at this layer (org
+/// is added at the edge from the verified JWT claim).
+fn build_create_source_body(body: &Value) -> Result<Value, String> {
+    let Some(name) = first_str(body, &["name"]) else {
+        return Err("A source name is required.".to_owned());
+    };
+    let Some(raw_url) = first_str(body, &["url"]) else {
+        return Err("A source URL is required.".to_owned());
+    };
+    let url = normalize_target(&raw_url)?;
+    let kind = first_str(body, &["kind"]).unwrap_or_else(|| "crawl".to_owned());
+    if !SOURCE_KINDS.contains(&kind.as_str()) {
+        return Err("Source kind must be one of crawl, scrape, or search.".to_owned());
+    }
+
+    let mut request = serde_json::Map::new();
+    request.insert("name".into(), Value::String(name));
+    request.insert("url".into(), Value::String(url));
+    request.insert("kind".into(), Value::String(kind));
+    let monitor = body
+        .get("monitor")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if monitor {
+        request.insert("monitor".into(), Value::Bool(true));
+        if let Some(preset) = first_str(body, &["preset"]) {
+            request.insert("preset".into(), Value::String(preset));
+        }
+    }
+    if let Some(config) = body.get("config").filter(|v| v.is_object()) {
+        request.insert("config".into(), config.clone());
+    }
+    Ok(Value::Object(request))
 }
 
 struct DocSummary {
@@ -874,5 +998,95 @@ mod tests {
         assert_eq!(graph["nodeCount"], 42);
         assert_eq!(graph["edgeCount"], 99);
         assert_eq!(graph_summary(None)["available"], false);
+    }
+
+    // ── Create-body building + IDOR scoping ──────────────────────────────────
+
+    #[test]
+    fn build_create_source_body_validates_and_passes_through() {
+        let body = build_create_source_body(&json!({
+            "name": "Acme pricing",
+            "url": "https://acme.example/pricing",
+            "kind": "scrape",
+            "monitor": true,
+            "preset": "daily",
+            "config": { "max_pages": 5 }
+        }))
+        .unwrap();
+        assert_eq!(body["name"], "Acme pricing");
+        // normalize_target canonicalizes (adds no trailing slash to a real path).
+        assert_eq!(body["url"], "https://acme.example/pricing");
+        assert_eq!(body["kind"], "scrape");
+        assert_eq!(body["monitor"], true);
+        assert_eq!(body["preset"], "daily");
+        assert_eq!(body["config"]["max_pages"], 5);
+    }
+
+    #[test]
+    fn build_create_source_body_rejects_missing_fields_and_bad_kind() {
+        assert!(build_create_source_body(&json!({ "url": "https://x.example/" })).is_err());
+        assert!(build_create_source_body(&json!({ "name": "x" })).is_err());
+        assert!(build_create_source_body(&json!({
+            "name": "x", "url": "https://x.example/", "kind": "agent"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn build_create_source_body_ssrf_guards_the_url() {
+        // A loopback / private / internal target must be rejected before any
+        // quarry call — the source becomes a recurring fetch target.
+        assert!(build_create_source_body(&json!({
+            "name": "evil", "url": "http://127.0.0.1/admin", "kind": "scrape"
+        }))
+        .is_err());
+        assert!(build_create_source_body(&json!({
+            "name": "evil", "url": "http://169.254.169.254/latest/meta-data", "kind": "crawl"
+        }))
+        .is_err());
+    }
+
+    /// Cross-tenant regression: a client cannot register a source under another
+    /// org by smuggling an `org_id` / `orgId` / `organizationId` field in the
+    /// body. The forwarded edge body carries ONLY the source fields — org is
+    /// stamped at the edge from the verified JWT `claims.org_id`, never from
+    /// anything the client sends. This is the org-scoping invariant the parent
+    /// security-checks.
+    #[test]
+    fn build_create_source_body_strips_client_supplied_org_for_cross_tenant_safety() {
+        // Caller is authenticated as org A; they try to plant a source under org B.
+        let malicious = json!({
+            "name": "exfil",
+            "url": "https://b-corp.example/secret",
+            "kind": "scrape",
+            "org_id": "org_B",
+            "orgId": "org_B",
+            "organizationId": "org_B",
+            "tenant": "org_B"
+        });
+        let body = build_create_source_body(&malicious).unwrap();
+
+        // The body is an object with EXACTLY the allow-listed source keys.
+        let obj = body.as_object().expect("create body is an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["kind", "name", "url"],
+            "create body must carry only source fields, never an org field"
+        );
+
+        // Belt-and-suspenders: the serialized wire bytes never mention org B.
+        let wire = serde_json::to_string(&body).unwrap();
+        assert!(
+            !wire.contains("org_B"),
+            "forwarded body leaked org_B: {wire}"
+        );
+        assert!(
+            !wire.to_lowercase().contains("org_id")
+                && !wire.to_lowercase().contains("organizationid")
+                && !wire.contains("orgId"),
+            "forwarded body leaked an org field: {wire}"
+        );
     }
 }

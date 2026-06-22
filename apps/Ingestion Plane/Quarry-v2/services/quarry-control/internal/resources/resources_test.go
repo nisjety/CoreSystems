@@ -21,7 +21,7 @@ func newTestServer(t *testing.T) (http.Handler, store.DB) {
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID)
 	MountJobs(r, db)
-	MountEvents(r, db, "")
+	MountEvents(r, db, "", nil)
 	return r, db
 }
 
@@ -31,7 +31,7 @@ func newTestServerAuth(t *testing.T, key string) (http.Handler, store.DB) {
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID)
 	MountJobs(r, db)
-	MountEvents(r, db, key)
+	MountEvents(r, db, key, nil)
 	return r, db
 }
 

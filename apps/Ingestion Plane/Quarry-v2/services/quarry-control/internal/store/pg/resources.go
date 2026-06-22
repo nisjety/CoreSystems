@@ -553,18 +553,18 @@ type schedulesStore struct{ pool *pgxpool.Pool }
 
 func (s *schedulesStore) Create(v store.Schedule) error {
 	_, err := s.pool.Exec(context.Background(),
-		`INSERT INTO schedules(id, cron, target_kind, target_ref, enabled, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6)`,
-		string(v.ID), v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt)
+		`INSERT INTO schedules(id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		string(v.ID), v.OrgID, v.Cron, v.TargetKind, v.TargetRef, v.Enabled, v.CreatedAt, v.CreatedBy)
 	return mapPgErr(err)
 }
 
 func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
 	var v store.Schedule
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, cron, target_kind, target_ref, enabled, created_at
+		`SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by
 		 FROM schedules WHERE id=$1`, string(id),
-	).Scan(&v.ID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt)
+	).Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy)
 	if err != nil {
 		return store.Schedule{}, false
 	}
@@ -574,7 +574,7 @@ func (s *schedulesStore) Get(id quarrycontracts.ID) (store.Schedule, bool) {
 func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
-	q := `SELECT id, cron, target_kind, target_ref, enabled, created_at FROM schedules`
+	q := `SELECT id, org_id, cron, target_kind, target_ref, enabled, created_at, created_by FROM schedules`
 	args := []any{}
 	if c != nil {
 		q += ` WHERE (created_at, id) < ($1, $2)`
@@ -589,7 +589,7 @@ func (s *schedulesStore) List(limit int, cur string) ([]store.Schedule, string) 
 	out := make([]store.Schedule, 0, limit)
 	for rows.Next() {
 		var v store.Schedule
-		if err := rows.Scan(&v.ID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.OrgID, &v.Cron, &v.TargetKind, &v.TargetRef, &v.Enabled, &v.CreatedAt, &v.CreatedBy); err != nil {
 			return nil, ""
 		}
 		out = append(out, v)
@@ -617,6 +617,110 @@ func (s *schedulesStore) Delete(id quarrycontracts.ID) error {
 func (s *schedulesStore) UpdateEnabled(id quarrycontracts.ID, enabled bool) error {
 	ct, err := s.pool.Exec(context.Background(),
 		`UPDATE schedules SET enabled=$2 WHERE id=$1`, string(id), enabled)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// ---- sources --------------------------------------------------------------
+
+// sourcesStore is the pg-backed SourcesStore over `quarry_sources` (migration
+// 005). Every query carries an `org_id = $` predicate AND `deleted_at IS NULL`
+// so a tenant can never read or mutate another tenant's rows, and soft-deleted
+// rows stay invisible. created_at/updated_at are stored as TIMESTAMPTZ; we
+// convert to/from the store's unix-millis convention at the SQL boundary.
+type sourcesStore struct{ pool *pgxpool.Pool }
+
+func (s *sourcesStore) Create(v store.Source) error {
+	config := v.Config
+	if config == nil {
+		config = map[string]any{}
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	status := v.Status
+	if status == "" {
+		status = "active"
+	}
+	_, err = s.pool.Exec(context.Background(),
+		`INSERT INTO quarry_sources(source_id, org_id, name, url, kind, status, config, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0))`,
+		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt)
+	return mapPgErr(err)
+}
+
+func (s *sourcesStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Source, bool) {
+	var (
+		v          store.Source
+		configJSON []byte
+	)
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT source_id, org_id, name, url, kind, status, config,
+		        (extract(epoch from created_at) * 1000)::bigint,
+		        (extract(epoch from updated_at) * 1000)::bigint
+		   FROM quarry_sources
+		  WHERE source_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
+		string(id), orgID,
+	).Scan(&v.ID, &v.OrgID, &v.Name, &v.URL, &v.Kind, &v.Status, &configJSON, &v.CreatedAt, &v.UpdatedAt)
+	if err != nil {
+		return store.Source{}, false
+	}
+	_ = json.Unmarshal(configJSON, &v.Config)
+	return v, true
+}
+
+func (s *sourcesStore) ListByOrg(orgID string, limit int, cur string) ([]store.Source, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+	q := `SELECT source_id, org_id, name, url, kind, status, config,
+	             (extract(epoch from created_at) * 1000)::bigint,
+	             (extract(epoch from updated_at) * 1000)::bigint
+	        FROM quarry_sources
+	       WHERE org_id = $1 AND deleted_at IS NULL`
+	args := []any{orgID}
+	if c != nil {
+		q += ` AND (extract(epoch from created_at) * 1000, source_id) < ($2, $3)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += fmt.Sprintf(` ORDER BY created_at DESC, source_id DESC LIMIT %d`, limit+1)
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+	out := make([]store.Source, 0, limit)
+	for rows.Next() {
+		var (
+			v          store.Source
+			configJSON []byte
+		)
+		if err := rows.Scan(&v.ID, &v.OrgID, &v.Name, &v.URL, &v.Kind, &v.Status, &configJSON, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			return nil, ""
+		}
+		_ = json.Unmarshal(configJSON, &v.Config)
+		out = append(out, v)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+func (s *sourcesStore) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error {
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE quarry_sources
+		    SET deleted_at = NOW(), status = 'deleted', updated_at = NOW()
+		  WHERE source_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
+		string(id), orgID)
 	if err != nil {
 		return mapPgErr(err)
 	}

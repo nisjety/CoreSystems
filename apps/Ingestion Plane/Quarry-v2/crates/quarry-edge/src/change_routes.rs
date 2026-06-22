@@ -17,10 +17,10 @@
 
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Extension, Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use quarry_core::change_history::{BaselineSnapshot, ChangeRecord};
 use quarry_core::envelope::Envelope;
@@ -165,6 +165,230 @@ pub async fn history(
     ))
 }
 
+// ============================================================================
+// /v1/internal/change/record — the WRITE side of change tracking.
+//
+// W2 recurring change-monitoring. The orchestrator's Go CheckChange activity
+// can't touch the Rust in-process baseline store, so persistence routes
+// through this internal endpoint. Unlike the JWT-gated /v1/change/* routes,
+// org_id arrives in the BODY because the trusted orchestrator calls on behalf
+// of MANY tenants with one service identity — the org_id was already verified
+// at schedule-creation time (the edge stamped it from the JWT in create_schedule).
+//
+// Auth is a shared service token (QUARRY_EDGE_INTERNAL_TOKEN), NOT a JWT, so
+// this route lives OUTSIDE require_auth. It runs the full
+// compare → save_baseline → (on change) store-diff-artifact + create_diff_record
+// sequence in-process in Rust and returns the populated result.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct RecordRequest {
+    pub org_id: String,
+    pub url: String,
+    pub fresh_fingerprint: String,
+    #[serde(default)]
+    #[allow(dead_code)] // read only under `postgres-queue` in record_check
+    pub run_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecordResponse {
+    /// "new" | "unchanged" | "changed" | "unreachable".
+    pub status: String,
+    pub changed: bool,
+    pub fingerprint: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prev_fingerprint: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub baseline_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_id: Option<String>,
+}
+
+/// Returns true when the edge is running with auth dev-bypass — used to let
+/// internal calls through without a token in local dev (mirrors require_auth).
+fn internal_dev_bypass() -> bool {
+    std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Pure token check, extracted so it's testable without mutating process env.
+/// fail-closed: an unset `expected` token (and no dev bypass) refuses the call.
+fn check_internal_token(
+    expected: &str,
+    provided: Option<&str>,
+    dev_bypass: bool,
+) -> Result<(), QuarryError> {
+    if dev_bypass {
+        return Ok(());
+    }
+    if expected.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "internal change endpoint not configured (set QUARRY_EDGE_INTERNAL_TOKEN)",
+        ));
+    }
+    let token = provided
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    if !token.is_empty() && token == expected {
+        Ok(())
+    } else {
+        Err(QuarryError::new(
+            ErrorCode::Unauthorized,
+            "invalid internal token",
+        ))
+    }
+}
+
+fn verify_internal_token(headers: &HeaderMap) -> Result<(), QuarryError> {
+    let expected = std::env::var("QUARRY_EDGE_INTERNAL_TOKEN").unwrap_or_default();
+    let provided = headers.get("authorization").and_then(|v| v.to_str().ok());
+    check_internal_token(&expected, provided, internal_dev_bypass())
+}
+
+pub async fn record_internal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<RecordRequest>,
+) -> Result<Json<RecordResponse>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+    verify_internal_token(&headers).map_err(|e| err_response(&request_id, e))?;
+    validate_url(&req.url).map_err(|e| err_response(&request_id, e))?;
+    if req.org_id.trim().is_empty() {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "org_id required"),
+        ));
+    }
+    if req.fresh_fingerprint.trim().is_empty() {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "fresh_fingerprint required"),
+        ));
+    }
+
+    #[cfg(feature = "postgres-queue")]
+    if let Some(store) = state.baseline_store.as_ref() {
+        let resp = record_check(store, state.artifacts.as_ref(), &req)
+            .await
+            .map_err(|e| err_response(&request_id, e))?;
+        return Ok(Json(resp));
+    }
+
+    let _ = &state;
+    Err(err_response(
+        &request_id,
+        QuarryError::new(
+            ErrorCode::Unsupported,
+            "change recording requires postgres-queue feature + DATABASE_URL on the edge",
+        ),
+    ))
+}
+
+/// Runs the compare → save_baseline → (on change) diff sequence in-process.
+/// The baseline/diff store is Rust-local; the diff artifact body is stored via
+/// the same ArtifactStore that page runs use.
+#[cfg(feature = "postgres-queue")]
+async fn record_check(
+    store: &quarry_runtime::postgres_baseline_store::PostgresBaselineStore,
+    artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
+    req: &RecordRequest,
+) -> Result<RecordResponse, QuarryError> {
+    use chrono::Utc;
+    use quarry_core::change_history::{ChangeStatus, DiffRecord};
+    // These are concrete prefixed-ULID types (`kinds::X` is a type alias for
+    // `Id<X marker>`); `X::new()` mints one and `.ulid()` is the raw ULID.
+    use quarry_core::ids::kinds::{ArtifactKind, RunKind};
+
+    let record = store
+        .compare_snapshot(&req.org_id, &req.url, &req.fresh_fingerprint)
+        .await?;
+    let now = Utc::now();
+
+    let prev_fingerprint = record
+        .prev_baseline
+        .as_ref()
+        .map(|b| b.fingerprint.clone())
+        .unwrap_or_default();
+
+    // The orchestrator's scheduled run ids derive from Temporal UUIDs and are
+    // not ULIDs, so they won't parse into a typed RunKind — that's fine: the
+    // run linkage lives in the event log, and baseline.run_id is optional.
+    let run_kind: Option<RunKind> = req.run_id.parse().ok();
+
+    let status_str = match record.status {
+        ChangeStatus::New => "new",
+        ChangeStatus::Unchanged => "unchanged",
+        ChangeStatus::Changed => "changed",
+        ChangeStatus::Unreachable => "unreachable",
+    };
+
+    let mut resp = RecordResponse {
+        status: status_str.to_string(),
+        changed: record.status == ChangeStatus::Changed,
+        fingerprint: req.fresh_fingerprint.clone(),
+        prev_fingerprint,
+        baseline_id: String::new(),
+        diff_id: None,
+    };
+
+    // Persist a new baseline for New or Changed; Unchanged/Unreachable persist
+    // nothing (intentional storage saving — compare_snapshot is side-effect-free).
+    if matches!(record.status, ChangeStatus::New | ChangeStatus::Changed) {
+        let baseline_id = format!("bln_{}", ArtifactKind::new().ulid());
+        let new_baseline = BaselineSnapshot {
+            baseline_id: baseline_id.clone(),
+            org_id: req.org_id.clone(),
+            source_url: req.url.clone(),
+            fingerprint: req.fresh_fingerprint.clone(),
+            artifact_id: None,
+            // Chain from the already-loaded prev — no second load_latest.
+            prev_baseline_id: record.prev_baseline.as_ref().map(|b| b.baseline_id.clone()),
+            captured_at: now,
+            run_id: run_kind.clone(),
+        };
+        store.save_baseline(&new_baseline).await?;
+        resp.baseline_id = baseline_id;
+    }
+
+    // On Changed, persist a diff record. DiffRecord.artifact_id is required, so
+    // store the diff body first. We hold fingerprints (not the prev content),
+    // so the honest diff artifact records the fingerprint transition.
+    if record.status == ChangeStatus::Changed {
+        let prev = record.prev_baseline.as_ref().ok_or_else(|| {
+            QuarryError::new(ErrorCode::Internal, "changed status without prev baseline")
+        })?;
+        let summary = format!(
+            "content fingerprint changed: {} → {}",
+            prev.fingerprint, req.fresh_fingerprint
+        );
+        let artifact_run: RunKind = run_kind.unwrap_or_else(RunKind::new);
+        let handle = artifacts
+            .put(&artifact_run, &req.fresh_fingerprint, "raw", summary.clone().into_bytes())
+            .await?;
+
+        let diff_id = format!("diff_{}", ArtifactKind::new().ulid());
+        let diff = DiffRecord {
+            diff_id: diff_id.clone(),
+            org_id: req.org_id.clone(),
+            from_baseline_id: prev.baseline_id.clone(),
+            to_baseline_id: resp.baseline_id.clone(),
+            source_url: req.url.clone(),
+            format: "text".to_string(),
+            artifact_id: handle.artifact_id,
+            summary: Some(summary),
+            created_at: now,
+        };
+        store.create_diff_record(&diff).await?;
+        resp.diff_id = Some(diff_id);
+    }
+
+    Ok(resp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +417,48 @@ mod tests {
         assert!(validate_url("   ").is_err());
         assert!(validate_url("not-a-url").is_err());
         assert!(validate_url("https://example.com").is_ok());
+    }
+
+    #[test]
+    fn record_request_decodes_full_and_minimal() {
+        let full: RecordRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a",
+            "url": "https://example.com",
+            "fresh_fingerprint": "blake3:abc",
+            "run_id": "run_xyz"
+        }))
+        .unwrap();
+        assert_eq!(full.org_id, "org_a");
+        assert_eq!(full.run_id, "run_xyz");
+
+        // run_id is optional (scheduled fires may omit it pre-mint).
+        let minimal: RecordRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a",
+            "url": "https://example.com",
+            "fresh_fingerprint": "blake3:abc"
+        }))
+        .unwrap();
+        assert_eq!(minimal.run_id, "");
+    }
+
+    #[test]
+    fn internal_token_dev_bypass_allows() {
+        // Dev bypass accepts even with no expected token + no header.
+        assert!(check_internal_token("", None, true).is_ok());
+    }
+
+    #[test]
+    fn internal_token_unconfigured_is_fail_closed() {
+        let err = check_internal_token("", Some("Bearer anything"), false).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn internal_token_matches_and_rejects() {
+        assert!(check_internal_token("s3cret", Some("Bearer s3cret"), false).is_ok());
+        let wrong = check_internal_token("s3cret", Some("Bearer nope"), false).unwrap_err();
+        assert_eq!(wrong.code, ErrorCode::Unauthorized);
+        let missing = check_internal_token("s3cret", None, false).unwrap_err();
+        assert_eq!(missing.code, ErrorCode::Unauthorized);
     }
 }

@@ -11,7 +11,7 @@ import (
 func TestScheduleValidate_AssignsDefaults(t *testing.T) {
 	t.Parallel()
 
-	s := &Schedule{Cron: "*/5 * * * *"}
+	s := &Schedule{OrgID: "org_test", Cron: "*/5 * * * *", TargetRef: "https://example.com"}
 	if err := s.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
