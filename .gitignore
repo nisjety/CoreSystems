@@ -93,6 +93,12 @@ apps/Control Plane/user-core/user-core
 apps/Control Plane/user-core/server
 
 # ──────────────────────────────────────────────────────────────────────
+# Claude Code agent worktrees — isolated git worktrees (full nested
+# checkouts + build artifacts) created for background agents. Never commit.
+# ──────────────────────────────────────────────────────────────────────
+.claude/worktrees/
+
+# ──────────────────────────────────────────────────────────────────────
 # Logs and runtime state
 # ──────────────────────────────────────────────────────────────────────
 *.log

@@ -20,9 +20,15 @@
 	font-family: Protokoll;
 	font-style: normal;
 	font-weight: 300;
-	src:
-		url("/wp-content/themes/stingray/_/dist/ProtokollLight-Web.woff2") format("woff2"),
-		url("/wp-content/themes/stingray/_/dist/ProtokollLight-Web.woff") format("woff");
+	src: url("/fonts/protokoll-light/ProtokollLight-Web.woff2") format("woff2");
+	font-display: swap;
+}
+
+@font-face {
+	font-family: Protokoll;
+	font-style: normal;
+	font-weight: 500;
+	src: url("/fonts/protokoll-medium/ProtokollMedium-Web.woff2") format("woff2");
 	font-display: swap;
 }
 

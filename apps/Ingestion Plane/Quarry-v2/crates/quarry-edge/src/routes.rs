@@ -151,14 +151,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/artifacts/:id",
             get(crate::resource_routes::get_artifact),
         )
-        .route(
-            "/v1/sources",
-            get(crate::resource_routes::list_sources).post(crate::resource_routes::create_source),
-        )
-        .route(
-            "/v1/sources/:id",
-            delete(crate::resource_routes::delete_source),
-        )
+        .route("/v1/sources", get(crate::resource_routes::list_sources))
         .route("/v1/snapshots", get(crate::resource_routes::list_snapshots))
         .route("/v1/:kind/jobs", get(crate::resource_routes::list_jobs))
         // Cycle 23 / cluster #4 part 2 — request-queues, benchmarks, team/*

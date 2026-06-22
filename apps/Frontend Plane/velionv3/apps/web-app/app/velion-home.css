@@ -1,13 +1,13 @@
 .velion-home{--velion-page-pad:clamp(24px,4vw,56px);--velion-content-max:1328px;--velion-hero-opacity:1;--velion-hero-y:0px;--velion-water-y:0px;min-height:100vh;background:var(--velion-bg-cream);color:var(--velion-text)}
-.velion-navbar{position:fixed;z-index:60;inset:0 0 auto;display:flex;align-items:center;justify-content:space-between;height:112px;padding:0 var(--velion-page-pad);color:var(--velion-c-white);pointer-events:none;transition:color .36s ease,height .36s ease,opacity .36s ease}
-.velion-navbar.is-scrolled{height:86px;color:color-mix(in srgb,var(--velion-c-white) 72%,transparent)}
-.velion-navbar__brand,.velion-navbar__menu{pointer-events:auto}.velion-navbar__brand{font-size:1.6rem;font-weight:500;line-height:1}.velion-navbar__menu{display:grid;gap:6px;width:64px;padding:10px 0;border:0;background:transparent;color:currentColor;cursor:pointer}.velion-navbar__menu span{display:block;width:100%;height:2px;background:currentColor;transform-origin:right center;transition:transform .26s ease,opacity .26s ease}.velion-navbar__menu:hover span:nth-child(1){transform:scaleX(.76)}.velion-navbar__menu:hover span:nth-child(2){transform:scaleX(.9)}
+.velion-navbar{position:fixed;z-index:60;inset:0 0 auto;display:grid;grid-template-columns:minmax(160px,1fr) auto minmax(160px,1fr);align-items:center;height:112px;padding:0 var(--velion-page-pad);color:var(--velion-c-white);pointer-events:none;transition:color .36s ease,height .36s ease,opacity .36s ease}
+.velion-navbar.is-scrolled{height:92px;color:color-mix(in srgb,var(--velion-text) 76%,transparent)}
+.velion-navbar__brand,.velion-navbar__links,.velion-navbar__actions{pointer-events:auto}.velion-navbar__brand{justify-self:start;font-family:Arbeit,var(--font-geist-sans),"Helvetica Neue",ui-sans-serif,system-ui,sans-serif;font-size:1rem;font-weight:400;line-height:1;letter-spacing:.44em;text-transform:uppercase}.velion-navbar__links{justify-self:center;display:flex;align-items:center;gap:clamp(42px,5.25vw,90px)}.velion-navbar__link{position:relative;display:inline-flex;align-items:center;justify-content:center;padding:41px 0 28px;color:color-mix(in srgb,currentColor 76%,transparent);font-family:Protokoll,Arbeit,var(--font-geist-sans),"Helvetica Neue",ui-sans-serif,system-ui,sans-serif;font-size:.78rem;font-weight:500;letter-spacing:.06em;line-height:1;text-transform:uppercase;transition:color .22s ease,opacity .22s ease}.velion-navbar__link::after{position:absolute;left:50%;bottom:17px;width:34px;height:1px;background:currentColor;content:"";opacity:0;transform:translateX(-50%) scaleX(.5);transform-origin:center;transition:opacity .22s ease,transform .22s ease}.velion-navbar__link.is-active{color:currentColor}.velion-navbar__link.is-active::after,.velion-navbar__link:hover::after{opacity:.82;transform:translateX(-50%) scaleX(1)}.velion-navbar__link:hover{color:currentColor}.velion-navbar__actions{justify-self:end;display:flex;align-items:center;gap:30px}.velion-navbar__search{display:grid;place-items:center;width:34px;height:34px;color:color-mix(in srgb,currentColor 58%,transparent);transition:color .22s ease,opacity .22s ease}.velion-navbar__search svg{width:18px;height:18px;overflow:visible;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;stroke-width:1}.velion-navbar__search:hover{color:currentColor}.velion-navbar__menu{display:grid;gap:6px;width:50px;padding:10px 0;border:0;background:transparent;color:color-mix(in srgb,currentColor 68%,transparent);cursor:pointer;transition:color .22s ease}.velion-navbar__menu span{display:block;width:100%;height:1px;background:currentColor;transform-origin:right center;transition:transform .26s ease,opacity .26s ease}.velion-navbar__menu:hover{color:currentColor}.velion-navbar__menu:hover span:nth-child(1){transform:scaleX(.76)}.velion-navbar__menu:hover span:nth-child(2){transform:scaleX(.9)}
 .velion-arrow-button{display:inline-flex;align-items:center;gap:12px;width:fit-content;border:0;background:transparent;color:inherit;cursor:pointer;font-size:.96rem;line-height:1.2;transition:color .26s ease,opacity .26s ease,transform .26s ease}.velion-arrow-button svg{width:38px;height:14px;fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:miter;stroke-width:1.5;transition:transform .26s ease}.velion-arrow-button:hover{transform:translateX(3px)}.velion-arrow-button:hover svg{transform:translateX(5px)}.velion-arrow-button--light{color:color-mix(in srgb,var(--velion-c-white) 86%,transparent)}.velion-arrow-button--dark{color:var(--velion-text)}.velion-arrow-button--muted{color:color-mix(in srgb,var(--velion-a-earth) 62%,var(--velion-text-muted))}
 .velion-hero{position:relative;min-height:100svh;overflow:hidden;background:linear-gradient(180deg,rgba(41,64,74,.28),rgba(37,31,33,.34)),var(--velion-h-teal-deep);color:var(--velion-c-white)}
 .velion-hero__media{position:absolute;inset:0;overflow:hidden;transform:translate3d(0,0,0);will-change:transform}.velion-water{position:absolute;inset:-10% -6%;background:linear-gradient(150deg,rgba(255,255,255,.2) 0 1px,transparent 1px 100%),repeating-linear-gradient(172deg,rgba(255,255,255,.2) 0 2px,transparent 2px 28px),repeating-linear-gradient(6deg,rgba(255,255,255,.11) 0 1px,transparent 1px 42px),linear-gradient(180deg,#56717c 0%,#25424e 42%,#132936 78%,#0c1d27 100%);background-size:280px 180px,360px 120px,420px 160px,100% 100%;animation:velion-water-flow 18s linear infinite}.velion-water::before,.velion-water::after{position:absolute;inset:0;content:"";background:repeating-linear-gradient(165deg,transparent 0 34px,rgba(255,255,255,.18) 34px 35px,transparent 35px 74px),repeating-linear-gradient(18deg,transparent 0 56px,rgba(247,244,238,.12) 56px 58px,transparent 58px 112px);opacity:.56;mix-blend-mode:screen}.velion-water::after{transform:translate3d(8%,4%,0) rotate(2deg);opacity:.32}
 .velion-vessel{position:absolute;top:24%;left:49%;width:230px;height:380px;transform:rotate(15deg);transform-origin:50% 60%;animation:velion-vessel-float 7s ease-in-out infinite}.velion-vessel::before{position:absolute;inset:38px 42px 22px;content:"";border:1px solid rgba(255,255,255,.42);background:linear-gradient(180deg,#dfe6e4,#f3f0e9 54%,#a9aaa4);clip-path:polygon(50% 0,94% 18%,76% 100%,24% 100%,6% 18%);box-shadow:0 22px 50px rgba(0,0,0,.3)}.velion-vessel__roof,.velion-vessel__glass,.velion-vessel__deck{position:absolute;left:50%;transform:translateX(-50%)}.velion-vessel__roof{top:38px;width:96px;height:150px;background:linear-gradient(180deg,#9cc7bf,#dfe9e5);clip-path:polygon(50% 0,96% 22%,72% 100%,28% 100%,4% 22%)}.velion-vessel__glass{top:116px;width:112px;height:88px;border:5px solid color-mix(in srgb,var(--velion-h-ink-warm) 72%,transparent);background:linear-gradient(90deg,rgba(20,32,38,.74),rgba(120,139,140,.42))}.velion-vessel__deck{bottom:34px;width:132px;height:72px;border:1px solid rgba(255,255,255,.5);background:repeating-linear-gradient(90deg,rgba(121,56,25,.16) 0 1px,transparent 1px 12px),linear-gradient(180deg,#eee9df,#d9d4c8)}
 .velion-wake{position:absolute;top:58%;left:48%;width:68px;height:540px;background:repeating-linear-gradient(178deg,rgba(255,255,255,.68) 0 6px,transparent 6px 18px),linear-gradient(180deg,rgba(255,255,255,.78),rgba(255,255,255,0));filter:blur(1px);opacity:.9;transform-origin:top center;animation:velion-wake-flow 2.8s linear infinite}.velion-wake--left{transform:rotate(18deg) translateX(-34px)}.velion-wake--right{transform:rotate(26deg) translateX(42px);opacity:.78}
-.velion-hero__content{position:absolute;top:0;bottom:0;left:var(--velion-page-pad);display:flex;flex-direction:column;align-items:flex-start;justify-content:center;width:min(540px,calc(100% - var(--velion-page-pad) * 2));max-width:540px;opacity:var(--velion-hero-opacity);transform:translate3d(0,0,0);will-change:transform}.velion-hero__content h1{margin:0 0 34px;font-size:4.75rem;font-weight:400;line-height:1.02}.velion-hero__content p{max-width:430px;margin:0 0 34px;color:color-mix(in srgb,var(--velion-c-white) 84%,transparent);font-size:1.08rem;line-height:1.45}.velion-hero__explore{position:absolute;left:var(--velion-page-pad);bottom:70px;display:inline-flex;align-items:center;gap:12px;color:color-mix(in srgb,var(--velion-c-white) 88%,transparent);font-size:1.06rem}.velion-hero__explore svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8}
+.velion-hero__content{--velion-hero-wrapper-bleed:clamp(96px,17.3svh,150px);position:absolute;top:calc(var(--velion-hero-wrapper-bleed) * -1);bottom:0;left:var(--velion-page-pad);box-sizing:border-box;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;width:min(540px,calc(100% - var(--velion-page-pad) * 2));max-width:540px;padding-top:var(--velion-hero-wrapper-bleed);opacity:var(--velion-hero-opacity);transform:translate3d(0,0,0);will-change:transform}.velion-hero__content h1{margin:0 0 34px;font-size:4.75rem;font-weight:400;line-height:1.02}.velion-hero__content p{max-width:430px;margin:0 0 34px;color:color-mix(in srgb,var(--velion-c-white) 84%,transparent);font-size:1.08rem;line-height:1.45}.velion-hero__explore{position:absolute;left:var(--velion-page-pad);bottom:70px;display:inline-flex;align-items:center;gap:12px;color:color-mix(in srgb,var(--velion-c-white) 88%,transparent);font-size:1.06rem}.velion-hero__explore svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8}
 .velion-cards{padding:72px var(--velion-page-pad) 152px;background:var(--velion-bg-cream)}.velion-cards__grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;max-width:var(--velion-content-max);margin:0 auto}.velion-card{display:grid;align-content:start;min-width:0}.velion-card p{margin:36px 0 10px;color:var(--velion-text-muted);font-size:.98rem}.velion-card h2{margin:0;padding-bottom:28px;border-bottom:1px solid var(--velion-border-strong);font-size:2.05rem;font-weight:400;line-height:1.14}.velion-card .velion-arrow-button{margin-top:28px}
 .velion-visual{position:relative;overflow:hidden;min-height:320px;aspect-ratio:1.82;background:repeating-linear-gradient(90deg,rgba(255,255,255,.22) 0 1px,transparent 1px 82px),linear-gradient(135deg,var(--velion-surface),var(--velion-bg-mist));border-radius:2px}.velion-visual::before,.velion-visual::after{position:absolute;content:""}.velion-visual::before{inset:18% 11%;border:1px solid rgba(52,54,61,.22);transform:skewX(-12deg)}.velion-visual::after{right:-18%;bottom:-16%;width:56%;height:48%;background:linear-gradient(135deg,transparent,rgba(121,56,25,.18),rgba(41,64,74,.18));transform:skewX(-18deg)}.velion-visual__line{position:absolute;display:block;height:1px;background:rgba(52,54,61,.18)}.velion-visual__line--one{top:28%;left:10%;width:74%}.velion-visual__line--two{top:58%;left:18%;width:64%;transform:rotate(-4deg)}.velion-visual__line--three{top:16%;left:52%;width:1px;height:68%}.velion-visual--craft::before{inset:35% 10% 28%;border:0;background:linear-gradient(180deg,#f4f1eb,#c8d2cd);clip-path:polygon(3% 50%,22% 18%,72% 18%,95% 48%,76% 78%,18% 78%)}.velion-visual--surface{background:repeating-linear-gradient(90deg,rgba(216,216,212,.42) 0 2px,transparent 2px 72px),linear-gradient(180deg,#fff,#edecea)}.velion-visual--mark{background:linear-gradient(105deg,transparent 0 36%,rgba(121,56,25,.2) 36% 58%,transparent 58% 100%),linear-gradient(135deg,#f4f1eb,#d8d2c6)}.velion-visual--mark::before{content:"VELION";inset:40% auto auto 24%;border:0;color:color-mix(in srgb,var(--velion-c-white) 86%,transparent);font-size:3rem;font-weight:400;transform:none}
 .velion-section{display:grid;grid-template-columns:minmax(300px,.82fr) minmax(0,1.18fr);gap:72px;align-items:center;max-width:var(--velion-content-max);min-height:1040px;margin:0 auto;padding:110px var(--velion-page-pad);background:var(--velion-bg-cream)}.velion-section--reverse{grid-template-columns:minmax(0,1.1fr) minmax(300px,.9fr)}.velion-section--last{min-height:980px}.velion-section__copy{max-width:450px}.velion-section__copy span,.velion-detail__copy>span{display:block;margin-bottom:28px;color:var(--velion-text-muted);font-size:.95rem}.velion-section__copy h2,.velion-detail__copy h2,.velion-excellence__content h2,.velion-technology__copy h2{margin:0 0 34px;font-size:4rem;font-weight:400;line-height:1.04}.velion-section__copy p,.velion-detail__copy p,.velion-excellence__content p,.velion-technology__copy p{margin:0 0 38px;color:var(--velion-text-muted);font-size:1.08rem;line-height:1.62}.velion-section__visual{width:100%;min-height:620px;aspect-ratio:.92}.velion-visual--icon{background:repeating-linear-gradient(0deg,rgba(255,255,255,.26) 0 1px,transparent 1px 56px),linear-gradient(145deg,#e8ebe8,#cddad6 44%,#f8f8f7)}.velion-visual--icon::before{inset:43% 9% 34%;border:0;background:linear-gradient(180deg,#f7f4ee,#c4d2cd);clip-path:polygon(1% 56%,18% 24%,74% 18%,99% 50%,82% 78%,12% 78%)}.velion-visual--open{background:repeating-linear-gradient(90deg,rgba(255,255,255,.18) 0 1px,transparent 1px 48px),linear-gradient(160deg,var(--velion-h-teal-deep),#60727a 42%,var(--velion-c-cream))}.velion-visual--detail{background:linear-gradient(90deg,rgba(41,64,74,.18),transparent 45%),linear-gradient(140deg,var(--velion-c-cream),#fff)}.velion-visual--heritage{background:repeating-linear-gradient(172deg,rgba(255,255,255,.2) 0 2px,transparent 2px 40px),linear-gradient(180deg,#4f6670,#182a32 62%,#0d1518)}
@@ -18,43 +18,168 @@
 .velion-footer{min-height:880px;background:linear-gradient(155deg,rgba(121,56,25,.22),transparent 48%),linear-gradient(135deg,var(--velion-h-teal-deep),var(--velion-h-ink-warm));color:var(--velion-c-white)}.velion-footer__inner{display:grid;grid-template-columns:minmax(220px,.6fr) minmax(260px,.8fr) minmax(320px,1fr);gap:66px;max-width:var(--velion-content-max);min-height:880px;margin:0 auto;padding:84px var(--velion-page-pad) 58px}.velion-footer__brand{font-size:2rem;font-weight:500}.velion-footer__nav{display:grid;align-content:start;gap:20px}.velion-footer__nav a{display:grid;grid-template-columns:52px 1fr;align-items:baseline;color:color-mix(in srgb,var(--velion-c-white) 84%,transparent);font-size:1.46rem}.velion-footer__nav span{color:color-mix(in srgb,var(--velion-c-white) 46%,transparent);font-size:.88rem}.velion-footer__newsletter{align-self:start}.velion-footer__newsletter p{margin:0 0 26px;color:color-mix(in srgb,var(--velion-c-white) 74%,transparent)}.velion-footer__input{display:grid;grid-template-columns:1fr 52px;border-bottom:1px solid rgba(255,255,255,.34)}.velion-footer__input input{min-width:0;padding:18px 0;border:0;outline:0;background:transparent;color:var(--velion-c-white);font-size:1.05rem}.velion-footer__input input::placeholder{color:color-mix(in srgb,var(--velion-c-white) 46%,transparent)}.velion-footer__input button{border:0;background:transparent;color:var(--velion-c-white);cursor:pointer}.velion-footer__input svg{width:34px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5}.velion-footer__legal{grid-column:1/-1;align-self:end;display:flex;flex-wrap:wrap;gap:18px 34px;color:color-mix(in srgb,var(--velion-c-white) 58%,transparent);font-size:.94rem}
 .velion-reveal{opacity:0;transform:translateY(54px);transition:opacity .9s ease,transform .9s cubic-bezier(.16,1,.3,1);transition-delay:var(--delay,0ms)}.velion-reveal.is-visible{opacity:1;transform:translateY(0)}
 @keyframes velion-water-flow{to{background-position:280px 180px,360px 120px,-420px 160px,0 0}}@keyframes velion-vessel-float{50%{transform:rotate(15deg) translateY(-12px)}}@keyframes velion-wake-flow{to{background-position:0 54px,0 0}}@keyframes velion-gallery-cycle{0%,12%{opacity:1;transform:scale(1)}18%,100%{opacity:0;transform:scale(1.03)}}@keyframes velion-menu-enter{from{opacity:0;transform:scale(1.02)}}@keyframes velion-menu-item-enter{to{opacity:1;transform:translateY(0)}}
-@media (max-width:1100px){.velion-cards__grid,.velion-section,.velion-section--reverse,.velion-detail,.velion-technology,.velion-excellence__content,.velion-footer__inner{grid-template-columns:1fr}.velion-section,.velion-section--reverse,.velion-detail,.velion-technology{min-height:auto;padding-top:92px;padding-bottom:92px}.velion-section__copy,.velion-detail__copy,.velion-technology__copy{max-width:620px}.velion-section__visual,.velion-detail__stage,.velion-technology__visual{min-height:520px}.velion-excellence__content,.velion-footer__inner{min-height:auto}.velion-menu__grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media (max-width:760px){.velion-navbar{height:86px}.velion-navbar__brand{font-size:1.24rem}.velion-navbar__menu{width:48px}.velion-vessel{top:23%;left:47%;width:170px;height:310px}.velion-hero__content{right:var(--velion-page-pad);bottom:26%}.velion-hero__content h1{margin-bottom:24px;font-size:3.05rem}.velion-hero__content p{font-size:1rem}.velion-hero__explore{bottom:34px}.velion-cards{padding-top:48px;padding-bottom:96px}.velion-card h2,.velion-menu__item strong{font-size:1.72rem}.velion-section__copy h2,.velion-detail__copy h2,.velion-excellence__content h2,.velion-technology__copy h2{font-size:2.8rem}.velion-section__visual,.velion-detail__stage,.velion-technology__visual{min-height:420px}.velion-technology__stats{grid-template-columns:1fr}.velion-menu{padding-top:34px;padding-bottom:34px}.velion-menu__grid{grid-template-columns:1fr;gap:22px}.velion-menu__item{gap:18px}.velion-footer__nav a{font-size:1.25rem}}
+@media (max-width:1100px){.velion-cards__grid,.velion-section,.velion-section--reverse,.velion-detail,.velion-technology,.velion-excellence__content,.velion-footer__inner{grid-template-columns:1fr}.velion-section,.velion-section--reverse,.velion-detail,.velion-technology{min-height:auto;padding-top:var(--velion-section-vpad);padding-bottom:var(--velion-section-vpad)}.velion-section__copy,.velion-detail__copy,.velion-technology__copy{max-width:620px}.velion-section__visual,.velion-detail__stage,.velion-technology__visual{min-height:520px}.velion-excellence__content,.velion-footer__inner{min-height:auto}.velion-menu__grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:760px){.velion-navbar{grid-template-columns:1fr auto;height:96px}.velion-navbar__brand{font-size:.86rem;letter-spacing:.34em}.velion-navbar__links{display:none}.velion-navbar__actions{gap:22px}.velion-navbar__search{width:32px;height:32px}.velion-navbar__search svg{width:17px;height:17px}.velion-navbar__menu{width:44px}.velion-vessel{top:23%;left:47%;width:170px;height:310px}.velion-hero__content{right:var(--velion-page-pad);bottom:26%}.velion-hero__content h1{margin-bottom:24px;font-size:3.05rem}.velion-hero__content p{font-size:1rem}.velion-hero__explore{bottom:34px}.velion-cards{padding-top:var(--velion-section-vpad);padding-bottom:var(--velion-section-vpad)}.velion-card h2,.velion-menu__item strong{font-size:1.72rem}.velion-section__copy h2,.velion-detail__copy h2,.velion-excellence__content h2,.velion-technology__copy h2{font-size:2.8rem}.velion-section__visual,.velion-detail__stage,.velion-technology__visual{min-height:420px}.velion-technology__stats{grid-template-columns:1fr}.velion-menu{padding-top:34px;padding-bottom:34px}.velion-menu__grid{grid-template-columns:1fr;gap:22px}.velion-menu__item{gap:18px}.velion-footer__nav a{font-size:1.25rem}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{animation-duration:1ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:1ms!important}.velion-hero__media,.velion-hero__content{transform:none!important;will-change:auto}.velion-reveal{opacity:1;transform:none}}
 
 .velion-home {
 	--velion-edge: clamp(56px, 5.55vw, 208px);
 	--velion-section-gap: clamp(86px, 8.9vw, 330px);
+	--velion-section-vpad: clamp(96px, 15vh, 180px);
+}
+
+.velion-logo-carousel {
+	overflow: hidden;
+	background:
+		linear-gradient(90deg, rgba(248, 248, 247, 0.72), rgba(248, 248, 247, 0.08) 18%, rgba(248, 248, 247, 0.08) 82%, rgba(248, 248, 247, 0.72)),
+		linear-gradient(180deg, color-mix(in srgb, var(--velion-g-blue-mist) 80%, #ffffff), color-mix(in srgb, var(--velion-g-blue-mist) 58%, #ffffff));
+	border-top: 1px solid color-mix(in srgb, var(--velion-h-teal-deep) 8%, transparent);
+	border-bottom: 1px solid color-mix(in srgb, var(--velion-h-teal-deep) 8%, transparent);
+}
+
+.velion-logo-carousel__viewport {
+	display: flex;
+	width: max-content;
+	min-width: 100%;
+	padding: clamp(42px, 5.25vw, 76px) 0;
+	mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+	-webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+}
+
+.velion-logo-carousel__track {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: clamp(54px, 7vw, 118px);
+	padding-right: clamp(54px, 7vw, 118px);
+	animation: velion-logo-marquee 30s linear infinite;
+}
+
+.velion-logo-carousel:hover .velion-logo-carousel__track {
+	animation-play-state: paused;
+}
+
+.velion-logo-carousel__mark {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: max-content;
+	color: color-mix(in srgb, var(--velion-h-teal-deep) 78%, var(--velion-j-text));
+	font-family:
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(1.15rem, 2vw, 2rem);
+	font-weight: 400;
+	line-height: 1;
+	letter-spacing: -0.035em;
+	opacity: 0.84;
+	filter: saturate(0.2);
+}
+
+.velion-logo-carousel__mark:nth-child(2n) {
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.92rem, 1.35vw, 1.28rem);
+	font-weight: 500;
+	letter-spacing: 0.025em;
+	text-transform: uppercase;
+}
+
+.velion-logo-carousel__mark:nth-child(3n) {
+	font-weight: 300;
+	letter-spacing: 0.02em;
+}
+
+.velion-logo-carousel__mark:nth-child(5n) {
+	font-size: clamp(1rem, 1.55vw, 1.48rem);
+	font-weight: 500;
+	letter-spacing: -0.01em;
 }
 
 .velion-navbar.is-scrolled {
-	opacity: 0;
 	pointer-events: none;
 }
 
+.velion-navbar.is-on-dark {
+	color: color-mix(in srgb, var(--velion-c-white) 76%, transparent);
+}
+
 .velion-arrow-button {
-	gap: 16px;
-	color: color-mix(in srgb, var(--velion-a-earth) 64%, var(--velion-text-muted));
-	font-size: 0.95rem;
-	opacity: 0.82;
+	align-items: center;
+	gap: 6px;
+	color: color-mix(in srgb, var(--velion-a-earth) 78%, var(--velion-text-muted));
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(1.32rem, 1.55vw, 1.9rem);
+	font-weight: 300;
+	letter-spacing: -0.02em;
+	line-height: 1;
+	opacity: 1;
+}
+
+.velion-arrow-button span,
+.velion-section__copy .velion-arrow-button span,
+.velion-detail__copy .velion-arrow-button span,
+.velion-technology__copy .velion-arrow-button span {
+	display: inline-block;
+	margin: 0;
+	color: inherit;
+	font: inherit;
+	line-height: inherit;
+	letter-spacing: inherit;
 }
 
 .velion-arrow-button svg {
-	width: 46px;
-	stroke-width: 1.15;
+	flex: 0 0 auto;
+	width: clamp(68px, 5vw, 92px);
+	height: 18px;
+	stroke-width: 1.1;
+	transform: translateY(-1px);
 }
 
 .velion-arrow-button--light {
-	color: color-mix(in srgb, var(--velion-c-white) 72%, transparent);
+	color: color-mix(in srgb, var(--velion-c-white) 78%, transparent);
 }
 
 .velion-arrow-button--dark {
-	color: color-mix(in srgb, var(--velion-text) 82%, var(--velion-a-earth));
+	color: color-mix(in srgb, var(--velion-a-earth) 74%, var(--velion-text));
 }
 
 .velion-arrow-button:hover {
 	opacity: 1;
 	transform: none;
+}
+
+.velion-arrow-button:hover svg {
+	transform: translate(7px, -1px);
+}
+
+.velion-card .velion-arrow-button {
+	gap: 8px;
+	font-size: clamp(0.96rem, 1vw, 1.08rem);
+	letter-spacing: -0.01em;
+}
+
+.velion-card .velion-arrow-button svg {
+	width: 54px;
+	height: 14px;
+	stroke-width: 1.05;
 }
 
 .velion-hero__content h1,
@@ -67,7 +192,15 @@
 }
 
 .velion-cards {
-	padding-top: 56px;
+	padding-top: var(--velion-section-vpad);
+	padding-right: var(--velion-edge);
+	padding-bottom: var(--velion-section-vpad);
+	padding-left: var(--velion-edge);
+}
+
+.velion-cards__grid {
+	width: 100%;
+	max-width: none;
 }
 
 .velion-card p,
@@ -97,8 +230,8 @@
 	gap: var(--velion-section-gap);
 	align-items: start;
 	min-height: 0;
-	padding-top: clamp(46px, 8vh, 72px);
-	padding-bottom: clamp(46px, 8vh, 72px);
+	padding-top: var(--velion-section-vpad);
+	padding-bottom: var(--velion-section-vpad);
 }
 
 .velion-section--reverse {
@@ -242,6 +375,11 @@
 }
 
 @media (max-width: 760px) {
+	.velion-hero__content {
+		right: var(--velion-page-pad);
+		bottom: 0;
+	}
+
 	.velion-section__copy::before,
 	.velion-detail__copy::before,
 	.velion-technology__copy::before {
@@ -249,7 +387,11 @@
 	}
 
 	.velion-arrow-button svg {
-		width: 38px;
+		width: 58px;
+	}
+
+	.velion-card .velion-arrow-button svg {
+		width: 48px;
 	}
 }
 
@@ -268,8 +410,8 @@
 @media (max-width: 640px) {
 	.velion-section,
 	.velion-section--reverse {
-		padding-top: 46px;
-		padding-bottom: 46px;
+		padding-top: var(--velion-section-vpad);
+		padding-bottom: var(--velion-section-vpad);
 	}
 
 	.fade-out-top {
@@ -283,8 +425,8 @@
 @media (min-width: 2560px) {
 	.velion-section,
 	.velion-section--reverse {
-		padding-top: clamp(72px, 8vh, 10vh);
-		padding-bottom: clamp(72px, 8vh, 10vh);
+		padding-top: var(--velion-section-vpad);
+		padding-bottom: var(--velion-section-vpad);
 	}
 }
 
@@ -368,15 +510,15 @@
 }
 
 .velion-cards {
-	padding-bottom: clamp(46px, 8vh, 72px);
+	padding-bottom: var(--velion-section-vpad);
 }
 
 .velion-detail,
 .velion-technology {
 	align-items: start;
 	min-height: 0;
-	padding-top: clamp(46px, 8vh, 72px);
-	padding-bottom: clamp(46px, 8vh, 72px);
+	padding-top: var(--velion-section-vpad);
+	padding-bottom: var(--velion-section-vpad);
 }
 
 .velion-detail__stage {
@@ -457,5 +599,2698 @@
 		font-weight: 300;
 		line-height: 55px;
 		letter-spacing: -1.65px;
+	}
+}
+
+/* Velion AI-first product direction */
+.velion-hero {
+	background:
+		radial-gradient(circle at 68% 30%, rgba(79, 125, 243, 0.22), transparent 28%),
+		linear-gradient(180deg, rgba(12, 15, 18, 0.18), rgba(10, 12, 15, 0.36)),
+		#101316;
+}
+
+.velion-water {
+	inset: -12% -6%;
+	background:
+		linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+		radial-gradient(circle at 22% 40%, rgba(255, 255, 255, 0.14), transparent 10%),
+		radial-gradient(circle at 70% 28%, rgba(79, 125, 243, 0.18), transparent 18%),
+		linear-gradient(150deg, #1f272c 0%, #111518 48%, #0a0d10 100%);
+	background-size: 104px 104px, 104px 104px, 100% 100%, 100% 100%, 100% 100%;
+	animation: velion-system-drift 24s linear infinite;
+}
+
+.velion-water::before {
+	background:
+		linear-gradient(115deg, transparent 0 19%, rgba(247, 244, 238, 0.16) 19.1% 19.2%, transparent 19.3% 100%),
+		linear-gradient(145deg, transparent 0 52%, rgba(79, 125, 243, 0.22) 52.1% 52.2%, transparent 52.3% 100%),
+		repeating-linear-gradient(0deg, transparent 0 42px, rgba(247, 244, 238, 0.06) 42px 43px);
+	opacity: 0.7;
+}
+
+.velion-water::after {
+	inset: 16% 8% 12% 52%;
+	border: 1px solid rgba(247, 244, 238, 0.18);
+	background:
+		linear-gradient(90deg, rgba(247, 244, 238, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.08) 1px, transparent 1px),
+		linear-gradient(145deg, rgba(247, 244, 238, 0.09), rgba(79, 125, 243, 0.08));
+	background-size: 58px 58px;
+	border-radius: 2px;
+	opacity: 0.7;
+	transform: none;
+}
+
+.velion-vessel {
+	top: 20%;
+	left: 57%;
+	width: min(520px, 42vw);
+	height: min(420px, 52vh);
+	border: 1px solid rgba(247, 244, 238, 0.2);
+	background:
+		linear-gradient(90deg, rgba(247, 244, 238, 0.06) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.06) 1px, transparent 1px),
+		linear-gradient(145deg, rgba(247, 244, 238, 0.12), rgba(247, 244, 238, 0.03));
+	background-size: 44px 44px;
+	box-shadow: 0 34px 90px rgba(0, 0, 0, 0.32);
+	transform: rotate(0deg);
+	animation: velion-console-float 8s ease-in-out infinite;
+}
+
+.velion-vessel::before {
+	inset: 11% 8% auto;
+	height: 38%;
+	border: 1px solid rgba(247, 244, 238, 0.22);
+	background:
+		linear-gradient(90deg, rgba(247, 244, 238, 0.2) 0 16%, transparent 16% 100%),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.1), rgba(79, 125, 243, 0.06));
+	clip-path: none;
+	box-shadow: none;
+}
+
+.velion-vessel__roof {
+	top: 56%;
+	left: 10%;
+	width: 34%;
+	height: 22%;
+	background:
+		linear-gradient(90deg, rgba(238, 122, 80, 0.72) 0 4px, transparent 4px 100%),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.12), rgba(247, 244, 238, 0.04));
+	clip-path: none;
+	transform: none;
+}
+
+.velion-vessel__glass {
+	top: 56%;
+	left: 48%;
+	width: 42%;
+	height: 22%;
+	border: 1px solid rgba(247, 244, 238, 0.18);
+	background:
+		linear-gradient(90deg, rgba(79, 125, 243, 0.5) 0 4px, transparent 4px 100%),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.1), rgba(247, 244, 238, 0.03));
+	transform: none;
+}
+
+.velion-vessel__deck {
+	right: 8%;
+	bottom: 10%;
+	left: auto;
+	width: 52%;
+	height: 10%;
+	border: 1px solid rgba(247, 244, 238, 0.14);
+	background: repeating-linear-gradient(90deg, rgba(247, 244, 238, 0.28) 0 14px, transparent 14px 34px);
+	transform: none;
+}
+
+.velion-wake {
+	top: 39%;
+	left: 18%;
+	width: 42%;
+	height: 1px;
+	background: linear-gradient(90deg, transparent, rgba(247, 244, 238, 0.42), rgba(79, 125, 243, 0.7), transparent);
+	filter: none;
+	opacity: 0.75;
+	animation: velion-signal-pulse 3.8s ease-in-out infinite;
+}
+
+.velion-wake--left {
+	--signal-rotate: -16deg;
+	transform: rotate(-16deg);
+}
+
+.velion-wake--right {
+	--signal-rotate: 11deg;
+	top: 63%;
+	left: 34%;
+	width: 31%;
+	opacity: 0.58;
+	transform: rotate(11deg);
+}
+
+.velion-hero__content p {
+	max-width: 560px;
+}
+
+.velion-card {
+	gap: 0;
+}
+
+.velion-card__text {
+	display: block;
+	min-height: 5.6em;
+	margin-top: 20px;
+	color: color-mix(in srgb, var(--velion-text-muted) 88%, transparent);
+	font-size: 1rem;
+	line-height: 1.45;
+}
+
+.velion-visual {
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(145deg, #ffffff, var(--velion-bg-mist));
+	background-size: 64px 64px, 64px 64px, 100% 100%;
+}
+
+.velion-visual::before,
+.velion-visual::after {
+	content: "";
+}
+
+.velion-visual::before {
+	inset: 12% 10% auto;
+	height: 34%;
+	border: 1px solid rgba(26, 26, 26, 0.13);
+	background:
+		linear-gradient(90deg, rgba(121, 56, 25, 0.5) 0 4px, transparent 4px 100%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(247, 244, 238, 0.42));
+	transform: none;
+}
+
+.velion-visual::after {
+	right: 10%;
+	bottom: 12%;
+	width: 48%;
+	height: 28%;
+	border: 1px solid rgba(26, 26, 26, 0.11);
+	background:
+		linear-gradient(90deg, rgba(79, 125, 243, 0.45) 0 4px, transparent 4px 100%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(217, 227, 228, 0.44));
+	transform: none;
+}
+
+.velion-visual__line {
+	background: rgba(26, 26, 26, 0.16);
+}
+
+.velion-visual__line--one {
+	top: 55%;
+	left: 11%;
+	width: 72%;
+}
+
+.velion-visual__line--two {
+	top: 42%;
+	left: 20%;
+	width: 48%;
+	transform: rotate(-18deg);
+}
+
+.velion-visual__line--three {
+	top: 18%;
+	left: 67%;
+	width: 1px;
+	height: 64%;
+}
+
+.velion-visual__node {
+	position: absolute;
+	z-index: 2;
+	display: block;
+	width: 13px;
+	height: 13px;
+	border: 1px solid rgba(26, 26, 26, 0.24);
+	border-radius: 50%;
+	background: var(--velion-bg-cream);
+	box-shadow: 0 0 0 6px rgba(247, 244, 238, 0.64);
+}
+
+.velion-visual__node--one {
+	top: 39%;
+	left: 18%;
+}
+
+.velion-visual__node--two {
+	top: 29%;
+	left: 66%;
+}
+
+.velion-visual__node--three {
+	top: 67%;
+	left: 52%;
+	border-color: rgba(121, 56, 25, 0.4);
+}
+
+.velion-visual__panel {
+	position: absolute;
+	z-index: 1;
+	display: block;
+	border: 1px solid rgba(26, 26, 26, 0.12);
+	background:
+		repeating-linear-gradient(0deg, transparent 0 13px, rgba(26, 26, 26, 0.08) 13px 14px),
+		rgba(255, 255, 255, 0.48);
+}
+
+.velion-visual__panel--one {
+	top: 18%;
+	right: 12%;
+	width: 28%;
+	height: 16%;
+}
+
+.velion-visual__panel--two {
+	bottom: 18%;
+	left: 12%;
+	width: 32%;
+	height: 18%;
+}
+
+.velion-visual--craft {
+	background:
+		linear-gradient(120deg, rgba(79, 125, 243, 0.15), transparent 38%),
+		linear-gradient(145deg, #f9f8f5, #e7eceb);
+}
+
+.velion-visual--surface {
+	background:
+		linear-gradient(135deg, #171717, #29404a);
+}
+
+.velion-visual--surface .velion-visual__line,
+.velion-visual--surface .velion-visual__node {
+	border-color: rgba(247, 244, 238, 0.4);
+	background: rgba(247, 244, 238, 0.82);
+}
+
+.velion-visual--surface .velion-visual__line {
+	background: rgba(247, 244, 238, 0.26);
+}
+
+.velion-visual--surface::before,
+.velion-visual--surface::after,
+.velion-visual--surface .velion-visual__panel {
+	border-color: rgba(247, 244, 238, 0.18);
+	background: rgba(247, 244, 238, 0.08);
+}
+
+.velion-visual--mark::before {
+	content: "";
+}
+
+.velion-visual--mark {
+	background:
+		linear-gradient(90deg, transparent 0 45%, rgba(121, 56, 25, 0.2) 45% 45.5%, transparent 45.5% 100%),
+		linear-gradient(145deg, #ffffff, #ebe8e1);
+}
+
+.velion-visual--icon,
+.velion-visual--open,
+.velion-visual--detail,
+.velion-visual--heritage {
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.06) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.06) 1px, transparent 1px),
+		linear-gradient(145deg, #fbfaf7, #dfe6e4);
+	background-size: 72px 72px, 72px 72px, 100% 100%;
+}
+
+.velion-visual--heritage {
+	background:
+		radial-gradient(circle at 72% 26%, rgba(79, 125, 243, 0.18), transparent 18%),
+		linear-gradient(90deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(145deg, #ffffff, #f0eee8);
+	background-size: 100% 100%, 86px 86px, 86px 86px, 100% 100%;
+}
+
+.velion-detail__stage {
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(145deg, #ffffff, #e6ecec);
+	background-size: 70px 70px, 70px 70px, 100% 100%;
+}
+
+.velion-detail__frame {
+	background:
+		linear-gradient(90deg, rgba(121, 56, 25, 0.48) 0 5px, transparent 5px 100%),
+		repeating-linear-gradient(0deg, transparent 0 28px, rgba(26, 26, 26, 0.1) 28px 29px),
+		rgba(255, 255, 255, 0.46);
+}
+
+.velion-detail__frame--2,
+.velion-detail__frame--4,
+.velion-detail__frame--6 {
+	background:
+		linear-gradient(90deg, rgba(79, 125, 243, 0.42) 0 5px, transparent 5px 100%),
+		repeating-linear-gradient(0deg, transparent 0 28px, rgba(26, 26, 26, 0.1) 28px 29px),
+		rgba(255, 255, 255, 0.5);
+}
+
+.velion-excellence {
+	background:
+		radial-gradient(circle at 74% 20%, rgba(79, 125, 243, 0.18), transparent 24%),
+		linear-gradient(150deg, #111314, #1c1c1c 62%, #29404a);
+}
+
+.velion-excellence__content .ingress {
+	color: color-mix(in srgb, var(--velion-c-white) 74%, transparent);
+}
+
+.velion-technology__visual {
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.08) 1px, transparent 1px),
+		linear-gradient(145deg, #ffffff, #e7eceb);
+	background-size: 72px 72px, 72px 72px, 100% 100%;
+}
+
+.velion-technology__body {
+	top: 18%;
+	left: 12%;
+	width: 76%;
+	height: 28%;
+	border: 1px solid rgba(26, 26, 26, 0.14);
+	background:
+		linear-gradient(90deg, rgba(121, 56, 25, 0.46) 0 5px, transparent 5px 100%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(247, 244, 238, 0.52));
+	clip-path: none;
+	box-shadow: none;
+}
+
+.velion-technology__foil {
+	background: rgba(26, 26, 26, 0.22);
+}
+
+.velion-technology__foil--one {
+	top: 57%;
+	left: 14%;
+	width: 72%;
+	transform: rotate(-8deg);
+}
+
+.velion-technology__foil--two {
+	top: 69%;
+	left: 28%;
+	width: 52%;
+	transform: rotate(12deg);
+}
+
+.velion-technology__wake {
+	top: 58%;
+	left: 12%;
+	width: 76%;
+	height: 28%;
+	border: 1px solid rgba(26, 26, 26, 0.11);
+	background:
+		repeating-linear-gradient(0deg, transparent 0 22px, rgba(26, 26, 26, 0.1) 22px 23px),
+		rgba(255, 255, 255, 0.42);
+}
+
+@keyframes velion-system-drift {
+	to {
+		background-position: 104px 104px, -104px 104px, 0 0, 0 0, 0 0;
+	}
+}
+
+@keyframes velion-console-float {
+	50% {
+		transform: translateY(-10px);
+	}
+}
+
+@keyframes velion-signal-pulse {
+	50% {
+		opacity: 1;
+		transform: scaleX(1.08) rotate(var(--signal-rotate, 0deg));
+	}
+}
+
+@media (max-width: 760px) {
+	.velion-vessel {
+		top: 20%;
+		left: 36%;
+		width: min(420px, 76vw);
+		height: 42vh;
+	}
+
+	.velion-hero__content p {
+		max-width: 420px;
+	}
+}
+
+/* Velion image-vibe pass */
+.velion-hero {
+	background:
+		linear-gradient(180deg, rgba(12, 14, 16, 0.08), rgba(12, 14, 16, 0.36)),
+		#101316;
+}
+
+.velion-water {
+	inset: -6% -4%;
+	background:
+		linear-gradient(90deg, rgba(247, 244, 238, 0.05) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.05) 1px, transparent 1px),
+		linear-gradient(90deg, rgba(11, 13, 15, 0.78) 0%, rgba(11, 13, 15, 0.32) 42%, rgba(11, 13, 15, 0.08) 100%),
+		url("/velion-vibe/signal-ridge.png") 72% center / min(62vw, 900px) auto no-repeat,
+		linear-gradient(145deg, #111619, #20252a 58%, #0b0d0f);
+	background-size: 104px 104px, 104px 104px, 100% 100%, min(62vw, 900px) auto, 100% 100%;
+	animation: velion-vibe-drift 28s ease-in-out infinite alternate;
+}
+
+.velion-water::before {
+	background:
+		linear-gradient(115deg, transparent 0 20%, rgba(247, 244, 238, 0.2) 20.05% 20.12%, transparent 20.18% 100%),
+		linear-gradient(145deg, transparent 0 52%, rgba(79, 125, 243, 0.28) 52.05% 52.12%, transparent 52.18% 100%),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.04), rgba(247, 244, 238, 0));
+	opacity: 0.76;
+}
+
+.velion-water::after {
+	inset: 11% 3% 8% 57%;
+	border-color: rgba(247, 244, 238, 0.16);
+	background:
+		linear-gradient(180deg, rgba(247, 244, 238, 0.12), rgba(247, 244, 238, 0.02)),
+		url("/velion-vibe/glass-edge.png") center / cover no-repeat;
+	opacity: 0.62;
+	filter: saturate(0.74) contrast(1.03);
+}
+
+.velion-vessel {
+	top: 16%;
+	left: 60%;
+	width: min(480px, 32vw);
+	height: min(650px, 68vh);
+	overflow: hidden;
+	border-color: rgba(247, 244, 238, 0.24);
+	background:
+		linear-gradient(180deg, rgba(247, 244, 238, 0.18), rgba(247, 244, 238, 0.04)),
+		url("/velion-vibe/soft-orb.png") center / cover no-repeat;
+	box-shadow: 0 38px 100px rgba(0, 0, 0, 0.36);
+}
+
+.velion-vessel::before {
+	inset: 0;
+	height: auto;
+	border: 0;
+	background:
+		linear-gradient(90deg, rgba(247, 244, 238, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(247, 244, 238, 0.08) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(10, 13, 16, 0.08), rgba(10, 13, 16, 0.42));
+	background-size: 58px 58px, 58px 58px, 100% 100%;
+}
+
+.velion-vessel__roof,
+.velion-vessel__glass,
+.velion-vessel__deck {
+	backdrop-filter: blur(14px);
+}
+
+.velion-vessel__roof {
+	top: 11%;
+	left: 9%;
+	width: 31%;
+	height: 16%;
+	border: 1px solid rgba(247, 244, 238, 0.16);
+	background: rgba(247, 244, 238, 0.08);
+}
+
+.velion-vessel__glass {
+	top: 39%;
+	left: 17%;
+	width: 54%;
+	height: 1px;
+	border: 0;
+	background: linear-gradient(90deg, transparent, rgba(247, 244, 238, 0.72), transparent);
+}
+
+.velion-vessel__deck {
+	right: 12%;
+	bottom: 12%;
+	width: 42%;
+	height: 20%;
+	background:
+		linear-gradient(90deg, rgba(238, 122, 80, 0.34) 0 4px, transparent 4px),
+		rgba(247, 244, 238, 0.08);
+}
+
+.velion-wake {
+	background: linear-gradient(90deg, transparent, rgba(247, 244, 238, 0.46), rgba(238, 122, 80, 0.72), transparent);
+}
+
+.velion-visual {
+	isolation: isolate;
+	background: var(--velion-bg-soft);
+	box-shadow: inset 0 0 0 1px rgba(26, 26, 26, 0.05);
+}
+
+.velion-visual__asset {
+	position: absolute;
+	z-index: 0;
+	inset: 0;
+	display: block;
+	background:
+		linear-gradient(180deg, rgba(248, 248, 247, var(--vibe-wash, 0.04)), rgba(248, 248, 247, var(--vibe-wash-end, 0.18))),
+		var(--velion-vibe-image);
+	background-position: center;
+	background-size: cover;
+	filter: var(--vibe-filter, saturate(0.9) contrast(1.02));
+	opacity: var(--vibe-opacity, 0.94);
+	transform: scale(var(--vibe-scale, 1.02));
+}
+
+.velion-visual::before,
+.velion-visual::after,
+.velion-visual__line,
+.velion-visual__node,
+.velion-visual__panel {
+	z-index: 2;
+}
+
+.velion-visual::before {
+	background:
+		linear-gradient(90deg, rgba(238, 122, 80, 0.42) 0 4px, transparent 4px 100%),
+		rgba(255, 255, 255, 0.2);
+	backdrop-filter: blur(18px);
+}
+
+.velion-visual::after,
+.velion-visual__panel {
+	background: rgba(255, 255, 255, 0.18);
+	backdrop-filter: blur(16px);
+}
+
+.velion-visual__node {
+	background: rgba(247, 244, 238, 0.7);
+	backdrop-filter: blur(8px);
+}
+
+.velion-visual--craft {
+	--velion-vibe-image: url("/velion-vibe/mist-bloom.png");
+	--vibe-filter: saturate(0.45) contrast(1.05);
+	--vibe-wash: 0.02;
+	--vibe-wash-end: 0.08;
+}
+
+.velion-visual--surface {
+	--velion-vibe-image: url("/velion-vibe/signal-ridge.png");
+	--vibe-filter: saturate(0.82) contrast(1.04);
+	--vibe-opacity: 1;
+	--vibe-wash: 0;
+	--vibe-wash-end: 0;
+	background: #171a1d;
+}
+
+.velion-visual--surface .velion-visual__asset {
+	background:
+		linear-gradient(180deg, rgba(13, 15, 17, 0.18), rgba(13, 15, 17, 0.36)),
+		var(--velion-vibe-image);
+	background-position: center 42%;
+	background-size: cover;
+}
+
+.velion-visual--mark {
+	--velion-vibe-image: url("/velion-vibe/glass-edge.png");
+	--vibe-filter: saturate(0.62) contrast(1.04);
+	--vibe-wash: 0.04;
+	--vibe-wash-end: 0.14;
+}
+
+.velion-visual--icon {
+	--velion-vibe-image: url("/velion-vibe/warm-flight.png");
+	--vibe-filter: saturate(0.82) contrast(1.01);
+	--vibe-wash: 0;
+	--vibe-wash-end: 0.08;
+}
+
+.velion-visual--open {
+	--velion-vibe-image: url("/velion-vibe/mist-bloom.png");
+	--vibe-filter: saturate(0.42) contrast(1.03);
+	--vibe-wash: 0.04;
+	--vibe-wash-end: 0.12;
+}
+
+.velion-visual--detail {
+	--velion-vibe-image: url("/velion-vibe/soft-orb.png");
+	--vibe-filter: saturate(0.76) contrast(1.03);
+	--vibe-wash: 0.02;
+	--vibe-wash-end: 0.1;
+}
+
+.velion-visual--heritage {
+	--velion-vibe-image: url("/velion-vibe/signal-ridge.png");
+	--vibe-filter: saturate(0.72) contrast(1.04);
+	--vibe-wash: 0;
+	--vibe-wash-end: 0.16;
+}
+
+.velion-visual--mark::before {
+	content: "";
+}
+
+.velion-detail__stage {
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.07) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.07) 1px, transparent 1px),
+		url("/velion-vibe/mist-bloom.png") center / cover no-repeat;
+	background-size: 72px 72px, 72px 72px, cover;
+}
+
+.velion-detail__stage::before {
+	position: absolute;
+	z-index: 2;
+	inset: 0;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(90deg, rgba(248, 248, 247, 0.42), transparent 42%, rgba(248, 248, 247, 0.2)),
+		linear-gradient(180deg, rgba(248, 248, 247, 0.06), rgba(248, 248, 247, 0.3));
+}
+
+.velion-detail__frame {
+	inset: 8% 9%;
+	background:
+		linear-gradient(90deg, rgba(238, 122, 80, 0.45) 0 4px, transparent 4px 100%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.28)),
+		var(--frame-image, url("/velion-vibe/mist-bloom.png")) center / cover no-repeat;
+	box-shadow: 0 28px 80px rgba(26, 26, 26, 0.08);
+}
+
+.velion-detail__frame--1 {
+	--frame-image: url("/velion-vibe/mist-bloom.png");
+}
+
+.velion-detail__frame--2 {
+	--frame-image: url("/velion-vibe/glass-edge.png");
+}
+
+.velion-detail__frame--3 {
+	--frame-image: url("/velion-vibe/soft-orb.png");
+}
+
+.velion-detail__frame--4 {
+	--frame-image: url("/velion-vibe/warm-flight.png");
+}
+
+.velion-detail__frame--5 {
+	--frame-image: url("/velion-vibe/signal-ridge.png");
+}
+
+.velion-detail__frame--6 {
+	--frame-image: url("/velion-vibe/glass-edge.png");
+}
+
+.velion-excellence {
+	background:
+		linear-gradient(90deg, rgba(12, 14, 16, 0.88), rgba(12, 14, 16, 0.4)),
+		#111314;
+}
+
+.velion-excellence__media {
+	background:
+		linear-gradient(90deg, rgba(12, 14, 16, 0.7), rgba(12, 14, 16, 0.28)),
+		url("/velion-vibe/warm-flight.png") center / cover no-repeat;
+	filter: saturate(0.82) contrast(1.02);
+	opacity: 0.72;
+}
+
+.velion-technology__visual {
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.07) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.07) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(248, 248, 247, 0.08), rgba(248, 248, 247, 0.28)),
+		url("/velion-vibe/glass-edge.png") center / cover no-repeat;
+	background-size: 72px 72px, 72px 72px, 100% 100%, cover;
+}
+
+.velion-technology__body,
+.velion-technology__wake {
+	background: rgba(255, 255, 255, 0.18);
+	backdrop-filter: blur(18px);
+}
+
+.velion-technology__body {
+	border-color: rgba(255, 255, 255, 0.34);
+}
+
+.velion-technology__wake {
+	border-color: rgba(26, 26, 26, 0.1);
+}
+
+.velion-technology__visual {
+	display: grid;
+	place-items: center;
+	background:
+		radial-gradient(circle at 22% 28%, rgba(121, 56, 25, 0.08), transparent 24%),
+		radial-gradient(circle at 78% 24%, rgba(82, 113, 132, 0.1), transparent 26%),
+		linear-gradient(90deg, rgba(26, 26, 26, 0.035) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.035) 1px, transparent 1px),
+		linear-gradient(145deg, #ffffff, #f7f6f2);
+	background-size: 100% 100%, 100% 100%, 78px 78px, 78px 78px, 100% 100%;
+}
+
+.velion-technology__diagram-shell {
+	display: grid;
+	place-items: center;
+	width: min(86%, 940px);
+	aspect-ratio: 1.82;
+	border: 1px solid color-mix(in srgb, var(--velion-h-teal-deep) 7%, transparent);
+	background: rgba(255, 255, 255, 0.46);
+	box-shadow:
+		0 42px 120px rgba(26, 26, 26, 0.045),
+		inset 0 1px 0 rgba(255, 255, 255, 0.76);
+}
+
+.velion-circuit-diagram {
+	width: min(90%, 760px);
+	height: auto;
+	color: color-mix(in srgb, var(--velion-h-teal-deep) 34%, transparent);
+	overflow: visible;
+}
+
+.velion-circuit-diagram__paths path {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 0.34;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-dasharray: 100;
+	stroke-dashoffset: 0;
+	vector-effect: non-scaling-stroke;
+}
+
+.velion-circuit-diagram__signal {
+	opacity: 0.82;
+	mix-blend-mode: multiply;
+}
+
+.velion-circuit-diagram__signal.is-copper {
+	fill: url(#velion-circuit-copper-gradient);
+}
+
+.velion-circuit-diagram__signal.is-blue {
+	fill: url(#velion-circuit-blue-gradient);
+}
+
+.velion-circuit-diagram__signal.is-ink {
+	fill: url(#velion-circuit-ink-gradient);
+	opacity: 0.62;
+}
+
+.velion-circuit-diagram__pins rect {
+	fill: color-mix(in srgb, var(--velion-h-ink-warm) 72%, #ffffff);
+}
+
+.velion-circuit-diagram__core rect {
+	fill: url(#velion-circuit-core-gradient);
+}
+
+.velion-circuit-diagram__core text {
+	fill: color-mix(in srgb, var(--velion-c-white) 74%, transparent);
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: 5.6px;
+	font-weight: 400;
+	letter-spacing: 0.12em;
+	text-anchor: middle;
+}
+
+@keyframes velion-vibe-drift {
+	from {
+		background-position: 0 0, 0 0, 0 0, 72% center, 0 0;
+	}
+
+	to {
+		background-position: 104px 104px, -104px 104px, 0 0, 76% center, 0 0;
+	}
+}
+
+@keyframes velion-logo-marquee {
+	to {
+		transform: translateX(-100%);
+	}
+}
+
+@media (max-width: 760px) {
+	.velion-logo-carousel__viewport {
+		padding: 34px 0;
+	}
+
+	.velion-logo-carousel__track {
+		gap: 46px;
+		padding-right: 46px;
+		animation-duration: 22s;
+	}
+
+	.velion-water {
+		background-position: 0 0, 0 0, 0 0, 56% center, 0 0;
+		background-size: 82px 82px, 82px 82px, 100% 100%, auto 86vh, 100% 100%;
+	}
+
+	.velion-water::after {
+		inset: 14% 4% 24% 42%;
+	}
+
+	.velion-vessel {
+		left: 44%;
+		width: min(360px, 62vw);
+		height: 46vh;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-logo-carousel__viewport {
+		width: 100%;
+	}
+
+	.velion-logo-carousel__track {
+		flex-wrap: wrap;
+		justify-content: center;
+		width: 100%;
+		animation: none !important;
+	}
+
+	.velion-logo-carousel__track[aria-hidden="true"] {
+		display: none;
+	}
+}
+
+/* Rennsport-inspired first editorial section */
+.velion-section--partnership {
+	grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.82fr);
+	gap: clamp(72px, 11.4vw, 188px);
+	align-items: start;
+	background:
+		linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0)),
+		color-mix(in srgb, var(--velion-g-blue-mist) 70%, #d8ecff);
+	padding-top: clamp(58px, 7vw, 108px);
+	padding-bottom: clamp(150px, 18vh, 230px);
+}
+
+.velion-section--partnership .velion-section__visual {
+	--velion-visual-ratio: 1.48;
+
+	min-height: clamp(360px, 32vw, 520px);
+	aspect-ratio: var(--velion-visual-ratio);
+	box-shadow: none;
+}
+
+.velion-section--partnership .velion-section__visual::before {
+	inset: 18% 10% auto 54%;
+	height: 22%;
+}
+
+.velion-section--partnership .velion-section__visual::after {
+	right: 12%;
+	bottom: 13%;
+	width: 44%;
+	height: 28%;
+}
+
+.velion-section--partnership .velion-visual__asset {
+	background-position: center 42%;
+	filter: saturate(0.68) contrast(1.02);
+	opacity: 0.86;
+}
+
+.velion-section--partnership .velion-section__copy {
+	max-width: min(100%, 560px);
+	padding-top: 0;
+}
+
+.velion-section--partnership .velion-copy-rule {
+	display: none;
+}
+
+.velion-section--partnership .header-1 {
+	margin-bottom: clamp(24px, 3vw, 42px);
+	color: color-mix(in srgb, var(--velion-h-teal-deep) 82%, var(--velion-j-text));
+}
+
+.velion-section--partnership .velion-ingress {
+	max-width: 560px;
+	color: color-mix(in srgb, var(--velion-h-teal-deep) 72%, var(--velion-text-muted));
+}
+
+.velion-section--partnership .velion-ingress p + p {
+	margin-top: 1.4rem;
+}
+
+.velion-section--partnership .velion-copy-action {
+	margin-top: clamp(44px, 5vw, 72px);
+}
+
+.velion-outline-link {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 164px;
+	min-height: 56px;
+	padding: 15px 28px;
+	border: 1px solid color-mix(in srgb, var(--velion-h-teal-deep) 34%, transparent);
+	background: transparent;
+	color: color-mix(in srgb, var(--velion-h-teal-deep) 86%, var(--velion-j-text));
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: 1rem;
+	font-weight: 500;
+	line-height: 1;
+	transition:
+		background 220ms ease,
+		border-color 220ms ease,
+		color 220ms ease,
+		transform 220ms ease;
+}
+
+.velion-outline-link:hover {
+	border-color: color-mix(in srgb, var(--velion-h-teal-deep) 58%, transparent);
+	background: color-mix(in srgb, var(--velion-h-teal-deep) 7%, transparent);
+	transform: translateY(-1px);
+}
+
+@media (max-width: 1100px) {
+	.velion-section--partnership {
+		grid-template-columns: 1fr;
+		gap: 48px;
+		padding-top: 58px;
+		padding-bottom: 86px;
+	}
+
+	.velion-section--partnership .velion-section__copy {
+		max-width: 680px;
+	}
+
+	.velion-section--partnership .velion-section__visual {
+		min-height: clamp(320px, 54vw, 520px);
+	}
+}
+
+@media (max-width: 760px) {
+	.velion-section--partnership {
+		gap: 34px;
+	}
+
+	.velion-section--partnership .velion-section__visual {
+		min-height: 300px;
+	}
+}
+
+/* Final first-section layout: large left image, right image + copy */
+.velion-section--partnership {
+	grid-template-columns: minmax(0, 4fr) minmax(380px, 3fr);
+	gap: clamp(136px, 14vw, 280px);
+	align-items: start;
+	background: var(--velion-bg-cream);
+	padding-top: clamp(132px, 15vh, 220px);
+	padding-bottom: clamp(142px, 17vh, 240px);
+}
+
+.velion-partnership__content {
+	display: grid;
+	align-content: start;
+	gap: clamp(48px, 4.8vw, 72px);
+	min-width: 0;
+}
+
+.velion-partnership__media {
+	position: relative;
+	overflow: hidden;
+	background-color: var(--velion-bg-mist);
+	background-position: center;
+	background-size: cover;
+}
+
+.velion-partnership__media::after {
+	position: absolute;
+	inset: 0;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(90deg, rgba(247, 244, 238, 0.02), rgba(247, 244, 238, 0.16)),
+		linear-gradient(180deg, rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0));
+}
+
+.velion-partnership__media--primary {
+	aspect-ratio: 3 / 4;
+	justify-self: start;
+	width: min(100%, 660px);
+	min-height: clamp(640px, 58vw, 940px);
+	background-image:
+		linear-gradient(180deg, rgba(4, 5, 6, 0.12), rgba(4, 5, 6, 0.32)),
+		url("/velion-vibe/signal-ridge.png");
+	background-position: center 44%;
+	filter: saturate(0.72) contrast(1.08);
+}
+
+.velion-partnership__media--secondary {
+	aspect-ratio: 4 / 3;
+	justify-self: end;
+	width: min(100%, 460px);
+	background-image:
+		linear-gradient(180deg, rgba(248, 248, 247, 0.04), rgba(248, 248, 247, 0.12)),
+		url("/velion-vibe/glass-edge.png");
+	background-position: center;
+	filter: saturate(0.78) contrast(1.04);
+}
+
+.velion-section--partnership .velion-partnership__copy {
+	justify-self: end;
+	width: min(100%, 460px);
+	max-width: min(100%, 460px);
+	padding-top: 0;
+}
+
+.velion-section--partnership .velion-copy-rule {
+	display: none;
+}
+
+.velion-section--partnership .header-1 {
+	margin-bottom: clamp(28px, 3vw, 44px);
+	color: var(--velion-j-text);
+}
+
+.velion-section--partnership .velion-ingress {
+	max-width: 590px;
+	color: color-mix(in srgb, var(--velion-text-muted) 88%, var(--velion-j-text));
+}
+
+.velion-section--partnership .velion-copy-action {
+	margin-top: clamp(34px, 3.6vw, 58px);
+}
+
+@media (max-width: 1100px) {
+	.velion-section--partnership {
+		grid-template-columns: 1fr;
+		gap: 64px;
+		padding-top: 88px;
+		padding-bottom: 112px;
+	}
+
+	.velion-partnership__media--primary {
+		aspect-ratio: 1;
+		justify-self: stretch;
+		width: 100%;
+		min-height: clamp(460px, 78vw, 680px);
+	}
+
+	.velion-partnership__content {
+		gap: 42px;
+	}
+
+	.velion-section--partnership .velion-partnership__copy {
+		justify-self: start;
+		width: 100%;
+		max-width: 680px;
+	}
+}
+
+@media (max-width: 760px) {
+	.velion-section--partnership {
+		gap: 36px;
+		padding-top: 64px;
+		padding-bottom: 78px;
+	}
+
+	.velion-partnership__content {
+		gap: 32px;
+	}
+
+	.velion-partnership__media--secondary {
+		aspect-ratio: 1.35;
+		width: 100%;
+	}
+}
+
+.velion-prefooter {
+	position: relative;
+	min-height: 260svh;
+	padding: 0;
+	overflow: clip;
+	background: var(--velion-bg-cream);
+	color: var(--velion-j-text);
+}
+
+.velion-prefooter__sticky {
+	position: sticky;
+	top: 0;
+	height: 100svh;
+	min-height: 640px;
+	overflow: hidden;
+	background:
+		radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.62), transparent 32%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0)),
+		var(--velion-bg-cream);
+}
+
+.velion-prefooter__ambient {
+	position: absolute;
+	z-index: 1;
+	inset: 0;
+	pointer-events: none;
+	background:
+		radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.03), transparent 30%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 28%),
+		#06182b;
+	opacity: 0;
+	will-change: opacity;
+}
+
+.velion-prefooter__switch {
+	position: absolute;
+	z-index: 2;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	overflow: hidden;
+}
+
+.velion-prefooter__phrase {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	z-index: 3;
+	width: min(88vw, 720px);
+	margin: 0;
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(1.26rem, 1.55vw, 2rem);
+	font-weight: 300;
+	line-height: 1.18;
+	letter-spacing: -0.045em;
+	text-align: center;
+	transform: translate(-50%, -50%);
+	will-change: opacity, transform;
+}
+
+.velion-prefooter__phrase--dark {
+	opacity: 0;
+	color: color-mix(in srgb, var(--velion-c-white) 86%, transparent);
+}
+
+.velion-prefooter__final {
+	position: absolute;
+	z-index: 3;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	padding: clamp(120px, 18vh, 220px) var(--velion-edge);
+	opacity: 0;
+	will-change: opacity, transform;
+}
+
+.velion-prefooter__inner {
+	position: relative;
+	display: grid;
+	place-items: center;
+	width: 100%;
+	min-height: clamp(360px, 46vh, 540px);
+}
+
+.velion-prefooter__seal,
+.velion-prefooter__meta,
+.velion-prefooter__statement {
+	margin: 0;
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-weight: 400;
+	text-transform: uppercase;
+}
+
+.velion-prefooter__seal {
+	position: absolute;
+	top: 0;
+	left: 50%;
+	display: grid;
+	gap: 3px;
+	transform: translateX(-50%);
+	color: color-mix(in srgb, var(--velion-c-white) 58%, transparent);
+	font-size: clamp(0.86rem, 0.78vw, 1.02rem);
+	line-height: 1.06;
+	letter-spacing: -0.02em;
+	text-align: center;
+	white-space: nowrap;
+}
+
+.velion-prefooter__meta {
+	position: absolute;
+	top: 42%;
+	color: color-mix(in srgb, var(--velion-c-white) 52%, transparent);
+	font-size: clamp(0.82rem, 0.78vw, 1rem);
+	font-weight: 500;
+	line-height: 1;
+	letter-spacing: -0.03em;
+	white-space: nowrap;
+}
+
+.velion-prefooter__meta--left {
+	left: 0;
+}
+
+.velion-prefooter__meta--right {
+	right: 0;
+}
+
+.velion-prefooter__center {
+	display: grid;
+	justify-items: center;
+	gap: clamp(34px, 4vw, 52px);
+	width: min(100%, 760px);
+	text-align: center;
+}
+
+.velion-prefooter__statement {
+	max-width: 720px;
+	color: color-mix(in srgb, var(--velion-c-white) 66%, transparent);
+	font-size: clamp(0.9rem, 0.86vw, 1.08rem);
+	font-weight: 600;
+	line-height: 1.14;
+	letter-spacing: -0.045em;
+}
+
+.velion-prefooter__mark {
+	display: grid;
+	place-items: center;
+	width: clamp(46px, 4.2vw, 64px);
+	height: clamp(58px, 5.6vw, 82px);
+	color: #4f6cff;
+	font-family:
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(2.6rem, 4vw, 4rem);
+	font-weight: 300;
+	line-height: 1;
+	letter-spacing: -0.16em;
+}
+
+.velion-prefooter__mark span {
+	display: block;
+	transform: scaleX(0.78);
+	text-shadow:
+		-0.08em 0 currentColor,
+		0.08em 0 color-mix(in srgb, currentColor 72%, transparent);
+}
+
+.velion-home > main {
+	position: relative;
+	z-index: 2;
+	background: var(--velion-bg-cream);
+}
+
+.velion-footer-reveal {
+	position: relative;
+	z-index: 1;
+	min-height: auto;
+	margin-top: -1px;
+	overflow: clip;
+	background: color-mix(in srgb, var(--velion-bg-cream) 84%, #e8e7e3);
+}
+
+.velion-footer {
+	position: relative;
+	min-height: max(100svh, 880px);
+	overflow: clip;
+	background: #f3f1ee;
+	color: var(--velion-j-text);
+	will-change: transform;
+}
+
+.velion-footer__media {
+	position: absolute;
+	inset: -34% 0;
+	z-index: 0;
+	background:
+		radial-gradient(circle at 23% 18%, rgba(121, 56, 25, 0.1), transparent 29%),
+		radial-gradient(circle at 76% 18%, rgba(82, 113, 132, 0.12), transparent 28%),
+		linear-gradient(90deg, rgba(26, 26, 26, 0.036) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.028) 1px, transparent 1px),
+		linear-gradient(180deg, #f8f6f3 0%, #ecebe7 100%);
+	background-size:
+		100% 100%,
+		100% 100%,
+		96px 96px,
+		96px 96px,
+		100% 100%;
+	will-change: transform;
+}
+
+.velion-footer::before {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(90deg, transparent 0, transparent calc(var(--velion-edge) - 1px), rgba(26, 26, 26, 0.055) calc(var(--velion-edge) - 1px), rgba(26, 26, 26, 0.055) var(--velion-edge), transparent var(--velion-edge)),
+		linear-gradient(90deg, transparent 0, transparent calc(100% - var(--velion-edge)), rgba(26, 26, 26, 0.05) calc(100% - var(--velion-edge)), rgba(26, 26, 26, 0.05) calc(100% - var(--velion-edge) + 1px), transparent calc(100% - var(--velion-edge) + 1px));
+	opacity: 0.72;
+}
+
+.velion-footer__inner {
+	position: relative;
+	z-index: 2;
+	display: grid;
+	grid-template-columns: 1fr;
+	grid-template-rows: auto 1fr;
+	gap: clamp(56px, 9vh, 108px);
+	width: 100%;
+	min-height: max(100svh, 880px);
+	max-width: none;
+	margin: 0;
+	padding: clamp(96px, 8.8vw, 132px) var(--velion-edge) clamp(28px, 3.2vw, 48px);
+	will-change: opacity, transform;
+}
+
+.velion-footer__masthead {
+	display: grid;
+	grid-template-columns: minmax(220px, 0.85fr) minmax(340px, 1fr) minmax(300px, 0.8fr);
+	gap: clamp(48px, 8vw, 144px);
+	align-items: start;
+}
+
+.velion-footer__brand {
+	color: color-mix(in srgb, var(--velion-h-ink-warm) 92%, var(--velion-j-text));
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(3.25rem, 8.8vw, 10rem);
+	font-weight: 300;
+	line-height: 0.82;
+	letter-spacing: -0.09em;
+	text-transform: uppercase;
+	will-change: transform;
+}
+
+.velion-footer__statement {
+	max-width: 620px;
+}
+
+.velion-footer__kicker,
+.velion-footer__group h3,
+.velion-footer__newsletter p {
+	margin: 0;
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.82rem, 0.8vw, 0.96rem);
+	font-weight: 500;
+	line-height: 1;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+}
+
+.velion-footer__kicker {
+	margin-bottom: clamp(26px, 3vw, 42px);
+	color: color-mix(in srgb, var(--velion-a-earth) 72%, var(--velion-text-muted));
+}
+
+.velion-footer__statement h2 {
+	margin: 0;
+	color: var(--velion-j-text);
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(3.2rem, 5.2vw, 7.1rem);
+	font-weight: 300;
+	line-height: 0.96;
+	letter-spacing: -0.058em;
+}
+
+.velion-footer__statement > p:not(.velion-footer__kicker) {
+	max-width: 510px;
+	margin: clamp(30px, 3.2vw, 48px) 0 0;
+	color: color-mix(in srgb, var(--velion-j-text) 54%, var(--velion-text-muted));
+	font-size: clamp(1rem, 1vw, 1.14rem);
+	font-weight: 300;
+	line-height: 1.55;
+}
+
+.velion-footer__newsletter {
+	align-self: start;
+	width: 100%;
+	color: var(--velion-j-text);
+}
+
+.velion-footer__newsletter p {
+	margin-bottom: clamp(24px, 2.4vw, 34px);
+	color: color-mix(in srgb, var(--velion-j-text) 68%, var(--velion-text-muted));
+}
+
+.velion-footer__input {
+	display: grid;
+	grid-template-columns: 1fr clamp(42px, 4vw, 58px);
+	border-top: 1px solid color-mix(in srgb, var(--velion-j-text) 24%, transparent);
+	border-bottom: 1px solid color-mix(in srgb, var(--velion-j-text) 24%, transparent);
+}
+
+.velion-footer__input input {
+	min-width: 0;
+	padding: clamp(15px, 1.7vw, 22px) 0;
+	border: 0;
+	outline: 0;
+	background: transparent;
+	color: var(--velion-j-text);
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.95rem, 0.95vw, 1.08rem);
+	font-weight: 300;
+}
+
+.velion-footer__input input::placeholder {
+	color: color-mix(in srgb, var(--velion-j-text) 46%, transparent);
+}
+
+.velion-footer__input button {
+	display: grid;
+	place-items: center;
+	border: 0;
+	background: transparent;
+	color: color-mix(in srgb, var(--velion-a-earth) 78%, var(--velion-j-text));
+	cursor: pointer;
+}
+
+.velion-footer__input svg {
+	width: 34px;
+	height: 14px;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: square;
+	stroke-linejoin: miter;
+	stroke-width: 1.15;
+	transition: transform 220ms ease;
+}
+
+.velion-footer__input button:hover svg {
+	transform: translateX(5px);
+}
+
+.velion-footer__newsletter small {
+	display: block;
+	max-width: 420px;
+	margin-top: 18px;
+	color: color-mix(in srgb, var(--velion-j-text) 46%, var(--velion-text-muted));
+	font-size: 0.86rem;
+	font-weight: 300;
+	line-height: 1.5;
+}
+
+.velion-footer__bottom {
+	align-self: end;
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: clamp(26px, 4.4vw, 72px);
+}
+
+.velion-footer__group {
+	display: grid;
+	align-content: start;
+	gap: 7px;
+	padding-top: 14px;
+	border-top: 1px solid color-mix(in srgb, var(--velion-j-text) 22%, transparent);
+}
+
+.velion-footer__group h3 {
+	margin-bottom: 6px;
+	color: color-mix(in srgb, var(--velion-j-text) 82%, transparent);
+}
+
+.velion-footer__group a,
+.velion-footer__group span {
+	width: fit-content;
+	color: color-mix(in srgb, var(--velion-j-text) 48%, var(--velion-text-muted));
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.88rem, 0.84vw, 1rem);
+	font-weight: 500;
+	line-height: 1.06;
+	text-transform: uppercase;
+	transition: color 180ms ease;
+}
+
+.velion-footer__group a:hover {
+	color: var(--velion-j-text);
+}
+
+@media (max-width: 900px) {
+	.velion-prefooter {
+		min-height: 235svh;
+	}
+
+	.velion-prefooter__sticky {
+		min-height: 100svh;
+	}
+
+	.velion-prefooter__final {
+		padding: 104px var(--velion-page-pad) 116px;
+	}
+
+	.velion-prefooter__inner {
+		position: static;
+		min-height: 0;
+		justify-items: center;
+		gap: 34px;
+	}
+
+	.velion-prefooter__seal,
+	.velion-prefooter__meta {
+		position: static;
+		transform: none;
+	}
+
+	.velion-prefooter__meta--right {
+		order: 1;
+	}
+
+	.velion-prefooter__center {
+		order: 2;
+		gap: 30px;
+	}
+
+	.velion-footer-reveal {
+		min-height: auto;
+	}
+
+	.velion-footer {
+		position: relative;
+		min-height: auto;
+	}
+
+	.velion-footer__inner {
+		min-height: auto;
+		gap: 84px;
+		padding: 74px var(--velion-page-pad) 46px;
+	}
+
+	.velion-footer__masthead,
+	.velion-footer__bottom {
+		grid-template-columns: 1fr;
+	}
+
+	.velion-footer__masthead {
+		gap: 46px;
+	}
+
+	.velion-footer__brand {
+		font-size: clamp(3.2rem, 18vw, 8rem);
+	}
+
+	.velion-footer__statement h2 {
+		font-size: clamp(3.1rem, 13vw, 5.7rem);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-circuit-diagram animate,
+	.velion-circuit-diagram animateMotion {
+		display: none;
+	}
+
+	.velion-circuit-diagram__signal {
+		opacity: 0;
+	}
+}
+
+/* Velion landing rebuild: human metaphor, product proof, governed workflow. */
+.velion-home {
+	background: var(--velion-bg-cream);
+}
+
+.velion-home .velion-hero {
+	min-height: 100svh;
+	background: #070809;
+	color: var(--velion-c-white);
+}
+
+.velion-home .velion-hero__media {
+	inset: -8% 0 -18%;
+	background: #070809;
+}
+
+.velion-hero__image {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	object-position: 48% 48%;
+	filter: saturate(0.84) contrast(1.06) brightness(0.68);
+	transform: scale(1.04);
+}
+
+.velion-hero__veil {
+	position: absolute;
+	inset: 0;
+	background:
+		linear-gradient(90deg, rgba(4, 5, 6, 0.92) 0%, rgba(8, 9, 10, 0.72) 30%, rgba(8, 9, 10, 0.16) 64%, rgba(4, 5, 6, 0.28) 100%),
+		linear-gradient(180deg, rgba(6, 7, 8, 0.38), rgba(6, 7, 8, 0.2) 48%, rgba(6, 7, 8, 0.72)),
+		linear-gradient(90deg, rgba(255, 255, 255, 0.09) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+	background-size:
+		100% 100%,
+		100% 100%,
+		104px 104px,
+		104px 104px;
+}
+
+.velion-home .velion-hero__content {
+	top: 0;
+	bottom: 0;
+	left: var(--velion-edge);
+	width: min(650px, calc(100% - var(--velion-edge) * 2));
+	max-width: 650px;
+	padding-top: 0;
+}
+
+.velion-home .velion-hero__content h1 {
+	max-width: 620px;
+	margin-bottom: clamp(26px, 3vw, 42px);
+	color: var(--velion-c-white);
+	font-size: clamp(4.3rem, 7.4vw, 8.7rem);
+	font-weight: 300;
+	line-height: 0.94;
+	letter-spacing: -0.065em;
+}
+
+.velion-home .velion-hero__content p {
+	max-width: 470px;
+	color: color-mix(in srgb, var(--velion-c-white) 76%, transparent);
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(1.04rem, 1.08vw, 1.22rem);
+	font-weight: 300;
+	line-height: 1.5;
+}
+
+.velion-home .velion-hero__explore {
+	left: var(--velion-edge);
+	bottom: clamp(42px, 6vh, 76px);
+}
+
+.velion-logo-carousel {
+	height: clamp(112px, 12vw, 154px);
+	padding: 0 var(--velion-edge);
+	background:
+		linear-gradient(90deg, var(--velion-bg-cream), transparent 12%, transparent 88%, var(--velion-bg-cream)),
+		color-mix(in srgb, var(--velion-g-blue-mist) 44%, var(--velion-bg-cream));
+	border-top: 1px solid color-mix(in srgb, var(--velion-j-text) 6%, transparent);
+	border-bottom: 1px solid color-mix(in srgb, var(--velion-j-text) 7%, transparent);
+}
+
+.velion-logo-carousel__viewport {
+	height: 100%;
+	max-width: none;
+	mask-image: linear-gradient(90deg, transparent, #000 11%, #000 89%, transparent);
+}
+
+.velion-logo-carousel__mark {
+	color: color-mix(in srgb, var(--velion-j-text) 62%, transparent);
+	font-family:
+		Arbeit,
+		Protokoll,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(1.12rem, 1.45vw, 1.7rem);
+	font-weight: 500;
+	letter-spacing: -0.045em;
+	opacity: 0.84;
+	text-transform: none;
+}
+
+.velion-section--partnership {
+	display: grid;
+	grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
+	gap: clamp(58px, 8vw, 148px);
+	align-items: center;
+	min-height: min(860px, 94svh);
+	padding-top: clamp(86px, 11vw, 150px);
+	padding-bottom: clamp(82px, 10vw, 142px);
+}
+
+.velion-partnership__media {
+	background-size: cover;
+	background-position: center;
+}
+
+.velion-partnership__media--primary {
+	width: min(100%, 760px);
+	min-height: clamp(540px, 66vw, 760px);
+	background-image:
+		linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0)),
+		url("/velion-vibe/signal-ridge.png");
+	filter: saturate(0.82) contrast(0.98);
+}
+
+.velion-partnership__content {
+	display: grid;
+	align-content: start;
+	gap: clamp(54px, 6vw, 82px);
+}
+
+.velion-partnership__media--secondary {
+	justify-self: end;
+	width: min(74%, 430px);
+	aspect-ratio: 1.42;
+	background-image: url("/velion-vibe/glass-edge.png");
+}
+
+.velion-section--partnership .velion-partnership__copy {
+	max-width: 590px;
+}
+
+.velion-section--partnership .header-1 {
+	max-width: 600px;
+}
+
+.velion-section--partnership .velion-ingress {
+	max-width: 520px;
+}
+
+.velion-product-loop {
+	position: relative;
+	display: grid;
+	grid-template-columns: minmax(520px, 0.84fr) minmax(0, 1.16fr);
+	min-height: min(880px, 96svh);
+	border-top: 1px solid color-mix(in srgb, var(--velion-j-text) 8%, transparent);
+	border-bottom: 1px solid color-mix(in srgb, var(--velion-j-text) 8%, transparent);
+	background: linear-gradient(180deg, #f9f8f6 0%, #f5f3f0 100%);
+	color: var(--velion-j-text);
+}
+
+.velion-product-loop__copy {
+	display: grid;
+	align-content: center;
+	max-width: 620px;
+	padding: clamp(80px, 8.4vw, 124px) clamp(34px, 4.6vw, 72px) clamp(78px, 8vw, 116px) var(--velion-edge);
+}
+
+.velion-product-loop__copy .header-1 {
+	max-width: 540px;
+	margin: clamp(28px, 3.2vw, 44px) 0 0;
+}
+
+.velion-product-loop__copy .velion-ingress {
+	max-width: 520px;
+	margin-top: clamp(26px, 2.8vw, 40px);
+	color: color-mix(in srgb, var(--velion-j-text) 64%, transparent);
+}
+
+.velion-product-loop__eyebrow,
+.velion-product-loop__cta {
+	display: inline-flex;
+	align-items: center;
+	width: fit-content;
+	color: color-mix(in srgb, var(--velion-a-earth) 78%, var(--velion-j-text));
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.95rem, 0.9vw, 1.05rem);
+	font-weight: 300;
+	line-height: 1.18;
+	text-decoration: none;
+}
+
+.velion-product-loop__eyebrow span,
+.velion-product-loop__cta span {
+	display: inline-block;
+	width: clamp(52px, 5.8vw, 86px);
+	margin-left: 14px;
+	overflow: hidden;
+	white-space: nowrap;
+	transform: translateY(-1px);
+}
+
+.velion-product-loop__cta {
+	margin-top: clamp(42px, 5vw, 72px);
+	font-size: clamp(1rem, 1.06vw, 1.2rem);
+}
+
+.velion-product-loop__stage {
+	position: relative;
+	min-width: 0;
+	min-height: min(880px, 96svh);
+	overflow: hidden;
+	border-left: 1px solid color-mix(in srgb, var(--velion-j-text) 8%, transparent);
+	background:
+		linear-gradient(90deg, rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0)),
+		color-mix(in srgb, var(--velion-bg-soft) 92%, var(--velion-a-earth));
+}
+
+.velion-product-loop__ambient {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	filter: saturate(0.86) contrast(0.92);
+}
+
+.velion-product-loop__ambient img {
+	object-fit: cover;
+	object-position: center;
+	transform: scale(1.08);
+}
+
+.velion-product-loop__ambient::after {
+	position: absolute;
+	inset: 0;
+	content: "";
+	background:
+		linear-gradient(90deg, rgba(249, 248, 246, 0.42), rgba(249, 248, 246, 0.08) 26%, rgba(249, 248, 246, 0.58) 100%),
+		linear-gradient(180deg, rgba(249, 248, 246, 0.08), rgba(249, 248, 246, 0.34));
+	backdrop-filter: blur(8px);
+}
+
+.velion-product-loop__dashboard {
+	position: absolute;
+	inset: clamp(74px, 8.4vw, 128px) var(--velion-edge) clamp(58px, 6.6vw, 96px) clamp(42px, 4.5vw, 72px);
+	display: grid;
+	grid-template-rows: minmax(0, 1fr) auto;
+	align-content: center;
+	gap: clamp(14px, 1.4vw, 20px);
+}
+
+.velion-product-loop__video-frame {
+	position: relative;
+	width: 100%;
+	max-width: 1040px;
+	aspect-ratio: 1.818;
+	align-self: center;
+	justify-self: end;
+	overflow: hidden;
+	border: 1px solid rgba(31, 31, 29, 0.1);
+	border-radius: 18px 0 0 18px;
+	background: rgba(255, 255, 255, 0.86);
+	box-shadow:
+		0 48px 140px rgba(31, 31, 29, 0.16),
+		inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.velion-product-loop__video-frame video {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	object-position: center;
+}
+
+.velion-product-loop__screen-stack {
+	position: relative;
+	width: 100%;
+	max-width: 930px;
+	aspect-ratio: 1.471;
+	align-self: center;
+	justify-self: end;
+	overflow: hidden;
+	border: 1px solid rgba(31, 31, 29, 0.1);
+	border-radius: 18px 0 0 18px;
+	background: rgba(255, 255, 255, 0.86);
+	box-shadow:
+		0 48px 140px rgba(31, 31, 29, 0.16),
+		inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.velion-product-loop__screen {
+	position: absolute;
+	inset: 0;
+	margin: 0;
+	opacity: 0;
+	transform: scale(1.012);
+	animation: velion-dashboard-screen-cycle 18s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+	animation-delay: calc(var(--screen-index) * 4.5s);
+}
+
+.velion-product-loop__screen img {
+	display: block;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	object-position: center top;
+}
+
+.velion-product-loop__prompt-strip {
+	position: relative;
+	width: min(100%, 760px);
+	min-height: 74px;
+	justify-self: end;
+	overflow: hidden;
+	border: 1px solid rgba(31, 31, 29, 0.1);
+	border-radius: 18px;
+	background: rgba(255, 255, 255, 0.72);
+	box-shadow: 0 24px 70px rgba(31, 31, 29, 0.075);
+	backdrop-filter: blur(18px);
+}
+
+.velion-product-loop__prompt-strip .velion-product-loop__typed-line {
+	inset: 20px 24px auto;
+	width: calc(100% - 48px);
+	color: color-mix(in srgb, var(--velion-j-text) 84%, transparent);
+	font-size: clamp(0.92rem, 1.02vw, 1.12rem);
+	line-height: 1.35;
+}
+
+.velion-product-loop__dashboard .velion-product-loop__state-row {
+	justify-self: end;
+}
+
+.velion-product-loop__app {
+	position: absolute;
+	inset: clamp(74px, 8.4vw, 128px) var(--velion-edge) clamp(58px, 6.6vw, 96px) clamp(42px, 4.5vw, 72px);
+	display: grid;
+	grid-template-columns: minmax(172px, 0.28fr) minmax(0, 1fr);
+	overflow: hidden;
+	border: 1px solid rgba(255, 255, 255, 0.72);
+	border-radius: 20px 0 0 20px;
+	background: rgba(255, 255, 255, 0.72);
+	box-shadow:
+		0 48px 140px rgba(31, 31, 29, 0.16),
+		inset 0 1px 0 rgba(255, 255, 255, 0.82);
+	backdrop-filter: blur(18px);
+}
+
+.velion-product-loop__sidebar {
+	display: grid;
+	align-content: start;
+	gap: clamp(24px, 2.2vw, 36px);
+	padding: clamp(22px, 2vw, 32px);
+	border-right: 1px solid rgba(31, 31, 29, 0.075);
+	background: rgba(242, 241, 238, 0.7);
+}
+
+.velion-product-loop__workspace {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	color: color-mix(in srgb, var(--velion-j-text) 82%, transparent);
+	font-size: 0.92rem;
+	font-weight: 500;
+}
+
+.velion-product-loop__workspace span {
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	border-radius: 999px;
+	background: var(--velion-j-text);
+	color: var(--velion-c-white);
+	font-size: 0.78rem;
+	font-weight: 500;
+}
+
+.velion-product-loop__sidebar nav {
+	display: grid;
+	gap: 10px;
+	color: color-mix(in srgb, var(--velion-j-text) 58%, transparent);
+	font-size: clamp(0.88rem, 0.92vw, 1rem);
+}
+
+.velion-product-loop__sidebar nav span {
+	margin-bottom: 4px;
+	color: color-mix(in srgb, var(--velion-j-text) 44%, transparent);
+	font-size: 0.74rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
+.velion-product-loop__nav-item {
+	display: flex;
+	align-items: center;
+	min-height: 32px;
+	padding: 0 10px;
+	border-radius: 9px;
+	color: inherit;
+}
+
+.velion-product-loop__nav-item:first-of-type {
+	background: rgba(255, 255, 255, 0.76);
+	color: color-mix(in srgb, var(--velion-j-text) 88%, transparent);
+}
+
+.velion-product-loop__workspace-panel {
+	display: grid;
+	grid-template-rows: auto 1fr;
+	min-width: 0;
+	background: rgba(255, 255, 255, 0.78);
+}
+
+.velion-product-loop__topbar {
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	height: 58px;
+	padding: 0 clamp(20px, 2.2vw, 34px);
+	border-bottom: 1px solid rgba(31, 31, 29, 0.075);
+	color: color-mix(in srgb, var(--velion-j-text) 58%, transparent);
+}
+
+.velion-product-loop__topbar > span {
+	width: 14px;
+	height: 14px;
+	border: 1px solid currentColor;
+	border-radius: 3px;
+	opacity: 0.62;
+}
+
+.velion-product-loop__topbar p {
+	display: flex;
+	gap: 12px;
+	align-items: center;
+	margin: 0;
+	font-size: 0.96rem;
+}
+
+.velion-product-loop__assistant {
+	display: grid;
+	align-content: center;
+	justify-items: center;
+	gap: clamp(28px, 4vw, 54px);
+	min-height: 0;
+	padding: clamp(34px, 5vw, 78px);
+}
+
+.velion-product-loop__assistant-title {
+	text-align: center;
+}
+
+.velion-product-loop__assistant-title h2 {
+	margin: 0;
+	font-size: clamp(2rem, 2.2vw, 3rem);
+	font-weight: 400;
+	line-height: 1;
+	letter-spacing: -0.048em;
+}
+
+.velion-product-loop__assistant-title p {
+	margin: 16px 0 0;
+	color: color-mix(in srgb, var(--velion-j-text) 54%, transparent);
+	font-size: clamp(1rem, 1.1vw, 1.28rem);
+	font-weight: 300;
+	line-height: 1.32;
+}
+
+.velion-product-loop__prompt {
+	position: relative;
+	display: grid;
+	align-content: space-between;
+	width: min(100%, 560px);
+	min-height: clamp(136px, 12vw, 182px);
+	padding: clamp(28px, 2.8vw, 40px);
+	border: 1px solid rgba(31, 31, 29, 0.11);
+	border-radius: 22px;
+	background: rgba(255, 255, 255, 0.76);
+	box-shadow: 0 28px 72px rgba(31, 31, 29, 0.08);
+}
+
+.velion-product-loop__prompt-text {
+	position: relative;
+	min-height: 4.4em;
+	color: color-mix(in srgb, var(--velion-j-text) 86%, transparent);
+	font-size: clamp(1rem, 1.16vw, 1.34rem);
+	font-weight: 400;
+	line-height: 1.34;
+	letter-spacing: -0.02em;
+}
+
+.velion-product-loop__typed-line {
+	position: absolute;
+	inset: 0 auto auto 0;
+	width: min(100%, 460px);
+	opacity: 0;
+	clip-path: inset(0 100% 0 0);
+	animation: velion-prompt-cycle 18s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+	animation-delay: calc(var(--prompt-index) * 4.5s);
+}
+
+.velion-product-loop__typed-line::after {
+	display: inline-block;
+	width: 1px;
+	height: 1.05em;
+	margin-left: 3px;
+	background: currentColor;
+	content: "";
+	transform: translateY(0.18em);
+	animation: velion-prompt-caret 900ms steps(2, jump-none) infinite;
+}
+
+.velion-product-loop__prompt-actions {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-top: 26px;
+}
+
+.velion-product-loop__prompt-actions button {
+	display: grid;
+	place-items: center;
+	width: 48px;
+	height: 48px;
+	border: 1px solid rgba(31, 31, 29, 0.12);
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.72);
+	color: color-mix(in srgb, var(--velion-j-text) 76%, transparent);
+	font: inherit;
+}
+
+.velion-product-loop__prompt-actions button:last-child {
+	border-color: var(--velion-j-text);
+	background: var(--velion-j-text);
+	color: var(--velion-c-white);
+}
+
+.velion-product-loop__state-row {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px;
+	width: min(100%, 560px);
+}
+
+.velion-product-loop__state {
+	min-height: 0;
+	padding: 12px 16px;
+	border: 1px solid rgba(31, 31, 29, 0.08);
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.58);
+	color: color-mix(in srgb, var(--velion-j-text) 46%, transparent);
+	text-align: center;
+	animation: velion-loop-state-cycle 18s ease infinite;
+	animation-delay: calc(var(--state-index) * 4.5s);
+}
+
+.velion-product-loop__state span {
+	display: block;
+	margin: 0;
+	color: color-mix(in srgb, var(--velion-a-earth) 72%, var(--velion-j-text));
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: 0.78rem;
+	font-weight: 500;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.velion-product-loop__state p {
+	display: none;
+}
+
+@keyframes velion-prompt-cycle {
+	0%,
+	3% {
+		opacity: 0;
+		clip-path: inset(0 100% 0 0);
+		transform: translateY(10px);
+	}
+
+	9% {
+		opacity: 1;
+		clip-path: inset(0 58% 0 0);
+		transform: translateY(0);
+	}
+
+	19%,
+	25% {
+		opacity: 1;
+		clip-path: inset(0 0 0 0);
+		transform: translateY(0);
+	}
+
+	30%,
+	100% {
+		opacity: 0;
+		clip-path: inset(0 0 0 0);
+		transform: translateY(-8px);
+	}
+}
+
+@keyframes velion-prompt-caret {
+	0%,
+	48% {
+		opacity: 1;
+	}
+
+	49%,
+	100% {
+		opacity: 0;
+	}
+}
+
+@keyframes velion-dashboard-screen-cycle {
+	0%,
+	4% {
+		opacity: 0;
+		transform: translateY(12px) scale(1.012);
+	}
+
+	10%,
+	25% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+
+	31%,
+	100% {
+		opacity: 0;
+		transform: translateY(-10px) scale(0.992);
+	}
+}
+
+@keyframes velion-loop-state-cycle {
+	0%,
+	4% {
+		border-color: rgba(31, 31, 29, 0.08);
+		background: rgba(255, 255, 255, 0.58);
+		color: color-mix(in srgb, var(--velion-j-text) 46%, transparent);
+		transform: translateY(0);
+	}
+
+	10%,
+	25% {
+		border-color: color-mix(in srgb, var(--velion-a-earth) 30%, rgba(31, 31, 29, 0.1));
+		background: rgba(255, 255, 255, 0.88);
+		color: color-mix(in srgb, var(--velion-j-text) 76%, transparent);
+		transform: translateY(-4px);
+	}
+
+	31%,
+	100% {
+		border-color: rgba(31, 31, 29, 0.08);
+		background: rgba(255, 255, 255, 0.58);
+		color: color-mix(in srgb, var(--velion-j-text) 46%, transparent);
+		transform: translateY(0);
+	}
+}
+
+.velion-workflows {
+	position: relative;
+	display: grid;
+	gap: clamp(50px, 5.8vw, 92px);
+	padding: clamp(118px, 12vw, 184px) var(--velion-edge);
+	overflow: hidden;
+	background:
+		radial-gradient(circle at 78% 18%, rgba(238, 122, 80, 0.09), transparent 27%),
+		linear-gradient(90deg, rgba(26, 26, 26, 0.046) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.036) 1px, transparent 1px),
+		var(--velion-bg-soft);
+	background-size:
+		100% 100%,
+		112px 112px,
+		112px 112px,
+		100% 100%;
+}
+
+.velion-workflows::before {
+	position: absolute;
+	top: 18%;
+	right: var(--velion-edge);
+	left: var(--velion-edge);
+	height: 44%;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(115deg, transparent 0 18%, color-mix(in srgb, var(--velion-a-earth) 20%, transparent) 18% calc(18% + 1px), transparent calc(18% + 1px)),
+		linear-gradient(155deg, transparent 0 54%, color-mix(in srgb, var(--velion-h-teal-deep) 16%, transparent) 54% calc(54% + 1px), transparent calc(54% + 1px));
+	opacity: 0.8;
+}
+
+.velion-workflows__header {
+	position: relative;
+	z-index: 1;
+	display: grid;
+	grid-template-columns: minmax(180px, 0.48fr) minmax(420px, 1fr) minmax(320px, 0.64fr);
+	gap: clamp(34px, 5vw, 88px);
+	align-items: start;
+}
+
+.velion-workflows__header .header-1 {
+	max-width: 820px;
+	margin: 0;
+}
+
+.velion-workflows__header .velion-ingress {
+	max-width: 460px;
+}
+
+.velion-workflows__grid {
+	position: relative;
+	z-index: 1;
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: clamp(16px, 1.6vw, 24px);
+}
+
+.velion-workflows__card {
+	display: grid;
+	grid-template-rows: auto auto auto 1fr auto;
+	align-content: start;
+	min-width: 0;
+	min-height: 0;
+	padding: 0;
+	background: transparent;
+	border: 0;
+	box-shadow: none;
+}
+
+.velion-workflows__visual {
+	position: relative;
+	width: 100%;
+	aspect-ratio: 1.82;
+	min-height: clamp(148px, 11.5vw, 230px);
+	margin-bottom: clamp(30px, 3vw, 46px);
+	border: 1px solid color-mix(in srgb, var(--velion-j-text) 7%, transparent);
+	background-color: color-mix(in srgb, var(--velion-i-surface) 80%, transparent);
+	box-shadow:
+		10px 10px 0 color-mix(in srgb, var(--velion-a-earth) 8%, transparent),
+		20px 20px 0 color-mix(in srgb, var(--velion-h-teal-deep) 5%, transparent),
+		0 26px 82px rgba(31, 31, 29, 0.052);
+}
+
+.velion-workflows__meta {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 18px;
+	margin: 0 0 12px;
+	color: color-mix(in srgb, var(--velion-a-earth) 60%, var(--velion-text-muted));
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: 0.82rem;
+	font-weight: 500;
+	line-height: 1;
+	letter-spacing: 0.035em;
+	text-transform: uppercase;
+}
+
+.velion-workflows__meta strong {
+	color: color-mix(in srgb, var(--velion-j-text) 42%, transparent);
+	font: inherit;
+}
+
+.velion-workflows__card h2 {
+	margin: 0 0 22px;
+	padding-bottom: clamp(22px, 2.1vw, 30px);
+	border-bottom: 1px solid color-mix(in srgb, var(--velion-a-earth) 14%, var(--velion-border-strong));
+	font-size: clamp(1.86rem, 2.28vw, 2.42rem);
+	font-weight: 400;
+	line-height: 1.1;
+	letter-spacing: -0.048em;
+}
+
+.velion-workflows__card p {
+	margin: 0;
+	color: color-mix(in srgb, var(--velion-j-text) 54%, var(--velion-text-muted));
+	font-size: clamp(0.96rem, 0.92vw, 1.04rem);
+	font-weight: 300;
+	line-height: 1.54;
+}
+
+.velion-workflows__card .velion-arrow-button {
+	align-self: end;
+	margin-top: clamp(28px, 3vw, 42px);
+	font-size: clamp(0.98rem, 1vw, 1.12rem);
+}
+
+.velion-workflows__card .velion-arrow-button svg {
+	width: 56px;
+	height: 14px;
+}
+
+.velion-workflows > .velion-arrow-button {
+	position: relative;
+	z-index: 1;
+	justify-self: start;
+}
+
+.velion-trust-video {
+	display: grid;
+	grid-template-columns: minmax(0, 1.16fr) minmax(320px, 0.84fr);
+	gap: clamp(62px, 9vw, 150px);
+	align-items: center;
+	min-height: min(980px, 110svh);
+	padding: clamp(110px, 12vw, 180px) var(--velion-edge);
+	background: var(--velion-bg-cream);
+}
+
+.velion-trust-video__media {
+	position: relative;
+	min-height: clamp(520px, 58vw, 760px);
+	overflow: hidden;
+	background:
+		linear-gradient(180deg, rgba(8, 9, 10, 0.06), rgba(8, 9, 10, 0.18)),
+		url("/velion-vibe/human-haze.png");
+	background-size: cover;
+	background-position: center;
+	filter: saturate(0.82) contrast(1.04);
+}
+
+.velion-trust-video__media::after {
+	position: absolute;
+	inset: 0;
+	content: "";
+	background:
+		linear-gradient(90deg, rgba(255, 255, 255, 0.16) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.14) 1px, transparent 1px);
+	background-size: 92px 92px;
+	mix-blend-mode: screen;
+	opacity: 0.38;
+}
+
+.velion-trust-video__play {
+	position: absolute;
+	right: clamp(28px, 4vw, 58px);
+	bottom: clamp(28px, 4vw, 58px);
+	z-index: 2;
+	display: grid;
+	place-items: center;
+	width: clamp(66px, 5.4vw, 88px);
+	height: clamp(66px, 5.4vw, 88px);
+	border: 1px solid rgba(255, 255, 255, 0.46);
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.1);
+	color: var(--velion-c-white);
+	backdrop-filter: blur(18px);
+}
+
+.velion-trust-video__play svg {
+	width: 24px;
+	height: 24px;
+	fill: currentColor;
+}
+
+.velion-trust-video__copy {
+	max-width: 560px;
+}
+
+.velion-prefooter {
+	min-height: 190svh;
+}
+
+.velion-prefooter__sticky {
+	min-height: 620px;
+}
+
+.velion-prefooter__phrase {
+	font-size: clamp(1.7rem, 2.4vw, 3.2rem);
+	letter-spacing: -0.055em;
+}
+
+.velion-prefooter__final {
+	padding-top: clamp(80px, 13vh, 150px);
+	padding-bottom: clamp(80px, 13vh, 150px);
+}
+
+.velion-footer-reveal {
+	margin-top: 0;
+}
+
+@media (max-width: 1100px) {
+	.velion-workflows__header,
+	.velion-trust-video,
+	.velion-section--partnership {
+		grid-template-columns: 1fr;
+	}
+
+	.velion-product-loop {
+		grid-template-columns: 1fr;
+		min-height: auto;
+	}
+
+	.velion-product-loop__copy {
+		max-width: none;
+		padding-right: var(--velion-edge);
+	}
+
+	.velion-product-loop__stage {
+		min-height: 760px;
+		border-top: 1px solid color-mix(in srgb, var(--velion-j-text) 8%, transparent);
+		border-left: 0;
+	}
+
+	.velion-product-loop__app {
+		inset: clamp(54px, 8vw, 86px) var(--velion-edge);
+	}
+
+	.velion-product-loop__dashboard {
+		inset: clamp(54px, 8vw, 86px) var(--velion-edge);
+	}
+
+	.velion-product-loop__screen-stack,
+	.velion-product-loop__video-frame,
+	.velion-product-loop__prompt-strip,
+	.velion-product-loop__dashboard .velion-product-loop__state-row {
+		justify-self: center;
+	}
+
+	.velion-workflows__grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+}
+
+@media (max-width: 760px) {
+	.velion-home .velion-hero__content h1 {
+		font-size: clamp(3.1rem, 13vw, 5.1rem);
+	}
+
+	.velion-product-loop__stage,
+	.velion-trust-video__media,
+	.velion-partnership__media--primary {
+		min-height: 620px;
+	}
+
+	.velion-product-loop__app {
+		grid-template-columns: 1fr;
+		border-radius: 18px 18px 0 0;
+	}
+
+	.velion-product-loop__dashboard {
+		grid-template-rows: auto auto auto;
+		align-content: center;
+	}
+
+	.velion-product-loop__screen-stack {
+		border-radius: 16px;
+	}
+
+	.velion-product-loop__video-frame {
+		border-radius: 16px;
+	}
+
+	.velion-product-loop__sidebar {
+		display: none;
+	}
+
+	.velion-product-loop__assistant {
+		padding: 28px;
+	}
+
+	.velion-product-loop__state-row {
+		grid-template-columns: 1fr;
+	}
+
+	.velion-product-loop__state {
+		min-height: auto;
+	}
+
+	.velion-workflows__grid {
+		grid-template-columns: 1fr;
+	}
+
+	.velion-workflows__visual {
+		min-height: 250px;
+	}
+
+	.velion-workflows__card {
+		min-height: 560px;
+	}
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-product-loop__typed-line,
+	.velion-product-loop__typed-line::after,
+	.velion-product-loop__screen,
+	.velion-product-loop__state {
+		animation: none;
+	}
+
+	.velion-product-loop__typed-line:first-child {
+		opacity: 1;
+		clip-path: none;
+		transform: none;
+	}
+
+	.velion-product-loop__screen:first-child {
+		opacity: 1;
+		transform: none;
 	}
 }

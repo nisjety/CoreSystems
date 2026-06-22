@@ -18,7 +18,7 @@ mod shared;
 mod sources;
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 
@@ -35,14 +35,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(schedules::list_schedules).post(schedules::create_schedule),
         )
         .route("/api/ingestions/actions", post(schedules::schedule_actions))
-        .route(
-            "/api/ingestions/sources",
-            get(sources::list_sources).post(sources::create_source),
-        )
-        .route(
-            "/api/ingestions/sources/:id",
-            delete(sources::delete_source),
-        )
+        .route("/api/ingestions/sources", get(sources::list_sources))
         .route("/api/ingestions/profiles", get(profiles::list_profiles))
         .route("/api/ingestions/evidence", get(evidence::get_evidence))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

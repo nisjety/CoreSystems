@@ -45,6 +45,7 @@ import {
   type ProductExtraction,
 } from '@/shared/api/knowledge-client'
 import { cn } from '@/shared/lib/cn'
+import { useI18n } from '@/shared/i18n'
 import { readClientJson, writeClientJson } from '@/shared/session/client-storage'
 import { CrawlPagePicker } from './CrawlPagePicker'
 import { ProductPicker } from './ProductPicker'
@@ -114,6 +115,7 @@ export function KnowledgeComposer(props: {
   onPreviewActiveChange?: (active: boolean) => void
   previewCollapsed?: boolean
 }) {
+  const i18n = useI18n()
   let pollTimer: number | undefined
   let hydratedJobsKey: string | null = null
   let keySeq = 0
@@ -302,7 +304,9 @@ export function KnowledgeComposer(props: {
     const maxPages = crawlMaxPages()
     const key = addJob({
       agentMode: agentMode(),
-      detail: agentMode() ? 'Starter agentstyrt crawl-workflow…' : `Crawler opptil ${maxPages} sider…`,
+      detail: agentMode()
+        ? i18n.tr('Starter agentstyrt crawl-workflow ...', 'Starting agent-run crawl workflow ...')
+        : i18n.tr(`Crawler opptil ${maxPages} sider ...`, `Crawling up to ${maxPages} pages ...`),
       kind: 'crawl',
       label: target,
       status: 'pending',
@@ -330,7 +334,7 @@ export function KnowledgeComposer(props: {
       }
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : 'Crawl kunne ikke startes.'
+      const message = reason instanceof Error ? reason.message : i18n.tr('Crawl kunne ikke startes.', 'Crawl could not be started.')
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     }
@@ -342,7 +346,7 @@ export function KnowledgeComposer(props: {
     if (!canDiscover()) return
     const target = normalizeUrl(url())
     if (!target) {
-      setFormError('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://aquatiq.com.')
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://aquatiq.com.', 'Enter a valid web address, for example vg.no or https://aquatiq.com.'))
       return
     }
     setFormError(null)
@@ -351,12 +355,12 @@ export function KnowledgeComposer(props: {
     try {
       const result = await discoverCrawlPages(orgId(), { url: target, limit: 200 })
       if (result.pages.length === 0) {
-        setFormError('Fant ingen sider å crawle på dette nettstedet — prøv en annen adresse eller bruk hel-crawl.')
+        setFormError(i18n.tr('Fant ingen sider å crawle på dette nettstedet. Prøv en annen adresse eller bruk hel-crawl.', 'No crawlable pages were found on this site. Try another address or use a full-site crawl.'))
         return
       }
       setDiscovery(result)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : 'Kunne ikke oppdage sider.')
+      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdage sider.', 'Could not discover pages.'))
     } finally {
       setDiscovering(false)
     }
@@ -370,7 +374,7 @@ export function KnowledgeComposer(props: {
     setSubmitting(true)
     const host = hostnameOf(discovery()?.url || urls[0] || '')
     const key = addJob({
-      detail: `Crawler ${urls.length} valgte sider…`,
+      detail: i18n.tr(`Crawler ${urls.length} valgte sider ...`, `Crawling ${urls.length} selected pages ...`),
       kind: 'crawl',
       label: `${host} · ${urls.length} sider`,
       status: 'pending',
@@ -382,7 +386,7 @@ export function KnowledgeComposer(props: {
       setDiscovery(null)
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : 'Crawl kunne ikke startes.'
+      const message = reason instanceof Error ? reason.message : i18n.tr('Crawl kunne ikke startes.', 'Crawl could not be started.')
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -399,12 +403,12 @@ export function KnowledgeComposer(props: {
     try {
       const result = await extractProducts(orgId(), { url: target })
       if (result.products.length === 0) {
-        setFormError('Fant ingen produkter på siden — prøv en produktliste-URL, eller en annen side.')
+        setFormError(i18n.tr('Fant ingen produkter på siden. Prøv en produktliste-URL, eller en annen side.', 'No products were found on the page. Try a product-list URL or another page.'))
         return
       }
       setProductExtraction(result)
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : 'Kunne ikke hente produkter.')
+      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke hente produkter.', 'Could not fetch products.'))
     }
   }
 
@@ -421,7 +425,7 @@ export function KnowledgeComposer(props: {
         setBrowserProfileProbe(null)
       }
     } catch (reason) {
-      setBrowserProfileError(reason instanceof Error ? reason.message : 'Nettleserprofiler kunne ikke hentes.')
+      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Nettleserprofiler kunne ikke hentes.', 'Browser profiles could not be loaded.'))
     } finally {
       setBrowserProfilesLoading(false)
     }
@@ -438,7 +442,7 @@ export function KnowledgeComposer(props: {
       setBrowserProfileProbe(await probeBrowserProfile(id, profileId, target))
     } catch (reason) {
       setBrowserProfileProbe(null)
-      setBrowserProfileError(reason instanceof Error ? reason.message : 'Profilen kunne ikke sjekkes.')
+      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke sjekkes.', 'The profile could not be checked.'))
     } finally {
       setBrowserProfileProbing(false)
     }
@@ -450,9 +454,9 @@ export function KnowledgeComposer(props: {
     setProductSummary(null)
     try {
       const summary = await summarizeProducts(orgId(), selected, focus || undefined)
-      setProductSummary(summary || 'Ingen sammendrag ble generert.')
+      setProductSummary(summary || i18n.tr('Ingen sammendrag ble generert.', 'No summary was generated.'))
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : 'Kunne ikke lage AI-sammendrag.')
+      setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lage AI-sammendrag.', 'Could not create an AI summary.'))
     } finally {
       setSummarizing(false)
     }
@@ -485,13 +489,13 @@ export function KnowledgeComposer(props: {
       void browserSessionPromise?.then((attempt) => {
         closeBrowserSessionById(attempt.session?.session.id)
       })
-      setFormError(reason instanceof Error ? reason.message : 'Skraping kunne ikke fullføres.')
+      setFormError(reason instanceof Error ? reason.message : i18n.tr('Skraping kunne ikke fullføres.', 'Scraping could not be completed.'))
     }
   }
 
   const tryCreateBrowserSession = async (target: string): Promise<BrowserSessionAttempt> => {
     const id = orgId()
-    if (!id) return { error: 'Arbeidsområde mangler for nettleserøkt.', session: null }
+    if (!id) return { error: i18n.tr('Arbeidsområde mangler for nettleserøkt.', 'Workspace is missing for the browser session.'), session: null }
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), BROWSER_SESSION_TIMEOUT_MS)
     const profileId = selectedBrowserProfileId()
@@ -510,7 +514,7 @@ export function KnowledgeComposer(props: {
       return { error: null, session }
     } catch (reason) {
       return {
-        error: reason instanceof Error ? reason.message : 'Nettleserøkt kunne ikke startes.',
+        error: reason instanceof Error ? reason.message : i18n.tr('Nettleserøkt kunne ikke startes.', 'Browser session could not be started.'),
         session: null,
       }
     } finally {
@@ -545,7 +549,7 @@ export function KnowledgeComposer(props: {
       const nextSession = await runBrowserAction(id, sessionId, action)
       setPreview(attachBrowserSession(current, nextSession))
     } catch (reason) {
-      setFormError(reason instanceof Error ? reason.message : 'Nettleserhandlingen kunne ikke fullføres.')
+      setFormError(reason instanceof Error ? reason.message : i18n.tr('Nettleserhandlingen kunne ikke fullføres.', 'The browser action could not be completed.'))
     } finally {
       setBrowserBusy(false)
     }
@@ -558,7 +562,7 @@ export function KnowledgeComposer(props: {
     if (!canSubmitUrl()) return
     const target = normalizeUrl(url())
     if (!target) {
-      setFormError('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://aquatiq.com.')
+      setFormError(i18n.tr('Skriv inn en gyldig nettadresse, f.eks. vg.no eller https://aquatiq.com.', 'Enter a valid web address, for example vg.no or https://aquatiq.com.'))
       return
     }
     setFormError(null)
@@ -584,7 +588,9 @@ export function KnowledgeComposer(props: {
     setAdding(true)
     setFormError(null)
     const key = addJob({
-      detail: allSelected ? 'Indekserer hele siden…' : 'Indekserer valgte seksjoner…',
+      detail: allSelected
+        ? i18n.tr('Indekserer hele siden ...', 'Indexing the full page ...')
+        : i18n.tr('Indekserer valgte seksjoner ...', 'Indexing selected sections ...'),
       kind: 'link',
       label: current.title || current.url,
       status: 'pending',
@@ -606,7 +612,7 @@ export function KnowledgeComposer(props: {
       setPreview(null)
       setUrl('')
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : 'Kunne ikke legge til i kunnskapsbasen.'
+      const message = reason instanceof Error ? reason.message : i18n.tr('Kunne ikke legge til i kunnskapsbasen.', 'Could not add to the knowledge base.')
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -620,7 +626,10 @@ export function KnowledgeComposer(props: {
     if (list.length === 0 || !ready()) return
     setFormError(null)
     const key = addJob({
-      detail: `${list.length} fil${list.length === 1 ? '' : 'er'} lastes opp…`,
+      detail: i18n.tr(
+        `${list.length} fil${list.length === 1 ? '' : 'er'} lastes opp ...`,
+        `${list.length} file${list.length === 1 ? '' : 's'} uploading ...`,
+      ),
       kind: 'upload',
       label: list.map((file) => file.name).join(', '),
       status: 'pending',
@@ -629,7 +638,7 @@ export function KnowledgeComposer(props: {
       const job = await importUpload(orgId(), list)
       updateJob(key, { id: job.id, status: job.status || 'pending' })
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : 'Opplasting feilet.'
+      const message = reason instanceof Error ? reason.message : i18n.tr('Opplasting feilet.', 'Upload failed.')
       updateJob(key, { status: 'failed', error: message })
       setFormError(message)
     } finally {
@@ -650,20 +659,20 @@ export function KnowledgeComposer(props: {
           <Sparkles class="size-4" />
         </span>
         <div>
-          <p>Crawl inn kunnskap</p>
-          <small>Skrap og forhåndsvis en lenke, crawl valgte sider eller last opp dokumenter — Velion indekserer alt.</small>
+          <p>{i18n.tr('Hent inn kunnskap', 'Bring in knowledge')}</p>
+          <small>{i18n.tr('Skrap og forhåndsvis en lenke, crawl valgte sider eller last opp dokumenter. Velion indekserer alt.', 'Scrape and preview a link, crawl selected pages, or upload documents. Velion indexes it all.')}</small>
         </div>
       </div>
 
       <form class="dashboard-knowledge-composer__url" onSubmit={submitUrl}>
-        <div class="dashboard-knowledge-composer__modes" role="group" aria-label="Innhentingsmodus">
+        <div class="dashboard-knowledge-composer__modes" role="group" aria-label={i18n.tr('Innhentingsmodus', 'Ingestion mode')}>
           <button
             type="button"
             classList={{ 'dashboard-knowledge-composer__mode--active': mode() === 'link' }}
             onClick={() => switchMode('link')}
             aria-pressed={mode() === 'link'}
           >
-            <Link2 class="size-3.5" /> Lenke
+            <Link2 class="size-3.5" /> {i18n.tr('Lenke', 'Link')}
           </button>
           <button
             type="button"
@@ -671,7 +680,7 @@ export function KnowledgeComposer(props: {
             onClick={() => switchMode('crawl')}
             aria-pressed={mode() === 'crawl'}
           >
-            <Globe2 class="size-3.5" /> Crawl
+            <Globe2 class="size-3.5" /> {i18n.tr('Crawl', 'Crawl')}
           </button>
           <button
             type="button"
@@ -679,7 +688,7 @@ export function KnowledgeComposer(props: {
             onClick={() => switchMode('products')}
             aria-pressed={mode() === 'products'}
           >
-            <ShoppingBag class="size-3.5" /> Produkter
+            <ShoppingBag class="size-3.5" /> {i18n.tr('Produkter', 'Products')}
           </button>
         </div>
 
@@ -689,13 +698,7 @@ export function KnowledgeComposer(props: {
             value={url()}
             onInput={(event) => setUrl(event.currentTarget.value)}
             class="dashboard-knowledge-composer__input"
-            placeholder={
-              mode() === 'crawl'
-                ? 'vg.no — crawl hele nettstedet'
-                : mode() === 'products'
-                  ? 'elkjop.no/…/mac — hent produkter fra siden'
-                  : 'vg.no eller aquatiq.com — skrap og forhåndsvis'
-            }
+            placeholder={knowledgeUrlPlaceholder(mode(), i18n)}
             inputmode="url"
             autocomplete="off"
             disabled={!ready()}
@@ -704,8 +707,8 @@ export function KnowledgeComposer(props: {
             type="submit"
             class="dashboard-knowledge-composer__submit"
             disabled={!canSubmitUrl()}
-            aria-label={mode() === 'crawl' ? 'Start crawl' : mode() === 'products' ? 'Hent produkter' : 'Skrap side'}
-            title={mode() === 'crawl' ? 'Start crawl' : mode() === 'products' ? 'Hent produkter' : 'Skrap side'}
+            aria-label={knowledgeSubmitLabel(mode(), i18n)}
+            title={knowledgeSubmitLabel(mode(), i18n)}
           >
             <Show when={!submitting()} fallback={<Loader2 class="size-4 dashboard-xsearch-spin" />}>
               <ArrowRight class="size-4" />
@@ -725,10 +728,10 @@ export function KnowledgeComposer(props: {
                   setBrowserProfileError(null)
                 }}
                 disabled={!ready()}
-                aria-label="Nettleserprofil"
+                aria-label={i18n.tr('Nettleserprofil', 'Browser profile')}
               >
-                <option value={isolatedProfileChoice}>Isolert</option>
-                <option value={newProfileChoice}>Ny profil</option>
+                <option value={isolatedProfileChoice}>{i18n.tr('Isolert', 'Isolated')}</option>
+                <option value={newProfileChoice}>{i18n.tr('Ny profil', 'New profile')}</option>
                 <For each={browserProfiles()}>
                   {(profileId) => <option value={profileId}>{shortProfileLabel(profileId)}</option>}
                 </For>
@@ -739,8 +742,8 @@ export function KnowledgeComposer(props: {
               class="dashboard-knowledge-composer__browser-tool"
               onClick={() => void refreshBrowserProfiles()}
               disabled={!ready() || browserProfilesLoading()}
-              aria-label="Oppdater nettleserprofiler"
-              title="Oppdater"
+              aria-label={i18n.tr('Oppdater nettleserprofiler', 'Refresh browser profiles')}
+              title={i18n.tr('Oppdater', 'Refresh')}
             >
               <Show when={!browserProfilesLoading()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
                 <RefreshCw class="size-3.5" />
@@ -751,8 +754,8 @@ export function KnowledgeComposer(props: {
               class="dashboard-knowledge-composer__browser-tool"
               onClick={() => void probeSelectedBrowserProfile()}
               disabled={!ready() || !selectedBrowserProfileId() || browserProfileProbing() || !normalizeUrl(url())}
-              aria-label="Sjekk nettleserprofil"
-              title="Sjekk profil"
+              aria-label={i18n.tr('Sjekk nettleserprofil', 'Check browser profile')}
+              title={i18n.tr('Sjekk profil', 'Check profile')}
             >
               <Show when={!browserProfileProbing()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
                 <ShieldCheck class="size-3.5" />
@@ -762,7 +765,7 @@ export function KnowledgeComposer(props: {
               {(probe) => (
                 <span class="dashboard-knowledge-composer__browser-profile-status">
                   <ShieldCheck class="size-3.5" />
-                  {profileProbeSummary(probe())}
+                  {profileProbeSummary(probe(), i18n)}
                 </span>
               )}
             </Show>
@@ -780,7 +783,7 @@ export function KnowledgeComposer(props: {
         <Show when={mode() === 'crawl'}>
           <div class="dashboard-knowledge-composer__crawl-options">
             <label>
-              <span>Sider</span>
+              <span>{i18n.tr('Sider', 'Pages')}</span>
               <input
                 type="number"
                 min="1"
@@ -795,19 +798,19 @@ export function KnowledgeComposer(props: {
                 checked={agentMode()}
                 onChange={(event) => setAgentMode(event.currentTarget.checked)}
               />
-              <span>Agentstyrt workflow</span>
+              <span>{i18n.tr('Agentstyrt workflow', 'Agent-run workflow')}</span>
             </label>
             <button
               type="button"
               class="dashboard-knowledge-composer__discover"
               onClick={() => void discoverPages()}
               disabled={!canDiscover()}
-              title="Oppdag sidene på nettstedet og velg hvilke som skal crawles"
+              title={i18n.tr('Oppdag sidene på nettstedet og velg hvilke som skal crawles', 'Discover pages on the site and choose which ones to crawl')}
             >
               <Show when={!discovering()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
                 <ListChecks class="size-3.5" />
               </Show>
-              Velg sider
+              {i18n.tr('Velg sider', 'Choose pages')}
             </button>
           </div>
         </Show>
@@ -857,27 +860,27 @@ export function KnowledgeComposer(props: {
           disabled={!ready()}
         >
           <FileUp class="size-4" />
-          Last opp filer
+          {i18n.tr('Last opp filer', 'Upload files')}
         </button>
         <input
           ref={(element) => { fileInputRef = element }}
           type="file"
           multiple
           class="sr-only"
-          aria-label="Last opp dokumenter"
+          aria-label={i18n.tr('Last opp dokumenter', 'Upload documents')}
           onChange={(event) => {
             void uploadFiles(event.currentTarget.files)
             event.currentTarget.value = ''
           }}
         />
         <A href="/knowledge" class="dashboard-knowledge-composer__link">
-          Åpne kunnskapsbase
+          {i18n.tr('Åpne kunnskapsbase', 'Open knowledge base')}
           <ArrowRight class="size-3.5" />
         </A>
       </div>
 
       <Show when={!ready() && ctx.loading}>
-        <p class="dashboard-knowledge-composer__status">Kobler til arbeidsområdet…</p>
+        <p class="dashboard-knowledge-composer__status">{i18n.tr('Kobler til arbeidsområdet ...', 'Connecting to the workspace ...')}</p>
       </Show>
       <Show when={formError()}>
         {(message) => <p class="dashboard-knowledge-composer__error">{message()}</p>}
@@ -895,11 +898,12 @@ export function KnowledgeComposer(props: {
 }
 
 function IngestJobRow(props: { job: IngestJob }) {
+  const i18n = useI18n()
   const running = () => !isTerminal(props.job.status)
   const failed = () => /fail|error|cancel/.test(props.job.status.toLowerCase())
   const kindLabel = () => {
-    if (props.job.kind === 'crawl') return props.job.agentMode ? 'Agent crawl' : 'Crawl'
-    return props.job.kind === 'upload' ? 'Opplasting' : 'Lenke'
+    if (props.job.kind === 'crawl') return props.job.agentMode ? i18n.tr('Agent-crawl', 'Agent crawl') : i18n.tr('Crawl', 'Crawl')
+    return props.job.kind === 'upload' ? i18n.tr('Opplasting', 'Upload') : i18n.tr('Lenke', 'Link')
   }
   const progress = () => normalizeProgress(props.job.progress)
 
@@ -918,7 +922,7 @@ function IngestJobRow(props: { job: IngestJob }) {
       <span class="dashboard-knowledge-composer__job-body">
         <span class="dashboard-knowledge-composer__job-label">{props.job.label}</span>
         <span class="dashboard-knowledge-composer__job-detail">
-          {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : statusLabel(props.job.status))}
+          {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : statusLabel(props.job.status, i18n))}
         </span>
         <Show when={progress() !== null}>
           <span class="dashboard-knowledge-composer__job-progress">
@@ -937,12 +941,24 @@ function IngestJobRow(props: { job: IngestJob }) {
   )
 }
 
-function statusLabel(status: string): string {
+function statusLabel(status: string, i18n: ReturnType<typeof useI18n>): string {
   const normalized = status.trim().toLowerCase()
-  if (normalized === 'completed' || normalized === 'complete' || normalized === 'succeeded') return 'Ferdig indeksert'
-  if (normalized === 'failed' || normalized === 'error') return 'Mislyktes'
-  if (normalized === 'cancelled') return 'Avbrutt'
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'succeeded') return i18n.tr('Ferdig indeksert', 'Indexed')
+  if (normalized === 'failed' || normalized === 'error') return i18n.tr('Mislyktes', 'Failed')
+  if (normalized === 'cancelled') return i18n.tr('Avbrutt', 'Cancelled')
   return status
+}
+
+function knowledgeUrlPlaceholder(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {
+  if (mode === 'crawl') return i18n.tr('vg.no - crawl hele nettstedet', 'vg.no - crawl the full site')
+  if (mode === 'products') return i18n.tr('elkjop.no/.../mac - hent produkter fra siden', 'elkjop.no/.../mac - extract products from the page')
+  return i18n.tr('vg.no eller aquatiq.com - skrap og forhåndsvis', 'vg.no or aquatiq.com - scrape and preview')
+}
+
+function knowledgeSubmitLabel(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {
+  if (mode === 'crawl') return i18n.tr('Start crawl', 'Start crawl')
+  if (mode === 'products') return i18n.tr('Hent produkter', 'Extract products')
+  return i18n.tr('Skrap side', 'Scrape page')
 }
 
 function clampCrawlPages(value: number): number {
@@ -964,9 +980,9 @@ function shortProfileLabel(profileId: string): string {
   return profileId.length <= 18 ? profileId : `${profileId.slice(0, 10)}...${profileId.slice(-5)}`
 }
 
-function profileProbeSummary(probe: BrowserProfileRestoreProbe): string {
+function profileProbeSummary(probe: BrowserProfileRestoreProbe, i18n: ReturnType<typeof useI18n>): string {
   const stored = probe.cookies_count + probe.local_storage_count + probe.session_storage_count + probe.indexed_db_count
-  return probe.restorable ? `${stored} lagrede signaler` : 'Tom profil'
+  return probe.restorable ? i18n.tr(`${stored} lagrede signaler`, `${stored} saved signals`) : i18n.tr('Tom profil', 'Empty profile')
 }
 
 function parseJobKey(key: string): number {

@@ -315,3 +315,104 @@ Preview-gated (never trends over empty); E5 audit shows the real tool name (call
 "Used by AI?" NOT fabricated (builtin tools aren't connection-bound); leads are company-data-only (no PII) with
 the real Brreg page+size/10k + 1–4-band contract (the plan's "searchAfter" corrected to the real API); the
 US-region residency fabrication removed + guarded.
+
+---
+
+## PR-4 / W2 — recurring change-monitoring (BUILT this session; live-verify in progress)
+
+W2 was executed under the Ultracode blueprint (`tasks/w80y4vlr0.output`) — 8 of 9 steps built, all unit-green
+across four services. The honest MVP loop is end-to-end in code:
+
+`schedule (org_id + created_by + preset)` → orchestrator reconciler maps it to **ChangeMonitorWF** → workflow
+mints a per-fire run_id from its Temporal execution → **CheckChange** activity (runtime `/v1/internal/run_page`
+for the fresh fingerprint → edge `/v1/internal/change/record` for compare→save_baseline→[on change]diff) →
+emits **change_detected** → quarry-control fans out the **webhook** (existing) **+ one in-product notification**
+to the schedule's creator via notification-core.
+
+### What shipped
+- **quarry-control (Go)**: `store.Schedule.OrgID`+`CreatedBy`+`Preset`; `Validate` maps the change_monitor
+  preset (hourly=`0 * * * *`/daily=`0 9 * * *`/weekly=`0 9 * * 1`) to a literal 5-field cron (cron.Validate
+  rejects `@daily` aliases) and requires org_id; migrations `008_schedules_org_id.sql`+`009_schedules_created_by.sql`;
+  pg Create/Get/List carry org_id+created_by; NEW `schedule_wire.go` projects each schedule to the
+  orchestrator contract `{workflow,args,paused}` — **change_monitor only** maps a workflow (`ChangeMonitorWF`
+  + `[{org_id,url,created_by}]`); scrape/crawl/batch emit empty workflow so the reconciler skips them (no
+  fake "scheduled scrape"); `MountSchedules` rewritten to wire-shaped list/get/create; NEW `internal/notify`
+  HTTP sink + `notifyOnChange` (best-effort, idempotent on event_id, recipient = `payload.created_by`).
+- **quarry-orchestrator (Go)**: `ScheduleSpec` decode now binds (control emits workflow/args) — the empty-Workflow
+  root cause is fixed; defensive guard skips empty-workflow specs (reaper stays whole-set-safe, org_id rides in
+  Args only — the latent multi-tenant orphan-reap bug is documented & deliberately left untouched); NEW
+  `ChangeMonitorWF` + `CheckChange` activity (+ `EdgeBaseURL`/`EdgeAuthToken` config, defaulting EdgeBaseURL to
+  RUNTIME_BASE_URL since the edge serves both); registered as a 4th workflow.
+- **quarry-edge (Rust)**: NEW `POST /v1/internal/change/record` OUTSIDE `require_auth` (shared-token auth, org_id
+  from the trusted body — the orchestrator calls for many tenants; org was verified at create time) running the
+  full compare→save_baseline→(Changed)put-diff-artifact+create_diff_record sequence in-process; `create_schedule`
+  detects a change_monitor by `preset`, stamps org_id+created_by from the **verified JWT** (never the client body),
+  and forwards a `store.Schedule`-shaped body to control. Reused the existing `PostgresBaselineStore` (no
+  re-implementation). Compiles with + without `postgres-queue`; clippy-clean on changed files.
+- Incidental: fixed a pre-existing newer-clippy lint in `quarry-core/pagination.rs` (derivable_impls) that blocked
+  the workspace `-D warnings` gate.
+
+### Gates (unit)
+- quarry-control: `go build/vet/test ./...` green (store/resources/cron incl. new wire + preset + org_id tests).
+- quarry-orchestrator: `go build/vet`, `go test ./internal/workflows ./internal/schedules` green incl. 4 new
+  ChangeMonitorWF tests (changed/unchanged/scheduled-run-mints-run_id/activity-failure); `-race` green.
+- quarry-edge: `cargo check` (default + `--features postgres-queue`) green; 7 change_routes + 4 schedule_routes
+  unit tests pass; no clippy warnings in changed files.
+
+### Deliberately deferred (no silent cut)
+- **Step 7 (quarry_sources durable CRUD)**: blueprint's "only time-boxable deferral" — a source row is optional
+  scaffolding; the schedule's `target_ref=url` already drives monitoring. The DoD does not require it.
+- **Gateway monitor-CREATE + SPA form**: the gateway already surfaces change history (`monitoring.rs` →
+  `/api/v1/monitoring/{check,latest,history}`); the recurring-monitor *create* path (preset/target_ref) is the
+  one product seam still to add. The W2 DoD is the backend engine, verified directly.
+
+### Live DoD verification — see below (rebuild of quarry-{edge,control,orchestrator} + Temporal fire).
+
+### LIVE DoD VERIFICATION — ✅ COMPLETE (rebuilt quarry-{edge,control,orchestrator}, real Quarry+Temporal stack)
+Stack: ingestion-plane compose (quarry-edge :8082 built `--features grpc,http3,postgres-queue` + dedicated
+`quarry_edge` Postgres; quarry-control :8081 → `quarry_v2` Postgres + NOTIFICATION_CORE_URL=notification-core:3140
+over inter-plane-bus; quarry-orchestrator → Temporal; notification-core :3140). Migrations 008/009 auto-applied
+on control boot (schedules now carry org_id + created_by).
+
+- **Persistence (direct `/v1/internal/change/record`, deterministic fast-fire)**: org_a fp v1 → `{status:new, baseline_id:bln_…}`;
+  same fp → `{status:unchanged}` (no new baseline); fp v2 → `{status:changed, prev_fingerprint:v1, baseline_id, diff_id}`.
+  DB: org_a = 2 baselines + 1 diff; v2 baseline chains to v1 (prev_baseline_id set).
+- **Cross-org isolation (data)**: org_b posting the SAME url returned `status:new` (its `load_latest` saw none of
+  org_a's baselines) → DB org_a=2/org_b=1 baselines, org_a=1/org_b=0 diffs.
+- **Schedule → Temporal (the "daily preset")**: POST change_monitor (preset=daily) → control persists row +
+  list/get emit `workflow=ChangeMonitorWF`, `args=[{org_id,url,created_by}]`, cron `0 9 * * *`, paused=false. The
+  orchestrator reconciler (≤30s) materialized the Temporal schedule `{"Workflow":"ChangeMonitorWF"}`, NextRunTime
+  = next 09:00 UTC.
+- **Workflow → full chain**: `temporal workflow start --type ChangeMonitorWF` (org_placeholder, example.com,
+  created_by=user_w2_verify) against a pre-seeded bogus baseline → COMPLETED, run_started→change_detected→run_completed
+  in the event log; CheckChange fetched example.com (real blake3 fp) and persisted baseline+diff via the edge.
+- **Webhook leg**: a webhook subscribed to change_detected got a pending WebhookDelivery whose payload contains
+  `change_detected` (fanoutWebhooks fired on the workflow's event).
+- **ONE in-product notification**: notification-core `/notifications` (x-user-id=user_w2_verify) returned EXACTLY
+  one entry — event_type=change_detected, channel=in_app, delivery_status=delivered, payload carrying the real
+  fingerprint + diff_id + url. Recipient = the schedule's creator (created_by threaded edge JWT → schedule →
+  workflow args → event payload → notifyOnChange).
+- **Cross-org reconcile safety**: adding org_b's schedule did NOT reap org_a's (both Temporal schedules coexisted)
+  — the global-desiredSet reaper stayed whole-set-safe.
+- **Lifecycle**: DELETE /v1/schedules/{id} → 204 → control rows = 0 → reconciler reaped both Temporal schedules.
+
+**Two bugs caught BY live verification (not unit tests — both are Postgres/runtime-only paths):**
+1. `schedulesStore.List` SELECT/Scan column mismatch — the `created_by` column was added to the Scan (8 targets)
+   but the List SELECT string (single-line) wasn't, so List Scanned 8 against 7 columns → silent error → empty
+   list → the reconciler saw no schedules. Unit tests use the in-memory store and couldn't surface it. Fixed.
+2. `MountSchedules` rewrite dropped the `DELETE /v1/schedules/{id}` route the old generic mount provided (edge +
+   gateway both forward it) → schedules couldn't be deleted/reaped. Restored `deleteScheduleHandler`.
+
+Both fixes re-verified live (list returns the schedule; DELETE → 204 → reaped). Test data cleaned up.
+
+### Gateway BFF surface (product reachability) — built + static-green
+Added the recurring-monitor CREATE/LIST/DELETE seam the monitoring domain's own doc flagged as "Phase 2 (C-FULL)":
+- `velionv3/apps/gateway/src/domains/monitoring.rs`: `POST /api/v1/monitoring/schedules` (preset+SSRF-guarded url →
+  edge `/v1/schedules`; edge stamps org_id+created_by from the session token), `GET /api/v1/monitoring/schedules`
+  (lists change_monitor schedules only), `DELETE /api/v1/monitoring/schedules/:id`. Mirrors the proven
+  check/latest/history proxy pattern (quarry audience token, never a client org header). `cargo check` +
+  `cargo clippy -D warnings` green.
+- The change-history READ surface (`/api/v1/monitoring/{check,latest,history}`) was already wired pre-W2.
+- Remaining (documented, not a silent gap): the SPA monitoring-tab CREATE **form** + a live gateway-session
+  run through `/api/v1/monitoring/schedules`. The backend engine + edge create path are live-verified directly;
+  the gateway routes are thin proxies over that verified path.

@@ -9,21 +9,22 @@ export function HeritageSection() {
           003
         </span>
         <h1 className="header-1 fade-out-top" data-fade-out-top>
-          History in the making
+          Built for grounded Norwegian work.
         </h1>
         <div className="velion-ingress ingress fade-out-top" data-fade-out-top>
           <p>
-            Embark on a journey through our roots and delve into VELION&apos;s dynamic story. Discover the individuals and
-            partners behind our shared vision and the remarkable launch of The Icon.
+            Velion is designed for companies that need real customer work, real source grounding, and real control. The
+            wedge is local intelligence: Brreg-grounded company context, in-region operations, and an auditable path from
+            signal to approved action.
           </p>
         </div>
         <div className="velion-copy-action fade-out-top" data-fade-out-top>
           <ArrowButton href="#contact" variant="dark">
-            Contact
+            Request access
           </ArrowButton>
         </div>
       </div>
-      <VisualPanel className="velion-section__visual" label="Electric yacht wake at dusk" variant="heritage" />
+      <VisualPanel className="velion-section__visual" label="Norwegian intelligence and approved action map" variant="heritage" />
     </section>
   );
 }

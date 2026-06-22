@@ -47,6 +47,7 @@ import {
   type SidebarSection,
 } from '@/features/core/lib/sidebar-navigation'
 import { clearChatThreads, listChatThreads, saveChatThreadSnapshot } from '@/shared/api/chat-client'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
@@ -62,11 +63,12 @@ export function CoreSidebar(props: {
   onExpandedChange: (expanded: boolean) => void
   onOpenSearch: () => void
 }) {
+  const i18n = useI18n()
   const location = useLocation()
   const session = getSession()
-  const visibleSections = () => sidebarSections.filter((section) => (
-    section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session)
-  ))
+  const visibleSections = () => sidebarSections
+    .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
+    .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
   const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom)
   const pinnedSections = () => visibleSections().filter((section) => section.pinnedBottom)
@@ -76,13 +78,13 @@ export function CoreSidebar(props: {
   const openSection = () => props.onExpandedChange(true)
 
   return (
-    <aside class="velion-sidebar-themed core-sidebar velion-sidebar-type" style={{ width: width() }} aria-label="Primary navigation">
+    <aside class="velion-sidebar-themed core-sidebar velion-sidebar-type" style={{ width: width() }} aria-label={i18n.tr('Primærnavigasjon', 'Primary navigation')}>
       <div class="core-sidebar__body">
         <div class="core-sidebar__rail">
           <div class="core-sidebar__top-actions">
             <Show when={!props.expansionLocked}>
               <MiniActionButton
-                label={props.expanded ? 'Collapse sidebar' : 'Expand sidebar'}
+                label={props.expanded ? i18n.tr('Slå sammen sidefelt', 'Collapse sidebar') : i18n.tr('Utvid sidefelt', 'Expand sidebar')}
                 active={false}
                 onClick={() => props.onExpandedChange(!props.expanded)}
               >
@@ -93,7 +95,7 @@ export function CoreSidebar(props: {
             </Show>
           </div>
 
-          <nav class="core-sidebar__mini-nav" aria-label="Workspace sections">
+          <nav class="core-sidebar__mini-nav" aria-label={i18n.tr('Arbeidsområdeseksjoner', 'Workspace sections')}>
             <div class="core-sidebar__mini-stack">
               <For each={mainSections()}>
                 {(section) => (
@@ -110,7 +112,7 @@ export function CoreSidebar(props: {
 
           <div class="core-sidebar__bottom-actions">
             <div class="core-sidebar__mini-divider" />
-            <MiniAccountLink active={accountActive()} onOpen={openSection}>
+            <MiniAccountLink active={accountActive()} i18n={i18n} onOpen={openSection}>
               <CircleUserRound class="size-[18px]" strokeWidth={1.65} />
             </MiniAccountLink>
             <For each={pinnedSections()}>
@@ -123,7 +125,7 @@ export function CoreSidebar(props: {
               )}
             </For>
             <MiniActionButton
-              label={sidebarSearchAction.label}
+              label={i18n.tr('Søk', 'Search')}
               active={false}
               onClick={() => {
                 props.onOpenSearch()
@@ -227,10 +229,16 @@ function GenericSidebarPanel(props: {
   pathname: string
   searchQuery: string
 }) {
+  const i18n = useI18n()
   return (
     <div class="core-sidebar-panel">
       <SidebarPanelTitle onCollapse={props.onCollapse}>{props.activeSection.label}</SidebarPanelTitle>
-      <SidebarSearchField value={props.searchQuery} onChange={props.onSearchQueryChange} />
+      <SidebarSearchField
+        ariaLabel={i18n.tr('Filtrer sidefeltseksjon', 'Filter sidebar section')}
+        placeholder={i18n.tr('Filtrer denne seksjonen', 'Filter this section')}
+        value={props.searchQuery}
+        onChange={props.onSearchQueryChange}
+      />
 
       <Show when={props.panelTabs.length}>
         <div class="core-sidebar-tabs velion-sidebar-row-strong">
@@ -260,6 +268,7 @@ function GenericSidebarPanel(props: {
 }
 
 function ChatSidebarPanel(props: { onCollapse: () => void }) {
+  const i18n = useI18n()
   const [error, setError] = createSignal<string | null>(null)
   const [loading, setLoading] = createSignal(false)
   const [sessions, setSessions] = createSignal<ChatThreadHistoryItem[]>([])
@@ -306,7 +315,7 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
         setSessions(replaceChatThreadHistory([...refreshedSessions, ...localSessions]))
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not load saved conversations.')
+      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke laste lagrede samtaler.', 'Could not load saved conversations.'))
       refreshLocalSessions()
     } finally {
       setLoading(false)
@@ -372,11 +381,11 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
         Ny samtale
       </A>
 
-      <nav class="core-chat-sidebar__sessions" aria-label="Chat conversations">
-        <Show when={!loading()} fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">Loading conversations...</div>}>
+      <nav class="core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
+        <Show when={!loading()} fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">{i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</div>}>
           <Show
             when={sessionCount() > 0}
-            fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">{error() ?? 'Open chat to load real conversation history.'}</div>}
+            fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">{error() ?? i18n.tr('Åpne chat for å laste ekte samtalehistorikk.', 'Open chat to load real conversation history.')}</div>}
           >
             <For each={sessions()}>
               {(item) => (
@@ -388,7 +397,7 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
                   aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
                 >
                   <span class="velion-sidebar-row-strong" title={item.title}>{item.title}</span>
-                  <em>{formatChatUpdatedAt(item.updatedAt)}</em>
+                  <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
                 </button>
               )}
             </For>
@@ -398,20 +407,26 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
 
       <button type="button" class="core-chat-sidebar__clear" onClick={clearHistory}>
         <Trash2 class="size-3.5" />
-        Clear chat history
+        {i18n.tr('Tøm chathistorikk', 'Clear chat history')}
       </button>
     </div>
   )
 }
 
-function formatChatUpdatedAt(value: string) {
+function formatChatUpdatedAt(value: string, i18n: ReturnType<typeof useI18n>) {
   const updatedAt = Date.parse(value)
-  if (Number.isNaN(updatedAt)) return 'Saved thread'
+  if (Number.isNaN(updatedAt)) return i18n.tr('Lagret tråd', 'Saved thread')
   const ageMs = Date.now() - updatedAt
+  if (i18n.locale() === 'no') {
+    if (ageMs < 60_000) return 'Akkurat nå'
+    if (ageMs < 3_600_000) return `${Math.max(1, Math.round(ageMs / 60_000))}m siden`
+    if (ageMs < 86_400_000) return `${Math.max(1, Math.round(ageMs / 3_600_000))}t siden`
+    return new Intl.DateTimeFormat('nb-NO', { month: 'short', day: 'numeric' }).format(new Date(updatedAt))
+  }
   if (ageMs < 60_000) return 'Just now'
   if (ageMs < 3_600_000) return `${Math.max(1, Math.round(ageMs / 60_000))}m ago`
   if (ageMs < 86_400_000) return `${Math.max(1, Math.round(ageMs / 3_600_000))}h ago`
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(updatedAt))
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(updatedAt))
 }
 
 function SidebarPanelNavigation(props: {
@@ -420,6 +435,7 @@ function SidebarPanelNavigation(props: {
   activeTabId: string | null
   searchQuery: string
 }) {
+  const i18n = useI18n()
   const normalizedSearchQuery = () => normalizeSearchText(props.searchQuery.trim())
   const isSearchActive = () => normalizedSearchQuery().length > 0
   const [expandedGroups, setExpandedGroups] = createSignal<Set<string>>(new Set())
@@ -470,9 +486,9 @@ function SidebarPanelNavigation(props: {
   return (
     <Show
       when={visibleGroups().length > 0}
-      fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">Ingen treff i denne seksjonen.</div>}
+      fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">{i18n.tr('Ingen treff i denne seksjonen.', 'No matches in this section.')}</div>}
     >
-      <nav class="core-sidebar-panel-nav" aria-label={`${props.section.label} navigation`}>
+      <nav class="core-sidebar-panel-nav" aria-label={i18n.tr(`${props.section.label} navigasjon`, `${props.section.label} navigation`)}>
         <div>
           <For each={topGroups()}>
             {(group) => (
@@ -522,6 +538,7 @@ function SidebarGroup(props: {
   onToggleGroup: (groupId: string) => void
   onToggleItem: (itemId: string) => void
 }) {
+  const i18n = useI18n()
   const groupExpanded = () => !props.group.collapsible || props.isSearchActive || props.expandedGroups.has(props.group.id)
 
   return (
@@ -534,8 +551,8 @@ function SidebarGroup(props: {
               type="button"
               onClick={() => props.onToggleGroup(props.group.id)}
               aria-expanded={groupExpanded()}
-              aria-label={`${groupExpanded() ? 'Collapse' : 'Expand'} ${props.group.label}`}
-              title={`${groupExpanded() ? 'Collapse' : 'Expand'} ${props.group.label}`}
+              aria-label={groupExpanded() ? i18n.tr(`Slå sammen ${props.group.label}`, `Collapse ${props.group.label}`) : i18n.tr(`Utvid ${props.group.label}`, `Expand ${props.group.label}`)}
+              title={groupExpanded() ? i18n.tr(`Slå sammen ${props.group.label}`, `Collapse ${props.group.label}`) : i18n.tr(`Utvid ${props.group.label}`, `Expand ${props.group.label}`)}
             >
               <Show when={groupExpanded()} fallback={<ChevronRight class="size-4" strokeWidth={2.1} />}>
                 <ChevronDown class="size-4" strokeWidth={2.1} />
@@ -620,14 +637,14 @@ function MiniSectionLink(props: { section: SidebarSection; active: boolean; onOp
   )
 }
 
-function MiniAccountLink(props: { active: boolean; children: JSX.Element; onOpen: () => void }) {
+function MiniAccountLink(props: { active: boolean; children: JSX.Element; i18n: ReturnType<typeof useI18n>; onOpen: () => void }) {
   return (
     <A
       href="/account"
       onClick={props.onOpen}
       aria-current={props.active ? 'page' : undefined}
-      aria-label="Account"
-      title="Account"
+      aria-label={props.i18n.tr('Konto', 'Account')}
+      title={props.i18n.tr('Konto', 'Account')}
       class={cn('core-mini-nav-button', props.active ? 'velion-sidebar-mini-active' : '')}
     >
       {props.children}
@@ -677,4 +694,114 @@ function normalizeSearchText(value: string) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+}
+
+const sidebarLabels: Record<string, readonly [string, string]> = {
+  'section:overview': ['Oversikt', 'Overview'],
+  'section:messages': ['Chat', 'Chat'],
+  'section:studio': ['Studio', 'Studio'],
+  'section:inbox': ['Innboks', 'Inbox'],
+  'section:ticketing': ['Saker', 'Ticketing'],
+  'section:social': ['Sosialt', 'Social'],
+  'section:agents': ['Agenter', 'Agents'],
+  'section:ingestions': ['Innhenting', 'Ingestions'],
+  'section:knowledge': ['Kunnskap', 'Knowledge'],
+  'section:insights': ['Innsikt', 'Insights'],
+  'section:settings': ['Innstillinger', 'Settings'],
+  'tab:my-account': ['Min konto', 'My account'],
+  'tab:shared': ['Delt med meg', 'Shared with me'],
+  'group:overview-core': ['Oversikt', 'Overview'],
+  'group:messages-core': ['Chat', 'Chat'],
+  'group:studio-create': ['Opprett', 'Create'],
+  'group:studio-linked': ['Tilkoblede systemer', 'Linked systems'],
+  'group:inbox-core': ['Innboks', 'Inbox'],
+  'group:ticketing-core': ['Køer', 'Queues'],
+  'group:social-channels': ['Kanaler', 'Channels'],
+  'group:social-plan': ['Plan', 'Plan'],
+  'group:social-intelligence': ['Intelligens', 'Intelligence'],
+  'group:social-reuse': ['Gjenbruk', 'Reuse'],
+  'group:agents-core': ['Agenter', 'Agents'],
+  'group:ingestions-core': ['Innhenting', 'Ingestions'],
+  'group:knowledge-core': ['Kunnskap', 'Knowledge'],
+  'group:insights-core': ['Måling', 'Measure'],
+  'group:settings-core': ['Innstillinger', 'Settings'],
+  'item:overview-home': ['Hjem', 'Home'],
+  'item:overview-chat': ['Velion Chat', 'Velion Chat'],
+  'item:overview-studio': ['Studio', 'Studio'],
+  'item:overview-inbox': ['Innboks', 'Inbox'],
+  'item:overview-ticketing': ['Saker', 'Ticketing'],
+  'item:overview-social': ['Sosialt', 'Social'],
+  'item:overview-knowledge': ['Kunnskap', 'Knowledge'],
+  'item:overview-insights': ['Innsikt', 'Insights'],
+  'item:overview-leads': ['Leads', 'Leads'],
+  'item:overview-agents': ['Agenter', 'Agents'],
+  'item:messages-start': ['Ny samtale', 'New conversation'],
+  'item:messages-inbox': ['Samtaler', 'Conversations'],
+  'item:studio-canvas': ['Canvas', 'Canvas'],
+  'item:studio-campaigns': ['Kampanjeplanlegger', 'Campaign planner'],
+  'item:studio-templates': ['Maler', 'Templates'],
+  'item:studio-social-drafts': ['Sosiale utkast', 'Social drafts'],
+  'item:studio-knowledge-assets': ['Kunnskapsressurser', 'Knowledge assets'],
+  'item:inbox-home': ['Din innboks', 'Your inbox'],
+  'item:inbox-ai': ['AI-samtaler', 'AI conversations'],
+  'item:ticketing-suggested': ['Foreslått av AI', 'Suggested by AI'],
+  'item:ticketing-my': ['Mine saker', 'My tickets'],
+  'item:ticketing-unassigned': ['Uten eier', 'Unassigned'],
+  'item:ticketing-sla-risk': ['SLA-risiko', 'SLA risk'],
+  'item:social-accounts': ['Kontoer', 'Accounts'],
+  'item:social-calendar': ['Kalender', 'Calendar'],
+  'item:social-drafts': ['Utkast', 'Drafts'],
+  'item:social-approvals': ['Godkjenninger', 'Approvals'],
+  'item:social-campaigns': ['Kampanjer', 'Campaigns'],
+  'item:social-competitors': ['Konkurrentovervåking', 'Competitor watch'],
+  'item:social-trends': ['Trender', 'Trends'],
+  'item:social-evergreen': ['Evergreen-kø', 'Evergreen queue'],
+  'item:agents-all': ['Alle agenter', 'All agents'],
+  'item:agents-chat': ['Arbeidsflate', 'Workspace'],
+  'item:ingestions-home': ['Arbeidsflate', 'Workspace'],
+  'item:ingestions-knowledge': ['Kunnskap', 'Knowledge'],
+  'item:ingestions-chat': ['Spør Velion', 'Ask Velion'],
+  'item:knowledge-overview': ['Datakilder', 'Data sources'],
+  'item:knowledge-chat': ['Spør kunnskapen', 'Ask knowledge'],
+  'item:insights-overview': ['Oversikt', 'Overview'],
+  'item:insights-social': ['Sosialt', 'Social'],
+  'item:insights-inbox': ['Innboks', 'Inbox'],
+  'item:insights-agents': ['Agenter', 'Agents'],
+  'item:insights-campaigns': ['Kampanjer', 'Campaigns'],
+  'item:insights-experiments': ['Eksperimenter', 'Experiments'],
+  'item:settings-workspace': ['Arbeidsområde', 'Workspace'],
+  'item:settings-members': ['Medlemmer', 'Members'],
+  'item:settings-billing': ['Fakturering', 'Billing'],
+  'item:settings-security': ['Sikkerhet', 'Security'],
+  'item:settings-trust': ['Tillitssenter', 'Trust Center'],
+  'item:settings-router-policy': ['Router-policy', 'Router policy'],
+  'item:settings-finetune': ['Finjusteringsjobber', 'Fine-tune jobs'],
+}
+
+function localizeSidebarSection(section: SidebarSection, i18n: ReturnType<typeof useI18n>): SidebarSection {
+  return {
+    ...section,
+    label: translateSidebarLabel(`section:${section.id}`, section.label, i18n),
+    panelTabs: section.panelTabs?.map((tab) => ({
+      ...tab,
+      label: translateSidebarLabel(`tab:${tab.id}`, tab.label, i18n),
+    })),
+    panelGroups: section.panelGroups.map((group) => ({
+      ...group,
+      label: translateSidebarLabel(`group:${group.id}`, group.label, i18n),
+      items: group.items.map((item) => ({
+        ...item,
+        label: translateSidebarLabel(`item:${item.id}`, item.label, i18n),
+        subItems: item.subItems?.map((subItem) => ({
+          ...subItem,
+          label: translateSidebarLabel(`subitem:${subItem.id}`, subItem.label, i18n),
+        })),
+      })),
+    })),
+  }
+}
+
+function translateSidebarLabel(key: string, fallback: string, i18n: ReturnType<typeof useI18n>): string {
+  const label = sidebarLabels[key]
+  return label ? i18n.tr(label[0], label[1]) : fallback
 }

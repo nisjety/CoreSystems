@@ -97,21 +97,6 @@ export type SourcePayload = {
   }>
 }
 
-export type QuarrySource = SourcePayload['quarrySources'][number]
-
-export type SourceCreateInput = {
-  name: string
-  url: string
-  kind: string
-  monitor?: boolean
-  preset?: string
-  config?: Record<string, unknown>
-}
-
-export type SourceCreateResult = {
-  source: QuarrySource
-}
-
 export type ProfilePayload = {
   profiles: Array<{
     id: string
@@ -194,19 +179,4 @@ export function runIngestionScheduleAction(action: string, scheduleId: string, s
     body: JSON.stringify({ action, scheduleId }),
     signal,
   })
-}
-
-export function createIngestionSource(input: SourceCreateInput, signal?: AbortSignal) {
-  return requestJson<SourceCreateResult>('/api/ingestions/sources', {
-    method: 'POST',
-    body: JSON.stringify(input),
-    signal,
-  })
-}
-
-export function deleteIngestionSource(id: string, signal?: AbortSignal) {
-  return requestJson<{ deleted: boolean; sourceId: string }>(
-    `/api/ingestions/sources/${encodeURIComponent(id)}`,
-    { method: 'DELETE', signal },
-  )
 }

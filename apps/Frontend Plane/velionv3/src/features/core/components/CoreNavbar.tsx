@@ -6,6 +6,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Languages,
   MessageSquareMore,
   MoonStar,
   Search,
@@ -26,6 +27,7 @@ import {
 } from '@/shared/api/navbar-client'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { clearSession, getSession } from '@/shared/session/session-store'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
 type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
@@ -39,12 +41,13 @@ export function CoreNavbar(props: {
   workspace: WorkspaceIdentity
 }) {
   let headerRef: HTMLElement | undefined
+  const i18n = useI18n()
   const navigate = useNavigate()
   const session = getSession()
   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
   const [theme, setTheme] = createSignal<ThemePayload['theme']>('system')
   const [localSearchOpen, setLocalSearchOpen] = createSignal(false)
-  const labels = () => getNavbarLabels(props.activeRoute)
+  const labels = () => getNavbarLabels(props.activeRoute, i18n.locale())
   const profileInitial = () => (props.workspace.userName ?? props.workspace.userEmail ?? props.workspace.name).trim().charAt(0).toUpperCase() || props.workspace.initial
   const messageUnreadCount = () => props.navbarData?.notifications.messages.filter((message) => !message.read).length ?? 0
   const notificationUnreadCount = () =>
@@ -127,8 +130,8 @@ export function CoreNavbar(props: {
           <div class="core-navbar__left">
             <A
               href="/dashboard"
-              aria-label="Go to home"
-              title="Go to home"
+              aria-label={i18n.tr('Gå til hjem', 'Go to home')}
+              title={i18n.tr('Gå til hjem', 'Go to home')}
               class="core-navbar__home-mark"
             >
               {props.workspace.initial}
@@ -156,7 +159,7 @@ export function CoreNavbar(props: {
 
           <div class="core-navbar__actions">
             <NavbarActionButton
-              label="Open knowledge search"
+              label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
               onClick={() => setSearchOpen(true)}
               class="core-navbar__mobile-search"
             >
@@ -167,8 +170,8 @@ export function CoreNavbar(props: {
               <NavDivider />
 
               <NavbarActionButton
-                label="Toggle dark mode"
-                tooltip="Toggle dark mode"
+                label={i18n.tr('Bytt mørk modus', 'Toggle dark mode')}
+                tooltip={i18n.tr('Bytt mørk modus', 'Toggle dark mode')}
                 onClick={() => {
                   const nextTheme = nextThemePreference(theme())
                   const refreshNavbar = props.onNavbarRefresh
@@ -188,17 +191,30 @@ export function CoreNavbar(props: {
               <NavDivider />
 
               <NavbarActionButton
-                label="Open AI assistant"
-                tooltip="AI assistant for current page"
+                label={i18n.tr(`Bytt til ${i18n.nextLocaleName()}`, `Switch to ${i18n.nextLocaleName()}`)}
+                tooltip={i18n.tr(`Bytt til ${i18n.nextLocaleName()}`, `Switch to ${i18n.nextLocaleName()}`)}
+                onClick={i18n.toggleLocale}
+              >
+                <span class="core-navbar__language">
+                  <Languages class="size-[15px]" strokeWidth={1.85} />
+                  <span>{i18n.localeCode()}</span>
+                </span>
+              </NavbarActionButton>
+
+              <NavDivider />
+
+              <NavbarActionButton
+                label={i18n.tr('Åpne AI-assistent', 'Open AI assistant')}
+                tooltip={i18n.tr('AI-assistent for gjeldende side', 'AI assistant for current page')}
                 active={openPanel() === 'assistant'}
                 onClick={() => openExclusivePanel('assistant')}
               >
                 <Sparkles class="size-[18px]" strokeWidth={1.85} />
               </NavbarActionButton>
 
-              <BadgeButton count={messageUnreadCount()} label="Quick messages">
+              <BadgeButton count={messageUnreadCount()} label={i18n.tr('Hurtigmeldinger', 'Quick messages')} i18n={i18n}>
                 <NavbarActionButton
-                  label={`${messageUnreadCount()} unread messages`}
+                  label={i18n.tr(`${messageUnreadCount()} uleste meldinger`, `${messageUnreadCount()} unread messages`)}
                   active={openPanel() === 'messages'}
                   onClick={() => openExclusivePanel('messages')}
                 >
@@ -206,9 +222,9 @@ export function CoreNavbar(props: {
                 </NavbarActionButton>
               </BadgeButton>
 
-              <BadgeButton count={notificationUnreadCount()} label="Notifications">
+              <BadgeButton count={notificationUnreadCount()} label={i18n.tr('Varsler', 'Notifications')} i18n={i18n}>
                 <NavbarActionButton
-                  label={`${notificationUnreadCount()} unread notifications`}
+                  label={i18n.tr(`${notificationUnreadCount()} uleste varsler`, `${notificationUnreadCount()} unread notifications`)}
                   active={openPanel() === 'notifications'}
                   onClick={() => openExclusivePanel('notifications')}
                 >
@@ -217,7 +233,7 @@ export function CoreNavbar(props: {
               </BadgeButton>
 
               <NavbarActionButton
-                label="Calendar"
+                label={i18n.tr('Kalender', 'Calendar')}
                 active={openPanel() === 'calendar'}
                 onClick={() => openExclusivePanel('calendar')}
               >
@@ -228,8 +244,8 @@ export function CoreNavbar(props: {
 
               <button
                 type="button"
-                aria-label="Open profile menu"
-                title="Open profile menu"
+                aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')}
+                title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
                 onClick={() => openExclusivePanel('profile')}
                 class="core-navbar__profile"
               >
@@ -287,6 +303,7 @@ function GlobalSearchDialog(props: {
   onClose: () => void
   onNavigate: (href: string) => void
 }) {
+  const i18n = useI18n()
   let inputRef: HTMLInputElement | undefined
   let searchTimer: number | undefined
   let searchController: AbortController | undefined
@@ -318,7 +335,7 @@ function GlobalSearchDialog(props: {
         })
         .catch((searchError: unknown) => {
           if (controller.signal.aborted) return
-          setError(searchError instanceof Error ? searchError.message : 'Search failed.')
+          setError(searchError instanceof Error ? searchError.message : i18n.tr('Søk feilet.', 'Search failed.'))
           setResults([])
         })
         .finally(() => {
@@ -337,8 +354,8 @@ function GlobalSearchDialog(props: {
   })
 
   return (
-    <div class="core-search-overlay" role="dialog" aria-modal="true" aria-label="Knowledge search">
-      <button type="button" class="core-search-overlay__scrim" aria-label="Close global search" onClick={() => props.onClose()} />
+    <div class="core-search-overlay" role="dialog" aria-modal="true" aria-label={i18n.tr('Kunnskapssøk', 'Knowledge search')}>
+      <button type="button" class="core-search-overlay__scrim" aria-label={i18n.tr('Lukk globalt søk', 'Close global search')} onClick={() => props.onClose()} />
       <div class="core-search-overlay__panel velion-panel-in">
         <div class="core-search-overlay__header">
           <Search class="size-4 core-search-overlay__icon" strokeWidth={1.8} />
@@ -346,26 +363,26 @@ function GlobalSearchDialog(props: {
             ref={inputRef}
             value={query()}
             onInput={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search the knowledge base"
-            aria-label="Search the knowledge base"
+            placeholder={i18n.tr('Søk i kunnskapsbasen', 'Search the knowledge base')}
+            aria-label={i18n.tr('Søk i kunnskapsbasen', 'Search the knowledge base')}
           />
-          <button type="button" class="core-search-overlay__close" onClick={() => props.onClose()} aria-label="Close global search">
+          <button type="button" class="core-search-overlay__close" onClick={() => props.onClose()} aria-label={i18n.tr('Lukk globalt søk', 'Close global search')}>
             Esc
           </button>
         </div>
         <div class="core-search-overlay__results">
           <Show
             when={query().trim().length >= 2}
-            fallback={<EmptySearchPanel text="Start typing to search workspace knowledge." />}
+            fallback={<EmptySearchPanel text={i18n.tr('Begynn å skrive for å søke i arbeidsområdets kunnskap.', 'Start typing to search workspace knowledge.')} />}
           >
             <Show
               when={!loading()}
-              fallback={<EmptySearchPanel text="Searching…" />}
+              fallback={<EmptySearchPanel text={i18n.tr('Søker ...', 'Searching ...')} />}
             >
-              <Show when={!error()} fallback={<EmptySearchPanel text={error() ?? 'Search failed.'} />}>
+              <Show when={!error()} fallback={<EmptySearchPanel text={error() ?? i18n.tr('Søk feilet.', 'Search failed.')} />}>
                 <Show
                   when={results().length > 0}
-                  fallback={<EmptySearchPanel text="No matching knowledge records." />}
+                  fallback={<EmptySearchPanel text={i18n.tr('Ingen matchende kunnskapsoppføringer.', 'No matching knowledge records.')} />}
                 >
                   <For each={results()}>
                     {(result) => (
@@ -408,16 +425,17 @@ function applyThemePreference(theme: ThemePayload['theme']) {
 }
 
 function SearchTrigger(props: { onOpen: () => void }) {
+  const i18n = useI18n()
   return (
     <button
       type="button"
       onClick={() => props.onOpen()}
-      title="Open knowledge search"
+      title={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
       class="velion-navbar-search-trigger"
-      aria-label="Open knowledge search"
+      aria-label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
     >
       <Search class="velion-navbar-search-icon" strokeWidth={1.8} />
-      <span class="velion-navbar-search-label">Search knowledge base</span>
+      <span class="velion-navbar-search-label">{i18n.tr('Søk i kunnskapsbasen', 'Search knowledge base')}</span>
       <span class="velion-navbar-shortcut-key velion-navbar-shortcut-key-min">/</span>
       <span class="velion-navbar-shortcut-key velion-navbar-shortcut-key-wide">CMD+K</span>
     </button>
@@ -443,7 +461,13 @@ function Breadcrumb(props: {
         class="core-breadcrumb__workspace"
       >
         <span>{props.workspace.name}</span>
-        <strong>{props.workspace.plan}</strong>
+        <strong
+          classList={{
+            'core-breadcrumb__plan--paid': props.workspace.plan.trim().toLowerCase() !== 'trial',
+          }}
+        >
+          {props.workspace.plan}
+        </strong>
       </button>
       <BreadcrumbSeparator />
       <A href={props.moduleHref}>{props.moduleLabel}</A>
@@ -454,12 +478,13 @@ function Breadcrumb(props: {
 }
 
 function HistoryNav(props: { onBack: () => void; onForward: () => void }) {
+  const i18n = useI18n()
   return (
     <div class="core-history-nav">
-      <NavbarActionButton label="Go back" tooltip="Go back" onClick={props.onBack}>
+      <NavbarActionButton label={i18n.tr('Gå tilbake', 'Go back')} tooltip={i18n.tr('Gå tilbake', 'Go back')} onClick={props.onBack}>
         <ChevronLeft class="size-4" strokeWidth={2.1} />
       </NavbarActionButton>
-      <NavbarActionButton label="Go forward" tooltip="Go forward" onClick={props.onForward}>
+      <NavbarActionButton label={i18n.tr('Gå fremover', 'Go forward')} tooltip={i18n.tr('Gå fremover', 'Go forward')} onClick={props.onForward}>
         <ChevronRight class="size-4" strokeWidth={2.1} />
       </NavbarActionButton>
     </div>
@@ -490,12 +515,12 @@ function NavbarActionButton(props: {
   )
 }
 
-function BadgeButton(props: { children: JSX.Element; count: number; label: string }) {
+function BadgeButton(props: { children: JSX.Element; count: number; i18n: ReturnType<typeof useI18n>; label: string }) {
   return (
     <div class="core-badge-button">
       {props.children}
       <Show when={props.count > 0}>
-        <span aria-label={`${props.count} unread ${props.label.toLowerCase()}`}>
+        <span aria-label={props.i18n.tr(`${props.count} uleste ${props.label.toLowerCase()}`, `${props.count} unread ${props.label.toLowerCase()}`)}>
           {Math.min(props.count, 9)}
           {props.count > 9 ? '+' : null}
         </span>
@@ -513,6 +538,7 @@ function BreadcrumbSeparator() {
 }
 
 function WorkspaceSwitcher(props: { canManageWorkspace: boolean; onClose: () => void; workspace: WorkspaceIdentity }) {
+  const i18n = useI18n()
   const [active, setActive] = createSignal<'org' | 'personal'>('org')
 
   return (
@@ -529,7 +555,7 @@ function WorkspaceSwitcher(props: { canManageWorkspace: boolean; onClose: () => 
         <span class="core-workspace-mark">{props.workspace.initial}</span>
         <span>
           <strong>{props.workspace.name}</strong>
-          <small>Organization workspace · {props.workspace.plan}</small>
+          <small>{i18n.tr('Organisasjonsarbeidsområde', 'Organization workspace')} · {props.workspace.plan}</small>
         </span>
         <Show when={active() === 'org'}>
           <Check class="size-3.5" aria-hidden="true" />
@@ -547,8 +573,8 @@ function WorkspaceSwitcher(props: { canManageWorkspace: boolean; onClose: () => 
       >
         <span class="core-user-workspace-mark">{props.workspace.initial}</span>
         <span>
-          <strong>{props.workspace.userName ?? 'Personal workspace'}</strong>
-          <small>{props.workspace.userEmail ?? 'Signed in'}</small>
+          <strong>{props.workspace.userName ?? i18n.tr('Personlig arbeidsområde', 'Personal workspace')}</strong>
+          <small>{props.workspace.userEmail ?? i18n.tr('Innlogget', 'Signed in')}</small>
         </span>
         <Show when={active() === 'personal'}>
           <Check class="size-3.5" aria-hidden="true" />
@@ -558,7 +584,7 @@ function WorkspaceSwitcher(props: { canManageWorkspace: boolean; onClose: () => 
       <Show when={props.canManageWorkspace}>
         <A href="/settings/workspace" onClick={props.onClose} class="core-workspace-switcher__manage">
           <Building2 class="size-3.5" />
-          Manage workspaces and members
+          {i18n.tr('Administrer arbeidsområder og medlemmer', 'Manage workspaces and members')}
         </A>
       </Show>
     </div>

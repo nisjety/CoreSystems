@@ -29,6 +29,7 @@ import {
   type NavbarPayload,
 } from '@/shared/api/navbar-client'
 import { cn } from '@/shared/lib/cn'
+import { useI18n } from '@/shared/i18n'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 
@@ -100,12 +101,13 @@ function MessagesDropdown(props: {
   messages: NavbarNotification[]
   onOpen: (id: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <Panel class="right-24 velion-floating-panel-md">
-      <TabHeader tabs={['All', 'Messages', 'Mentions']} />
+      <TabHeader tabs={[i18n.tr('Alle', 'All'), i18n.tr('Meldinger', 'Messages'), i18n.tr('Omtaler', 'Mentions')]} />
       <div class="max-h-[380px] overflow-y-auto">
-        <Show when={props.configured} fallback={<EmptyPanel text="Connect Novu to show inbox and Velion AI chat messages." />}>
-          <Show when={props.messages.length} fallback={<EmptyPanel text="No messages" />}>
+        <Show when={props.configured} fallback={<EmptyPanel text={i18n.tr('Koble til Novu for å vise innboks og Velion AI-chatmeldinger.', 'Connect Novu to show inbox and Velion AI chat messages.')} />}>
+          <Show when={props.messages.length} fallback={<EmptyPanel text={i18n.tr('Ingen meldinger', 'No messages')} />}>
             <For each={props.messages}>
               {(message, index) => (
                 <MessageRow
@@ -118,7 +120,7 @@ function MessagesDropdown(props: {
           </Show>
         </Show>
       </div>
-      <PanelFooter href="/inbox" label="View all messages" />
+      <PanelFooter href="/inbox" label={i18n.tr('Vis alle meldinger', 'View all messages')} />
     </Panel>
   )
 }
@@ -128,12 +130,13 @@ function NotificationsDropdown(props: {
   notifications: NavbarNotification[]
   onOpen: (id: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <Panel class="right-14 velion-floating-panel-md">
-      <TabHeader tabs={['All', 'Systems', 'Unread']} />
+      <TabHeader tabs={[i18n.tr('Alle', 'All'), i18n.tr('Systemer', 'Systems'), i18n.tr('Ulest', 'Unread')]} />
       <div class="max-h-[380px] overflow-y-auto">
-        <Show when={props.configured} fallback={<EmptyPanel text="Connect Novu to show real notifications." />}>
-          <Show when={props.notifications.length} fallback={<EmptyPanel text="No notifications" />}>
+        <Show when={props.configured} fallback={<EmptyPanel text={i18n.tr('Koble til Novu for å vise ekte varsler.', 'Connect Novu to show real notifications.')} />}>
+          <Show when={props.notifications.length} fallback={<EmptyPanel text={i18n.tr('Ingen varsler', 'No notifications')} />}>
             <For each={props.notifications}>
               {(notification, index) => (
                 <NotificationRow
@@ -154,6 +157,7 @@ function CalendarDropdown(props: {
   onRefresh?: () => void
   state: CalendarState
 }) {
+  const i18n = useI18n()
   const [activeTab, setActiveTab] = createSignal<'calendar' | 'notes'>('calendar')
   const [calendar, setCalendar] = createSignal<CalendarState>(emptyCalendar)
   const [error, setError] = createSignal<string | null>(null)
@@ -188,7 +192,7 @@ function CalendarDropdown(props: {
       setError(null)
       props.onRefresh?.()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Calendar event could not be saved.')
+      setError(reason instanceof Error ? reason.message : i18n.tr('Kalenderhendelsen kunne ikke lagres.', 'Calendar event could not be saved.'))
     }
   }
 
@@ -207,7 +211,7 @@ function CalendarDropdown(props: {
       setError(null)
       props.onRefresh?.()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Calendar note could not be saved.')
+      setError(reason instanceof Error ? reason.message : i18n.tr('Kalendernotatet kunne ikke lagres.', 'Calendar note could not be saved.'))
     }
   }
 
@@ -221,7 +225,7 @@ function CalendarDropdown(props: {
               onClick={() => setActiveTab(tab)}
               classList={{ 'core-calendar-panel__tab--active': activeTab() === tab }}
             >
-              {tab}
+              {tab === 'calendar' ? i18n.tr('kalender', 'calendar') : i18n.tr('notater', 'notes')}
             </button>
           )}
         </For>
@@ -236,17 +240,18 @@ function CalendarDropdown(props: {
             selectedDate={selectedDate()}
             onNoteTextChange={setNoteText}
             onSaveNote={() => void saveNote()}
+            i18n={i18n}
           />
         }
       >
         <div class="core-calendar-panel">
           <div class="core-calendar-panel__header">
-            <h3>{selectedDate().toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</h3>
+            <h3>{selectedDate().toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-US', { month: 'short', year: 'numeric' })}</h3>
             <div>
-              <MiniIcon label="Previous" onClick={() => setSelectedDate((current) => shiftDate(current, -7))}>
+              <MiniIcon label={i18n.tr('Forrige', 'Previous')} onClick={() => setSelectedDate((current) => shiftDate(current, -7))}>
                 <ChevronLeft class="size-4" />
               </MiniIcon>
-              <MiniIcon label="Next" onClick={() => setSelectedDate((current) => shiftDate(current, 7))}>
+              <MiniIcon label={i18n.tr('Neste', 'Next')} onClick={() => setSelectedDate((current) => shiftDate(current, 7))}>
                 <ChevronRight class="size-4" />
               </MiniIcon>
             </div>
@@ -259,19 +264,19 @@ function CalendarDropdown(props: {
           />
 
           <div class="core-calendar-panel__events">
-            <p>{selectedDate().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</p>
-            <Show when={selectedEvents().length} fallback={<span>No events for this day</span>}>
+            <p>{selectedDate().toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</p>
+            <Show when={selectedEvents().length} fallback={<span>{i18n.tr('Ingen hendelser denne dagen', 'No events for this day')}</span>}>
               <For each={selectedEvents()}>
                 {(event) => <CalendarEventRow event={event} />}
               </For>
             </Show>
             <div class="core-calendar-panel__add">
-              <button type="button" aria-label="Add calendar event" onClick={() => void saveEvent()}>
+              <button type="button" aria-label={i18n.tr('Legg til kalenderhendelse', 'Add calendar event')} onClick={() => void saveEvent()}>
                 <Plus class="size-3.5" />
               </button>
               <input
-                placeholder="Add event..."
-                aria-label="Calendar event title"
+                placeholder={i18n.tr('Legg til hendelse ...', 'Add event ...')}
+                aria-label={i18n.tr('Tittel på kalenderhendelse', 'Calendar event title')}
                 value={eventTitle()}
                 onInput={(event) => setEventTitle(event.currentTarget.value)}
                 onKeyDown={(event) => {
@@ -291,6 +296,7 @@ function CalendarDropdown(props: {
 }
 
 function CalendarNotes(props: {
+  i18n: ReturnType<typeof useI18n>
   noteText: string
   notes: CalendarNote[]
   onNoteTextChange: (value: string) => void
@@ -299,14 +305,14 @@ function CalendarNotes(props: {
 }) {
   return (
     <div class="core-calendar-panel">
-      <p class="core-calendar-panel__date-label">{props.selectedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ·</p>
-      <h3 class="core-calendar-panel__today">Today</h3>
+      <p class="core-calendar-panel__date-label">{props.selectedDate.toLocaleDateString(props.i18n.locale() === 'no' ? 'nb-NO' : 'en-US', { month: 'short', day: 'numeric' })} ·</p>
+      <h3 class="core-calendar-panel__today">{props.i18n.tr('I dag', 'Today')}</h3>
       <div class="core-calendar-panel__notes">
-        <Show when={props.notes.length} fallback={<EmptyPanel text="No notes for this day" />}>
+        <Show when={props.notes.length} fallback={<EmptyPanel text={props.i18n.tr('Ingen notater denne dagen', 'No notes for this day')} />}>
           <For each={props.notes}>
             {(note) => (
               <div>
-                <span>{formatEventTime(new Date(note.createdAt))}</span>
+                <span>{formatEventTime(new Date(note.createdAt), props.i18n)}</span>
                 <p>{note.text}</p>
               </div>
             )}
@@ -314,12 +320,12 @@ function CalendarNotes(props: {
         </Show>
       </div>
       <div class="core-calendar-panel__add">
-        <button type="button" aria-label="Add calendar note" onClick={() => props.onSaveNote()}>
+        <button type="button" aria-label={props.i18n.tr('Legg til kalendernotat', 'Add calendar note')} onClick={() => props.onSaveNote()}>
           <Plus class="size-3.5" />
         </button>
         <input
-          placeholder="Start typing..."
-          aria-label="Calendar note text"
+          placeholder={props.i18n.tr('Begynn å skrive ...', 'Start typing ...')}
+          aria-label={props.i18n.tr('Tekst for kalendernotat', 'Calendar note text')}
           value={props.noteText}
           onInput={(event) => props.onNoteTextChange(event.currentTarget.value)}
           onKeyDown={(event) => {
@@ -340,41 +346,43 @@ function ProfileDropdown(props: {
   planLabel?: string
   profile: { email?: string | null; name?: string | null }
 }) {
+  const i18n = useI18n()
   return (
     <Panel class="right-0 velion-floating-panel-sm p-2">
       <div class="core-profile-card">
-        <div>{props.profile.name ?? 'Account'}</div>
+        <div>{props.profile.name ?? i18n.tr('Konto', 'Account')}</div>
         <Show when={props.profile.email}>
           {(email) => <div>{email()}</div>}
         </Show>
       </div>
-      <ProfileItem href="/account" icon={User} label="Profile" onNavigate={props.onNavigate} />
+      <ProfileItem href="/account" icon={User} label={i18n.tr('Profil', 'Profile')} onNavigate={props.onNavigate} />
       <Show when={props.canManageWorkspace}>
-        <ProfileItem href="/settings/members" icon={Users} label="Community" onNavigate={props.onNavigate} />
-        <ProfileItem href="/settings/billing" icon={CreditCard} label="Subscription" badge={props.planLabel} onNavigate={props.onNavigate} />
-        <ProfileItem href="/settings/workspace" icon={Settings} label="Settings" onNavigate={props.onNavigate} />
+        <ProfileItem href="/settings/members" icon={Users} label={i18n.tr('Fellesskap', 'Community')} onNavigate={props.onNavigate} />
+        <ProfileItem href="/settings/billing" icon={CreditCard} label={i18n.tr('Abonnement', 'Subscription')} badge={props.planLabel} onNavigate={props.onNavigate} />
+        <ProfileItem href="/settings/workspace" icon={Settings} label={i18n.tr('Innstillinger', 'Settings')} onNavigate={props.onNavigate} />
       </Show>
       <div class="core-menu-divider" />
       <button type="button" onClick={() => props.onSupport()} class="velion-menu-item">
         <HelpCircle class="size-[17px]" strokeWidth={1.7} />
-        <span>Help center</span>
+        <span>{i18n.tr('Hjelpesenter', 'Help center')}</span>
       </button>
       <button type="button" class="velion-menu-item" onClick={() => props.onSignOut()}>
         <LogOut class="size-[17px]" strokeWidth={1.7} />
-        <span>Sign out</span>
+        <span>{i18n.tr('Logg ut', 'Sign out')}</span>
       </button>
     </Panel>
   )
 }
 
 function AssistantPanel(props: { onNavigate: (href: VelionRoute) => void }) {
+  const i18n = useI18n()
   return (
     <Panel class="right-32 velion-floating-panel-sm p-3">
       <div class="core-assistant-panel">
-        <strong>AI assistant</strong>
-        <p>Page-aware help for current workspace actions.</p>
+        <strong>{i18n.tr('AI-assistent', 'AI assistant')}</strong>
+        <p>{i18n.tr('Sidebevisst hjelp for handlinger i gjeldende arbeidsområde.', 'Page-aware help for current workspace actions.')}</p>
         <button type="button" onClick={() => props.onNavigate('/chat')}>
-          Open chat
+          {i18n.tr('Åpne chat', 'Open chat')}
         </button>
       </div>
     </Panel>
@@ -386,6 +394,7 @@ function NotificationRow(props: {
   item: NavbarNotification
   onOpen: (id: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <A
       href={props.item.href ?? '/inbox'}
@@ -406,7 +415,7 @@ function NotificationRow(props: {
           </div>
           <p>{props.item.body}</p>
           <Show when={props.item.createdAt}>
-            {(createdAt) => <small>{formatRelativeTime(createdAt())}</small>}
+            {(createdAt) => <small>{formatRelativeTime(createdAt(), i18n)}</small>}
           </Show>
         </div>
       </div>
@@ -419,6 +428,7 @@ function MessageRow(props: {
   item: NavbarNotification
   onOpen: (id: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <A
       href={props.item.href ?? '/inbox'}
@@ -431,7 +441,7 @@ function MessageRow(props: {
           <div>
             <strong>{props.item.title}</strong>
             <Show when={props.item.createdAt}>
-              {(createdAt) => <small>{formatRelativeTime(createdAt())}</small>}
+              {(createdAt) => <small>{formatRelativeTime(createdAt(), i18n)}</small>}
             </Show>
           </div>
           <p>{props.item.body}</p>
@@ -449,13 +459,17 @@ function CalendarGrid(props: {
   onSelect: (date: Date) => void
   selectedDate: Date
 }) {
+  const i18n = useI18n()
   const days = () => buildCalendarDays(props.selectedDate)
   const eventDates = () => new Set(props.events.map((event) => formatDateKey(new Date(event.start))))
+  const weekdayLabels = () => i18n.locale() === 'no'
+    ? ['S', 'M', 'T', 'O', 'T', 'F', 'L']
+    : ['S', 'M', 'T', 'W', 'T', 'F', 'S']
 
   return (
     <div class="core-calendar-grid">
       <div>
-        <For each={['S', 'M', 'T', 'W', 'T', 'F', 'S']}>
+        <For each={weekdayLabels()}>
           {(day) => <span>{day}</span>}
         </For>
       </div>
@@ -481,12 +495,13 @@ function CalendarGrid(props: {
 }
 
 function CalendarEventRow(props: { event: CalendarEvent }) {
+  const i18n = useI18n()
   return (
     <div class="core-calendar-event-row">
       <span />
       <div>
         <p>{props.event.title}</p>
-        <small>{formatEventRange(props.event)}</small>
+        <small>{formatEventRange(props.event, i18n)}</small>
       </div>
     </div>
   )
@@ -576,18 +591,24 @@ function formatDateKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
-function formatEventRange(event: CalendarEvent) {
+function formatEventRange(event: CalendarEvent, i18n: ReturnType<typeof useI18n>) {
   const start = new Date(event.start)
   const end = new Date(event.end)
-  return `${formatEventTime(start)} - ${formatEventTime(end)}`
+  return `${formatEventTime(start, i18n)} - ${formatEventTime(end, i18n)}`
 }
 
-function formatEventTime(date: Date) {
-  return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+function formatEventTime(date: Date, i18n: ReturnType<typeof useI18n>) {
+  return date.toLocaleTimeString(i18n.locale() === 'no' ? 'nb-NO' : 'en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
-function formatRelativeTime(value: string) {
+function formatRelativeTime(value: string, i18n: ReturnType<typeof useI18n>) {
   const deltaSeconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000))
+  if (i18n.locale() === 'no') {
+    if (deltaSeconds < 60) return 'nå'
+    if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m siden`
+    if (deltaSeconds < 86_400) return `${Math.floor(deltaSeconds / 3600)}t siden`
+    return `${Math.floor(deltaSeconds / 86_400)}d siden`
+  }
   if (deltaSeconds < 60) return 'now'
   if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`
   if (deltaSeconds < 86_400) return `${Math.floor(deltaSeconds / 3600)}h ago`

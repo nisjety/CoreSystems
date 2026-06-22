@@ -4,6 +4,7 @@ import { ExternalLink, Layers, Loader2, X } from 'lucide-solid'
 import { createSignal, For, Match, Show, Switch } from 'solid-js'
 import type { NavbarSearchResult } from '@/shared/api/navbar-client'
 import { safeHostname, type ImageHit, type PreviewResult, type VideoHit } from '@/shared/api/search-client'
+import { useI18n } from '@/shared/i18n'
 import type { ImagesStatus, SearchResultTab } from '@/features/dashboard/home/dashboard-home-types'
 import { faviconUrlForResult, searchRailTips } from '@/features/dashboard/home/dashboard-search-utils'
 
@@ -19,6 +20,7 @@ export function SearchResultCard(props: {
   result: PreviewResult
   selected?: boolean
 }) {
+  const i18n = useI18n()
   const favicon = () => faviconUrlForResult(props.result.url)
   const highlights = () => (props.result.highlights ?? []).filter((passage) => passage.trim().length > 0).slice(0, 2)
 
@@ -32,13 +34,13 @@ export function SearchResultCard(props: {
               type="button"
               class="dashboard-xresult__open"
               onClick={() => props.onOpen?.(props.result)}
-              aria-label={`Åpne ${props.result.title} i Velion`}
+              aria-label={i18n.tr(`Åpne ${props.result.title} i Velion`, `Open ${props.result.title} in Velion`)}
             >
               <span class="dashboard-xresult__host">
                 <span>{props.result.hostname}</span>
                 <Show when={typeof props.result.score === 'number'}>
-                  <span class="dashboard-xresult__score" title="Semantisk relevans">
-                    {relevancePercent(props.result.score as number)}% relevant
+                  <span class="dashboard-xresult__score" title={i18n.tr('Semantisk relevans', 'Semantic relevance')}>
+                    {relevancePercent(props.result.score as number)}% {i18n.tr('relevant', 'relevant')}
                   </span>
                 </Show>
               </span>
@@ -48,11 +50,17 @@ export function SearchResultCard(props: {
               when={highlights().length > 0}
               fallback={
                 <>
-                  <span class="dashboard-xresult__eyebrow">AI explanation</span>
+                  <span class="dashboard-xresult__eyebrow">{i18n.tr('AI-forklaring', 'AI explanation')}</span>
                   <span class="dashboard-xresult__expl">
                     {props.result.snippet
-                      ? `Velion sees this as relevant to the query because the page context overlaps with the topic: ${props.result.snippet}`
-                      : 'Velion matched this source to your search and can inspect it further before using it in an answer.'}
+                      ? i18n.tr(
+                          `Velion vurderer dette som relevant fordi sidekonteksten overlapper med temaet: ${props.result.snippet}`,
+                          `Velion sees this as relevant to the query because the page context overlaps with the topic: ${props.result.snippet}`,
+                        )
+                      : i18n.tr(
+                          'Velion koblet denne kilden til søket ditt og kan inspisere den videre før den brukes i et svar.',
+                          'Velion matched this source to your search and can inspect it further before using it in an answer.',
+                        )}
                   </span>
                 </>
               }
@@ -63,7 +71,7 @@ export function SearchResultCard(props: {
               </span>
             </Show>
             <span class="dashboard-xresult__tags">
-              <For each={[props.result.hostname, 'web page', 'source']}>
+              <For each={[props.result.hostname, i18n.tr('webside', 'web page'), i18n.tr('kilde', 'source')]}>
                 {(label) => <span>{label}</span>}
               </For>
             </span>
@@ -74,7 +82,7 @@ export function SearchResultCard(props: {
                 onClick={() => props.onFindSimilar?.(props.result)}
               >
                 <Layers class="size-3.5" aria-hidden="true" />
-                Finn lignende
+                {i18n.tr('Finn lignende', 'Find similar')}
               </button>
             </Show>
           </span>
@@ -116,25 +124,31 @@ export function SearchResultCard(props: {
         target="_blank"
         rel="noopener noreferrer"
         class="dashboard-xresult__external"
-        aria-label={`Åpne ${props.result.title} i ny fane`}
+        aria-label={i18n.tr(`Åpne ${props.result.title} i ny fane`, `Open ${props.result.title} in a new tab`)}
       >
         <ExternalLink class="size-3.5" aria-hidden="true" />
-        Ny fane
+        {i18n.tr('Ny fane', 'New tab')}
       </a>
     </article>
   )
 }
 
 export function WebPageViewer(props: { result: PreviewResult | null }) {
+  const i18n = useI18n()
   return (
-    <section class="dashboard-webview" aria-label="Websidevisning i Velion">
+    <section class="dashboard-webview" aria-label={i18n.tr('Websidevisning i Velion', 'Web page view in Velion')}>
       <Show
         when={props.result}
         fallback={
           <div class="dashboard-webview__empty">
-            <p class="dashboard-xsearch-eyebrow">Web view</p>
-            <h3>Velg et søkeresultat</h3>
-            <p>Velion åpner siden her, slik at JavaScript og layout kan lastes uten at du forlater arbeidsflaten.</p>
+            <p class="dashboard-xsearch-eyebrow">{i18n.tr('Webvisning', 'Web view')}</p>
+            <h3>{i18n.tr('Velg et søkeresultat', 'Choose a search result')}</h3>
+            <p>
+              {i18n.tr(
+                'Velion åpner siden her, slik at JavaScript og layout kan lastes uten at du forlater arbeidsflaten.',
+                'Velion opens the page here so JavaScript and layout can load without leaving the workspace.',
+              )}
+            </p>
           </div>
         }
       >
@@ -147,7 +161,7 @@ export function WebPageViewer(props: { result: PreviewResult | null }) {
               </div>
               <a href={result().url} target="_blank" rel="noopener noreferrer">
                 <ExternalLink class="size-3.5" aria-hidden="true" />
-                Ny fane
+                {i18n.tr('Ny fane', 'New tab')}
               </a>
             </div>
             <iframe
@@ -159,7 +173,10 @@ export function WebPageViewer(props: { result: PreviewResult | null }) {
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation"
             />
             <p class="dashboard-webview__hint">
-              Hvis kilden blokkerer innebygging, bruk Ny fane. Sider som tillater iframe kjører egne scripts her inne.
+              {i18n.tr(
+                'Hvis kilden blokkerer innebygging, bruk Ny fane. Sider som tillater iframe kjører egne scripts her inne.',
+                'If the source blocks embedding, use New tab. Pages that allow iframes run their own scripts here.',
+              )}
             </p>
           </>
         )}
@@ -174,6 +191,7 @@ export function ImageResultsPanel(props: {
   imagesStatus: ImagesStatus
   query: string
 }) {
+  const i18n = useI18n()
   return (
     <Switch>
       <Match when={props.imagesStatus === 'loading' || props.imagesStatus === 'idle'}>
@@ -184,10 +202,14 @@ export function ImageResultsPanel(props: {
         </div>
       </Match>
       <Match when={props.imagesStatus === 'error'}>
-        <div class="dashboard-xsearch-error">{props.imagesError ?? 'Image search could not be completed.'}</div>
+        <div class="dashboard-xsearch-error">
+          {props.imagesError ?? i18n.tr('Bildesøket kunne ikke fullføres.', 'Image search could not be completed.')}
+        </div>
       </Match>
       <Match when={props.images.length === 0}>
-        <div class="dashboard-xsearch-empty">No images found for {props.query}.</div>
+        <div class="dashboard-xsearch-empty">
+          {i18n.tr(`Fant ingen bilder for ${props.query}.`, `No images found for ${props.query}.`)}
+        </div>
       </Match>
       <Match when={true}>
         <div class="dashboard-ximages">
@@ -196,8 +218,13 @@ export function ImageResultsPanel(props: {
               <a href={image.url} target="_blank" rel="noopener noreferrer" class="dashboard-ximages__item">
                 <img src={image.thumbnailUrl} alt={image.title ?? ''} loading="lazy" referrerpolicy="no-referrer" />
                 <div class="dashboard-ximages__cap">
-                  <p>{image.title ?? 'Image result'}</p>
-                  <small>Velion can use this visual to explain context, layout, product details, or place cues.</small>
+                  <p>{image.title ?? i18n.tr('Bildetreff', 'Image result')}</p>
+                  <small>
+                    {i18n.tr(
+                      'Velion kan bruke dette visuelle treffet til å forklare kontekst, layout, produktdetaljer eller stedssignaler.',
+                      'Velion can use this visual to explain context, layout, product details, or place cues.',
+                    )}
+                  </small>
                 </div>
               </a>
             )}
@@ -209,6 +236,7 @@ export function ImageResultsPanel(props: {
 }
 
 export function VideoResultsPanel(props: { error: string | null; query: string; status: ImagesStatus; videos: VideoHit[] }) {
+  const i18n = useI18n()
   const [playing, setPlaying] = createSignal<string | null>(null)
 
   return (
@@ -216,14 +244,16 @@ export function VideoResultsPanel(props: { error: string | null; query: string; 
       <Match when={props.status === 'loading' || props.status === 'idle'}>
         <div class="dashboard-xsearch-status">
           <Loader2 class="size-4 dashboard-xsearch-spin" aria-hidden="true" />
-          Laster videoer…
+          {i18n.tr('Laster videoer...', 'Loading videos...')}
         </div>
       </Match>
       <Match when={props.status === 'error'}>
-        <div class="dashboard-xsearch-error">{props.error ?? 'Videosøk kunne ikke fullføres.'}</div>
+        <div class="dashboard-xsearch-error">
+          {props.error ?? i18n.tr('Videosøk kunne ikke fullføres.', 'Video search could not be completed.')}
+        </div>
       </Match>
       <Match when={props.videos.length === 0}>
-        <SearchVerticalEmpty label="video" query={props.query} />
+        <SearchVerticalEmpty label={i18n.tr('video', 'video')} query={props.query} />
       </Match>
       <Match when={true}>
         <div class="dashboard-xvideos">
@@ -257,7 +287,10 @@ export function VideoResultsPanel(props: { error: string | null; query: string; 
                       <h3 class="dashboard-xvideo__title">{video.title ?? safeHostname(video.url)}</h3>
                       <p class="dashboard-xvideo__desc">
                         {video.author ? `${video.author} · ` : ''}
-                        Klikk for å spille av{video.embedUrl ? ' her' : ' på kilden'}.
+                        {i18n.tr(
+                          `Klikk for å spille av${video.embedUrl ? ' her' : ' på kilden'}.`,
+                          `Click to play${video.embedUrl ? ' here' : ' on the source'}.`,
+                        )}
                       </p>
                     </div>
                   </a>
@@ -267,7 +300,7 @@ export function VideoResultsPanel(props: { error: string | null; query: string; 
                   <div class="dashboard-xvideo__thumb">
                     <iframe
                       src={video.embedUrl ?? ''}
-                      title={video.title ?? 'Video'}
+                      title={video.title ?? i18n.tr('Video', 'Video')}
                       style={{ width: '100%', height: '100%', border: '0' }}
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                       allowfullscreen
@@ -288,18 +321,19 @@ export function VideoResultsPanel(props: { error: string | null; query: string; 
 }
 
 export function VelionResultsSection(props: { loading: boolean; results: NavbarSearchResult[] }) {
+  const i18n = useI18n()
   return (
     <Show when={props.loading || props.results.length > 0}>
       <section class="dashboard-xsearch-velion">
         <p class="dashboard-xsearch-eyebrow">
-          Fra Velion
+          {i18n.tr('Fra Velion', 'From Velion')}
           <Show when={props.loading}>
             <Loader2 class="size-3 dashboard-xsearch-spin" aria-hidden="true" />
           </Show>
         </p>
         <Show
           when={props.results.length > 0}
-          fallback={<p class="dashboard-xsearch-velion__hint">Søker i selskapets kunnskap…</p>}
+          fallback={<p class="dashboard-xsearch-velion__hint">{i18n.tr('Søker i selskapets kunnskap...', 'Searching company knowledge...')}</p>}
         >
           <div class="dashboard-xsearch-velion__list">
             <For each={props.results}>
@@ -326,12 +360,13 @@ export function VelionResultsSection(props: { loading: boolean; results: NavbarS
 }
 
 export function MapGuidePanel(props: { query: string; results: PreviewResult[] }) {
+  const i18n = useI18n()
   const places = () => props.results.slice(0, 4)
 
   return (
     <div class="dashboard-xmap">
       <div class="dashboard-xmap__canvas">
-        <p class="dashboard-xsearch-eyebrow">AI map guide</p>
+        <p class="dashboard-xsearch-eyebrow">{i18n.tr('AI-kartguide', 'AI map guide')}</p>
         <h3 class="dashboard-xmap__title">{props.query}</h3>
         <div class="dashboard-xmap__plane">
           <For each={places()}>
@@ -365,16 +400,19 @@ export function MapGuidePanel(props: { query: string; results: PreviewResult[] }
 }
 
 export function ShoppingResultsPanel(props: { query: string; results: PreviewResult[] }) {
+  const i18n = useI18n()
   const items = () => props.results.slice(0, 5)
 
   return (
-    <Show when={items().length > 0} fallback={<SearchVerticalEmpty label="shopping" query={props.query} />}>
+    <Show when={items().length > 0} fallback={<SearchVerticalEmpty label={i18n.tr('shopping', 'shopping')} query={props.query} />}>
       <div class="dashboard-xshop">
         <section class="dashboard-xshop__intro">
-          <p class="dashboard-xsearch-eyebrow">AI shopping/booking guide</p>
+          <p class="dashboard-xsearch-eyebrow">{i18n.tr('AI shopping-/bookingguide', 'AI shopping/booking guide')}</p>
           <p>
-            Velion compares booking references, shopping pages, similar articles, and source credibility before
-            recommending an action.
+            {i18n.tr(
+              'Velion sammenligner bookingreferanser, shopping-sider, lignende artikler og kildetroverdighet før en handling anbefales.',
+              'Velion compares booking references, shopping pages, similar articles, and source credibility before recommending an action.',
+            )}
           </p>
         </section>
         <For each={items()}>
@@ -385,7 +423,7 @@ export function ShoppingResultsPanel(props: { query: string; results: PreviewRes
                 <span class="dashboard-xshop__host">{item.hostname}</span>
                 <span class="dashboard-xshop__title">{item.title}</span>
                 <span class="dashboard-xshop__desc">
-                  {item.snippet ?? 'Potential buying, booking, reference, or comparison source.'}
+                  {item.snippet ?? i18n.tr('Mulig kjøps-, booking-, referanse- eller sammenligningskilde.', 'Potential buying, booking, reference, or comparison source.')}
                 </span>
               </span>
             </a>
@@ -397,10 +435,13 @@ export function ShoppingResultsPanel(props: { query: string; results: PreviewRes
 }
 
 function SearchVerticalEmpty(props: { label: string; query: string }) {
+  const i18n = useI18n()
   return (
     <div class="dashboard-xsearch-empty">
-      Velion needs more reliable {props.label} evidence for {props.query}. Try a more specific place, product, brand, or
-      source name.
+      {i18n.tr(
+        `Velion trenger mer pålitelig ${props.label}-grunnlag for ${props.query}. Prøv et mer spesifikt sted, produkt, merke eller kildenavn.`,
+        `Velion needs more reliable ${props.label} evidence for ${props.query}. Try a more specific place, product, brand, or source name.`,
+      )}
     </div>
   )
 }
@@ -412,25 +453,29 @@ export function SearchInsightRail(props: {
   query: string
   sourceItems: Array<{ hostname: string; title: string; url: string }>
 }) {
+  const i18n = useI18n()
   return (
     <div class="dashboard-xrail">
       <section class="dashboard-xrail__card">
-        <p class="dashboard-xsearch-eyebrow">Sources</p>
+        <p class="dashboard-xsearch-eyebrow">{i18n.tr('Kilder', 'Sources')}</p>
         <ExpandedSourcesList sourceItems={props.sourceItems} />
       </section>
 
       <section class="dashboard-xrail__card">
-        <p class="dashboard-xsearch-eyebrow">AI notes</p>
+        <p class="dashboard-xsearch-eyebrow">{i18n.tr('AI-notater', 'AI notes')}</p>
         <p class="dashboard-xrail__notes">
           {props.answer
-            || `Velion is organizing ${props.activeTab.toLowerCase()} evidence for “${props.query}” across sources, visuals, and useful next actions.`}
+            || i18n.tr(
+              `Velion organiserer ${searchTabEvidenceLabel(props.activeTab, 'no')}-grunnlag for "${props.query}" på tvers av kilder, visuelt materiale og nyttige neste handlinger.`,
+              `Velion is organizing ${searchTabEvidenceLabel(props.activeTab, 'en')} evidence for "${props.query}" across sources, visuals, and useful next actions.`,
+            )}
         </p>
       </section>
 
       <section class="dashboard-xrail__card">
-        <p class="dashboard-xsearch-eyebrow">Tips</p>
+        <p class="dashboard-xsearch-eyebrow">{i18n.tr('Tips', 'Tips')}</p>
         <ul class="dashboard-xrail__tips">
-          <For each={searchRailTips(props.activeTab)}>
+          <For each={searchRailTips(props.activeTab, i18n.locale())}>
             {(tip) => (
               <li>
                 <span class="dashboard-xrail__dot" aria-hidden="true" />
@@ -445,7 +490,12 @@ export function SearchInsightRail(props: {
         {(thumb) => (
           <section class="dashboard-xrail__media">
             <img src={thumb()} alt={props.images[0]?.title ?? ''} loading="lazy" referrerpolicy="no-referrer" />
-            <p>Visual context can help Velion explain places, products, screenshots, or layout-specific details.</p>
+            <p>
+              {i18n.tr(
+                'Visuell kontekst kan hjelpe Velion med å forklare steder, produkter, skjermbilder eller layoutspesifikke detaljer.',
+                'Visual context can help Velion explain places, products, screenshots, or layout-specific details.',
+              )}
+            </p>
           </section>
         )}
       </Show>
@@ -455,6 +505,7 @@ export function SearchInsightRail(props: {
 
 /** Paste-a-URL/text seed for an ad-hoc "find similar" query. */
 export function SimilarSeedForm(props: { onSubmit: (value: string) => void }) {
+  const i18n = useI18n()
   const [value, setValue] = createSignal('')
 
   return (
@@ -472,11 +523,11 @@ export function SimilarSeedForm(props: { onSubmit: (value: string) => void }) {
       <input
         value={value()}
         onInput={(event) => setValue(event.currentTarget.value)}
-        placeholder="Lim inn en URL eller tekst for å finne lignende sider..."
+        placeholder={i18n.tr('Lim inn en URL eller tekst for å finne lignende sider...', 'Paste a URL or text to find similar pages...')}
         autocomplete="off"
-        aria-label="Finn lignende fra URL eller tekst"
+        aria-label={i18n.tr('Finn lignende fra URL eller tekst', 'Find similar from URL or text')}
       />
-      <button type="submit" disabled={!value().trim()}>Finn lignende</button>
+      <button type="submit" disabled={!value().trim()}>{i18n.tr('Finn lignende', 'Find similar')}</button>
     </form>
   )
 }
@@ -491,14 +542,15 @@ export function SimilarResultsPanel(props: {
   results: PreviewResult[]
   status: ImagesStatus
 }) {
+  const i18n = useI18n()
   return (
-    <section class="dashboard-xsimilar" aria-label="Lignende sider">
+    <section class="dashboard-xsimilar" aria-label={i18n.tr('Lignende sider', 'Similar pages')}>
       <div class="dashboard-xsimilar__head">
         <p class="dashboard-xsearch-eyebrow">
-          Lignende sider
+          {i18n.tr('Lignende sider', 'Similar pages')}
           <span class="dashboard-xsimilar__seed">{props.label}</span>
         </p>
-        <button type="button" class="dashboard-xsimilar__close" onClick={() => props.onClose()} aria-label="Lukk lignende sider">
+        <button type="button" class="dashboard-xsimilar__close" onClick={() => props.onClose()} aria-label={i18n.tr('Lukk lignende sider', 'Close similar pages')}>
           <X class="size-3.5" aria-hidden="true" />
         </button>
       </div>
@@ -506,14 +558,18 @@ export function SimilarResultsPanel(props: {
         <Match when={props.status === 'loading' || props.status === 'idle'}>
           <div class="dashboard-xsearch-status">
             <Loader2 class="size-4 dashboard-xsearch-spin" aria-hidden="true" />
-            Finner lignende sider…
+            {i18n.tr('Finner lignende sider...', 'Finding similar pages...')}
           </div>
         </Match>
         <Match when={props.status === 'error'}>
-          <div class="dashboard-xsearch-error">{props.error ?? 'Kunne ikke finne lignende sider.'}</div>
+          <div class="dashboard-xsearch-error">
+            {props.error ?? i18n.tr('Kunne ikke finne lignende sider.', 'Could not find similar pages.')}
+          </div>
         </Match>
         <Match when={props.results.length === 0}>
-          <div class="dashboard-xsearch-empty">Fant ingen lignende sider for {props.query}.</div>
+          <div class="dashboard-xsearch-empty">
+            {i18n.tr(`Fant ingen lignende sider for ${props.query}.`, `No similar pages found for ${props.query}.`)}
+          </div>
         </Match>
         <Match when={true}>
           <div class="dashboard-xsimilar__list">
@@ -548,11 +604,23 @@ export function SimilarResultsPanel(props: {
   )
 }
 
+function searchTabEvidenceLabel(tab: SearchResultTab, locale: 'en' | 'no'): string {
+  const labels: Record<SearchResultTab, { en: string; no: string }> = {
+    Images: { en: 'image', no: 'bilde' },
+    Info: { en: 'information', no: 'informasjons' },
+    Map: { en: 'map', no: 'kart' },
+    Shopping: { en: 'shopping', no: 'shopping' },
+    Videos: { en: 'video', no: 'video' },
+  }
+  return labels[tab][locale]
+}
+
 function ExpandedSourcesList(props: { sourceItems: Array<{ hostname: string; title: string; url: string }> }) {
+  const i18n = useI18n()
   return (
     <Show
       when={props.sourceItems.length > 0}
-      fallback={<p class="dashboard-xrail__empty">Kilder vises når Velion har sikre treff.</p>}
+      fallback={<p class="dashboard-xrail__empty">{i18n.tr('Kilder vises når Velion har sikre treff.', 'Sources appear when Velion has confident matches.')}</p>}
     >
       <div class="dashboard-xrail__sources">
         <For each={props.sourceItems}>

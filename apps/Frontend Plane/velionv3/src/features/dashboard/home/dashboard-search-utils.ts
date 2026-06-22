@@ -9,6 +9,7 @@ import {
   type WebSearchResult,
 } from '@/shared/api/search-client'
 import type { SearchResultTab } from '@/features/dashboard/home/dashboard-home-types'
+import type { Locale } from '@/shared/i18n'
 
 export type SearchSourceItem = {
   hostname: string
@@ -22,33 +23,59 @@ export function faviconUrlForResult(url: string): string | null {
   return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=64`
 }
 
-export function searchRailTips(activeTab: SearchResultTab): string[] {
+export function searchRailTips(activeTab: SearchResultTab, locale: Locale = 'no'): string[] {
+  const no = locale === 'no'
   switch (activeTab) {
     case 'Map':
-      return [
-        'Use the map view to compare location, travel context, opening hours, and booking confidence.',
-        'Velion can turn place results into a short route or visit plan when map data is available.',
-      ]
+      return no
+        ? [
+            'Bruk kartvisningen til å sammenligne sted, reisevei, åpningstider og bookingtrygghet.',
+            'Velion kan gjøre stedstreff om til en kort rute eller besøksplan når kartdata finnes.',
+          ]
+        : [
+            'Use the map view to compare location, travel context, opening hours, and booking confidence.',
+            'Velion can turn place results into a short route or visit plan when map data is available.',
+          ]
     case 'Images':
-      return [
-        'Images are treated as visual evidence, not final answers, until Velion can cite the source page.',
-        'Velion can explain product, venue, layout, or screenshot details from the image context.',
-      ]
+      return no
+        ? [
+            'Bilder behandles som visuelt bevis, ikke endelige svar, til Velion kan sitere kildesiden.',
+            'Velion kan forklare produkt-, sted-, layout- eller skjermbildedetaljer fra bildekonteksten.',
+          ]
+        : [
+            'Images are treated as visual evidence, not final answers, until Velion can cite the source page.',
+            'Velion can explain product, venue, layout, or screenshot details from the image context.',
+          ]
     case 'Videos':
-      return [
-        'Video sources should be summarized with timestamps and cited source pages when available.',
-        'Velion can extract the useful moments before suggesting that a user watches the full clip.',
-      ]
+      return no
+        ? [
+            'Videokilder bør oppsummeres med tidsstempler og siterte kildesider når de finnes.',
+            'Velion kan hente ut nyttige øyeblikk før hele klippet anbefales.',
+          ]
+        : [
+            'Video sources should be summarized with timestamps and cited source pages when available.',
+            'Velion can extract the useful moments before suggesting that a user watches the full clip.',
+          ]
     case 'Shopping':
-      return [
-        'Shopping and booking results should be cross-checked against official pages and recent articles.',
-        'Velion can compare price, availability, source confidence, and similar alternatives.',
-      ]
+      return no
+        ? [
+            'Shopping- og bookingtreff bør kryssjekkes mot offisielle sider og ferske artikler.',
+            'Velion kan sammenligne pris, tilgjengelighet, kildetrygghet og lignende alternativer.',
+          ]
+        : [
+            'Shopping and booking results should be cross-checked against official pages and recent articles.',
+            'Velion can compare price, availability, source confidence, and similar alternatives.',
+          ]
     default:
-      return [
-        'Use sources to inspect where the answer came from before trusting or reusing it.',
-        'Ask a follow-up to make Velion narrow, compare, crawl, or summarize the result set.',
-      ]
+      return no
+        ? [
+            'Bruk kildene til å se hvor svaret kommer fra før du stoler på eller gjenbruker det.',
+            'Still et oppfølgingsspørsmål for å få Velion til å snevre inn, sammenligne, crawle eller oppsummere treffene.',
+          ]
+        : [
+            'Use sources to inspect where the answer came from before trusting or reusing it.',
+            'Ask a follow-up to make Velion narrow, compare, crawl, or summarize the result set.',
+          ]
   }
 }
 

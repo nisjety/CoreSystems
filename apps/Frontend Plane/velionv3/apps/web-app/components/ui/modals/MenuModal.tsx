@@ -4,10 +4,10 @@ type MenuModalProps = {
 };
 
 const menuItems = [
-  { href: "#yachts", label: "Yachts", number: "001" },
-  { href: "#technology", label: "Technology", number: "002" },
-  { href: "#company", label: "About", number: "003" },
-  { href: "#contact", label: "Contact", number: "004" },
+  { href: "#product-loop", label: "Demo", number: "001" },
+  { href: "#workflows", label: "Workflows", number: "002" },
+  { href: "#trust", label: "Trust", number: "003" },
+  { href: "#contact", label: "Access", number: "004" },
 ];
 
 const socialLinks = ["Instagram", "LinkedIn", "YouTube"];

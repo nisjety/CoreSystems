@@ -27,6 +27,7 @@ import {
   SidebarPanelTitle,
   SidebarSearchField,
 } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
 type InboxIcon = Component<LucideProps>
@@ -153,6 +154,7 @@ const inboxSidebarGroups: InboxSidebarGroup[] = [
 ]
 
 export function InboxExpandedSidebarPanel(props: { onCollapse: () => void }) {
+  const i18n = useI18n()
   const location = useLocation()
   const [searchQuery, setSearchQuery] = createSignal('')
   const [expandedGroups, setExpandedGroups] = createSignal<Record<string, boolean>>(
@@ -161,7 +163,8 @@ export function InboxExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const [expandedItems, setExpandedItems] = createSignal<Record<string, boolean>>(getDefaultInboxExpandedItems())
   const normalizedSearch = () => searchQuery().trim().toLowerCase()
   const activeParams = () => getInboxActiveParams(location.pathname, location.search)
-  const visibleGroups = createMemo(() => getVisibleInboxGroups(normalizedSearch()))
+  const localizedGroups = createMemo(() => localizeInboxGroups(i18n))
+  const visibleGroups = createMemo(() => getVisibleInboxGroups(localizedGroups(), normalizedSearch()))
   const topVisibleGroups = () => visibleGroups().filter((group) => !group.alignBottom)
   const bottomVisibleGroups = () => visibleGroups().filter((group) => group.alignBottom)
 
@@ -175,16 +178,16 @@ export function InboxExpandedSidebarPanel(props: { onCollapse: () => void }) {
 
   return (
     <div class="core-sidebar-dedicated-panel">
-      <SidebarPanelTitle onCollapse={props.onCollapse}>Inbox</SidebarPanelTitle>
+      <SidebarPanelTitle onCollapse={props.onCollapse}>{i18n.tr('Innboks', 'Inbox')}</SidebarPanelTitle>
 
       <SidebarSearchField
-        ariaLabel="Filter inbox section"
+        ariaLabel={i18n.tr('Filtrer innboksseksjon', 'Filter inbox section')}
         class="core-sidebar-search-spacious"
         value={searchQuery()}
         onChange={setSearchQuery}
       />
 
-      <nav class="core-sidebar-dedicated-nav" aria-label="Inbox navigation">
+      <nav class="core-sidebar-dedicated-nav" aria-label={i18n.tr('Innboksnavigasjon', 'Inbox navigation')}>
         <div class="core-sidebar-dedicated-nav__stack">
           <For each={topVisibleGroups()}>
             {(group) => (
@@ -231,6 +234,7 @@ function InboxSidebarGroup(props: {
   onToggle: () => void
   onToggleItem: (itemId: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <section>
       <div class="core-sidebar-dedicated-group-header">
@@ -239,7 +243,12 @@ function InboxSidebarGroup(props: {
           <ChevronDown class={cn('size-4 core-sidebar-chevron', !props.expanded && '-rotate-90')} strokeWidth={2.1} />
         </button>
         <Show when={props.group.showAddButton}>
-          <button type="button" class="core-sidebar-round-add" aria-label={`Add ${props.group.label.toLowerCase()}`} title={`Add ${props.group.label.toLowerCase()}`}>
+          <button
+            type="button"
+            class="core-sidebar-round-add"
+            aria-label={i18n.tr(`Legg til ${props.group.label.toLowerCase()}`, `Add ${props.group.label.toLowerCase()}`)}
+            title={i18n.tr(`Legg til ${props.group.label.toLowerCase()}`, `Add ${props.group.label.toLowerCase()}`)}
+          >
             <Plus class="size-4" strokeWidth={1.9} />
           </button>
         </Show>
@@ -248,7 +257,7 @@ function InboxSidebarGroup(props: {
       <Show when={props.expanded}>
         <Show
           when={props.group.items.length}
-          fallback={<SidebarEmptyState label={props.group.emptyLabel ?? 'Ingen elementer.'} />}
+          fallback={<SidebarEmptyState label={props.group.emptyLabel ?? i18n.tr('Ingen elementer.', 'No items.')} />}
         >
           <div class="core-sidebar-link-list">
             <For each={props.group.items}>
@@ -278,6 +287,7 @@ function InboxSidebarItem(props: {
   item: InboxSidebarItem
   onToggle: () => void
 }) {
+  const i18n = useI18n()
   const hasSubItems = () => Boolean(props.item.subItems?.length)
   const subNavigationId = () => `inbox-sidebar-${props.item.id}-subitems`
 
@@ -301,8 +311,8 @@ function InboxSidebarItem(props: {
               onClick={props.onToggle}
               aria-controls={subNavigationId()}
               aria-expanded={props.expanded}
-              aria-label={`${props.expanded ? 'Hide' : 'Show'} ${props.item.label}`}
-              title={`${props.expanded ? 'Hide' : 'Show'} ${props.item.label}`}
+              aria-label={props.expanded ? i18n.tr(`Skjul ${props.item.label}`, `Hide ${props.item.label}`) : i18n.tr(`Vis ${props.item.label}`, `Show ${props.item.label}`)}
+              title={props.expanded ? i18n.tr(`Skjul ${props.item.label}`, `Hide ${props.item.label}`) : i18n.tr(`Vis ${props.item.label}`, `Show ${props.item.label}`)}
             >
               <ChevronRight class={cn('size-4 transition-transform', props.expanded && 'rotate-90')} strokeWidth={1.9} />
             </button>
@@ -400,8 +410,8 @@ function getDefaultInboxExpandedItems() {
   return expandedItems
 }
 
-function getVisibleInboxGroups(normalizedSearch: string) {
-  return inboxSidebarGroups.reduce<InboxSidebarGroup[]>((groups, group) => {
+function getVisibleInboxGroups(sourceGroups: InboxSidebarGroup[], normalizedSearch: string) {
+  return sourceGroups.reduce<InboxSidebarGroup[]>((groups, group) => {
     const items = normalizedSearch
       ? group.items.filter((item) => (
         item.label.toLowerCase().includes(normalizedSearch) ||
@@ -412,4 +422,52 @@ function getVisibleInboxGroups(normalizedSearch: string) {
     if (items.length > 0 || group.emptyLabel) return [...groups, { ...group, items }]
     return groups
   }, [])
+}
+
+const inboxLabels: Record<string, readonly [string, string]> = {
+  'group:inbox-core': ['Innboks', 'Inbox'],
+  'group:inbox-ai-agent': ['Velion AI-agent', 'Velion AI Agent'],
+  'group:inbox-team-inboxes': ['Teaminnbokser', 'Team inboxes'],
+  'group:inbox-teammates': ['Teamkolleger', 'Teammates'],
+  'group:inbox-views': ['Visninger', 'Views'],
+  'group:inbox-manage': ['Administrer', 'Manage'],
+  'item:mine': ['Din innboks', 'Your inbox'],
+  'item:mentions': ['Omtaler', 'Mentions'],
+  'item:created-by-you': ['Opprettet av deg', 'Created by you'],
+  'item:all': ['Alle', 'All'],
+  'item:unassigned': ['Uten eier', 'Unassigned'],
+  'item:spam': ['Spam', 'Spam'],
+  'item:dashboard': ['Dashboard', 'Dashboard'],
+  'item:ai-all': ['Alle samtaler', 'All conversations'],
+  'item:ai-resolved': ['Løst', 'Resolved'],
+  'item:ai-routed': ['Rutet', 'Routed'],
+  'item:ai-abandoned': ['Forlatt', 'Abandoned'],
+  'item:team-admin-support': ['Admin-support', 'Admin Support'],
+  'item:view-messenger': ['Messenger', 'Messenger'],
+  'item:view-email': ['E-post', 'Email'],
+  'item:view-social': ['WhatsApp og sosialt', 'WhatsApp & Social'],
+  'item:manage': ['Administrer', 'Manage'],
+  'sub:all': ['Alle meldinger', 'All messages'],
+  'sub:mentions-all': ['Alle omtaler', 'All mentions'],
+}
+
+function localizeInboxGroups(i18n: ReturnType<typeof useI18n>): InboxSidebarGroup[] {
+  return inboxSidebarGroups.map((group) => ({
+    ...group,
+    emptyLabel: group.emptyLabel ? i18n.tr('Ingen teamkolleger er lagt til ennå.', 'No teammates added yet.') : undefined,
+    label: localizeInboxLabel(`group:${group.id}`, group.label, i18n),
+    items: group.items.map((item) => ({
+      ...item,
+      label: localizeInboxLabel(`item:${item.id}`, item.label, i18n),
+      subItems: item.subItems?.map((subItem) => ({
+        ...subItem,
+        label: localizeInboxLabel(`sub:${subItem.id}`, subItem.label, i18n),
+      })),
+    })),
+  }))
+}
+
+function localizeInboxLabel(key: string, fallback: string, i18n: ReturnType<typeof useI18n>): string {
+  const label = inboxLabels[key]
+  return label ? i18n.tr(label[0], label[1]) : fallback
 }

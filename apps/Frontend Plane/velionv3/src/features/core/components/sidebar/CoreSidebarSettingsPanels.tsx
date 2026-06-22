@@ -18,6 +18,7 @@ import { createSignal, For, onCleanup, onMount, Show, type Component } from 'sol
 import type { LucideProps } from 'lucide-solid'
 import { Dynamic } from 'solid-js/web'
 import { SidebarPanelTitle } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
 type SettingsIcon = Component<LucideProps>
@@ -46,17 +47,18 @@ const defaultAccountSectionId = accountSidebarSections[0]!.id
 const defaultSettingsSectionId = settingsSidebarSections[0]!.id
 
 export function AccountExpandedSidebarPanel(props: { onCollapse: () => void }) {
+  const i18n = useI18n()
   const activeSectionId = useActiveAccountSection()
 
   return (
     <div class="core-sidebar-dedicated-panel">
       <SidebarPanelTitle spacing="core-sidebar-title-spacious" onCollapse={props.onCollapse}>
-        Account
+        {i18n.tr('Konto', 'Account')}
       </SidebarPanelTitle>
 
       <SettingsSectionLinks
-        ariaLabel="Account sections"
-        sections={accountSidebarSections}
+        ariaLabel={i18n.tr('Kontoseksjoner', 'Account sections')}
+        sections={localizedAccountSections(i18n)}
         activeSectionId={activeSectionId()}
       />
     </div>
@@ -64,18 +66,19 @@ export function AccountExpandedSidebarPanel(props: { onCollapse: () => void }) {
 }
 
 export function SettingsExpandedSidebarPanel(props: { onCollapse: () => void }) {
+  const i18n = useI18n()
   const location = useLocation()
   const activeSectionId = () => getSettingsActiveSectionId(location.pathname)
 
   return (
     <div class="core-sidebar-dedicated-panel">
       <SidebarPanelTitle spacing="core-sidebar-title-spacious" onCollapse={props.onCollapse}>
-        Settings
+        {i18n.tr('Innstillinger', 'Settings')}
       </SidebarPanelTitle>
 
       <SettingsSectionLinks
-        ariaLabel="Settings sections"
-        sections={settingsSidebarSections}
+        ariaLabel={i18n.tr('Innstillingsseksjoner', 'Settings sections')}
+        sections={localizedSettingsSections(i18n)}
         activeSectionId={activeSectionId()}
       />
     </div>
@@ -193,4 +196,60 @@ function getActiveAccountSectionId() {
     const section = document.getElementById(id)
     return section && section.getBoundingClientRect().top <= activationLine ? id : activeId
   }, ids[0] ?? defaultAccountSectionId)
+}
+
+function localizedAccountSections(i18n: ReturnType<typeof useI18n>): SettingsLinkSection[] {
+  return accountSidebarSections.map((section) => ({
+    ...section,
+    label: accountSectionLabel(section.id, section.label, i18n),
+  }))
+}
+
+function localizedSettingsSections(i18n: ReturnType<typeof useI18n>): SettingsLinkSection[] {
+  return settingsSidebarSections.map((section) => ({
+    ...section,
+    label: settingsSectionLabel(section.id, section.label, i18n),
+  }))
+}
+
+function accountSectionLabel(id: string, fallback: string, i18n: ReturnType<typeof useI18n>): string {
+  switch (id) {
+    case 'profile':
+      return i18n.tr('Profil', 'Profile')
+    case 'contact':
+      return i18n.tr('Kontakt', 'Contact')
+    case 'preferences':
+      return i18n.tr('Preferanser', 'Preferences')
+    case 'availability':
+      return i18n.tr('Tilgjengelighet', 'Availability')
+    case 'connected-accounts':
+      return i18n.tr('Tilkoblede kontoer', 'Connected accounts')
+    case 'privacy':
+      return i18n.tr('Personvern', 'Privacy')
+    default:
+      return fallback
+  }
+}
+
+function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typeof useI18n>): string {
+  switch (id) {
+    case 'workspace':
+      return i18n.tr('Arbeidsområde', 'Workspace')
+    case 'members':
+      return i18n.tr('Medlemmer og roller', 'Members & roles')
+    case 'billing':
+      return i18n.tr('Fakturering', 'Billing')
+    case 'sso':
+      return i18n.tr('SSO', 'SSO')
+    case 'org-security':
+      return i18n.tr('Organisasjonssikkerhet', 'Org security')
+    case 'integrations':
+      return i18n.tr('Integrasjoner', 'Integrations')
+    case 'router-policy':
+      return i18n.tr('Router-policy', 'Router policy')
+    case 'finetune':
+      return i18n.tr('Finjusteringsjobber', 'Fine-tune jobs')
+    default:
+      return fallback
+  }
 }
