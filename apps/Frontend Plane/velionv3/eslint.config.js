@@ -31,6 +31,25 @@ export default tseslint.config(
           ],
         },
       ],
+      // Phase 4 A8 — no-fabricated-state guard. Beyond banning mock modules,
+      // flag the highest-signal in-file fabrication: a hardcoded security /
+      // compliance posture (the A1 breach). This is precise and false-positive
+      // free; an inline-array guard was evaluated and dropped because it cannot
+      // distinguish legitimate static UI config (tabs, label rows) from
+      // fabricated data, and the real A5/A6 blueprint/template arrays are
+      // module consts (relabeled honestly in PR-3, not lint-caught).
+      'no-restricted-syntax': [
+        'error',
+        {
+          // A1: a security/compliance-named declaration must NEVER render a
+          // control as enabled from a boolean literal — read real org state or
+          // show a disabled/unknown state via the read-data substrate.
+          selector:
+            "VariableDeclarator[id.name=/securit|complian|posture/i] Property > Literal[value=true]",
+          message:
+            'Fabricated security/compliance posture: a security control may not be hardcoded enabled from a boolean literal (Phase 4 A8). Read real org-security state or render a disabled/unknown state.',
+        },
+      ],
     },
   },
 )

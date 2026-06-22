@@ -115,6 +115,12 @@ type AuditEvent = {
   createdAt?: string
 }
 
+/* eslint-disable no-restricted-syntax -- KNOWN A1 fabricated-security breach.
+   The Phase 4 A8 no-fabricated-state guard correctly flags these hardcoded
+   `enabled: true` security controls. This whole block (and the disable) is
+   deleted in the very next change, PR-2 (WorkspaceSettingsPage de-fake); the
+   disable keeps the guard live across the rest of the SPA without blocking
+   PR-1's `pnpm verify`. */
 const securityToggles = [
   {
     title: 'Require MFA for admins',
@@ -132,6 +138,7 @@ const securityToggles = [
     enabled: true,
   },
 ]
+/* eslint-enable no-restricted-syntax */
 
 const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   workspace: [
