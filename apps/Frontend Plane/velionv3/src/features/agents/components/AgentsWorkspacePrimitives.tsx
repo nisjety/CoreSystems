@@ -4,10 +4,11 @@ import {
   PanelRight,
   Zap,
 } from 'lucide-solid'
-import { For, createMemo, type JSX } from 'solid-js'
+import { For, Show, createMemo, type JSX } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
+import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import type {
   AgentBlueprint,
   RoleFeature,
@@ -45,6 +46,12 @@ export function CounterpartPanel(props: {
   description: string
   eyebrow: string
   icon: AgentBlueprint['Icon']
+  /**
+   * Phase 4 agents-studio honesty sweep: marks this panel as a not-yet-wired
+   * design preview. Set on panels whose action controls (Review / Apply /
+   * meeting slots) are disabled because no backend executes them yet.
+   */
+  preview?: boolean
   role: AgentBlueprint
   title: string
 }) {
@@ -55,6 +62,9 @@ export function CounterpartPanel(props: {
           <p class={cn('velion-agent-eyebrow', roleEyebrowClass(props.role))}>{props.eyebrow}</p>
           <h2 class="velion-agent-title mt-1">{props.title}</h2>
           <p class="velion-agent-body mt-1 max-w-[640px]">{props.description}</p>
+          <Show when={props.preview}>
+            <DesignPreviewBadge class="mt-2" />
+          </Show>
         </div>
         <span class={cn('grid size-8 shrink-0 place-items-center rounded-[8px] text-white', props.role.accentClass)}>
           <Dynamic component={props.icon} class="size-4" />
@@ -146,13 +156,16 @@ export function RoleConversationPreview(props: {
       <div class="mt-3 rounded-[7px] border border-dashed border-[#DDE0E5] px-3 py-2 text-[11px] leading-4 text-[#656C78] dark:border-[#343842] dark:text-[#B7BEC9]">
         {props.operatingModel.conversation.note}
       </div>
+      {/* Phase 4 honesty sweep: preview-only quick replies — the mock
+          conversation has no chat backend, so these are disabled. */}
       <div class="mt-3 flex flex-wrap gap-1.5">
         <For each={props.operatingModel.conversation.quickReplies}>
           {(reply) => (
             <button
               type="button"
+              disabled
               class={cn(
-                'rounded-full border border-[#E2E3E8] bg-white px-2.5 py-1 text-[10px] font-semibold text-[#3C414A] transition hover:bg-[#F2F3F5] dark:border-[#2B2D33] dark:bg-[#17181C] dark:text-[#DCE2EC]',
+                'rounded-full border border-[#E2E3E8] bg-white px-2.5 py-1 text-[10px] font-semibold text-[#3C414A] transition hover:bg-[#F2F3F5] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white dark:border-[#2B2D33] dark:bg-[#17181C] dark:text-[#DCE2EC]',
                 props.role.ringClass,
                 controlFocusClass,
               )}
@@ -173,11 +186,15 @@ export function StageReadinessPanel(props: { role: AgentBlueprint; system: Stage
         <div>
           <p class={cn('velion-agent-eyebrow', roleEyebrowClass(props.role))}>Operational checklist</p>
           <h2 class="velion-agent-title mt-1">{props.role.shortTitle} readiness</h2>
+          {/* Phase 4 honesty sweep: there is no agent activation/deploy backend
+              yet, so the readiness actions below are disabled. */}
+          <DesignPreviewBadge class="mt-2" />
         </div>
         <Button
           variant="primary"
           size="md"
           shape="pill"
+          disabled
           class={cn('min-h-8 px-3 text-[12px] font-semibold', controlFocusClass)}
         >
           <Zap class="size-3.5" />
@@ -198,6 +215,7 @@ export function StageReadinessPanel(props: { role: AgentBlueprint; system: Stage
         variant="secondary"
         size="md"
         shape="pill"
+        disabled
         class={cn('mt-3 min-h-8 w-full px-3 text-[12px] font-semibold', controlFocusClass)}
       >
         <PanelRight class="size-3.5" />

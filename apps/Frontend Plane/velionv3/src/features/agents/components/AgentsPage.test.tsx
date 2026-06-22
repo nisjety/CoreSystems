@@ -96,6 +96,30 @@ describe('AgentsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /select post on instagram workflow node/i }))
 
     expect(screen.getByRole('heading', { name: /post on instagram/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /test run/i })).toBeTruthy()
+    // Phase 3 PR-1 removed the dead Test Run / Publish controls and labelled the
+    // WorkflowBuilder a design preview; assert that honesty label (not the
+    // now-removed Test Run button) here.
+    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+  })
+})
+
+// Phase 4 agents-studio honesty sweep: the role operating-model workspaces are
+// static design previews (no agent activation/deploy/booking backend yet), so
+// their action controls must be disabled and the surfaces labelled.
+describe('AgentsPage honesty sweep (Phase 4)', () => {
+  it('labels the ecommerce store workspace as a design preview and disables Review/Apply', () => {
+    renderWithProviders(() => <AgentsPage />, '/agents?agent=ecommerce&feature=commerce-store')
+
+    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+    expect((screen.getByRole('button', { name: 'Review' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('disables the preview-only meeting-slot picker on the sales booking workspace', () => {
+    renderWithProviders(() => <AgentsPage />, '/agents?agent=sales&feature=sales-booking')
+
+    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+    const disabledButtons = screen.getAllByRole('button').filter((button) => (button as HTMLButtonElement).disabled)
+    expect(disabledButtons.length).toBeGreaterThan(1)
   })
 })

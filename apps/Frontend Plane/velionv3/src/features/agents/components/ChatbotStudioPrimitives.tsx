@@ -1,9 +1,10 @@
 import { ChevronDown, type LucideProps } from 'lucide-solid'
-import { createSignal, type Component, type JSX } from 'solid-js'
+import { createSignal, Show, type Component, type JSX } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
 import { cn } from '@/shared/lib/cn'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { VelionTextarea } from '@/shared/ui/velion/VelionTextarea'
+import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import type { SupportIntegrationStatus } from '@/features/agents/lib/use-chatbot-support-status'
 
 export type StudioIcon = Component<LucideProps>
@@ -100,6 +101,12 @@ export function SettingTextarea(props: { label: string; value: string }) {
 export function SectionHeader(props: {
   action?: JSX.Element
   description?: string
+  /**
+   * Phase 4 agents-studio honesty sweep: marks the surface as a not-yet-wired
+   * design preview. When set, every action-implying control on the surface
+   * must also be disabled (the badge never ships without neutralized controls).
+   */
+  preview?: boolean
   title: string
 }) {
   return (
@@ -107,6 +114,9 @@ export function SectionHeader(props: {
       <div class="min-w-0">
         <h1 class="text-[26px] font-semibold leading-tight tracking-normal">{props.title}</h1>
         {props.description ? <p class="mt-2 text-[14px] leading-6 text-[#555B65] dark:text-[#AEB4C0]">{props.description}</p> : null}
+        <Show when={props.preview}>
+          <DesignPreviewBadge class="mt-4" />
+        </Show>
       </div>
       {props.action ? <div class="min-w-0">{props.action}</div> : null}
     </div>

@@ -38,7 +38,8 @@ export function IntegrationCard(props: {
       </div>
       <h2 class="mt-5 text-[18px] font-semibold">{props.title}</h2>
       <p class="mt-3 text-[14px] leading-6 text-[#5F6673] dark:text-[#AEB4C0]">{props.description}</p>
-      <Button size="sm" shape="rounded" class="mt-auto">
+      {/* Phase 4 honesty sweep: no integration-config backend yet. */}
+      <Button size="sm" shape="rounded" disabled class="mt-auto">
         Configure
       </Button>
     </article>
@@ -65,11 +66,12 @@ export function ActionCard(props: {
         <Zap class="size-4" />
         {props.subtitle}
       </p>
+      {/* Phase 4 honesty sweep: tool menu/customize have no backend yet. */}
       <div class="mt-auto flex justify-end gap-3">
-        <VelionIconButton size="lg" shape="rounded" aria-label={`Open ${props.title} tool menu`}>
+        <VelionIconButton size="lg" shape="rounded" disabled aria-label={`Open ${props.title} tool menu`}>
           <MoreHorizontal class="size-5" />
         </VelionIconButton>
-        <Button shape="rounded" size="md">
+        <Button shape="rounded" size="md" disabled>
           Customize
         </Button>
       </div>
@@ -127,11 +129,12 @@ export function ChannelHeroCard(props: {
           </div>
           {widget() ? <ToggleSwitch enabled label="Chat widget enabled" /> : null}
         </div>
+        {/* Phase 4 honesty sweep: channel manage/setup has no backend yet. */}
         <div class="mt-10 flex justify-end gap-3">
-          <VelionIconButton size="lg" shape="rounded" aria-label={`${widget() ? 'Chat widget' : 'Help page'} preview device`}>
+          <VelionIconButton size="lg" shape="rounded" disabled aria-label={`${widget() ? 'Chat widget' : 'Help page'} preview device`}>
             <Smartphone class="size-5" />
           </VelionIconButton>
-          <Button shape="rounded" size="md">
+          <Button shape="rounded" size="md" disabled>
             {widget() ? 'Manage' : 'Setup'}
           </Button>
         </div>
@@ -157,19 +160,20 @@ export function ChannelCard(props: {
         {props.badge ? <span class="rounded-full bg-[#111111] px-3 py-1 text-[12px] font-semibold text-white">{props.badge}</span> : null}
       </h2>
       <p class="mt-3 text-[17px] leading-7 text-[#555B65] dark:text-[#AEB4C0]">{props.description}</p>
+      {/* Phase 4 honesty sweep: channel actions have no backend yet. */}
       <div class="mt-auto flex justify-end gap-3">
-        <VelionIconButton size="lg" shape="rounded" aria-label={`${props.title} device preview`}>
+        <VelionIconButton size="lg" shape="rounded" disabled aria-label={`${props.title} device preview`}>
           <Smartphone class="size-5" />
         </VelionIconButton>
-        <Button shape="rounded" size="md">{props.action}</Button>
+        <Button shape="rounded" size="md" disabled>{props.action}</Button>
       </div>
     </article>
   )
 }
 
-export function SquareIconButton(props: { Icon: StudioIcon; label: string }) {
+export function SquareIconButton(props: { disabled?: boolean; Icon: StudioIcon; label: string }) {
   return (
-    <VelionIconButton size="lg" shape="rounded" aria-label={props.label}>
+    <VelionIconButton size="lg" shape="rounded" disabled={props.disabled} aria-label={props.label}>
       <Dynamic component={props.Icon} class="size-5" />
     </VelionIconButton>
   )

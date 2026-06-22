@@ -23,6 +23,7 @@ import { cn } from '@/shared/lib/cn'
 import type { ChatbotAddOnId } from '@/features/agents/lib/agent-roles'
 import type { SupportIntegrationStatus } from '@/features/agents/lib/use-chatbot-support-status'
 import { ToggleSwitch } from '@/features/agents/components/ChatbotStudioCards'
+import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import {
   PlaygroundAccordion,
   SettingInput,
@@ -75,9 +76,12 @@ function PlaygroundSettingsPanel(props: {
   return (
     <section class="velion-sidebar-type velion-panel flex h-[660px] min-h-0 flex-col overflow-hidden text-[#1D1D1F] xl:h-full dark:text-[#F7F8F8]">
       <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-5">
-        <h1 class="text-[24px] font-semibold leading-8 tracking-normal text-[#0F1011] dark:text-white">
-          Playground
-        </h1>
+        <div class="flex flex-wrap items-center gap-3">
+          <h1 class="text-[24px] font-semibold leading-8 tracking-normal text-[#0F1011] dark:text-white">
+            Playground
+          </h1>
+          <DesignPreviewBadge />
+        </div>
         <SupportIntegrationBanner status={props.supportStatus} />
 
         <div class="mt-6 space-y-3">
@@ -93,7 +97,8 @@ function PlaygroundSettingsPanel(props: {
             </div>
             <div class="mt-3 flex h-11 items-center justify-between rounded-[9px] border border-[#E8E8EA] bg-white px-3 dark:border-[#2A2C31] dark:bg-[#15161A]">
               <span class="text-[13px] font-medium text-[#67686D] dark:text-[#D7DCE4]">Compare AI models</span>
-              <Button size="xs" shape="rounded">
+              {/* Phase 4 honesty sweep: model comparison has no backend yet. */}
+              <Button size="xs" shape="rounded" disabled>
                 Compare
               </Button>
             </div>
@@ -171,7 +176,8 @@ function PlaygroundSettingsPanel(props: {
 
           <PlaygroundAccordion defaultOpen Icon={FileText} title="Instructions">
             <div class="flex gap-2">
-              <Button shape="rounded" size="md" class="min-w-0 flex-1 justify-between">
+              {/* Phase 4 honesty sweep: instruction-set switcher is preview-only. */}
+              <Button shape="rounded" size="md" disabled class="min-w-0 flex-1 justify-between">
                 Base Instructions
                 <ChevronDown class="size-3.5 text-[#9EA3AA]" />
               </Button>
@@ -224,10 +230,12 @@ function PlaygroundBotPanel(props: {
       <div class="relative z-10 flex min-h-full w-full items-center justify-center px-6 py-8">
         <ChatbotDevice selectedAddOn={props.selectedAddOn} supportStatus={props.supportStatus} />
       </div>
+      {/* Phase 4 honesty sweep: preview-only widget launcher (no live widget). */}
       <button
         type="button"
+        disabled
         aria-label="Open chatbot widget"
-        class="absolute bottom-5 right-5 z-20 grid size-[52px] place-items-center rounded-full bg-[#111111] text-white shadow-[0_12px_34px_rgba(0,0,0,0.22)] transition-transform hover:scale-[1.03]"
+        class="absolute bottom-5 right-5 z-20 grid size-[52px] place-items-center rounded-full bg-[#111111] text-white shadow-[0_12px_34px_rgba(0,0,0,0.22)] transition-transform hover:scale-[1.03] disabled:cursor-not-allowed"
       >
         <Sparkles class="size-5" />
       </button>
@@ -255,8 +263,9 @@ function ChatbotDevice(props: {
         </div>
         <button
           type="button"
+          disabled
           aria-label="Refresh chatbot preview"
-          class="grid size-9 shrink-0 place-items-center rounded-[9px] text-[#4F5661] transition-colors hover:bg-[#F4F5F7] dark:text-[#D7DCE4] dark:hover:bg-[#202229]"
+          class="grid size-9 shrink-0 place-items-center rounded-[9px] text-[#4F5661] transition-colors hover:bg-[#F4F5F7] disabled:cursor-not-allowed dark:text-[#D7DCE4] dark:hover:bg-[#202229]"
         >
           <RefreshCw class="size-4" strokeWidth={1.9} />
         </button>

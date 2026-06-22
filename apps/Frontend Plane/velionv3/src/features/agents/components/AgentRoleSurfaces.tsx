@@ -378,7 +378,9 @@ function SalesSdrSurface(props: {
             eyebrow="HubSpot / Salesforce style"
             title="Meeting + CRM"
             description="Booking and handoff are treated as controlled sales actions."
+            preview
           >
+            {/* Phase 4 honesty sweep: preview-only slot picker — no booking backend. */}
             <div class="grid grid-cols-2 gap-2">
               <For each={salesMeetingSlots}>
                 {(slot, index) => (
@@ -386,6 +388,7 @@ function SalesSdrSurface(props: {
                     variant={index() === 1 ? 'primary' : 'secondary'}
                     size="md"
                     shape="pill"
+                    disabled
                     aria-pressed={index() === 1}
                     class={cn('min-h-8 px-3 text-[12px] font-semibold', controlFocusClass)}
                   >
@@ -459,6 +462,7 @@ function SalesSdrSurface(props: {
             eyebrow="HubSpot / Salesforce style"
             title={props.feature === 'sales-booking' ? 'Meeting router' : 'CRM handoff builder'}
             description={props.feature === 'sales-booking' ? 'Show the right slots only after the lead reaches a sales-ready threshold.' : 'Create structured handoffs with source pages, objections, qualification, and next steps.'}
+            preview={props.feature === 'sales-booking'}
           >
             <Show
               when={props.feature === 'sales-booking'}
@@ -481,6 +485,7 @@ function SalesSdrSurface(props: {
                 </div>
               }
             >
+              {/* Phase 4 honesty sweep: preview-only slot picker — no booking backend. */}
               <div class="grid grid-cols-2 gap-2">
                 <For each={salesMeetingSlots}>
                   {(slot, index) => (
@@ -488,6 +493,7 @@ function SalesSdrSurface(props: {
                       variant={index() === 1 ? 'primary' : 'secondary'}
                       shape="pill"
                       size="md"
+                      disabled
                       aria-pressed={index() === 1}
                       class={cn('min-h-8 px-3 text-[12px] font-semibold', controlFocusClass)}
                     >
@@ -736,6 +742,7 @@ function EcommerceCommerceSurface(props: {
             eyebrow="Shopify Sidekick style"
             title="Store command center"
             description="Ask in plain language, review generated store actions, then apply with approval."
+            preview
           >
             <div class={cn('rounded-[8px] border p-3', roleInsetClass(props.role))}>
               <p class={cn('text-[11px] font-semibold uppercase', roleEyebrowClass(props.role))}>Command</p>
@@ -761,9 +768,10 @@ function EcommerceCommerceSurface(props: {
                   </For>
                 </div>
               </div>
+              {/* Phase 4 honesty sweep: store actions have no apply backend yet. */}
               <div class="mt-3 flex gap-2">
-                <Button variant="primary" size="md" shape="pill" class={cn('min-h-8 flex-1 px-3 text-[12px] font-semibold', controlFocusClass)}>Review</Button>
-                <Button variant="secondary" size="md" shape="pill" class={cn('min-h-8 flex-1 px-3 text-[12px] font-semibold', controlFocusClass)}>Apply</Button>
+                <Button variant="primary" size="md" shape="pill" disabled class={cn('min-h-8 flex-1 px-3 text-[12px] font-semibold', controlFocusClass)}>Review</Button>
+                <Button variant="secondary" size="md" shape="pill" disabled class={cn('min-h-8 flex-1 px-3 text-[12px] font-semibold', controlFocusClass)}>Apply</Button>
               </div>
             </div>
           </CounterpartPanel>
