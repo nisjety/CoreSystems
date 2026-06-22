@@ -1,4 +1,3 @@
-/* eslint-disable solid/prefer-for */
 import {
   Bot,
   CalendarClock,
@@ -15,7 +14,7 @@ import {
   Split,
   TicketCheck,
 } from 'lucide-solid'
-import type { JSX } from 'solid-js'
+import { For, Index, type JSX } from 'solid-js'
 import { cn } from '@/shared/lib/cn'
 
 export type AgentVisualProps = {
@@ -62,18 +61,22 @@ export function SalesVisual(props: AgentVisualProps) {
           <span>Availability</span>
         </div>
         <div class="agent-visual__calendar-grid">
-          {Array.from({ length: 21 }).map((_, index) => (
-            <span class={cn('agent-visual__calendar-day', index === 10 && 'agent-visual__calendar-day--active')}>
-              {index + 1}
-            </span>
-          ))}
+          <Index each={Array.from({ length: 21 })}>
+            {(_, index) => (
+              <span class={cn('agent-visual__calendar-day', index === 10 && 'agent-visual__calendar-day--active')}>
+                {index + 1}
+              </span>
+            )}
+          </Index>
         </div>
         <div class="agent-visual__calendar-slots">
-          {['Owner', 'Team', 'Fallback'].map((slot, index) => (
-            <span class={cn('agent-visual__calendar-slot', index === 1 && 'agent-visual__calendar-slot--active')}>
-              {slot}
-            </span>
-          ))}
+          <Index each={['Owner', 'Team', 'Fallback']}>
+            {(slot, index) => (
+              <span class={cn('agent-visual__calendar-slot', index === 1 && 'agent-visual__calendar-slot--active')}>
+                {slot()}
+              </span>
+            )}
+          </Index>
         </div>
       </div>
       <div class="agent-visual__sales-pill">
@@ -90,16 +93,18 @@ export function EcommerceVisual(props: AgentVisualProps) {
       <div class="agent-visual__product-window">
         <div class="agent-visual__product-query">Looking for running shoes?</div>
         <div class="agent-visual__product-grid">
-          {['#ECEFF3', '#D9D0BE', '#1F2428'].map((color, index) => (
-            <div class="agent-visual__product-card">
-              <div class="agent-visual__product-swatch" style={{ 'background-color': color }}>
-                <span />
+          <Index each={['#ECEFF3', '#D9D0BE', '#1F2428']}>
+            {(color, index) => (
+              <div class="agent-visual__product-card">
+                <div class="agent-visual__product-swatch" style={{ 'background-color': color() }}>
+                  <span />
+                </div>
+                <div class="agent-visual__product-line agent-visual__product-line--wide" />
+                <div class="agent-visual__product-line agent-visual__product-line--short" />
+                <div class="agent-visual__product-label">{index === 0 ? 'Data' : 'Rule'}</div>
               </div>
-              <div class="agent-visual__product-line agent-visual__product-line--wide" />
-              <div class="agent-visual__product-line agent-visual__product-line--short" />
-              <div class="agent-visual__product-label">{index === 0 ? 'Data' : 'Rule'}</div>
-            </div>
-          ))}
+            )}
+          </Index>
         </div>
       </div>
       <div class="agent-visual__floating-action">
@@ -118,9 +123,9 @@ export function ChatbotVisual(props: AgentVisualProps) {
           Playground
         </div>
         <div class="agent-visual__chatbot-source">Source mapped</div>
-        {['Model', 'Actions', 'Instructions'].map((item) => (
-          <div class="agent-visual__chatbot-field">{item}</div>
-        ))}
+        <For each={['Model', 'Actions', 'Instructions']}>
+          {(item) => <div class="agent-visual__chatbot-field">{item}</div>}
+        </For>
       </div>
 
       <div class="agent-visual__chatbot-device">
@@ -154,11 +159,13 @@ export function WorkflowVisual(props: AgentVisualProps) {
           Tools
         </div>
         <div class="agent-visual__workflow-tool-grid">
-          {[Bot, Database, Globe2, TicketCheck, Split, Code2].map((ToolIcon) => (
-            <span class="agent-visual__workflow-tool">
-              <ToolIcon class="agent-visual__small-icon" />
-            </span>
-          ))}
+          <For each={[Bot, Database, Globe2, TicketCheck, Split, Code2]}>
+            {(ToolIcon) => (
+              <span class="agent-visual__workflow-tool">
+                <ToolIcon class="agent-visual__small-icon" />
+              </span>
+            )}
+          </For>
         </div>
       </div>
 
@@ -185,11 +192,13 @@ export function WorkflowVisual(props: AgentVisualProps) {
             Generate caption
             <CircleDashed class="agent-visual__muted-icon" />
           </div>
-          {['Provider', 'Model', 'Prompt'].map((item, index) => (
-            <div class={cn('agent-visual__workflow-field', index === 2 && 'agent-visual__workflow-field--large')}>
-              {item}
-            </div>
-          ))}
+          <Index each={['Provider', 'Model', 'Prompt']}>
+            {(item, index) => (
+              <div class={cn('agent-visual__workflow-field', index === 2 && 'agent-visual__workflow-field--large')}>
+                {item()}
+              </div>
+            )}
+          </Index>
         </div>
       ) : null}
     </div>
