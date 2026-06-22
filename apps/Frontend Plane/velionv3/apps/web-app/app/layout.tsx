@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Velion | Electric Luxury",
-  description: "Electric luxury yachts shaped for silent performance.",
+  title: "Velion | Approved AI Workbench",
+  description: "An AI-first customer experience system for support, sales, knowledge, and approved workflow execution.",
 };
 
 export default function RootLayout({

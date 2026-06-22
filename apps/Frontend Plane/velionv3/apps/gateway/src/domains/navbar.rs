@@ -139,10 +139,36 @@ async fn navbar(
         .or_else(|| feed.get("total_count").and_then(Value::as_u64))
         .unwrap_or(0);
 
-    // Plan ← user-core /me includes account_plan or plan field when present.
-    let plan = first_str(&me_user, &["account_plan", "plan"])
-        .unwrap_or("trial")
-        .to_owned();
+    // Plan ← billing-core is the source of truth for the org's plan (user-core
+    // /me carries no plan). Fall back to any plan on /me, then "trial" only when
+    // billing-core is unavailable / no account exists.
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let plan = {
+        let (status, Json(acct)) = proxy_json(
+            &state,
+            Method::GET,
+            &format!(
+                "{}/api/v1/billing/orgs/{}/account",
+                state.billing_core_url, org_id
+            ),
+            None,
+            Some(org_id.as_str()),
+            Some(&actor),
+            None,
+        )
+        .await;
+        let billing_plan = if status.is_success() {
+            let data = crate::envelope::unwrap_data(&acct);
+            first_str(&data, &["plan"])
+                .filter(|p| !p.trim().is_empty())
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        billing_plan
+            .or_else(|| first_str(&me_user, &["account_plan", "plan"]).map(str::to_owned))
+            .unwrap_or_else(|| "trial".to_owned())
+    };
 
     Json(ok(json!({
         "profile": profile,

@@ -64,15 +64,22 @@ import {
   type ModelGroup,
   type ModelInfo,
 } from '@/shared/api/chat-client'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
 type ResponseMode = 'auto' | 'quick' | 'deep'
 
 type ResponseModeOption = {
-  announcement: string
+  announcement: {
+    en: string
+    no: string
+  }
   icon: Component<LucideProps>
   id: ResponseMode
-  label: string
+  label: {
+    en: string
+    no: string
+  }
 }
 
 type ComposerTone = 'concise' | 'balanced' | 'detailed'
@@ -173,39 +180,39 @@ type PanelPosition = {
 }
 
 const responseModes: ResponseModeOption[] = [
-  { id: 'auto', label: 'Auto', announcement: 'Auto mode', icon: WandSparkles },
-  { id: 'quick', label: 'Quick response', announcement: 'Quick response activated', icon: Zap },
-  { id: 'deep', label: 'Deep research', announcement: 'Deep research mode', icon: Lightbulb },
+  { id: 'auto', label: { no: 'Auto', en: 'Auto' }, announcement: { no: 'Auto-modus', en: 'Auto mode' }, icon: WandSparkles },
+  { id: 'quick', label: { no: 'Raskt svar', en: 'Quick response' }, announcement: { no: 'Raskt svar aktivert', en: 'Quick response activated' }, icon: Zap },
+  { id: 'deep', label: { no: 'Dyp research', en: 'Deep research' }, announcement: { no: 'Dyp research-modus', en: 'Deep research mode' }, icon: Lightbulb },
 ]
 const voiceLanguages = [
-  { value: 'en-US', label: 'English (US)' },
-  { value: 'en-GB', label: 'English (UK)' },
-  { value: 'nb-NO', label: 'Norwegian (Bokmål)' },
-  { value: 'nn-NO', label: 'Norwegian (Nynorsk)' },
-  { value: 'sv-SE', label: 'Swedish' },
-  { value: 'da-DK', label: 'Danish' },
-  { value: 'de-DE', label: 'German' },
-  { value: 'fr-FR', label: 'French' },
-  { value: 'es-ES', label: 'Spanish' },
-  { value: 'pt-BR', label: 'Portuguese (BR)' },
+  { value: 'en-US', label: { no: 'Engelsk (USA)', en: 'English (US)' } },
+  { value: 'en-GB', label: { no: 'Engelsk (UK)', en: 'English (UK)' } },
+  { value: 'nb-NO', label: { no: 'Norsk (bokmål)', en: 'Norwegian (Bokmål)' } },
+  { value: 'nn-NO', label: { no: 'Norsk (nynorsk)', en: 'Norwegian (Nynorsk)' } },
+  { value: 'sv-SE', label: { no: 'Svensk', en: 'Swedish' } },
+  { value: 'da-DK', label: { no: 'Dansk', en: 'Danish' } },
+  { value: 'de-DE', label: { no: 'Tysk', en: 'German' } },
+  { value: 'fr-FR', label: { no: 'Fransk', en: 'French' } },
+  { value: 'es-ES', label: { no: 'Spansk', en: 'Spanish' } },
+  { value: 'pt-BR', label: { no: 'Portugisisk (BR)', en: 'Portuguese (BR)' } },
 ] as const
-const toneOptions: Array<{ value: ComposerTone; label: string; icon: Component<LucideProps> }> = [
-  { value: 'concise', label: 'Concise', icon: AlignLeft },
-  { value: 'balanced', label: 'Balanced', icon: AlignCenter },
-  { value: 'detailed', label: 'Detailed', icon: AlignJustify },
+const toneOptions: Array<{ value: ComposerTone; label: { no: string; en: string }; icon: Component<LucideProps> }> = [
+  { value: 'concise', label: { no: 'Kortfattet', en: 'Concise' }, icon: AlignLeft },
+  { value: 'balanced', label: { no: 'Balansert', en: 'Balanced' }, icon: AlignCenter },
+  { value: 'detailed', label: { no: 'Detaljert', en: 'Detailed' }, icon: AlignJustify },
 ]
 const dayEntries = [
-  { name: 'Monday', dayIndex: 1 },
-  { name: 'Tuesday', dayIndex: 2 },
-  { name: 'Wednesday', dayIndex: 3 },
-  { name: 'Thursday', dayIndex: 4 },
-  { name: 'Friday', dayIndex: 5 },
-  { name: 'Saturday', dayIndex: 6 },
-  { name: 'Sunday', dayIndex: 0 },
+  { name: 'Monday', nameNo: 'mandag', dayIndex: 1 },
+  { name: 'Tuesday', nameNo: 'tirsdag', dayIndex: 2 },
+  { name: 'Wednesday', nameNo: 'onsdag', dayIndex: 3 },
+  { name: 'Thursday', nameNo: 'torsdag', dayIndex: 4 },
+  { name: 'Friday', nameNo: 'fredag', dayIndex: 5 },
+  { name: 'Saturday', nameNo: 'lørdag', dayIndex: 6 },
+  { name: 'Sunday', nameNo: 'søndag', dayIndex: 0 },
 ] as const
 const slashCommands: AutocompleteItem[] = [
-  { id: 'cmd-file', icon: Upload, label: 'File upload', meta: 'slash', action: 'file' },
-  { id: 'cmd-image', icon: ImagePlus, label: 'Generate image', meta: 'slash', action: 'image' },
+  { id: 'cmd-file', icon: Upload, label: 'Last opp fil', meta: 'slash', action: 'file' },
+  { id: 'cmd-image', icon: ImagePlus, label: 'Generer bilde', meta: 'slash', action: 'image' },
 ]
 
 const TEXTAREA_AUTO_MAX_PX = 240
@@ -255,8 +262,8 @@ function modeAnnouncementDisplay(announcement: string | null, message: string) {
   return announcement
 }
 
-function textareaPlaceholder(announcement: string | null) {
-  return announcement ? '' : 'Ask anything, use / to activate specialized actions.'
+function textareaPlaceholder(announcement: string | null, i18n: ReturnType<typeof useI18n>) {
+  return announcement ? '' : i18n.tr('Spør om hva som helst, bruk / for spesialhandlinger.', 'Ask anything, use / to activate specialized actions.')
 }
 
 function textareaCursorPosition(element: HTMLTextAreaElement) {
@@ -267,12 +274,12 @@ function shouldShowTextareaExpandButton(hasOverflow: boolean, expanded: boolean)
   return hasOverflow || expanded
 }
 
-function textareaExpandLabel(expanded: boolean) {
-  return expanded ? 'Collapse input' : 'Expand to see full text'
+function textareaExpandLabel(expanded: boolean, i18n: ReturnType<typeof useI18n>) {
+  return expanded ? i18n.tr('Slå sammen feltet', 'Collapse input') : i18n.tr('Utvid for å se hele teksten', 'Expand to see full text')
 }
 
-function textareaExpandTitle(expanded: boolean) {
-  return expanded ? 'Collapse' : 'Expand'
+function textareaExpandTitle(expanded: boolean, i18n: ReturnType<typeof useI18n>) {
+  return expanded ? i18n.tr('Slå sammen', 'Collapse') : i18n.tr('Utvid', 'Expand')
 }
 
 function isVoiceInputLocked(voiceMode: boolean, voiceRecording: boolean) {
@@ -318,6 +325,7 @@ export function DashboardComposer(props: {
   showTurnReceipt?: boolean
   submitting?: boolean
 }) {
+  const i18n = useI18n()
   const navigate = useNavigate()
   let composerRootRef: HTMLDivElement | undefined
   let fileInputRef: HTMLInputElement | undefined
@@ -382,7 +390,7 @@ export function DashboardComposer(props: {
     setSelectedModel(id)
     setModelOpen(false)
   }
-  const [settings, setSettings] = createSignal<ComposerSettings>({ tone: 'balanced', voiceLang: 'en-US' })
+  const [settings, setSettings] = createSignal<ComposerSettings>({ tone: 'balanced', voiceLang: 'nb-NO' })
   const [settingsPanelPosition, setSettingsPanelPosition] = createSignal<PanelPosition>({ top: 0, left: 0, maxHeight: 460 })
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [suggestionsOpen, setSuggestionsOpen] = createSignal(false)
@@ -435,7 +443,7 @@ export function DashboardComposer(props: {
         setSpecializedActions(items.length > 0 ? items : BUILTIN_ACTIONS)
         untrack(() => {
           const state = autocomplete()
-          if (state?.category === 'Actions') {
+          if (state?.category === i18n.tr('Handlinger', 'Actions')) {
             const query = props.message.slice(state.triggerStart + 1, state.triggerStart + state.triggerLen)
             openActionMenu(query, state.triggerStart, state.triggerLen)
           }
@@ -469,7 +477,7 @@ export function DashboardComposer(props: {
     setAutocompleteIndex(0)
     setAutocomplete(
       items.length > 0
-        ? { category: 'Actions', items, triggerStart, triggerLen }
+        ? { category: i18n.tr('Handlinger', 'Actions'), items, triggerStart, triggerLen }
         : null,
     )
   }
@@ -582,7 +590,9 @@ export function DashboardComposer(props: {
 
     const names = files().map((file) => file.name).join(', ')
     const body = props.message.trim()
-    props.onMessageChange(body ? `Analyze the attached file(s) (${names}) and ${body}` : `Describe and analyze the attached file(s): ${names}`)
+    props.onMessageChange(body
+      ? i18n.tr(`Analyser vedlagte fil(er) (${names}) og ${body}`, `Analyze the attached file(s) (${names}) and ${body}`)
+      : i18n.tr(`Beskriv og analyser vedlagte fil(er): ${names}`, `Describe and analyze the attached file(s): ${names}`))
     focusTextareaAt()
   }
 
@@ -593,7 +603,7 @@ export function DashboardComposer(props: {
     }
 
     if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      setModeAnnouncement('Voice recording is not supported in this browser.')
+      setModeAnnouncement(i18n.tr('Stemmeopptak støttes ikke i denne nettleseren.', 'Voice recording is not supported in this browser.'))
       return
     }
 
@@ -620,7 +630,7 @@ export function DashboardComposer(props: {
             if (transcript) onTranscript(transcript)
           })
           .catch(() => {
-            setModeAnnouncement('Voice transcription is unavailable.')
+            setModeAnnouncement(i18n.tr('Transkribering er utilgjengelig.', 'Voice transcription is unavailable.'))
           })
       }
       recorder.onerror = () => {
@@ -633,7 +643,7 @@ export function DashboardComposer(props: {
       setVoiceRecording(true)
     } catch {
       setVoiceRecording(false)
-      setModeAnnouncement('Microphone access was not available.')
+      setModeAnnouncement(i18n.tr('Mikrofontilgang var ikke tilgjengelig.', 'Microphone access was not available.'))
     }
   }
 
@@ -689,7 +699,7 @@ export function DashboardComposer(props: {
       const sessions = await listChatThreads()
       if (requestSeq === historyRequestSeq) setHistoryThreads(sessions)
     } catch {
-      if (requestSeq === historyRequestSeq) setHistoryError('Could not load conversations.')
+      if (requestSeq === historyRequestSeq) setHistoryError(i18n.tr('Kunne ikke laste samtaler.', 'Could not load conversations.'))
     } finally {
       if (requestSeq === historyRequestSeq) setHistoryLoading(false)
     }
@@ -772,9 +782,9 @@ export function DashboardComposer(props: {
     }
 
     if (trigger.type === 'date') {
-      const items = getUpcomingDates(trigger.dayIndex)
+      const items = getUpcomingDates(trigger.dayIndex, i18n)
       setAutocomplete(items.length > 0
-        ? { category: 'Schedule', items, triggerStart: trigger.start, triggerLen: trigger.rawLen }
+        ? { category: i18n.tr('Plan', 'Schedule'), items, triggerStart: trigger.start, triggerLen: trigger.rawLen }
         : null)
       return
     }
@@ -803,7 +813,7 @@ export function DashboardComposer(props: {
           }))
           setAutocomplete(items.length > 0
             ? {
-              category: trigger.type === 'person' ? 'People' : 'Documents',
+              category: trigger.type === 'person' ? i18n.tr('Personer', 'People') : i18n.tr('Dokumenter', 'Documents'),
               items,
               triggerStart: trigger.start,
               triggerLen: trigger.rawLen,
@@ -949,7 +959,7 @@ export function DashboardComposer(props: {
     const nextMode = responseModes.find((candidate) => candidate.id === mode)
     setResponseMode(mode)
     if (nextMode) {
-      setModeAnnouncement(nextMode.announcement)
+      setModeAnnouncement(i18n.tr(nextMode.announcement.no, nextMode.announcement.en))
       if (modeAnnouncementTimer) window.clearTimeout(modeAnnouncementTimer)
       modeAnnouncementTimer = window.setTimeout(() => setModeAnnouncement(null), 3000)
     }
@@ -958,7 +968,7 @@ export function DashboardComposer(props: {
   const createSubmissionSnapshot = () => {
     const now = new Date()
     const body = props.message.trim()
-    const submittedText = body || 'Vedlegg sendt til Velion.'
+    const submittedText = body || i18n.tr('Vedlegg sendt til Velion.', 'Attachment sent to Velion.')
     return {
       actions: activeActions(),
       body,
@@ -1054,7 +1064,7 @@ export function DashboardComposer(props: {
     >
       <Show when={dragActive()}>
         <div class="dashboard-composer-drop-overlay">
-          Slipp for å legge ved
+          {i18n.tr('Slipp for å legge ved', 'Drop to attach')}
         </div>
       </Show>
 
@@ -1064,8 +1074,8 @@ export function DashboardComposer(props: {
             <button
               type="button"
               aria-expanded={modelOpen()}
-              aria-label="Velg AI-modell"
-              title="Velg AI-modell"
+              aria-label={i18n.tr('Velg AI-modell', 'Choose AI model')}
+              title={i18n.tr('Velg AI-modell', 'Choose AI model')}
               onClick={() => {
                 setModelOpen((current) => !current)
                 closeSecondaryPanels()
@@ -1099,12 +1109,12 @@ export function DashboardComposer(props: {
                           <Show
                             when={mode.badge === 'premium'}
                             fallback={
-                              <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">Rimelig</span>
+                              <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Rimelig', 'Low cost')}</span>
                             }
                           >
                             <span
                               class="dashboard-composer-model-badge dashboard-composer-model-badge--premium"
-                              title="Premium — beste svar, dyrere"
+                              title={i18n.tr('Premium - beste svar, dyrere', 'Premium - best answers, more expensive')}
                             >
                               $$
                             </span>
@@ -1126,7 +1136,7 @@ export function DashboardComposer(props: {
                         {(model) => (
                           <button
                             type="button"
-                            title={`Bruk ${model.name}`}
+                            title={i18n.tr(`Bruk ${model.name}`, `Use ${model.name}`)}
                             onClick={() => selectModel(model.id)}
                             classList={{ 'dashboard-composer-model-menu__item--active': selectedModel() === model.id }}
                           >
@@ -1138,7 +1148,7 @@ export function DashboardComposer(props: {
                               <Show when={isExpensiveModel(model)}>
                                 <span
                                   class="dashboard-composer-model-badge dashboard-composer-model-badge--premium"
-                                  title="Dyrere modell — velg bevisst"
+                                  title={i18n.tr('Dyrere modell - velg bevisst', 'More expensive model - choose deliberately')}
                                 >
                                   $$
                                 </span>
@@ -1159,16 +1169,19 @@ export function DashboardComposer(props: {
 
           <A
             href="/agents"
-            title="Opprett agent"
+            title={i18n.tr('Opprett agent', 'Create agent')}
             class="dashboard-composer-agent-button velion-composer-control"
             onClick={() => {
-              props.onMessageChange('Opprett en agent som håndterer kundesamtaler med kunnskapsbase, tone og eskaleringer.')
+              props.onMessageChange(i18n.tr(
+                'Opprett en agent som håndterer kundesamtaler med kunnskapsbase, tone og eskaleringer.',
+                'Create an agent that handles customer conversations with a knowledge base, tone, and escalations.',
+              ))
               setSuggestionsOpen(true)
               setModelOpen(false)
             }}
           >
             <Sparkles class="dashboard-composer-agent-button__icon" />
-            <span>Create agent</span>
+            <span>{i18n.tr('Opprett agent', 'Create agent')}</span>
           </A>
         </div>
 
@@ -1176,7 +1189,7 @@ export function DashboardComposer(props: {
           <Show when={props.onPlanModeChange}>
             <ComposerIconButton
               active={planMode()}
-              label="Planmodus — agenten planlegger og ber om godkjenning før risikable verktøy"
+              label={i18n.tr('Planmodus - agenten planlegger og ber om godkjenning før risikable verktøy', 'Plan mode - the agent plans and asks for approval before risky tools')}
               onClick={() => props.onPlanModeChange?.(!planMode())}
               variant="chip"
             >
@@ -1184,12 +1197,12 @@ export function DashboardComposer(props: {
             </ComposerIconButton>
           </Show>
           <span ref={(element) => { historyTriggerRef = element }}>
-            <ComposerIconButton active={historyOpen()} label="Historikk" onClick={openHistoryPanel} variant="chip">
+            <ComposerIconButton active={historyOpen()} label={i18n.tr('Historikk', 'History')} onClick={openHistoryPanel} variant="chip">
               <Clock3 class="size-3.5" />
             </ComposerIconButton>
           </span>
           <span ref={(element) => { settingsTriggerRef = element }}>
-            <ComposerIconButton active={settingsOpen()} label="Innstillinger" onClick={openSettingsPanel} variant="chip">
+            <ComposerIconButton active={settingsOpen()} label={i18n.tr('Innstillinger', 'Settings')} onClick={openSettingsPanel} variant="chip">
               <SlidersHorizontal class="size-3.5" />
             </ComposerIconButton>
           </span>
@@ -1203,7 +1216,7 @@ export function DashboardComposer(props: {
           accept="*/*"
           multiple
           class="sr-only"
-          aria-label="Add files"
+          aria-label={i18n.tr('Legg til filer', 'Add files')}
           onChange={(event) => {
             if (event.currentTarget.files) addFiles(event.currentTarget.files)
             event.currentTarget.value = ''
@@ -1212,9 +1225,9 @@ export function DashboardComposer(props: {
 
         <Show when={suggestionsOpen()}>
           <div class="dashboard-composer-suggestions velion-popover velion-popover-up">
-            <button type="button" onClick={() => props.onMessageChange('Finn de viktigste kundesakene fra siste uke.')}>Finn de viktigste kundesakene fra siste uke.</button>
-            <button type="button" onClick={() => props.onMessageChange('Lag et kort svarutkast med kildehenvisninger.')}>Lag et kort svarutkast med kildehenvisninger.</button>
-            <button type="button" onClick={() => props.onMessageChange('Oppsummer kunnskapsbasen og pek på mangler.')}>Oppsummer kunnskapsbasen og pek på mangler.</button>
+            <button type="button" onClick={() => props.onMessageChange(i18n.tr('Finn de viktigste kundesakene fra siste uke.', 'Find the most important customer cases from last week.'))}>{i18n.tr('Finn de viktigste kundesakene fra siste uke.', 'Find the most important customer cases from last week.')}</button>
+            <button type="button" onClick={() => props.onMessageChange(i18n.tr('Lag et kort svarutkast med kildehenvisninger.', 'Create a short draft reply with source references.'))}>{i18n.tr('Lag et kort svarutkast med kildehenvisninger.', 'Create a short draft reply with source references.')}</button>
+            <button type="button" onClick={() => props.onMessageChange(i18n.tr('Oppsummer kunnskapsbasen og pek på mangler.', 'Summarize the knowledge base and point out gaps.'))}>{i18n.tr('Oppsummer kunnskapsbasen og pek på mangler.', 'Summarize the knowledge base and point out gaps.')}</button>
           </div>
         </Show>
 
@@ -1239,7 +1252,7 @@ export function DashboardComposer(props: {
             void submitComposer()
           }}
         >
-          <AttachmentPreview attachments={files()} onEnhance={enhanceAttachments} onRemove={removeFile} />
+          <AttachmentPreview attachments={files()} i18n={i18n} onEnhance={enhanceAttachments} onRemove={removeFile} />
 
           <Show when={activeActions().length > 0}>
             <div class="dashboard-composer-actions-bar">
@@ -1250,8 +1263,8 @@ export function DashboardComposer(props: {
                     <span>{action.name}</span>
                     <button
                       type="button"
-                      aria-label={`Remove ${action.name}`}
-                      title={`Remove ${action.name}`}
+                      aria-label={i18n.tr(`Fjern ${action.name}`, `Remove ${action.name}`)}
+                      title={i18n.tr(`Fjern ${action.name}`, `Remove ${action.name}`)}
                       onClick={() => removeActiveAction(action)}
                     >
                       <X class="size-2.5" />
@@ -1273,14 +1286,14 @@ export function DashboardComposer(props: {
                 <SplitText text={currentModeAnnouncement()} />
               </div>
             </Show>
-            <label class="sr-only" for="velion-dashboard-input">Message Velion</label>
+            <label class="sr-only" for="velion-dashboard-input">{i18n.tr('Meld Velion', 'Message Velion')}</label>
             <textarea
               ref={(element) => { textareaRef = element }}
               id="velion-dashboard-input"
-              aria-label="Message Velion"
+              aria-label={i18n.tr('Meld Velion', 'Message Velion')}
               class="velion-dashboard-textarea"
               aria-busy={voiceRecording()}
-              placeholder={textareaPlaceholder(modeAnnouncement())}
+              placeholder={textareaPlaceholder(modeAnnouncement(), i18n)}
               rows="3"
               style={textareaOverlayStyle(hasEntityOverlay())}
               value={props.message}
@@ -1292,8 +1305,8 @@ export function DashboardComposer(props: {
               <button
                 type="button"
                 class="dashboard-composer-expand-btn"
-                aria-label={textareaExpandLabel(textareaExpanded())}
-                title={textareaExpandTitle(textareaExpanded())}
+                aria-label={textareaExpandLabel(textareaExpanded(), i18n)}
+                title={textareaExpandTitle(textareaExpanded(), i18n)}
                 onClick={() => setTextareaExpanded((prev) => !prev)}
               >
                 <Show when={textareaExpanded()} fallback={<Maximize2 size={11} strokeWidth={2} />}>
@@ -1311,39 +1324,45 @@ export function DashboardComposer(props: {
 
           <div class="dashboard-composer-toolbar">
             <div class="dashboard-composer-toolbar__left">
-              <button type="button" class="dashboard-composer-attach" aria-label="Add files" title="Add files" onClick={openFileDialog}>
+              <button
+                type="button"
+                class="dashboard-composer-attach"
+                aria-label={i18n.tr('Legg til filer', 'Add files')}
+                title={i18n.tr('Legg til filer', 'Add files')}
+                onClick={openFileDialog}
+              >
                 <span><CirclePlus class="size-4" /></span>
-                <span>add files</span>
+                <span>{i18n.tr('legg til filer', 'add files')}</span>
               </button>
               <div class="dashboard-composer-toolbar__divider" />
-              <ComposerIconButton active={suggestionsOpen()} label="Suggestions" onClick={() => setSuggestionsOpen((current) => !current)} variant="toolbar">
+              <ComposerIconButton active={suggestionsOpen()} label={i18n.tr('Forslag', 'Suggestions')} onClick={() => setSuggestionsOpen((current) => !current)} variant="toolbar">
                 <Lightbulb class="size-4" />
               </ComposerIconButton>
-              <ComposerIconButton active={deepSearch()} label="Deep search" onClick={() => setDeepSearch((current) => !current)} variant="toolbar">
+              <ComposerIconButton active={deepSearch()} label={i18n.tr('Dyp research', 'Deep search')} onClick={() => setDeepSearch((current) => !current)} variant="toolbar">
                 <Telescope class="size-4" />
               </ComposerIconButton>
               <button
                 type="button"
                 aria-pressed={browseWeb()}
-                aria-label="Browse web"
-                title="Browse web"
+                aria-label={i18n.tr('Søk på nett', 'Browse web')}
+                title={i18n.tr('Søk på nett', 'Browse web')}
                 onClick={() => setBrowseWeb((current) => !current)}
                 class={composerWebButtonClass(browseWeb())}
               >
                 <Globe2 class="size-4" />
-                Search
+                {i18n.tr('Søk', 'Search')}
               </button>
               <Show when={props.onImageModeChange}>
                 <button
                   type="button"
                   aria-pressed={imageMode()}
-                  aria-label="Generer bilde"
-                  title="Generer bilde"
+                  aria-label={i18n.tr('Generer bilde', 'Generate image')}
+                  title={i18n.tr('Generer bilde', 'Generate image')}
                   onClick={() => props.onImageModeChange?.(!imageMode())}
                   class={composerImageButtonClass(imageMode())}
                 >
                   <ImagePlus class="size-4" />
-                  Bilde
+                  {i18n.tr('Bilde', 'Image')}
                 </button>
               </Show>
             </div>
@@ -1354,7 +1373,7 @@ export function DashboardComposer(props: {
                   {(mode) => (
                     <ComposerIconButton
                       active={responseMode() === mode.id}
-                      label={mode.label}
+                      label={i18n.tr(mode.label.no, mode.label.en)}
                       onClick={() => handleResponseMode(mode.id)}
                       variant="toolbar"
                     >
@@ -1363,10 +1382,10 @@ export function DashboardComposer(props: {
                   )}
                 </For>
               </div>
-              <ComposerIconButton active={voiceMode()} label="Voice mode" onClick={() => setVoiceMode(true)} variant="toolbar">
+              <ComposerIconButton active={voiceMode()} label={i18n.tr('Stemmemodus', 'Voice mode')} onClick={() => setVoiceMode(true)} variant="toolbar">
                 <AudioWaveform class="size-4" />
               </ComposerIconButton>
-              <ComposerIconButton active={voiceRecording()} label="Voice input" onClick={() => void toggleRecording()} variant="toolbar">
+              <ComposerIconButton active={voiceRecording()} label={i18n.tr('Stemmeinndata', 'Voice input')} onClick={() => void toggleRecording()} variant="toolbar">
                 <Mic class="size-4" />
               </ComposerIconButton>
               <Show
@@ -1375,8 +1394,8 @@ export function DashboardComposer(props: {
                   <button
                     type="submit"
                     disabled={!submitEnabled()}
-                    aria-label="Send message"
-                    title="Send message"
+                    aria-label={i18n.tr('Send melding', 'Send message')}
+                    title={i18n.tr('Send melding', 'Send message')}
                     class={composerSubmitButtonClass(submitEnabled())}
                   >
                     <ArrowUp class="size-4" />
@@ -1385,8 +1404,8 @@ export function DashboardComposer(props: {
               >
                 <button
                   type="button"
-                  aria-label="Stop response"
-                  title="Stop response"
+                  aria-label={i18n.tr('Stopp svar', 'Stop response')}
+                  title={i18n.tr('Stopp svar', 'Stop response')}
                   onClick={() => props.onStop?.()}
                   class="dashboard-composer-submit-button dashboard-composer-submit-button--active"
                 >
@@ -1399,7 +1418,7 @@ export function DashboardComposer(props: {
       </div>
 
       <Show when={activeTurnReceipt()}>
-        {(turn) => <TurnReceipt turn={turn()} />}
+        {(turn) => <TurnReceipt i18n={i18n} turn={turn()} />}
       </Show>
 
       {/* Portal floating panels/overlays to <body>: they use position:fixed and
@@ -1409,6 +1428,7 @@ export function DashboardComposer(props: {
         <Portal>
           <HistoryPanel
             error={historyError()}
+            i18n={i18n}
             loading={historyLoading()}
             position={historyPanelPosition()}
             threads={historyThreads()}
@@ -1422,6 +1442,7 @@ export function DashboardComposer(props: {
       <Show when={settingsOpen()}>
         <Portal>
           <SettingsPanel
+            i18n={i18n}
             position={settingsPanelPosition()}
             settings={settings()}
             onAddFiles={() => {
@@ -1439,6 +1460,7 @@ export function DashboardComposer(props: {
       <Show when={voiceMode()}>
         <Portal>
           <RealtimeVoiceModal
+            i18n={i18n}
             language={settings().voiceLang}
             model={selectedModelLabel()}
             onClose={() => setVoiceMode(false)}
@@ -1570,10 +1592,13 @@ function detectTrigger(text: string, position: number): TriggerContext | null {
     }
   }
 
-  const wordMatch = before.match(/\b([A-Za-z]{3,})$/)
+  const wordMatch = before.match(/\b([A-Za-zÆØÅæøå]{3,})$/)
   if (!wordMatch) return null
   const word = wordMatch[1] ?? ''
-  const day = dayEntries.find((entry) => entry.name.toLowerCase().startsWith(word.toLowerCase()))
+  const normalizedWord = word.toLowerCase()
+  const day = dayEntries.find((entry) =>
+    entry.name.toLowerCase().startsWith(normalizedWord) ||
+    entry.nameNo.toLowerCase().startsWith(normalizedWord))
   if (!day) return null
   return {
     type: 'date',
@@ -1583,14 +1608,14 @@ function detectTrigger(text: string, position: number): TriggerContext | null {
   }
 }
 
-function getUpcomingDates(dayIndex: number): AutocompleteItem[] {
+function getUpcomingDates(dayIndex: number, i18n: ReturnType<typeof useI18n>): AutocompleteItem[] {
   const items: AutocompleteItem[] = []
   const date = new Date()
 
   while (items.length < 2) {
     date.setDate(date.getDate() + 1)
     if (date.getDay() === dayIndex) {
-      const label = date.toLocaleDateString('en-US', {
+      const label = date.toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-US', {
         day: 'numeric',
         month: 'short',
         weekday: 'short',
@@ -1691,6 +1716,7 @@ function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
 }
 
 function RealtimeVoiceModal(props: {
+  i18n: ReturnType<typeof useI18n>
   language: string
   model: string
   onClose: () => void
@@ -1763,18 +1789,18 @@ function RealtimeVoiceModal(props: {
   onCleanup(() => stop())
 
   return (
-    <dialog open class="realtime-voice-modal" aria-label="Voice mode" data-dashboard-modal="true">
-      <button type="button" aria-label="Dismiss voice backdrop" class="realtime-voice-modal__scrim" onClick={close} />
+    <dialog open class="realtime-voice-modal" aria-label={props.i18n.tr('Stemmemodus', 'Voice mode')} data-dashboard-modal="true">
+      <button type="button" aria-label={props.i18n.tr('Lukk stemmebakgrunn', 'Dismiss voice backdrop')} class="realtime-voice-modal__scrim" onClick={close} />
       <div class="realtime-voice-modal__panel velion-panel-in">
         <div class="realtime-voice-modal__header">
           <span>
             <AudioWaveform class="size-5" />
           </span>
           <div>
-            <p>Stemmemodus</p>
+            <p>{props.i18n.tr('Stemmemodus', 'Voice mode')}</p>
             <small>{props.model} · {props.language}</small>
           </div>
-          <button type="button" onClick={close} aria-label="Lukk stemmemodus">
+          <button type="button" onClick={close} aria-label={props.i18n.tr('Lukk stemmemodus', 'Close voice mode')}>
             <X class="size-4" />
           </button>
         </div>
@@ -1785,7 +1811,7 @@ function RealtimeVoiceModal(props: {
             onClick={() => listening() ? stop() : startListening()}
             disabled={!supported()}
             class={cn('realtime-voice-modal__mic', listening() ? 'realtime-voice-modal__mic--listening velion-voice-pulse' : '')}
-            aria-label={listening() ? 'Stop dictation' : 'Start dictation'}
+            aria-label={listening() ? props.i18n.tr('Stopp diktering', 'Stop dictation') : props.i18n.tr('Start diktering', 'Start dictation')}
           >
             <Mic class="size-6" />
           </button>
@@ -1793,8 +1819,8 @@ function RealtimeVoiceModal(props: {
             when={liveText()}
             fallback={
               <>
-                <p>{listening() ? 'Lytter …' : supported() ? 'Klar for diktering' : 'Stemme støttes ikke i denne nettleseren'}</p>
-                <small>{supported() ? 'Snakk fritt. Teksten settes inn i meldingen.' : 'Prøv Chrome/Edge, eller skriv meldingen i stedet.'}</small>
+                <p>{listening() ? props.i18n.tr('Lytter ...', 'Listening ...') : supported() ? props.i18n.tr('Klar for diktering', 'Ready for dictation') : props.i18n.tr('Stemme støttes ikke i denne nettleseren', 'Voice is not supported in this browser')}</p>
+                <small>{supported() ? props.i18n.tr('Snakk fritt. Teksten settes inn i meldingen.', 'Speak freely. The text will be inserted into the message.') : props.i18n.tr('Prøv Chrome/Edge, eller skriv meldingen i stedet.', 'Try Chrome/Edge, or type the message instead.')}</small>
               </>
             }
           >
@@ -1809,10 +1835,10 @@ function RealtimeVoiceModal(props: {
 
         <div class="realtime-voice-modal__actions">
           <button type="button" onClick={() => listening() ? stop() : startListening()} disabled={!supported()}>
-            {listening() ? 'Stopp' : 'Start diktering'}
+            {listening() ? props.i18n.tr('Stopp', 'Stop') : props.i18n.tr('Start diktering', 'Start dictation')}
           </button>
           <button type="button" onClick={insert} disabled={!liveText()}>
-            Sett inn
+            {props.i18n.tr('Sett inn', 'Insert')}
           </button>
         </div>
       </div>
@@ -1862,6 +1888,7 @@ function formatFileSize(size: number) {
 
 function AttachmentPreview(props: {
   attachments: ComposerFile[]
+  i18n: ReturnType<typeof useI18n>
   onEnhance: () => void
   onRemove: (id: string) => void
 }) {
@@ -1888,8 +1915,8 @@ function AttachmentPreview(props: {
                   type="button"
                   onClick={() => props.onRemove(attachment.id)}
                   class="dashboard-composer-attachment__remove"
-                  aria-label={`Remove ${attachment.name}`}
-                  title={`Remove ${attachment.name}`}
+                  aria-label={props.i18n.tr(`Fjern ${attachment.name}`, `Remove ${attachment.name}`)}
+                  title={props.i18n.tr(`Fjern ${attachment.name}`, `Remove ${attachment.name}`)}
                 >
                   <X class="size-2.5" />
                 </button>
@@ -1901,8 +1928,8 @@ function AttachmentPreview(props: {
           type="button"
           onClick={() => props.onEnhance()}
           class="dashboard-composer-attachments__enhance"
-          aria-label="AI enhance"
-          title="AI enhance"
+          aria-label={props.i18n.tr('AI-forbedre', 'AI enhance')}
+          title={props.i18n.tr('AI-forbedre', 'AI enhance')}
         >
           <WandSparkles class="size-4" />
         </button>
@@ -1911,7 +1938,12 @@ function AttachmentPreview(props: {
   )
 }
 
-function TurnReceipt(props: { turn: ComposerTurn }) {
+function responseModeReceiptLabel(mode: ResponseMode, i18n: ReturnType<typeof useI18n>): string {
+  const option = responseModes.find((candidate) => candidate.id === mode)
+  return option ? i18n.tr(option.label.no, option.label.en) : mode
+}
+
+function TurnReceipt(props: { i18n: ReturnType<typeof useI18n>; turn: ComposerTurn }) {
   return (
     <div class="velion-composer-turn-receipt velion-fade-up">
       <div>
@@ -1921,12 +1953,12 @@ function TurnReceipt(props: { turn: ComposerTurn }) {
         <div>
           <p>{props.turn.body}</p>
           <small>
-            {props.turn.model} · {props.turn.responseMode}
-            <Show when={props.turn.browseWeb}> · web</Show>
-            <Show when={props.turn.deepSearch}> · deep search</Show>
+            {props.turn.model} · {responseModeReceiptLabel(props.turn.responseMode, props.i18n)}
+            <Show when={props.turn.browseWeb}> · {props.i18n.tr('nett', 'web')}</Show>
+            <Show when={props.turn.deepSearch}> · {props.i18n.tr('dyp research', 'deep search')}</Show>
           </small>
           <Show when={props.turn.files.length > 0}>
-            <small>{props.turn.files.length} vedlegg lagt til.</small>
+            <small>{props.i18n.tr(`${props.turn.files.length} vedlegg lagt til.`, `${props.turn.files.length} attachment${props.turn.files.length === 1 ? '' : 's'} added.`)}</small>
           </Show>
         </div>
       </div>
@@ -1936,6 +1968,7 @@ function TurnReceipt(props: { turn: ComposerTurn }) {
 
 function HistoryPanel(props: {
   error: string | null
+  i18n: ReturnType<typeof useI18n>
   loading: boolean
   onClose: () => void
   onThreadSelect: (threadId: string) => void
@@ -1944,10 +1977,10 @@ function HistoryPanel(props: {
   turns: ComposerTurn[]
 }) {
   const items = createMemo(() => [
-    ...props.threads.map(threadToHistoryItem),
-    ...props.turns.map(turnToHistoryItem),
+    ...props.threads.map((thread) => threadToHistoryItem(thread, props.i18n)),
+    ...props.turns.map((turn) => turnToHistoryItem(turn, props.i18n)),
   ])
-  const groups = createMemo(() => historyGroups(items()))
+  const groups = createMemo(() => historyGroups(items(), props.i18n))
 
   return (
     <div
@@ -1960,8 +1993,8 @@ function HistoryPanel(props: {
           <div class="velion-menu-row dashboard-composer-history-row dashboard-composer-history-row--loading">
             <Loader2 class="size-4 shrink-0 animate-spin" strokeWidth={1.7} />
             <span>
-              <span class="velion-menu-label">Loading conversations...</span>
-              <span class="velion-menu-meta">Signed-in user history</span>
+              <span class="velion-menu-label">{props.i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</span>
+              <span class="velion-menu-meta">{props.i18n.tr('Historikk for innlogget bruker', 'Signed-in user history')}</span>
             </span>
           </div>
         </Show>
@@ -1980,7 +2013,7 @@ function HistoryPanel(props: {
                       >
                         <MessageSquare class="size-4 shrink-0" strokeWidth={1.7} />
                         <span>
-                          <span class="velion-menu-label">{item.title || 'Untitled'}</span>
+                          <span class="velion-menu-label">{item.title || props.i18n.tr('Uten tittel', 'Untitled')}</span>
                           <span class="velion-menu-meta">{item.meta}</span>
                         </span>
                         <span class="velion-menu-meta dashboard-composer-history-row__time">
@@ -1997,14 +2030,14 @@ function HistoryPanel(props: {
         <Show when={!props.loading && items().length === 0}>
           <div class="dashboard-composer-history-empty">
             <MessageSquare class="size-5" strokeWidth={1.5} />
-            <p>{props.error ?? 'No conversations found for this user.'}</p>
+            <p>{props.error ?? props.i18n.tr('Fant ingen samtaler for denne brukeren.', 'No conversations found for this user.')}</p>
           </div>
         </Show>
 
         <div class="dashboard-composer-menu-divider" />
         <A href="/chat" onClick={props.onClose} class="velion-menu-row">
           <LayoutGrid class="size-4 shrink-0" strokeWidth={1.7} />
-          <span class="velion-menu-label">View all conversations</span>
+          <span class="velion-menu-label">{props.i18n.tr('Vis alle samtaler', 'View all conversations')}</span>
         </A>
       </div>
     </div>
@@ -2012,6 +2045,7 @@ function HistoryPanel(props: {
 }
 
 function SettingsPanel(props: {
+  i18n: ReturnType<typeof useI18n>
   onAddFiles: () => void
   onScreenshot: () => void
   onSettingsChange: (settings: ComposerSettings) => void
@@ -2019,7 +2053,10 @@ function SettingsPanel(props: {
   settings: ComposerSettings
 }) {
   const [view, setView] = createSignal<SettingsView>('main')
-  const currentLangLabel = () => voiceLanguages.find((language) => language.value === props.settings.voiceLang)?.label ?? props.settings.voiceLang
+  const currentLangLabel = () => {
+    const label = voiceLanguages.find((language) => language.value === props.settings.voiceLang)?.label
+    return label ? props.i18n.tr(label.no, label.en) : props.settings.voiceLang
+  }
   const updateSetting = <K extends keyof ComposerSettings>(key: K, value: ComposerSettings[K]) => {
     props.onSettingsChange({ ...props.settings, [key]: value })
   }
@@ -2036,7 +2073,7 @@ function SettingsPanel(props: {
             <div class="velion-settings-view">
               <div class="velion-menu-row">
                 <Mic class="size-[17px] shrink-0" strokeWidth={1.7} />
-                <span class="velion-menu-label">Voice language</span>
+                <span class="velion-menu-label">{props.i18n.tr('Stemmespråk', 'Voice language')}</span>
                 <select
                   value={props.settings.voiceLang}
                   title={currentLangLabel()}
@@ -2044,7 +2081,7 @@ function SettingsPanel(props: {
                   class="dashboard-composer-settings-select"
                 >
                   <For each={voiceLanguages}>
-                    {(language) => <option value={language.value}>{language.label}</option>}
+                    {(language) => <option value={language.value}>{props.i18n.tr(language.label.no, language.label.en)}</option>}
                   </For>
                 </select>
               </div>
@@ -2053,7 +2090,7 @@ function SettingsPanel(props: {
                 {(option) => (
                   <ComposerMenuRow
                     icon={<Dynamic component={option.icon} class="size-[17px]" strokeWidth={1.7} />}
-                    label={option.label}
+                    label={props.i18n.tr(option.label.no, option.label.en)}
                     onClick={() => updateSetting('tone', option.value)}
                     right={props.settings.tone === option.value ? <Check class="size-3.5" strokeWidth={2.5} /> : <span class="dashboard-composer-menu-spacer" />}
                   />
@@ -2061,24 +2098,24 @@ function SettingsPanel(props: {
               </For>
 
               <div class="dashboard-composer-menu-divider" />
-              <ComposerMenuRow icon={<Paperclip class="size-[17px]" strokeWidth={1.7} />} label="Add files or photos" onClick={props.onAddFiles} />
-              <ComposerMenuRow icon={<Camera class="size-[17px]" strokeWidth={1.7} />} label="Take a screenshot" onClick={props.onScreenshot} />
+              <ComposerMenuRow icon={<Paperclip class="size-[17px]" strokeWidth={1.7} />} label={props.i18n.tr('Legg til filer eller bilder', 'Add files or photos')} onClick={props.onAddFiles} />
+              <ComposerMenuRow icon={<Camera class="size-[17px]" strokeWidth={1.7} />} label={props.i18n.tr('Ta et skjermbilde', 'Take a screenshot')} onClick={props.onScreenshot} />
               <ComposerMenuRow
                 icon={<FolderPlus class="size-[17px]" strokeWidth={1.7} />}
-                label="Add to project"
+                label={props.i18n.tr('Legg til i prosjekt', 'Add to project')}
                 onClick={() => setView('projects')}
                 right={<ChevronRight class="size-3.5" />}
               />
               <div class="dashboard-composer-menu-divider" />
               <ComposerMenuRow
                 icon={<Blocks class="size-[17px]" strokeWidth={1.7} />}
-                label="Skills"
+                label={props.i18n.tr('Ferdigheter', 'Skills')}
                 onClick={() => setView('skills')}
                 right={<ChevronRight class="size-3.5" />}
               />
               <ComposerMenuRow
                 icon={<LayoutGrid class="size-[17px]" strokeWidth={1.7} />}
-                label="Connectors"
+                label={props.i18n.tr('Koblinger', 'Connectors')}
                 onClick={() => setView('connectors')}
                 right={<ChevronRight class="size-3.5" />}
               />
@@ -2086,35 +2123,38 @@ function SettingsPanel(props: {
           </Match>
 
           <Match when={view() === 'skills'}>
-            <SettingsSubView title="Skills" onBack={() => setView('main')}>
+            <SettingsSubView title={props.i18n.tr('Ferdigheter', 'Skills')} onBack={() => setView('main')}>
               <RemoteSettingsList
-                emptyLabel="No skills are available yet."
+                emptyLabel={props.i18n.tr('Ingen ferdigheter er tilgjengelige ennå.', 'No skills are available yet.')}
                 endpoint="/api/v1/skills"
                 itemKey="skills"
                 manageHref="/agents"
-                manageLabel="Manage skills"
+                manageLabel={props.i18n.tr('Administrer ferdigheter', 'Manage skills')}
+                i18n={props.i18n}
               />
             </SettingsSubView>
           </Match>
 
           <Match when={view() === 'projects'}>
-            <SettingsSubView title="Add to project" onBack={() => setView('main')}>
+            <SettingsSubView title={props.i18n.tr('Legg til i prosjekt', 'Add to project')} onBack={() => setView('main')}>
               <RemoteSettingsList
-                emptyLabel="No projects are available yet."
+                emptyLabel={props.i18n.tr('Ingen prosjekter er tilgjengelige ennå.', 'No projects are available yet.')}
                 endpoint="/api/v1/projects"
                 itemKey="projects"
+                i18n={props.i18n}
               />
             </SettingsSubView>
           </Match>
 
           <Match when={view() === 'connectors'}>
-            <SettingsSubView title="Connectors" onBack={() => setView('main')}>
+            <SettingsSubView title={props.i18n.tr('Koblinger', 'Connectors')} onBack={() => setView('main')}>
               <RemoteSettingsList
-                emptyLabel="No connectors are connected yet."
+                emptyLabel={props.i18n.tr('Ingen koblinger er tilkoblet ennå.', 'No connectors are connected yet.')}
                 endpoint="/api/v1/integrations/providers"
                 itemKey="providers"
                 manageHref="/settings/integrations"
-                manageLabel="Connect more"
+                manageLabel={props.i18n.tr('Koble til flere', 'Connect more')}
+                i18n={props.i18n}
               />
             </SettingsSubView>
           </Match>
@@ -2159,6 +2199,7 @@ function SettingsSubView(props: {
 function RemoteSettingsList(props: {
   emptyLabel: string
   endpoint: string
+  i18n: ReturnType<typeof useI18n>
   itemKey: string
   manageHref?: string
   manageLabel?: string
@@ -2175,7 +2216,7 @@ function RemoteSettingsList(props: {
         fallback={
           <div class="dashboard-composer-settings-loading">
             <Loader2 class="size-3.5" />
-            <span>Loading…</span>
+            <span>{props.i18n.tr('Laster ...', 'Loading ...')}</span>
           </div>
         }
       >
@@ -2183,8 +2224,8 @@ function RemoteSettingsList(props: {
           when={!items.error}
           fallback={
             <div class="dashboard-composer-settings-error">
-              <p>Could not load from the gateway.</p>
-              <small>{items.error instanceof Error ? items.error.message : 'Service unavailable'}</small>
+              <p>{props.i18n.tr('Kunne ikke laste fra gatewayen.', 'Could not load from the gateway.')}</p>
+              <small>{items.error instanceof Error ? items.error.message : props.i18n.tr('Tjenesten er utilgjengelig', 'Service unavailable')}</small>
             </div>
           }
         >
@@ -2193,7 +2234,7 @@ function RemoteSettingsList(props: {
             fallback={<div class="dashboard-composer-settings-empty">{props.emptyLabel}</div>}
           >
             <For each={items()}>
-              {(item) => <RemoteSettingsItemRow item={item} />}
+              {(item) => <RemoteSettingsItemRow i18n={props.i18n} item={item} />}
             </For>
           </Show>
         </Show>
@@ -2216,7 +2257,7 @@ function RemoteSettingsList(props: {
   )
 }
 
-function RemoteSettingsItemRow(props: { item: ComposerSettingsItem }) {
+function RemoteSettingsItemRow(props: { i18n: ReturnType<typeof useI18n>; item: ComposerSettingsItem }) {
   return (
     <div class="velion-menu-row dashboard-composer-settings-data-row">
       <span class="dashboard-composer-settings-item-icon">
@@ -2230,7 +2271,7 @@ function RemoteSettingsItemRow(props: { item: ComposerSettingsItem }) {
       </span>
       <Show when={typeof props.item.connected === 'boolean'}>
         <span class="velion-menu-meta dashboard-composer-settings-item-status">
-          {props.item.connected ? 'Ready' : 'Open'}
+          {props.item.connected ? props.i18n.tr('Klar', 'Ready') : props.i18n.tr('Åpne', 'Open')}
         </span>
       </Show>
     </div>
@@ -2280,28 +2321,28 @@ function formatComposerTurnTime(date: Date) {
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
-function threadToHistoryItem(thread: ChatThreadSession): HistoryPanelItem {
+function threadToHistoryItem(thread: ChatThreadSession, i18n: ReturnType<typeof useI18n>): HistoryPanelItem {
   return {
     fallbackTime: thread.updatedAt,
     id: thread.threadId,
-    meta: thread.preview || 'Chat thread',
+    meta: thread.preview || i18n.tr('Chat-tråd', 'Chat thread'),
     threadId: thread.threadId,
-    title: thread.title || 'Untitled',
+    title: thread.title || i18n.tr('Uten tittel', 'Untitled'),
     updatedAt: thread.updatedAt,
   }
 }
 
-function turnToHistoryItem(turn: ComposerTurn): HistoryPanelItem {
+function turnToHistoryItem(turn: ComposerTurn, i18n: ReturnType<typeof useI18n>): HistoryPanelItem {
   return {
     fallbackTime: turn.createdAt,
     id: turn.id,
     meta: turn.model,
-    title: turn.body || 'Untitled',
+    title: turn.body || i18n.tr('Uten tittel', 'Untitled'),
     updatedAt: turn.createdAtIso,
   }
 }
 
-function historyGroups(items: HistoryPanelItem[]) {
+function historyGroups(items: HistoryPanelItem[], i18n: ReturnType<typeof useI18n>) {
   const now = new Date()
   const today = now.toDateString()
   const yesterday = new Date(now.getTime() - 86_400_000).toDateString()
@@ -2320,9 +2361,9 @@ function historyGroups(items: HistoryPanelItem[]) {
   )
 
   return [
-    { label: 'Today', items: groups.today, isToday: true },
-    { label: 'Yesterday', items: groups.yesterday, isToday: false },
-    { label: 'Earlier', items: groups.earlier, isToday: false },
+    { label: i18n.tr('I dag', 'Today'), items: groups.today, isToday: true },
+    { label: i18n.tr('I går', 'Yesterday'), items: groups.yesterday, isToday: false },
+    { label: i18n.tr('Tidligere', 'Earlier'), items: groups.earlier, isToday: false },
   ] as const
 }
 

@@ -1,4 +1,4 @@
-const detailNotes = ["Surface", "Silence", "Control", "Craft", "Space", "Flow"];
+const detailNotes = ["Monitor", "Brief", "Review", "Approve", "Execute", "Audit"];
 
 export function DetailGallerySection() {
   return (
@@ -8,12 +8,12 @@ export function DetailGallerySection() {
           02 / 06
         </span>
         <h1 className="header-1 fade-out-top" data-fade-out-top>
-          Attention to detail
+          The approval loop is the product.
         </h1>
         <div className="velion-ingress ingress fade-out-top" data-fade-out-top>
           <p>
-            Step into a world where design transcends luxury and evolves into a sensual experience from every
-            perspective.
+            Velion can propose work across support, sales, knowledge, and operations, but the system is built around
+            human control. High-impact actions stop at review with context, rollback, and audit attached.
           </p>
         </div>
         <div className="velion-detail__ticks" aria-label="Detail sequence">

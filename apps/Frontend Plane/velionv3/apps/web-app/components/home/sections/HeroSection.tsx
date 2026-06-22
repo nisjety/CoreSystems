@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { ArrowButton } from "@/components/ui/buttons/ArrowButton";
 
 export function HeroSection() {
@@ -10,15 +11,15 @@ export function HeroSection() {
         data-parallax-effect=""
         data-parallax-options='{"from":{"y":"0%"},"to":{"y":"80%"},"start":"top top","end":"bottom top","disableOnMobile":false,"disableOnTablet":false}'
       >
-        <div className="velion-water">
-          <div className="velion-vessel">
-            <span className="velion-vessel__roof" />
-            <span className="velion-vessel__glass" />
-            <span className="velion-vessel__deck" />
-          </div>
-          <span className="velion-wake velion-wake--left" />
-          <span className="velion-wake velion-wake--right" />
-        </div>
+        <Image
+          alt=""
+          className="velion-hero__image"
+          fill
+          priority
+          sizes="100vw"
+          src="/velion-vibe/human-haze.png"
+        />
+        <div className="velion-hero__veil" />
       </div>
 
       <div
@@ -27,20 +28,20 @@ export function HeroSection() {
         data-parallax-effect=""
         data-parallax-options='{"from":{"y":"0%"},"to":{"y":"40%"},"start":"top top","end":"bottom top","disableOnMobile":false,"disableOnTablet":false}'
       >
-        <h1>Electric Luxury</h1>
+        <h1>Your AI worker for customer experience.</h1>
         <p>
-          Experience style, sustainability and forward-thinking. Ride the VELION.
+          Velion learns the company, drafts work, asks for approval, and keeps every customer action traceable.
         </p>
-        <ArrowButton href="#yachts" variant="light">
-          Discover Our Yachts
+        <ArrowButton href="#product-loop" variant="light">
+          See the system
         </ArrowButton>
       </div>
 
-      <a className="velion-hero__explore" href="#yachts">
+      <a className="velion-hero__explore" href="#product-loop">
         <svg aria-hidden="true" viewBox="0 0 18 18">
           <path d="m3 6 6 6 6-6" />
         </svg>
-        Explore
+        Scroll
       </a>
     </section>
   );

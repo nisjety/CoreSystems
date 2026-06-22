@@ -4,7 +4,6 @@ import { Activity, ArrowUpRight, CloudSun, MessageSquare, Newspaper, RefreshCw, 
 import { createEffect, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js'
 import type { DashboardCard } from '@/features/dashboard/home/dashboard-cards'
 import {
-  formatRelativeNorwegianTime,
   loadDashboardInformationSnapshot,
   loadNews,
   loadTraffic,
@@ -15,6 +14,7 @@ import {
   type InformationWeatherPayload,
   weatherGlyph,
 } from '@/shared/api/information-client'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
 const aboveFoldDashboardCardIds = new Set(['weather', 'traffic', 'news'])
@@ -89,6 +89,7 @@ export function DashboardCardsRail(props: {
   onPrompt: (card: DashboardCard) => void
   visibleCards: DashboardCard[]
 }) {
+  const i18n = useI18n()
   return (
     <section
       class={cn(
@@ -107,8 +108,8 @@ export function DashboardCardsRail(props: {
           type="button"
           onClick={() => props.onNextPage()}
           class="velion-home-next mx-auto flex size-12 items-center justify-center transition-transform duration-300 hover:scale-105 active:scale-95"
-          aria-label="Vis neste kortside"
-          title="Vis neste kortside"
+          aria-label={i18n.tr('Vis neste kortside', 'Show next card page')}
+          title={i18n.tr('Vis neste kortside', 'Show next card page')}
         >
           <span aria-hidden="true">
             <span class="dashboard-home__next-line dashboard-home__next-line--left" />
@@ -124,7 +125,9 @@ function DashboardImageCard(props: {
   card: DashboardCard
   onPrompt: (card: DashboardCard) => void
 }) {
+  const i18n = useI18n()
   const aboveFold = () => aboveFoldDashboardCardIds.has(props.card.id)
+  const title = () => i18n.tr(props.card.title, props.card.titleEn)
 
   return (
     <Switch>
@@ -140,21 +143,21 @@ function DashboardImageCard(props: {
       <Match when={true}>
         <div class="velion-dashboard-card">
           <div class="velion-dashboard-card-label">
-            {props.card.category}
+            {i18n.tr(props.card.category, props.card.categoryEn)}
           </div>
 
           <A href={props.card.href} class="block">
             <div class="velion-dashboard-card-media">
               <img
                 src={props.card.image ?? '/imagens/arched-corridor-1.jpeg'}
-                alt={props.card.title}
+                alt={title()}
                 loading={aboveFold() ? 'eager' : 'lazy'}
                 class="dashboard-card-image"
               />
               <div class="dashboard-card-gradient" />
               <div class="velion-dashboard-card-copy">
-                <h3>{props.card.title}</h3>
-                <p>{props.card.description}</p>
+                <h3>{title()}</h3>
+                <p>{i18n.tr(props.card.description, props.card.descriptionEn)}</p>
               </div>
             </div>
           </A>
@@ -163,11 +166,11 @@ function DashboardImageCard(props: {
             type="button"
             onClick={() => props.onPrompt(props.card)}
             class="velion-dashboard-card-action"
-            aria-label={`Start chat for ${props.card.title}`}
-            title={`Start chat for ${props.card.title}`}
+            aria-label={i18n.tr(`Start chat for ${title()}`, `Start chat for ${title()}`)}
+            title={i18n.tr(`Start chat for ${title()}`, `Start chat for ${title()}`)}
           >
             <MessageSquare class="size-3.5" />
-            Chat
+            {i18n.tr('Chat', 'Chat')}
           </button>
         </div>
       </Match>
@@ -176,6 +179,7 @@ function DashboardImageCard(props: {
 }
 
 function WeatherDashboardCard(props: { card: DashboardCard; onPrompt: (card: DashboardCard) => void }) {
+  const i18n = useI18n()
   const weather = createLiveInformationState<InformationWeatherPayload>({
     fallbackError: 'Kunne ikke hente værdata.',
     load: loadWeather,
@@ -189,7 +193,7 @@ function WeatherDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
     <InformationCardShell
       card={props.card}
       onPrompt={props.onPrompt}
-      action={<RefreshButton label="Oppdater vær" loading={weather.loading()} onClick={() => void weather.refresh(true)} />}
+      action={<RefreshButton label={i18n.tr('Oppdater vær', 'Refresh weather')} loading={weather.loading()} onClick={() => void weather.refresh(true)} />}
     >
       <InformationCardState
         data={weather.data()}
@@ -200,7 +204,7 @@ function WeatherDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
             <div class="dashboard-info-card__weather">
               <div>
                 <p>{payload.current.location}</p>
-                <small>{weather.usingLiveLocation() ? 'Din posisjon' : 'Standard plassering'}</small>
+                <small>{weather.usingLiveLocation() ? i18n.tr('Din posisjon', 'Your location') : i18n.tr('Standard plassering', 'Default location')}</small>
                 <div>
                   <span>{weatherGlyph(payload.current.condition)}</span>
                   <div class="dashboard-info-card__weather-readout">
@@ -210,14 +214,14 @@ function WeatherDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
                 </div>
               </div>
               <div class="dashboard-info-card__updated">
-                <small>Oppdatert</small>
-                <strong>{formatRelativeNorwegianTime(payload.current.lastUpdated)}</strong>
+                <small>{i18n.tr('Oppdatert', 'Updated')}</small>
+                <strong>{formatRelativeTime(payload.current.lastUpdated, i18n)}</strong>
               </div>
             </div>
             <div class="dashboard-info-card__metrics">
-              <MetricPill icon={<Wind class="size-3.5" />} label="Vind" value={`${payload.current.windSpeed} m/s`} />
-              <MetricPill icon={<CloudSun class="size-3.5" />} label="Fukt" value={`${payload.current.humidity}%`} />
-              <MetricPill icon={<Activity class="size-3.5" />} label="Trykk" value={`${payload.current.pressure} hPa`} />
+              <MetricPill icon={<Wind class="size-3.5" />} label={i18n.tr('Vind', 'Wind')} value={`${payload.current.windSpeed} m/s`} />
+              <MetricPill icon={<CloudSun class="size-3.5" />} label={i18n.tr('Fukt', 'Humidity')} value={`${payload.current.humidity}%`} />
+              <MetricPill icon={<Activity class="size-3.5" />} label={i18n.tr('Trykk', 'Pressure')} value={`${payload.current.pressure} hPa`} />
             </div>
           </>
         )}
@@ -227,6 +231,7 @@ function WeatherDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
 }
 
 function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: DashboardCard) => void }) {
+  const i18n = useI18n()
   const traffic = createLiveInformationState<InformationTrafficPayload>({
     fallbackError: 'Kunne ikke hente trafikkdata.',
     load: loadTraffic,
@@ -240,7 +245,7 @@ function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
     <InformationCardShell
       card={props.card}
       onPrompt={props.onPrompt}
-      action={<RefreshButton label="Oppdater trafikk" loading={traffic.loading()} onClick={() => void traffic.refresh(true)} />}
+      action={<RefreshButton label={i18n.tr('Oppdater trafikk', 'Refresh traffic')} loading={traffic.loading()} onClick={() => void traffic.refresh(true)} />}
     >
       <InformationCardState
         data={traffic.data()}
@@ -251,9 +256,9 @@ function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
             <div class="dashboard-info-row">
               <span>
                 <strong>Statens vegvesen</strong>
-                <small>{payload.data.length} aktive målepunkter · {traffic.usingLiveLocation() ? 'Nær deg' : 'Oslo-område'}</small>
+                <small>{payload.data.length} {i18n.tr('aktive målepunkter', 'active sensors')} · {traffic.usingLiveLocation() ? i18n.tr('Nær deg', 'Near you') : i18n.tr('Oslo-område', 'Oslo area')}</small>
               </span>
-              <em>{formatRelativeNorwegianTime(payload.timestamp)}</em>
+              <em>{formatRelativeTime(payload.timestamp, i18n)}</em>
             </div>
             <For each={payload.data.slice(0, 2)}>
               {(station) => (
@@ -264,7 +269,7 @@ function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
                   </span>
                   <em class="dashboard-info-row__metric">
                     {station.averageSpeed} km/t
-                    <small>{station.trafficVolume.toLocaleString('nb-NO')} biler</small>
+                    <small>{station.trafficVolume.toLocaleString(i18n.locale() === 'no' ? 'nb-NO' : 'en-US')} {i18n.tr('biler', 'cars')}</small>
                   </em>
                 </div>
               )}
@@ -277,6 +282,7 @@ function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
 }
 
 function NewsDashboardCard(props: { card: DashboardCard; onPrompt: (card: DashboardCard) => void }) {
+  const i18n = useI18n()
   type NewsCategory = typeof newsCategoryOptions[number]['value']
   const [category, setCategory] = createSignal<NewsCategory>('all')
   const [data, setData] = createSignal<InformationNewsPayload | null>(null)
@@ -330,17 +336,17 @@ function NewsDashboardCard(props: { card: DashboardCard; onPrompt: (card: Dashbo
     <InformationCardShell
       card={props.card}
       onPrompt={props.onPrompt}
-      action={<RefreshButton label="Oppdater nyheter" loading={loading()} onClick={() => void load(category())} />}
+      action={<RefreshButton label={i18n.tr('Oppdater nyheter', 'Refresh news')} loading={loading()} onClick={() => void load(category())} />}
     >
       <div class="dashboard-info-list">
         <select
-          aria-label="Filtrer nyheter"
+          aria-label={i18n.tr('Filtrer nyheter', 'Filter news')}
           class="dashboard-info-card__select"
           value={category()}
           onChange={(event) => setCategory(event.currentTarget.value as NewsCategory)}
         >
           <For each={newsCategoryOptions}>
-            {(option) => <option value={option.value}>{option.label}</option>}
+            {(option) => <option value={option.value}>{newsCategoryLabel(option.label, i18n)}</option>}
           </For>
         </select>
 
@@ -360,7 +366,7 @@ function NewsDashboardCard(props: { card: DashboardCard; onPrompt: (card: Dashbo
                   >
                     <span>
                       <strong>{article.title}</strong>
-                      <small>{article.source} · {formatRelativeNorwegianTime(article.publishDate)}</small>
+                      <small>{article.source} · {formatRelativeTime(article.publishDate, i18n)}</small>
                     </span>
                     <em><ArrowUpRight class="size-3.5" /></em>
                   </a>
@@ -402,16 +408,19 @@ function InformationCardShell(props: {
   children: JSX.Element
   onPrompt: (card: DashboardCard) => void
 }) {
+  const i18n = useI18n()
+  const title = () => i18n.tr(props.card.title, props.card.titleEn)
+
   return (
     <div class="velion-dashboard-card dashboard-info-card">
       <div class="velion-dashboard-card-label">
-        {props.card.category}
+        {i18n.tr(props.card.category, props.card.categoryEn)}
       </div>
 
       <div class="dashboard-info-card__surface">
         <div class="dashboard-info-card__head">
           <div class="min-w-0">
-            <h3>{props.card.title}</h3>
+            <h3>{title()}</h3>
           </div>
           {props.action}
         </div>
@@ -422,11 +431,11 @@ function InformationCardShell(props: {
         type="button"
         onClick={() => props.onPrompt(props.card)}
         class="dashboard-info-card__ask"
-        aria-label={`Start chat for ${props.card.title}`}
-        title={`Start chat for ${props.card.title}`}
+        aria-label={i18n.tr(`Start chat for ${title()}`, `Start chat for ${title()}`)}
+        title={i18n.tr(`Start chat for ${title()}`, `Start chat for ${title()}`)}
       >
         <Newspaper class="size-3.5" />
-        Ask Velion
+        {i18n.tr('Spør Velion', 'Ask Velion')}
       </button>
     </div>
   )
@@ -474,4 +483,28 @@ function InformationSkeleton(props: { lines: number }) {
 
 function InformationError(props: { text: string }) {
   return <div class="dashboard-info-error">{props.text}</div>
+}
+
+function formatRelativeTime(value: string, i18n: ReturnType<typeof useI18n>): string {
+  const date = new Date(value)
+  const deltaSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000))
+  if (i18n.locale() === 'no') {
+    if (deltaSeconds < 60) return 'nå'
+    if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m siden`
+    if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}t siden`
+    return `${Math.floor(deltaSeconds / 86400)}d siden`
+  }
+
+  if (deltaSeconds < 60) return 'now'
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`
+  return `${Math.floor(deltaSeconds / 86400)}d ago`
+}
+
+function newsCategoryLabel(label: string, i18n: ReturnType<typeof useI18n>): string {
+  if (label === 'Alle') return i18n.tr('Alle', 'All')
+  if (label === 'General') return i18n.tr('Generelt', 'General')
+  if (label === 'Business') return i18n.tr('Næring', 'Business')
+  if (label === 'Technology') return i18n.tr('Teknologi', 'Technology')
+  return label
 }

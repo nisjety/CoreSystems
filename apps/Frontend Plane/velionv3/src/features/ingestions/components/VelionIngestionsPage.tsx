@@ -5,15 +5,12 @@ import {
   Database,
   FileSearch,
   Globe,
-  Loader,
   Play,
-  Plus,
   RefreshCw,
   ScanSearch,
   ShieldCheck,
   Telescope,
   TimerReset,
-  Trash2,
   type LucideProps,
 } from 'lucide-solid'
 import {
@@ -30,8 +27,6 @@ import {
 import {
   createIngestionRun,
   createIngestionSchedule,
-  createIngestionSource,
-  deleteIngestionSource,
   getIngestionEvidence,
   listIngestionProfiles,
   listIngestionRuns,
@@ -44,7 +39,6 @@ import {
   type RunCreateRequest,
   type RunItem,
   type ScheduleItem,
-  type SourceCreateInput,
   type SourcePayload,
 } from '@/shared/api/ingestions-client'
 import {
@@ -74,13 +68,6 @@ type ScheduleFormState = {
   kind: string
   targetUrl: string
   cron: string
-}
-
-type SourceFormState = {
-  name: string
-  url: string
-  kind: string
-  monitor: boolean
 }
 
 const views: Array<{ id: IngestionView; label: string; icon: Component<LucideProps> }> = [
@@ -115,14 +102,6 @@ export default function VelionIngestionsPage() {
     targetUrl: '',
     cron: '0 7 * * *',
   })
-  const [sourceForm, setSourceForm] = createSignal<SourceFormState>({
-    name: '',
-    url: '',
-    kind: 'crawl',
-    monitor: false,
-  })
-  const [sourcePending, setSourcePending] = createSignal(false)
-  const [deletingSourceId, setDeletingSourceId] = createSignal<string | null>(null)
 
   const selectedRun = createMemo(() => runs().find((run) => run.id === selectedRunId()) ?? null)
 
@@ -230,44 +209,6 @@ export default function VelionIngestionsPage() {
     }
   }
 
-  async function createSource() {
-    setError(null)
-    const form = sourceForm()
-    if (!form.name.trim() || !form.url.trim()) {
-      setError('A source name and URL are required.')
-      return
-    }
-    setSourcePending(true)
-    try {
-      const input: SourceCreateInput = {
-        name: form.name.trim(),
-        url: form.url.trim(),
-        kind: form.kind,
-        monitor: form.monitor,
-      }
-      await createIngestionSource(input)
-      setSourceForm((current) => ({ ...current, name: '', url: '' }))
-      await loadWorkspace()
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Source could not be created.')
-    } finally {
-      setSourcePending(false)
-    }
-  }
-
-  async function removeSource(id: string) {
-    setError(null)
-    setDeletingSourceId(id)
-    try {
-      await deleteIngestionSource(id)
-      await loadWorkspace()
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Source could not be removed.')
-    } finally {
-      setDeletingSourceId(null)
-    }
-  }
-
   return (
     <div class="velion-page-surface ingestions-page">
       <div class="ingestions-page__content">
@@ -347,15 +288,7 @@ export default function VelionIngestionsPage() {
         </Show>
 
         <Show when={activeView() === 'sources'}>
-          <SourcesPanel
-            sources={sources()}
-            form={sourceForm()}
-            onFormChange={(patch) => setSourceForm((current) => ({ ...current, ...patch }))}
-            onCreate={createSource}
-            creating={sourcePending()}
-            deletingId={deletingSourceId()}
-            onDelete={removeSource}
-          />
+          <SourcesPanel sources={sources()} />
         </Show>
 
         <Show when={activeView() === 'evidence'}>
@@ -799,18 +732,7 @@ function shortFingerprint(value: string) {
   return algo ? `${algo}:${head}…` : `${head}…`
 }
 
-function SourcesPanel(props: {
-  sources: SourcePayload | null
-  form: SourceFormState
-  onFormChange: (patch: Partial<SourceFormState>) => void
-  onCreate: () => Promise<void>
-  creating: boolean
-  deletingId: string | null
-  onDelete: (id: string) => Promise<void>
-}) {
-  const canSubmit = () =>
-    !props.creating && props.form.name.trim().length > 0 && props.form.url.trim().length > 0
-
+function SourcesPanel(props: { sources: SourcePayload | null }) {
   return (
     <section class="ingestions-sources-grid">
       <div class="velion-panel ingestions-card">
@@ -825,10 +747,7 @@ function SourcesPanel(props: {
           </A>
         </div>
         <div class="ingestions-card-list">
-          <For
-            each={props.sources?.integrations ?? []}
-            fallback={<div class="ingestions-empty-box">No connected integrations yet.</div>}
-          >
+          <For each={props.sources?.integrations ?? []}>
             {(source) => (
               <article class="ingestions-list-card">
                 <div class="ingestions-title-row ingestions-title-row--spread">
@@ -855,67 +774,6 @@ function SourcesPanel(props: {
       <div class="velion-panel ingestions-card">
         <h2>Tracked web sources</h2>
         <p>Durable source resources registered in Quarry for recurring refresh and review.</p>
-        <form
-          class="ingestions-source-form"
-          onSubmit={(event) => {
-            event.preventDefault()
-            void props.onCreate()
-          }}
-        >
-          <label class="ingestions-field">
-            Name
-            <VelionInput
-              value={props.form.name}
-              onInput={(event) => props.onFormChange({ name: event.currentTarget.value })}
-              placeholder="Acme pricing page"
-              disabled={props.creating}
-            />
-          </label>
-          <label class="ingestions-field">
-            URL
-            <VelionInput
-              value={props.form.url}
-              onInput={(event) => props.onFormChange({ url: event.currentTarget.value })}
-              placeholder="https://example.com/pricing"
-              disabled={props.creating}
-            />
-          </label>
-          <label class="ingestions-field">
-            Kind
-            <VelionSelect
-              value={props.form.kind}
-              onChange={(event) => props.onFormChange({ kind: event.currentTarget.value })}
-              disabled={props.creating}
-            >
-              <option value="crawl">Crawl</option>
-              <option value="scrape">Scrape</option>
-              <option value="search">Search</option>
-            </VelionSelect>
-          </label>
-          <label class="ingestions-checkbox-field">
-            <input
-              type="checkbox"
-              checked={props.form.monitor}
-              onChange={(event) => props.onFormChange({ monitor: event.currentTarget.checked })}
-              disabled={props.creating}
-            />
-            Monitor for changes (daily)
-          </label>
-          <Button variant="primary" fullWidth type="submit" disabled={!canSubmit()}>
-            <Show
-              when={props.creating}
-              fallback={
-                <>
-                  <Plus class="size-4" strokeWidth={1.9} />
-                  Add source
-                </>
-              }
-            >
-              <Loader class="size-4 ingestions-spin" strokeWidth={1.9} />
-              Adding…
-            </Show>
-          </Button>
-        </form>
         <div class="ingestions-card-list">
           <For
             each={props.sources?.quarrySources ?? []}
@@ -932,23 +790,7 @@ function SourcesPanel(props: {
                 </div>
                 <div class="ingestions-meta-row ingestions-meta-row--spread">
                   <span class="ingestions-capitalize">{source.kind}</span>
-                  <span class="ingestions-source-meta-actions">
-                    <Show when={source.updatedAt}>{relativeTime(source.updatedAt)}</Show>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      disabled={props.deletingId === source.id}
-                      onClick={() => void props.onDelete(source.id)}
-                    >
-                      <Show
-                        when={props.deletingId === source.id}
-                        fallback={<Trash2 class="size-4" strokeWidth={1.9} />}
-                      >
-                        <Loader class="size-4 ingestions-spin" strokeWidth={1.9} />
-                      </Show>
-                      Remove
-                    </Button>
-                  </span>
+                  <span>{relativeTime(source.updatedAt)}</span>
                 </div>
               </article>
             )}

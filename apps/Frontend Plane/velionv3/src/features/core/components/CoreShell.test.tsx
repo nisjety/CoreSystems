@@ -11,14 +11,17 @@ import { CoreSidebar } from '@/features/core/components/CoreSidebar'
 import { demoWorkspaceIdentity, routeFromPath } from '@/features/core/lib/shell-data'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import DashboardHome from '@/features/dashboard/home/DashboardHome'
+import { I18nProvider } from '@/shared/i18n'
 
 function renderWithRouter(component: () => JSX.Element, path = '/dashboard') {
   window.history.pushState(null, '', path)
   return render(() => (
     <QueryProvider>
-      <Router root={(props) => <>{props.children}</>}>
-        <Route path="/*all" component={component} />
-      </Router>
+      <I18nProvider>
+        <Router root={(props) => <>{props.children}</>}>
+          <Route path="/*all" component={component} />
+        </Router>
+      </I18nProvider>
     </QueryProvider>
   ))
 }
@@ -60,13 +63,13 @@ describe('v2 dashboard shell port', () => {
     ))
 
     expect(screen.getByRole('banner')).toBeTruthy()
-    expect(screen.getByRole('navigation', { name: 'Workspace sections' })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Arbeidsområdeseksjoner' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Chat' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /God (morgen|ettermiddag|kveld), Velion/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Velg AI-modell' })).toBeTruthy()
-    expect(screen.getByText('Create agent')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Add files' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Deep search' })).toBeTruthy()
+    expect(screen.getByText('Opprett agent')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Legg til filer' })).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Dyp research' }).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Lokalt værbilde')).toBeTruthy()
     expect(screen.getByText('Trafikk rundt Oslo')).toBeTruthy()
     expect(screen.getByText('Norske nyheter')).toBeTruthy()
@@ -118,9 +121,9 @@ describe('v2 dashboard shell port', () => {
     })
     expect(screen.queryByText('AI operations status')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Crawl' }))
-    expect(screen.getByRole('heading', { name: 'Crawl inn kunnskap' })).toBeTruthy()
-    expect(screen.getAllByText('Crawl inn kunnskap').length).toBeGreaterThanOrEqual(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Innhent' }))
+    expect(screen.getByRole('heading', { name: 'Hent inn kunnskap' })).toBeTruthy()
+    expect(screen.getAllByText('Hent inn kunnskap').length).toBeGreaterThanOrEqual(2)
     expect(screen.getByText(/Velion indekserer alt/)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Last opp filer' })).toBeTruthy()
     expect(screen.getByRole('link', { name: /Åpne kunnskapsbase/ })).toBeTruthy()
@@ -136,11 +139,11 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByText('brief.pdf')).toBeTruthy()
     expect(screen.getByText('5 B')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'AI enhance' }))
-    expect((screen.getByRole('textbox', { name: 'Message Velion' }) as HTMLTextAreaElement).value)
-      .toBe('Describe and analyze the attached file(s): brief.pdf')
+    fireEvent.click(screen.getByRole('button', { name: 'AI-forbedre' }))
+    expect((screen.getByRole('textbox', { name: 'Meld Velion' }) as HTMLTextAreaElement).value)
+      .toBe('Beskriv og analyser vedlagte fil(er): brief.pdf')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Remove brief.pdf' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern brief.pdf' }))
     expect(screen.queryByText('brief.pdf')).toBeNull()
   })
 
@@ -164,23 +167,23 @@ describe('v2 dashboard shell port', () => {
     renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Historikk' }))
-    await waitFor(() => expect(screen.getByText('View all conversations')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Vis alle samtaler')).toBeTruthy())
 
     fireEvent.click(screen.getByRole('button', { name: 'Innstillinger' }))
-    expect(screen.getByText('Voice language')).toBeTruthy()
-    expect(screen.getByText('Concise')).toBeTruthy()
-    expect(screen.getByText('Balanced')).toBeTruthy()
-    expect(screen.getByText('Detailed')).toBeTruthy()
-    expect(screen.getByText('Add files or photos')).toBeTruthy()
-    expect(screen.getByText('Take a screenshot')).toBeTruthy()
-    expect(screen.getByText('Add to project')).toBeTruthy()
-    expect(screen.getByText('Skills')).toBeTruthy()
-    expect(screen.getByText('Connectors')).toBeTruthy()
+    expect(screen.getByText('Stemmespråk')).toBeTruthy()
+    expect(screen.getByText('Kortfattet')).toBeTruthy()
+    expect(screen.getByText('Balansert')).toBeTruthy()
+    expect(screen.getByText('Detaljert')).toBeTruthy()
+    expect(screen.getByText('Legg til filer eller bilder')).toBeTruthy()
+    expect(screen.getByText('Ta et skjermbilde')).toBeTruthy()
+    expect(screen.getByText('Legg til i prosjekt')).toBeTruthy()
+    expect(screen.getByText('Ferdigheter')).toBeTruthy()
+    expect(screen.getByText('Koblinger')).toBeTruthy()
 
-    fireEvent.click(screen.getByText('Skills'))
+    fireEvent.click(screen.getByText('Ferdigheter'))
     await waitFor(() => expect(screen.getByText('Support drafts')).toBeTruthy())
     expect(screen.getByText('Draft customer replies from connected workspace data.')).toBeTruthy()
-    expect(screen.getByText('Manage skills')).toBeTruthy()
+    expect(screen.getByText('Administrer ferdigheter')).toBeTruthy()
     const fetchCalls = fetchMock.mock.calls as unknown as Array<[unknown, { credentials?: RequestCredentials } | undefined]>
     expect(fetchCalls.some(([url, init]) =>
       String(url).endsWith('/api/v1/skills') &&
@@ -191,34 +194,34 @@ describe('v2 dashboard shell port', () => {
   it('stores submitted dashboard composer turns in the v2-style history panel', () => {
     renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
 
-    fireEvent.input(screen.getByRole('textbox', { name: 'Message Velion' }), {
+    fireEvent.input(screen.getByRole('textbox', { name: 'Meld Velion' }), {
       target: { value: 'Oppsummer kundesaker' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send melding' }))
 
     expect(screen.getByText('Oppsummer kundesaker')).toBeTruthy()
     // The composer model selector defaults to the "Velion Balance" intent mode
     // (resolved server-side, cost-aware); no concrete catalog model is shown until
     // the user picks one.
-    expect(screen.getByText(/Velion Balance · auto/)).toBeTruthy()
+    expect(screen.getByText(/Velion Balance · Auto/)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Historikk' }))
-    expect(screen.getByText('Today')).toBeTruthy()
+    expect(screen.getByText('I dag')).toBeTruthy()
     expect(screen.getAllByText('Oppsummer kundesaker').length).toBeGreaterThanOrEqual(2)
   })
 
   it('renders v2-style navbar dropdown panels instead of placeholder popovers', () => {
     renderWithRouter(() => <CoreNavbar activeRoute="/dashboard" workspace={demoWorkspaceIdentity} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '0 unread messages' }))
-    expect(screen.getByText('View all messages')).toBeTruthy()
-    expect(screen.getByText('Connect Novu to show inbox and Velion AI chat messages.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '0 uleste meldinger' }))
+    expect(screen.getByText('Vis alle meldinger')).toBeTruthy()
+    expect(screen.getByText('Koble til Novu for å vise innboks og Velion AI-chatmeldinger.')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Calendar' }))
-    expect(screen.getByText('No events for this day')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Kalender' }))
+    expect(screen.getByText('Ingen hendelser denne dagen')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open profile menu' }))
-    expect(screen.getByText('Subscription')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Åpne profilmeny' }))
+    expect(screen.getByText('Abonnement')).toBeTruthy()
   })
 
   it('renders dedicated v2-style expanded sidebar panels for core sections', () => {
@@ -237,52 +240,52 @@ describe('v2 dashboard shell port', () => {
     }
 
     renderSidebar('/knowledge')
-    const knowledgeNavigation = screen.getByRole('navigation', { name: 'Knowledge navigation' })
+    const knowledgeNavigation = screen.getByRole('navigation', { name: 'Kunnskapsnavigasjon' })
     expect(knowledgeNavigation).toBeTruthy()
-    expect(screen.getByText('Knowledge Base')).toBeTruthy()
-    expect(screen.getByText('Pinned sources')).toBeTruthy()
-    expect(within(knowledgeNavigation).getByRole('link', { name: 'Insights' })).toBeTruthy()
+    expect(screen.getByText('Kunnskapsbase')).toBeTruthy()
+    expect(screen.getByText('Festede kilder')).toBeTruthy()
+    expect(within(knowledgeNavigation).getByRole('link', { name: 'Innsikt' })).toBeTruthy()
 
     renderSidebar('/inbox?view=mine')
-    expect(screen.getByRole('navigation', { name: 'Inbox navigation' })).toBeTruthy()
-    expect(screen.getByText('Velion AI Agent')).toBeTruthy()
-    expect(screen.getByText('Your inbox')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Innboksnavigasjon' })).toBeTruthy()
+    expect(screen.getByText('Velion AI-agent')).toBeTruthy()
+    expect(screen.getByText('Din innboks')).toBeTruthy()
 
     renderSidebar('/tickets?queue=suggested')
-    expect(screen.getByRole('navigation', { name: 'Ticketing navigation' })).toBeTruthy()
-    expect(screen.getByText('Suggested by AI')).toBeTruthy()
-    expect(screen.getByText('SLA risk')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Saksnavigasjon' })).toBeTruthy()
+    expect(screen.getByText('Foreslått av AI')).toBeTruthy()
+    expect(screen.getAllByText('SLA-risiko').length).toBeGreaterThanOrEqual(1)
 
     renderSidebar('/studio/canvas')
-    expect(screen.getByRole('navigation', { name: 'Studio navigation' })).toBeTruthy()
-    expect(screen.getByText('Campaign planner')).toBeTruthy()
-    expect(screen.getByText('Social drafts')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse Create' }))
-    expect(screen.queryByText('Campaign planner')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Expand Create' }))
-    expect(screen.getByText('Campaign planner')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Studio navigasjon' })).toBeTruthy()
+    expect(screen.getByText('Kampanjeplanlegger')).toBeTruthy()
+    expect(screen.getByText('Sosiale utkast')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Slå sammen Opprett' }))
+    expect(screen.queryByText('Kampanjeplanlegger')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Utvid Opprett' }))
+    expect(screen.getByText('Kampanjeplanlegger')).toBeTruthy()
 
     renderSidebar('/social/trends')
-    expect(screen.getByRole('navigation', { name: 'Social navigation' })).toBeTruthy()
-    expect(screen.getByText('Competitor watch')).toBeTruthy()
-    expect(screen.getByText('Evergreen queue')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Sosialt navigasjon' })).toBeTruthy()
+    expect(screen.getByText('Konkurrentovervåking')).toBeTruthy()
+    expect(screen.getByText('Evergreen-kø')).toBeTruthy()
 
     renderSidebar('/insights/social')
-    expect(screen.getByRole('navigation', { name: 'Insights navigation' })).toBeTruthy()
-    expect(screen.getByText('Experiments')).toBeTruthy()
-    expect(screen.getByText('Campaigns')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Innsikt navigasjon' })).toBeTruthy()
+    expect(screen.getByText('Eksperimenter')).toBeTruthy()
+    expect(screen.getByText('Kampanjer')).toBeTruthy()
 
     renderSidebar('/agents')
-    expect(screen.getByRole('navigation', { name: 'Agent feature tabs' })).toBeTruthy()
-    expect(screen.getByText('All roles')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Agentfaner' })).toBeTruthy()
+    expect(screen.getByText('Alle roller')).toBeTruthy()
 
     renderSidebar('/settings/workspace')
-    expect(screen.getByRole('navigation', { name: 'Settings sections' })).toBeTruthy()
-    expect(screen.getByText('Members & roles')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Innstillingsseksjoner' })).toBeTruthy()
+    expect(screen.getByText('Medlemmer og roller')).toBeTruthy()
 
     renderSidebar('/account')
-    expect(screen.getByRole('navigation', { name: 'Account sections' })).toBeTruthy()
-    expect(screen.getByText('Connected accounts')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Kontoseksjoner' })).toBeTruthy()
+    expect(screen.getByText('Tilkoblede kontoer')).toBeTruthy()
   })
 
   it('renders saved chat thread history in the expanded chat sidebar', () => {
@@ -313,11 +316,11 @@ describe('v2 dashboard shell port', () => {
       </AgentsProvider>
     ), '/chat')
 
-    const chatHistory = screen.getByRole('navigation', { name: 'Chat conversations' })
+    const chatHistory = screen.getByRole('navigation', { name: 'Chat-samtaler' })
     expect(within(chatHistory).getByText('history visible check')).toBeTruthy()
-    expect(within(chatHistory).getByText('Just now')).toBeTruthy()
+    expect(within(chatHistory).getByText('Akkurat nå')).toBeTruthy()
     expect(within(chatHistory).queryByText('Assistant reply preview')).toBeNull()
-    expect(within(chatHistory).queryByText('Current thread')).toBeNull()
+    expect(within(chatHistory).queryByText('Gjeldende tråd')).toBeNull()
   })
 
   it('keeps and uploads local chat history when the server index is empty', async () => {
@@ -377,7 +380,7 @@ describe('v2 dashboard shell port', () => {
       </AgentsProvider>
     ), '/chat')
 
-    const chatHistory = screen.getByRole('navigation', { name: 'Chat conversations' })
+    const chatHistory = screen.getByRole('navigation', { name: 'Chat-samtaler' })
     expect(within(chatHistory).getByText('local only thread')).toBeTruthy()
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -419,5 +422,20 @@ describe('v2 dashboard shell port', () => {
 
     expect(readActiveChatThreadId()).toBeNull()
     expect(screen.getByText('history visible check')).toBeTruthy()
+  })
+
+  it('switches navbar and dashboard home copy to English', () => {
+    renderWithRouter(() => (
+      <>
+        <CoreNavbar activeRoute="/dashboard" workspace={demoWorkspaceIdentity} />
+        <DashboardHome workspace={demoWorkspaceIdentity} />
+      </>
+    ))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Bytt til English' }))
+
+    expect(screen.getByText('Search knowledge base')).toBeTruthy()
+    expect(screen.getByText('Create agent')).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: 'Message Velion' })).toBeTruthy()
   })
 })

@@ -24,8 +24,8 @@ export function ArrowButton({
   const content = (
     <>
       <span>{children}</span>
-      <svg aria-hidden="true" viewBox="0 0 24 12">
-        <path d="M1 6h20M16 1l5 5-5 5" />
+      <svg aria-hidden="true" viewBox="0 0 74 16">
+        <path d="M1 8h66M58 1.5 72 8 58 14.5" />
       </svg>
     </>
   );

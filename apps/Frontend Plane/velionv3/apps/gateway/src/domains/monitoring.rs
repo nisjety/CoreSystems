@@ -58,6 +58,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/monitoring/check", post(check_now))
         .route("/api/v1/monitoring/latest", get(latest))
         .route("/api/v1/monitoring/history", get(history))
+        // Phase 2 (C-FULL): recurring, Temporal-driven change monitors.
+        .route(
+            "/api/v1/monitoring/schedules",
+            get(list_monitors).post(create_monitor),
+        )
+        .route(
+            "/api/v1/monitoring/schedules/:id",
+            axum::routing::delete(delete_monitor),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -258,6 +267,115 @@ async fn check_now(
         Json(ok(normalize_change_record(&unwrap_data(body)))),
     )
         .into_response()
+}
+
+// ── Recurring monitors (Phase 2 / C-FULL) ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateMonitorRequest {
+    #[serde(default)]
+    url: Option<String>,
+    /// Fixed cadence: "hourly" | "daily" | "weekly". The edge/control derive the
+    /// 5-field cron from this — free-form cron is intentionally not accepted.
+    #[serde(default)]
+    preset: Option<String>,
+}
+
+/// `POST /api/v1/monitoring/schedules` — create a recurring change monitor. The
+/// edge stamps org_id + the creator's user_id from the validated session token;
+/// we never trust a client-supplied tenant. The URL is SSRF-guarded.
+async fn create_monitor(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(req): Json<CreateMonitorRequest>,
+) -> Response {
+    let Some(raw_url) = req.url.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return validation("A URL is required.");
+    };
+    let target = match normalize_public_http_url(raw_url) {
+        Ok(url) => url,
+        Err(message) => return validation(&message),
+    };
+    let preset = req.preset.as_deref().map(str::trim).unwrap_or("daily");
+    if !matches!(preset, "hourly" | "daily" | "weekly") {
+        return validation("preset must be one of hourly, daily, or weekly.");
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::POST,
+        "/v1/schedules",
+        Some(json!({ "preset": preset, "target_ref": target })),
+        token.as_deref(),
+        user.user_id.as_str(),
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, body);
+    }
+    (StatusCode::CREATED, Json(ok(unwrap_data(body)))).into_response()
+}
+
+/// `GET /api/v1/monitoring/schedules` — list the org's recurring change monitors
+/// (change_monitor schedules only; other ingestion schedules live under
+/// `/api/ingestions/schedules`).
+async fn list_monitors(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Response {
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::GET,
+        "/v1/schedules?limit=100",
+        None,
+        token.as_deref(),
+        user.user_id.as_str(),
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, body);
+    }
+    let monitors: Vec<Value> = unwrap_data(body)
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|s| s.get("target_kind").and_then(Value::as_str) == Some("change_monitor"))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    (StatusCode::OK, Json(ok(Value::Array(monitors)))).into_response()
+}
+
+/// `DELETE /api/v1/monitoring/schedules/:id` — stop + remove a recurring monitor.
+async fn delete_monitor(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let path = format!("/v1/schedules/{}", urlencoding(&id));
+    let (status, body) = quarry_call(
+        &state,
+        Method::DELETE,
+        &path,
+        None,
+        token.as_deref(),
+        user.user_id.as_str(),
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, body);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Debug, Deserialize)]

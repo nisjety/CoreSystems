@@ -10,11 +10,13 @@ import {
   type WorkspaceIdentity,
 } from '@/features/core/lib/shell-data'
 import { useCoreWorkspace } from '@/features/core/lib/workspace-context'
+import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
 const cardsPerPage = 3
 
 export default function DashboardHome(props: { workspace?: WorkspaceIdentity } = {}) {
+  const i18n = useI18n()
   const shellWorkspace = useCoreWorkspace()
   const [activeTab, setActiveTab] = createSignal<DashboardTab>('Chat')
   const [isLaunching, setIsLaunching] = createSignal(false)
@@ -31,10 +33,10 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   const displayName = () => firstName(workspace().userName ?? workspace().userEmail)
   const planLabel = () => formatPlanLabel(workspace().plan)
   const homeTitle = () => {
-    if (activeTab() === 'Søk') return 'Søk på nett og i Velion'
-    if (activeTab() === 'Crawl') return 'Crawl inn kunnskap'
+    if (activeTab() === 'Søk') return i18n.tr('Søk på nett og i Velion', 'Search the web and Velion')
+    if (activeTab() === 'Crawl') return i18n.tr('Hent inn kunnskap', 'Bring in knowledge')
 
-    const greeting = getNorwegianGreeting()
+    const greeting = getGreeting(i18n)
     const name = displayName()
     return name ? `${greeting}, ${name}` : greeting
   }
@@ -75,7 +77,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
 
   const applyCardPrompt = (card: DashboardCard) => {
     setActiveTab('Chat')
-    setMessage(card.prompt)
+    setMessage(i18n.tr(card.prompt, card.promptEn))
   }
 
   const changeActiveTab = (tab: DashboardTab) => {
@@ -134,13 +136,13 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
             type="button"
             class="velion-home-results-toggle"
             onClick={() => setCardsRevealed((value) => !value)}
-            aria-label={cardsRevealed() ? 'Vis resultatet igjen' : 'Vis kortene'}
-            title={cardsRevealed() ? 'Vis resultatet igjen' : 'Vis kortene'}
+            aria-label={cardsRevealed() ? i18n.tr('Vis resultatet igjen', 'Show the result again') : i18n.tr('Vis kortene', 'Show the cards')}
+            title={cardsRevealed() ? i18n.tr('Vis resultatet igjen', 'Show the result again') : i18n.tr('Vis kortene', 'Show the cards')}
           >
             <Show when={cardsRevealed()} fallback={<ChevronDown class="size-4" />}>
               <ChevronUp class="size-4" />
             </Show>
-            <span>{cardsRevealed() ? 'Resultat' : 'Kort'}</span>
+            <span>{cardsRevealed() ? i18n.tr('Resultat', 'Result') : i18n.tr('Kort', 'Cards')}</span>
           </button>
         </Show>
       </div>
@@ -148,18 +150,18 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   )
 }
 
-function getNorwegianGreeting() {
+function getGreeting(i18n: ReturnType<typeof useI18n>) {
   const hour = new Date().getHours()
 
   if (hour < 11) {
-    return 'God morgen'
+    return i18n.tr('God morgen', 'Good morning')
   }
 
   if (hour < 17) {
-    return 'God ettermiddag'
+    return i18n.tr('God ettermiddag', 'Good afternoon')
   }
 
-  return 'God kveld'
+  return i18n.tr('God kveld', 'Good evening')
 }
 
 function firstName(value?: string | null) {

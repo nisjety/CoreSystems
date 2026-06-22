@@ -1,3 +1,5 @@
+import { pickLocaleText, type Locale } from '@/shared/i18n/locales'
+
 export type VelionRoute =
   | '/dashboard'
   | '/search'
@@ -82,7 +84,8 @@ export function formatPlanLabel(plan?: string | null): string {
     expert: 'Expert',
     free: 'Free',
     hobby: 'Hobby',
-    pro: 'Pro',
+    // Velion brand name for the `pro` billing tier (billing-core: "Velion Expert").
+    pro: 'Expert',
     standard: 'Standard',
     trial: 'Trial',
   }
@@ -90,61 +93,66 @@ export function formatPlanLabel(plan?: string | null): string {
   return labels[normalized] ?? normalized.replace(/(^|[-_\s])(\w)/g, (_match, prefix: string, char: string) => `${prefix === '_' ? ' ' : prefix}${char.toUpperCase()}`)
 }
 
-export function getNavbarLabels(activeRoute: VelionRoute) {
+export function getNavbarLabels(activeRoute: VelionRoute, locale: Locale = 'no') {
+  const labels = (moduleNo: string, moduleEn: string, tabNo: string, tabEn: string) => ({
+    moduleLabel: pickLocaleText(locale, moduleNo, moduleEn),
+    tabLabel: pickLocaleText(locale, tabNo, tabEn),
+  })
+
   switch (activeRoute) {
     case '/chat':
-      return { moduleLabel: 'Chat', tabLabel: 'Oppgaver' }
+      return labels('Chat', 'Chat', 'Oppgaver', 'Tasks')
     case '/studio':
     case '/studio/canvas':
       return { moduleLabel: 'Studio', tabLabel: 'Canvas' }
     case '/studio/campaigns':
-      return { moduleLabel: 'Studio', tabLabel: 'Campaigns' }
+      return labels('Studio', 'Studio', 'Kampanjer', 'Campaigns')
     case '/studio/templates':
-      return { moduleLabel: 'Studio', tabLabel: 'Templates' }
+      return labels('Studio', 'Studio', 'Maler', 'Templates')
     case '/inbox':
-      return { moduleLabel: 'Inbox', tabLabel: 'Your inbox' }
+      return labels('Innboks', 'Inbox', 'Din innboks', 'Your inbox')
     case '/tickets':
-      return { moduleLabel: 'Ticketing', tabLabel: 'My tickets' }
+      return labels('Saker', 'Ticketing', 'Mine saker', 'My tickets')
     case '/social':
     case '/social/calendar':
-      return { moduleLabel: 'Social', tabLabel: 'Calendar' }
+      return labels('Sosialt', 'Social', 'Kalender', 'Calendar')
     case '/social/accounts':
-      return { moduleLabel: 'Social', tabLabel: 'Accounts' }
+      return labels('Sosialt', 'Social', 'Kontoer', 'Accounts')
     case '/social/drafts':
-      return { moduleLabel: 'Social', tabLabel: 'Drafts' }
+      return labels('Sosialt', 'Social', 'Utkast', 'Drafts')
     case '/social/approvals':
-      return { moduleLabel: 'Social', tabLabel: 'Approvals' }
+      return labels('Sosialt', 'Social', 'Godkjenninger', 'Approvals')
     case '/social/campaigns':
-      return { moduleLabel: 'Social', tabLabel: 'Campaigns' }
+      return labels('Sosialt', 'Social', 'Kampanjer', 'Campaigns')
     case '/social/competitors':
-      return { moduleLabel: 'Social', tabLabel: 'Competitors' }
+      return labels('Sosialt', 'Social', 'Konkurrenter', 'Competitors')
     case '/social/trends':
-      return { moduleLabel: 'Social', tabLabel: 'Trends' }
+      return labels('Sosialt', 'Social', 'Trender', 'Trends')
     case '/social/evergreen':
-      return { moduleLabel: 'Social', tabLabel: 'Evergreen' }
+      return labels('Sosialt', 'Social', 'Evergreen', 'Evergreen')
     case '/insights':
     case '/insights/overview':
-      return { moduleLabel: 'Insights', tabLabel: 'Overview' }
+      return labels('Innsikt', 'Insights', 'Oversikt', 'Overview')
     case '/insights/social':
-      return { moduleLabel: 'Insights', tabLabel: 'Social' }
+      return labels('Innsikt', 'Insights', 'Sosialt', 'Social')
     case '/insights/inbox':
-      return { moduleLabel: 'Insights', tabLabel: 'Inbox' }
+      return labels('Innsikt', 'Insights', 'Innboks', 'Inbox')
     case '/insights/agents':
-      return { moduleLabel: 'Insights', tabLabel: 'Agents' }
+      return labels('Innsikt', 'Insights', 'Agenter', 'Agents')
     case '/insights/campaigns':
-      return { moduleLabel: 'Insights', tabLabel: 'Campaigns' }
+      return labels('Innsikt', 'Insights', 'Kampanjer', 'Campaigns')
     case '/insights/experiments':
-      return { moduleLabel: 'Insights', tabLabel: 'Experiments' }
+      return labels('Innsikt', 'Insights', 'Eksperimenter', 'Experiments')
     case '/ingestions':
-      return { moduleLabel: 'Ingestions', tabLabel: 'Workspace' }
+      return labels('Innhenting', 'Ingestions', 'Arbeidsflate', 'Workspace')
     case '/agents':
-      return { moduleLabel: 'Agenter', tabLabel: 'Studio' }
+      return labels('Agenter', 'Agents', 'Studio', 'Studio')
     case '/agents/runs':
-      return { moduleLabel: 'Agenter', tabLabel: 'Run Console' }
+      return labels('Agenter', 'Agents', 'Kjørekonsoll', 'Run Console')
     case '/knowledge':
-      return { moduleLabel: 'Kunnskap', tabLabel: 'Kilder' }
+      return labels('Kunnskap', 'Knowledge', 'Kilder', 'Sources')
     case '/account':
-      return { moduleLabel: 'Account', tabLabel: 'Profile' }
+      return labels('Konto', 'Account', 'Profil', 'Profile')
     case '/settings':
     case '/settings/workspace':
     case '/settings/members':
@@ -153,10 +161,10 @@ export function getNavbarLabels(activeRoute: VelionRoute) {
     case '/settings/org-security':
     case '/settings/integrations':
     case '/settings/trust':
-      return { moduleLabel: 'Innstillinger', tabLabel: 'Workspace' }
+      return labels('Innstillinger', 'Settings', 'Arbeidsområde', 'Workspace')
     case '/dashboard':
     default:
-      return { moduleLabel: 'Oversikt', tabLabel: 'Hjem' }
+      return labels('Oversikt', 'Overview', 'Hjem', 'Home')
   }
 }
 

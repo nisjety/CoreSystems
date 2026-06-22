@@ -4,18 +4,23 @@ import { useEffect, useRef, useState } from "react";
 import { Footer } from "@/components/core/footer/Footer";
 import { Navbar } from "@/components/core/navbar/Navbar";
 import { MenuModal } from "@/components/ui/modals/MenuModal";
+import { BrandLogosSection } from "./sections/BrandLogosSection";
 import { DetailGallerySection } from "./sections/DetailGallerySection";
 import { ExcellenceSection } from "./sections/ExcellenceSection";
-import { FeatureCardsSection } from "./sections/FeatureCardsSection";
 import { HeritageSection } from "./sections/HeritageSection";
 import { HeroSection } from "./sections/HeroSection";
 import { PartnershipSection } from "./sections/PartnershipSection";
+import { PreFooterStatementSection } from "./sections/PreFooterStatementSection";
+import { ProductLoopSection } from "./sections/ProductLoopSection";
 import { SensesSection } from "./sections/SensesSection";
 import { TechnologySection } from "./sections/TechnologySection";
+import { TrustVideoSection } from "./sections/TrustVideoSection";
+import { WorkflowAutomationSection } from "./sections/WorkflowAutomationSection";
 
 export function VelionHome() {
   const homeRef = useRef<HTMLDivElement>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isNavOnDark, setIsNavOnDark] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
 
   useEffect(() => {
@@ -23,9 +28,25 @@ export function VelionHome() {
 
     const updateScrollState = () => {
       setIsScrolled((current) => {
-        const next = window.scrollY > 80;
+        const next = window.scrollY > window.innerHeight * 0.86;
         return current === next ? current : next;
       });
+
+      setIsNavOnDark((current) => {
+        const prefooter = document.querySelector<HTMLElement>("[data-prefooter-scroll]");
+
+        if (!prefooter) {
+          return current ? false : current;
+        }
+
+        const rect = prefooter.getBoundingClientRect();
+        const travel = Math.max(rect.height - window.innerHeight, 1);
+        const progress = Math.min(Math.max(-rect.top / travel, 0), 1);
+        const next = rect.top <= 0 && rect.bottom >= window.innerHeight && progress >= 0.32;
+
+        return current === next ? current : next;
+      });
+
       frame = null;
     };
 
@@ -64,47 +85,199 @@ export function VelionHome() {
       gsap.registerPlugin(ScrollTrigger);
 
       animationContext = gsap.context(() => {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         const hero = homeRef.current?.querySelector<HTMLElement>("[data-hero-parallax]");
         const media = homeRef.current?.querySelector<HTMLElement>("[data-hero-parallax-media]");
         const content = homeRef.current?.querySelector<HTMLElement>("[data-hero-parallax-content]");
+        const productLoop = homeRef.current?.querySelector<HTMLElement>("[data-product-loop]");
+        const prefooter = homeRef.current?.querySelector<HTMLElement>("[data-prefooter-scroll]");
+        const footerReveal = homeRef.current?.querySelector<HTMLElement>("[data-footer-reveal]");
+        const footer = footerReveal?.querySelector<HTMLElement>("[data-footer-parallax]");
+        const footerMedia = footer?.querySelector<HTMLElement>("[data-footer-parallax-media]");
+        const footerContent = footer?.querySelector<HTMLElement>("[data-footer-parallax-content]");
+        const footerBrand = footer?.querySelector<HTMLElement>("[data-footer-parallax-brand]");
 
-        if (!hero || !media || !content) {
-          return;
+        if (hero && media && content) {
+          gsap.set([media, content], { yPercent: 0, force3D: true });
+
+          if (!reduceMotion) {
+            const scrollTrigger = {
+              trigger: hero,
+              start: "top top",
+              end: "bottom top",
+              scrub: true,
+              invalidateOnRefresh: true,
+            } as const;
+
+            gsap.to(media, {
+              yPercent: 80,
+              ease: "none",
+              overwrite: "auto",
+              scrollTrigger: {
+                ...scrollTrigger,
+                id: "velion-hero-media-parallax",
+              },
+            });
+
+            gsap.to(content, {
+              yPercent: 40,
+              ease: "none",
+              overwrite: "auto",
+              scrollTrigger: {
+                ...scrollTrigger,
+                id: "velion-hero-content-parallax",
+              },
+            });
+          }
         }
 
-        gsap.set([media, content], { yPercent: 0, force3D: true });
+        if (productLoop) {
+          const steps = Array.from(productLoop.querySelectorAll<HTMLElement>("[data-product-step]"));
+          const panels = Array.from(productLoop.querySelectorAll<HTMLElement>("[data-product-panel]"));
 
-        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-          return;
+          if (steps.length > 0 && panels.length > 0) {
+            const setActiveStep = (nextIndex: number) => {
+              const activeIndex = Math.min(Math.max(nextIndex, 0), steps.length - 1);
+
+              productLoop.style.setProperty("--product-active-index", String(activeIndex));
+
+              steps.forEach((step, index) => {
+                step.classList.toggle("is-active", index === activeIndex);
+              });
+
+              panels.forEach((panel, index) => {
+                panel.classList.toggle("is-active", index === activeIndex);
+
+                if (!reduceMotion) {
+                  gsap.to(panel, {
+                    autoAlpha: index === activeIndex ? 1 : 0,
+                    duration: 0.42,
+                    ease: "power2.out",
+                    overwrite: "auto",
+                    scale: index === activeIndex ? 1 : 0.965,
+                    y: index === activeIndex ? 0 : 34,
+                  });
+                }
+              });
+            };
+
+            if (reduceMotion) {
+              setActiveStep(0);
+            } else {
+              gsap.set(panels, { autoAlpha: 0, scale: 0.965, y: 34, force3D: true });
+              gsap.set(panels[0], { autoAlpha: 1, scale: 1, y: 0 });
+              setActiveStep(0);
+
+              ScrollTrigger.create({
+                trigger: productLoop,
+                start: "top top",
+                end: "bottom bottom",
+                scrub: true,
+                id: "velion-product-loop",
+                invalidateOnRefresh: true,
+                onUpdate: (self) => {
+                  const progress = Math.min(Math.max(self.progress, 0), 1);
+                  const activeIndex = Math.min(steps.length - 1, Math.floor(progress * steps.length));
+
+                  productLoop.style.setProperty("--product-progress", progress.toFixed(4));
+                  setActiveStep(activeIndex);
+                },
+              });
+            }
+          }
         }
 
-        const scrollTrigger = {
-          trigger: hero,
-          start: "top top",
-          end: "bottom top",
-          scrub: true,
-          invalidateOnRefresh: true,
-        } as const;
+        if (prefooter) {
+          const lightPhrase = prefooter.querySelector<HTMLElement>("[data-prefooter-light-phrase]");
+          const darkPanel = prefooter.querySelector<HTMLElement>("[data-prefooter-dark-panel]");
+          const darkPhrase = prefooter.querySelector<HTMLElement>("[data-prefooter-dark-phrase]");
+          const finalStatement = prefooter.querySelector<HTMLElement>("[data-prefooter-final]");
 
-        gsap.to(media, {
-          yPercent: 80,
-          ease: "none",
-          overwrite: "auto",
-          scrollTrigger: {
-            ...scrollTrigger,
-            id: "velion-hero-media-parallax",
-          },
-        });
+          if (lightPhrase && darkPanel && darkPhrase && finalStatement) {
+            if (reduceMotion) {
+              gsap.set(darkPanel, { autoAlpha: 1 });
+              gsap.set([lightPhrase, darkPhrase], { autoAlpha: 0 });
+              gsap.set(finalStatement, { autoAlpha: 1, y: 0 });
+            } else {
+              gsap.set(lightPhrase, { autoAlpha: 1, scale: 1 });
+              gsap.set(darkPanel, { autoAlpha: 0 });
+              gsap.set(darkPhrase, { autoAlpha: 0, scale: 1 });
+              gsap.set(finalStatement, { autoAlpha: 0, y: () => window.innerHeight * 0.22 });
 
-        gsap.to(content, {
-          yPercent: 40,
-          ease: "none",
-          overwrite: "auto",
-          scrollTrigger: {
-            ...scrollTrigger,
-            id: "velion-hero-content-parallax",
-          },
-        });
+              gsap
+                .timeline({
+                  scrollTrigger: {
+                    trigger: prefooter,
+                    start: "top top",
+                    end: "bottom bottom",
+                    scrub: 0.45,
+                    id: "velion-prefooter-scroll-shift",
+                    invalidateOnRefresh: true,
+                  },
+                })
+                .to(lightPhrase, { autoAlpha: 0, scale: 0.995, ease: "none", duration: 0.16 }, 0.16)
+                .to(darkPanel, { autoAlpha: 1, ease: "none", duration: 0.22 }, 0.19)
+                .to(darkPhrase, { autoAlpha: 1, scale: 1, ease: "none", duration: 0.18 }, 0.28)
+                .to(
+                  darkPhrase,
+                  {
+                    y: () => -window.innerHeight * 0.48,
+                    autoAlpha: 0.92,
+                    ease: "none",
+                    duration: 0.22,
+                  },
+                  0.52,
+                )
+                .to(finalStatement, { autoAlpha: 1, y: 0, ease: "none", duration: 0.3 }, 0.56);
+            }
+          }
+        }
+
+        if (footerReveal && footer && footerMedia && footerContent) {
+          if (reduceMotion) {
+            const footerTargets = [footer, footerMedia, footerContent, footerBrand].filter(
+              (target): target is HTMLElement => Boolean(target),
+            );
+
+            gsap.set(footerTargets, {
+              autoAlpha: 1,
+              yPercent: 0,
+              y: 0,
+            });
+          } else {
+            gsap.set(footerMedia, { yPercent: -44, force3D: true });
+            gsap.set(footerContent, { autoAlpha: 0.94, yPercent: 18, force3D: true });
+
+            const footerScrollTrigger = {
+              trigger: footerReveal,
+              start: "top bottom",
+              end: "top top",
+              scrub: true,
+              invalidateOnRefresh: true,
+            } as const;
+
+            gsap.to(footerMedia, {
+              yPercent: 0,
+              ease: "none",
+              overwrite: "auto",
+              scrollTrigger: {
+                ...footerScrollTrigger,
+                id: "velion-footer-media-parallax",
+              },
+            });
+
+            gsap.to(footerContent, {
+              autoAlpha: 1,
+              yPercent: 0,
+              ease: "none",
+              overwrite: "auto",
+              scrollTrigger: {
+                ...footerScrollTrigger,
+                id: "velion-footer-content-parallax",
+              },
+            });
+          }
+        }
 
         window.requestAnimationFrame(() => ScrollTrigger.refresh());
       }, homeRef);
@@ -225,21 +398,32 @@ export function VelionHome() {
 
   return (
     <div className="velion-home" ref={homeRef}>
-      <Navbar isMenuOpen={isMenuOpen} isScrolled={isScrolled} onOpen={() => setIsMenuOpen(true)} />
+      <Navbar
+        isMenuOpen={isMenuOpen}
+        isOnDark={isNavOnDark}
+        isScrolled={isScrolled}
+        onOpen={() => setIsMenuOpen(true)}
+      />
       <MenuModal onClose={() => setIsMenuOpen(false)} open={isMenuOpen} />
 
       <main>
         <HeroSection />
-        <FeatureCardsSection />
+        <BrandLogosSection />
         <PartnershipSection />
+        <ProductLoopSection />
+        <WorkflowAutomationSection />
         <SensesSection />
         <DetailGallerySection />
         <ExcellenceSection />
         <TechnologySection />
         <HeritageSection />
+        <TrustVideoSection />
+        <PreFooterStatementSection />
       </main>
 
-      <Footer />
+      <div className="velion-footer-reveal" data-footer-reveal>
+        <Footer />
+      </div>
     </div>
   );
 }

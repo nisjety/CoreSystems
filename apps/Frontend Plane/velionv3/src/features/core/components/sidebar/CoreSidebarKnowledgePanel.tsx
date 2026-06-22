@@ -21,6 +21,7 @@ import {
   SidebarPanelTitle,
   SidebarSearchField,
 } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
+import { useI18n } from '@/shared/i18n'
 import {
   buildKnowledgeSidebarLiveData,
   filterKnowledgeFolders,
@@ -53,6 +54,7 @@ const sourceTypeIcon: Record<LiveKnowledgeSourceType, KnowledgeIcon> = {
 }
 
 export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void }) {
+  const i18n = useI18n()
   const [activeMode, setActiveMode] = createSignal<KnowledgeSidebarModeId>('folders')
   const [activeFolderId, setActiveFolderId] = createSignal('')
   const [activeSourceId, setActiveSourceId] = createSignal('')
@@ -88,7 +90,7 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
       .catch((reason) => {
         if (controller.signal.aborted) return
         setLiveKnowledge(null)
-        setError(reason instanceof Error ? reason.message : 'Knowledge API unavailable.')
+        setError(reason instanceof Error ? reason.message : i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.'))
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
@@ -110,10 +112,10 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
 
   return (
     <div class="core-sidebar-dedicated-panel">
-      <SidebarPanelTitle onCollapse={props.onCollapse}>Knowledge</SidebarPanelTitle>
+      <SidebarPanelTitle onCollapse={props.onCollapse}>{i18n.tr('Kunnskap', 'Knowledge')}</SidebarPanelTitle>
 
       <SidebarSearchField
-        ariaLabel="Filter knowledge section"
+        ariaLabel={i18n.tr('Filtrer kunnskapsseksjon', 'Filter knowledge section')}
         class="core-sidebar-search-compact"
         value={searchQuery()}
         onChange={setSearchQuery}
@@ -121,20 +123,20 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
 
       <KnowledgeModeSelector value={activeMode()} onChange={setActiveMode} />
 
-      <nav class="core-sidebar-dedicated-nav" aria-label="Knowledge navigation">
+      <nav class="core-sidebar-dedicated-nav" aria-label={i18n.tr('Kunnskapsnavigasjon', 'Knowledge navigation')}>
         <Show when={activeMode() === 'folders'}>
           <div class="core-sidebar-dedicated-nav__stack core-sidebar-knowledge-stack">
             <section>
               <div class="core-sidebar-dedicated-group-header">
-                <h2 class="velion-sidebar-group-title">Collections</h2>
-                <button type="button" class="core-sidebar-round-add" aria-label="Add collection" title="Add collection">
+                <h2 class="velion-sidebar-group-title">{i18n.tr('Samlinger', 'Collections')}</h2>
+                <button type="button" class="core-sidebar-round-add" aria-label={i18n.tr('Legg til samling', 'Add collection')} title={i18n.tr('Legg til samling', 'Add collection')}>
                   <Plus class="size-4" strokeWidth={1.9} />
                 </button>
               </div>
               <div class="core-sidebar-link-list">
-                <Show when={!loading() || sidebarData()} fallback={<SidebarEmptyState label="Loading collections..." />}>
-                  <Show when={!error()} fallback={<SidebarEmptyState label={error() ?? 'Knowledge API unavailable.'} />}>
-                    <For each={visibleFolders()} fallback={<SidebarEmptyState label="No collections found." />}>
+                <Show when={!loading() || sidebarData()} fallback={<SidebarEmptyState label={i18n.tr('Laster samlinger ...', 'Loading collections ...')} />}>
+                  <Show when={!error()} fallback={<SidebarEmptyState label={error() ?? i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.')} />}>
+                    <For each={visibleFolders()} fallback={<SidebarEmptyState label={i18n.tr('Fant ingen samlinger.', 'No collections found.')} />}>
                       {(folder) => (
                         <KnowledgeSidebarTreeItem
                           activeFolderId={activeFolderId()}
@@ -156,17 +158,17 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
               loading={loading()}
               onSelect={setActiveSourceId}
               sources={visibleSources()}
-              title="Pinned sources"
+              title={i18n.tr('Festede kilder', 'Pinned sources')}
             />
 
             <section>
               <div class="core-sidebar-dedicated-group-header">
-                <h2 class="velion-sidebar-group-title">Insights</h2>
+                <h2 class="velion-sidebar-group-title">{i18n.tr('Innsikt', 'Insights')}</h2>
               </div>
               <div class="core-sidebar-link-list">
                 <A href="/insights/overview" class="core-sidebar-section-link">
                   <BarChart3 class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
-                  <span>Insights</span>
+                  <span>{i18n.tr('Innsikt', 'Insights')}</span>
                 </A>
               </div>
             </section>
@@ -180,20 +182,20 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
             loading={loading()}
             onSelect={setActiveSourceId}
             sources={visibleSources()}
-            title="Sources"
+            title={i18n.tr('Kilder', 'Sources')}
           />
         </Show>
 
         <Show when={activeMode() === 'tags'}>
           <section>
             <div class="core-sidebar-dedicated-group-header">
-              <h2 class="velion-sidebar-group-title">Tags</h2>
+              <h2 class="velion-sidebar-group-title">{i18n.tr('Etiketter', 'Tags')}</h2>
               <span class="velion-sidebar-secondary core-sidebar-muted-count">{visibleTags().length}</span>
             </div>
             <div class="core-sidebar-link-list">
-              <Show when={!loading() || sidebarData()} fallback={<SidebarEmptyState label="Loading tags..." />}>
-                <Show when={!error()} fallback={<SidebarEmptyState label={error() ?? 'Knowledge API unavailable.'} />}>
-                  <For each={visibleTags()} fallback={<SidebarEmptyState label="No tags found." />}>
+              <Show when={!loading() || sidebarData()} fallback={<SidebarEmptyState label={i18n.tr('Laster etiketter ...', 'Loading tags ...')} />}>
+                <Show when={!error()} fallback={<SidebarEmptyState label={error() ?? i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.')} />}>
+                  <For each={visibleTags()} fallback={<SidebarEmptyState label={i18n.tr('Fant ingen etiketter.', 'No tags found.')} />}>
                     {(tag) => (
                       <button type="button" class="core-sidebar-section-link">
                         <KeyRound class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
@@ -216,6 +218,7 @@ function KnowledgeModeSelector(props: {
   onChange: (value: KnowledgeSidebarModeId) => void
   value: KnowledgeSidebarModeId
 }) {
+  const i18n = useI18n()
   let rootRef!: HTMLDivElement
   const [open, setOpen] = createSignal(false)
   const listboxId = createUniqueId()
@@ -312,7 +315,7 @@ function KnowledgeModeSelector(props: {
       </span>
       <button
         type="button"
-        aria-label="Select knowledge view"
+        aria-label={i18n.tr('Velg kunnskapsvisning', 'Select knowledge view')}
         aria-haspopup="menu"
         aria-expanded={open()}
         aria-controls={open() ? listboxId : undefined}
@@ -323,11 +326,11 @@ function KnowledgeModeSelector(props: {
         onKeyDown={handleKeyDown}
         class="core-sidebar-select__button"
       >
-        <span>{selectedOption().label}</span>
+        <span>{knowledgeModeLabel(selectedOption().id, i18n)}</span>
       </button>
       <ChevronDown class={cn('core-sidebar-select__chevron', open() && 'rotate-180')} strokeWidth={2.2} />
       <Show when={open()}>
-        <menu id={listboxId} class="velion-popover core-sidebar-select__menu" aria-label="Knowledge view options">
+        <menu id={listboxId} class="velion-popover core-sidebar-select__menu" aria-label={i18n.tr('Valg for kunnskapsvisning', 'Knowledge view options')}>
           <For each={knowledgeSidebarModeOptions}>
             {(option, index) => {
               const selected = () => option.id === props.value
@@ -347,7 +350,7 @@ function KnowledgeModeSelector(props: {
                     onMouseEnter={() => setActiveIndex(index())}
                     onClick={() => selectOptionAtIndex(index())}
                   >
-                    <span>{option.label}</span>
+                    <span>{knowledgeModeLabel(option.id, i18n)}</span>
                     <Show when={selected()}>
                       <CheckCircle2 class="size-3.5 core-sidebar-success" strokeWidth={2} />
                     </Show>
@@ -371,6 +374,7 @@ function KnowledgeSourcesList(props: {
   sources: readonly LiveKnowledgeSource[]
   title: string
 }) {
+  const i18n = useI18n()
   const visibleSources = () => props.limit ? props.sources.slice(0, props.limit) : props.sources
 
   return (
@@ -380,9 +384,9 @@ function KnowledgeSourcesList(props: {
         <span class="velion-sidebar-secondary core-sidebar-muted-count">{visibleSources().length}</span>
       </div>
       <div class="core-sidebar-link-list">
-        <Show when={!props.loading || visibleSources().length > 0} fallback={<SidebarEmptyState label="Loading sources..." />}>
-          <Show when={!props.error} fallback={<SidebarEmptyState label={props.error ?? 'Knowledge API unavailable.'} />}>
-            <For each={visibleSources()} fallback={<SidebarEmptyState label="No sources found." />}>
+        <Show when={!props.loading || visibleSources().length > 0} fallback={<SidebarEmptyState label={i18n.tr('Laster kilder ...', 'Loading sources ...')} />}>
+          <Show when={!props.error} fallback={<SidebarEmptyState label={props.error ?? i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.')} />}>
+            <For each={visibleSources()} fallback={<SidebarEmptyState label={i18n.tr('Fant ingen kilder.', 'No sources found.')} />}>
               {(source) => {
                 const active = () => props.activeSourceId === source.id
                 return (
@@ -406,6 +410,12 @@ function KnowledgeSourcesList(props: {
       </div>
     </section>
   )
+}
+
+function knowledgeModeLabel(id: KnowledgeSidebarModeId, i18n: ReturnType<typeof useI18n>): string {
+  if (id === 'folders') return i18n.tr('Kunnskapsbase', 'Knowledge Base')
+  if (id === 'sources') return i18n.tr('Kilder', 'Sources')
+  return i18n.tr('Etiketter', 'Tags')
 }
 
 function KnowledgeSidebarTreeItem(props: {

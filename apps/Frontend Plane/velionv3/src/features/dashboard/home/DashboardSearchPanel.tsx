@@ -46,6 +46,7 @@ import {
   webResultsToPreviews,
   type SearchSourceItem,
 } from '@/features/dashboard/home/dashboard-search-utils'
+import { useI18n } from '@/shared/i18n'
 import { readClientJson, writeClientJson } from '@/shared/session/client-storage'
 
 // Search session state lives at module scope so the active query survives the
@@ -79,6 +80,7 @@ export function SearchPanel(props: {
   onPreviewActiveChange: (active: boolean) => void
   previewCollapsed?: boolean
 }) {
+  const i18n = useI18n()
   const navigate = useNavigate()
   const restored = readSearchSnapshot()
   let suggestionsTimer: number | undefined
@@ -379,7 +381,7 @@ export function SearchPanel(props: {
       })
       .catch((reason) => {
         if (controller.signal.aborted) return
-        setImagesError(reason instanceof Error ? reason.message : 'Image search could not be completed.')
+        setImagesError(reason instanceof Error ? reason.message : i18n.tr('Bildesøk kunne ikke fullføres.', 'Image search could not be completed.'))
         setImagesStatus('error')
       })
   }
@@ -578,7 +580,7 @@ export function SearchPanel(props: {
                   value={query()}
                   onInput={(event) => updateQuery(event.currentTarget.value)}
                   class="dashboard-xsearch-input"
-                  placeholder="Skriv et nytt søk..."
+                  placeholder={i18n.tr('Skriv et nytt søk ...', 'Type a new search ...')}
                   autocomplete="off"
                 />
                 <Show when={webLoading()}>
@@ -597,7 +599,7 @@ export function SearchPanel(props: {
                       classList={{ 'dashboard-xsearch-tab--active': activeResultTab() === tab }}
                       aria-pressed={activeResultTab() === tab}
                     >
-                      {tab}
+                      {searchResultTabLabel(tab, i18n)}
                     </button>
                   )}
                 </For>
@@ -605,19 +607,19 @@ export function SearchPanel(props: {
 
               <div class="dashboard-xsearch-actions">
                 <button type="button" onClick={() => void runExpandedSearch(activeQuery())} disabled={webLoading()}>
-                  Oppdater
+                  {i18n.tr('Oppdater', 'Refresh')}
                 </button>
                 <button type="button" onClick={() => setActiveResultTab('Info')}>
-                  Sources {sourceItems().length ? sourceItems().length : ''}
+                  {i18n.tr('Kilder', 'Sources')} {sourceItems().length ? sourceItems().length : ''}
                 </button>
                 <button
                   type="button"
                   onClick={() => void launchChatWithSearchContext()}
                   disabled={!activeQuery()}
                 >
-                  Spør Velion
+                  {i18n.tr('Spør Velion', 'Ask Velion')}
                 </button>
-                <button type="button" onClick={() => props.onExpandedChange(false)}>Kompakt</button>
+                <button type="button" onClick={() => props.onExpandedChange(false)}>{i18n.tr('Kompakt', 'Compact')}</button>
               </div>
             </div>
 
@@ -630,7 +632,7 @@ export function SearchPanel(props: {
                 <Match when={webLoading() && webResults().length === 0}>
                   <div class="dashboard-xsearch-status">
                     <Loader2 class="size-4 dashboard-xsearch-spin" aria-hidden="true" />
-                    Thinking...
+                    {i18n.tr('Tenker ...', 'Thinking ...')}
                   </div>
                 </Match>
                 <Match when={Boolean(webError()) && webResults().length === 0}>
@@ -669,14 +671,14 @@ export function SearchPanel(props: {
                     <Show when={answerStreaming() || webAnswer()}>
                       <section class="dashboard-xsearch-summary">
                         <p class="dashboard-xsearch-eyebrow">
-                          Velion summary
+                          {i18n.tr('Velion-sammendrag', 'Velion summary')}
                           <Show when={answerStreaming()}>
                             <Loader2 class="ml-2 inline size-3 dashboard-xsearch-spin" aria-hidden="true" />
                           </Show>
                         </p>
                         <Show
                           when={webAnswer()}
-                          fallback={<p class="dashboard-xsearch-summary-text">Velion samler kilder og skriver et svar…</p>}
+                          fallback={<p class="dashboard-xsearch-summary-text">{i18n.tr('Velion samler kilder og skriver et svar ...', 'Velion is gathering sources and writing an answer ...')}</p>}
                         >
                           <p class="dashboard-xsearch-summary-text">{webAnswer()}</p>
                         </Show>
@@ -715,7 +717,7 @@ export function SearchPanel(props: {
                         <Show when={correctedQuery()}>
                           {(corrected) => (
                             <p class="dashboard-xsuggest__correction">
-                              Mente du{' '}
+                              {i18n.tr('Mente du', 'Did you mean')}{' '}
                               <button
                                 type="button"
                                 onClick={() => {
@@ -731,7 +733,7 @@ export function SearchPanel(props: {
                         </Show>
                         <Show when={relatedQueries().length > 0}>
                           <div class="dashboard-xsuggest__related">
-                            <span class="dashboard-xsearch-eyebrow">Relaterte søk</span>
+                            <span class="dashboard-xsearch-eyebrow">{i18n.tr('Relaterte søk', 'Related searches')}</span>
                             <div class="dashboard-xsuggest__chips">
                               <For each={relatedQueries()}>
                                 {(related) => (
@@ -769,7 +771,7 @@ export function SearchPanel(props: {
                     <Show
                       when={webResults().length > 0}
                       fallback={
-                        <div class="dashboard-xsearch-empty">Endre søket over, eller skriv en oppfølging under.</div>
+                        <div class="dashboard-xsearch-empty">{i18n.tr('Endre søket over, eller skriv en oppfølging under.', 'Change the search above, or write a follow-up below.')}</div>
                       }
                     >
                       <For each={webResults().slice(0, visibleCount())}>
@@ -789,7 +791,7 @@ export function SearchPanel(props: {
                           class="dashboard-xsearch-more"
                           onClick={() => setVisibleCount((count) => count + SEARCH_PAGE_SIZE)}
                         >
-                          Vis flere ({webResults().length - visibleCount()})
+                          {i18n.tr('Vis flere', 'Show more')} ({webResults().length - visibleCount()})
                         </button>
                       </Show>
                     </Show>
@@ -814,10 +816,15 @@ export function SearchPanel(props: {
             <input
               value={followUpQuery()}
               onInput={(event) => setFollowUpQuery(event.currentTarget.value)}
-              placeholder="Spør om oppfølging..."
+              placeholder={i18n.tr('Spør om oppfølging ...', 'Ask a follow-up ...')}
               autocomplete="off"
             />
-            <button type="submit" disabled={!followUpQuery().trim()} aria-label="Send follow-up" title="Send follow-up">
+            <button
+              type="submit"
+              disabled={!followUpQuery().trim()}
+              aria-label={i18n.tr('Send oppfølging', 'Send follow-up')}
+              title={i18n.tr('Send oppfølging', 'Send follow-up')}
+            >
               <ArrowRight class="size-4" />
             </button>
           </form>
@@ -826,15 +833,15 @@ export function SearchPanel(props: {
     >
       <div class="velion-panel-in relative transition-all duration-500 ease-out">
         <form onSubmit={submit} class="relative z-[1] w-full">
-          <label class="sr-only" for="dashboard-search">Søk i selskapets kunnskap</label>
+          <label class="sr-only" for="dashboard-search">{i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}</label>
           <div class="dashboard-search-row">
             <button
               type="button"
-              aria-label="Send søkekontekst til chat"
+              aria-label={i18n.tr('Send søkekontekst til chat', 'Send search context to chat')}
               class="velion-glass-input dashboard-search-context-button"
               disabled={!activeQuery()}
               onClick={() => void launchChatWithSearchContext()}
-              title="Send søkekontekst til chat"
+              title={i18n.tr('Send søkekontekst til chat', 'Send search context to chat')}
             >
               <CirclePlus class="size-4" />
             </button>
@@ -843,20 +850,20 @@ export function SearchPanel(props: {
               <input
                 id="dashboard-search"
                 role="combobox"
-                aria-label="Søk i selskapets kunnskap"
+                aria-label={i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}
                 aria-expanded={isDropdownOpen()}
                 autocomplete="off"
                 value={query()}
                 onInput={(event) => updateQuery(event.currentTarget.value)}
                 class="dashboard-search-input"
-                placeholder="Søk eller spør..."
+                placeholder={i18n.tr('Søk eller spør ...', 'Search or ask ...')}
               />
               <button
                 type="submit"
-                aria-label="Søk"
+                aria-label={i18n.tr('Søk', 'Search')}
                 disabled={!activeQuery()}
                 class="dashboard-search-submit"
-                title="Søk"
+                title={i18n.tr('Søk', 'Search')}
               >
                 <ArrowRight class="size-4" />
               </button>
@@ -865,7 +872,7 @@ export function SearchPanel(props: {
 
           <Show when={isDropdownOpen()}>
             <div class="velion-glass velion-fade-up dashboard-search-suggestions">
-              <p>Forslag</p>
+              <p>{i18n.tr('Forslag', 'Suggestions')}</p>
               <For each={suggestions()}>
                 {(suggestion) => (
                   <button type="button" onMouseDown={() => updateQuery(suggestion.text)}>
@@ -883,7 +890,7 @@ export function SearchPanel(props: {
               <div>
                 <Show
                   when={!previewLoading()}
-                  fallback={<div class="dashboard-search-preview-status">Søker...</div>}
+                  fallback={<div class="dashboard-search-preview-status">{i18n.tr('Søker ...', 'Searching ...')}</div>}
                 >
                   <Show
                     when={!previewError()}
@@ -915,7 +922,7 @@ export function SearchPanel(props: {
                   </Show>
                 </Show>
                 <div class="dashboard-search-preview-results__footer">
-                  <p>Viser {Math.min(previewResults().length, 3)} av {previewResults().length} forhåndstreff.</p>
+                  <p>{i18n.tr('Viser', 'Showing')} {Math.min(previewResults().length, 3)} {i18n.tr('av', 'of')} {previewResults().length} {i18n.tr('forhåndstreff.', 'preview results.')}</p>
                   <button
                     type="button"
                     onClick={() => {
@@ -924,7 +931,7 @@ export function SearchPanel(props: {
                       void runExpandedSearch(activeQuery())
                     }}
                   >
-                    Se mer
+                    {i18n.tr('Se mer', 'See more')}
                   </button>
                 </div>
               </div>
@@ -959,6 +966,14 @@ function isSearchSnapshot(value: unknown): value is SearchSnapshot {
 
 function isResultTab(value: unknown): value is SearchResultTab {
   return value === 'Info' || value === 'Videos' || value === 'Map' || value === 'Images' || value === 'Shopping'
+}
+
+function searchResultTabLabel(tab: SearchResultTab, i18n: ReturnType<typeof useI18n>): string {
+  if (tab === 'Videos') return i18n.tr('Videoer', 'Videos')
+  if (tab === 'Map') return i18n.tr('Kart', 'Map')
+  if (tab === 'Images') return i18n.tr('Bilder', 'Images')
+  if (tab === 'Shopping') return i18n.tr('Shopping', 'Shopping')
+  return i18n.tr('Info', 'Info')
 }
 
 /**

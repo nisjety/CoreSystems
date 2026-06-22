@@ -2,6 +2,7 @@ import { useLocation } from '@solidjs/router'
 import { onMount, Show, type JSX } from 'solid-js'
 import { QueryProvider } from '@/app/providers/QueryProvider'
 import { CoreShell } from '@/features/core/components/CoreShell'
+import { I18nProvider } from '@/shared/i18n'
 import { loadSession } from '@/shared/session/session-store'
 
 export function AppShell(props: { children?: JSX.Element }) {
@@ -17,10 +18,12 @@ export function AppShell(props: { children?: JSX.Element }) {
   })
 
   return (
-    <QueryProvider>
-      <Show when={!isStandaloneSurface()} fallback={<>{props.children}</>}>
-        <CoreShell>{props.children}</CoreShell>
-      </Show>
-    </QueryProvider>
+    <I18nProvider>
+      <QueryProvider>
+        <Show when={!isStandaloneSurface()} fallback={<>{props.children}</>}>
+          <CoreShell>{props.children}</CoreShell>
+        </Show>
+      </QueryProvider>
+    </I18nProvider>
   )
 }

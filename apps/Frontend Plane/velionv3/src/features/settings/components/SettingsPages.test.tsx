@@ -347,13 +347,13 @@ describe('settings sidebars', () => {
       />
     ), '/account')
 
-    const accountNav = screen.getByRole('navigation', { name: /account sections/i })
-    expect(within(accountNav).getByRole('link', { name: /^profile$/i }).getAttribute('href')).toBe('#profile')
-    expect(within(accountNav).getByRole('link', { name: /^contact$/i }).getAttribute('href')).toBe('#contact')
-    expect(within(accountNav).getByRole('link', { name: /^preferences$/i }).getAttribute('href')).toBe('#preferences')
-    expect(within(accountNav).getByRole('link', { name: /^availability$/i }).getAttribute('href')).toBe('#availability')
-    expect(within(accountNav).getByRole('link', { name: /^connected accounts$/i }).getAttribute('href')).toBe('#connected-accounts')
-    expect(within(accountNav).getByRole('link', { name: /^privacy$/i }).getAttribute('href')).toBe('#privacy')
+    const accountNav = screen.getByRole('navigation', { name: /kontoseksjoner/i })
+    expect(within(accountNav).getByRole('link', { name: /^profil$/i }).getAttribute('href')).toBe('#profile')
+    expect(within(accountNav).getByRole('link', { name: /^kontakt$/i }).getAttribute('href')).toBe('#contact')
+    expect(within(accountNav).getByRole('link', { name: /^preferanser$/i }).getAttribute('href')).toBe('#preferences')
+    expect(within(accountNav).getByRole('link', { name: /^tilgjengelighet$/i }).getAttribute('href')).toBe('#availability')
+    expect(within(accountNav).getByRole('link', { name: /^tilkoblede kontoer$/i }).getAttribute('href')).toBe('#connected-accounts')
+    expect(within(accountNav).getByRole('link', { name: /^personvern$/i }).getAttribute('href')).toBe('#privacy')
   })
 
   it('renders workspace settings routes in the settings sidebar', () => {
@@ -366,12 +366,12 @@ describe('settings sidebars', () => {
       />
     ), '/settings/sso')
 
-    const settingsNav = screen.getByRole('navigation', { name: /settings sections/i })
-    expect(within(settingsNav).getByRole('link', { name: /^workspace$/i }).getAttribute('href')).toBe('/settings/workspace')
-    expect(within(settingsNav).getByRole('link', { name: /^members & roles$/i }).getAttribute('href')).toBe('/settings/members')
-    expect(within(settingsNav).getByRole('link', { name: /^billing$/i }).getAttribute('href')).toBe('/settings/billing')
+    const settingsNav = screen.getByRole('navigation', { name: /innstillingsseksjoner/i })
+    expect(within(settingsNav).getByRole('link', { name: /^arbeidsområde$/i }).getAttribute('href')).toBe('/settings/workspace')
+    expect(within(settingsNav).getByRole('link', { name: /^medlemmer og roller$/i }).getAttribute('href')).toBe('/settings/members')
+    expect(within(settingsNav).getByRole('link', { name: /^fakturering$/i }).getAttribute('href')).toBe('/settings/billing')
     expect(within(settingsNav).getByRole('link', { name: /^sso$/i }).getAttribute('href')).toBe('/settings/sso')
-    expect(within(settingsNav).getByRole('link', { name: /^org security$/i }).getAttribute('href')).toBe('/settings/org-security')
-    expect(within(settingsNav).getByRole('link', { name: /^integrations$/i }).getAttribute('href')).toBe('/settings/integrations')
+    expect(within(settingsNav).getByRole('link', { name: /^organisasjonssikkerhet$/i }).getAttribute('href')).toBe('/settings/org-security')
+    expect(within(settingsNav).getByRole('link', { name: /^integrasjoner$/i }).getAttribute('href')).toBe('/settings/integrations')
   })
 })

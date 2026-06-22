@@ -1,30 +1,31 @@
 import { ArrowButton } from "@/components/ui/buttons/ArrowButton";
+import { VelionCircuitDiagram } from "./VelionCircuitDiagram";
 
 const stats = [
-  { label: "Range at 24 kn", unit: "nm", value: "› 50" },
-  { label: "Maximum speed", unit: "kn", value: "30" },
-  { label: "Battery capacity", unit: "KWh", value: "240" },
+  { label: "AI worker loop", unit: "steps", value: "4" },
+  { label: "Manual parity", unit: "%", value: "100" },
+  { label: "Risky actions", unit: "approved", value: "HITL" },
 ];
 
 export function TechnologySection() {
   return (
     <section className="velion-technology" id="technology">
       <div className="velion-technology__visual" aria-hidden="true">
-        <span className="velion-technology__body" />
-        <span className="velion-technology__foil velion-technology__foil--one" />
-        <span className="velion-technology__foil velion-technology__foil--two" />
-        <span className="velion-technology__wake" />
+        <div className="velion-technology__diagram-shell">
+          <VelionCircuitDiagram />
+        </div>
       </div>
 
       <div className="velion-technology__copy">
         <span className="velion-copy-rule fade-out-top" data-fade-out-top aria-hidden="true" />
         <h1 className="header-1 fade-out-top" data-fade-out-top>
-          Pioneering technology
+          Monitor, brief, approve, act.
         </h1>
         <div className="velion-ingress ingress fade-out-top" data-fade-out-top>
           <p>
-            Discover VELION&apos;s advanced technology, a synergy of expertise from global leaders in mobility, naval
-            architecture, marine engineering, and design.
+            The useful Velion loop starts with change: a customer message, website update, competitor movement,
+            connector gap, or knowledge conflict. Velion turns that signal into a brief, proposes the next action, and
+            waits when approval is required.
           </p>
         </div>
         <div className="velion-technology__stats">
@@ -38,7 +39,7 @@ export function TechnologySection() {
           ))}
         </div>
         <ArrowButton href="#company" variant="dark">
-          Learn More
+          See the wedge
         </ArrowButton>
       </div>
     </section>
