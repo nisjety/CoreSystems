@@ -1,8 +1,8 @@
-//! Lead-builder (W1) surface — metered + audited.
+//! Lead-builder (W1) surface — metered and audited.
 //!
-//! Filtered Enhetsregisteret company search + sub-entity/branch + financials
-//! enrichment + the governed `leads.build_list` action + saved org-scoped lists
-//! + CSV export, proxied to leads-core. The org is resolved server-side via
+//! Filtered Enhetsregisteret company search, sub-entity/branch and financials
+//! enrichment, the governed `leads.build_list` action, saved org-scoped lists,
+//! and CSV export, proxied to leads-core. The org is resolved server-side via
 //! `authorized_org_id` (never a client header), so every route is IDOR-clean.
 //! The CSV export and `build_list` are METERED: both are gated on the org's
 //! billing-core `leads` entitlement and 402 when not entitled (leads-core emits

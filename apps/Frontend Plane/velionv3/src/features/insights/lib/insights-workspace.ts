@@ -4,18 +4,15 @@ import {
   type InsightConnector,
 } from '@/shared/api/insights-client'
 import { listConnections, type IntegrationConnection } from '@/shared/api/integrations-client'
-import {
-  withResourceTimeout,
-  type MeasurementState,
-  type ResourceResult,
-} from '@/shared/read-data'
+import { withResourceTimeout } from '@/shared/read-data'
+import type { MeasurementState, ResourceResult } from '@/shared/read-data'
 
 // The read-data substrate (Phase 4 PR-1) owns MeasurementState / ResourceResult
 // / withResourceTimeout. Re-exported here so existing insights importers keep
 // their paths and the honesty contract stays single-sourced: `live` still never
 // attaches to a rendered metric VALUE — only the connector registry is real.
 export type { MeasurementState, ResourceResult }
-export { withResourceTimeout }
+export { withResourceTimeout } from '@/shared/read-data'
 
 export type InsightsContext = {
   email: string
