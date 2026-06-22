@@ -200,6 +200,13 @@ message CreateEmbeddingRequest {
 
   // Optional provider hint: "openai", "azure-openai", etc.
   string provider_hint = 5;
+
+  // Zero Data Retention; the content must not egress to a retaining provider.
+  // An EU/ZDR embedding provider is a Phase-4 prerequisite — this field does
+  // NOT by itself satisfy residency (both provider paths still default to
+  // Azure today). It is plumbing for that future provider plus the
+  // direct-Azure egress reject enforced on the Data Plane.
+  bool zdr = 6;
 }
 
 // CreateEmbeddingResponse — generated vector and serving metadata.

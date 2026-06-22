@@ -377,7 +377,12 @@ impl FallbackChain {
     }
 
     fn provider_matches(name: &str, hint: &str) -> bool {
-        let hint = hint.trim().to_ascii_lowercase();
+        // Normalise: lowercase + treat '_' and '-' as equivalent. Phase 3 B-spike
+        // root cause: a caller sending `azure_openai` (underscore) matched zero
+        // providers (registry id is `azure-openai`), yielding AllExhausted(0) with
+        // no server log. Normalising both sides makes the hop robust to either form.
+        let hint = hint.trim().to_ascii_lowercase().replace('_', "-");
+        let name = name.to_ascii_lowercase().replace('_', "-");
         hint.is_empty()
             || hint == name
             || (hint == "openai" && name == "azure-openai")
@@ -575,6 +580,12 @@ impl FallbackChain {
                     provider = %name,
                     attempt = attempt,
                     request_id = %req.request_id,
+                    // ZDR is recorded on the embedding-attempt span so the
+                    // retention posture of each provider hop is observable.
+                    // inference-core's provider is Azure today, so residency
+                    // enforcement is Phase-4; this carries the signal end-to-end
+                    // (it does NOT by itself satisfy residency).
+                    zdr = req.zdr,
                 );
                 let _enter = span.enter();
 
@@ -704,6 +715,27 @@ mod resolution_tests {
         assert!(FallbackChain::provider_matches("anthropic", "claude"));
         assert!(FallbackChain::provider_matches("azure-openai", "azure"));
         // A claude hint must not match the OpenAI surface.
+        assert!(!FallbackChain::provider_matches("azure-openai", "claude"));
+    }
+
+    #[test]
+    fn provider_hint_underscore_matches_hyphen_id() {
+        // Phase 3 B-spike regression: a caller sending `azure_openai` (underscore)
+        // must match the `azure-openai` provider id. Before normalisation this
+        // matched zero providers → AllExhausted(0) with no server log.
+        assert!(FallbackChain::provider_matches(
+            "azure-openai",
+            "azure_openai"
+        ));
+        assert!(FallbackChain::provider_matches(
+            "azure-openai",
+            "AZURE_OPENAI"
+        ));
+        assert!(FallbackChain::provider_matches(
+            "azure-anthropic",
+            "azure_anthropic"
+        ));
+        // Hyphen/underscore equivalence must not over-match across surfaces.
         assert!(!FallbackChain::provider_matches("azure-openai", "claude"));
     }
 

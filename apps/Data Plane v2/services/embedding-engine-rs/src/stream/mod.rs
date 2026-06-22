@@ -156,6 +156,24 @@ pub async fn run_consumer(
 
                     let chunk_index = payload["chunk_index"].as_i64().unwrap_or(0) as i32;
 
+                    // ZDR source of truth: the owning document's classification.
+                    // A `restricted` doc is Zero-Data-Retention content, so its
+                    // chunks must not egress to a retaining embedding provider —
+                    // the embed egress guard enforces it downstream. We read it
+                    // here (the real column) rather than trusting the event
+                    // payload, so a stale/forged event can't downgrade ZDR.
+                    let zdr = if doc_id.is_empty() {
+                        false
+                    } else {
+                        let row: Option<(Option<String>,)> = sqlx::query_as(
+                            "SELECT zdr_classification FROM documents WHERE document_id = $1",
+                        )
+                        .bind(&doc_id)
+                        .fetch_optional(&pool)
+                        .await?;
+                        matches!(row, Some((Some(c),)) if c == "restricted")
+                    };
+
                     buffer.push((
                         msg,
                         BatchItem {
@@ -164,6 +182,7 @@ pub async fn run_consumer(
                             org_id,
                             chunk_index,
                             text,
+                            zdr,
                         },
                     ));
                 }
@@ -218,6 +237,7 @@ pub async fn run_consumer(
                     org_id: item.org_id.clone(),
                     chunk_index: item.chunk_index,
                     text: item.text.clone(),
+                    zdr: item.zdr,
                 })
                 .collect();
 

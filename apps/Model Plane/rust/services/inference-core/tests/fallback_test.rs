@@ -119,6 +119,7 @@ fn sample_embedding_request(provider_hint: &str) -> EmbedRequest {
         provider_hint: provider_hint.to_owned(),
         text: "hello".to_owned(),
         model: "embedding-model".to_owned(),
+        zdr: false,
     }
 }
 

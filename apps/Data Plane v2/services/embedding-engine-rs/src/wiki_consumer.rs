@@ -58,7 +58,10 @@ pub async fn spawn(
     .await
     .context("create DATAPLANE_WIKI stream")?;
 
-    let stream = js.get_stream(WIKI_STREAM).await.context("get wiki stream")?;
+    let stream = js
+        .get_stream(WIKI_STREAM)
+        .await
+        .context("get wiki stream")?;
     let consumer = stream
         .get_or_create_consumer(
             WIKI_CONSUMER,
@@ -130,8 +133,11 @@ async fn handle(
 ) -> anyhow::Result<()> {
     use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder, Value as QdrantValue};
 
+    // Wiki pages carry no `zdr_classification` (the ZDR doc path is the
+    // `documents` table). No ZDR signal exists on this subject, so the egress
+    // guard does not apply here.
     let vecs = provider
-        .embed_batch(&evt.org_id, &[evt.content.clone()])
+        .embed_batch(&evt.org_id, std::slice::from_ref(&evt.content), false)
         .await
         .context("embed wiki content")?;
     let vec = vecs.into_iter().next().context("empty embed result")?;

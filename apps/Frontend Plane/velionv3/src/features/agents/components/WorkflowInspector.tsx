@@ -28,10 +28,12 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
         <h2 class="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#282B31] dark:text-white">
           {props.inspector.title}
         </h2>
-        <VelionIconButton type="button" size="xs" shape="rounded" aria-label="More tool options">
+        {/* Phase 3 PR-1: inspector is part of the WorkflowBuilder design
+            preview — its config actions have no backend, so they are disabled. */}
+        <VelionIconButton type="button" size="xs" shape="rounded" aria-label="More tool options" disabled>
           <MoreHorizontal class="size-3.5" strokeWidth={2} />
         </VelionIconButton>
-        <VelionIconButton type="button" size="xs" shape="rounded" aria-label="Close tool settings">
+        <VelionIconButton type="button" size="xs" shape="rounded" aria-label="Close tool settings" disabled>
           <X class="size-3.5" strokeWidth={2} />
         </VelionIconButton>
       </div>
@@ -63,7 +65,7 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
             </div>
           </div>
 
-          <Button variant="secondary" size="xs" shape="pill">
+          <Button variant="secondary" size="xs" shape="pill" disabled>
             <Pencil class="size-3.5" strokeWidth={2} />
             Improve prompt
           </Button>
@@ -81,7 +83,7 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
                 )}
               </For>
             </div>
-            <Button variant="secondary" size="xs" shape="pill" class="mt-2">
+            <Button variant="secondary" size="xs" shape="pill" class="mt-2" disabled>
               <Plus class="size-3.5" strokeWidth={2} />
               Add output
             </Button>
@@ -90,7 +92,7 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
       </div>
 
       <div class="shrink-0 px-4 pb-4 pt-2">
-        <Button variant="secondary" size="xs" shape="pill" fullWidth>
+        <Button variant="secondary" size="xs" shape="pill" fullWidth disabled>
           {props.inspector.nextLabel}
         </Button>
       </div>

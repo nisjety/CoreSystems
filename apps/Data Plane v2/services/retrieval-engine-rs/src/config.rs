@@ -121,7 +121,10 @@ fn default_model_plane_ai_core_grpc_url() -> String {
     "http://inference-core:9092".into()
 }
 fn default_model_plane_embedding_provider() -> String {
-    "azure_openai".into()
+    // Canonical hyphen form: inference-core's provider registry id is
+    // `azure-openai`. (inference-core now normalises `_`≡`-`, but we send the
+    // canonical form so the hop never depends on that fallback — Phase 3 B-fix.)
+    "azure-openai".into()
 }
 fn default_model_plane_embedding_timeout_ms() -> u64 {
     30_000

@@ -447,6 +447,11 @@ struct SemanticCacheSearchRequest {
     org_id: String,
     model: String,
     prompt: String,
+    /// Optional ZDR session mode (e.g. "ephemeral"). When ephemeral, the prompt
+    /// is ZDR content and its embedding must not egress to a retaining provider;
+    /// the embed layer's egress guard enforces it. Defaults to non-ZDR.
+    #[serde(default)]
+    zdr_mode: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -455,6 +460,12 @@ struct SemanticCacheStoreRequest {
     model: String,
     prompt: String,
     response: String,
+    #[serde(default)]
+    zdr_mode: Option<String>,
+}
+
+fn is_ephemeral_zdr(zdr_mode: &Option<String>) -> bool {
+    zdr_mode.as_deref() == Some("ephemeral")
 }
 
 async fn semantic_cache_search(
@@ -468,6 +479,7 @@ async fn semantic_cache_search(
         &req.org_id,
         &req.model,
         &req.prompt,
+        is_ephemeral_zdr(&req.zdr_mode),
     )
     .await?;
     Ok(match hit {
@@ -492,6 +504,7 @@ async fn semantic_cache_store(
         &req.model,
         &req.prompt,
         &req.response,
+        is_ephemeral_zdr(&req.zdr_mode),
     )
     .await?;
     Ok(Json(serde_json::json!({ "stored": true })))

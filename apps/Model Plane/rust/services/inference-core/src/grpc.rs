@@ -145,18 +145,38 @@ impl InferenceCore for InferenceService {
         request: Request<pb::CreateEmbeddingRequest>,
     ) -> Result<Response<pb::CreateEmbeddingResponse>, Status> {
         let req = request.into_inner();
+        // Capture identifiers before they move into the internal request so a
+        // failure is never silent (Phase 3 B-spike: the embedding error path had
+        // no server-side log, so a provider-hint mismatch surfaced only as an
+        // opaque client-side Status).
+        let request_id = req.request_id.clone();
+        let provider_hint = req.provider_hint.clone();
+        let model = req.model.clone();
         let internal_req = provider::EmbedRequest {
             request_id: req.request_id,
             provider_hint: req.provider_hint,
             text: req.text,
             model: req.model,
+            // Carry the ZDR signal through; inference-core's provider is Azure
+            // today so residency enforcement is Phase-4 — this just threads it
+            // so a future EU/ZDR provider can honor it.
+            zdr: req.zdr,
         };
 
         let result = self
             .chain
             .create_embedding(&internal_req)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(
+                    request_id = %request_id,
+                    provider_hint = %provider_hint,
+                    model = %model,
+                    error = %e,
+                    "create_embedding failed"
+                );
+                Status::internal(e.to_string())
+            })?;
 
         Ok(Response::new(pb::CreateEmbeddingResponse {
             request_id: result.request_id,
