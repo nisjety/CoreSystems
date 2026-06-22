@@ -545,6 +545,7 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         requested_at: Some(ts(row.requested_at)),
         decided_at: row.decided_at.map(ts),
         expires_at: row.expires_at.map(ts),
+        org_id: row.org_id.clone(),
     }
 }
 
@@ -999,6 +1000,28 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         result
     }
 
+    async fn list_pending_approvals(
+        &self,
+        request: Request<proto::OrgPendingApprovalsRequest>,
+    ) -> Result<Response<proto::OrgPendingApprovalsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::OrgPendingApprovalsResponse>, Status> = async {
+            let req = request.into_inner();
+            // Empty org_id is intentional: it returns ALL pending approvals
+            // across every org for model-gateway's boot rehydrate. A non-empty
+            // org_id scopes the read to that tenant (IDOR-safe). The durable
+            // "pending" status is `'requested'`.
+            let rows = store::list_pending_approvals(&self.pool, &req.org_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let approvals: Vec<proto::Approval> = rows.iter().map(approval_from_row).collect();
+            Ok(Response::new(proto::OrgPendingApprovalsResponse { approvals }))
+        }
+        .await;
+        record_metrics("list_pending_approvals", started, result.is_ok());
+        result
+    }
+
     async fn get_approval(
         &self,
         request: Request<proto::GetApprovalRequest>,
@@ -1072,20 +1095,39 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req.requested_of,
                 &req.org_id,
                 &req.user_id,
-                // No idempotency key — a posture gate may legitimately fire
-                // more than once per run/step.
-                "",
+                // Caller-supplied idempotency key (D-1). When set, a retried
+                // request collapses onto the existing durable row via the
+                // `ON CONFLICT (org_id, idempotency_key) DO NOTHING` guard
+                // instead of creating a duplicate. Empty = no guard (a posture
+                // gate may legitimately fire more than once per run/step).
+                &req.idempotency_key,
                 &metadata,
                 expires_at,
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            let approval_id = created.unwrap_or(id);
-            let row = store::get_approval(&self.pool, &approval_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::internal("approval vanished after insert"))?;
+            // On the `DO NOTHING` no-op path `created` is None and the existing
+            // durable row keeps its ORIGINAL id (not the new caller id), so we
+            // must resolve it by the idempotency key rather than by `id`.
+            let row = match created {
+                Some(new_id) => store::get_approval(&self.pool, &new_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?,
+                None if !req.idempotency_key.is_empty() => {
+                    store::get_approval_by_idempotency_key(
+                        &self.pool,
+                        &req.org_id,
+                        &req.idempotency_key,
+                    )
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                }
+                None => store::get_approval(&self.pool, &id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?,
+            }
+            .ok_or_else(|| Status::internal("approval vanished after insert"))?;
             let approval = approval_from_row(&row);
 
             // Operator surfaces (run-event feed, snapshot) consume both: the

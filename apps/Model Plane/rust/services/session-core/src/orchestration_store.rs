@@ -517,6 +517,31 @@ pub async fn get_approval(pool: &Pool, id: &str) -> Result<Option<ApprovalRow>> 
     Ok(row)
 }
 
+/// Fetch a single approval by its `(org_id, idempotency_key)` pair. Used to
+/// resolve the existing durable record when an idempotent re-request hit the
+/// `ON CONFLICT ... DO NOTHING` no-op path and so returned no new id. (D-1)
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn get_approval_by_idempotency_key(
+    pool: &Pool,
+    org_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<ApprovalRow>> {
+    let row = sqlx::query_as::<_, ApprovalRow>(
+        "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
+                decision_reason, org_id, user_id, idempotency_key, metadata, \
+                requested_at, decided_at, expires_at \
+         FROM approvals WHERE org_id = $1 AND idempotency_key = $2",
+    )
+    .bind(org_id)
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// List plans associated with a run id.
 ///
 /// # Errors
@@ -600,6 +625,29 @@ pub async fn list_approvals_by_run_full(pool: &Pool, run_id: &str) -> Result<Vec
          FROM approvals WHERE run_id = $1 ORDER BY requested_at DESC",
     )
     .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// List all PENDING (status = `'requested'`) approvals (full row), oldest
+/// first. When `org_id` is empty, returns every pending approval across all
+/// orgs — the internal-only boot-rehydrate path for model-gateway. A non-empty
+/// `org_id` scopes the result to that tenant (IDOR-safe read-through). (D-1)
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_pending_approvals(pool: &Pool, org_id: &str) -> Result<Vec<ApprovalRow>> {
+    let rows = sqlx::query_as::<_, ApprovalRow>(
+        "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
+                decision_reason, org_id, user_id, idempotency_key, metadata, \
+                requested_at, decided_at, expires_at \
+         FROM approvals \
+         WHERE status = 'requested' AND ($1 = '' OR org_id = $1) \
+         ORDER BY requested_at ASC",
+    )
+    .bind(org_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)
