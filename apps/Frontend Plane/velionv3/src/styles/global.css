@@ -17989,6 +17989,49 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
+.ingestions-source-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 4px 0 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #ecebe7;
+}
+
+.ingestions-checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #555b52;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.ingestions-checkbox-field input {
+  width: 16px;
+  height: 16px;
+  accent-color: #111111;
+}
+
+.ingestions-source-meta-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dark .ingestions-source-form {
+  border-bottom-color: #2a2c28;
+}
+
+.dark .ingestions-checkbox-field {
+  color: #aeb3a8;
+}
+
+.dark .ingestions-checkbox-field input {
+  accent-color: #f4f3ef;
+}
+
 .ingestions-inline-link {
   display: inline-flex;
   flex-shrink: 0;
