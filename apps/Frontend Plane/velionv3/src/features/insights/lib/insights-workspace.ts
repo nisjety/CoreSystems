@@ -4,23 +4,24 @@ import {
   type InsightConnector,
 } from '@/shared/api/insights-client'
 import { listConnections, type IntegrationConnection } from '@/shared/api/integrations-client'
+import {
+  withResourceTimeout,
+  type MeasurementState,
+  type ResourceResult,
+} from '@/shared/read-data'
 
-// `live` describes a CONTRACT that responded with real rows. It must never be
-// attached to a rendered metric VALUE, because there are no live metric
-// producers behind insight-core yet — only the connector registry is real.
-export type MeasurementState = 'live' | 'empty' | 'not_connected' | 'unavailable' | 'planned'
+// The read-data substrate (Phase 4 PR-1) owns MeasurementState / ResourceResult
+// / withResourceTimeout. Re-exported here so existing insights importers keep
+// their paths and the honesty contract stays single-sourced: `live` still never
+// attaches to a rendered metric VALUE — only the connector registry is real.
+export type { MeasurementState, ResourceResult }
+export { withResourceTimeout }
 
 export type InsightsContext = {
   email: string
   name: string
   orgId: string
   orgLabel: string
-}
-
-export type ResourceResult<T> = {
-  data: T
-  message: string
-  state: MeasurementState
 }
 
 export type InsightsWorkspace = {
@@ -64,23 +65,6 @@ export async function loadInsightsWorkspace(): Promise<InsightsWorkspace> {
     externalAnalytics: buildExternalAnalyticsSlots(integrations, insightConnectors),
     insightConnectors,
     integrations,
-  }
-}
-
-export async function withResourceTimeout<T>(
-  resource: Promise<ResourceResult<T>>,
-  fallback: ResourceResult<T>,
-  timeoutMs = INSIGHTS_RESOURCE_TIMEOUT_MS,
-): Promise<ResourceResult<T>> {
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  const timeoutResult = new Promise<ResourceResult<T>>((resolve) => {
-    timeout = setTimeout(() => resolve(fallback), timeoutMs)
-  })
-
-  try {
-    return await Promise.race([resource, timeoutResult])
-  } finally {
-    if (timeout) clearTimeout(timeout)
   }
 }
 
