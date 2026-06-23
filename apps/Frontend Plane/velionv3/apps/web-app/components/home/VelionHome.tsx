@@ -9,7 +9,7 @@ import { DetailGallerySection } from "./sections/DetailGallerySection";
 import { ExcellenceSection } from "./sections/ExcellenceSection";
 import { HeritageSection } from "./sections/HeritageSection";
 import { HeroSection } from "./sections/HeroSection";
-import { PartnershipSection } from "./sections/PartnershipSection";
+import ExploreSection from "./sections/ExploreSection";
 import { PreFooterStatementSection } from "./sections/PreFooterStatementSection";
 import { ProductLoopSection } from "./sections/ProductLoopSection";
 import { SensesSection } from "./sections/SensesSection";
@@ -409,9 +409,9 @@ export function VelionHome() {
       <main>
         <HeroSection />
         <BrandLogosSection />
-        <PartnershipSection />
-        <ProductLoopSection />
+        <ExploreSection />
         <WorkflowAutomationSection />
+        <ProductLoopSection />
         <SensesSection />
         <DetailGallerySection />
         <ExcellenceSection />

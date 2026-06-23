@@ -1,0 +1,256 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@font-face {
+	font-family: Arbeit;
+	font-style: normal;
+	font-weight: 300;
+	src: url("/fonts/arbeit-pro-light/arbeit-pro-light.woff") format("woff");
+	font-display: swap;
+}
+
+@font-face {
+	font-family: Arbeit;
+	font-style: normal;
+	font-weight: 400;
+	src: url("/fonts/arbeit-pro-book/arbeit-pro-book.woff") format("woff");
+	font-display: swap;
+}
+
+@font-face {
+	font-family: Protokoll;
+	font-style: normal;
+	font-weight: 300;
+	src: url("/fonts/protokoll-light/ProtokollLight-Web.woff2") format("woff2");
+	font-display: swap;
+}
+
+@font-face {
+	font-family: Protokoll;
+	font-style: normal;
+	font-weight: 500;
+	src: url("/fonts/protokoll-medium/ProtokollMedium-Web.woff2") format("woff2");
+	font-display: swap;
+}
+
+:root {
+	color: var(--foreground);
+	background: var(--background);
+
+	font-synthesis: none;
+	line-height: 1.5;
+	text-rendering: optimizeLegibility;
+	-webkit-font-smoothing: antialiased;
+
+	--background: #f8f8f7;
+	--foreground: #1a1a1a;
+
+	--card: #ffffff;
+	--card-foreground: #1a1a1a;
+	--popover: #ffffff;
+	--popover-foreground: #1a1a1a;
+	--primary: #171717;
+	--primary-foreground: #ffffff;
+	--secondary: #f1f1f0;
+	--secondary-foreground: #1a1a1a;
+	--muted: #f3f3f2;
+	--muted-foreground: #7a7a7f;
+	--accent: #f0f0ef;
+	--accent-foreground: #1a1a1a;
+	--destructive: #dc2626;
+	--destructive-foreground: #ffffff;
+	--border: #e7e7e5;
+	--input: #e9e9e7;
+	--ring: #ee7a50;
+	--radius: 0.75rem;
+
+	--velion-bg: #f8f8f7;
+	--velion-bg-soft: #f3f3f2;
+	--velion-bg-cream: #f8f8f7;
+	--velion-bg-mist: #ecebea;
+
+	--velion-surface: #ffffff;
+	--velion-surface-soft: #f4f4f3;
+	--velion-surface-muted: #eeeeed;
+
+	--velion-text: #1a1a1a;
+	--velion-text-soft: #34363d;
+	--velion-text-muted: #66615b;
+	--velion-text-subtle: #a3a6ad;
+
+	--velion-border: #e7e7e5;
+	--velion-border-soft: #eeeeec;
+	--velion-border-strong: #d8d8d4;
+  --velion-footer-bg: #f6f6f4;
+
+	--velion-primary: #171717;
+	--velion-primary-hover: #34363d;
+	--velion-primary-soft: #efefee;
+	--velion-primary-dark: #111111;
+
+	--velion-brand: #171717;
+	--velion-blue-mist: #eef4ff;
+	--velion-blue-grey: #4f7df3;
+	--velion-ink-warm: #1c1c1c;
+	--velion-teal-deep: #4f7df3;
+
+	--velion-coral: #ee7a50;
+	--velion-coral-hover: #dd6f3d;
+	--velion-coral-glow: #ee7a50;
+	--velion-coral-deep: #793819;
+	--velion-coral-soft: #fff1e7;
+
+	--velion-a-earth: #793819;
+	--velion-a-accent: #ee7a50;
+	--velion-b-apricot: #f7c8a8;
+	--velion-b-mist: #e8d8c8;
+	--velion-c-cream: #f4f1eb;
+	--velion-c-white: #f7f4ee;
+	--velion-d-panel-muted: #f1eee8;
+	--velion-d-border: #d8d2c6;
+	--velion-e-muted: #66615b;
+	--velion-e-subtle: #8a8d96;
+	--velion-g-blue-mist: #d9e3e4;
+	--velion-g-blue-grey: #818e99;
+	--velion-h-teal-deep: #29404a;
+	--velion-h-ink-warm: #251f21;
+	--velion-j-text: #171717;
+	--velion-j-text-soft: #34363d;
+}
+
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	--color-velion-bg: var(--velion-bg);
+	--color-velion-bg-soft: var(--velion-bg-soft);
+	--color-velion-bg-cream: var(--velion-bg-cream);
+	--color-velion-bg-mist: var(--velion-bg-mist);
+
+	--color-velion-surface: var(--velion-surface);
+	--color-velion-surface-soft: var(--velion-surface-soft);
+	--color-velion-surface-muted: var(--velion-surface-muted);
+
+	--color-velion-text: var(--velion-text);
+	--color-velion-text-soft: var(--velion-text-soft);
+	--color-velion-text-muted: var(--velion-text-muted);
+	--color-velion-text-subtle: var(--velion-text-subtle);
+
+	--color-velion-border: var(--velion-border);
+	--color-velion-border-soft: var(--velion-border-soft);
+	--color-velion-border-strong: var(--velion-border-strong);
+  --color-velion-footer-bg: var(--velion-footer-bg);
+
+	--color-velion-coral: var(--velion-coral);
+	--color-velion-coral-hover: var(--velion-coral-hover);
+	--color-velion-coral-soft: var(--velion-coral-soft);
+
+	--color-velion-a-earth: var(--velion-a-earth);
+	--color-velion-c-white: var(--velion-c-white);
+	--color-velion-g-blue-mist: var(--velion-g-blue-mist);
+	--color-velion-h-teal-deep: var(--velion-h-teal-deep);
+	--color-velion-h-ink-warm: var(--velion-h-ink-warm);
+	--color-velion-j-text: var(--velion-j-text);
+	--color-velion-j-text-soft: var(--velion-j-text-soft);
+  
+
+	--font-arbeit: Arbeit, sans-serif;
+	--font-protokoll: Protokoll, sans-serif;
+	--font-sans: var(--font-geist-sans);
+	--font-mono: var(--font-geist-mono);
+
+	--radius-sm: calc(var(--radius) - 4px);
+	--radius-md: calc(var(--radius) - 2px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 4px);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--background: #171717;
+		--foreground: #f8f8f7;
+	}
+}
+
+html {
+	scroll-behavior: smooth;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	overflow-x: hidden;
+	background: var(--background);
+	color: var(--foreground);
+	font-family:
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+}
+
+body.velion-menu-open {
+	overflow: hidden;
+}
+
+button,
+input {
+	font: inherit;
+}
+
+a {
+	color: inherit;
+	text-decoration: none;
+}
+
+img,
+svg,
+video,
+canvas {
+	display: block;
+	max-width: 100%;
+}
+
+::selection {
+	background: var(--velion-coral);
+	color: #ffffff;
+}
+
+@keyframes velion-menu-enter {
+	from {
+		opacity: 0;
+		transform: scale(1.02);
+	}
+}
+
+@keyframes velion-menu-item-enter {
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}

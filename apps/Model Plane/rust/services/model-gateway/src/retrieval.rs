@@ -577,6 +577,7 @@ struct GraphRetrieveResponse {
 async fn load_graph_grounding(
     state: &AppState,
     org_id: &str,
+    user_id: &str,
     query: &str,
 ) -> Option<GroundingGraph> {
     let url = format!("{}/v1/retrieve/graph", retrieval_http_base_url());
@@ -588,9 +589,14 @@ async fn load_graph_grounding(
         .json(&json!({
             "org_id": org_id,
             "query": query,
-            "max_entities": GRAPH_NODE_LIMIT as i32,
+            "max_entities": i32::try_from(GRAPH_NODE_LIMIT).unwrap_or(i32::MAX),
             "include_communities": true,
         }));
+    // Forward the viewer so the Data Plane gates graph nodes per-user (entities/
+    // claims/relationships derived from docs the viewer can't see are filtered out).
+    if !user_id.is_empty() {
+        request = request.header("x-user-id", user_id);
+    }
     if let Ok(key) = std::env::var("DATAPLANE_INTERNAL_KEY") {
         request = request.header("x-api-key", key);
     }
@@ -675,8 +681,18 @@ pub async fn retrieve(
     };
 
     let mut retrieval_client = state.retrieval_client.clone();
-    let retrieval_future = retrieval_client.retrieve(authorize(tonic::Request::new(request)));
-    let graph_future = load_graph_grounding(state, org_id, query);
+    // Forward the viewer as `x-user-id` metadata so the Data Plane binds per-user
+    // ownership to the session user (the DP ignores the request-body user_id and
+    // trusts this gateway-internal, x-api-key-authed metadata). Empty → the DP
+    // stays org-scoped (legacy).
+    let mut grpc_req = authorize(tonic::Request::new(request));
+    if !user_id.is_empty() {
+        if let Ok(val) = tonic::metadata::AsciiMetadataValue::try_from(user_id) {
+            grpc_req.metadata_mut().insert("x-user-id", val);
+        }
+    }
+    let retrieval_future = retrieval_client.retrieve(grpc_req);
+    let graph_future = load_graph_grounding(state, org_id, user_id, query);
     let (retrieval_result, graph) = tokio::join!(retrieval_future, graph_future);
 
     match retrieval_result {

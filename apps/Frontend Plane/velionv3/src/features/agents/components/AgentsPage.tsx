@@ -26,7 +26,7 @@ import {
   StageReadinessPanel,
   StageSystemCard,
 } from '@/features/agents/components/AgentsWorkspacePrimitives'
-import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
+import { BLUEPRINT_BADGE_TITLE, DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import { WorkflowBuilder } from '@/features/agents/components/WorkflowBuilder'
 import { agentBlueprints } from '@/features/agents/lib/velion-agent-blueprints'
 import {
@@ -103,7 +103,8 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
           One agent system for the entire customer journey
         </h1>
         <p class="agents-overview-description">
-          Choose a Velion blueprint, then configure the role with knowledge, tests, channels, and insight loops.
+          Each role below is a Velion blueprint — a reference operating model, not yet configured for this org.
+          Choose one to review how its knowledge, tests, channels, and insight loops fit together.
         </p>
       </header>
 
@@ -215,11 +216,14 @@ function SelectedAgentWorkspace(props: {
                   </span>
                 </div>
                 <p class="mt-3 text-[12px] leading-5 text-[#626873] dark:text-[#AEB4C0]">{view().operatingModel.activationSummary}</p>
-                {/* Phase 3 PR-1 (honesty sweep): agent activation/readiness has no
-                    deploy backend yet (no agent-activation substrate). Marked as a
-                    design preview and the activate/readiness controls are disabled
-                    so neither implies a working deploy path. */}
-                <DesignPreviewBadge class="mt-3" />
+                {/* Phase 3 PR-1 (honesty sweep) + Phase 4 PR-3 (A5): agent
+                    activation/readiness has no deploy or per-org config backend yet
+                    (the real per-org agent-config store is deferred to Phase 5).
+                    Labelled "Blueprint / not yet configured for this org" and the
+                    activate/readiness controls are disabled so nothing implies a
+                    configured or deployable agent. No Active/Private/Live badge. */}
+                <DesignPreviewBadge class="mt-3" label="Blueprint" title={BLUEPRINT_BADGE_TITLE} />
+                <p class="mt-2 text-[11px] font-medium leading-4 text-[#8A909B] dark:text-[#7C828C]">Not yet configured for this org</p>
                 <div class="mt-4 flex gap-2">
                   <Button variant="primary" size="md" shape="pill" disabled class={cn('min-h-8 flex-1 px-4 text-[12px] font-semibold', controlFocusClass)}>
                     <Rocket class="size-3.5" />

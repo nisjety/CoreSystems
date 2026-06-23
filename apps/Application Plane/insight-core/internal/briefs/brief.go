@@ -10,6 +10,8 @@ package briefs
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/insights"
 )
@@ -47,12 +49,19 @@ type Brief struct {
 	Disclosure  string         `json:"disclosure,omitempty"`
 	TotalEvents int            `json:"total_events"`
 	Surfaces    []SurfaceCount `json:"surfaces"`
+	// Sources cites the real producer services behind the brief's counts
+	// (e.g. ["conversation-core", "social-core"]), distinct and sorted. Empty
+	// when nothing was attributed — never a fabricated source.
+	Sources []string `json:"sources,omitempty"`
 }
 
 // SurfaceCount is one surface's real recorded total in the brief window.
 type SurfaceCount struct {
 	Surface     string `json:"surface"`
 	TotalEvents int    `json:"total_events"`
+	// Source cites the real producer(s) behind this surface's counts, threaded
+	// from the overview scorecards. Empty when unattributed — never fabricated.
+	Source string `json:"source,omitempty"`
 }
 
 // AssembleBrief builds a brief from an insight-core overview. It sums the real
@@ -69,18 +78,30 @@ func AssembleBrief(overview *insights.Overview) Brief {
 	}
 	brief.OrgID = overview.OrgID
 
+	// Citation: gather the real producer(s) per surface from the overview
+	// scorecards (which carry MetricRollup.Source). Never fabricated — a surface
+	// with no attributed scorecard simply has an empty source.
+	sourcesBySurface := sourcesBySurfaceFrom(overview.Scorecards)
+	allSources := map[string]struct{}{}
+
 	total := 0
 	for _, surface := range overview.Surfaces {
 		if surface.TotalEvents <= 0 {
 			continue
 		}
 		total += surface.TotalEvents
+		source := joinSources(sourcesBySurface[surface.Surface])
 		brief.Surfaces = append(brief.Surfaces, SurfaceCount{
 			Surface:     surface.Surface,
 			TotalEvents: surface.TotalEvents,
+			Source:      source,
 		})
+		for src := range sourcesBySurface[surface.Surface] {
+			allSources[src] = struct{}{}
+		}
 	}
 	brief.TotalEvents = total
+	brief.Sources = sortedSources(allSources)
 
 	if total >= BriefMinEvents {
 		brief.State = StateLive
@@ -94,6 +115,59 @@ func AssembleBrief(overview *insights.Overview) Brief {
 	brief.Body = fmt.Sprintf("%d recorded event(s) so far.", total)
 	brief.Disclosure = PreviewDisclosure
 	return brief
+}
+
+// sourcesBySurfaceFrom collects the distinct, non-empty producer sources per
+// surface from the overview scorecards. The map values are sets so the same
+// producer is never double-counted across metrics on one surface.
+func sourcesBySurfaceFrom(scorecards []insights.Scorecard) map[string]map[string]struct{} {
+	bySurface := map[string]map[string]struct{}{}
+	for _, card := range scorecards {
+		source := card.Source
+		if source == "" {
+			continue
+		}
+		if bySurface[card.Surface] == nil {
+			bySurface[card.Surface] = map[string]struct{}{}
+		}
+		// Scorecard.Source may already be a joined "a, b" string; split on the
+		// same separator so each producer is a distinct set member.
+		for _, part := range splitSources(source) {
+			bySurface[card.Surface][part] = struct{}{}
+		}
+	}
+	return bySurface
+}
+
+// joinSources renders a producer set as a stable, comma-separated citation.
+// Empty when the set is empty — the honest "unattributed" state.
+func joinSources(sources map[string]struct{}) string {
+	return strings.Join(sortedSources(sources), ", ")
+}
+
+// sortedSources returns the set's members as a sorted slice (deterministic).
+func sortedSources(sources map[string]struct{}) []string {
+	if len(sources) == 0 {
+		return nil
+	}
+	list := make([]string, 0, len(sources))
+	for source := range sources {
+		list = append(list, source)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// splitSources splits a possibly-joined "a, b" citation back into producers,
+// trimming whitespace and dropping empties.
+func splitSources(joined string) []string {
+	parts := []string{}
+	for _, part := range strings.Split(joined, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return parts
 }
 
 // Payload converts the brief into the notification payload map. It carries the
@@ -113,6 +187,9 @@ func (b Brief) Payload() map[string]any {
 	}
 	if b.Disclosure != "" {
 		payload["disclosure"] = b.Disclosure
+	}
+	if len(b.Sources) > 0 {
+		payload["sources"] = b.Sources
 	}
 	return payload
 }

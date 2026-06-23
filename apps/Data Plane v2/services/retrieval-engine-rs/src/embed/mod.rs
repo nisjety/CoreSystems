@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+pub mod visual;
+
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 200;
 
@@ -224,6 +226,10 @@ impl ModelPlaneEmbeddingClient {
             model: self.model.clone(),
             provider_hint: self.provider.clone(),
             zdr,
+            // Empty = no caller preference → inference-core uses its configured
+            // EU deployment (deny-by-default on non-EU). Query embeddings ride the
+            // same EU default; a specific region can be wired here later.
+            region: String::new(),
         }
     }
 

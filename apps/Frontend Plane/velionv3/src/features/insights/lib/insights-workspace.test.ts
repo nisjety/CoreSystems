@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   buildExternalAnalyticsSlots,
   normalizeIntegrationConnections,
+  overviewResult,
   withResourceTimeout,
   type ResourceResult,
 } from '@/features/insights/lib/insights-workspace'
-import type { InsightConnector } from '@/shared/api/insights-client'
+import type { InsightConnector, InsightScorecard } from '@/shared/api/insights-client'
 import type { IntegrationConnection } from '@/shared/api/integrations-client'
 
 describe('buildExternalAnalyticsSlots', () => {
@@ -114,6 +115,27 @@ describe('buildExternalAnalyticsSlots', () => {
     expect(normalizeIntegrationConnections([connectionItem])).toEqual([connectionItem])
     expect(normalizeIntegrationConnections({ connections: [connectionItem] })).toEqual([connectionItem])
     expect(normalizeIntegrationConnections({ providers: [connectionItem] })).toEqual([])
+  })
+})
+
+describe('overviewResult', () => {
+  it('maps recorded scorecards to a live result that carries the real rows', () => {
+    const scorecards: InsightScorecard[] = [
+      { id: 'inbox.a', label: 'inbox a', metric: 'a', surface: 'inbox', unit: 'count', value: 4, source: 'conversation-core' },
+    ]
+    const result = overviewResult(scorecards)
+
+    expect(result.state).toBe('live')
+    expect(result.data).toEqual(scorecards)
+  })
+
+  it('maps zero scorecards to an honest empty state, never live', () => {
+    const result = overviewResult([])
+
+    expect(result.state).toBe('empty')
+    expect(result.data).toEqual([])
+    // The honesty invariant: `live` is never attached to an unproduced value.
+    expect(result.state).not.toBe('live')
   })
 })
 

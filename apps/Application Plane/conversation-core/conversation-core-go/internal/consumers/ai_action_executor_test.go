@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 )
 
 // fakeStore models conversation_ai_actions with an atomic approved→executed
@@ -16,8 +17,10 @@ type fakeStore struct {
 	mu           sync.Mutex
 	action       *conversation.AIAction
 	ticket       *conversation.Ticket
+	threadRef    *conversation.ChannelThreadRef
 	getErr       error
 	getTicketErr error
+	getRefErr    error
 	claimErr     error
 
 	claimWins    int // claims that observed RowsAffected == 1
@@ -48,6 +51,19 @@ func (f *fakeStore) GetTicketByConversation(_ context.Context, orgID, conversati
 		return nil, conversation.ErrNotFound
 	}
 	cp := *f.ticket
+	return &cp, nil
+}
+
+func (f *fakeStore) GetChannelThreadRefByConversation(_ context.Context, orgID, conversationID string) (*conversation.ChannelThreadRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getRefErr != nil {
+		return nil, f.getRefErr
+	}
+	if f.threadRef == nil || f.threadRef.OrgID != orgID || f.threadRef.ConversationID != conversationID {
+		return nil, conversation.ErrNotFound
+	}
+	cp := *f.threadRef
 	return &cp, nil
 }
 
@@ -114,15 +130,76 @@ func (f *fakePublisher) Publish(_ context.Context, subject string, _ any) error 
 }
 
 func (f *fakePublisher) countExecuted() int {
+	return f.countSubject(conversation.SubjectAIActionExecuted)
+}
+
+func (f *fakePublisher) countSubject(subject string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
 	for _, s := range f.subjects {
-		if s == conversation.SubjectAIActionExecuted {
+		if s == subject {
 			n++
 		}
 	}
 	return n
+}
+
+// fakeSender records send attempts behind a mutex so concurrent deliveries race
+// exactly as a real send would, letting the no-double-send test assert exactly
+// one Send call survives the atomic claim.
+type fakeSender struct {
+	mu     sync.Mutex
+	calls  int
+	result *integration.SendResult
+	err    error
+}
+
+func (f *fakeSender) Send(_ context.Context, _ integration.SendRequest) (*integration.SendResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &integration.SendResult{ProviderMessageID: "pmid-1", Operation: "message.send"}, nil
+}
+
+func (f *fakeSender) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// draftFixture wires an executor over a fresh approved draft.reply action, its
+// resolved channel thread ref, and a fakeSender ready to confirm the send.
+func draftFixture() (*AIActionExecutor, *fakeStore, *fakeSender, *fakePublisher) {
+	store := &fakeStore{
+		action: &conversation.AIAction{
+			ID:             "act-1",
+			OrgID:          "org-1",
+			ConversationID: "conv-1",
+			Kind:           kindDraftReply,
+			Status:         "approved",
+			Payload: map[string]any{
+				"body_text": "Thanks for reaching out — here is your answer.",
+			},
+		},
+		threadRef: &conversation.ChannelThreadRef{
+			OrgID:            "org-1",
+			ConversationID:   "conv-1",
+			Provider:         "slack",
+			ConnectionID:     "conn-1",
+			ProviderThreadID: "C123",
+		},
+	}
+	sender := &fakeSender{}
+	publisher := &fakePublisher{}
+	exec := &AIActionExecutor{store: store, publisher: publisher, sender: sender}
+	return exec, store, sender, publisher
 }
 
 // fixture wires an executor over a fresh approved ticket.classification action
@@ -325,5 +402,155 @@ func TestProcess_MalformedEvent_Acks(t *testing.T) {
 	}
 	if tickets.count() != 0 || pub.countExecuted() != 0 {
 		t.Errorf("malformed event applied side effects")
+	}
+}
+
+// --- draft.reply act-leg ---
+
+func TestProcess_ApprovedDraftReply_SendsOnceAndEmitsExecuted(t *testing.T) {
+	exec, store, sender, pub := draftFixture()
+	sender.result = &integration.SendResult{ProviderMessageID: "slack-ts-1", Operation: "message.send"}
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if sender.count() != 1 {
+		t.Errorf("Send called %d times, want 1", sender.count())
+	}
+	if pub.countExecuted() != 1 {
+		t.Errorf("ai_action.executed emitted %d times, want 1", pub.countExecuted())
+	}
+	if pub.countSubject(conversation.SubjectAIActionSendFailed) != 0 {
+		t.Errorf("send_failed emitted on a successful send")
+	}
+	if store.action.Status != "executed" {
+		t.Errorf("action status = %q, want executed", store.action.Status)
+	}
+}
+
+func TestProcess_DraftReply_DuplicateDelivery_SendsOnce(t *testing.T) {
+	exec, _, sender, pub := draftFixture()
+	ev := reviewedEvent("org-1", "act-1", "approved")
+
+	for i := range 3 {
+		if got := exec.process(context.Background(), ev); got != outcomeAck {
+			t.Fatalf("delivery %d outcome = %v, want outcomeAck", i, got)
+		}
+	}
+	if sender.count() != 1 {
+		t.Errorf("Send called %d times across 3 deliveries, want 1 (no double-send)", sender.count())
+	}
+	if pub.countExecuted() != 1 {
+		t.Errorf("ai_action.executed emitted %d times across 3 deliveries, want 1", pub.countExecuted())
+	}
+}
+
+func TestProcess_DraftReply_ConcurrentDelivery_SendsOnce(t *testing.T) {
+	exec, _, sender, pub := draftFixture()
+	ev := reviewedEvent("org-1", "act-1", "approved")
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			exec.process(context.Background(), ev)
+		}()
+	}
+	wg.Wait()
+
+	if sender.count() != 1 {
+		t.Errorf("Send called %d times under concurrent redelivery, want exactly 1 (no double-send)", sender.count())
+	}
+	if pub.countExecuted() != 1 {
+		t.Errorf("ai_action.executed emitted %d times under concurrency, want exactly 1", pub.countExecuted())
+	}
+}
+
+func TestProcess_DraftReply_TerminalSendFailure_EmitsSendFailedNoUnclaim(t *testing.T) {
+	exec, store, sender, pub := draftFixture()
+	// Terminal: a 4xx-class failure must not be retried forever.
+	sender.err = &integration.SendError{Terminal: true, Status: 400, Code: "invalid_body", Message: "bad request"}
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck (terminal failure must not retry)", got)
+	}
+	if sender.count() != 1 {
+		t.Errorf("Send called %d times, want 1", sender.count())
+	}
+	if pub.countSubject(conversation.SubjectAIActionSendFailed) != 1 {
+		t.Errorf("send_failed emitted %d times, want exactly 1", pub.countSubject(conversation.SubjectAIActionSendFailed))
+	}
+	if pub.countExecuted() != 0 {
+		t.Errorf("executed emitted on a terminal send failure")
+	}
+	if store.unclaimCalls != 0 {
+		t.Errorf("terminal failure unclaimed (%d); must stay claimed to avoid retry-forever", store.unclaimCalls)
+	}
+	if store.action.Status != "executed" {
+		t.Errorf("action status = %q, want executed (claim retained after terminal failure)", store.action.Status)
+	}
+}
+
+func TestProcess_DraftReply_TransientSendFailure_UnclaimsAndRetries(t *testing.T) {
+	exec, store, sender, pub := draftFixture()
+	// Transient: a 5xx/timeout-class failure should unclaim and retry.
+	sender.err = &integration.SendError{Terminal: false, Status: 502, Code: "upstream", Message: "down"}
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeRetry {
+		t.Fatalf("outcome = %v, want outcomeRetry (transient failure retries)", got)
+	}
+	if store.unclaimCalls != 1 {
+		t.Errorf("transient failure did not unclaim: unclaimCalls=%d, want 1", store.unclaimCalls)
+	}
+	if store.action.Status != "approved" {
+		t.Errorf("action status after rollback = %q, want approved (eligible for redelivery)", store.action.Status)
+	}
+	if pub.countExecuted() != 0 || pub.countSubject(conversation.SubjectAIActionSendFailed) != 0 {
+		t.Errorf("transient failure emitted a terminal event")
+	}
+}
+
+func TestProcess_DraftReply_ForeignOrg_NeverSends(t *testing.T) {
+	exec, store, sender, pub := draftFixture()
+	if got := exec.process(context.Background(), reviewedEvent("org-2", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if sender.count() != 0 || store.claimCalls != 0 {
+		t.Errorf("foreign-org draft.reply sent or claimed: sends=%d claims=%d", sender.count(), store.claimCalls)
+	}
+	if pub.countExecuted() != 0 {
+		t.Errorf("foreign-org draft.reply emitted executed")
+	}
+}
+
+func TestProcess_DraftReply_MissingThreadRef_SkipsWithoutClaiming(t *testing.T) {
+	exec, store, sender, _ := draftFixture()
+	store.threadRef = nil // no channel ref to address the send
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if store.claimCalls != 0 {
+		t.Errorf("claimed despite no thread ref (%d)", store.claimCalls)
+	}
+	if sender.count() != 0 {
+		t.Errorf("sent despite no thread ref (%d)", sender.count())
+	}
+}
+
+func TestProcess_DraftReply_NoSenderConfigured_SkipsWithoutClaiming(t *testing.T) {
+	exec, store, _, pub := draftFixture()
+	exec.sender = nil // integration not configured
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if store.claimCalls != 0 {
+		t.Errorf("claimed despite no sender configured (%d)", store.claimCalls)
+	}
+	if pub.countExecuted() != 0 {
+		t.Errorf("emitted executed despite no sender configured")
 	}
 }

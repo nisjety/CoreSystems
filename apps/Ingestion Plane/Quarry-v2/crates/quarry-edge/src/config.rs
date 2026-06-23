@@ -30,6 +30,13 @@ pub struct EdgeConfig {
     pub security_snapshot_path: Option<String>,
     #[serde(default)]
     pub data_plane_url: Option<String>,
+    /// Dedicated Data Plane *ingest* (durable write) target. The retrieval
+    /// engine (`data_plane_url`) serves reads/vector-similarity but has no
+    /// `POST /v1/documents` write route — that route lives on the Go
+    /// documents-api. When set, the ingest client (HTTP or gRPC) posts here;
+    /// otherwise it falls back to `data_plane_url` for backward compatibility.
+    #[serde(default)]
+    pub data_plane_ingest_url: Option<String>,
     #[serde(default)]
     pub data_plane_api_key: Option<String>,
     #[serde(default)]
@@ -160,6 +167,17 @@ pub struct EdgeConfig {
     #[serde(default)]
     #[allow(dead_code)] // read only under `postgres-queue`; wired in follow-up
     pub durable_event_history: bool,
+    /// Phase-2 visual RAG producer — when all three are set (and `browser-agent`
+    /// is on), ingested web pages are rendered to PNGs, written to the `cas_bucket`
+    /// MinIO bucket, and `page_images.created` is published to `dataplane_nats_url`.
+    /// `edge_internal_base_url` is the base of the image-serve endpoint the
+    /// embedding-engine GETs. All unset (default) ⇒ producer inert.
+    #[serde(default)]
+    pub cas_bucket: Option<String>,
+    #[serde(default)]
+    pub dataplane_nats_url: Option<String>,
+    #[serde(default)]
+    pub edge_internal_base_url: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -211,6 +229,7 @@ impl EdgeConfig {
             cache_ttl_secs: default_cache_ttl(),
             security_snapshot_path: None,
             data_plane_url: None,
+            data_plane_ingest_url: None,
             data_plane_api_key: None,
             browserbase_api_key: None,
             browserbase_project_id: None,
@@ -240,6 +259,9 @@ impl EdgeConfig {
             profile_store_kind: None,
             database_url: None,
             durable_event_history: false,
+            cas_bucket: None,
+            dataplane_nats_url: None,
+            edge_internal_base_url: None,
         }
     }
 }

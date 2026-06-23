@@ -8,6 +8,7 @@ export const workspaceSettingsSectionIds = [
   'trust',
   'router-policy',
   'finetune',
+  'mcp',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -84,6 +85,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Fine-tune jobs',
     description: 'Manage Azure model fine-tuning jobs: upload training data, launch jobs, and track status.',
     saveLabel: 'Save fine-tune',
+  },
+  {
+    id: 'mcp',
+    label: 'MCP-servere',
+    title: 'MCP-servere',
+    description: 'Registrer eksterne MCP-tjenere agenten kan bruke, og styr hvilke verktøy som er tillatt.',
+    saveLabel: 'Lagre MCP-servere',
   },
 ]
 

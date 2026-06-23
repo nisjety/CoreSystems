@@ -158,6 +158,43 @@ fn artifact_content_type(_id: &str) -> HeaderValue {
     HeaderValue::from_static("application/octet-stream")
 }
 
+/// Phase-2 visual RAG — serve a page-image PNG from the CAS for the
+/// embedding-engine consumer, which GETs the producer-emitted `image_url` with
+/// NO auth. Lives on the INTERNAL (no-JWT) router; the content-hash in the path
+/// is the capability on the trusted inter-plane bus. Always returns `image/png`
+/// (the consumer filters on an `image/*` content-type).
+pub async fn get_page_image(
+    State(state): State<AppState>,
+    Path((org, doc, page, hash)): Path<(String, String, i64, String)>,
+) -> Response {
+    let request_id = RequestKind::new().to_string();
+    let Some(renderer) = state.page_renderer.as_ref() else {
+        return err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::Internal, "page-image producer not configured"),
+        )
+        .into_response();
+    };
+    let key = quarry_runtime::cas_store::CasStore::page_object_key(&org, &doc, page, &hash);
+    let bytes = match renderer.cas().get_object(&key).await {
+        Ok(b) => b,
+        Err(err) => return err_response(&request_id, err).into_response(),
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("image/png"))
+        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| {
+            err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::Internal, "page-image response build failed"),
+            )
+            .into_response()
+        })
+}
+
 // =============================================================================
 // /v1/sources, /v1/snapshots, /v1/{kind}/jobs — Control-Plane forwards
 // =============================================================================

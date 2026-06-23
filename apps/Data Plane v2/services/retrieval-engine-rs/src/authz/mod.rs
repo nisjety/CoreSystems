@@ -32,7 +32,7 @@ pub mod policy;
 pub mod taxonomy;
 pub mod visibility;
 
-pub use context::{AuthContext, AuthMethod, Claims, EffectiveAcl};
+pub use context::{pin_org_from_ctx, AuthContext, AuthMethod, Claims, EffectiveAcl};
 pub use jwks::JwksCache;
 #[allow(unused_imports)]
 // PolicyDecision is part of the public surface; consumers land in later wiring

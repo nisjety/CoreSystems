@@ -47,8 +47,12 @@ type FinetuneJob struct {
 	EstimatedCostUsd     float64 `protobuf:"fixed64,16,opt,name=estimated_cost_usd,json=estimatedCostUsd,proto3" json:"estimated_cost_usd,omitempty"`
 	ActualCostUsd        float64 `protobuf:"fixed64,17,opt,name=actual_cost_usd,json=actualCostUsd,proto3" json:"actual_cost_usd,omitempty"`
 	CreatedBy            string  `protobuf:"bytes,18,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"` // user_id from JWT claims
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Hosting SKU tier of the deployment. `developer` ($0/hr, auto-deletes in
+	// 24h) on auto-deploy; `production` (paid Standard hosting) after an explicit
+	// operator promote. Defaults to `developer`.
+	DeploymentTier string `protobuf:"bytes,19,opt,name=deployment_tier,json=deploymentTier,proto3" json:"deployment_tier,omitempty"` // developer | production
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *FinetuneJob) Reset() {
@@ -203,6 +207,13 @@ func (x *FinetuneJob) GetActualCostUsd() float64 {
 func (x *FinetuneJob) GetCreatedBy() string {
 	if x != nil {
 		return x.CreatedBy
+	}
+	return ""
+}
+
+func (x *FinetuneJob) GetDeploymentTier() string {
+	if x != nil {
+		return x.DeploymentTier
 	}
 	return ""
 }
@@ -708,9 +719,13 @@ type UpdateFinetuneJobStatusRequest struct {
 	ActualCostUsd  float64                `protobuf:"fixed64,7,opt,name=actual_cost_usd,json=actualCostUsd,proto3" json:"actual_cost_usd,omitempty"`
 	// When true the server stamps completed_at = now() and persists. Set on
 	// any terminal state (succeeded/failed/cancelled).
-	SetCompleted  bool `protobuf:"varint,8,opt,name=set_completed,json=setCompleted,proto3" json:"set_completed,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SetCompleted bool `protobuf:"varint,8,opt,name=set_completed,json=setCompleted,proto3" json:"set_completed,omitempty"`
+	// New deployment tier (developer | production). Empty = leave unchanged.
+	// The promote route sets this alongside deployment_name when an operator
+	// provisions a paid production deployment.
+	DeploymentTier string `protobuf:"bytes,9,opt,name=deployment_tier,json=deploymentTier,proto3" json:"deployment_tier,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *UpdateFinetuneJobStatusRequest) Reset() {
@@ -799,11 +814,18 @@ func (x *UpdateFinetuneJobStatusRequest) GetSetCompleted() bool {
 	return false
 }
 
+func (x *UpdateFinetuneJobStatusRequest) GetDeploymentTier() string {
+	if x != nil {
+		return x.DeploymentTier
+	}
+	return ""
+}
+
 var File_model_plane_v1_finetune_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_finetune_proto_rawDesc = "" +
 	"\n" +
-	"\x1dmodel_plane/v1/finetune.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xde\x05\n" +
+	"\x1dmodel_plane/v1/finetune.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x87\x06\n" +
 	"\vFinetuneJob\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x19\n" +
@@ -828,7 +850,8 @@ const file_model_plane_v1_finetune_proto_rawDesc = "" +
 	"\x12estimated_cost_usd\x18\x10 \x01(\x01R\x10estimatedCostUsd\x12&\n" +
 	"\x0factual_cost_usd\x18\x11 \x01(\x01R\ractualCostUsd\x12\x1d\n" +
 	"\n" +
-	"created_by\x18\x12 \x01(\tR\tcreatedBy\"\xfe\x02\n" +
+	"created_by\x18\x12 \x01(\tR\tcreatedBy\x12'\n" +
+	"\x0fdeployment_tier\x18\x13 \x01(\tR\x0edeploymentTier\"\xfe\x02\n" +
 	"\x18CreateFinetuneJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x19\n" +
@@ -864,7 +887,7 @@ const file_model_plane_v1_finetune_proto_rawDesc = "" +
 	"\x1dListActiveFinetuneJobsRequest\x12\x14\n" +
 	"\x05limit\x18\x01 \x01(\x05R\x05limit\"Q\n" +
 	"\x1eListActiveFinetuneJobsResponse\x12/\n" +
-	"\x04jobs\x18\x01 \x03(\v2\x1b.model_plane.v1.FinetuneJobR\x04jobs\"\xab\x02\n" +
+	"\x04jobs\x18\x01 \x03(\v2\x1b.model_plane.v1.FinetuneJobR\x04jobs\"\xd4\x02\n" +
 	"\x1eUpdateFinetuneJobStatusRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x16\n" +
@@ -873,7 +896,8 @@ const file_model_plane_v1_finetune_proto_rawDesc = "" +
 	"\x10fine_tuned_model\x18\x05 \x01(\tR\x0efineTunedModel\x12'\n" +
 	"\x0fdeployment_name\x18\x06 \x01(\tR\x0edeploymentName\x12&\n" +
 	"\x0factual_cost_usd\x18\a \x01(\x01R\ractualCostUsd\x12#\n" +
-	"\rset_completed\x18\b \x01(\bR\fsetCompleted2\xcd\x04\n" +
+	"\rset_completed\x18\b \x01(\bR\fsetCompleted\x12'\n" +
+	"\x0fdeployment_tier\x18\t \x01(\tR\x0edeploymentTier2\xcd\x04\n" +
 	"\fFinetuneJobs\x12R\n" +
 	"\tCreateJob\x12(.model_plane.v1.CreateFinetuneJobRequest\x1a\x1b.model_plane.v1.FinetuneJob\x12L\n" +
 	"\x06GetJob\x12%.model_plane.v1.GetFinetuneJobRequest\x1a\x1b.model_plane.v1.FinetuneJob\x12]\n" +

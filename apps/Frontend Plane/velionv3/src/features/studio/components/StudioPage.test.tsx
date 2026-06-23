@@ -21,31 +21,35 @@ describe('StudioPage', () => {
     vi.unstubAllGlobals()
   })
 
-  it('renders the canvas and can add an editable text block', () => {
+  it('opens to an honest empty canvas and can add an editable text block', () => {
     renderWithRouter(() => <StudioPage section="canvas" />)
 
     expect(screen.getByText('Launch canvas')).toBeTruthy()
     expect(screen.getByLabelText('Studio canvas workspace')).toBeTruthy()
+    // Phase 4 PR-3 seed strip: the canvas starts empty (no fabricated demo blocks).
+    expect(screen.getByText('Start a Studio board')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Add Text block' }))
 
-    expect(screen.getAllByText('Text note 2').length).toBeGreaterThanOrEqual(1)
-    fireEvent.input(screen.getByDisplayValue('Text note 2'), {
+    expect(screen.getAllByText('Text note 1').length).toBeGreaterThanOrEqual(1)
+    fireEvent.input(screen.getByDisplayValue('Text note 1'), {
       target: { value: 'Launch proof point' },
     })
     expect(screen.getAllByText('Launch proof point').length).toBeGreaterThanOrEqual(1)
   })
 
-  it('duplicates, deletes, and recovers from an empty canvas', () => {
+  it('duplicates, deletes, and recovers back to the empty canvas', () => {
     renderWithRouter(() => <StudioPage section="canvas" />)
 
+    // Build up from the empty canvas, then duplicate the added block.
+    fireEvent.click(screen.getByRole('button', { name: 'Add Text block' }))
     fireEvent.click(screen.getByRole('button', { name: 'Duplicate selected block' }))
 
-    expect(screen.getByDisplayValue('Ava Berg copy')).toBeTruthy()
+    expect(screen.getByDisplayValue('Text note 1 copy')).toBeTruthy()
 
-    for (let index = 0; index < 7; index += 1) {
-      fireEvent.click(screen.getByRole('button', { name: 'Delete selected block' }))
-    }
+    // Delete both blocks; the empty-state affordance returns.
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected block' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected block' }))
 
     expect(screen.getByText('Start a Studio board')).toBeTruthy()
 

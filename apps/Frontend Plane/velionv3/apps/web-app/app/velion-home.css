@@ -1414,6 +1414,309 @@
 	text-anchor: middle;
 }
 
+.velion-technology {
+	position: relative;
+	display: block;
+	min-height: 100svh;
+	max-width: none;
+	margin: 0;
+	padding: 0;
+	overflow: hidden;
+	background:
+		linear-gradient(90deg, rgba(249, 248, 246, 0.96) 0%, rgba(249, 248, 246, 0.88) 32%, rgba(249, 248, 246, 0.2) 58%, rgba(249, 248, 246, 0.46) 100%),
+		radial-gradient(circle at 64% 36%, rgba(121, 56, 25, 0.09), transparent 24%),
+		radial-gradient(circle at 84% 18%, rgba(82, 113, 132, 0.12), transparent 30%),
+		linear-gradient(180deg, #ffffff, #f4f3ef);
+	color: var(--velion-j-text);
+	isolation: isolate;
+}
+
+.velion-technology::before {
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(90deg, rgba(26, 26, 26, 0.035) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(26, 26, 26, 0.03) 1px, transparent 1px);
+	background-size: 112px 112px;
+	opacity: 0.48;
+}
+
+.velion-technology::after {
+	position: absolute;
+	inset: 0;
+	z-index: 2;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(90deg, rgba(249, 248, 246, 0.64), transparent 38%),
+		linear-gradient(180deg, rgba(249, 248, 246, 0.08), rgba(249, 248, 246, 0.28));
+	backdrop-filter: none;
+	mask-image: linear-gradient(90deg, #000 0 40%, rgba(0, 0, 0, 0.18) 64%, transparent 100%);
+}
+
+.velion-technology__copy {
+	position: relative;
+	z-index: 3;
+	display: grid;
+	align-content: start;
+	width: min(48vw, 780px);
+	min-height: 100svh;
+	padding: clamp(104px, 10vw, 162px) 0 clamp(78px, 8vw, 124px) var(--velion-edge);
+}
+
+.velion-technology__copy .velion-copy-rule {
+	display: none;
+}
+
+.velion-technology .fade-out-top {
+	-webkit-mask-image: none !important;
+	mask-image: none !important;
+}
+
+.velion-technology__copy .header-1 {
+	max-width: 720px;
+	margin: 0 0 clamp(24px, 2.4vw, 38px);
+	color: var(--velion-j-text);
+}
+
+.velion-technology__copy .velion-ingress {
+	max-width: 620px;
+	color: color-mix(in srgb, var(--velion-j-text) 78%, transparent);
+}
+
+.velion-technology__visual {
+	position: absolute;
+	inset: 0;
+	z-index: 1;
+	display: block;
+	min-height: 0;
+	overflow: hidden;
+	background: transparent;
+}
+
+.velion-technology__diagram-shell {
+	position: absolute;
+	top: 0;
+	right: clamp(24px, 5vw, 112px);
+	bottom: 0;
+	width: min(54vw, 920px);
+	display: grid;
+	place-items: center;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	opacity: 1;
+	transform: translate3d(0, 0, 0);
+}
+
+.velion-cpu-card {
+	position: relative;
+	display: grid;
+	place-items: center;
+	width: min(100%, 820px);
+	aspect-ratio: 16 / 9;
+	padding: clamp(38px, 4vw, 72px);
+	overflow: hidden;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: clamp(18px, 1.8vw, 28px);
+	background:
+		radial-gradient(circle at 50% 42%, rgba(255, 255, 255, 0.08), transparent 42%),
+		radial-gradient(circle at 22% 16%, rgba(0, 232, 237, 0.08), transparent 28%),
+		radial-gradient(circle at 78% 74%, rgba(249, 115, 22, 0.1), transparent 30%),
+		linear-gradient(180deg, rgba(31, 31, 31, 0.97), rgba(15, 15, 15, 0.98));
+	box-shadow:
+		0 34px 96px rgba(26, 26, 26, 0.22),
+		inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.velion-cpu-card::before {
+	position: absolute;
+	inset: 0;
+	content: "";
+	pointer-events: none;
+	background:
+		linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+	background-size: 46px 46px;
+	mask-image: radial-gradient(circle at center, #000 0 58%, transparent 100%);
+	opacity: 0.34;
+}
+
+.velion-cpu-card .velion-cpu-architecture {
+	position: relative;
+	z-index: 1;
+	width: 100%;
+	height: auto;
+	overflow: visible;
+	color: rgba(255, 255, 255, 0.18);
+	filter: drop-shadow(0 16px 34px rgba(0, 0, 0, 0.28));
+	opacity: 1;
+	transform: none;
+	transform-origin: center;
+}
+
+.velion-cpu-card .velion-cpu-architecture > g[stroke="currentColor"] {
+	stroke-width: 0.3;
+}
+
+.velion-cpu-architecture text {
+	font-family:
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+}
+
+.velion-cpu-architecture .cpu-architecture {
+	offset-anchor: 10px 0;
+	animation-name: velion-cpu-animation-path;
+	animation-iteration-count: infinite;
+	animation-timing-function: cubic-bezier(0.75, -0.01, 0, 0.99);
+	opacity: 1;
+	filter: saturate(1.6) drop-shadow(0 0 10px currentColor);
+	transform-box: fill-box;
+	transform-origin: center;
+	will-change: offset-distance;
+}
+
+.velion-cpu-architecture .cpu-line-1 {
+	offset-path: path("M 10 20 h 79.5 q 5 0 5 5 v 30");
+	animation-delay: 1s;
+	animation-duration: 5s;
+}
+
+.velion-cpu-architecture .cpu-line-2 {
+	offset-path: path("M 180 10 h -69.7 q -5 0 -5 5 v 40");
+	animation-delay: 6s;
+	animation-duration: 2s;
+}
+
+.velion-cpu-architecture .cpu-line-3 {
+	offset-path: path("M 130 20 v 21.8 q 0 5 -5 5 h -25");
+	animation-delay: 4s;
+	animation-duration: 6s;
+}
+
+.velion-cpu-architecture .cpu-line-4 {
+	offset-path: path("M 170 80 v -21.8 q 0 -5 -5 -5 h -65");
+	animation-delay: 3s;
+	animation-duration: 3s;
+}
+
+.velion-cpu-architecture .cpu-line-5 {
+	offset-path: path("M 135 65 h 15 q 5 0 5 5 v 10 q 0 5 -5 5 h -39.8 q -5 0 -5 -5 v -35");
+	animation-delay: 9s;
+	animation-duration: 4s;
+}
+
+.velion-cpu-architecture .cpu-line-6 {
+	offset-path: path("M 94.8 95 v -46");
+	animation-delay: 3s;
+	animation-duration: 7s;
+}
+
+.velion-cpu-architecture .cpu-line-7 {
+	offset-path: path("M 88 88 v -15 q 0 -5 -5 -5 h -10 q -5 0 -5 -5 v -5 q 0 -5 5 -5 h 28");
+	animation-delay: 4s;
+	animation-duration: 4s;
+}
+
+.velion-cpu-architecture .cpu-line-8 {
+	offset-path: path("M 30 30 h 25 q 5 0 5 5 v 6.5 q 0 5 5 5 h 35");
+	animation-delay: 3s;
+	animation-duration: 3s;
+}
+
+.velion-technology__stats {
+	align-self: end;
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 12px;
+	width: min(100%, 690px);
+	margin: auto 0 clamp(34px, 3.6vw, 56px);
+	border: 0;
+}
+
+.velion-technology__stats div {
+	padding: 0 0 clamp(22px, 2.2vw, 30px);
+	border-bottom: 1px solid color-mix(in srgb, var(--velion-j-text) 32%, transparent);
+}
+
+.velion-technology__stats strong {
+	display: block;
+	color: color-mix(in srgb, var(--velion-j-text) 86%, transparent);
+	font-family:
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(2rem, 2.5vw, 3.5rem);
+	font-weight: 300;
+	line-height: 1;
+	letter-spacing: -0.04em;
+}
+
+.velion-technology__stats sup {
+	top: -0.08em;
+	margin-left: 0.12em;
+	color: color-mix(in srgb, var(--velion-j-text) 72%, transparent);
+	font-size: 0.42em;
+	letter-spacing: 0;
+}
+
+.velion-technology__stats span {
+	display: block;
+	margin-top: 16px;
+	color: color-mix(in srgb, var(--velion-j-text) 72%, transparent);
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.96rem, 0.98vw, 1.16rem);
+	font-weight: 300;
+	line-height: 1.3;
+}
+
+.velion-technology__copy .velion-arrow-button {
+	color: color-mix(in srgb, var(--velion-a-earth) 86%, var(--velion-j-text));
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(1rem, 1vw, 1.14rem);
+	font-weight: 300;
+}
+
+.velion-technology__copy .velion-arrow-button svg {
+	width: 66px;
+	stroke-width: 1.1;
+}
+
+@keyframes velion-cpu-animation-path {
+	from {
+		offset-distance: 0%;
+	}
+
+	to {
+		offset-distance: 100%;
+	}
+}
+
 @keyframes velion-vibe-drift {
 	from {
 		background-position: 0 0, 0 0, 0 0, 72% center, 0 0;
@@ -2340,8 +2643,13 @@
 }
 
 .velion-logo-carousel {
+	display: grid;
+	grid-template-columns: minmax(138px, 220px) minmax(0, 1fr);
+	gap: clamp(34px, 4.8vw, 92px);
+	align-items: center;
 	height: clamp(112px, 12vw, 154px);
 	padding: 0 var(--velion-edge);
+	overflow: hidden;
 	background:
 		linear-gradient(90deg, var(--velion-bg-cream), transparent 12%, transparent 88%, var(--velion-bg-cream)),
 		color-mix(in srgb, var(--velion-g-blue-mist) 44%, var(--velion-bg-cream));
@@ -2349,10 +2657,52 @@
 	border-bottom: 1px solid color-mix(in srgb, var(--velion-j-text) 7%, transparent);
 }
 
+.velion-logo-carousel__label {
+	display: grid;
+	gap: 2px;
+	justify-self: start;
+	margin: 0;
+	padding-right: clamp(18px, 2vw, 34px);
+	border-right: 1px solid color-mix(in srgb, var(--velion-j-text) 10%, transparent);
+	color: color-mix(in srgb, var(--velion-j-text) 58%, transparent);
+	font-family:
+		Protokoll,
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(0.78rem, 0.72vw, 0.92rem);
+	font-weight: 500;
+	line-height: 1.12;
+	letter-spacing: 0.025em;
+	text-align: left;
+	text-transform: uppercase;
+}
+
 .velion-logo-carousel__viewport {
+	display: flex;
+	align-items: center;
+	width: 100%;
+	min-width: 0;
 	height: 100%;
 	max-width: none;
+	padding: 0;
+	overflow: hidden;
 	mask-image: linear-gradient(90deg, transparent, #000 11%, #000 89%, transparent);
+	-webkit-mask-image: linear-gradient(90deg, transparent, #000 11%, #000 89%, transparent);
+}
+
+.velion-logo-carousel__slider {
+	display: flex;
+	align-items: center;
+	width: max-content;
+	will-change: transform;
+}
+
+.velion-logo-carousel__slider .velion-logo-carousel__mark {
+	flex: 0 0 auto;
 }
 
 .velion-logo-carousel__mark {
@@ -2998,13 +3348,13 @@
 	position: relative;
 	z-index: 1;
 	display: grid;
-	grid-template-columns: repeat(4, minmax(0, 1fr));
+	grid-template-columns: repeat(3, minmax(0, 1fr));
 	gap: clamp(16px, 1.6vw, 24px);
 }
 
 .velion-workflows__card {
 	display: grid;
-	grid-template-rows: auto auto auto 1fr auto;
+	grid-template-rows: auto auto 1fr auto;
 	align-content: start;
 	min-width: 0;
 	min-height: 0;
@@ -3055,11 +3405,18 @@
 	font: inherit;
 }
 
-.velion-workflows__card h2 {
+.velion-workflows__card h1 {
 	margin: 0 0 22px;
 	padding-bottom: clamp(22px, 2.1vw, 30px);
 	border-bottom: 1px solid color-mix(in srgb, var(--velion-a-earth) 14%, var(--velion-border-strong));
-	font-size: clamp(1.86rem, 2.28vw, 2.42rem);
+	font-family:
+		Arbeit,
+		var(--font-geist-sans),
+		"Helvetica Neue",
+		ui-sans-serif,
+		system-ui,
+		sans-serif;
+	font-size: clamp(2.08rem, 2.68vw, 3rem);
 	font-weight: 400;
 	line-height: 1.1;
 	letter-spacing: -0.048em;
@@ -3075,7 +3432,7 @@
 
 .velion-workflows__card .velion-arrow-button {
 	align-self: end;
-	margin-top: clamp(28px, 3vw, 42px);
+	margin-top: clamp(34px, 3.4vw, 52px);
 	font-size: clamp(0.98rem, 1vw, 1.12rem);
 }
 
@@ -3217,6 +3574,28 @@
 }
 
 @media (max-width: 760px) {
+	.velion-logo-carousel {
+		grid-template-columns: 1fr;
+		gap: 20px;
+		height: auto;
+		padding-top: 30px;
+		padding-bottom: 30px;
+	}
+
+	.velion-logo-carousel__label {
+		display: flex;
+		gap: 6px;
+		padding-right: 0;
+		padding-bottom: 16px;
+		border-right: 0;
+		border-bottom: 1px solid color-mix(in srgb, var(--velion-j-text) 10%, transparent);
+	}
+
+	.velion-logo-carousel__viewport {
+		height: 54px;
+		padding: 0;
+	}
+
 	.velion-home .velion-hero__content h1 {
 		font-size: clamp(3.1rem, 13vw, 5.1rem);
 	}

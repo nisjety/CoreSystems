@@ -205,6 +205,37 @@ func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) erro
 	return nil
 }
 
+// allowedAIActionKinds is the closed set of kinds a human/hook may propose via
+// CreateAIAction. Keep it explicit so an arbitrary kind can never be queued and
+// later "executed" — only draft.reply is actable through the act-leg today.
+var allowedAIActionKinds = map[string]bool{
+	"draft.reply": true,
+}
+
+// CreateAIAction validates and persists a model-proposed action into the HITL
+// review queue (status 'suggested'). It is the generic propose path shared by
+// the POST /ai-actions route and the model-proposed consumer. The kind must be
+// in the allowlist; org_id and conversation_id are required.
+func (s *Service) CreateAIAction(ctx context.Context, input CreateAIActionInput) (*AIAction, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	input.Kind = strings.TrimSpace(input.Kind)
+	input.CreatedBy = strings.TrimSpace(input.CreatedBy)
+	if input.OrgID == "" || input.ConversationID == "" {
+		return nil, fmt.Errorf("%w: org_id and conversation_id are required", ErrInvalidInput)
+	}
+	if input.Kind == "" {
+		return nil, fmt.Errorf("%w: kind is required", ErrInvalidInput)
+	}
+	if !allowedAIActionKinds[input.Kind] {
+		return nil, fmt.Errorf("%w: unsupported action kind %q", ErrInvalidInput, input.Kind)
+	}
+	if input.Payload == nil {
+		input.Payload = map[string]any{}
+	}
+	return s.repository.CreateAIAction(ctx, input)
+}
+
 func (s *Service) ListAIActions(ctx context.Context, filter AIActionListFilter) ([]AIAction, error) {
 	filter.OrgID = strings.TrimSpace(filter.OrgID)
 	filter.Status = strings.TrimSpace(filter.Status)

@@ -84,17 +84,20 @@ const analyticsTabs: Array<{ id: AnalyticsTabId; label: string }> = [
   { id: 'sentiment', label: 'Sentiment' },
 ]
 
-const insightMetrics: Array<{ label: string; value: string; Icon: StudioIcon }> = [
-  { label: 'Total conversations', value: '0', Icon: MessagesSquare },
-  { label: 'Total messages', value: '0', Icon: MessageSquare },
-  { label: 'Thumbs up messages', value: '0', Icon: ThumbsUp },
-  { label: 'Thumbs down messages', value: '0', Icon: ThumbsDown },
+// Phase 4 honesty sweep: these preview surfaces have no measurement backend yet,
+// so they carry NO hardcoded values. MetricCard / SentimentPanel render a neutral
+// placeholder; a real aggregate is wired in only once a source produces one.
+const insightMetrics: Array<{ label: string; Icon: StudioIcon }> = [
+  { label: 'Total conversations', Icon: MessagesSquare },
+  { label: 'Total messages', Icon: MessageSquare },
+  { label: 'Thumbs up messages', Icon: ThumbsUp },
+  { label: 'Thumbs down messages', Icon: ThumbsDown },
 ]
 
 const sentimentCards = [
-  { label: 'Positive', value: '0', className: 'bg-[#E9F8EF] text-[#16834A]' },
-  { label: 'Neutral', value: '0', className: 'bg-[#F4F5F7] text-[#555B65]' },
-  { label: 'Negative', value: '0', className: 'bg-[#FFF0EC] text-[#B6482C]' },
+  { label: 'Positive', className: 'bg-[#E9F8EF] text-[#16834A]' },
+  { label: 'Neutral', className: 'bg-[#F4F5F7] text-[#555B65]' },
+  { label: 'Negative', className: 'bg-[#FFF0EC] text-[#B6482C]' },
 ]
 
 function getInitialAddOnCanvasState(): AddOnCanvasState {
@@ -251,9 +254,9 @@ function AnalyticsPage() {
 
       <Show when={activeTab() === 'chat-count'}>
         <div class="mt-7 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <MetricCard Icon={MessagesSquare} label="Chats" value="0" />
-          <MetricCard Icon={MessageSquare} label="Messages" value="0" />
-          <MetricCard Icon={ThumbsUp} label="Positive feedback" value="0" />
+          <MetricCard Icon={MessagesSquare} label="Chats" />
+          <MetricCard Icon={MessageSquare} label="Messages" />
+          <MetricCard Icon={ThumbsUp} label="Positive feedback" />
         </div>
         <EmptyStateCard
           Icon={BarChart3}
@@ -284,7 +287,7 @@ function InsightsPage() {
 
       <div class="mt-12 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <For each={insightMetrics}>
-          {(metric) => <MetricCard Icon={metric.Icon} label={metric.label} value={metric.value} />}
+          {(metric) => <MetricCard Icon={metric.Icon} label={metric.label} />}
         </For>
       </div>
 
@@ -319,7 +322,7 @@ function SentimentPanel() {
         {(item) => (
           <div class="velion-panel p-6">
             <div class={cn('inline-flex rounded-full px-3 py-1 text-[12px] font-semibold', item.className)}>{item.label}</div>
-            <div class="mt-5 text-[34px] font-semibold">{item.value}</div>
+            <div class="mt-5 text-[34px] font-semibold text-[#8A909B] dark:text-[#AEB4C0]">—</div>
             <p class="mt-3 text-[14px] leading-6 text-[#6F747D] dark:text-[#AEB4C0]">Measured from classified customer and assistant turns once live conversations are available.</p>
           </div>
         )}

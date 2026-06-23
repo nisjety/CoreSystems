@@ -520,6 +520,52 @@ WHERE org_id = $1 AND id = $2 AND status = 'executed'`, orgID, id)
 	return err
 }
 
+// CreateAIAction inserts a model-proposed action of an arbitrary kind at the
+// default 'suggested' status, org-scoped. It generalizes the hard-coded insert
+// in RecordTicketClassification so a human/hook (or the model-proposed consumer)
+// can queue any allowed action — currently draft.reply — into the review queue.
+func (r *PGRepository) CreateAIAction(ctx context.Context, input CreateAIActionInput) (*AIAction, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	row := r.pool.QueryRow(ctx, `
+INSERT INTO conversation_ai_actions (
+	id, org_id, conversation_id, kind, status, payload, created_by, created_at, updated_at
+) VALUES ($1, $2, $3, $4, 'suggested', $5::jsonb, $6, NOW(), NOW())
+RETURNING id, org_id, conversation_id, kind, status, payload, created_by, reviewed_by, reviewed_at, created_at, updated_at`,
+		newID("aiact"), input.OrgID, input.ConversationID, input.Kind, mustJSON(input.Payload), createdBy(input.CreatedBy))
+	action, err := scanAIAction(row)
+	if err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+// GetChannelThreadRefByConversation resolves the outbound send target for a
+// conversation: the most recent provider/connection/thread the conversation is
+// bound to. Org-scoped; returns ErrNotFound when no channel ref exists (e.g. a
+// purely internal conversation), so the executor skips without claiming.
+func (r *PGRepository) GetChannelThreadRefByConversation(ctx context.Context, orgID, conversationID string) (*ChannelThreadRef, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	var ref ChannelThreadRef
+	if err := r.pool.QueryRow(ctx, `
+SELECT org_id, conversation_id, provider, connection_id, provider_thread_id
+FROM conversation_channel_thread_refs
+WHERE org_id = $1 AND conversation_id = $2
+ORDER BY created_at DESC
+LIMIT 1`, orgID, conversationID).Scan(
+		&ref.OrgID, &ref.ConversationID, &ref.Provider, &ref.ConnectionID, &ref.ProviderThreadID,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &ref, nil
+}
+
 func (r *PGRepository) ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error) {
 	if err := r.ensureConfigured(); err != nil {
 		return nil, err

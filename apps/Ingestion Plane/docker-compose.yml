@@ -35,13 +35,18 @@ services:
       # self-contained and does not depend on a root mega-stack service.
       QUARRY_EDGE__SEARXNG_URL: http://searxng:8080
       QUARRY_EDGE__BRAVE_SEARCH_KEY: ${BRAVE_API_KEY:-${BRAVE_SEARCH_KEY:-}}
-      # Accept any non-empty Bearer in dev so the orchestrator's calls
-      # to /v1/internal/run_page succeed without a real auth-core JWT.
-      # The Rust binary refuses to start when this is `1` AND
-      # ENVIRONMENT={prod,production} — see edge main.rs. Production
-      # operators must either unset this OR set ENVIRONMENT=dev (the
-      # latter is wrong; do the former).
-      QUARRY_EDGE_AUTH_DEV_BYPASS: "${QUARRY_EDGE_AUTH_DEV_BYPASS:-1}"
+      # Real auth path (bypass OFF by default): public /v1/* routes verify the
+      # gateway's short-lived `quarry` audience JWT against auth-core's JWKS and
+      # derive org scope from the verified `claims.org_id`. The orchestrator's
+      # internal /v1/internal/run_page authenticates with the shared runtime
+      # service token instead (org travels in the body), so it does NOT depend
+      # on this bypass. Set =1 only for an isolated edge with no reachable auth-core.
+      QUARRY_EDGE_AUTH_DEV_BYPASS: "${QUARRY_EDGE_AUTH_DEV_BYPASS:-0}"
+      # auth-core (Better Auth / convex-auth) signs the `quarry` audience token;
+      # the edge fetches its JWKS to verify the signature and enforces aud=quarry.
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-quarry}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
       QUARRY_BROWSER_NO_SANDBOX: "${QUARRY_BROWSER_NO_SANDBOX:-1}"
       ENVIRONMENT: ${ENVIRONMENT:-dev}
@@ -72,10 +77,22 @@ services:
       QUARRY_EDGE__ZERO_SAAS_SEARCH: "${QUARRY_EDGE_ZERO_SAAS_SEARCH:-0}"
       # Data Plane retrieval (EdgeConfig field `data_plane_url`) → retrieval_v2 /v1/retrieve,
       # powering hybrid search (lexical ⊕ Qdrant semantic, RRF-fused). A separate
-      # ingest/documents URL (dpv2-documents-api:8010) is added in Phase 4 for content
-      # promotion — see docs/AI_SEARCH_PLATFORM_PLAN.md.
+      # DATA_PLANE_URL = retrieval engine (reads + vector/find-similar). It has
+      # no POST /v1/documents write route — durable ingest goes to the Go
+      # documents-api (dpv2-documents-api:8010) via DATA_PLANE_INGEST_URL below.
       QUARRY_EDGE__DATA_PLANE_URL: ${DATA_PLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:8004}
+      QUARRY_EDGE__DATA_PLANE_INGEST_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
       QUARRY_EDGE__DATA_PLANE_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
+      # Phase-2 visual RAG producer — render ingested web pages to PNGs, write to
+      # the dpv2 MinIO CAS, and publish page_images.created to dpv2-nats (both on
+      # inter-plane-bus). All three set ⇒ producer active (browser-agent feature on).
+      QUARRY_EDGE__CAS_BUCKET: ${DATAPLANE_CAS_BUCKET:-dataplane-cas}
+      QUARRY_EDGE__DATAPLANE_NATS_URL: ${DATAPLANE_NATS_URL:-nats://dpv2-nats:4222}
+      QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: ${QUARRY_EDGE_INTERNAL_BASE_URL:-http://quarry-edge:8082}
+      AWS_ENDPOINT_URL: ${DATAPLANE_MINIO_ENDPOINT:-http://dpv2-minio:9000}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${DATAPLANE_MINIO_USER:-dataplane}
+      AWS_SECRET_ACCESS_KEY: ${DATAPLANE_MINIO_PASSWORD:-dataplane-dev-password}
       QUARRY_EDGE__CANARY_PCT: ${QUARRY_CANARY_PCT:-100}
       QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
       QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}
@@ -108,7 +125,11 @@ services:
       searxng:
         condition: service_healthy
     ports:
-      - "8082:8082"
+      # CRIT-2/HIGH-3: the edge is an internal BFF-backed service (the gateway
+      # reaches it over the docker network); it must NOT be reachable from the
+      # external/LAN interface. Bind the host publish to loopback only so the
+      # internal routes (/v1/internal/run_page etc.) cannot be hit off-host.
+      - "127.0.0.1:8082:8082"
     volumes:
       - ./config/security-feeds:/app/data/security-feeds
     networks:
@@ -193,6 +214,11 @@ services:
       CONTROL_BASE_URL: http://quarry-control:8081
       RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
       CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      # Shared HMAC secret for the run_page org-binding (must equal the
+      # edge's QUARRY_EDGE__INTERNAL_SECRET). Binds org_id+url on the
+      # /v1/internal/run_page call so a leaked runtime bearer can't forge
+      # another tenant's org.
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
     depends_on:

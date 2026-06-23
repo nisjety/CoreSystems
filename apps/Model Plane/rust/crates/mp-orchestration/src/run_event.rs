@@ -169,9 +169,7 @@ impl OrchestrationEvent {
             Self::SubagentStopped { .. } => OrchestrationEventKind::SubagentStopped,
             Self::RunPausedForApproval { .. } => OrchestrationEventKind::RunPausedForApproval,
             Self::RunResumedAfterApproval { .. } => OrchestrationEventKind::RunResumedAfterApproval,
-            Self::BrowserActionDispatched { .. } => {
-                OrchestrationEventKind::BrowserActionDispatched
-            }
+            Self::BrowserActionDispatched { .. } => OrchestrationEventKind::BrowserActionDispatched,
             Self::BrowserObservationReceived { .. } => {
                 OrchestrationEventKind::BrowserObservationReceived
             }

@@ -11,11 +11,13 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 )
 
 const (
 	aiActionExecutorDurable  = "conversation-core-ai-action-executor"
 	kindTicketClassification = "ticket.classification"
+	kindDraftReply           = "draft.reply"
 	executorActor            = "ai-action-executor"
 )
 
@@ -24,6 +26,7 @@ const (
 type ActionStore interface {
 	GetAIAction(ctx context.Context, orgID, id string) (*conversation.AIAction, error)
 	GetTicketByConversation(ctx context.Context, orgID, conversationID string) (*conversation.Ticket, error)
+	GetChannelThreadRefByConversation(ctx context.Context, orgID, conversationID string) (*conversation.ChannelThreadRef, error)
 	MarkAIActionExecuted(ctx context.Context, orgID, id string) (bool, error)
 	UnmarkAIActionExecuted(ctx context.Context, orgID, id string) error
 }
@@ -39,6 +42,14 @@ type Publisher interface {
 	Publish(ctx context.Context, subject string, payload any) error
 }
 
+// OutboundSender sends an approved draft.reply through integration-corev2. It is
+// the adapter-confirmation point: a reply is only "sent" once Send returns nil.
+// *integration.Client satisfies it. A nil OutboundSender disables draft.reply
+// execution (so the executor never claims a send it cannot perform).
+type OutboundSender interface {
+	Send(ctx context.Context, req integration.SendRequest) (*integration.SendResult, error)
+}
+
 // AIActionExecutor completes the HITL loop: when a human approves a
 // ticket.classification action, it promotes the suggested ticket and applies
 // the AI's suggested routing — the moment "approve" stops being a no-op. It is
@@ -52,14 +63,19 @@ type AIActionExecutor struct {
 	store     ActionStore
 	tickets   TicketPromoter
 	publisher Publisher
+	sender    OutboundSender
 }
 
-func NewAIActionExecutor(js nats.JetStreamContext, store ActionStore, tickets TicketPromoter, publisher Publisher) *AIActionExecutor {
+// NewAIActionExecutor wires the executor. sender may be nil when no integration
+// client is configured; in that case draft.reply actions are skipped (never
+// claimed), so the executor never asserts a send it cannot make.
+func NewAIActionExecutor(js nats.JetStreamContext, store ActionStore, tickets TicketPromoter, publisher Publisher, sender OutboundSender) *AIActionExecutor {
 	return &AIActionExecutor{
 		consumer:  NewDurableConsumer(js, "ai-action-executor"),
 		store:     store,
 		tickets:   tickets,
 		publisher: publisher,
+		sender:    sender,
 	}
 }
 
@@ -125,15 +141,27 @@ func (e *AIActionExecutor) process(ctx context.Context, ev conversation.Lifecycl
 		log.Printf("[cc-go/ai-action-executor] get action %s: %v", actionID, err)
 		return outcomeRetry
 	}
-	// MVP scope: only ticket.classification is executable here.
-	if action.Kind != kindTicketClassification {
-		return outcomeAck
-	}
 	// Fast idempotent skip on redelivery: already executed (or never approved).
 	if action.Status != "approved" {
 		return outcomeAck
 	}
 
+	// Dispatch by kind. Each branch reuses the SAME atomic approved→executed
+	// claim guard (MarkAIActionExecuted) keyed by the AIAction id, which equals
+	// the approval_id, so a redelivered approve never double-applies.
+	switch action.Kind {
+	case kindTicketClassification:
+		return e.executeTicketClassification(ctx, orgID, actionID, action, ev)
+	case kindDraftReply:
+		return e.executeDraftReply(ctx, orgID, actionID, action, ev)
+	default:
+		// Unknown kind — not executable here. Terminal no-op.
+		return outcomeAck
+	}
+}
+
+// executeTicketClassification promotes the suggested ticket and applies routing.
+func (e *AIActionExecutor) executeTicketClassification(ctx context.Context, orgID, actionID string, action *conversation.AIAction, ev conversation.LifecycleEvent) outcome {
 	ticket, err := e.store.GetTicketByConversation(ctx, orgID, action.ConversationID)
 	if errors.Is(err, conversation.ErrNotFound) {
 		// The suggested ticket should exist (RecordTicketClassification creates it).
@@ -179,6 +207,137 @@ func (e *AIActionExecutor) process(ctx context.Context, ev conversation.Lifecycl
 		OccurredAt: time.Now().UTC(),
 	})
 	return outcomeAck
+}
+
+// executeDraftReply sends the approved reply through integration-corev2. It is
+// idempotent on approval_id (= actionID) via the same atomic claim, so a
+// redelivered approve does NOT double-send. A terminal send failure publishes
+// ai_action.send_failed and ACKs (no retry-forever); a transient failure
+// unclaims and retries. The UI must not claim "sent" until the executed event.
+func (e *AIActionExecutor) executeDraftReply(ctx context.Context, orgID, actionID string, action *conversation.AIAction, ev conversation.LifecycleEvent) outcome {
+	if e.sender == nil {
+		// No integration client configured — we cannot send, and must not claim
+		// the action as executed. Skip honestly without claiming.
+		log.Printf("[cc-go/ai-action-executor] draft.reply skipped: no outbound sender configured (action %s)", actionID)
+		return outcomeAck
+	}
+
+	// Resolve the send target BEFORE claiming so a missing channel ref skips
+	// without burning the claim (mirrors the missing-ticket path).
+	ref, err := e.store.GetChannelThreadRefByConversation(ctx, orgID, action.ConversationID)
+	if errors.Is(err, conversation.ErrNotFound) {
+		log.Printf("[cc-go/ai-action-executor] no channel thread ref for conversation %s; skipping draft.reply %s", action.ConversationID, actionID)
+		return outcomeAck
+	}
+	if err != nil {
+		log.Printf("[cc-go/ai-action-executor] get channel ref for conversation %s: %v", action.ConversationID, err)
+		return outcomeRetry
+	}
+
+	// Claim FIRST so a duplicate/redelivered approve never double-sends.
+	claimed, err := e.store.MarkAIActionExecuted(ctx, orgID, actionID)
+	if err != nil {
+		log.Printf("[cc-go/ai-action-executor] claim %s: %v", actionID, err)
+		return outcomeRetry
+	}
+	if !claimed {
+		return outcomeAck // lost the race / already sent — no double-send
+	}
+
+	req := buildSendRequest(orgID, ev.ActorUserID, ref, action.Payload)
+	result, sendErr := e.sender.Send(ctx, req)
+	if sendErr != nil {
+		if integration.IsTerminal(sendErr) {
+			// Permanent failure: do NOT unclaim (so it is not retried forever) and
+			// surface send_failed so the UI never claims a phantom "sent".
+			e.publishSendFailed(ctx, orgID, action, ev, sendErr)
+			log.Printf("[cc-go/ai-action-executor] terminal send failure for draft.reply %s: %v", actionID, sendErr)
+			return outcomeAck
+		}
+		// Transient failure: unclaim so a redelivery can retry cleanly.
+		if uerr := e.store.UnmarkAIActionExecuted(ctx, orgID, actionID); uerr != nil {
+			log.Printf("[cc-go/ai-action-executor] unclaim %s after transient send failure: %v", actionID, uerr)
+		}
+		log.Printf("[cc-go/ai-action-executor] transient send failure for draft.reply %s: %v", actionID, sendErr)
+		return outcomeRetry
+	}
+
+	providerMessageID := ""
+	if result != nil {
+		providerMessageID = result.ProviderMessageID
+	}
+	_ = e.publisher.Publish(ctx, conversation.SubjectAIActionExecuted, conversation.LifecycleEvent{
+		Type:           "ai_action.executed",
+		OrgID:          orgID,
+		ConversationID: action.ConversationID,
+		ActorUserID:    ev.ActorUserID,
+		Data: map[string]any{
+			"ai_action_id":        actionID,
+			"kind":                action.Kind,
+			"provider":            ref.Provider,
+			"connection_id":       ref.ConnectionID,
+			"provider_message_id": providerMessageID,
+		},
+		OccurredAt: time.Now().UTC(),
+	})
+	return outcomeAck
+}
+
+// publishSendFailed emits the terminal send_failed lifecycle event keyed by
+// approval_id (= the AIAction id), so the failure surfaces honestly.
+func (e *AIActionExecutor) publishSendFailed(ctx context.Context, orgID string, action *conversation.AIAction, ev conversation.LifecycleEvent, sendErr error) {
+	_ = e.publisher.Publish(ctx, conversation.SubjectAIActionSendFailed, conversation.LifecycleEvent{
+		Type:           "ai_action.send_failed",
+		OrgID:          orgID,
+		ConversationID: action.ConversationID,
+		ActorUserID:    ev.ActorUserID,
+		Data: map[string]any{
+			"ai_action_id": action.ID,
+			"kind":         action.Kind,
+			"error":        sendErr.Error(),
+		},
+		OccurredAt: time.Now().UTC(),
+	})
+}
+
+// buildSendRequest maps the approved draft.reply payload + resolved channel ref
+// into an integration send request.
+func buildSendRequest(orgID, actorUserID string, ref *conversation.ChannelThreadRef, payload map[string]any) integration.SendRequest {
+	return integration.SendRequest{
+		OrgID:            orgID,
+		ActorUserID:      actorUserID,
+		Provider:         ref.Provider,
+		ConnectionID:     ref.ConnectionID,
+		ProviderThreadID: ref.ProviderThreadID,
+		BodyText:         stringFromData(payload, "body_text"),
+		BodyHTML:         stringFromData(payload, "body_html"),
+		Subject:          stringFromData(payload, "subject"),
+		To:               stringSliceFromData(payload, "to"),
+	}
+}
+
+// stringSliceFromData reads a []string from payload[key], tolerating a JSON
+// array of strings (decoded as []any).
+func stringSliceFromData(data map[string]any, key string) []string {
+	if data == nil {
+		return nil
+	}
+	raw, ok := data[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // promote flips the suggested ticket to open and applies the AI's suggested

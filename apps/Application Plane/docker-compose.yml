@@ -547,10 +547,11 @@ services:
       dockerfile: Dockerfile
     container_name: insight-core
     restart: unless-stopped
-    # Registry-only Market-Intelligence service. NO database and NO NATS: it
-    # serves the connector registry from an in-memory, per-process repository, so
-    # it MUST run as a single instance — the container_name pins it to exactly one.
-    # Do NOT scale it; replicas would each hold divergent in-memory state.
+    # W3 Market-Intelligence service. Durable metric store on application-postgres
+    # (DATABASE_URL) + a JetStream metric subscriber on the shared application bus
+    # (NATS_URL=velion-nats, where conversation-core publishes velion.application.>).
+    # The connector registry remains in-memory; do NOT scale this beyond one
+    # instance while that registry is process-local (container_name pins it).
     environment:
       PORT: "3163"
       SERVICE_NAME: insight-core
@@ -560,8 +561,25 @@ services:
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       # Explicit (config.go hard-fails on empty) — audience for connector token leases.
       INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE: ${INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE:-insight-core}
+      # W3 (PR-3): durable metric store + real-event subscriber. Mirrors leads-core.
+      # Phase 4 PR-4: migration 002 creates a dedicated `insight_core` schema on
+      # this shared application-postgres (queries are schema-qualified), so the
+      # metric store never collides with the other cores sharing the database.
+      # NOTE (infra): the live application-postgres-data volume may have been
+      # initialized under the legacy NOTIFICATION_* creds; reconcile
+      # APPLICATION_PLANE_DB_USER/PASSWORD/NAME with the volume before this
+      # DATABASE_URL authenticates (Postgres honors POSTGRES_* only at first init).
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      # Subscribe to the SAME bus conversation-core publishes velion.application.> to
+      # (its config resolves VELION_NATS_URL first), so the metric subscriber binds
+      # the existing JetStream stream rather than a divergent one.
+      NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
+      NATS_TOKEN: ${VELION_NATS_TOKEN:-}
     ports:
       - "${INSIGHT_CORE_HOST_PORT:-3163}:3163"
+    depends_on:
+      application-postgres:
+        condition: service_healthy
     networks:
       - app-net
       - inter-plane-bus

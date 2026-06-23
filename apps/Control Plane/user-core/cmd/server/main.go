@@ -315,7 +315,7 @@ func main() {
 	// Per-user authz facade (ListVisible/Check) is served over HTTP so Data
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
-	httpServer := httpserver.NewServer(userService, aclRepo, httpPort)
+	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, httpPort)
 
 	// Handle shutdown gracefully
 	sigChan := make(chan os.Signal, 1)

@@ -132,6 +132,10 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-dataplane-dev-password}
     networks:
       - dpv2-net
+      # Phase-2 visual RAG: the Ingestion-Plane producer (quarry-edge) writes
+      # page-image PNGs to the `dataplane-cas` bucket here, so MinIO must also be
+      # reachable on the shared inter-plane bus (it was dpv2-net-only before).
+      - inter-plane-bus
     volumes:
       - dpv2_minio:/data
     deploy:
@@ -152,7 +156,8 @@ services:
     command:
       - >
         mc alias set dpv2 http://minio:9000 "${MINIO_ROOT_USER:-dataplane}" "${MINIO_ROOT_PASSWORD:-dataplane-dev-password}" &&
-        mc mb --ignore-existing "dpv2/quickwit"
+        mc mb --ignore-existing "dpv2/quickwit" &&
+        mc mb --ignore-existing "dpv2/dataplane-cas"
     networks:
       - dpv2-net
     depends_on:
@@ -237,6 +242,28 @@ services:
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-3072}
       COHERE_API_KEY: ${COHERE_API_KEY:-}
+      # Phase-2 visual RAG — Cohere Embed v4 query embedder + fused visual arm.
+      # `W_VISUAL` > 0 activates the page-image arm in the RRF fusion (was 0/shadow);
+      # the query embedder reuses the core-ai-rg key (deployed model `embed-v-4-0`).
+      COHERE_EMBED_V4_ENDPOINT: ${COHERE_EMBED_V4_ENDPOINT:-}
+      COHERE_EMBED_V4_API_KEY: ${COHERE_API_KEY:-}
+      COHERE_EMBED_V4_DEPLOYMENT: ${COHERE_EMBED_V4_DEPLOYMENT:-embed-v-4-0}
+      COHERE_EMBED_V4_API_VERSION: ${COHERE_EMBED_V4_API_VERSION:-2024-05-01-preview}
+      QDRANT_VISUAL_COLLECTION: ${QDRANT_VISUAL_COLLECTION:-dataplane_page_images}
+      VISUAL_EMBEDDING_DIMENSION: ${VISUAL_EMBEDDING_DIMENSION:-1536}
+      W_VISUAL: ${W_VISUAL:-0}
+      # ColQwen visual reranker (services/colqwen-reranker). OFF by default — the
+      # model runs as a separate GPU server (local MPS for verification,
+      # Hetzner/Azure for prod). Flip VISUAL_RERANK_ENABLED=true and point
+      # COLQWEN_ENDPOINT_URL at it (e.g. http://host.docker.internal:8090 locally).
+      VISUAL_RERANK_ENABLED: ${VISUAL_RERANK_ENABLED:-false}
+      COLQWEN_ENDPOINT_URL: ${COLQWEN_ENDPOINT_URL:-}
+      VISUAL_RERANK_TOP_K: ${VISUAL_RERANK_TOP_K:-20}
+      # Text cross-encoder rerank endpoint. Empty = public Cohere (api.cohere.ai,
+      # Bearer). Set to an Azure AI Foundry serverless Cohere rerank URL +
+      # RERANK_USE_API_KEY=true to use the in-EU deployment.
+      RERANK_ENDPOINT: ${RERANK_ENDPOINT:-}
+      RERANK_USE_API_KEY: ${RERANK_USE_API_KEY:-false}
       HYBRID_ENABLED: "true"
       SPARSE_SEARCH_BACKEND: ${SPARSE_SEARCH_BACKEND:-postgres}
       QUICKWIT_URL: ${QUICKWIT_URL:-http://quickwit:7280}
@@ -246,6 +273,22 @@ services:
       # Per-user ownership: resolve viewer grants from user-core's resource_grants
       # facade (reached over inter-plane-bus). HTTP/facade port is 3012, NOT 8080.
       USER_CORE_HTTP_URL: ${USER_CORE_HTTP_URL:-http://user-core:3012}
+      # Ownership PR-4 rollout: org-axis PolicyClient mode. off (default) =
+      # NoopPolicyClient; permissive = fail-open + audit-only shadow (review
+      # deny-rate on real traffic) before strict. Ownership post-filter is
+      # ALWAYS-ON regardless of this flag.
+      CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-off}
+      # Verified-JWT path: when the gateway forwards a Bearer token minted by
+      # auth-core (POST /api/data-plane/internal-token | GET /api/data-plane/token,
+      # aud=data-plane), the HTTP middleware + gRPC interceptor verify it against
+      # this PUBLIC key and bind the viewer from the signed `sub` (preferred over
+      # the forwarded x-user-id header). The key file is auth-core's PUBLIC key,
+      # mounted read-only (public material, gitignored). AUDIENCE pins data-plane
+      # so a token leaked to another plane can't authenticate here. ISSUER matches
+      # auth-core's stamped `iss`. Unset file → API-key + x-user-id path unchanged.
+      JWT_PUBLIC_KEY_FILE: ${JWT_PUBLIC_KEY_FILE:-/app/keys/convex-auth.pub}
+      JWT_REQUIRED_AUDIENCE: ${JWT_REQUIRED_AUDIENCE:-data-plane}
+      JWT_REQUIRED_ISSUER: ${JWT_REQUIRED_ISSUER:-http://localhost:3011/api/convex-auth}
       # Tower middleware tuning (v2.1)
       GRPC_TIMEOUT_SECS: ${GRPC_TIMEOUT_SECS:-30}
       GRPC_MAX_CONCURRENT: ${GRPC_MAX_CONCURRENT:-256}
@@ -255,7 +298,12 @@ services:
       PG_ACQUIRE_TIMEOUT_SECS: ${PG_ACQUIRE_TIMEOUT_SECS:-5}
       # Optional OTel collector
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      RUST_LOG: "retrieval_engine_rs=info,tower_http=info"
+      # Log target is the bin/crate name `retrieval_engine` (package is
+      # `retrieval-engine-rs`); the old `retrieval_engine_rs=info` matched nothing.
+      RUST_LOG: ${RUST_LOG:-warn,retrieval_engine=info,tower_http=info}
+    volumes:
+      # auth-core's PUBLIC JWT key (read-only) for verified-JWT viewer binding.
+      - ./services/retrieval-engine-rs/keys:/app/keys:ro
     networks:
       - dpv2-net
       - inter-plane-bus
@@ -294,7 +342,7 @@ services:
       CHUNK_OVERLAP: "64"
       BATCH_SIZE: "10"
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      RUST_LOG: "index_engine_rs=info"
+      RUST_LOG: ${RUST_LOG:-warn,index_engine=info}
     networks:
       - dpv2-net
       - inter-plane-bus
@@ -340,8 +388,22 @@ services:
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
+      # Phase-2 visual RAG — Cohere Embed v4 (multimodal) page-image embeddings.
+      # Same core-ai-rg Foundry resource + key as Cohere rerank; the DEPLOYED
+      # model is `embed-v-4-0` (NOT the code default `Cohere-embed-4`). Setting the
+      # endpoint activates the page-image consumer (embeds pages → visual collection).
+      COHERE_EMBED_V4_ENDPOINT: ${COHERE_EMBED_V4_ENDPOINT:-}
+      COHERE_EMBED_V4_API_KEY: ${COHERE_API_KEY:-}
+      COHERE_EMBED_V4_DEPLOYMENT: ${COHERE_EMBED_V4_DEPLOYMENT:-embed-v-4-0}
+      COHERE_EMBED_V4_API_VERSION: ${COHERE_EMBED_V4_API_VERSION:-2024-05-01-preview}
+      QDRANT_VISUAL_COLLECTION: ${QDRANT_VISUAL_COLLECTION:-dataplane_page_images}
+      VISUAL_EMBEDDING_DIMENSION: ${VISUAL_EMBEDDING_DIMENSION:-1536}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      RUST_LOG: "embedding_engine_rs=info"
+      # NOTE: the log target is the BIN/crate name `embedding_engine` (package is
+      # `embedding-engine-rs`). The old `embedding_engine_rs=info` matched nothing →
+      # silent empty logs. (Code default in main.rs has the same wrong name — fix on
+      # next rebuild; this compose value overrides it at runtime.)
+      RUST_LOG: ${RUST_LOG:-warn,embedding_engine=info}
     networks:
       - dpv2-net
       - inter-plane-bus
@@ -375,7 +437,7 @@ services:
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EXTRACTION_DEPLOYMENT: ${AZURE_OPENAI_EXTRACTION_DEPLOYMENT:-gpt-4o}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      RUST_LOG: "graph_index_rs=info"
+      RUST_LOG: ${RUST_LOG:-warn,graph_index=info}
     networks:
       - dpv2-net
       - inter-plane-bus
@@ -409,7 +471,7 @@ services:
       BATCH_SIZE: ${QUICKWIT_ADAPTER_BATCH_SIZE:-500}
       REBUILD_ON_START: ${QUICKWIT_ADAPTER_REBUILD_ON_START:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      RUST_LOG: "quickwit_adapter_rs=info"
+      RUST_LOG: ${RUST_LOG:-warn,quickwit_adapter=info}
     networks:
       - dpv2-net
       - inter-plane-bus

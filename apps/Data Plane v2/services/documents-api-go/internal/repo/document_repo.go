@@ -31,15 +31,17 @@ const documentColumns = `document_id, org_id, source, type, title, content, stat
 // The viewer filter is a single static predicate so the tenant-isolation lint
 // still sees org_id in the same literal: when viewerID is empty (no identity —
 // legacy/back-compat) the `$3 = ''` branch short-circuits to the org-scoped
-// behaviour; when present, only the owner, org/shared-visible docs, or docs
-// explicitly granted to the viewer (grantedIDs from user-core resource_grants)
-// are returned. A filtered-out doc returns pgx.ErrNoRows → 404.
+// behaviour; when present, only the owner, ORG-visible docs, or docs explicitly
+// granted to the viewer (grantedIDs from user-core resource_grants) are
+// returned. NOTE: 'shared' docs are NOT org-readable — they reach recipients
+// ONLY via an explicit grant (or the owner), so visibility='shared' alone
+// grants no one access. A filtered-out doc returns pgx.ErrNoRows → 404.
 func (r *DocumentRepo) Get(ctx context.Context, orgID, documentID, viewerID string, grantedIDs []string) (*model.Document, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT `+documentColumns+`
 		FROM documents
 		WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL
-		  AND ($3 = '' OR owner_id = $3 OR visibility IN ('org', 'shared') OR document_id = ANY($4))
+		  AND ($3 = '' OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
 	`, documentID, orgID, viewerID, normalizeGranted(grantedIDs))
 	return scanDocument(row)
 }
@@ -60,7 +62,7 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 		err := r.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM documents
 			 WHERE org_id = $1 AND deleted_at IS NULL
-			   AND ($2 = '' OR owner_id = $2 OR visibility IN ('org', 'shared') OR document_id = ANY($3))`,
+			   AND ($2 = '' OR owner_id = $2 OR visibility = 'org' OR document_id = ANY($3))`,
 			input.OrgID, input.ViewerID, granted,
 		).Scan(&total)
 		if err != nil {
@@ -70,7 +72,7 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 		err := r.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM documents
 			 WHERE org_id = $1 AND deleted_at IS NULL AND type = $2
-			   AND ($3 = '' OR owner_id = $3 OR visibility IN ('org', 'shared') OR document_id = ANY($4))`,
+			   AND ($3 = '' OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))`,
 			input.OrgID, input.Type, input.ViewerID, granted,
 		).Scan(&total)
 		if err != nil {
@@ -85,7 +87,7 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 			SELECT `+documentColumns+`
 			FROM documents
 			WHERE org_id = $1 AND deleted_at IS NULL
-			  AND ($2 = '' OR owner_id = $2 OR visibility IN ('org', 'shared') OR document_id = ANY($3))
+			  AND ($2 = '' OR owner_id = $2 OR visibility = 'org' OR document_id = ANY($3))
 			ORDER BY created_at DESC
 			LIMIT $4 OFFSET $5
 		`, input.OrgID, input.ViewerID, granted, limit, input.Offset)
@@ -94,7 +96,7 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 			SELECT `+documentColumns+`
 			FROM documents
 			WHERE org_id = $1 AND deleted_at IS NULL AND type = $2
-			  AND ($3 = '' OR owner_id = $3 OR visibility IN ('org', 'shared') OR document_id = ANY($4))
+			  AND ($3 = '' OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
 			ORDER BY created_at DESC
 			LIMIT $5 OFFSET $6
 		`, input.OrgID, input.Type, input.ViewerID, granted, limit, input.Offset)
@@ -434,7 +436,11 @@ func normalizeVisibility(v string) string {
 	case "private", "org", "shared":
 		return v
 	default:
-		return "org"
+		// Fail-safe: an unset/invalid value defaults to PRIVATE, never org-wide.
+		// The handler (applyVisibilityPolicy) sets an explicit value first — for
+		// end users that's 'private', for system ingest 'org' — so this branch is
+		// only a backstop against an unexpected/invalid string.
+		return "private"
 	}
 }
 

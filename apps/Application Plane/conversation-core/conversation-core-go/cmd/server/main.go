@@ -16,6 +16,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/eventing"
 	apphttp "github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/http"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 	appnats "github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/nats"
 )
 
@@ -37,6 +38,7 @@ func main() {
 	}
 
 	var publisher conversation.EventPublisher
+	var eventPublisher *eventing.Publisher
 	natsClient, err := appnats.NewClient(appnats.Config{
 		URL:   cfg.NATSURL,
 		Token: cfg.NATSToken,
@@ -46,9 +48,15 @@ func main() {
 		log.Printf("conversation-core-go: NATS disabled: %v", err)
 	} else {
 		defer natsClient.Close()
-		eventPublisher := eventing.NewPublisher(natsClient.JS)
+		eventPublisher = eventing.NewPublisher(natsClient.JS)
 		if err := eventPublisher.EnsureStream(); err != nil {
 			log.Printf("conversation-core-go: ensure stream: %v", err)
+		}
+		// The model-proposed subject lives in the model namespace, which the
+		// application stream does not cover — ensure its own stream so the
+		// propose leg is durable.
+		if err := eventPublisher.EnsureModelStream(); err != nil {
+			log.Printf("conversation-core-go: ensure model stream: %v", err)
 		}
 		publisher = eventPublisher
 	}
@@ -56,15 +64,35 @@ func main() {
 	repository := conversation.NewRepository(db.Pool)
 	service := conversation.NewService(repository, publisher)
 
-	// W4 HITL executor: when a human approves a ticket.classification action,
-	// promote the suggested ticket + apply routing. Only runs when JetStream is
-	// available (publisher set in the NATS branch above). Idempotent by action id.
+	// PR-6 act-leg: outbound client to integration-corev2 for draft.reply sends.
+	// Constructed only when configured, so the executor never claims a send it
+	// cannot perform (a nil sender disables draft.reply execution honestly).
+	var sender consumers.OutboundSender
+	if cfg.DraftReplySendEnabled() {
+		sender = integration.NewClient(cfg.IntegrationBaseURL, cfg.IntegrationInternalKey)
+		log.Printf("conversation-core-go: draft.reply outbound-send enabled via %s", cfg.IntegrationBaseURL)
+	} else {
+		log.Printf("conversation-core-go: draft.reply outbound-send disabled (INTEGRATION_BASE_URL / key unset)")
+	}
+
+	// W4 HITL executor: when a human approves an action, promote the ticket
+	// (ticket.classification) or send the reply (draft.reply). Only runs when
+	// JetStream is available (publisher set above). Idempotent by action id.
 	if natsClient != nil && publisher != nil {
-		executor := consumers.NewAIActionExecutor(natsClient.JS, repository, service, publisher)
+		executor := consumers.NewAIActionExecutor(natsClient.JS, repository, service, publisher, sender)
 		if err := executor.Start(ctx); err != nil {
 			log.Printf("conversation-core-go: ai-action executor: %v", err)
 		} else {
 			defer executor.Stop()
+		}
+
+		// Propose leg: model/hook-published velion.model.action.proposed events
+		// queue suggested actions into the HITL review queue.
+		proposedConsumer := consumers.NewModelActionProposedConsumer(natsClient.JS, service)
+		if err := proposedConsumer.Start(ctx); err != nil {
+			log.Printf("conversation-core-go: model-action-proposed consumer: %v", err)
+		} else {
+			defer proposedConsumer.Stop()
 		}
 	}
 

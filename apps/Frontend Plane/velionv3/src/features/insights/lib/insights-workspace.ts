@@ -1,10 +1,12 @@
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
+  getInsightsOverview,
   listInsightConnectors,
   type InsightConnector,
+  type InsightScorecard,
 } from '@/shared/api/insights-client'
 import { listConnections, type IntegrationConnection } from '@/shared/api/integrations-client'
-import { withResourceTimeout } from '@/shared/read-data'
+import { listResult, withResourceTimeout } from '@/shared/read-data'
 import type { MeasurementState, ResourceResult } from '@/shared/read-data'
 
 // The read-data substrate (Phase 4 PR-1) owns MeasurementState / ResourceResult
@@ -26,6 +28,10 @@ export type InsightsWorkspace = {
   externalAnalytics: ExternalAnalyticsSlot[]
   insightConnectors: ResourceResult<InsightConnector[]>
   integrations: ResourceResult<IntegrationConnection[]>
+  // Real, recorded metric scorecards. `live` ONLY when insight-core produced
+  // rows; zero rows resolve to `empty`, a failure/timeout to `unavailable` —
+  // `live` never attaches to an unproduced value.
+  overview: ResourceResult<InsightScorecard[]>
 }
 
 export type ExternalAnalyticsSlot = {
@@ -44,7 +50,7 @@ const INSIGHTS_RESOURCE_TIMEOUT_MS = 3500
 
 export async function loadInsightsWorkspace(): Promise<InsightsWorkspace> {
   const context = await loadInsightsContext()
-  const [insightConnectors, integrations] = await Promise.all([
+  const [insightConnectors, integrations, overview] = await Promise.all([
     withResourceTimeout(readInsightConnectors(), {
       data: [],
       message: 'Insight connector registry did not respond before the dashboard timeout.',
@@ -55,6 +61,11 @@ export async function loadInsightsWorkspace(): Promise<InsightsWorkspace> {
       message: 'Integration registry did not respond before the dashboard timeout.',
       state: 'unavailable',
     }),
+    withResourceTimeout(readInsightsOverview(), {
+      data: [],
+      message: 'Metric overview did not respond before the dashboard timeout.',
+      state: 'unavailable',
+    }),
   ])
 
   return {
@@ -62,6 +73,7 @@ export async function loadInsightsWorkspace(): Promise<InsightsWorkspace> {
     externalAnalytics: buildExternalAnalyticsSlots(integrations, insightConnectors),
     insightConnectors,
     integrations,
+    overview,
   }
 }
 
@@ -112,6 +124,32 @@ async function readInsightConnectors(): Promise<InsightsWorkspace['insightConnec
     return {
       data: [],
       message: 'Insight-core connector proxy is not available yet; falling back to integration connections.',
+      state: 'unavailable',
+    }
+  }
+}
+
+// Map real recorded scorecards to a ResourceResult. `listResult` is the
+// anti-fabrication helper: rows → `live`, zero rows → `empty` (an honest
+// "not yet reporting"). `live` is therefore NEVER attached to an unproduced
+// metric value. Pure, so the state mapping is unit-testable.
+export function overviewResult(scorecards: InsightScorecard[]): ResourceResult<InsightScorecard[]> {
+  return listResult(scorecards, {
+    empty: 'Measurement layer is live, but no connector has reported a metric yet.',
+    live: 'Showing real recorded metrics from the measurement layer.',
+  })
+}
+
+// The gateway resolves the org from the session, so the SPA sends no org scope.
+// A failure resolves to `unavailable` rather than a fabricated empty/live state.
+async function readInsightsOverview(): Promise<InsightsWorkspace['overview']> {
+  try {
+    const overview = await getInsightsOverview()
+    return overviewResult(overview.scorecards)
+  } catch {
+    return {
+      data: [],
+      message: 'Metric overview is not available yet; the measurement layer did not respond.',
       state: 'unavailable',
     }
   }

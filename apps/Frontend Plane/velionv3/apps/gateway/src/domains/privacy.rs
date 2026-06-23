@@ -12,7 +12,9 @@
 //! DELETE inherits the gateway's global per-identity rate limiter (see
 //! `rate_limit.rs`), keyed by the session identity — a tighter erase-specific
 //! limit is a possible follow-up but unnecessary today (the operation is
-//! self-targeted and one-shot, and user-core also gates it on step-up re-auth).
+//! self-targeted and one-shot). NOTE: step-up re-auth is NOT yet enforced (here
+//! or in user-core); it is a documented Phase-3 follow-up tied to the admin
+//! erase-another-user surface — today erasure through the gateway is self-only.
 
 use axum::{
     extract::{Extension, State},

@@ -6,6 +6,7 @@ import {
   generateKeyPairSync,
   type KeyObject,
 } from 'crypto';
+import { readFileSync } from 'fs';
 
 type ConvexJwtClaims = {
   externalAuthId: string;
@@ -379,8 +380,17 @@ export class ConvexTokenService {
   }
 
   private loadKeyPair() {
-    const privatePem = process.env.CONVEX_AUTH_PRIVATE_KEY_PEM;
-    const publicPem = process.env.CONVEX_AUTH_PUBLIC_KEY_PEM;
+    // Precedence: mounted key files (secrets-as-files; survives container
+    // recreation so the JWKS at /api/convex-auth/jwks is STABLE and downstream
+    // verifiers can pin the public key) → inline PEM env → ephemeral (dev only).
+    // File-based keys avoid the docker `env_file` multiline-PEM limitation and
+    // keep private-key material out of env/compose (and out of git).
+    const privatePem =
+      this.readKeyFile(process.env.CONVEX_AUTH_PRIVATE_KEY_FILE) ??
+      process.env.CONVEX_AUTH_PRIVATE_KEY_PEM;
+    const publicPem =
+      this.readKeyFile(process.env.CONVEX_AUTH_PUBLIC_KEY_FILE) ??
+      process.env.CONVEX_AUTH_PUBLIC_KEY_PEM;
 
     if (privatePem && publicPem) {
       return {
@@ -390,7 +400,7 @@ export class ConvexTokenService {
     }
 
     const message =
-      'CONVEX_AUTH_PRIVATE_KEY_PEM / CONVEX_AUTH_PUBLIC_KEY_PEM not set; generating ephemeral RSA keypair for local development.';
+      'CONVEX_AUTH_PRIVATE_KEY_FILE/PEM + CONVEX_AUTH_PUBLIC_KEY_FILE/PEM not set; generating ephemeral RSA keypair for local development (JWKS rotates on every restart — set a stable key for production).';
     if (process.env.NODE_ENV === 'production') {
       this.logger.warn(message);
     } else {
@@ -405,6 +415,28 @@ export class ConvexTokenService {
       privateKey: generated.privateKey,
       publicKey: generated.publicKey,
     };
+  }
+
+  /**
+   * Read a PEM key from a mounted file path. Returns `undefined` when the env
+   * var is unset/empty or the file cannot be read, so the caller falls through
+   * to the inline-PEM / ephemeral branches without throwing on a misconfigured
+   * mount.
+   */
+  private readKeyFile(path: string | undefined): string | undefined {
+    const trimmed = (path ?? '').trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    try {
+      const pem = readFileSync(trimmed, 'utf8').trim();
+      return pem.length > 0 ? pem : undefined;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to read key file at ${trimmed}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
   }
 
   private encodeSegment(value: unknown) {

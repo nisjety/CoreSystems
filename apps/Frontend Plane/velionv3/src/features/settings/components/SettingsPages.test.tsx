@@ -163,14 +163,21 @@ describe('workspace settings page', () => {
     expect(screen.queryByRole('textbox', { name: /workspace name/i })).toBeNull()
   })
 
-  it('renders security controls on the org security page', () => {
+  it('renders org-security controls as honest unconfigured, never enabled from a literal', () => {
     render(() => <VelionWorkspaceSettingsPage section="org-security" />)
 
     expect(screen.getByRole('heading', { name: /org security/i, level: 1 })).toBeTruthy()
-    // De-faked: the fabricated MFA/Sessions/Audit status cards were removed; the
-    // live security toggle control remains the source of truth.
-    expect(screen.getByRole('switch', { name: /require mfa for admins/i }).getAttribute('aria-checked')).toBe('true')
-    expect((screen.getByRole('combobox', { name: /session duration/i }) as HTMLSelectElement).value).toBe('30-days')
+    // Phase 4 PR-2 de-fake: no real org-security source is wired behind the
+    // gateway, so the MFA control must render OFF and DISABLED — never shown
+    // enabled from a literal (the prior `enabled: true` was a fabricated posture).
+    const mfa = screen.getByRole('switch', { name: /require mfa for admins/i })
+    expect(mfa.getAttribute('aria-checked')).toBe('false')
+    expect(
+      mfa.hasAttribute('disabled')
+      || mfa.getAttribute('aria-disabled') === 'true'
+      || mfa.getAttribute('data-disabled') !== null,
+    ).toBe(true)
+    expect(screen.getByRole('combobox', { name: /session duration/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /recent security events/i })).toBeTruthy()
     expect(screen.getByText(/loading security events/i)).toBeTruthy()
   })

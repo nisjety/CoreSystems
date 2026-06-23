@@ -180,6 +180,33 @@ impl InternalSigner {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     }
+
+    /// Verify the `X-Quarry-Run-Sig` org-binding the orchestrator stamps
+    /// on `/v1/internal/run_page`. The runtime bearer token authenticates
+    /// the *caller*; this HMAC binds the *tenant identity* so a leaked
+    /// bearer can't be replayed against an arbitrary `org_id`.
+    ///
+    /// Canonical string is `org_id + "\n" + url` — the body's `org_id`, a
+    /// single `\n`, then the body's raw `url` (BEFORE URL-parsing). This
+    /// MUST match the Go signer (`runBindingSig`) byte-for-byte. Signature
+    /// is lowercase-hex of HMAC-SHA256(secret, canonical), compared in
+    /// constant time so a near-miss can't be timing-oracled into a forgery.
+    pub fn verify_run_binding(&self, org_id: &str, url: &str, provided_hex: &str) -> bool {
+        // Field-confusion guard: a `\n` inside org_id (or url) would shift the
+        // canonical boundary so (org="a", url="\nX") forges the same HMAC as
+        // (org="a\nX", url="…"). Org ids + URLs are newline-free in practice;
+        // reject any that aren't rather than hash an ambiguous string.
+        if org_id.contains('\n') || url.contains('\n') {
+            return false;
+        }
+        let canonical = format!("{org_id}\n{url}");
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(canonical.as_bytes());
+        // Lowercase-hex — same style as `body_digest`'s `{:x}`.
+        let expected = format!("{:x}", mac.finalize().into_bytes());
+        crate::change_routes::ct_eq(expected.as_bytes(), provided_hex.as_bytes())
+    }
 }
 
 /// Three-tuple of header values applied by `apply_to_request` —
@@ -338,5 +365,50 @@ mod tests {
         let tampered_hash = InternalSigner::body_digest(b"{\"name\":\"OTHER\"}");
         let tampered = s.sign_raw(method, path, &tampered_hash, ts, &nonce);
         assert_ne!(sig, tampered, "body tamper MUST be detected");
+    }
+
+    /// run_page org-binding round-trip. A correct sig over
+    /// `org_id\nurl` verifies; tampering with org, url, or the sig
+    /// itself fails. This is the contract the Go `runBindingSig` signer
+    /// must mirror byte-for-byte.
+    #[test]
+    fn verify_run_binding_accepts_correct_and_rejects_tampered() {
+        let s = signer();
+        let org = "org_a";
+        let url = "https://example.com/pricing";
+
+        // Compute the honest signature the way the Go signer does:
+        // lowercase-hex HMAC-SHA256 over `org_id\nurl`.
+        let good = {
+            let mut mac = HmacSha256::new_from_slice(s.secret.as_bytes()).unwrap();
+            mac.update(format!("{org}\n{url}").as_bytes());
+            format!("{:x}", mac.finalize().into_bytes())
+        };
+
+        assert!(
+            s.verify_run_binding(org, url, &good),
+            "honest org-binding signature MUST verify"
+        );
+
+        // Tampered org → mismatch.
+        assert!(
+            !s.verify_run_binding("org_b", url, &good),
+            "swapping org_id MUST fail (the whole point of the binding)"
+        );
+        // Tampered url → mismatch.
+        assert!(
+            !s.verify_run_binding(org, "https://evil.example.com", &good),
+            "swapping url MUST fail"
+        );
+        // Tampered signature → mismatch.
+        assert!(
+            !s.verify_run_binding(org, url, "deadbeef"),
+            "a forged signature MUST fail"
+        );
+        // Empty signature (header absent) → mismatch.
+        assert!(
+            !s.verify_run_binding(org, url, ""),
+            "a missing signature MUST fail"
+        );
     }
 }

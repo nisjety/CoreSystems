@@ -25,71 +25,14 @@ export const MIN_BLOCK_WIDTH = 180
 export const MIN_BLOCK_HEIGHT = 140
 export const DUPLICATE_OFFSET = 32
 
-export const initialBlocks: StudioBlock[] = [
-  {
-    id: 'profile',
-    kind: 'profile',
-    title: 'Ava Berg',
-    body: 'Creative lead, Velion',
-    imageUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=420&q=80',
-    x: 92,
-    y: 82,
-    width: 390,
-    height: 300,
-  },
-  {
-    id: 'positioning',
-    kind: 'text',
-    title: 'Campaign hook',
-    body: 'Turn support signals into public trust. Show the workflow, not the promise.',
-    x: 520,
-    y: 92,
-    width: 310,
-    height: 210,
-  },
-  {
-    id: 'brand',
-    kind: 'brand',
-    title: 'VELION',
-    body: 'Quiet operations, visible momentum',
-    x: 868,
-    y: 90,
-    width: 330,
-    height: 220,
-  },
-  {
-    id: 'workspace',
-    kind: 'image',
-    title: 'Product workspace',
-    body: 'Dashboard crop for launch story',
-    imageUrl: 'https://images.unsplash.com/photo-1497366811353-6870744d04b2?auto=format&fit=crop&w=520&q=80',
-    x: 1252,
-    y: 90,
-    width: 320,
-    height: 590,
-  },
-  {
-    id: 'motion',
-    kind: 'image',
-    title: 'Motion background',
-    body: 'Use as short-form opening scene',
-    imageUrl: 'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=780&q=80',
-    x: 92,
-    y: 420,
-    width: 690,
-    height: 270,
-  },
-  {
-    id: 'x-card',
-    kind: 'link',
-    title: '@velion on X',
-    body: 'x.com/velion',
-    x: 870,
-    y: 350,
-    width: 320,
-    height: 265,
-  },
-]
+/**
+ * Phase 4 PR-3 seed strip: the canvas now starts empty. The previous demo blocks
+ * (a fabricated persona plus stock imagery) were a verbatim mirror of the gateway
+ * seed and implied real org content that does not exist. Both have been stripped
+ * so the canvas opens to the honest "Start a Studio board" empty state until the
+ * user (or a loaded project) adds blocks.
+ */
+export const initialBlocks: StudioBlock[] = []
 
 export async function loadStudioWorkspace(): Promise<{
   orgId: string
@@ -124,9 +67,10 @@ export function createBlock(kind: StudioBlockKind, count: number): StudioBlock {
   }
 
   if (kind === 'image' || kind === 'profile') {
+    // Phase 4 PR-3 seed strip: a freshly added image block starts with no image
+    // (an empty placeholder the user fills) rather than fabricated stock imagery.
     return constrainBlock({
       ...base,
-      imageUrl: 'https://images.unsplash.com/photo-1518005020951-eccb494ad742?auto=format&fit=crop&w=520&q=80',
       height: 260,
     })
   }

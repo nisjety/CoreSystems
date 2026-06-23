@@ -35,6 +35,13 @@ const NEWS_TOOL: &str = "news";
 const TRACK_SHIPMENT_TOOL: &str = "track_shipment";
 const COMPANY_LOOKUP_TOOL: &str = "company_lookup";
 
+/// Namespace prefix for tools proxied to a registered MCP server
+/// (`mcp__<server_id>__<tool>`). Routed back through the gateway's
+/// `ProxyMcpTool` (matrix §G2) — exec-core holds no MCP registry of its own.
+/// Offered to the model via [`agent::run_agent`]'s merged tool defs, so an
+/// `mcp__` call has already passed the purpose-lock by the time it lands here.
+const MCP_TOOL_PREFIX: &str = "mcp__";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepOutcome {
     pub status: String,
@@ -129,6 +136,8 @@ pub async fn execute_step(
         execute_track_shipment(tool_input).await
     } else if tool_name == COMPANY_LOOKUP_TOOL {
         execute_company_lookup(tool_input).await
+    } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
+        execute_mcp(tool_name, tool_input, org_id).await
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };
@@ -202,6 +211,32 @@ async fn execute_web_search(tool_input: &str) -> tool_bridge::ToolExecution {
         return tool_error("web_search unavailable: QUARRY_EDGE_URL not configured".to_owned());
     };
     match client.search(&input.query, input.limit.unwrap_or(8)).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `mcp__<server_id>__<tool>` — proxy a registered MCP server's tool through the
+/// gateway's `ProxyMcpTool` (matrix §G2). `org_id` is the run-context tenant
+/// (never model input); the server is selected by the namespaced name, and the
+/// gateway enforces the server's enabled flag + tool allowlist. Best-effort: a
+/// missing gateway or remote error returns a clear tool error to the model.
+async fn execute_mcp(tool_name: &str, tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+    let Some((server_id, remote_tool)) = crate::mcp_gateway::parse_mcp_tool_name(tool_name) else {
+        return tool_error(format!(
+            "malformed MCP tool '{tool_name}' (expected mcp__<server>__<tool>)"
+        ));
+    };
+    let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() else {
+        return tool_error("MCP gateway not configured (MODEL_GATEWAY_ADDR)".to_owned());
+    };
+    match client
+        .proxy_tool(org_id, server_id, remote_tool, tool_input)
+        .await
+    {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -445,7 +480,16 @@ mod tests {
 
     #[tokio::test]
     async fn shell_tool_invalid_json_fails() {
-        let out = execute_step("shell", "not json", "auto", "", "org_test", "user_test", None).await;
+        let out = execute_step(
+            "shell",
+            "not json",
+            "auto",
+            "",
+            "org_test",
+            "user_test",
+            None,
+        )
+        .await;
         assert_eq!(out.status, "failed");
     }
 
@@ -466,7 +510,16 @@ mod tests {
 
     #[tokio::test]
     async fn non_shell_tool_still_uses_the_deterministic_bridge() {
-        let out = execute_step("echo", "hello-bridge", "auto", "", "org_test", "user_test", None).await;
+        let out = execute_step(
+            "echo",
+            "hello-bridge",
+            "auto",
+            "",
+            "org_test",
+            "user_test",
+            None,
+        )
+        .await;
         assert_eq!(out.status, "completed");
         assert!(out.output.contains("hello-bridge"));
     }

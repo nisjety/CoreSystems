@@ -32,17 +32,33 @@ pub async fn graph_expansion_search(
     query: &str,
     org_id: &str,
     max_entities: i32,
+    // Per-user ownership: when `viewer` is `Some`, an entity/relationship/claim is
+    // returned only if at least one of its `source_refs` (knowledge_ids) belongs
+    // to a document the viewer can see (owner / org-visible / explicitly granted).
+    // `None` → no-op (legacy org-scoped path). Closes the graph-grounding leak so
+    // a non-owner never sees graph knowledge extracted from another user's private
+    // docs.
+    viewer: Option<&str>,
+    granted_ids: &[String],
 ) -> anyhow::Result<Vec<GraphExpansionResult>> {
     let entity_rows = sqlx::query_as::<_, (String, String, String, f64)>(
         "SELECT entity_id, entity_text, entity_type, COALESCE(confidence, 0)
          FROM graph_entities
          WHERE org_id = $1 AND to_tsvector('english', entity_text) @@ plainto_tsquery('english', $2)
+           AND ($4::text IS NULL OR EXISTS (
+                 SELECT 1 FROM jsonb_array_elements_text(graph_entities.source_refs) sr
+                 JOIN knowledge_units ku ON ku.knowledge_id = sr
+                 JOIN documents d ON d.document_id = ku.document_id
+                 WHERE d.deleted_at IS NULL
+                   AND (d.owner_id = $4 OR d.visibility = 'org' OR d.document_id = ANY($5))))
          ORDER BY ts_rank_cd(to_tsvector('english', entity_text), plainto_tsquery('english', $2)) DESC
          LIMIT $3"
     )
     .bind(org_id)
     .bind(query)
     .bind(max_entities)
+    .bind(viewer)
+    .bind(granted_ids)
     .fetch_all(pool)
     .await?;
 
@@ -57,10 +73,19 @@ pub async fn graph_expansion_search(
              JOIN graph_entities a ON r.entity_a_id = a.entity_id
              JOIN graph_entities b ON r.entity_b_id = b.entity_id
              WHERE r.org_id = $2 AND (r.entity_a_id = $1 OR r.entity_b_id = $1)
+               AND ($3::text IS NULL OR EXISTS (
+                     SELECT 1 FROM jsonb_array_elements_text(
+                         CASE WHEN r.entity_a_id = $1 THEN b.source_refs ELSE a.source_refs END) sr
+                     JOIN knowledge_units ku ON ku.knowledge_id = sr
+                     JOIN documents d ON d.document_id = ku.document_id
+                     WHERE d.deleted_at IS NULL
+                       AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))))
              LIMIT 20",
         )
         .bind(eid)
         .bind(org_id)
+        .bind(viewer)
+        .bind(granted_ids)
         .fetch_all(pool)
         .await?;
 
@@ -82,10 +107,18 @@ pub async fn graph_expansion_search(
             "SELECT claim_id, claim_text, COALESCE(confidence, 0), COALESCE(claim_status, 'active')
              FROM graph_claims
              WHERE org_id = $1 AND entity_ids @> $2::jsonb
+               AND ($3::text IS NULL OR EXISTS (
+                     SELECT 1 FROM jsonb_array_elements_text(graph_claims.source_refs) sr
+                     JOIN knowledge_units ku ON ku.knowledge_id = sr
+                     JOIN documents d ON d.document_id = ku.document_id
+                     WHERE d.deleted_at IS NULL
+                       AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))))
              LIMIT 10",
         )
         .bind(org_id)
         .bind(serde_json::json!([eid]))
+        .bind(viewer)
+        .bind(granted_ids)
         .fetch_all(pool)
         .await?;
 

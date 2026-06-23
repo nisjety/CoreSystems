@@ -41,7 +41,13 @@ type InferRequest struct {
 	// Optional JSON Schema for structured output conformance.
 	StructuredOutputSchema string `protobuf:"bytes,8,opt,name=structured_output_schema,json=structuredOutputSchema,proto3" json:"structured_output_schema,omitempty"`
 	// Zero Data Retention mode. When true, inference results are not cached or logged durably.
-	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	Zdr bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// chat-parity §2 function-calling: tool/function definitions the model may
+	// call. Empty → no tools offered (plain text completion, unchanged).
+	Tools []*ToolDefinition `protobuf:"bytes,10,rep,name=tools,proto3" json:"tools,omitempty"`
+	// Tool selection policy: "auto" (default), "none", "required", or a specific
+	// tool name. Empty is treated as "auto" when `tools` is non-empty.
+	ToolChoice    string `protobuf:"bytes,11,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -139,6 +145,148 @@ func (x *InferRequest) GetZdr() bool {
 	return false
 }
 
+func (x *InferRequest) GetTools() []*ToolDefinition {
+	if x != nil {
+		return x.Tools
+	}
+	return nil
+}
+
+func (x *InferRequest) GetToolChoice() string {
+	if x != nil {
+		return x.ToolChoice
+	}
+	return ""
+}
+
+// ToolDefinition — a function the model may call (chat-parity §2).
+type ToolDefinition struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Function name (e.g. "search_web").
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Human/model-readable description of what the tool does.
+	Description string `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	// JSON Schema (as a JSON string) describing the tool's parameters.
+	ParametersJson string `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ToolDefinition) Reset() {
+	*x = ToolDefinition{}
+	mi := &file_model_plane_v1_inference_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolDefinition) ProtoMessage() {}
+
+func (x *ToolDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_inference_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolDefinition.ProtoReflect.Descriptor instead.
+func (*ToolDefinition) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ToolDefinition) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolDefinition) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *ToolDefinition) GetParametersJson() string {
+	if x != nil {
+		return x.ParametersJson
+	}
+	return ""
+}
+
+// ToolCall — a model-requested tool invocation (chat-parity §2).
+type ToolCall struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Provider-assigned call id (echoed back with the result).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Name of the tool to invoke.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// JSON-encoded arguments object.
+	ArgumentsJson string `protobuf:"bytes,3,opt,name=arguments_json,json=argumentsJson,proto3" json:"arguments_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolCall) Reset() {
+	*x = ToolCall{}
+	mi := &file_model_plane_v1_inference_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolCall) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolCall) ProtoMessage() {}
+
+func (x *ToolCall) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_inference_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
+func (*ToolCall) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ToolCall) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolCall) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolCall) GetArgumentsJson() string {
+	if x != nil {
+		return x.ArgumentsJson
+	}
+	return ""
+}
+
 // ChatMessage — a single message in the conversation.
 type ChatMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -154,7 +302,7 @@ type ChatMessage struct {
 
 func (x *ChatMessage) Reset() {
 	*x = ChatMessage{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[1]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -166,7 +314,7 @@ func (x *ChatMessage) String() string {
 func (*ChatMessage) ProtoMessage() {}
 
 func (x *ChatMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[1]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -179,7 +327,7 @@ func (x *ChatMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatMessage.ProtoReflect.Descriptor instead.
 func (*ChatMessage) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{1}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ChatMessage) GetRole() string {
@@ -217,14 +365,16 @@ type InferResponse struct {
 	// Token counts for usage tracking.
 	InputTokens int32 `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
 	// Number of generated tokens.
-	OutputTokens  int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	OutputTokens int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// chat-parity §2: tool calls the model requested (empty for a plain answer).
+	ToolCalls     []*ToolCall `protobuf:"bytes,7,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InferResponse) Reset() {
 	*x = InferResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[2]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -236,7 +386,7 @@ func (x *InferResponse) String() string {
 func (*InferResponse) ProtoMessage() {}
 
 func (x *InferResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[2]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -249,7 +399,7 @@ func (x *InferResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InferResponse.ProtoReflect.Descriptor instead.
 func (*InferResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{2}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *InferResponse) GetRequestId() string {
@@ -294,6 +444,13 @@ func (x *InferResponse) GetOutputTokens() int32 {
 	return 0
 }
 
+func (x *InferResponse) GetToolCalls() []*ToolCall {
+	if x != nil {
+		return x.ToolCalls
+	}
+	return nil
+}
+
 // InferChunk — a single chunk in a streaming inference response.
 type InferChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -315,7 +472,7 @@ type InferChunk struct {
 
 func (x *InferChunk) Reset() {
 	*x = InferChunk{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[3]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -327,7 +484,7 @@ func (x *InferChunk) String() string {
 func (*InferChunk) ProtoMessage() {}
 
 func (x *InferChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[3]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -340,7 +497,7 @@ func (x *InferChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InferChunk.ProtoReflect.Descriptor instead.
 func (*InferChunk) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{3}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InferChunk) GetRequestId() string {
@@ -397,14 +554,26 @@ type CreateEmbeddingRequest struct {
 	// Requested model/deployment (e.g. "text-embedding-3-large").
 	Model string `protobuf:"bytes,4,opt,name=model,proto3" json:"model,omitempty"`
 	// Optional provider hint: "openai", "azure-openai", etc.
-	ProviderHint  string `protobuf:"bytes,5,opt,name=provider_hint,json=providerHint,proto3" json:"provider_hint,omitempty"`
+	ProviderHint string `protobuf:"bytes,5,opt,name=provider_hint,json=providerHint,proto3" json:"provider_hint,omitempty"`
+	// Zero Data Retention; the content must not egress to a retaining provider.
+	// An EU/ZDR embedding provider is a Phase-4 prerequisite — this field does
+	// NOT by itself satisfy residency (both provider paths still default to
+	// Azure today). It is plumbing for that future provider plus the
+	// direct-Azure egress reject enforced on the Data Plane.
+	Zdr bool `protobuf:"varint,6,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Requested/required residency region for the embedding deployment (e.g.
+	// "swedencentral", "westeurope"). inference-core enforces this deny-by-default:
+	// a non-EU region is REJECTED before any network call unless the operator has
+	// explicitly opted in via MODEL_PLANE_ALLOW_NON_EU_EMBEDDING. Empty means the
+	// caller expresses no preference and the configured EU deployment is used.
+	Region        string `protobuf:"bytes,7,opt,name=region,proto3" json:"region,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateEmbeddingRequest) Reset() {
 	*x = CreateEmbeddingRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[4]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -416,7 +585,7 @@ func (x *CreateEmbeddingRequest) String() string {
 func (*CreateEmbeddingRequest) ProtoMessage() {}
 
 func (x *CreateEmbeddingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[4]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -429,7 +598,7 @@ func (x *CreateEmbeddingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateEmbeddingRequest.ProtoReflect.Descriptor instead.
 func (*CreateEmbeddingRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{4}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CreateEmbeddingRequest) GetRequestId() string {
@@ -467,6 +636,20 @@ func (x *CreateEmbeddingRequest) GetProviderHint() string {
 	return ""
 }
 
+func (x *CreateEmbeddingRequest) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *CreateEmbeddingRequest) GetRegion() string {
+	if x != nil {
+		return x.Region
+	}
+	return ""
+}
+
 // CreateEmbeddingResponse — generated vector and serving metadata.
 type CreateEmbeddingResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -484,7 +667,7 @@ type CreateEmbeddingResponse struct {
 
 func (x *CreateEmbeddingResponse) Reset() {
 	*x = CreateEmbeddingResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[5]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -496,7 +679,7 @@ func (x *CreateEmbeddingResponse) String() string {
 func (*CreateEmbeddingResponse) ProtoMessage() {}
 
 func (x *CreateEmbeddingResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[5]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -509,7 +692,7 @@ func (x *CreateEmbeddingResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateEmbeddingResponse.ProtoReflect.Descriptor instead.
 func (*CreateEmbeddingResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{5}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CreateEmbeddingResponse) GetRequestId() string {
@@ -553,7 +736,7 @@ type ListModelsRequest struct {
 
 func (x *ListModelsRequest) Reset() {
 	*x = ListModelsRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[6]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -565,7 +748,7 @@ func (x *ListModelsRequest) String() string {
 func (*ListModelsRequest) ProtoMessage() {}
 
 func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[6]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -578,7 +761,7 @@ func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsRequest.ProtoReflect.Descriptor instead.
 func (*ListModelsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListModelsRequest) GetModality() string {
@@ -605,14 +788,19 @@ type ModelInfo struct {
 	// Modality served by the model.
 	Modality string `protobuf:"bytes,3,opt,name=modality,proto3" json:"modality,omitempty"`
 	// Whether the model supports streaming responses.
-	Streaming     bool `protobuf:"varint,4,opt,name=streaming,proto3" json:"streaming,omitempty"`
+	Streaming bool `protobuf:"varint,4,opt,name=streaming,proto3" json:"streaming,omitempty"`
+	// chat-parity §2 per-model feature flags: the rich-event / capability
+	// families this model supports, derived from the provider's
+	// ProviderCapabilities (e.g. "reasoning", "tools", "vision", "image").
+	// Lets the client gate the opt-in `features[]` per selected model.
+	Features      []string `protobuf:"bytes,5,rep,name=features,proto3" json:"features,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ModelInfo) Reset() {
 	*x = ModelInfo{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[7]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -624,7 +812,7 @@ func (x *ModelInfo) String() string {
 func (*ModelInfo) ProtoMessage() {}
 
 func (x *ModelInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[7]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -637,7 +825,7 @@ func (x *ModelInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelInfo.ProtoReflect.Descriptor instead.
 func (*ModelInfo) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ModelInfo) GetId() string {
@@ -668,6 +856,13 @@ func (x *ModelInfo) GetStreaming() bool {
 	return false
 }
 
+func (x *ModelInfo) GetFeatures() []string {
+	if x != nil {
+		return x.Features
+	}
+	return nil
+}
+
 // ListModelsResponse — available models in the active provider chain.
 type ListModelsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -679,7 +874,7 @@ type ListModelsResponse struct {
 
 func (x *ListModelsResponse) Reset() {
 	*x = ListModelsResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[8]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -691,7 +886,7 @@ func (x *ListModelsResponse) String() string {
 func (*ListModelsResponse) ProtoMessage() {}
 
 func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[8]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -704,7 +899,7 @@ func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsResponse.ProtoReflect.Descriptor instead.
 func (*ListModelsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{8}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListModelsResponse) GetModels() []*ModelInfo {
@@ -739,7 +934,7 @@ type SynthesizeSpeechRequest struct {
 
 func (x *SynthesizeSpeechRequest) Reset() {
 	*x = SynthesizeSpeechRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[9]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -751,7 +946,7 @@ func (x *SynthesizeSpeechRequest) String() string {
 func (*SynthesizeSpeechRequest) ProtoMessage() {}
 
 func (x *SynthesizeSpeechRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[9]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -764,7 +959,7 @@ func (x *SynthesizeSpeechRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SynthesizeSpeechRequest.ProtoReflect.Descriptor instead.
 func (*SynthesizeSpeechRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{9}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SynthesizeSpeechRequest) GetRequestId() string {
@@ -844,7 +1039,7 @@ type SynthesizeSpeechResponse struct {
 
 func (x *SynthesizeSpeechResponse) Reset() {
 	*x = SynthesizeSpeechResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[10]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -856,7 +1051,7 @@ func (x *SynthesizeSpeechResponse) String() string {
 func (*SynthesizeSpeechResponse) ProtoMessage() {}
 
 func (x *SynthesizeSpeechResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[10]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -869,7 +1064,7 @@ func (x *SynthesizeSpeechResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SynthesizeSpeechResponse.ProtoReflect.Descriptor instead.
 func (*SynthesizeSpeechResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{10}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SynthesizeSpeechResponse) GetRequestId() string {
@@ -937,7 +1132,7 @@ type TranscribeSpeechRequest struct {
 
 func (x *TranscribeSpeechRequest) Reset() {
 	*x = TranscribeSpeechRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[11]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -949,7 +1144,7 @@ func (x *TranscribeSpeechRequest) String() string {
 func (*TranscribeSpeechRequest) ProtoMessage() {}
 
 func (x *TranscribeSpeechRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[11]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -962,7 +1157,7 @@ func (x *TranscribeSpeechRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranscribeSpeechRequest.ProtoReflect.Descriptor instead.
 func (*TranscribeSpeechRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{11}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TranscribeSpeechRequest) GetRequestId() string {
@@ -1035,7 +1230,7 @@ type TranscribeSpeechResponse struct {
 
 func (x *TranscribeSpeechResponse) Reset() {
 	*x = TranscribeSpeechResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[12]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +1242,7 @@ func (x *TranscribeSpeechResponse) String() string {
 func (*TranscribeSpeechResponse) ProtoMessage() {}
 
 func (x *TranscribeSpeechResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[12]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +1255,7 @@ func (x *TranscribeSpeechResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranscribeSpeechResponse.ProtoReflect.Descriptor instead.
 func (*TranscribeSpeechResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{12}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *TranscribeSpeechResponse) GetRequestId() string {
@@ -1118,7 +1313,7 @@ type ListSpeechVoicesRequest struct {
 
 func (x *ListSpeechVoicesRequest) Reset() {
 	*x = ListSpeechVoicesRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[13]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1130,7 +1325,7 @@ func (x *ListSpeechVoicesRequest) String() string {
 func (*ListSpeechVoicesRequest) ProtoMessage() {}
 
 func (x *ListSpeechVoicesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[13]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1143,7 +1338,7 @@ func (x *ListSpeechVoicesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSpeechVoicesRequest.ProtoReflect.Descriptor instead.
 func (*ListSpeechVoicesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{13}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ListSpeechVoicesRequest) GetProvider() string {
@@ -1179,7 +1374,7 @@ type SpeechVoiceInfo struct {
 
 func (x *SpeechVoiceInfo) Reset() {
 	*x = SpeechVoiceInfo{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[14]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1191,7 +1386,7 @@ func (x *SpeechVoiceInfo) String() string {
 func (*SpeechVoiceInfo) ProtoMessage() {}
 
 func (x *SpeechVoiceInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[14]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1204,7 +1399,7 @@ func (x *SpeechVoiceInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpeechVoiceInfo.ProtoReflect.Descriptor instead.
 func (*SpeechVoiceInfo) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{14}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SpeechVoiceInfo) GetId() string {
@@ -1253,7 +1448,7 @@ type ListSpeechVoicesResponse struct {
 
 func (x *ListSpeechVoicesResponse) Reset() {
 	*x = ListSpeechVoicesResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[15]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1265,7 +1460,7 @@ func (x *ListSpeechVoicesResponse) String() string {
 func (*ListSpeechVoicesResponse) ProtoMessage() {}
 
 func (x *ListSpeechVoicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[15]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1278,7 +1473,7 @@ func (x *ListSpeechVoicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSpeechVoicesResponse.ProtoReflect.Descriptor instead.
 func (*ListSpeechVoicesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{15}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ListSpeechVoicesResponse) GetVoices() []*SpeechVoiceInfo {
@@ -1311,7 +1506,7 @@ type TranslateTextRequest struct {
 
 func (x *TranslateTextRequest) Reset() {
 	*x = TranslateTextRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[16]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1323,7 +1518,7 @@ func (x *TranslateTextRequest) String() string {
 func (*TranslateTextRequest) ProtoMessage() {}
 
 func (x *TranslateTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[16]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1336,7 +1531,7 @@ func (x *TranslateTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranslateTextRequest.ProtoReflect.Descriptor instead.
 func (*TranslateTextRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{16}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *TranslateTextRequest) GetRequestId() string {
@@ -1409,7 +1604,7 @@ type TranslateTextResponse struct {
 
 func (x *TranslateTextResponse) Reset() {
 	*x = TranslateTextResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[17]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1421,7 +1616,7 @@ func (x *TranslateTextResponse) String() string {
 func (*TranslateTextResponse) ProtoMessage() {}
 
 func (x *TranslateTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[17]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1434,7 +1629,7 @@ func (x *TranslateTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranslateTextResponse.ProtoReflect.Descriptor instead.
 func (*TranslateTextResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{17}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *TranslateTextResponse) GetRequestId() string {
@@ -1492,7 +1687,7 @@ type TranslationInput struct {
 
 func (x *TranslationInput) Reset() {
 	*x = TranslationInput{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[18]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1504,7 +1699,7 @@ func (x *TranslationInput) String() string {
 func (*TranslationInput) ProtoMessage() {}
 
 func (x *TranslationInput) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[18]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1517,7 +1712,7 @@ func (x *TranslationInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranslationInput.ProtoReflect.Descriptor instead.
 func (*TranslationInput) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{18}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *TranslationInput) GetId() string {
@@ -1557,7 +1752,7 @@ type BatchTranslateTextRequest struct {
 
 func (x *BatchTranslateTextRequest) Reset() {
 	*x = BatchTranslateTextRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[19]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1569,7 +1764,7 @@ func (x *BatchTranslateTextRequest) String() string {
 func (*BatchTranslateTextRequest) ProtoMessage() {}
 
 func (x *BatchTranslateTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[19]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1582,7 +1777,7 @@ func (x *BatchTranslateTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchTranslateTextRequest.ProtoReflect.Descriptor instead.
 func (*BatchTranslateTextRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{19}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *BatchTranslateTextRequest) GetRequestId() string {
@@ -1653,7 +1848,7 @@ type TranslationResult struct {
 
 func (x *TranslationResult) Reset() {
 	*x = TranslationResult{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[20]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1665,7 +1860,7 @@ func (x *TranslationResult) String() string {
 func (*TranslationResult) ProtoMessage() {}
 
 func (x *TranslationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[20]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1678,7 +1873,7 @@ func (x *TranslationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranslationResult.ProtoReflect.Descriptor instead.
 func (*TranslationResult) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{20}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *TranslationResult) GetId() string {
@@ -1733,7 +1928,7 @@ type BatchTranslateTextResponse struct {
 
 func (x *BatchTranslateTextResponse) Reset() {
 	*x = BatchTranslateTextResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[21]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1745,7 +1940,7 @@ func (x *BatchTranslateTextResponse) String() string {
 func (*BatchTranslateTextResponse) ProtoMessage() {}
 
 func (x *BatchTranslateTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[21]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1758,7 +1953,7 @@ func (x *BatchTranslateTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchTranslateTextResponse.ProtoReflect.Descriptor instead.
 func (*BatchTranslateTextResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{21}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *BatchTranslateTextResponse) GetRequestId() string {
@@ -1808,7 +2003,7 @@ type DetectTextLanguageRequest struct {
 
 func (x *DetectTextLanguageRequest) Reset() {
 	*x = DetectTextLanguageRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[22]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1820,7 +2015,7 @@ func (x *DetectTextLanguageRequest) String() string {
 func (*DetectTextLanguageRequest) ProtoMessage() {}
 
 func (x *DetectTextLanguageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[22]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1833,7 +2028,7 @@ func (x *DetectTextLanguageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetectTextLanguageRequest.ProtoReflect.Descriptor instead.
 func (*DetectTextLanguageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{22}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *DetectTextLanguageRequest) GetRequestId() string {
@@ -1886,7 +2081,7 @@ type TranslationDetection struct {
 
 func (x *TranslationDetection) Reset() {
 	*x = TranslationDetection{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[23]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1898,7 +2093,7 @@ func (x *TranslationDetection) String() string {
 func (*TranslationDetection) ProtoMessage() {}
 
 func (x *TranslationDetection) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[23]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1911,7 +2106,7 @@ func (x *TranslationDetection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranslationDetection.ProtoReflect.Descriptor instead.
 func (*TranslationDetection) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{23}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *TranslationDetection) GetLanguage() string {
@@ -1952,7 +2147,7 @@ type DetectTextLanguageResponse struct {
 
 func (x *DetectTextLanguageResponse) Reset() {
 	*x = DetectTextLanguageResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[24]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1964,7 +2159,7 @@ func (x *DetectTextLanguageResponse) String() string {
 func (*DetectTextLanguageResponse) ProtoMessage() {}
 
 func (x *DetectTextLanguageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[24]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1977,7 +2172,7 @@ func (x *DetectTextLanguageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetectTextLanguageResponse.ProtoReflect.Descriptor instead.
 func (*DetectTextLanguageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{24}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *DetectTextLanguageResponse) GetRequestId() string {
@@ -2019,7 +2214,7 @@ type ListTranslationLanguagesRequest struct {
 
 func (x *ListTranslationLanguagesRequest) Reset() {
 	*x = ListTranslationLanguagesRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[25]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2031,7 +2226,7 @@ func (x *ListTranslationLanguagesRequest) String() string {
 func (*ListTranslationLanguagesRequest) ProtoMessage() {}
 
 func (x *ListTranslationLanguagesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[25]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2044,7 +2239,7 @@ func (x *ListTranslationLanguagesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTranslationLanguagesRequest.ProtoReflect.Descriptor instead.
 func (*ListTranslationLanguagesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{25}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ListTranslationLanguagesRequest) GetProvider() string {
@@ -2071,7 +2266,7 @@ type TranslationLanguageInfo struct {
 
 func (x *TranslationLanguageInfo) Reset() {
 	*x = TranslationLanguageInfo{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[26]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2083,7 +2278,7 @@ func (x *TranslationLanguageInfo) String() string {
 func (*TranslationLanguageInfo) ProtoMessage() {}
 
 func (x *TranslationLanguageInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[26]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2096,7 +2291,7 @@ func (x *TranslationLanguageInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TranslationLanguageInfo.ProtoReflect.Descriptor instead.
 func (*TranslationLanguageInfo) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{26}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *TranslationLanguageInfo) GetCode() string {
@@ -2138,7 +2333,7 @@ type ListTranslationLanguagesResponse struct {
 
 func (x *ListTranslationLanguagesResponse) Reset() {
 	*x = ListTranslationLanguagesResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[27]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2150,7 +2345,7 @@ func (x *ListTranslationLanguagesResponse) String() string {
 func (*ListTranslationLanguagesResponse) ProtoMessage() {}
 
 func (x *ListTranslationLanguagesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[27]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2163,7 +2358,7 @@ func (x *ListTranslationLanguagesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTranslationLanguagesResponse.ProtoReflect.Descriptor instead.
 func (*ListTranslationLanguagesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{27}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ListTranslationLanguagesResponse) GetLanguages() []*TranslationLanguageInfo {
@@ -2198,7 +2393,7 @@ type GenerateImageRequest struct {
 
 func (x *GenerateImageRequest) Reset() {
 	*x = GenerateImageRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[28]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2210,7 +2405,7 @@ func (x *GenerateImageRequest) String() string {
 func (*GenerateImageRequest) ProtoMessage() {}
 
 func (x *GenerateImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[28]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2223,7 +2418,7 @@ func (x *GenerateImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateImageRequest.ProtoReflect.Descriptor instead.
 func (*GenerateImageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{28}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *GenerateImageRequest) GetRequestId() string {
@@ -2297,7 +2492,7 @@ type GeneratedImage struct {
 
 func (x *GeneratedImage) Reset() {
 	*x = GeneratedImage{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[29]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2309,7 +2504,7 @@ func (x *GeneratedImage) String() string {
 func (*GeneratedImage) ProtoMessage() {}
 
 func (x *GeneratedImage) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[29]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2322,7 +2517,7 @@ func (x *GeneratedImage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GeneratedImage.ProtoReflect.Descriptor instead.
 func (*GeneratedImage) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{29}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GeneratedImage) GetUrl() string {
@@ -2363,7 +2558,7 @@ type GenerateImageResponse struct {
 
 func (x *GenerateImageResponse) Reset() {
 	*x = GenerateImageResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[30]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2375,7 +2570,7 @@ func (x *GenerateImageResponse) String() string {
 func (*GenerateImageResponse) ProtoMessage() {}
 
 func (x *GenerateImageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[30]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2388,7 +2583,7 @@ func (x *GenerateImageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateImageResponse.ProtoReflect.Descriptor instead.
 func (*GenerateImageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{30}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GenerateImageResponse) GetRequestId() string {
@@ -2446,7 +2641,7 @@ type AnalyzeImageRequest struct {
 
 func (x *AnalyzeImageRequest) Reset() {
 	*x = AnalyzeImageRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[31]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2458,7 +2653,7 @@ func (x *AnalyzeImageRequest) String() string {
 func (*AnalyzeImageRequest) ProtoMessage() {}
 
 func (x *AnalyzeImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[31]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2471,7 +2666,7 @@ func (x *AnalyzeImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeImageRequest.ProtoReflect.Descriptor instead.
 func (*AnalyzeImageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{31}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *AnalyzeImageRequest) GetRequestId() string {
@@ -2558,7 +2753,7 @@ type AnalyzeImageResponse struct {
 
 func (x *AnalyzeImageResponse) Reset() {
 	*x = AnalyzeImageResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[32]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2570,7 +2765,7 @@ func (x *AnalyzeImageResponse) String() string {
 func (*AnalyzeImageResponse) ProtoMessage() {}
 
 func (x *AnalyzeImageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[32]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2583,7 +2778,7 @@ func (x *AnalyzeImageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeImageResponse.ProtoReflect.Descriptor instead.
 func (*AnalyzeImageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{32}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *AnalyzeImageResponse) GetRequestId() string {
@@ -2651,7 +2846,7 @@ type ExtractImageTextRequest struct {
 
 func (x *ExtractImageTextRequest) Reset() {
 	*x = ExtractImageTextRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[33]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2663,7 +2858,7 @@ func (x *ExtractImageTextRequest) String() string {
 func (*ExtractImageTextRequest) ProtoMessage() {}
 
 func (x *ExtractImageTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[33]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2676,7 +2871,7 @@ func (x *ExtractImageTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtractImageTextRequest.ProtoReflect.Descriptor instead.
 func (*ExtractImageTextRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{33}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ExtractImageTextRequest) GetRequestId() string {
@@ -2747,7 +2942,7 @@ type ExtractImageTextResponse struct {
 
 func (x *ExtractImageTextResponse) Reset() {
 	*x = ExtractImageTextResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[34]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2759,7 +2954,7 @@ func (x *ExtractImageTextResponse) String() string {
 func (*ExtractImageTextResponse) ProtoMessage() {}
 
 func (x *ExtractImageTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[34]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2772,7 +2967,7 @@ func (x *ExtractImageTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtractImageTextResponse.ProtoReflect.Descriptor instead.
 func (*ExtractImageTextResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{34}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ExtractImageTextResponse) GetRequestId() string {
@@ -2837,7 +3032,7 @@ type AnalyzeDocumentRequest struct {
 
 func (x *AnalyzeDocumentRequest) Reset() {
 	*x = AnalyzeDocumentRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[35]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2849,7 +3044,7 @@ func (x *AnalyzeDocumentRequest) String() string {
 func (*AnalyzeDocumentRequest) ProtoMessage() {}
 
 func (x *AnalyzeDocumentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[35]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2862,7 +3057,7 @@ func (x *AnalyzeDocumentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeDocumentRequest.ProtoReflect.Descriptor instead.
 func (*AnalyzeDocumentRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{35}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *AnalyzeDocumentRequest) GetRequestId() string {
@@ -2959,7 +3154,7 @@ type AnalyzeDocumentResponse struct {
 
 func (x *AnalyzeDocumentResponse) Reset() {
 	*x = AnalyzeDocumentResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[36]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2971,7 +3166,7 @@ func (x *AnalyzeDocumentResponse) String() string {
 func (*AnalyzeDocumentResponse) ProtoMessage() {}
 
 func (x *AnalyzeDocumentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[36]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2984,7 +3179,7 @@ func (x *AnalyzeDocumentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeDocumentResponse.ProtoReflect.Descriptor instead.
 func (*AnalyzeDocumentResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{36}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *AnalyzeDocumentResponse) GetRequestId() string {
@@ -3091,7 +3286,7 @@ type AnalyzeLanguageRequest struct {
 
 func (x *AnalyzeLanguageRequest) Reset() {
 	*x = AnalyzeLanguageRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[37]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3103,7 +3298,7 @@ func (x *AnalyzeLanguageRequest) String() string {
 func (*AnalyzeLanguageRequest) ProtoMessage() {}
 
 func (x *AnalyzeLanguageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[37]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3116,7 +3311,7 @@ func (x *AnalyzeLanguageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeLanguageRequest.ProtoReflect.Descriptor instead.
 func (*AnalyzeLanguageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{37}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *AnalyzeLanguageRequest) GetRequestId() string {
@@ -3208,14 +3403,19 @@ type LanguageAnalysisResult struct {
 	// Summary text for summary operations.
 	Summary string `protobuf:"bytes,11,opt,name=summary,proto3" json:"summary,omitempty"`
 	// Raw provider result JSON for audit/debug.
-	RawJson       string `protobuf:"bytes,12,opt,name=raw_json,json=rawJson,proto3" json:"raw_json,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RawJson string `protobuf:"bytes,12,opt,name=raw_json,json=rawJson,proto3" json:"raw_json,omitempty"`
+	// Content-safety verdict JSON for operation="content_safety":
+	// {"flagged":bool,"categories":{"hate":0..1,"harassment":0..1,
+	// "violence":0..1,"self_harm":0..1,"sexual":0..1}}. Empty otherwise.
+	// capability-core safety_policies (kind=content_safety) own the thresholds.
+	ContentSafetyJson string `protobuf:"bytes,13,opt,name=content_safety_json,json=contentSafetyJson,proto3" json:"content_safety_json,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *LanguageAnalysisResult) Reset() {
 	*x = LanguageAnalysisResult{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[38]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3227,7 +3427,7 @@ func (x *LanguageAnalysisResult) String() string {
 func (*LanguageAnalysisResult) ProtoMessage() {}
 
 func (x *LanguageAnalysisResult) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[38]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3240,7 +3440,7 @@ func (x *LanguageAnalysisResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LanguageAnalysisResult.ProtoReflect.Descriptor instead.
 func (*LanguageAnalysisResult) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{38}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *LanguageAnalysisResult) GetId() string {
@@ -3327,6 +3527,13 @@ func (x *LanguageAnalysisResult) GetRawJson() string {
 	return ""
 }
 
+func (x *LanguageAnalysisResult) GetContentSafetyJson() string {
+	if x != nil {
+		return x.ContentSafetyJson
+	}
+	return ""
+}
+
 // AnalyzeLanguageResponse — language analytics results and serving metadata.
 type AnalyzeLanguageResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3346,7 +3553,7 @@ type AnalyzeLanguageResponse struct {
 
 func (x *AnalyzeLanguageResponse) Reset() {
 	*x = AnalyzeLanguageResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[39]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3358,7 +3565,7 @@ func (x *AnalyzeLanguageResponse) String() string {
 func (*AnalyzeLanguageResponse) ProtoMessage() {}
 
 func (x *AnalyzeLanguageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[39]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3371,7 +3578,7 @@ func (x *AnalyzeLanguageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeLanguageResponse.ProtoReflect.Descriptor instead.
 func (*AnalyzeLanguageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{39}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *AnalyzeLanguageResponse) GetRequestId() string {
@@ -3436,7 +3643,7 @@ type CreateRealtimeSessionRequest struct {
 
 func (x *CreateRealtimeSessionRequest) Reset() {
 	*x = CreateRealtimeSessionRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[40]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3448,7 +3655,7 @@ func (x *CreateRealtimeSessionRequest) String() string {
 func (*CreateRealtimeSessionRequest) ProtoMessage() {}
 
 func (x *CreateRealtimeSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[40]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3461,7 +3668,7 @@ func (x *CreateRealtimeSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRealtimeSessionRequest.ProtoReflect.Descriptor instead.
 func (*CreateRealtimeSessionRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{40}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *CreateRealtimeSessionRequest) GetRequestId() string {
@@ -3552,7 +3759,7 @@ type CreateRealtimeSessionResponse struct {
 
 func (x *CreateRealtimeSessionResponse) Reset() {
 	*x = CreateRealtimeSessionResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[41]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3564,7 +3771,7 @@ func (x *CreateRealtimeSessionResponse) String() string {
 func (*CreateRealtimeSessionResponse) ProtoMessage() {}
 
 func (x *CreateRealtimeSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[41]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3577,7 +3784,7 @@ func (x *CreateRealtimeSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRealtimeSessionResponse.ProtoReflect.Descriptor instead.
 func (*CreateRealtimeSessionResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{41}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *CreateRealtimeSessionResponse) GetRequestId() string {
@@ -3663,7 +3870,7 @@ type CreateVideoGenerationJobRequest struct {
 
 func (x *CreateVideoGenerationJobRequest) Reset() {
 	*x = CreateVideoGenerationJobRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[42]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3675,7 +3882,7 @@ func (x *CreateVideoGenerationJobRequest) String() string {
 func (*CreateVideoGenerationJobRequest) ProtoMessage() {}
 
 func (x *CreateVideoGenerationJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[42]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3688,7 +3895,7 @@ func (x *CreateVideoGenerationJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVideoGenerationJobRequest.ProtoReflect.Descriptor instead.
 func (*CreateVideoGenerationJobRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{42}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *CreateVideoGenerationJobRequest) GetRequestId() string {
@@ -3775,7 +3982,7 @@ type CreateVideoGenerationJobResponse struct {
 
 func (x *CreateVideoGenerationJobResponse) Reset() {
 	*x = CreateVideoGenerationJobResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[43]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3787,7 +3994,7 @@ func (x *CreateVideoGenerationJobResponse) String() string {
 func (*CreateVideoGenerationJobResponse) ProtoMessage() {}
 
 func (x *CreateVideoGenerationJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[43]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3800,7 +4007,7 @@ func (x *CreateVideoGenerationJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVideoGenerationJobResponse.ProtoReflect.Descriptor instead.
 func (*CreateVideoGenerationJobResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{43}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *CreateVideoGenerationJobResponse) GetRequestId() string {
@@ -3864,7 +4071,7 @@ type GetVideoGenerationJobRequest struct {
 
 func (x *GetVideoGenerationJobRequest) Reset() {
 	*x = GetVideoGenerationJobRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[44]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3876,7 +4083,7 @@ func (x *GetVideoGenerationJobRequest) String() string {
 func (*GetVideoGenerationJobRequest) ProtoMessage() {}
 
 func (x *GetVideoGenerationJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[44]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3889,7 +4096,7 @@ func (x *GetVideoGenerationJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVideoGenerationJobRequest.ProtoReflect.Descriptor instead.
 func (*GetVideoGenerationJobRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{44}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *GetVideoGenerationJobRequest) GetRequestId() string {
@@ -3954,7 +4161,7 @@ type GetVideoGenerationJobResponse struct {
 
 func (x *GetVideoGenerationJobResponse) Reset() {
 	*x = GetVideoGenerationJobResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[45]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3966,7 +4173,7 @@ func (x *GetVideoGenerationJobResponse) String() string {
 func (*GetVideoGenerationJobResponse) ProtoMessage() {}
 
 func (x *GetVideoGenerationJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[45]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3979,7 +4186,7 @@ func (x *GetVideoGenerationJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVideoGenerationJobResponse.ProtoReflect.Descriptor instead.
 func (*GetVideoGenerationJobResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{45}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *GetVideoGenerationJobResponse) GetRequestId() string {
@@ -4064,7 +4271,7 @@ type StreamVideoGenerationContentRequest struct {
 
 func (x *StreamVideoGenerationContentRequest) Reset() {
 	*x = StreamVideoGenerationContentRequest{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[46]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4076,7 +4283,7 @@ func (x *StreamVideoGenerationContentRequest) String() string {
 func (*StreamVideoGenerationContentRequest) ProtoMessage() {}
 
 func (x *StreamVideoGenerationContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[46]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4089,7 +4296,7 @@ func (x *StreamVideoGenerationContentRequest) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use StreamVideoGenerationContentRequest.ProtoReflect.Descriptor instead.
 func (*StreamVideoGenerationContentRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{46}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *StreamVideoGenerationContentRequest) GetRequestId() string {
@@ -4150,7 +4357,7 @@ type StreamVideoGenerationContentResponse struct {
 
 func (x *StreamVideoGenerationContentResponse) Reset() {
 	*x = StreamVideoGenerationContentResponse{}
-	mi := &file_model_plane_v1_inference_proto_msgTypes[47]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4162,7 +4369,7 @@ func (x *StreamVideoGenerationContentResponse) String() string {
 func (*StreamVideoGenerationContentResponse) ProtoMessage() {}
 
 func (x *StreamVideoGenerationContentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_inference_proto_msgTypes[47]
+	mi := &file_model_plane_v1_inference_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4175,7 +4382,7 @@ func (x *StreamVideoGenerationContentResponse) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use StreamVideoGenerationContentResponse.ProtoReflect.Descriptor instead.
 func (*StreamVideoGenerationContentResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{47}
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *StreamVideoGenerationContentResponse) GetRequestId() string {
@@ -4231,7 +4438,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xc5\x02\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x9c\x03\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -4243,11 +4450,23 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
 	"max_tokens\x18\a \x01(\x05R\tmaxTokens\x128\n" +
 	"\x18structured_output_schema\x18\b \x01(\tR\x16structuredOutputSchema\x12\x10\n" +
-	"\x03zdr\x18\t \x01(\bR\x03zdr\"O\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\x124\n" +
+	"\x05tools\x18\n" +
+	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\x12\x1f\n" +
+	"\vtool_choice\x18\v \x01(\tR\n" +
+	"toolChoice\"o\n" +
+	"\x0eToolDefinition\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
+	"\x0fparameters_json\x18\x03 \x01(\tR\x0eparametersJson\"U\n" +
+	"\bToolCall\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
+	"\x0earguments_json\x18\x03 \x01(\tR\rargumentsJson\"O\n" +
 	"\vChatMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\"\xd0\x01\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\"\x89\x02\n" +
 	"\rInferResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
@@ -4257,7 +4476,9 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\vstop_reason\x18\x04 \x01(\tR\n" +
 	"stopReason\x12!\n" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\"\xbc\x01\n" +
+	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x127\n" +
+	"\n" +
+	"tool_calls\x18\a \x03(\v2\x18.model_plane.v1.ToolCallR\ttoolCalls\"\xbc\x01\n" +
 	"\n" +
 	"InferChunk\x12\x1d\n" +
 	"\n" +
@@ -4267,14 +4488,16 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
 	"model_used\x18\x04 \x01(\tR\tmodelUsed\x12!\n" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\"\x9d\x01\n" +
+	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\"\xc7\x01\n" +
 	"\x16CreateEmbeddingRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x12\n" +
 	"\x04text\x18\x03 \x01(\tR\x04text\x12\x14\n" +
 	"\x05model\x18\x04 \x01(\tR\x05model\x12#\n" +
-	"\rprovider_hint\x18\x05 \x01(\tR\fproviderHint\"\x94\x01\n" +
+	"\rprovider_hint\x18\x05 \x01(\tR\fproviderHint\x12\x10\n" +
+	"\x03zdr\x18\x06 \x01(\bR\x03zdr\x12\x16\n" +
+	"\x06region\x18\a \x01(\tR\x06region\"\x94\x01\n" +
 	"\x17CreateEmbeddingResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x16\n" +
@@ -4284,12 +4507,13 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_used\x18\x04 \x01(\tR\fproviderUsed\"K\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bmodality\x18\x01 \x01(\tR\bmodality\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"q\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\x8d\x01\n" +
 	"\tModelInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
 	"\bmodality\x18\x03 \x01(\tR\bmodality\x12\x1c\n" +
-	"\tstreaming\x18\x04 \x01(\bR\tstreaming\"G\n" +
+	"\tstreaming\x18\x04 \x01(\bR\tstreaming\x12\x1a\n" +
+	"\bfeatures\x18\x05 \x03(\tR\bfeatures\"G\n" +
 	"\x12ListModelsResponse\x121\n" +
 	"\x06models\x18\x01 \x03(\v2\x19.model_plane.v1.ModelInfoR\x06models\"\xe8\x01\n" +
 	"\x17SynthesizeSpeechRequest\x12\x1d\n" +
@@ -4526,7 +4750,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_hint\x18\x06 \x01(\tR\fproviderHint\x12\x14\n" +
 	"\x05model\x18\a \x01(\tR\x05model\x12%\n" +
 	"\x0esentence_count\x18\b \x01(\rR\rsentenceCount\x12!\n" +
-	"\fsummary_kind\x18\t \x01(\tR\vsummaryKind\"\xcf\x03\n" +
+	"\fsummary_kind\x18\t \x01(\tR\vsummaryKind\"\xff\x03\n" +
 	"\x16LanguageAnalysisResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\tsentiment\x18\x02 \x01(\tR\tsentiment\x124\n" +
@@ -4543,7 +4767,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	" \x01(\x02R\n" +
 	"confidence\x12\x18\n" +
 	"\asummary\x18\v \x01(\tR\asummary\x12\x19\n" +
-	"\braw_json\x18\f \x01(\tR\arawJson\"\xdc\x01\n" +
+	"\braw_json\x18\f \x01(\tR\arawJson\x12.\n" +
+	"\x13content_safety_json\x18\r \x01(\tR\x11contentSafetyJson\"\xdc\x01\n" +
 	"\x17AnalyzeLanguageResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1c\n" +
@@ -4668,112 +4893,116 @@ func file_model_plane_v1_inference_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_inference_proto_rawDescData
 }
 
-var file_model_plane_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_model_plane_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
 var file_model_plane_v1_inference_proto_goTypes = []any{
 	(*InferRequest)(nil),                         // 0: model_plane.v1.InferRequest
-	(*ChatMessage)(nil),                          // 1: model_plane.v1.ChatMessage
-	(*InferResponse)(nil),                        // 2: model_plane.v1.InferResponse
-	(*InferChunk)(nil),                           // 3: model_plane.v1.InferChunk
-	(*CreateEmbeddingRequest)(nil),               // 4: model_plane.v1.CreateEmbeddingRequest
-	(*CreateEmbeddingResponse)(nil),              // 5: model_plane.v1.CreateEmbeddingResponse
-	(*ListModelsRequest)(nil),                    // 6: model_plane.v1.ListModelsRequest
-	(*ModelInfo)(nil),                            // 7: model_plane.v1.ModelInfo
-	(*ListModelsResponse)(nil),                   // 8: model_plane.v1.ListModelsResponse
-	(*SynthesizeSpeechRequest)(nil),              // 9: model_plane.v1.SynthesizeSpeechRequest
-	(*SynthesizeSpeechResponse)(nil),             // 10: model_plane.v1.SynthesizeSpeechResponse
-	(*TranscribeSpeechRequest)(nil),              // 11: model_plane.v1.TranscribeSpeechRequest
-	(*TranscribeSpeechResponse)(nil),             // 12: model_plane.v1.TranscribeSpeechResponse
-	(*ListSpeechVoicesRequest)(nil),              // 13: model_plane.v1.ListSpeechVoicesRequest
-	(*SpeechVoiceInfo)(nil),                      // 14: model_plane.v1.SpeechVoiceInfo
-	(*ListSpeechVoicesResponse)(nil),             // 15: model_plane.v1.ListSpeechVoicesResponse
-	(*TranslateTextRequest)(nil),                 // 16: model_plane.v1.TranslateTextRequest
-	(*TranslateTextResponse)(nil),                // 17: model_plane.v1.TranslateTextResponse
-	(*TranslationInput)(nil),                     // 18: model_plane.v1.TranslationInput
-	(*BatchTranslateTextRequest)(nil),            // 19: model_plane.v1.BatchTranslateTextRequest
-	(*TranslationResult)(nil),                    // 20: model_plane.v1.TranslationResult
-	(*BatchTranslateTextResponse)(nil),           // 21: model_plane.v1.BatchTranslateTextResponse
-	(*DetectTextLanguageRequest)(nil),            // 22: model_plane.v1.DetectTextLanguageRequest
-	(*TranslationDetection)(nil),                 // 23: model_plane.v1.TranslationDetection
-	(*DetectTextLanguageResponse)(nil),           // 24: model_plane.v1.DetectTextLanguageResponse
-	(*ListTranslationLanguagesRequest)(nil),      // 25: model_plane.v1.ListTranslationLanguagesRequest
-	(*TranslationLanguageInfo)(nil),              // 26: model_plane.v1.TranslationLanguageInfo
-	(*ListTranslationLanguagesResponse)(nil),     // 27: model_plane.v1.ListTranslationLanguagesResponse
-	(*GenerateImageRequest)(nil),                 // 28: model_plane.v1.GenerateImageRequest
-	(*GeneratedImage)(nil),                       // 29: model_plane.v1.GeneratedImage
-	(*GenerateImageResponse)(nil),                // 30: model_plane.v1.GenerateImageResponse
-	(*AnalyzeImageRequest)(nil),                  // 31: model_plane.v1.AnalyzeImageRequest
-	(*AnalyzeImageResponse)(nil),                 // 32: model_plane.v1.AnalyzeImageResponse
-	(*ExtractImageTextRequest)(nil),              // 33: model_plane.v1.ExtractImageTextRequest
-	(*ExtractImageTextResponse)(nil),             // 34: model_plane.v1.ExtractImageTextResponse
-	(*AnalyzeDocumentRequest)(nil),               // 35: model_plane.v1.AnalyzeDocumentRequest
-	(*AnalyzeDocumentResponse)(nil),              // 36: model_plane.v1.AnalyzeDocumentResponse
-	(*AnalyzeLanguageRequest)(nil),               // 37: model_plane.v1.AnalyzeLanguageRequest
-	(*LanguageAnalysisResult)(nil),               // 38: model_plane.v1.LanguageAnalysisResult
-	(*AnalyzeLanguageResponse)(nil),              // 39: model_plane.v1.AnalyzeLanguageResponse
-	(*CreateRealtimeSessionRequest)(nil),         // 40: model_plane.v1.CreateRealtimeSessionRequest
-	(*CreateRealtimeSessionResponse)(nil),        // 41: model_plane.v1.CreateRealtimeSessionResponse
-	(*CreateVideoGenerationJobRequest)(nil),      // 42: model_plane.v1.CreateVideoGenerationJobRequest
-	(*CreateVideoGenerationJobResponse)(nil),     // 43: model_plane.v1.CreateVideoGenerationJobResponse
-	(*GetVideoGenerationJobRequest)(nil),         // 44: model_plane.v1.GetVideoGenerationJobRequest
-	(*GetVideoGenerationJobResponse)(nil),        // 45: model_plane.v1.GetVideoGenerationJobResponse
-	(*StreamVideoGenerationContentRequest)(nil),  // 46: model_plane.v1.StreamVideoGenerationContentRequest
-	(*StreamVideoGenerationContentResponse)(nil), // 47: model_plane.v1.StreamVideoGenerationContentResponse
+	(*ToolDefinition)(nil),                       // 1: model_plane.v1.ToolDefinition
+	(*ToolCall)(nil),                             // 2: model_plane.v1.ToolCall
+	(*ChatMessage)(nil),                          // 3: model_plane.v1.ChatMessage
+	(*InferResponse)(nil),                        // 4: model_plane.v1.InferResponse
+	(*InferChunk)(nil),                           // 5: model_plane.v1.InferChunk
+	(*CreateEmbeddingRequest)(nil),               // 6: model_plane.v1.CreateEmbeddingRequest
+	(*CreateEmbeddingResponse)(nil),              // 7: model_plane.v1.CreateEmbeddingResponse
+	(*ListModelsRequest)(nil),                    // 8: model_plane.v1.ListModelsRequest
+	(*ModelInfo)(nil),                            // 9: model_plane.v1.ModelInfo
+	(*ListModelsResponse)(nil),                   // 10: model_plane.v1.ListModelsResponse
+	(*SynthesizeSpeechRequest)(nil),              // 11: model_plane.v1.SynthesizeSpeechRequest
+	(*SynthesizeSpeechResponse)(nil),             // 12: model_plane.v1.SynthesizeSpeechResponse
+	(*TranscribeSpeechRequest)(nil),              // 13: model_plane.v1.TranscribeSpeechRequest
+	(*TranscribeSpeechResponse)(nil),             // 14: model_plane.v1.TranscribeSpeechResponse
+	(*ListSpeechVoicesRequest)(nil),              // 15: model_plane.v1.ListSpeechVoicesRequest
+	(*SpeechVoiceInfo)(nil),                      // 16: model_plane.v1.SpeechVoiceInfo
+	(*ListSpeechVoicesResponse)(nil),             // 17: model_plane.v1.ListSpeechVoicesResponse
+	(*TranslateTextRequest)(nil),                 // 18: model_plane.v1.TranslateTextRequest
+	(*TranslateTextResponse)(nil),                // 19: model_plane.v1.TranslateTextResponse
+	(*TranslationInput)(nil),                     // 20: model_plane.v1.TranslationInput
+	(*BatchTranslateTextRequest)(nil),            // 21: model_plane.v1.BatchTranslateTextRequest
+	(*TranslationResult)(nil),                    // 22: model_plane.v1.TranslationResult
+	(*BatchTranslateTextResponse)(nil),           // 23: model_plane.v1.BatchTranslateTextResponse
+	(*DetectTextLanguageRequest)(nil),            // 24: model_plane.v1.DetectTextLanguageRequest
+	(*TranslationDetection)(nil),                 // 25: model_plane.v1.TranslationDetection
+	(*DetectTextLanguageResponse)(nil),           // 26: model_plane.v1.DetectTextLanguageResponse
+	(*ListTranslationLanguagesRequest)(nil),      // 27: model_plane.v1.ListTranslationLanguagesRequest
+	(*TranslationLanguageInfo)(nil),              // 28: model_plane.v1.TranslationLanguageInfo
+	(*ListTranslationLanguagesResponse)(nil),     // 29: model_plane.v1.ListTranslationLanguagesResponse
+	(*GenerateImageRequest)(nil),                 // 30: model_plane.v1.GenerateImageRequest
+	(*GeneratedImage)(nil),                       // 31: model_plane.v1.GeneratedImage
+	(*GenerateImageResponse)(nil),                // 32: model_plane.v1.GenerateImageResponse
+	(*AnalyzeImageRequest)(nil),                  // 33: model_plane.v1.AnalyzeImageRequest
+	(*AnalyzeImageResponse)(nil),                 // 34: model_plane.v1.AnalyzeImageResponse
+	(*ExtractImageTextRequest)(nil),              // 35: model_plane.v1.ExtractImageTextRequest
+	(*ExtractImageTextResponse)(nil),             // 36: model_plane.v1.ExtractImageTextResponse
+	(*AnalyzeDocumentRequest)(nil),               // 37: model_plane.v1.AnalyzeDocumentRequest
+	(*AnalyzeDocumentResponse)(nil),              // 38: model_plane.v1.AnalyzeDocumentResponse
+	(*AnalyzeLanguageRequest)(nil),               // 39: model_plane.v1.AnalyzeLanguageRequest
+	(*LanguageAnalysisResult)(nil),               // 40: model_plane.v1.LanguageAnalysisResult
+	(*AnalyzeLanguageResponse)(nil),              // 41: model_plane.v1.AnalyzeLanguageResponse
+	(*CreateRealtimeSessionRequest)(nil),         // 42: model_plane.v1.CreateRealtimeSessionRequest
+	(*CreateRealtimeSessionResponse)(nil),        // 43: model_plane.v1.CreateRealtimeSessionResponse
+	(*CreateVideoGenerationJobRequest)(nil),      // 44: model_plane.v1.CreateVideoGenerationJobRequest
+	(*CreateVideoGenerationJobResponse)(nil),     // 45: model_plane.v1.CreateVideoGenerationJobResponse
+	(*GetVideoGenerationJobRequest)(nil),         // 46: model_plane.v1.GetVideoGenerationJobRequest
+	(*GetVideoGenerationJobResponse)(nil),        // 47: model_plane.v1.GetVideoGenerationJobResponse
+	(*StreamVideoGenerationContentRequest)(nil),  // 48: model_plane.v1.StreamVideoGenerationContentRequest
+	(*StreamVideoGenerationContentResponse)(nil), // 49: model_plane.v1.StreamVideoGenerationContentResponse
 }
 var file_model_plane_v1_inference_proto_depIdxs = []int32{
-	1,  // 0: model_plane.v1.InferRequest.messages:type_name -> model_plane.v1.ChatMessage
-	7,  // 1: model_plane.v1.ListModelsResponse.models:type_name -> model_plane.v1.ModelInfo
-	14, // 2: model_plane.v1.ListSpeechVoicesResponse.voices:type_name -> model_plane.v1.SpeechVoiceInfo
-	18, // 3: model_plane.v1.BatchTranslateTextRequest.items:type_name -> model_plane.v1.TranslationInput
-	20, // 4: model_plane.v1.BatchTranslateTextResponse.translations:type_name -> model_plane.v1.TranslationResult
-	23, // 5: model_plane.v1.DetectTextLanguageResponse.detections:type_name -> model_plane.v1.TranslationDetection
-	26, // 6: model_plane.v1.ListTranslationLanguagesResponse.languages:type_name -> model_plane.v1.TranslationLanguageInfo
-	29, // 7: model_plane.v1.GenerateImageResponse.images:type_name -> model_plane.v1.GeneratedImage
-	38, // 8: model_plane.v1.AnalyzeLanguageResponse.results:type_name -> model_plane.v1.LanguageAnalysisResult
-	0,  // 9: model_plane.v1.InferenceCore.Infer:input_type -> model_plane.v1.InferRequest
-	0,  // 10: model_plane.v1.InferenceCore.InferStream:input_type -> model_plane.v1.InferRequest
-	4,  // 11: model_plane.v1.InferenceCore.CreateEmbedding:input_type -> model_plane.v1.CreateEmbeddingRequest
-	6,  // 12: model_plane.v1.InferenceCore.ListModels:input_type -> model_plane.v1.ListModelsRequest
-	9,  // 13: model_plane.v1.InferenceCore.SynthesizeSpeech:input_type -> model_plane.v1.SynthesizeSpeechRequest
-	11, // 14: model_plane.v1.InferenceCore.TranscribeSpeech:input_type -> model_plane.v1.TranscribeSpeechRequest
-	13, // 15: model_plane.v1.InferenceCore.ListSpeechVoices:input_type -> model_plane.v1.ListSpeechVoicesRequest
-	16, // 16: model_plane.v1.InferenceCore.TranslateText:input_type -> model_plane.v1.TranslateTextRequest
-	19, // 17: model_plane.v1.InferenceCore.BatchTranslateText:input_type -> model_plane.v1.BatchTranslateTextRequest
-	22, // 18: model_plane.v1.InferenceCore.DetectTextLanguage:input_type -> model_plane.v1.DetectTextLanguageRequest
-	25, // 19: model_plane.v1.InferenceCore.ListTranslationLanguages:input_type -> model_plane.v1.ListTranslationLanguagesRequest
-	28, // 20: model_plane.v1.InferenceCore.GenerateImage:input_type -> model_plane.v1.GenerateImageRequest
-	31, // 21: model_plane.v1.InferenceCore.AnalyzeImage:input_type -> model_plane.v1.AnalyzeImageRequest
-	33, // 22: model_plane.v1.InferenceCore.ExtractImageText:input_type -> model_plane.v1.ExtractImageTextRequest
-	35, // 23: model_plane.v1.InferenceCore.AnalyzeDocument:input_type -> model_plane.v1.AnalyzeDocumentRequest
-	37, // 24: model_plane.v1.InferenceCore.AnalyzeLanguage:input_type -> model_plane.v1.AnalyzeLanguageRequest
-	40, // 25: model_plane.v1.InferenceCore.CreateRealtimeSession:input_type -> model_plane.v1.CreateRealtimeSessionRequest
-	42, // 26: model_plane.v1.InferenceCore.CreateVideoGenerationJob:input_type -> model_plane.v1.CreateVideoGenerationJobRequest
-	44, // 27: model_plane.v1.InferenceCore.GetVideoGenerationJob:input_type -> model_plane.v1.GetVideoGenerationJobRequest
-	46, // 28: model_plane.v1.InferenceCore.StreamVideoGenerationContent:input_type -> model_plane.v1.StreamVideoGenerationContentRequest
-	2,  // 29: model_plane.v1.InferenceCore.Infer:output_type -> model_plane.v1.InferResponse
-	3,  // 30: model_plane.v1.InferenceCore.InferStream:output_type -> model_plane.v1.InferChunk
-	5,  // 31: model_plane.v1.InferenceCore.CreateEmbedding:output_type -> model_plane.v1.CreateEmbeddingResponse
-	8,  // 32: model_plane.v1.InferenceCore.ListModels:output_type -> model_plane.v1.ListModelsResponse
-	10, // 33: model_plane.v1.InferenceCore.SynthesizeSpeech:output_type -> model_plane.v1.SynthesizeSpeechResponse
-	12, // 34: model_plane.v1.InferenceCore.TranscribeSpeech:output_type -> model_plane.v1.TranscribeSpeechResponse
-	15, // 35: model_plane.v1.InferenceCore.ListSpeechVoices:output_type -> model_plane.v1.ListSpeechVoicesResponse
-	17, // 36: model_plane.v1.InferenceCore.TranslateText:output_type -> model_plane.v1.TranslateTextResponse
-	21, // 37: model_plane.v1.InferenceCore.BatchTranslateText:output_type -> model_plane.v1.BatchTranslateTextResponse
-	24, // 38: model_plane.v1.InferenceCore.DetectTextLanguage:output_type -> model_plane.v1.DetectTextLanguageResponse
-	27, // 39: model_plane.v1.InferenceCore.ListTranslationLanguages:output_type -> model_plane.v1.ListTranslationLanguagesResponse
-	30, // 40: model_plane.v1.InferenceCore.GenerateImage:output_type -> model_plane.v1.GenerateImageResponse
-	32, // 41: model_plane.v1.InferenceCore.AnalyzeImage:output_type -> model_plane.v1.AnalyzeImageResponse
-	34, // 42: model_plane.v1.InferenceCore.ExtractImageText:output_type -> model_plane.v1.ExtractImageTextResponse
-	36, // 43: model_plane.v1.InferenceCore.AnalyzeDocument:output_type -> model_plane.v1.AnalyzeDocumentResponse
-	39, // 44: model_plane.v1.InferenceCore.AnalyzeLanguage:output_type -> model_plane.v1.AnalyzeLanguageResponse
-	41, // 45: model_plane.v1.InferenceCore.CreateRealtimeSession:output_type -> model_plane.v1.CreateRealtimeSessionResponse
-	43, // 46: model_plane.v1.InferenceCore.CreateVideoGenerationJob:output_type -> model_plane.v1.CreateVideoGenerationJobResponse
-	45, // 47: model_plane.v1.InferenceCore.GetVideoGenerationJob:output_type -> model_plane.v1.GetVideoGenerationJobResponse
-	47, // 48: model_plane.v1.InferenceCore.StreamVideoGenerationContent:output_type -> model_plane.v1.StreamVideoGenerationContentResponse
-	29, // [29:49] is the sub-list for method output_type
-	9,  // [9:29] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	3,  // 0: model_plane.v1.InferRequest.messages:type_name -> model_plane.v1.ChatMessage
+	1,  // 1: model_plane.v1.InferRequest.tools:type_name -> model_plane.v1.ToolDefinition
+	2,  // 2: model_plane.v1.InferResponse.tool_calls:type_name -> model_plane.v1.ToolCall
+	9,  // 3: model_plane.v1.ListModelsResponse.models:type_name -> model_plane.v1.ModelInfo
+	16, // 4: model_plane.v1.ListSpeechVoicesResponse.voices:type_name -> model_plane.v1.SpeechVoiceInfo
+	20, // 5: model_plane.v1.BatchTranslateTextRequest.items:type_name -> model_plane.v1.TranslationInput
+	22, // 6: model_plane.v1.BatchTranslateTextResponse.translations:type_name -> model_plane.v1.TranslationResult
+	25, // 7: model_plane.v1.DetectTextLanguageResponse.detections:type_name -> model_plane.v1.TranslationDetection
+	28, // 8: model_plane.v1.ListTranslationLanguagesResponse.languages:type_name -> model_plane.v1.TranslationLanguageInfo
+	31, // 9: model_plane.v1.GenerateImageResponse.images:type_name -> model_plane.v1.GeneratedImage
+	40, // 10: model_plane.v1.AnalyzeLanguageResponse.results:type_name -> model_plane.v1.LanguageAnalysisResult
+	0,  // 11: model_plane.v1.InferenceCore.Infer:input_type -> model_plane.v1.InferRequest
+	0,  // 12: model_plane.v1.InferenceCore.InferStream:input_type -> model_plane.v1.InferRequest
+	6,  // 13: model_plane.v1.InferenceCore.CreateEmbedding:input_type -> model_plane.v1.CreateEmbeddingRequest
+	8,  // 14: model_plane.v1.InferenceCore.ListModels:input_type -> model_plane.v1.ListModelsRequest
+	11, // 15: model_plane.v1.InferenceCore.SynthesizeSpeech:input_type -> model_plane.v1.SynthesizeSpeechRequest
+	13, // 16: model_plane.v1.InferenceCore.TranscribeSpeech:input_type -> model_plane.v1.TranscribeSpeechRequest
+	15, // 17: model_plane.v1.InferenceCore.ListSpeechVoices:input_type -> model_plane.v1.ListSpeechVoicesRequest
+	18, // 18: model_plane.v1.InferenceCore.TranslateText:input_type -> model_plane.v1.TranslateTextRequest
+	21, // 19: model_plane.v1.InferenceCore.BatchTranslateText:input_type -> model_plane.v1.BatchTranslateTextRequest
+	24, // 20: model_plane.v1.InferenceCore.DetectTextLanguage:input_type -> model_plane.v1.DetectTextLanguageRequest
+	27, // 21: model_plane.v1.InferenceCore.ListTranslationLanguages:input_type -> model_plane.v1.ListTranslationLanguagesRequest
+	30, // 22: model_plane.v1.InferenceCore.GenerateImage:input_type -> model_plane.v1.GenerateImageRequest
+	33, // 23: model_plane.v1.InferenceCore.AnalyzeImage:input_type -> model_plane.v1.AnalyzeImageRequest
+	35, // 24: model_plane.v1.InferenceCore.ExtractImageText:input_type -> model_plane.v1.ExtractImageTextRequest
+	37, // 25: model_plane.v1.InferenceCore.AnalyzeDocument:input_type -> model_plane.v1.AnalyzeDocumentRequest
+	39, // 26: model_plane.v1.InferenceCore.AnalyzeLanguage:input_type -> model_plane.v1.AnalyzeLanguageRequest
+	42, // 27: model_plane.v1.InferenceCore.CreateRealtimeSession:input_type -> model_plane.v1.CreateRealtimeSessionRequest
+	44, // 28: model_plane.v1.InferenceCore.CreateVideoGenerationJob:input_type -> model_plane.v1.CreateVideoGenerationJobRequest
+	46, // 29: model_plane.v1.InferenceCore.GetVideoGenerationJob:input_type -> model_plane.v1.GetVideoGenerationJobRequest
+	48, // 30: model_plane.v1.InferenceCore.StreamVideoGenerationContent:input_type -> model_plane.v1.StreamVideoGenerationContentRequest
+	4,  // 31: model_plane.v1.InferenceCore.Infer:output_type -> model_plane.v1.InferResponse
+	5,  // 32: model_plane.v1.InferenceCore.InferStream:output_type -> model_plane.v1.InferChunk
+	7,  // 33: model_plane.v1.InferenceCore.CreateEmbedding:output_type -> model_plane.v1.CreateEmbeddingResponse
+	10, // 34: model_plane.v1.InferenceCore.ListModels:output_type -> model_plane.v1.ListModelsResponse
+	12, // 35: model_plane.v1.InferenceCore.SynthesizeSpeech:output_type -> model_plane.v1.SynthesizeSpeechResponse
+	14, // 36: model_plane.v1.InferenceCore.TranscribeSpeech:output_type -> model_plane.v1.TranscribeSpeechResponse
+	17, // 37: model_plane.v1.InferenceCore.ListSpeechVoices:output_type -> model_plane.v1.ListSpeechVoicesResponse
+	19, // 38: model_plane.v1.InferenceCore.TranslateText:output_type -> model_plane.v1.TranslateTextResponse
+	23, // 39: model_plane.v1.InferenceCore.BatchTranslateText:output_type -> model_plane.v1.BatchTranslateTextResponse
+	26, // 40: model_plane.v1.InferenceCore.DetectTextLanguage:output_type -> model_plane.v1.DetectTextLanguageResponse
+	29, // 41: model_plane.v1.InferenceCore.ListTranslationLanguages:output_type -> model_plane.v1.ListTranslationLanguagesResponse
+	32, // 42: model_plane.v1.InferenceCore.GenerateImage:output_type -> model_plane.v1.GenerateImageResponse
+	34, // 43: model_plane.v1.InferenceCore.AnalyzeImage:output_type -> model_plane.v1.AnalyzeImageResponse
+	36, // 44: model_plane.v1.InferenceCore.ExtractImageText:output_type -> model_plane.v1.ExtractImageTextResponse
+	38, // 45: model_plane.v1.InferenceCore.AnalyzeDocument:output_type -> model_plane.v1.AnalyzeDocumentResponse
+	41, // 46: model_plane.v1.InferenceCore.AnalyzeLanguage:output_type -> model_plane.v1.AnalyzeLanguageResponse
+	43, // 47: model_plane.v1.InferenceCore.CreateRealtimeSession:output_type -> model_plane.v1.CreateRealtimeSessionResponse
+	45, // 48: model_plane.v1.InferenceCore.CreateVideoGenerationJob:output_type -> model_plane.v1.CreateVideoGenerationJobResponse
+	47, // 49: model_plane.v1.InferenceCore.GetVideoGenerationJob:output_type -> model_plane.v1.GetVideoGenerationJobResponse
+	49, // 50: model_plane.v1.InferenceCore.StreamVideoGenerationContent:output_type -> model_plane.v1.StreamVideoGenerationContentResponse
+	31, // [31:51] is the sub-list for method output_type
+	11, // [11:31] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_inference_proto_init() }
@@ -4787,7 +5016,7 @@ func file_model_plane_v1_inference_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_inference_proto_rawDesc), len(file_model_plane_v1_inference_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   48,
+			NumMessages:   50,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

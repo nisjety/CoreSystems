@@ -97,9 +97,9 @@ export default function StudioPage(props: { section?: StudioSection }) {
       </Match>
       <Match when={section() === 'templates'}>
         <StudioLibraryPage
-          eyebrow="Reusable canvas systems"
+          eyebrow="Starter canvas templates"
           title="Templates"
-          description="Start from approved layouts for launches, founder updates, UGC scripts, case studies, and weekly content systems."
+          description="Starter layouts you can copy onto a canvas for launches, founder updates, UGC scripts, case studies, and weekly content systems — edit everything before you ship."
           active="templates"
         />
       </Match>
@@ -438,7 +438,27 @@ function StudioCanvasPage() {
       <div class="velion-studio-board-shell">
         <header class="velion-studio-topbar">
           <div class="velion-studio-profile">
-            <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=160&q=80" alt="" />
+            {/* Phase 4 PR-3 seed strip: no fabricated avatar — a neutral monogram.
+                Styled inline (semantic, self-contained) since global.css is owned
+                elsewhere; mirrors the 58px round avatar the img previously used. */}
+            <span
+              aria-hidden="true"
+              style={{
+                width: '58px',
+                height: '58px',
+                'border-radius': '999px',
+                border: '1px solid rgb(32 33 36 / 18%)',
+                display: 'inline-flex',
+                'align-items': 'center',
+                'justify-content': 'center',
+                'font-size': '18px',
+                'font-weight': '650',
+                color: 'rgb(32 33 36 / 64%)',
+                background: 'rgb(32 33 36 / 5%)',
+              }}
+            >
+              LC
+            </span>
             <div>
               <strong>Launch canvas</strong>
               <span>{canvasSummary()}</span>

@@ -145,8 +145,17 @@ services:
       BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:-http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199}
       DISPOSABLE_EMAIL_BLOCKLIST_ENABLED: ${DISPOSABLE_EMAIL_BLOCKLIST_ENABLED:-true}
       DISPOSABLE_EMAIL_DOMAINS_FILE: ${DISPOSABLE_EMAIL_DOMAINS_FILE:-/app/config/security/disposable-email-domains.txt}
+      # Stable RS256 signing key for the data-plane / Convex / plane JWTs +
+      # JWKS at /api/convex-auth/jwks. Mounted from ./auth-core/keys (gitignored;
+      # generate with `openssl genpkey -algorithm RSA ...`). Without this the
+      # service falls back to an EPHEMERAL key that rotates on every restart —
+      # breaking any verifier that pins the public key (e.g. retrieval-engine's
+      # JWT_PUBLIC_KEY_FILE). Paths only — no private-key material in compose.
+      CONVEX_AUTH_PRIVATE_KEY_FILE: ${CONVEX_AUTH_PRIVATE_KEY_FILE:-/app/keys/convex-auth.key}
+      CONVEX_AUTH_PUBLIC_KEY_FILE: ${CONVEX_AUTH_PUBLIC_KEY_FILE:-/app/keys/convex-auth.pub}
     volumes:
       - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
+      - ./auth-core/keys:/app/keys:ro
     ports:
       - "3011:3011"
       - "50011:50011"

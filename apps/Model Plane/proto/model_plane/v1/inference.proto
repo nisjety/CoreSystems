@@ -207,6 +207,13 @@ message CreateEmbeddingRequest {
   // Azure today). It is plumbing for that future provider plus the
   // direct-Azure egress reject enforced on the Data Plane.
   bool zdr = 6;
+
+  // Requested/required residency region for the embedding deployment (e.g.
+  // "swedencentral", "westeurope"). inference-core enforces this deny-by-default:
+  // a non-EU region is REJECTED before any network call unless the operator has
+  // explicitly opted in via MODEL_PLANE_ALLOW_NON_EU_EMBEDDING. Empty means the
+  // caller expresses no preference and the configured EU deployment is used.
+  string region = 7;
 }
 
 // CreateEmbeddingResponse — generated vector and serving metadata.

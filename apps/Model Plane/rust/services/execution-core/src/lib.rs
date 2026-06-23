@@ -10,6 +10,7 @@ pub mod http_health;
 pub mod info_tools;
 pub mod knowledge_tools;
 pub mod llm_planner;
+pub mod mcp_gateway;
 pub mod permission;
 pub mod policy;
 pub mod quarry_agent;

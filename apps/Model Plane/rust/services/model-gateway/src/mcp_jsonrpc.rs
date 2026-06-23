@@ -48,6 +48,82 @@ pub fn build_initialized_notification() -> Value {
     json!({ "jsonrpc": JSONRPC_VERSION, "method": "notifications/initialized" })
 }
 
+/// One tool advertised by an MCP server's `tools/list` response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolDef {
+    /// The tool's name as the server reports it (NOT yet namespaced).
+    pub name: String,
+    /// Human/model-readable description (may be empty).
+    pub description: String,
+    /// The tool's `inputSchema` object, serialized as a JSON string. Defaults
+    /// to an open object schema when the server omits it.
+    pub input_schema_json: String,
+}
+
+/// Build a `tools/list` request — discovers the tools an MCP server exposes,
+/// with their real input schemas (matrix §G2). Issued after the `initialize`
+/// handshake, same as `tools/call`.
+#[must_use]
+pub fn build_list_tools_request(id: i64) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id,
+        "method": "tools/list",
+        "params": {}
+    })
+}
+
+/// Parse a `tools/list` response line for `expected_id` into the advertised
+/// tool defs. Mirrors [`parse_tool_call_response`]'s validation; a server that
+/// reports no `tools` array yields an `Err` so the caller can fall back.
+///
+/// # Errors
+/// Returns `Err` on invalid JSON-RPC, id mismatch, a JSON-RPC `error`, or a
+/// `result` missing the `tools` array.
+pub fn parse_list_tools_response(expected_id: i64, line: &str) -> Result<Vec<McpToolDef>, String> {
+    let value: Value =
+        serde_json::from_str(line.trim()).map_err(|e| format!("invalid json-rpc: {e}"))?;
+    if value.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
+        return Err("missing or wrong jsonrpc version".to_owned());
+    }
+    if !is_response_for(&value, expected_id) {
+        return Err(format!("response id mismatch (expected {expected_id})"));
+    }
+    if let Some(err) = value.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(Value::as_str)
+            .map_or_else(|| err.to_string(), ToOwned::to_owned);
+        return Err(msg);
+    }
+    let tools = value
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "tools/list result missing tools array".to_owned())?;
+    Ok(tools.iter().filter_map(parse_one_tool).collect())
+}
+
+/// Extract a single `{name, description, inputSchema}` entry from a `tools/list`
+/// result. Entries without a name are skipped (return `None`).
+#[must_use]
+pub fn parse_one_tool(tool: &Value) -> Option<McpToolDef> {
+    let name = tool.get("name").and_then(Value::as_str)?.to_owned();
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let input_schema_json = tool
+        .get("inputSchema")
+        .map_or_else(|| "{\"type\":\"object\"}".to_owned(), ToString::to_string);
+    Some(McpToolDef {
+        name,
+        description,
+        input_schema_json,
+    })
+}
+
 /// Build a `tools/call` request. `arguments` is the already-parsed JSON value
 /// of the tool input (use `Value::Null` / `{}` when there are none).
 #[must_use]
@@ -208,5 +284,45 @@ mod tests {
         // of silently producing broken argv tokens like `"a` / `b"`.
         assert!(parse_stdio_command("stdio:///bin/mcp --msg \"a b\"").is_err());
         assert!(parse_stdio_command("stdio:///bin/mcp --msg 'a b'").is_err());
+    }
+
+    #[test]
+    fn build_list_tools_request_has_method_and_id() {
+        let req = build_list_tools_request(7);
+        assert_eq!(req["method"], "tools/list");
+        assert_eq!(req["id"], 7);
+        assert_eq!(req["jsonrpc"], JSONRPC_VERSION);
+    }
+
+    #[test]
+    fn parse_list_tools_response_extracts_name_desc_and_schema() {
+        let line = r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[
+            {"name":"read_file","description":"Read a file","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
+            {"name":"list_dir"}
+        ]}}"#;
+        let tools = parse_list_tools_response(3, line).expect("parse ok");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "read_file");
+        assert_eq!(tools[0].description, "Read a file");
+        assert!(tools[0].input_schema_json.contains("\"path\""));
+        // A tool with no inputSchema gets an open object schema, not empty.
+        assert_eq!(tools[1].name, "list_dir");
+        assert_eq!(tools[1].input_schema_json, "{\"type\":\"object\"}");
+    }
+
+    #[test]
+    fn parse_list_tools_response_rejects_error_and_id_mismatch() {
+        let err_line = r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"no such method"}}"#;
+        assert!(parse_list_tools_response(3, err_line)
+            .unwrap_err()
+            .contains("no such method"));
+        let other_id = r#"{"jsonrpc":"2.0","id":9,"result":{"tools":[]}}"#;
+        assert!(parse_list_tools_response(3, other_id)
+            .unwrap_err()
+            .contains("id mismatch"));
+        let no_tools = r#"{"jsonrpc":"2.0","id":3,"result":{}}"#;
+        assert!(parse_list_tools_response(3, no_tools)
+            .unwrap_err()
+            .contains("missing tools array"));
     }
 }

@@ -26,6 +26,17 @@ const (
 	SubjectTagRemoved          = "velion.application.conversation.tag.removed"
 	SubjectAIActionReviewed    = "velion.application.conversation.ai_action.reviewed"
 	SubjectAIActionExecuted    = "velion.application.conversation.ai_action.executed"
+	// SubjectAIActionSendFailed is the terminal lifecycle event for an
+	// outbound-send (draft.reply) that failed permanently — the UI must surface
+	// this honestly rather than ever claiming "sent". It stays in the
+	// application namespace, covered by the existing application stream.
+	SubjectAIActionSendFailed = "velion.application.conversation.ai_action.send_failed"
+	// SubjectModelActionProposed is the Model-Plane → Application-Plane subject a
+	// model (or hook) publishes to propose an action (e.g. a draft.reply) into the
+	// HITL review queue. It lives in the model namespace, so it needs its own
+	// JetStream stream (see eventing.EnsureModelStream); the application stream
+	// does NOT cover it.
+	SubjectModelActionProposed = "velion.model.action.proposed"
 	SubjectTicketSuggested     = "velion.application.conversation.ticket.suggested"
 	SubjectTicketCreated       = "velion.application.conversation.ticket.created"
 	SubjectTicketUpdated       = "velion.application.conversation.ticket.updated"
@@ -57,6 +68,7 @@ type Repository interface {
 	AddTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
 	RemoveTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
 	ReviewAIAction(ctx context.Context, input AIActionReview) error
+	CreateAIAction(ctx context.Context, input CreateAIActionInput) (*AIAction, error)
 	ListAIActions(ctx context.Context, filter AIActionListFilter) ([]AIAction, error)
 	ListTickets(ctx context.Context, filter TicketListFilter) ([]Ticket, error)
 	GetTicket(ctx context.Context, orgID, ticketID string) (*Ticket, error)
@@ -405,6 +417,29 @@ type AIActionListFilter struct {
 	Status         string
 	ConversationID string
 	Limit          int
+}
+
+// CreateAIActionInput queues a model-proposed action (e.g. a draft.reply) into
+// the HITL review queue at status 'suggested'. It is the generic path used by
+// both the new POST /ai-actions route and the model-proposed consumer, so a
+// human or hook can propose an action end-to-end.
+type CreateAIActionInput struct {
+	OrgID          string
+	ConversationID string
+	Kind           string
+	Payload        map[string]any
+	CreatedBy      string
+}
+
+// ChannelThreadRef is the per-conversation outbound send target resolved from
+// conversation_channel_thread_refs: which provider/connection/thread a reply is
+// addressed to. It is the source the draft.reply executor sends through.
+type ChannelThreadRef struct {
+	OrgID            string `json:"org_id"`
+	ConversationID   string `json:"conversation_id"`
+	Provider         string `json:"provider"`
+	ConnectionID     string `json:"connection_id"`
+	ProviderThreadID string `json:"provider_thread_id"`
 }
 
 type CreateTicketInput struct {

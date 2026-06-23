@@ -39,6 +39,12 @@ pub fn evaluate(mode: PermissionMode, tool_name: &str) -> PermissionDecision {
 
 /// Heuristic for tools with side effects worth a human gate. Matches on
 /// destructive/outbound verbs in the tool name.
+///
+/// External MCP tools (`mcp__<server>__<tool>`) are gated unconditionally: the
+/// server is third-party and the remote tool's side effects are unverifiable
+/// from the name alone, so under the `ask` (`deployed_agent`) posture a human
+/// approves each external call by default. Under `auto` (chat) posture nothing
+/// is gated, so this does not change the default chat experience.
 #[must_use]
 pub fn is_risky_tool(tool_name: &str) -> bool {
     const RISKY: &[&str] = &[
@@ -46,6 +52,9 @@ pub fn is_risky_tool(tool_name: &str) -> bool {
         "deploy", "payment", "refund", "charge", "exec", "shell", "post", "purge", "revoke",
         "transfer",
     ];
+    if tool_name.starts_with("mcp__") {
+        return true;
+    }
     let lowered = tool_name.to_ascii_lowercase();
     RISKY.iter().any(|kw| lowered.contains(kw))
 }
@@ -83,6 +92,22 @@ mod tests {
     fn auto_allows_everything() {
         assert_eq!(
             evaluate(PermissionMode::Auto, "delete_account"),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn external_mcp_tools_are_gated_under_ask() {
+        // Even a read-ish remote name (no risky verb) is gated under `ask`,
+        // because the external server's behavior is unverifiable.
+        assert!(is_risky_tool("mcp__fakemcp__echo"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "mcp__fakemcp__echo"),
+            PermissionDecision::AwaitApproval
+        );
+        // ...but not gated under the default `auto` (chat) posture.
+        assert_eq!(
+            evaluate(PermissionMode::Auto, "mcp__fakemcp__echo"),
             PermissionDecision::Allow
         );
     }

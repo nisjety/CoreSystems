@@ -12,9 +12,13 @@ import { beforeAll, describe, expect, it } from 'vitest'
 
 let eslint: ESLint
 
-beforeAll(() => {
+beforeAll(async () => {
   eslint = new ESLint()
-})
+  // Warm the ESLint flat-config + TS parser once. Cold-start is ~8s, which can
+  // exceed the default 5s test timeout when this file runs in isolation; warming
+  // here (with a generous hook timeout) keeps each assertion fast and stable.
+  await eslint.lintText('export const warmup = 1\n', { filePath: 'src/__a8_warmup__.ts' })
+}, 60_000)
 
 async function syntaxGuardMessages(code: string, relativeFilePath: string): Promise<string[]> {
   const [result] = await eslint.lintText(code, { filePath: relativeFilePath })
@@ -37,7 +41,7 @@ describe('A8 no-fabricated-state lint guard', () => {
     const messages = await syntaxGuardMessages(fabricated, 'src/__a8_fixture_invalid__.ts')
     expect(messages.length).toBeGreaterThan(0)
     expect(messages.some((m) => /security\/compliance posture/i.test(m))).toBe(true)
-  })
+  }, 30_000)
 
   it('does not fire on a resource-shaped security read (no hardcoded enabled:true)', async () => {
     const honest = [
@@ -51,5 +55,5 @@ describe('A8 no-fabricated-state lint guard', () => {
 
     const messages = await syntaxGuardMessages(honest, 'src/__a8_fixture_valid__.ts')
     expect(messages).toEqual([])
-  })
+  }, 30_000)
 })

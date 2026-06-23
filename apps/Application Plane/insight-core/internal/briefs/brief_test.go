@@ -14,6 +14,57 @@ func overview(orgID string, surfaceTotals map[string]int) *insights.Overview {
 	return ov
 }
 
+func TestAssembleBrief_CitesRealSourcesFromScorecards(t *testing.T) {
+	ov := overview("org-1", map[string]int{
+		insights.SurfaceInbox:  3,
+		insights.SurfaceSocial: 2,
+	})
+	// The overview scorecards carry the real producer citation per surface.
+	ov.Scorecards = []insights.Scorecard{
+		{Surface: insights.SurfaceInbox, Metric: "ai_actions_executed", Source: "conversation-core"},
+		{Surface: insights.SurfaceSocial, Metric: "posts_published", Source: "social-core"},
+	}
+
+	b := AssembleBrief(ov)
+	if b.State != StateLive {
+		t.Fatalf("state = %q, want %q", b.State, StateLive)
+	}
+	// Brief-level sources are the distinct producers, sorted.
+	if len(b.Sources) != 2 || b.Sources[0] != "conversation-core" || b.Sources[1] != "social-core" {
+		t.Errorf("brief sources = %v, want sorted [conversation-core social-core]", b.Sources)
+	}
+	// Per-surface source is threaded from the matching scorecard.
+	bySurface := map[string]string{}
+	for _, s := range b.Surfaces {
+		bySurface[s.Surface] = s.Source
+	}
+	if bySurface[insights.SurfaceInbox] != "conversation-core" {
+		t.Errorf("inbox source = %q, want conversation-core", bySurface[insights.SurfaceInbox])
+	}
+	if bySurface[insights.SurfaceSocial] != "social-core" {
+		t.Errorf("social source = %q, want social-core", bySurface[insights.SurfaceSocial])
+	}
+	if got := b.Payload()["sources"]; got == nil {
+		t.Errorf("payload must carry the sources citation when present")
+	}
+}
+
+func TestAssembleBrief_NoScorecardsLeavesSourcesUnattributed(t *testing.T) {
+	// Counts without scorecards must NOT fabricate a source.
+	b := AssembleBrief(overview("org-1", map[string]int{insights.SurfaceInbox: 3, insights.SurfaceSocial: 2}))
+	if len(b.Sources) != 0 {
+		t.Errorf("unattributed brief must have no sources, never fabricated; got %v", b.Sources)
+	}
+	for _, s := range b.Surfaces {
+		if s.Source != "" {
+			t.Errorf("unattributed surface %q must have an empty source; got %q", s.Surface, s.Source)
+		}
+	}
+	if _, ok := b.Payload()["sources"]; ok {
+		t.Errorf("payload must omit sources when unattributed")
+	}
+}
+
 func TestAssembleBrief_PreviewBelowGate(t *testing.T) {
 	b := AssembleBrief(overview("org-1", map[string]int{insights.SurfaceInbox: 2}))
 	if b.State != StatePreview {

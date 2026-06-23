@@ -22,6 +22,7 @@ const (
 	ExecutionCore_ExecuteStep_FullMethodName = "/model_plane.v1.ExecutionCore/ExecuteStep"
 	ExecutionCore_ResumeRun_FullMethodName   = "/model_plane.v1.ExecutionCore/ResumeRun"
 	ExecutionCore_CancelRun_FullMethodName   = "/model_plane.v1.ExecutionCore/CancelRun"
+	ExecutionCore_RunAgent_FullMethodName    = "/model_plane.v1.ExecutionCore/RunAgent"
 )
 
 // ExecutionCoreClient is the client API for ExecutionCore service.
@@ -39,6 +40,12 @@ type ExecutionCoreClient interface {
 	ResumeRun(ctx context.Context, in *ResumeRunRequest, opts ...grpc.CallOption) (*ResumeRunResponse, error)
 	// Cancel an active run.
 	CancelRun(ctx context.Context, in *CancelRunRequest, opts ...grpc.CallOption) (*CancelRunResponse, error)
+	// Drive a whole agent run to completion: plan → infer → persist → finalize.
+	// MVP no-tool slice — a single InferenceCore.Infer round persisted to the
+	// run's thread, with the run flipped to a terminal status. Dispatched by the
+	// gateway after StartRun so a chat turn produces a durable answer instead of
+	// stalling in `'queued'`.
+	RunAgent(ctx context.Context, in *RunAgentRequest, opts ...grpc.CallOption) (*RunAgentResponse, error)
 }
 
 type executionCoreClient struct {
@@ -79,6 +86,16 @@ func (c *executionCoreClient) CancelRun(ctx context.Context, in *CancelRunReques
 	return out, nil
 }
 
+func (c *executionCoreClient) RunAgent(ctx context.Context, in *RunAgentRequest, opts ...grpc.CallOption) (*RunAgentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunAgentResponse)
+	err := c.cc.Invoke(ctx, ExecutionCore_RunAgent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutionCoreServer is the server API for ExecutionCore service.
 // All implementations must embed UnimplementedExecutionCoreServer
 // for forward compatibility.
@@ -94,6 +111,12 @@ type ExecutionCoreServer interface {
 	ResumeRun(context.Context, *ResumeRunRequest) (*ResumeRunResponse, error)
 	// Cancel an active run.
 	CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error)
+	// Drive a whole agent run to completion: plan → infer → persist → finalize.
+	// MVP no-tool slice — a single InferenceCore.Infer round persisted to the
+	// run's thread, with the run flipped to a terminal status. Dispatched by the
+	// gateway after StartRun so a chat turn produces a durable answer instead of
+	// stalling in `'queued'`.
+	RunAgent(context.Context, *RunAgentRequest) (*RunAgentResponse, error)
 	mustEmbedUnimplementedExecutionCoreServer()
 }
 
@@ -112,6 +135,9 @@ func (UnimplementedExecutionCoreServer) ResumeRun(context.Context, *ResumeRunReq
 }
 func (UnimplementedExecutionCoreServer) CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelRun not implemented")
+}
+func (UnimplementedExecutionCoreServer) RunAgent(context.Context, *RunAgentRequest) (*RunAgentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunAgent not implemented")
 }
 func (UnimplementedExecutionCoreServer) mustEmbedUnimplementedExecutionCoreServer() {}
 func (UnimplementedExecutionCoreServer) testEmbeddedByValue()                       {}
@@ -188,6 +214,24 @@ func _ExecutionCore_CancelRun_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutionCore_RunAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunAgentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionCoreServer).RunAgent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutionCore_RunAgent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionCoreServer).RunAgent(ctx, req.(*RunAgentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutionCore_ServiceDesc is the grpc.ServiceDesc for ExecutionCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -206,6 +250,10 @@ var ExecutionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelRun",
 			Handler:    _ExecutionCore_CancelRun_Handler,
+		},
+		{
+			MethodName: "RunAgent",
+			Handler:    _ExecutionCore_RunAgent_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

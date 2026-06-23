@@ -25,18 +25,20 @@ pub async fn temporal_search(
     );
     let mut params: Vec<String> = vec![org_id.to_string()];
 
+    // All params bind as text, so cast in SQL: timestamptz for the date bounds
+    // and bigint for LIMIT (Postgres rejects a text LIMIT — this was the 500).
     if let Some(b) = before {
         params.push(b.to_string());
-        q.push_str(&format!(" AND d.created_at < ${}", params.len()));
+        q.push_str(&format!(" AND d.created_at < ${}::timestamptz", params.len()));
     }
     if let Some(a) = after {
         params.push(a.to_string());
-        q.push_str(&format!(" AND d.created_at > ${}", params.len()));
+        q.push_str(&format!(" AND d.created_at > ${}::timestamptz", params.len()));
     }
 
     q.push_str(" ORDER BY d.created_at DESC");
     params.push(limit.to_string());
-    q.push_str(&format!(" LIMIT ${}", params.len()));
+    q.push_str(&format!(" LIMIT ${}::bigint", params.len()));
 
     let mut query = sqlx::query_as::<_, (String, String, String, String, String, i64)>(&q);
     for p in &params {

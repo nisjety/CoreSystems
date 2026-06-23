@@ -42,6 +42,7 @@ export type VelionRoute =
   | '/settings/trust'
   | '/settings/router-policy'
   | '/settings/finetune'
+  | '/settings/mcp'
 
 export type WorkspaceIdentity = {
   accentColor?: string | null
@@ -199,6 +200,7 @@ export function routeFromPath(pathname: string): VelionRoute {
   if (path.startsWith('/account')) return '/account'
   if (path.startsWith('/settings/router-policy')) return '/settings/router-policy'
   if (path.startsWith('/settings/finetune')) return '/settings/finetune'
+  if (path.startsWith('/settings/mcp')) return '/settings/mcp'
   if (path.startsWith('/settings/integrations')) return '/settings/integrations'
   if (path.startsWith('/settings/trust')) return '/settings/trust'
   if (path.startsWith('/settings/org-security')) return '/settings/org-security'

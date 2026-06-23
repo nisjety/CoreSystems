@@ -8,29 +8,6 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 
 gsap.registerPlugin(ScrollTrigger);
 
-const TECHNOLOGIES = [
-	{
-		title: "Rengjøringssystemer",
-		desc: "Avanserte lavtrykks- og høytrykkssystemer for optimal hygiene.",
-		category: "Systemer",
-	},
-	{
-		title: "Clean-in-Place (CIP)",
-		desc: "Automatiserte rengjøringsprosesser for lukkede systemer.",
-		category: "Automasjon",
-	},
-	{
-		title: "Kjemi & Desinfeksjon",
-		desc: "Spesialutviklede kjemikalier for næringsmiddelindustrien.",
-		category: "Kjemi",
-	},
-	{
-		title: "Inspeksjon & Kontroll",
-		desc: "Systemer for validering og dokumentasjon av renhold.",
-		category: "Kvalitet",
-	},
-];
-
 export default function ExploreSection() {
 	const containerRef = useRef<HTMLElement>(null);
 
@@ -86,15 +63,14 @@ export default function ExploreSection() {
 				<div className="grid grid-cols-1 md:grid-cols-3 gap-y-6 gap-x-8">
 					{/* Col 1 — label */}
 					<div className="text-[10px] font-bold tracking-[0.25em] text-[#282A22]/60 uppercase pt-1">
-						04 / Teknologi
+						01 / Product
 					</div>
 
 					{/* Col 2+3 — intro heading */}
 					<h2 className="md:col-span-2 explore-header-text text-2xl md:text-3xl lg:text-[2rem] font-light leading-snug tracking-wide text-[#282A22]">
-						Vi kombinerer banebrytende teknologi med dyp
-						bransjekunnskap for å levere systemer som setter nye
-						standarder for mattrygghet og effektivitet i
-						produksjonen.
+						Velion is the operating layer for customer experience.
+						Every autonomous action has a manual equivalent, and
+						every risky step can require human approval.
 					</h2>
 				</div>
 			</div>
@@ -114,37 +90,17 @@ export default function ExploreSection() {
 					{/* Background image with parallax */}
 					<div className="absolute inset-0 z-0">
 						<Image
-							src="/images/CIP/sveise.png"
-							alt="Sveise"
+							src="/velion-vibe/signal-ridge.png"
+							alt="Abstract signal field for Velion's operating layer"
 							fill
+							sizes="(min-width: 768px) 45vw, 88vw"
 							className="explore-media-img object-cover opacity-40 scale-110"
 						/>
 						<div className="absolute inset-0 bg-[#282A22]/60" />
 					</div>
 					<span className="relative z-10 text-[10px] font-bold tracking-[0.25em] uppercase text-[#F2F2F2]/40">
-						Teknologi &amp; Innovasjon
+						Knowledge, workflows, approval
 					</span>
-
-					<div className="relative z-10 flex flex-col gap-0">
-						{TECHNOLOGIES.map((tech, idx) => (
-							<div
-								key={idx}
-								className="flex items-start gap-6 border-t border-[#F2F2F2]/10 py-6"
-							>
-								<span className="text-[11px] font-semibold tracking-widest text-[#F2F2F2]/30 mt-1 shrink-0 w-6">
-									0{idx + 1}
-								</span>
-								<div className="flex flex-col gap-1">
-									<p className="text-lg md:text-xl font-light tracking-wide text-[#F2F2F2]">
-										{tech.title}
-									</p>
-									<p className="text-[13px] font-light text-[#F2F2F2]/50 leading-relaxed">
-										{tech.desc}
-									</p>
-								</div>
-							</div>
-						))}
-					</div>
 				</div>
 
 				{/* Right — accent block + heading + text + CTA */}
@@ -155,34 +111,36 @@ export default function ExploreSection() {
 						style={{ aspectRatio: "4/3" }}
 					>
 						<Image
-							src="/images/about/aquatiqOneMac2.png"
-							alt="Aquatiq One"
+							src="/velion-vibe/glass-edge.png"
+							alt="Soft abstract interface surface for Velion"
 							fill
-							className="explore-media-img object-contain object-center scale-110"
+							sizes="(min-width: 768px) 24vw, 88vw"
+							className="explore-media-img object-cover object-center scale-110"
 						/>
 						<div className="absolute inset-0 bg-[#282A22]/10" />
 						<span className="relative z-10 text-[10px] font-bold tracking-[0.25em] uppercase text-[#282A22]/60">
-							Utforsk løsninger
+							Controlled AI work
 						</span>
 					</div>
 
 					{/* Text & CTA */}
 					<div className="pt-10 md:pt-14 pb-10 md:pb-0 flex flex-col gap-6">
 						<h3 className="text-3xl md:text-4xl lg:text-5xl font-light tracking-tight text-[#282A22]">
-							Redefiner renheten
+							An AI teammate, not a helpdesk add-on.
 						</h3>
 
 						<p className="text-[15px] md:text-base font-light leading-relaxed text-[#282A22]/70">
-							Vår reise begynner med en grundig analyse av din
-							produksjon. Vi spesifiserer, leverer og støtter
-							systemer skreddersydd til dine behov.
+							Velion is the operating layer for customer
+							experience: chatbot creation, support drafts,
+							source connections, knowledge inspection,
+							workflows, and governed next actions.
 						</p>
 
 						<a
-							href="/teknologi"
+							href="#product-loop"
 							className="inline-flex items-center justify-center self-start gap-2 px-7 py-3 bg-[#282A22] text-[#F2F2F2] text-sm font-light tracking-widest uppercase hover:bg-black transition-colors duration-300"
 						>
-							Se teknologi <ArrowRight className="w-4 h-4" />
+							Follow the work loop <ArrowRight className="w-4 h-4" />
 						</a>
 					</div>
 				</div>
@@ -190,4 +148,3 @@ export default function ExploreSection() {
 		</section>
 	);
 }
-a;

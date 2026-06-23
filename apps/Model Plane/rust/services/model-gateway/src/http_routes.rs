@@ -6,10 +6,10 @@
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
+    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
 use chrono::Utc;
@@ -21,8 +21,10 @@ use mp_contracts::model_plane::v1::{
     ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
     GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
     ListApprovalsRequest, ListModelsRequest, ListPlansRequest, ListRunsRequest,
-    ListSpeechVoicesRequest, ListTodosRequest, ListTranslationLanguagesRequest, Plan, PlanState,
-    PlanStep, PlanStepState, ResumeRunRequest, RunDetail, StreamVideoGenerationContentRequest,
+    ListMcpServersRequest, ListSpeechVoicesRequest, ListTodosRequest,
+    ListTranslationLanguagesRequest, McpServer, Plan, PlanState,
+    PlanStep, PlanStepState, RegisterMcpServerRequest, ResumeRunRequest, RunDetail,
+    StreamVideoGenerationContentRequest,
     SubagentLineage, SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState,
     TranscribeSpeechRequest, TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest,
     TranslationInput,
@@ -188,6 +190,12 @@ fn proxy_routes() -> Router<AppState> {
         // Capabilities
         .route("/v1/capabilities", get(list_capabilities_proxy))
         .route("/v1/capabilities/:id", get(get_capability_proxy))
+        // MCP servers — add/list/remove an MCP server (and thus its tools) over
+        // HTTP. The gateway exposes registered tools to the model automatically
+        // (see runtime_registries::mcp_tool_defs).
+        .route("/v1/mcp/servers", get(mcp_list).post(mcp_register))
+        .route("/v1/mcp/servers/:server_id", delete(mcp_delete))
+        .route("/v1/mcp/servers/:server_id/share", post(mcp_share))
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -726,7 +734,7 @@ async fn decide_approval(
                 "approval granted → execution-core resume_run"
             ),
             Err(e) => {
-                warn!(error = %e, approval_id = %approval.id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)")
+                warn!(error = %e, approval_id = %approval.id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)");
             }
         }
     }
@@ -1208,7 +1216,7 @@ fn string_array_field(parsed: &Value, key: &str, limit: usize) -> Vec<String> {
             items
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|text| text.trim())
+                .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .take(limit)
                 .map(ToOwned::to_owned)
@@ -1268,6 +1276,9 @@ async fn ai_embeddings(
             // has no zdr field); the ZDR egress guard lives in the Data Plane.
             // Phase 3 PR-3 added CreateEmbeddingRequest.zdr — false here is honest.
             zdr: false,
+            // No region preference expressed at this primitive — inference-core
+            // uses its configured EU deployment (deny-by-default for non-EU).
+            region: String::new(),
         })
         .await
         .map_err(|e| grpc_status_to_http(&e))?
@@ -1280,6 +1291,270 @@ async fn ai_embeddings(
         "provider_used": resp.provider_used,
         "embedding": resp.vector,
     })))
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_owned()
+}
+const fn default_true() -> bool {
+    true
+}
+
+/// Body for `POST /v1/mcp/servers`. Mirrors the gRPC `RegisterMcpServer` RPC so
+/// an MCP server (hence its tools) can be added with a plain POST — the
+/// ergonomic "add a new tool" entry point. `org_id` is taken from the caller's
+/// session, never the body.
+fn default_mcp_scope() -> String {
+    "user".to_owned()
+}
+
+#[derive(Debug, Deserialize)]
+struct McpRegisterBody {
+    name: String,
+    /// `stdio:///path/to/exe --flags` or `http(s)://host` per transport.
+    url: String,
+    #[serde(default = "default_mcp_transport")]
+    transport: String,
+    #[serde(default)]
+    token: String,
+    /// Tool-name prefixes the server may expose; empty = all (needs discovery).
+    #[serde(default)]
+    tool_allowlist: Vec<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    /// Optional explicit id; omit to let the gateway assign a ULID.
+    #[serde(default)]
+    server_id: String,
+    /// "user" (private to the creator, default) or "org" (admin-only, visible to
+    /// all org members). A non-admin can never create an "org" server.
+    #[serde(default = "default_mcp_scope")]
+    scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpShareBody {
+    /// Full replacement set of user ids the server is shared with.
+    #[serde(default)]
+    user_ids: Vec<String>,
+}
+
+/// Admin = an `*:admin` scope in the verified token OR a BFF-forwarded
+/// `x-user-role: admin` (trusted on the internal bus, like `x-user-id`).
+fn req_is_admin(claims: &Claims, headers: &HeaderMap) -> bool {
+    let role = headers.get("x-user-role").and_then(|v| v.to_str().ok());
+    crate::ownership::is_admin_claim(&claims.scopes, role)
+}
+
+/// Project an [`McpServer`] + its ownership for an API response, deliberately
+/// omitting `token` (an operational secret — it never leaves the gateway). A
+/// server with no ownership record is reported as org-scoped (grandfathered).
+fn mcp_server_json(s: &McpServer, ownership: Option<&crate::ownership::Ownership>) -> Value {
+    let (scope, owner, shared) = ownership.map_or_else(
+        || ("org", String::new(), Vec::new()),
+        |o| (o.scope.as_wire(), o.owner_user_id.clone(), o.shared_with.clone()),
+    );
+    json!({
+        "server_id": s.server_id,
+        "name": s.name,
+        "url": s.url,
+        "transport": s.transport,
+        "tool_allowlist": s.tool_allowlist,
+        "enabled": s.enabled,
+        "scope": scope,
+        "owner_user_id": owner,
+        "shared_with": shared,
+    })
+}
+
+/// `POST /v1/mcp/servers` — register (or upsert) an MCP server for the caller.
+/// Default scope is user-private; `scope:"org"` requires admin (defended here
+/// and authoritatively at the BFF). Records ownership and writes through to
+/// capability-core (best-effort: a catalog write failure never fails register).
+async fn mcp_register(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    Json(body): Json<McpRegisterBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if body.name.trim().is_empty() || body.url.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name and url are required" })),
+        ));
+    }
+    let org_id = claims.org_id.clone();
+    let scope = crate::ownership::Scope::from_wire(&body.scope);
+    if scope == crate::ownership::Scope::Org && !req_is_admin(&claims, &headers) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "only an admin can create an org-wide MCP server" })),
+        ));
+    }
+    let ownership = match scope {
+        crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
+        crate::ownership::Scope::User => {
+            crate::ownership::Ownership::user(claims.user_id.clone())
+        }
+    };
+    let server = McpServer {
+        server_id: body.server_id,
+        name: body.name,
+        url: body.url,
+        transport: body.transport,
+        token: body.token,
+        tool_allowlist: body.tool_allowlist,
+        enabled: body.enabled,
+    };
+    let resp = crate::runtime_registries::handle_register_mcp_server(
+        &state.mcp,
+        RegisterMcpServerRequest {
+            request_id: new_ulid(),
+            org_id: org_id.clone(),
+            server: Some(server),
+        },
+    )
+    .map_err(|e| grpc_status_to_http(&e))?;
+
+    // Record ownership for the assigned server id (the source of truth for the
+    // exposure + visibility filters).
+    if let Some(server) = resp.server.as_ref() {
+        state.ownership.set(
+            &org_id,
+            crate::ownership::KIND_MCP,
+            &server.server_id,
+            ownership.clone(),
+        );
+    }
+
+    // Best-effort write-through to capability-core (matrix §4.1/H.1), mirroring
+    // the gRPC handler — fire-and-forget; a write failure never fails register.
+    if !state.capability_core_base_url.is_empty() {
+        if let Some(server) = resp.server.as_ref() {
+            if !org_id.is_empty() && !server.name.is_empty() {
+                let payload = crate::runtime_registries::mcp_capability_payload(
+                    &org_id, server, &ownership,
+                );
+                let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
+                let client = state.http_client.clone();
+                tokio::spawn(async move {
+                    match client.post(&url).json(&payload).send().await {
+                        Ok(r) if !r.status().is_success() => {
+                            warn!(status = %r.status(), "mcp catalog write-through non-2xx (best-effort)");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "mcp catalog write-through failed (best-effort)");
+                        }
+                        _ => {}
+                    }
+                });
+            }
+        }
+    }
+
+    let owned = resp
+        .server
+        .as_ref()
+        .map(|s| mcp_server_json(s, Some(&ownership)));
+    Ok(Json(json!({ "data": owned })))
+}
+
+/// `GET /v1/mcp/servers` — list the MCP servers the caller may SEE: org-wide,
+/// their own, ones shared with them, and (if admin) shared ones for governance.
+/// Tokens are never returned.
+async fn mcp_list(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, HttpJsonError> {
+    let is_admin = req_is_admin(&claims, &headers);
+    let resp = crate::runtime_registries::handle_list_mcp_servers(
+        &state.mcp,
+        ListMcpServersRequest {
+            request_id: new_ulid(),
+            org_id: claims.org_id.clone(),
+        },
+    )
+    .map_err(|e| grpc_status_to_http(&e))?;
+    let servers: Vec<Value> = resp
+        .servers
+        .iter()
+        .filter(|s| {
+            state.ownership.visible(
+                &claims.org_id,
+                crate::ownership::KIND_MCP,
+                &s.server_id,
+                &claims.user_id,
+                is_admin,
+            )
+        })
+        .map(|s| {
+            let own = state.ownership.get(
+                &claims.org_id,
+                crate::ownership::KIND_MCP,
+                &s.server_id,
+            );
+            mcp_server_json(s, own.as_ref())
+        })
+        .collect();
+    Ok(Json(json!({ "data": { "servers": servers } })))
+}
+
+/// `DELETE /v1/mcp/servers/:server_id` — remove a server. Only the owner (user
+/// resource) or an admin (org resource) may delete; an admin cannot delete a
+/// user's private resource (they cannot even see it).
+async fn mcp_delete(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    Path(server_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let is_admin = req_is_admin(&claims, &headers);
+    if !state.ownership.can_modify(
+        &claims.org_id,
+        crate::ownership::KIND_MCP,
+        &server_id,
+        &claims.user_id,
+        is_admin,
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "not allowed to remove this MCP server" })),
+        ));
+    }
+    let removed = state.mcp.remove(&claims.org_id, &server_id);
+    state
+        .ownership
+        .remove(&claims.org_id, crate::ownership::KIND_MCP, &server_id);
+    Ok(Json(
+        json!({ "data": { "removed": removed, "server_id": server_id } }),
+    ))
+}
+
+/// `POST /v1/mcp/servers/:server_id/share` — replace the set of users a
+/// user-owned server is shared with. Owner only; a user may share with specific
+/// users but can NEVER make the server org-wide (that requires admin re-create).
+async fn mcp_share(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(server_id): Path<String>,
+    Json(body): Json<McpShareBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let updated = state
+        .ownership
+        .set_shares(
+            &claims.org_id,
+            crate::ownership::KIND_MCP,
+            &server_id,
+            &claims.user_id,
+            body.user_ids,
+        )
+        .map_err(|e| (StatusCode::FORBIDDEN, Json(json!({ "error": e }))))?;
+    Ok(Json(json!({ "data": {
+        "server_id": server_id,
+        "scope": updated.scope.as_wire(),
+        "owner_user_id": updated.owner_user_id,
+        "shared_with": updated.shared_with,
+    } })))
 }
 
 /// Active inference model catalogue.
@@ -2664,7 +2939,7 @@ fn not_found(message: &str) -> HttpJsonError {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
 }
 
-/// Serialize a `RunDetail` for the runs-history UI. Snake_case wire keys match
+/// Serialize a `RunDetail` for the runs-history UI. `Snake_case` wire keys match
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.

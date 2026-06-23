@@ -233,7 +233,7 @@ fn check_internal_token(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
         .unwrap_or("");
-    if !token.is_empty() && token == expected {
+    if !token.is_empty() && ct_eq(token.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
         Err(QuarryError::new(
@@ -241,6 +241,20 @@ fn check_internal_token(
             "invalid internal token",
         ))
     }
+}
+
+/// Constant-time byte comparison for shared-secret tokens — avoids the
+/// first-mismatch timing side-channel of `==`. A length difference returns
+/// early (token length is not itself secret).
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn verify_internal_token(headers: &HeaderMap) -> Result<(), QuarryError> {

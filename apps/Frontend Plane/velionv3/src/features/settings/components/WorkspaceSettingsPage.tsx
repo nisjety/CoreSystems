@@ -3,6 +3,7 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount,
 import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
+import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import {
   confirmBillingCheckout,
@@ -115,53 +116,47 @@ type AuditEvent = {
   createdAt?: string
 }
 
-/* eslint-disable no-restricted-syntax -- KNOWN A1 fabricated-security breach.
-   The Phase 4 A8 no-fabricated-state guard correctly flags these hardcoded
-   `enabled: true` security controls. This whole block (and the disable) is
-   deleted in the very next change, PR-2 (WorkspaceSettingsPage de-fake); the
-   disable keeps the guard live across the rest of the SPA without blocking
-   PR-1's `pnpm verify`. */
-const securityToggles = [
+// Phase 4 PR-2 de-fake: org-security policy controls. No real org-security /
+// MFA / domain-restriction source is wired behind the gateway today, so these
+// render as honest, DISABLED "not configured" controls — a security control is
+// never shown enabled from a literal. (No boolean-`true` posture remains, so
+// the A8 no-fabricated-state guard needs no suppression here.)
+const securityControls: { title: string; description: string }[] = [
   {
     title: 'Require MFA for admins',
     description: 'Admins must use multi-factor authentication before accessing organization settings.',
-    enabled: true,
   },
   {
     title: 'Restrict sign-in to verified domains',
     description: 'Only users with approved workspace domains can sign in.',
-    enabled: true,
   },
   {
     title: 'Log admin configuration changes',
     description: 'Keep an audit trail for billing, member, SSO, and integration changes.',
-    enabled: true,
   },
 ]
-/* eslint-enable no-restricted-syntax */
 
 const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
-  workspace: [
-    { label: 'Primary domain', value: 'Verified', detail: 'aquatiq.no is ready for customer-facing links.', tone: 'ok' },
-    { label: 'Data region', value: 'Europe', detail: 'All new workspace data is stored in EU infrastructure.', tone: 'neutral' },
-    { label: 'Routing owner', value: 'Support ops', detail: 'Default inbox ownership is assigned.', tone: 'ok' },
-  ],
+  // Phase 4 PR-2 de-fake: the workspace + integrations status grids carried a
+  // fabricated posture ('Verified' / 'aquatiq.no is ready' / 'Connected apps
+  // 2 / 4' / 'Healthy, synced 8 minutes ago'). No real producer exists, so the
+  // grids are honestly empty; integration counts are shown truthfully by the
+  // live <Metric> grid in IntegrationsSection.
+  workspace: [],
   members: [],
   billing: [],
   // SSO + org-security status are not wired to a real source; show no
   // fabricated "Verified / Required / 365 days" cards.
   sso: [],
   'org-security': [],
-  integrations: [
-    { label: 'Connected apps', value: '2 / 4', detail: 'Zendesk and Slack are connected.', tone: 'neutral' },
-    { label: 'Sync health', value: 'Healthy', detail: 'Last workspace sync finished 8 minutes ago.', tone: 'ok' },
-    { label: 'Webhook errors', value: '0', detail: 'No failed deliveries in the last 24 hours.', tone: 'ok' },
-  ],
+  integrations: [],
   // Trust Center renders its own live transparency cards, and router-policy /
   // fine-tune render dedicated pages — so these carry no shared status grid.
   trust: [],
   'router-policy': [],
   finetune: [],
+  // MCP servers renders its own live list + form, so it carries no shared status grid.
+  mcp: [],
 }
 
 const businessHourRows = [
@@ -213,12 +208,6 @@ function normalizeMemberList(payload: unknown): LiveMember[] {
 
   return members.map(normalizeMember).filter((member): member is LiveMember => Boolean(member))
 }
-
-const webhookRows = [
-  { endpoint: 'Zendesk ticket sync', status: '200 OK', lastRun: '8 min ago' },
-  { endpoint: 'Slack escalation', status: '200 OK', lastRun: '14 min ago' },
-  { endpoint: 'CRM customer upsert', status: 'Paused', lastRun: '2 days ago' },
-]
 
 export function VelionWorkspaceSettingsPage(props: {
   section?: WorkspaceSettingsSectionId
@@ -390,6 +379,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'trust'}>
         <TrustCenterSection />
+      </Match>
+      <Match when={props.section === 'mcp'}>
+        <McpServersSection />
       </Match>
     </Switch>
   )
@@ -908,10 +900,15 @@ function OrgSecuritySection() {
     <>
       <SectionHeader title="Security policy" description="Set organization-wide security requirements and audit controls." />
       <div class="velion-settings-divided-list">
-        <For each={securityToggles}>
-          {(toggle) => <ToggleRow {...toggle} />}
+        <For each={securityControls}>
+          {(control) => (
+            <ToggleRow title={control.title} description={control.description} enabled={false} disabled />
+          )}
         </For>
       </div>
+      <p class="velion-settings-panel-note">
+        Organization-wide security policy is not yet connected to a live source for this workspace, so these controls are shown unconfigured. They will reflect real policy state once an org-security backend is wired.
+      </p>
       <div class="velion-settings-field-grid velion-settings-field-grid--spaced">
         <SettingsSelect
           id="session-duration"
@@ -1153,11 +1150,9 @@ function IntegrationsSection() {
         actionLabel="View logs"
         class="velion-settings-feature-panel--spaced"
       >
-        <div class="velion-settings-row-divider">
-          <For each={webhookRows}>
-            {(row) => <DataRow primary={row.endpoint} secondary={row.lastRun} meta={row.status} />}
-          </For>
-        </div>
+        <p class="velion-settings-panel-note">
+          No webhook delivery telemetry is available for this workspace yet.
+        </p>
       </FeaturePanel>
     </>
   )

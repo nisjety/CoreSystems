@@ -169,26 +169,54 @@ func buildSurfaceOverviews(surfaces []string, events []MetricEvent) []SurfaceOve
 
 func rollupMetrics(events []MetricEvent) []MetricRollup {
 	type aggregate struct {
-		value float64
-		unit  string
+		value   float64
+		unit    string
+		sources map[string]struct{}
 	}
 	aggregates := map[string]aggregate{}
 	for _, event := range events {
-		current := aggregates[event.Metric]
+		current, ok := aggregates[event.Metric]
+		if !ok {
+			current.sources = map[string]struct{}{}
+		}
 		current.value += event.Value
 		if current.unit == "" {
 			current.unit = event.Unit
+		}
+		// Cite the real producer(s) behind the events — never invent attribution.
+		if source := strings.TrimSpace(event.Source); source != "" {
+			current.sources[source] = struct{}{}
 		}
 		aggregates[event.Metric] = current
 	}
 	metrics := make([]MetricRollup, 0, len(aggregates))
 	for metric, aggregate := range aggregates {
-		metrics = append(metrics, MetricRollup{Metric: metric, Value: aggregate.value, Unit: aggregate.unit})
+		metrics = append(metrics, MetricRollup{
+			Metric: metric,
+			Value:  aggregate.value,
+			Unit:   aggregate.unit,
+			Source: joinSources(aggregate.sources),
+		})
 	}
 	sort.Slice(metrics, func(i, j int) bool {
 		return metrics[i].Metric < metrics[j].Metric
 	})
 	return metrics
+}
+
+// joinSources renders the distinct producer set as a stable, comma-separated
+// citation ("conversation-core, social-core"). Empty when no event carried a
+// source — the honest "unattributed" state, never a fabricated producer.
+func joinSources(sources map[string]struct{}) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	list := make([]string, 0, len(sources))
+	for source := range sources {
+		list = append(list, source)
+	}
+	sort.Strings(list)
+	return strings.Join(list, ", ")
 }
 
 func lastEventAt(events []MetricEvent) *time.Time {
@@ -213,6 +241,7 @@ func buildScorecards(surfaces []SurfaceOverview) []Scorecard {
 				Metric:  metric.Metric,
 				Value:   metric.Value,
 				Unit:    metric.Unit,
+				Source:  metric.Source,
 			})
 		}
 	}

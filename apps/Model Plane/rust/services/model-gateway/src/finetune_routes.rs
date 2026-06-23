@@ -888,6 +888,7 @@ const PRODUCTION_HOURS_PER_MONTH: f64 = 730.0;
 /// the job is not `succeeded` or lacks a `fine_tuned_model`, a `503` if the
 /// Azure management plane is unconfigured, a `429` if the production hosting
 /// estimate exceeds a budget cap, or maps upstream Azure/gRPC failures.
+#[allow(clippy::too_many_lines)]
 pub async fn deploy_job(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,

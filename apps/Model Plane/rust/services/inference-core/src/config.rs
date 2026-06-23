@@ -83,6 +83,20 @@ pub struct InferenceConfig {
     /// How often inference-core re-polls session-core for the live policy, in
     /// seconds (from `ROUTER_POLICY_REFRESH_SECS`, default 60).
     pub router_policy_refresh_secs: u64,
+
+    /// Explicit residency region of the configured Azure embedding deployment
+    /// (from `AZURE_OPENAI_REGION`, e.g. `swedencentral`). Azure `OpenAI`
+    /// endpoint hosts don't carry the region, so this is the authoritative
+    /// signal the startup residency gate classifies. Empty/unset means
+    /// "unspecified" — the endpoint-substring heuristic is then the only signal.
+    pub azure_openai_region: Option<String>,
+
+    /// Deny-by-default override for the EU embedding residency gate (from
+    /// `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING`, default `false`). When `false`, a
+    /// non-EU embedding region/endpoint fails the service loud at startup and
+    /// rejects requests; setting it `true` is an explicit operator opt-in to
+    /// egress embeddings outside the EU residency boundary.
+    pub allow_non_eu_embedding: bool,
 }
 
 impl InferenceConfig {
@@ -143,6 +157,18 @@ impl InferenceConfig {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(60);
 
+        let azure_openai_region = std::env::var("AZURE_OPENAI_REGION")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+
+        // Deny-by-default: only an explicit truthy opt-in disables the EU
+        // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
+        // shape but the embedding gate REJECTS rather than warn-and-fallback.
+        let allow_non_eu_embedding = std::env::var("MODEL_PLANE_ALLOW_NON_EU_EMBEDDING")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+            .unwrap_or(false);
+
         Ok(Self {
             provider_order,
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
@@ -183,6 +209,8 @@ impl InferenceConfig {
             velion_intent_budget_usd,
             session_core_url,
             router_policy_refresh_secs,
+            azure_openai_region,
+            allow_non_eu_embedding,
         })
     }
 }

@@ -22,7 +22,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use mp_ids::new_ulid;
@@ -39,8 +39,26 @@ use mp_contracts::model_plane::v1::{
     ProxyMcpToolResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest,
     RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, SetPermissionRequest,
     SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest,
-    SetPolicyResponse, TaskRecord, ThreadMessage, ToolCallCount,
+    SetPolicyResponse, TaskRecord, ThreadMessage, ToolCallCount, ToolDefinition,
 };
+
+use crate::mcp_jsonrpc::McpToolDef;
+
+/// Per-(org, `server_id`) discovered tool catalog with the instant it was
+/// fetched. Aliased to keep the [`McpRegistry`] field readable (clippy
+/// `type_complexity`).
+type McpCatalog = Arc<DashMap<(String, String), (Instant, Vec<McpToolDef>)>>;
+
+/// How long a discovered `tools/list` catalog is reused before the next
+/// discovery. Keeps the chat hot-path from spawning a subprocess (stdio) or an
+/// HTTP round-trip on every turn while staying fresh enough to pick up newly
+/// added tools within a minute.
+const MCP_CATALOG_TTL: Duration = Duration::from_secs(60);
+
+/// Hard cap on how long tool discovery may block a turn. A registered-but-down
+/// server must not stall the user's chat — discovery fails fast and the caller
+/// falls back to the stored allowlist.
+const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(6);
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -56,6 +74,10 @@ fn now_unix() -> i64 {
 #[derive(Clone, Default, Debug)]
 pub struct McpRegistry {
     inner: Arc<DashMap<(String, String), McpServer>>, // (org, server_id)
+    /// Discovered `tools/list` catalog per (org, `server_id`), with the instant
+    /// it was fetched — reused for [`MCP_CATALOG_TTL`] so the chat hot-path
+    /// doesn't re-discover on every turn.
+    catalog: McpCatalog,
     http: reqwest::Client,
 }
 
@@ -64,6 +86,7 @@ impl McpRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
+            catalog: Arc::new(DashMap::new()),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -76,9 +99,11 @@ impl McpRegistry {
     /// when capability-core (the system-of-record) reports a server removed —
     /// so the gateway stops proxying to a decommissioned/revoked server.
     pub fn remove(&self, org_id: &str, server_id: &str) -> bool {
-        self.inner
-            .remove(&(org_id.to_owned(), server_id.to_owned()))
-            .is_some()
+        let key = (org_id.to_owned(), server_id.to_owned());
+        // Evict the discovered catalog too, so a decommissioned server's tools
+        // stop being advertised to the model immediately (not after the TTL).
+        self.catalog.remove(&key);
+        self.inner.remove(&key).is_some()
     }
 
     /// Whether a server is cached for (org, `server_id`). Test/observability helper.
@@ -207,6 +232,214 @@ async fn await_response(
     }
 }
 
+/// Discover an MCP server's tools over the **stdio** transport: spawn,
+/// `initialize` handshake, then `tools/list`. Mirrors [`stdio_tool_call`] but
+/// returns the advertised tool defs. Bounded by the shared 30s child timeout;
+/// the caller additionally wraps this in the shorter [`MCP_DISCOVERY_TIMEOUT`].
+async fn stdio_list_tools(url: &str) -> Result<Vec<McpToolDef>, String> {
+    use crate::mcp_jsonrpc::{
+        build_initialize_request, build_initialized_notification, build_list_tools_request,
+        parse_list_tools_response,
+    };
+    use tokio::io::AsyncBufReadExt as _;
+
+    let (program, args) = crate::mcp_jsonrpc::parse_stdio_command(url)?;
+    let mut child = tokio::process::Command::new(&program)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("mcp stdio spawn {program}: {e}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "mcp stdio: no child stdin".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "mcp stdio: no child stdout".to_owned())?;
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+
+    let interaction = async {
+        send_jsonrpc(&mut stdin, &build_initialize_request(1)).await?;
+        await_response(&mut reader, 1).await?;
+        send_jsonrpc(&mut stdin, &build_initialized_notification()).await?;
+        send_jsonrpc(&mut stdin, &build_list_tools_request(2)).await?;
+        await_response(&mut reader, 2).await
+    };
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), interaction).await;
+    let _ = child.kill().await;
+    let line = match outcome {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("mcp stdio tools/list timed out".to_owned()),
+    };
+    parse_list_tools_response(2, &line)
+}
+
+/// Discover an MCP server's tools over the **HTTP** bridge: `POST {url}/tools/list`.
+/// Accepts either a JSON-RPC envelope (`result.tools`) or a bare `{tools:[...]}`
+/// (the bridge may unwrap), mirroring the lenient `tools/call` bridge shape.
+async fn http_list_tools(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<Vec<McpToolDef>, String> {
+    let mut req = http
+        .post(format!("{url}/tools/list"))
+        .json(&serde_json::json!({}));
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await.map_err(|e| format!("transport: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("mcp HTTP {}: {}", status, truncate(&body, 200)));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("invalid json: {e}"))?;
+    let tools = v
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| v.get("tools").and_then(serde_json::Value::as_array))
+        .ok_or_else(|| "tools/list response missing tools array".to_owned())?;
+    Ok(tools
+        .iter()
+        .filter_map(crate::mcp_jsonrpc::parse_one_tool)
+        .collect())
+}
+
+/// Keep only discovered tools whose name starts with one of the allowlist
+/// prefixes — the same prefix semantics [`handle_proxy_mcp_tool`] enforces at
+/// call time. An empty allowlist means "all tools allowed".
+#[must_use]
+fn filter_allowlist(tools: Vec<McpToolDef>, allowlist: &[String]) -> Vec<McpToolDef> {
+    if allowlist.is_empty() {
+        return tools;
+    }
+    tools
+        .into_iter()
+        .filter(|t| allowlist.iter().any(|p| t.name.starts_with(p)))
+        .collect()
+}
+
+/// When discovery is unavailable, expose the allowlisted tool names with an
+/// open input schema so they stay callable (the server validates args at call
+/// time). An empty allowlist yields nothing — there is nothing to enumerate
+/// without discovery.
+#[must_use]
+fn allowlist_fallback(allowlist: &[String]) -> Vec<McpToolDef> {
+    allowlist
+        .iter()
+        .map(|name| McpToolDef {
+            name: name.clone(),
+            description: String::new(),
+            input_schema_json: "{\"type\":\"object\"}".to_owned(),
+        })
+        .collect()
+}
+
+/// Return `server`'s discovered tool catalog, served from the TTL cache when
+/// fresh. On a miss it discovers over the server's transport (bounded by
+/// [`MCP_DISCOVERY_TIMEOUT`]) and caches success. `None` means discovery is
+/// currently unavailable, so the caller falls back to the stored allowlist.
+async fn mcp_discover_cached(
+    reg: &McpRegistry,
+    org_id: &str,
+    server: &McpServer,
+) -> Option<Vec<McpToolDef>> {
+    let key = (org_id.to_owned(), server.server_id.clone());
+    if let Some(entry) = reg.catalog.get(&key) {
+        if entry.0.elapsed() < MCP_CATALOG_TTL {
+            return Some(entry.1.clone());
+        }
+    }
+    let discovery = async {
+        match server.transport.as_str() {
+            "stdio" => stdio_list_tools(&server.url).await,
+            "http" => http_list_tools(&reg.http, &server.url, &server.token).await,
+            other => Err(format!("discovery unsupported for transport {other}")),
+        }
+    };
+    match tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, discovery).await {
+        Ok(Ok(tools)) => {
+            reg.catalog.insert(key, (Instant::now(), tools.clone()));
+            Some(tools)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(
+                server = %server.server_id,
+                error = %e,
+                "mcp tools/list discovery failed; falling back to allowlist"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                server = %server.server_id,
+                "mcp tools/list discovery timed out; falling back to allowlist"
+            );
+            None
+        }
+    }
+}
+
+/// Build the agent-facing tool definitions for every **enabled** MCP server an
+/// org has registered, namespaced `mcp__<server_id>__<tool>` so the gateway's
+/// `dispatch_tool` (and the model) can route calls back to the right server.
+/// This is the exposure bridge: without it, registered MCP servers sit in the
+/// registry but their tools never reach the model.
+///
+/// Discovery is best-effort and bounded (see [`mcp_discover_cached`]): each
+/// server's `tools/list` is fetched for real input schemas; if unreachable, it
+/// falls back to the stored `tool_allowlist` with an open schema so registered
+/// tools stay callable. A disabled server, or an unreachable one with an empty
+/// allowlist (nothing to enumerate), contributes nothing. Never panics.
+pub async fn mcp_tool_defs(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+    user_id: &str,
+) -> Vec<ToolDefinition> {
+    // Tenant scope from the key; ownership filters to the resources THIS user may
+    // use (org-wide, owned, or shared-to-them) — never another user's private.
+    let servers: Vec<McpServer> = reg
+        .inner
+        .iter()
+        .filter(|e| {
+            e.key().0 == org_id
+                && e.value().enabled
+                && ownership.usable(org_id, crate::ownership::KIND_MCP, &e.key().1, user_id)
+        })
+        .map(|e| e.value().clone())
+        .collect();
+
+    let mut defs: Vec<ToolDefinition> = Vec::new();
+    for server in servers {
+        let tools = match mcp_discover_cached(reg, org_id, &server).await {
+            Some(discovered) => filter_allowlist(discovered, &server.tool_allowlist),
+            None => allowlist_fallback(&server.tool_allowlist),
+        };
+        for t in tools {
+            let description = if t.description.is_empty() {
+                format!("Tool '{}' from MCP server '{}'.", t.name, server.name)
+            } else {
+                format!("[{}] {}", server.name, t.description)
+            };
+            defs.push(ToolDefinition {
+                name: format!("mcp__{}__{}", server.server_id, t.name),
+                description,
+                parameters_json: t.input_schema_json,
+            });
+        }
+    }
+    defs
+}
+
 /// Registers (or upserts) an MCP server in the gateway-scoped registry.
 ///
 /// # Errors
@@ -225,10 +458,11 @@ pub fn handle_register_mcp_server(
     if server.server_id.is_empty() {
         server.server_id = new_ulid();
     }
-    reg.inner.insert(
-        (req.org_id.clone(), server.server_id.clone()),
-        server.clone(),
-    );
+    let key = (req.org_id.clone(), server.server_id.clone());
+    // A re-register may change the url/allowlist/enabled flag — drop any stale
+    // discovered catalog so the next exposure re-discovers against new config.
+    reg.catalog.remove(&key);
+    reg.inner.insert(key, server.clone());
     Ok(RegisterMcpServerResponse {
         request_id: req.request_id,
         server: Some(server),
@@ -248,12 +482,19 @@ pub fn handle_register_mcp_server(
 /// auth is required. The token stays in the gateway cache, which is what
 /// actually proxies tool calls; the catalog holds metadata only.
 #[must_use]
-pub fn mcp_capability_payload(org_id: &str, server: &McpServer) -> serde_json::Value {
+pub fn mcp_capability_payload(
+    org_id: &str,
+    server: &McpServer,
+    ownership: &crate::ownership::Ownership,
+) -> serde_json::Value {
     let auth_kind = if server.token.is_empty() {
         "none"
     } else {
         "bearer"
     };
+    // Ownership (scope/owner/shares) rides in config_json so the durable catalog
+    // record stays the system-of-record for who-can-see-what, not just the
+    // ephemeral gateway sidecar. `scope` reflects the real owner/org scope.
     serde_json::json!({
         "id": server.server_id,
         "org_id": org_id,
@@ -261,8 +502,12 @@ pub fn mcp_capability_payload(org_id: &str, server: &McpServer) -> serde_json::V
         "endpoint_url": server.url,
         "transport": server.transport,
         "auth_kind": auth_kind,
-        "config_json": { "tool_allowlist": server.tool_allowlist },
-        "scope": "org",
+        "config_json": {
+            "tool_allowlist": server.tool_allowlist,
+            "owner_user_id": ownership.owner_user_id,
+            "shared_with": ownership.shared_with,
+        },
+        "scope": ownership.scope.as_wire(),
         "enabled": server.enabled,
     })
 }
@@ -287,7 +532,7 @@ mod mcp_writethrough_tests {
             tool_allowlist: vec!["read".into(), "list".into()],
             enabled: true,
         };
-        let p = mcp_capability_payload("org-7", &server);
+        let p = mcp_capability_payload("org-7", &server, &crate::ownership::Ownership::org());
         // Client-supplied id is honored → gateway cache and catalog stay aligned.
         assert_eq!(p["id"], "mcp_abc");
         assert_eq!(p["org_id"], "org-7");
@@ -317,9 +562,145 @@ mod mcp_writethrough_tests {
             tool_allowlist: vec![],
             enabled: false,
         };
-        let p = mcp_capability_payload("o", &server);
+        let p = mcp_capability_payload("o", &server, &crate::ownership::Ownership::user("alice"));
         assert_eq!(p["auth_kind"], "none");
         assert_eq!(p["enabled"], false);
+    }
+}
+
+#[cfg(test)]
+mod mcp_exposure_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::McpServer;
+
+    fn tool(name: &str) -> McpToolDef {
+        McpToolDef {
+            name: name.to_owned(),
+            description: String::new(),
+            input_schema_json: "{}".to_owned(),
+        }
+    }
+
+    #[test]
+    fn filter_allowlist_empty_keeps_all() {
+        let tools = vec![tool("read"), tool("write")];
+        assert_eq!(filter_allowlist(tools, &[]).len(), 2);
+    }
+
+    #[test]
+    fn filter_allowlist_prefix_matches() {
+        let tools = vec![tool("read_file"), tool("write_file"), tool("list_dir")];
+        let kept = filter_allowlist(tools, &["read".to_owned(), "list".to_owned()]);
+        let names: Vec<&str> = kept.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["read_file", "list_dir"]);
+    }
+
+    #[test]
+    fn allowlist_fallback_yields_open_schema_named_tools() {
+        let defs = allowlist_fallback(&["search".to_owned()]);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "search");
+        assert_eq!(defs[0].input_schema_json, "{\"type\":\"object\"}");
+        assert!(allowlist_fallback(&[]).is_empty());
+    }
+
+    fn register(reg: &McpRegistry, org: &str, server: McpServer) {
+        handle_register_mcp_server(
+            reg,
+            RegisterMcpServerRequest {
+                request_id: String::new(),
+                org_id: org.to_owned(),
+                server: Some(server),
+            },
+        )
+        .expect("register ok");
+    }
+
+    #[tokio::test]
+    async fn exposes_namespaced_allowlist_when_server_unreachable() {
+        // An unreachable stdio server (spawn fails fast) must still surface its
+        // allowlisted tools, namespaced — so registered tools stay callable
+        // even when discovery is down. This is the core exposure guarantee.
+        let reg = McpRegistry::new();
+        register(
+            &reg,
+            "org-1",
+            McpServer {
+                server_id: "fs".into(),
+                name: "Filesystem".into(),
+                url: "stdio:///nonexistent-mcp-binary-zzz".into(),
+                transport: "stdio".into(),
+                token: String::new(),
+                tool_allowlist: vec!["read_file".into(), "list_dir".into()],
+                enabled: true,
+            },
+        );
+        let defs =
+            mcp_tool_defs(&reg, &crate::ownership::OwnershipStore::new(), "org-1", "u1").await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"mcp__fs__read_file"), "got {names:?}");
+        assert!(names.contains(&"mcp__fs__list_dir"), "got {names:?}");
+        // Description names the server so the model knows the provenance.
+        assert!(defs[0].description.contains("Filesystem"));
+    }
+
+    #[tokio::test]
+    async fn disabled_or_empty_allowlist_unreachable_contributes_nothing() {
+        let reg = McpRegistry::new();
+        // Disabled server → skipped entirely.
+        register(
+            &reg,
+            "org-2",
+            McpServer {
+                server_id: "off".into(),
+                name: "Off".into(),
+                url: "stdio:///nope".into(),
+                transport: "stdio".into(),
+                token: String::new(),
+                tool_allowlist: vec!["x".into()],
+                enabled: false,
+            },
+        );
+        // Enabled but unreachable with an empty allowlist → nothing to enumerate.
+        register(
+            &reg,
+            "org-2",
+            McpServer {
+                server_id: "empty".into(),
+                name: "Empty".into(),
+                url: "stdio:///nope2".into(),
+                transport: "stdio".into(),
+                token: String::new(),
+                tool_allowlist: vec![],
+                enabled: true,
+            },
+        );
+        assert!(
+            mcp_tool_defs(&reg, &crate::ownership::OwnershipStore::new(), "org-2", "u1")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn org_scoped_exposure_does_not_leak_across_orgs() {
+        let reg = McpRegistry::new();
+        register(
+            &reg,
+            "org-a",
+            McpServer {
+                server_id: "s".into(),
+                name: "S".into(),
+                url: "stdio:///nope".into(),
+                transport: "stdio".into(),
+                token: String::new(),
+                tool_allowlist: vec!["t".into()],
+                enabled: true,
+            },
+        );
+        let own = crate::ownership::OwnershipStore::new();
+        assert_eq!(mcp_tool_defs(&reg, &own, "org-a", "u1").await.len(), 1);
+        assert!(mcp_tool_defs(&reg, &own, "org-b", "u1").await.is_empty());
     }
 }
 

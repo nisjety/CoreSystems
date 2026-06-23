@@ -150,10 +150,10 @@ type ModelGatewayClient interface {
 	// ListPendingApprovals — read pending approvals for a run. Used by
 	// UIs surfacing the queue and by the run-loop polling for resolution.
 	ListPendingApprovals(ctx context.Context, in *ListPendingApprovalsRequest, opts ...grpc.CallOption) (*ListPendingApprovalsResponse, error)
-	// RecordTrajectory — append a single run trajectory (goal + actions
-	// + outcome) to the recorder. Fire-and-forget from the run-loop's
-	// hot path. Records are kept in-memory (size-bounded) and published
-	// to NATS so external pipelines can stream them.
+	// RecordTrajectory — append a single run trajectory
+	// (goal + actions + outcome) to the recorder. Fire-and-forget from the
+	// run-loop's hot path. Records are kept in-memory (size-bounded) and
+	// published to NATS so external pipelines can stream them.
 	RecordTrajectory(ctx context.Context, in *RecordTrajectoryRequest, opts ...grpc.CallOption) (*RecordTrajectoryResponse, error)
 	// ListTrajectories — read recent trajectories for an org. Filtered
 	// by outcome / pattern / time range. Capped at 500 per call.
@@ -773,10 +773,10 @@ type ModelGatewayServer interface {
 	// ListPendingApprovals — read pending approvals for a run. Used by
 	// UIs surfacing the queue and by the run-loop polling for resolution.
 	ListPendingApprovals(context.Context, *ListPendingApprovalsRequest) (*ListPendingApprovalsResponse, error)
-	// RecordTrajectory — append a single run trajectory (goal + actions
-	// + outcome) to the recorder. Fire-and-forget from the run-loop's
-	// hot path. Records are kept in-memory (size-bounded) and published
-	// to NATS so external pipelines can stream them.
+	// RecordTrajectory — append a single run trajectory
+	// (goal + actions + outcome) to the recorder. Fire-and-forget from the
+	// run-loop's hot path. Records are kept in-memory (size-bounded) and
+	// published to NATS so external pipelines can stream them.
 	RecordTrajectory(context.Context, *RecordTrajectoryRequest) (*RecordTrajectoryResponse, error)
 	// ListTrajectories — read recent trajectories for an org. Filtered
 	// by outcome / pattern / time range. Capped at 500 per call.

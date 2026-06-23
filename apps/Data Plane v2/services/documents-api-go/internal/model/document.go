@@ -43,7 +43,10 @@ type CreateDocumentInput struct {
 	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
 	IngestPolicy      *IngestPolicy   `json:"ingest_policy,omitempty"`
 	// OwnerID, when set, stamps the document's owner; otherwise it falls back to
-	// CreatedBy, then the org-system account. Visibility defaults to 'org'.
+	// CreatedBy, then the org-system account. Visibility (private|org|shared): when
+	// empty it defaults to 'private' for an end-user create (a viewer is present)
+	// and 'org' for a system/ingest create (no viewer). Setting 'org' explicitly
+	// requires an admin scope or a system caller — end users get 403.
 	OwnerID    string `json:"owner_id,omitempty"`
 	Visibility string `json:"visibility,omitempty"`
 }

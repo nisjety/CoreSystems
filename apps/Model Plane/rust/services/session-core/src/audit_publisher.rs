@@ -233,7 +233,10 @@ mod tests {
             tool: Some("company_lookup".to_owned()),
         };
         // The step_id suffix is the opaque provider call id; the prefix wins.
-        assert_eq!(resolve_tool_name(&with_tool, "tool_1_call-abc123"), "company_lookup");
+        assert_eq!(
+            resolve_tool_name(&with_tool, "tool_1_call-abc123"),
+            "company_lookup"
+        );
 
         let legacy = ToolActionDetail {
             data_category: "public_non_personal".to_owned(),
@@ -241,7 +244,10 @@ mod tests {
             tool: None,
         };
         // Pre-E5 step with no tool= → fall back to the step_id-derived name.
-        assert_eq!(resolve_tool_name(&legacy, "tool_2_yr_weather"), "yr_weather");
+        assert_eq!(
+            resolve_tool_name(&legacy, "tool_2_yr_weather"),
+            "yr_weather"
+        );
     }
 
     #[test]

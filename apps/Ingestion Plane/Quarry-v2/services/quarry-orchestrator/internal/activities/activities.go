@@ -9,6 +9,7 @@ package activities
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +37,12 @@ type Config struct {
 	// through the edge rather than calling the store in-process.
 	EdgeBaseURL   string
 	EdgeAuthToken string
+	// EdgeRunSecret is the shared HMAC secret (env QUARRY_INTERNAL_SECRET)
+	// used to org-bind the /v1/internal/run_page call. When non-empty the
+	// orchestrator stamps an X-Quarry-Run-Sig header over org_id+url so a
+	// leaked runtime bearer token can't be replayed against another tenant's
+	// org_id. Empty = no binding (edge falls back to runtime-token-only).
+	EdgeRunSecret string
 	HTTPTimeout   time.Duration
 }
 
@@ -61,6 +68,11 @@ func New(cfg Config) *Activities {
 type RunPageInput struct {
 	RunID string `json:"run_id"`
 	URL   string `json:"url"`
+	// OrgID is the originating tenant, stamped by the workflow from the
+	// schedule/job memo. It travels in the run_page body (the edge reads
+	// org_id from the body, not a JWT) AND is HMAC-bound via the
+	// X-Quarry-Run-Sig header so it can't be forged with a leaked bearer.
+	OrgID string `json:"org_id"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -83,7 +95,7 @@ type RunPageResult struct {
 // RunPage executes a single page via Quarry Runtime.
 func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResult, error) {
 	const op = "activities.RunPage"
-	body, err := json.Marshal(map[string]string{"url": in.URL})
+	body, err := json.Marshal(map[string]string{"url": in.URL, "org_id": in.OrgID})
 	if err != nil {
 		return RunPageResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
 	}
@@ -96,6 +108,14 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", idempotencyKey(in.RunID, in.URL))
 	setAuth(req, a.cfg.RuntimeAuthToken)
+	// HMAC org-binding: a leaked runtime bearer can't forge a tenant's
+	// org_id. Sign over org_id+"\n"+url (matching the edge's
+	// verify_run_binding byte-for-byte). Skipped when no shared secret is
+	// configured — the edge then falls back to runtime-token-only.
+	if a.cfg.EdgeRunSecret != "" {
+		sig := runBindingSig(a.cfg.EdgeRunSecret, in.OrgID, in.URL)
+		req.Header.Set("X-Quarry-Run-Sig", sig)
+	}
 
 	resp, err := a.http.Do(req)
 	if err != nil {
@@ -253,7 +273,9 @@ func (a *Activities) CheckChange(ctx context.Context, in CheckChangeInput) (Chec
 	const op = "activities.CheckChange"
 
 	// 1) Fresh fetch via the runtime — reuse RunPage's classified HTTP path.
-	page, err := a.RunPage(ctx, RunPageInput{RunID: in.RunID, URL: in.URL})
+	// Pass OrgID so RunPage stamps the HMAC org-binding (the edge enforces
+	// it on /v1/internal/run_page).
+	page, err := a.RunPage(ctx, RunPageInput{RunID: in.RunID, URL: in.URL, OrgID: in.OrgID})
 	if err != nil {
 		return CheckChangeResult{}, err
 	}
@@ -320,4 +342,14 @@ func setAuth(req *http.Request, token string) {
 func idempotencyKey(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, ":")))
 	return hex.EncodeToString(sum[:])
+}
+
+// runBindingSig computes the X-Quarry-Run-Sig value: lowercase-hex
+// HMAC-SHA256(secret, org_id+"\n"+url). The canonical string MUST match
+// the edge's InternalSigner::verify_run_binding byte-for-byte (org_id, a
+// single 0x0A newline, then the raw url; NO trailing newline).
+func runBindingSig(secret, orgID, url string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(orgID + "\n" + url))
+	return hex.EncodeToString(mac.Sum(nil))
 }

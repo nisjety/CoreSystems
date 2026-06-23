@@ -10,8 +10,9 @@ use tracing::{info, warn};
 use super::policy_client::PolicyClient;
 use super::routing_policy::RoutingPolicy;
 use super::{
-    anthropic::AnthropicProvider, intent, openai::OpenAiProvider, EmbedRequest, EmbedResponse,
-    InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter,
+    anthropic::AnthropicProvider, endpoint_region_is_non_eu, intent, is_eu_region,
+    normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk,
+    InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter,
 };
 use crate::cache::PromptCache;
 use crate::config::InferenceConfig;
@@ -75,6 +76,24 @@ pub struct FallbackChain {
     policy_client: Option<Arc<PolicyClient>>,
     /// Best-effort budget signal for the intent layer. `None` disables the gate.
     budget: Option<Arc<intent::BudgetClient>>,
+    /// EU embedding residency posture, resolved at boot from config. Drives the
+    /// request-time deny-by-default gate in [`FallbackChain::create_embedding`].
+    residency: EmbeddingResidency,
+}
+
+/// Resolved EU embedding residency posture for the chain.
+///
+/// `allow_non_eu` is the explicit operator opt-in
+/// (`MODEL_PLANE_ALLOW_NON_EU_EMBEDDING`); when it is `false` (the default) any
+/// non-EU requested region — or a configured deployment region the startup gate
+/// flagged non-EU — is rejected before any network call.
+#[derive(Debug, Clone, Default)]
+pub struct EmbeddingResidency {
+    /// Explicit opt-in to egress embeddings outside the EU residency boundary.
+    pub allow_non_eu: bool,
+    /// Configured deployment region (`AZURE_OPENAI_REGION`), normalized; empty
+    /// when unspecified.
+    pub configured_region: String,
 }
 
 /// True when the caller didn't pin a model — empty or a "let the gateway pick"
@@ -134,6 +153,13 @@ fn provider_serves_model(provider_name: &str, model: &str) -> bool {
 
 impl FallbackChain {
     /// Build a fallback chain from configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics at boot (fail-loud) when an Azure embedding provider is registered
+    /// against a non-EU deployment region/endpoint and the operator has not set
+    /// `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` — a misconfigured non-EU embedding
+    /// path must never be allowed to serve traffic.
     // Linear provider-registration table plus the intent/budget wiring; reads
     // top-to-bottom and isn't worth fragmenting across helpers.
     #[allow(clippy::too_many_lines)]
@@ -237,6 +263,42 @@ impl FallbackChain {
             }
         }
 
+        // EU embedding residency — STARTUP fail-loud (deny-by-default).
+        //
+        // If an Azure OpenAI provider was registered (it owns the embedding
+        // path), classify the configured deployment region. The authoritative
+        // signal is `AZURE_OPENAI_REGION`; the endpoint host is a fallback
+        // heuristic since Azure OpenAI hosts don't carry the region. A non-EU
+        // deployment must NOT be allowed to serve embeddings unless the operator
+        // explicitly opted in via `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` — so we
+        // abort boot rather than silently registering a non-EU embedding path.
+        let configured_region =
+            normalize_region_token(cfg.azure_openai_region.as_deref().unwrap_or_default());
+        let azure_registered = providers.iter().any(|(name, _)| name == "azure-openai");
+        if azure_registered && !cfg.allow_non_eu_embedding {
+            let region_is_non_eu =
+                !configured_region.is_empty() && !is_eu_region(&configured_region);
+            let endpoint_is_non_eu = cfg
+                .azure_openai_endpoint
+                .as_deref()
+                .is_some_and(endpoint_region_is_non_eu);
+            let configured_region_display = cfg.azure_openai_region.as_deref().unwrap_or("");
+            assert!(
+                !(region_is_non_eu || endpoint_is_non_eu),
+                "EU embedding residency: the configured Azure embedding deployment is \
+                 non-EU (AZURE_OPENAI_REGION={configured_region_display:?}, endpoint flagged \
+                 non-EU={endpoint_is_non_eu}) and MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off. \
+                 Refusing to boot a non-EU embedding path. Point AZURE_OPENAI_ENDPOINT/\
+                 AZURE_OPENAI_REGION at an EU deployment (e.g. swedencentral), or set \
+                 MODEL_PLANE_ALLOW_NON_EU_EMBEDDING=1 to explicitly accept the cross-region \
+                 transfer."
+            );
+        }
+        let residency = EmbeddingResidency {
+            allow_non_eu: cfg.allow_non_eu_embedding,
+            configured_region,
+        };
+
         let budget = cfg
             .cost_core_url
             .as_deref()
@@ -289,6 +351,7 @@ impl FallbackChain {
             policy,
             policy_client,
             budget,
+            residency,
         }
     }
 
@@ -309,6 +372,10 @@ impl FallbackChain {
             policy: Arc::new(ArcSwap::from_pointee(seed)),
             policy_client: None,
             budget: None,
+            // Tests construct an explicit chain with no Azure deployment; the
+            // residency gate is exercised via dedicated unit tests below and the
+            // request region. Default = deny-by-default (allow_non_eu = false).
+            residency: EmbeddingResidency::default(),
         }
     }
 
@@ -562,11 +629,40 @@ impl FallbackChain {
     ///
     /// # Errors
     ///
-    /// Returns `ProviderError::AllExhausted` if every matching provider fails.
+    /// Returns [`ProviderError::ResidencyViolation`] when the EU residency gate
+    /// rejects the request (deny-by-default, before any network call), or
+    /// [`ProviderError::AllExhausted`] if every matching provider fails.
     pub async fn create_embedding(
         &self,
         req: &EmbedRequest,
     ) -> Result<EmbedResponse, ProviderError> {
+        // EU embedding residency — REQUEST-time deny-by-default gate. Reject
+        // BEFORE any network call when the resolved region is non-EU and the
+        // operator has not explicitly opted in. The resolved region is the
+        // request's `region` when set, else the configured deployment region.
+        // Mirrors the speech.rs allow-flag shape but REJECTS (does not
+        // warn-and-fallback): an EU/ZDR posture must fail closed.
+        if !self.residency.allow_non_eu {
+            let requested = normalize_region_token(&req.region);
+            let resolved = if requested.is_empty() {
+                self.residency.configured_region.as_str()
+            } else {
+                requested.as_str()
+            };
+            if !is_eu_region(resolved) {
+                warn!(
+                    request_id = %req.request_id,
+                    region = %resolved,
+                    "embedding rejected: non-EU residency region and \
+                     MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off"
+                );
+                return Err(ProviderError::ResidencyViolation(format!(
+                    "embedding region `{resolved}` is outside the EU residency boundary and \
+                     MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off"
+                )));
+            }
+        }
+
         let mut total_attempts: u32 = 0;
 
         for (name, provider) in &self.providers {
@@ -856,5 +952,160 @@ mod resolution_tests {
         };
         chain.infer(&req).await.unwrap();
         assert_eq!(seen.lock().unwrap().as_deref(), Some(AZURE_MODEL_ROUTER));
+    }
+
+    /// An embedding provider that records whether it was reached. Used to prove
+    /// the residency gate rejects BEFORE any provider (network) call.
+    struct RecordingEmbedProvider {
+        reached: Arc<Mutex<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for RecordingEmbedProvider {
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            Err(ProviderError::UnsupportedModel(
+                "chat not supported".to_owned(),
+            ))
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+
+        async fn create_embedding(
+            &self,
+            req: &EmbedRequest,
+        ) -> Result<EmbedResponse, ProviderError> {
+            *self.reached.lock().unwrap() = true;
+            Ok(EmbedResponse {
+                request_id: req.request_id.clone(),
+                vector: vec![0.0_f32; 3],
+                model_used: req.model.clone(),
+                provider_used: "azure-openai".to_owned(),
+            })
+        }
+    }
+
+    fn embed_chain(residency: EmbeddingResidency, reached: Arc<Mutex<bool>>) -> FallbackChain {
+        let provider: BoxedProvider = Arc::new(RecordingEmbedProvider { reached });
+        let mut chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        chain.residency = residency;
+        chain
+    }
+
+    #[tokio::test]
+    async fn embedding_rejects_non_eu_region_before_network_call() {
+        // Deny-by-default: a non-EU requested region is rejected with a
+        // ResidencyViolation BEFORE the provider (network) is ever reached.
+        let reached = Arc::new(Mutex::new(false));
+        let chain = embed_chain(EmbeddingResidency::default(), reached.clone());
+        let req = EmbedRequest {
+            request_id: "e1".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            zdr: false,
+            region: "eastus2".to_owned(),
+        };
+        let err = chain.create_embedding(&req).await.unwrap_err();
+        assert!(
+            matches!(err, ProviderError::ResidencyViolation(_)),
+            "expected ResidencyViolation, got {err:?}"
+        );
+        assert!(
+            !*reached.lock().unwrap(),
+            "provider must NOT be reached when residency rejects"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_accepts_eu_region() {
+        // An EU region passes the gate and reaches the provider.
+        let reached = Arc::new(Mutex::new(false));
+        let chain = embed_chain(EmbeddingResidency::default(), reached.clone());
+        let req = EmbedRequest {
+            request_id: "e2".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            zdr: false,
+            region: "swedencentral".to_owned(),
+        };
+        let resp = chain.create_embedding(&req).await.unwrap();
+        assert_eq!(resp.vector.len(), 3);
+        assert!(
+            *reached.lock().unwrap(),
+            "provider should be reached for an EU region"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_empty_region_uses_configured_eu_deployment() {
+        // No requested region + an EU-configured deployment → allowed.
+        let reached = Arc::new(Mutex::new(false));
+        let residency = EmbeddingResidency {
+            allow_non_eu: false,
+            configured_region: "swedencentral".to_owned(),
+        };
+        let chain = embed_chain(residency, reached.clone());
+        let req = EmbedRequest {
+            request_id: "e3".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            zdr: false,
+            region: String::new(),
+        };
+        chain.create_embedding(&req).await.unwrap();
+        assert!(*reached.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn embedding_empty_region_falls_to_non_eu_configured_deployment_rejected() {
+        // No requested region but the configured deployment is non-EU and the
+        // allow-flag is off → rejected before the network call.
+        let reached = Arc::new(Mutex::new(false));
+        let residency = EmbeddingResidency {
+            allow_non_eu: false,
+            configured_region: "eastus".to_owned(),
+        };
+        let chain = embed_chain(residency, reached.clone());
+        let req = EmbedRequest {
+            request_id: "e4".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            zdr: false,
+            region: String::new(),
+        };
+        let err = chain.create_embedding(&req).await.unwrap_err();
+        assert!(matches!(err, ProviderError::ResidencyViolation(_)));
+        assert!(!*reached.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn embedding_allow_flag_permits_non_eu_region() {
+        // Explicit operator opt-in lets a non-EU region through (no rejection).
+        let reached = Arc::new(Mutex::new(false));
+        let residency = EmbeddingResidency {
+            allow_non_eu: true,
+            configured_region: String::new(),
+        };
+        let chain = embed_chain(residency, reached.clone());
+        let req = EmbedRequest {
+            request_id: "e5".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            zdr: false,
+            region: "eastus2".to_owned(),
+        };
+        chain.create_embedding(&req).await.unwrap();
+        assert!(*reached.lock().unwrap());
     }
 }

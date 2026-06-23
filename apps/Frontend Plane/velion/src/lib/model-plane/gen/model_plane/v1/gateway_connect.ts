@@ -270,10 +270,10 @@ export const ModelGateway = {
       kind: MethodKind.Unary,
     },
     /**
-     * RecordTrajectory — append a single run trajectory (goal + actions
-     * + outcome) to the recorder. Fire-and-forget from the run-loop's
-     * hot path. Records are kept in-memory (size-bounded) and published
-     * to NATS so external pipelines can stream them.
+     * RecordTrajectory — append a single run trajectory
+     * (goal + actions + outcome) to the recorder. Fire-and-forget from the
+     * run-loop's hot path. Records are kept in-memory (size-bounded) and
+     * published to NATS so external pipelines can stream them.
      *
      * @generated from rpc model_plane.v1.ModelGateway.RecordTrajectory
      */

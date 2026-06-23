@@ -43,6 +43,10 @@ services:
     environment:
       PORT: 3185
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+      # Ownership honesty gate (PR-6): the SAME value retrieval-engine reads. The
+      # gateway reports gate_open = (this == strict) && identity_live at
+      # /api/v1/ownership/status; the SPA renders no privacy affordance otherwise.
+      CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-off}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}

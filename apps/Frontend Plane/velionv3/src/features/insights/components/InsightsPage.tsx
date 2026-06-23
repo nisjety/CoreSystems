@@ -21,7 +21,7 @@ import {
   type InsightsWorkspace,
   type MeasurementState,
 } from '@/features/insights/lib/insights-workspace'
-import type { InsightConnector } from '@/shared/api/insights-client'
+import type { InsightConnector, InsightScorecard } from '@/shared/api/insights-client'
 import { cn } from '@/shared/lib/cn'
 
 // `section` exists only to drive the static header copy and active-tab styling.
@@ -124,7 +124,7 @@ export default function InsightsPage(props: { section?: InsightsSection }) {
         {(loadedWorkspace) => (
           <>
             <ConnectorRegistrySection registry={loadedWorkspace().insightConnectors} />
-            <MetricsEmptyState />
+            <MetricsSection overview={loadedWorkspace().overview} />
             <ExternalAnalyticsSection slots={loadedWorkspace().externalAnalytics} />
           </>
         )}
@@ -210,9 +210,11 @@ function ConnectorCard(props: { connector: InsightConnector }) {
   )
 }
 
-function MetricsEmptyState() {
+function MetricsSection(props: { overview: InsightsWorkspace['overview'] }) {
+  const state = () => props.overview.state
+
   return (
-    <section class="velion-insights-metrics-empty" aria-label="Measurement metrics">
+    <section class="velion-insights-metrics" aria-label="Measurement metrics">
       <div class="velion-insights-section-heading">
         <div>
           <span>
@@ -221,15 +223,76 @@ function MetricsEmptyState() {
           </span>
           <h2>Reporting</h2>
         </div>
+        <p>{props.overview.message}</p>
       </div>
-      <div class="velion-insights-empty" aria-live="polite">
-        <CircleDashed size={20} />
-        <div>
-          <h3>Not yet reporting — connect a source</h3>
-          <p>Metrics will appear once a connector starts reporting. The connector registry above is real; no placeholder numbers are shown here.</p>
-        </div>
-      </div>
+
+      <Show
+        when={state() === 'live'}
+        fallback={<MetricsHonestState state={state()} />}
+      >
+        <ul class="velion-insights-metrics-grid">
+          <For each={props.overview.data}>
+            {(scorecard) => <ScorecardCard scorecard={scorecard} />}
+          </For>
+        </ul>
+      </Show>
     </section>
+  )
+}
+
+// The honest non-live states. Each renders an explicit empty/unavailable card —
+// NEVER a placeholder number. `empty` means the measurement layer is live but no
+// connector has reported yet; `unavailable` means the contract did not respond.
+function MetricsHonestState(props: { state: MeasurementState }) {
+  const copy = (): { body: string; heading: string } => {
+    switch (props.state) {
+      case 'unavailable':
+        return {
+          heading: 'Metric overview unavailable',
+          body: 'The measurement layer did not respond. No numbers are shown rather than placeholders.',
+        }
+      case 'planned':
+        return {
+          heading: 'Metric producer not built yet',
+          body: 'This measurement source is planned. No numbers are shown until it reports.',
+        }
+      default:
+        return {
+          heading: 'Not yet reporting — connect a source',
+          body: 'Metrics will appear once a connector starts reporting. The connector registry above is real; no placeholder numbers are shown here.',
+        }
+    }
+  }
+
+  return (
+    <div class="velion-insights-empty" aria-live="polite">
+      <CircleDashed size={20} />
+      <div>
+        <h3>{copy().heading}</h3>
+        <p>{copy().body}</p>
+      </div>
+    </div>
+  )
+}
+
+function ScorecardCard(props: { scorecard: InsightScorecard }) {
+  const displayValue = () => {
+    const value = props.scorecard.value
+    const formatted = Number.isInteger(value) ? value.toString() : value.toFixed(2)
+    return props.scorecard.unit ? `${formatted} ${props.scorecard.unit}` : formatted
+  }
+
+  return (
+    <li class="velion-insights-metric-card">
+      <div class="velion-insights-metric-card__topline">
+        <span>{props.scorecard.label || props.scorecard.metric}</span>
+        <small>{props.scorecard.surface}</small>
+      </div>
+      <strong class="velion-insights-metric-card__value">{displayValue()}</strong>
+      <Show when={props.scorecard.source}>
+        <p class="velion-insights-metric-card__source">Source: {props.scorecard.source}</p>
+      </Show>
+    </li>
   )
 }
 

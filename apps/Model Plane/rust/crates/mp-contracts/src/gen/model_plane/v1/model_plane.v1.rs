@@ -923,6 +923,55 @@ pub struct RunDetail {
     #[prost(message, optional, tag="16")]
     pub metadata: ::core::option::Option<::prost_types::Struct>,
 }
+/// RunAgentRequest — drive one agent run from goal to terminal answer.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunAgentRequest {
+    /// Run to drive (created by session-core StartRun).
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Thread the run belongs to (assistant answer is appended here).
+    #[prost(string, tag="2")]
+    pub thread_id: ::prost::alloc::string::String,
+    /// User goal / prompt for this turn.
+    #[prost(string, tag="3")]
+    pub goal: ::prost::alloc::string::String,
+    /// Tenant identifier.
+    #[prost(string, tag="4")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Acting user identifier.
+    #[prost(string, tag="5")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Requested model (empty / "velion-*" lets inference-core's intent layer
+    /// resolve a concrete model).
+    #[prost(string, tag="6")]
+    pub model: ::prost::alloc::string::String,
+    /// Run mode hint: "execute", etc.
+    #[prost(string, tag="7")]
+    pub mode: ::prost::alloc::string::String,
+    /// Maximum agent rounds (reserved for the multi-tool loop; the MVP no-tool
+    /// slice executes a single round).
+    #[prost(uint32, tag="8")]
+    pub max_rounds: u32,
+    /// Zero-Data-Retention flag for this run. When true, the driver threads it
+    /// into every inference round and onto each tool step's GDPR audit detail so
+    /// no run content is retained durably. Sourced from the chat request's `zdr`
+    /// flag (model-gateway), OR'd with any org-level ZDR default.
+    #[prost(bool, tag="9")]
+    pub zdr: bool,
+}
+/// RunAgentResponse — terminal outcome of a driven agent run.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunAgentResponse {
+    /// Terminal status: "completed" or "failed".
+    #[prost(string, tag="1")]
+    pub status: ::prost::alloc::string::String,
+    /// The persisted assistant answer (or graceful error sentence on failure).
+    #[prost(string, tag="2")]
+    pub final_output: ::prost::alloc::string::String,
+    /// Number of agent rounds actually executed.
+    #[prost(uint32, tag="3")]
+    pub rounds_executed: u32,
+}
 /// ExecuteStepRequest — request to execute one step in the agent loop.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecuteStepRequest {
@@ -1043,6 +1092,13 @@ pub struct FinetuneJob {
     /// user_id from JWT claims
     #[prost(string, tag="18")]
     pub created_by: ::prost::alloc::string::String,
+    /// Hosting SKU tier of the deployment. `developer` ($0/hr, auto-deletes in
+    /// 24h) on auto-deploy; `production` (paid Standard hosting) after an explicit
+    /// operator promote. Defaults to `developer`.
+    ///
+    /// developer | production
+    #[prost(string, tag="19")]
+    pub deployment_tier: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateFinetuneJobRequest {
@@ -1149,6 +1205,11 @@ pub struct UpdateFinetuneJobStatusRequest {
     /// any terminal state (succeeded/failed/cancelled).
     #[prost(bool, tag="8")]
     pub set_completed: bool,
+    /// New deployment tier (developer | production). Empty = leave unchanged.
+    /// The promote route sets this alongside deployment_name when an operator
+    /// provisions a paid production deployment.
+    #[prost(string, tag="9")]
+    pub deployment_tier: ::prost::alloc::string::String,
 }
 /// InvokeRequest — normalized inference request entering the gateway.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1199,6 +1260,70 @@ pub struct InvokeRequest {
     /// Maximum total tokens (input + output) budget for this request.
     #[prost(int32, tag="15")]
     pub max_tokens_budget: i32,
+    // ===== Chat-parity additive fields (docs/chat-parity-audit.md §4) =====
+
+    /// Multimodal content parts. When non-empty, supersedes `content` (which
+    /// stays for the plain-text path) so a turn can mix text + images + files.
+    #[prost(message, repeated, tag="16")]
+    pub content_parts: ::prost::alloc::vec::Vec<ContentPart>,
+    /// Tool / function schemas the model may call this turn.
+    #[prost(message, repeated, tag="17")]
+    pub tools: ::prost::alloc::vec::Vec<ToolSpec>,
+    /// Attachment references (uploaded files/images) for grounding.
+    #[prost(message, repeated, tag="18")]
+    pub attachments: ::prost::alloc::vec::Vec<AttachmentRef>,
+    /// Opt-in SSE event families the client understands (e.g. "reasoning",
+    /// "tools", "citations", "artifacts", "steps", "usage"). EMPTY = the plain
+    /// chat stream (connected/delta/done/error only) — protects profile:"chat".
+    #[prost(string, repeated, tag="19")]
+    pub features: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Idempotency key for safe regenerate / retry (defaults to request_id).
+    #[prost(string, tag="20")]
+    pub idempotency_key: ::prost::alloc::string::String,
+    /// Parent message id for edit-and-resubmit / branch (thread fork).
+    #[prost(string, tag="21")]
+    pub parent_message_id: ::prost::alloc::string::String,
+}
+/// ContentPart — one piece of a multimodal turn (chat-parity §9 vision).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContentPart {
+    /// "text" | "image" | "file".
+    #[prost(string, tag="1")]
+    pub r#type: ::prost::alloc::string::String,
+    /// Text content (type=text).
+    #[prost(string, tag="2")]
+    pub text: ::prost::alloc::string::String,
+    /// Image/file URL or data ref (type=image|file).
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// MIME type (type=image|file).
+    #[prost(string, tag="4")]
+    pub mime: ::prost::alloc::string::String,
+}
+/// ToolSpec — a callable tool/function the model may invoke (chat-parity §12).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ToolSpec {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub description: ::prost::alloc::string::String,
+    /// JSON Schema for the tool's arguments.
+    #[prost(message, optional, tag="3")]
+    pub json_schema: ::core::option::Option<::prost_types::Struct>,
+}
+/// AttachmentRef — an uploaded asset referenced by a turn (chat-parity §8 RAG).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AttachmentRef {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub mime: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub url: ::prost::alloc::string::String,
+    #[prost(int64, tag="5")]
+    pub size: i64,
 }
 /// SourceTrace records the provenance of a piece of generated content.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2856,6 +2981,40 @@ pub struct InferRequest {
     /// Zero Data Retention mode. When true, inference results are not cached or logged durably.
     #[prost(bool, tag="9")]
     pub zdr: bool,
+    /// chat-parity §2 function-calling: tool/function definitions the model may
+    /// call. Empty → no tools offered (plain text completion, unchanged).
+    #[prost(message, repeated, tag="10")]
+    pub tools: ::prost::alloc::vec::Vec<ToolDefinition>,
+    /// Tool selection policy: "auto" (default), "none", "required", or a specific
+    /// tool name. Empty is treated as "auto" when `tools` is non-empty.
+    #[prost(string, tag="11")]
+    pub tool_choice: ::prost::alloc::string::String,
+}
+/// ToolDefinition — a function the model may call (chat-parity §2).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ToolDefinition {
+    /// Function name (e.g. "search_web").
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Human/model-readable description of what the tool does.
+    #[prost(string, tag="2")]
+    pub description: ::prost::alloc::string::String,
+    /// JSON Schema (as a JSON string) describing the tool's parameters.
+    #[prost(string, tag="3")]
+    pub parameters_json: ::prost::alloc::string::String,
+}
+/// ToolCall — a model-requested tool invocation (chat-parity §2).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ToolCall {
+    /// Provider-assigned call id (echoed back with the result).
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    /// Name of the tool to invoke.
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    /// JSON-encoded arguments object.
+    #[prost(string, tag="3")]
+    pub arguments_json: ::prost::alloc::string::String,
 }
 /// ChatMessage — a single message in the conversation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2871,7 +3030,7 @@ pub struct ChatMessage {
     pub name: ::prost::alloc::string::String,
 }
 /// InferResponse — complete inference result.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InferResponse {
     /// Echoed request identifier.
     #[prost(string, tag="1")]
@@ -2891,6 +3050,9 @@ pub struct InferResponse {
     /// Number of generated tokens.
     #[prost(int32, tag="6")]
     pub output_tokens: i32,
+    /// chat-parity §2: tool calls the model requested (empty for a plain answer).
+    #[prost(message, repeated, tag="7")]
+    pub tool_calls: ::prost::alloc::vec::Vec<ToolCall>,
 }
 /// InferChunk — a single chunk in a streaming inference response.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2932,6 +3094,20 @@ pub struct CreateEmbeddingRequest {
     /// Optional provider hint: "openai", "azure-openai", etc.
     #[prost(string, tag="5")]
     pub provider_hint: ::prost::alloc::string::String,
+    /// Zero Data Retention; the content must not egress to a retaining provider.
+    /// An EU/ZDR embedding provider is a Phase-4 prerequisite — this field does
+    /// NOT by itself satisfy residency (both provider paths still default to
+    /// Azure today). It is plumbing for that future provider plus the
+    /// direct-Azure egress reject enforced on the Data Plane.
+    #[prost(bool, tag="6")]
+    pub zdr: bool,
+    /// Requested/required residency region for the embedding deployment (e.g.
+    /// "swedencentral", "westeurope"). inference-core enforces this deny-by-default:
+    /// a non-EU region is REJECTED before any network call unless the operator has
+    /// explicitly opted in via MODEL_PLANE_ALLOW_NON_EU_EMBEDDING. Empty means the
+    /// caller expresses no preference and the configured EU deployment is used.
+    #[prost(string, tag="7")]
+    pub region: ::prost::alloc::string::String,
 }
 /// CreateEmbeddingResponse — generated vector and serving metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2974,6 +3150,12 @@ pub struct ModelInfo {
     /// Whether the model supports streaming responses.
     #[prost(bool, tag="4")]
     pub streaming: bool,
+    /// chat-parity §2 per-model feature flags: the rich-event / capability
+    /// families this model supports, derived from the provider's
+    /// ProviderCapabilities (e.g. "reasoning", "tools", "vision", "image").
+    /// Lets the client gate the opt-in `features\[\]` per selected model.
+    #[prost(string, repeated, tag="5")]
+    pub features: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// ListModelsResponse — available models in the active provider chain.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3602,6 +3784,12 @@ pub struct LanguageAnalysisResult {
     /// Raw provider result JSON for audit/debug.
     #[prost(string, tag="12")]
     pub raw_json: ::prost::alloc::string::String,
+    /// Content-safety verdict JSON for operation="content_safety":
+    /// {"flagged":bool,"categories":{"hate":0..1,"harassment":0..1,
+    /// "violence":0..1,"self_harm":0..1,"sexual":0..1}}. Empty otherwise.
+    /// capability-core safety_policies (kind=content_safety) own the thresholds.
+    #[prost(string, tag="13")]
+    pub content_safety_json: ::prost::alloc::string::String,
 }
 /// AnalyzeLanguageResponse — language analytics results and serving metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4006,6 +4194,11 @@ pub struct Approval {
     /// Hard deadline for the approval.
     #[prost(message, optional, tag="12")]
     pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Owning tenant. Carried so a cross-org boot-rehydrate of pending approvals
+    /// (ListPendingApprovals with empty org_id) can re-scope each entry to its
+    /// tenant in the consumer's cache (D-1, IDOR-safe).
+    #[prost(string, tag="13")]
+    pub org_id: ::prost::alloc::string::String,
 }
 /// A durable todo record.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4211,6 +4404,18 @@ pub struct CreateApprovalRequest {
     /// Optional TTL; the server computes expires_at = now + this. 0 = no deadline.
     #[prost(uint32, tag="8")]
     pub expires_in_seconds: u32,
+    /// Optional caller-supplied id. When set, the durable approval uses this id
+    /// instead of minting one — lets an upstream cache (the gateway's in-memory
+    /// ApprovalStore) keep its id aligned with the durable record so a later
+    /// DecideApproval can target it. Empty = server mints (matrix §4.1).
+    #[prost(string, tag="9")]
+    pub client_approval_id: ::prost::alloc::string::String,
+    /// Optional idempotency key. When set, the durable INSERT is a no-op on
+    /// conflict with an existing (org_id, idempotency_key) row — so a retried
+    /// request (e.g. the gateway re-asserting a pending gate) never creates a
+    /// duplicate durable approval. Empty = no idempotency guard (D-1).
+    #[prost(string, tag="10")]
+    pub idempotency_key: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateApprovalResponse {
@@ -4232,6 +4437,22 @@ pub struct ListApprovalsRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListApprovalsResponse {
     /// Approvals ordered by request time ascending.
+    #[prost(message, repeated, tag="1")]
+    pub approvals: ::prost::alloc::vec::Vec<Approval>,
+}
+// --- ListPendingApprovals (org-scoped; D-1 HITL durability) ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OrgPendingApprovalsRequest {
+    /// Tenant filter. Empty → ALL pending approvals across every org (the
+    /// internal-only boot-rehydrate path). Non-empty → only this org's pending
+    /// approvals (IDOR-safe read-through for a client-facing list).
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OrgPendingApprovalsResponse {
+    /// Pending (state = REQUESTED) approvals ordered by request time ascending.
     #[prost(message, repeated, tag="1")]
     pub approvals: ::prost::alloc::vec::Vec<Approval>,
 }
@@ -4340,8 +4561,9 @@ pub struct OrchestrationEvent {
     /// line and as the `after_event_id` resume cursor. Sorts in emission order.
     #[prost(string, tag="2")]
     pub event_id: ::prost::alloc::string::String,
-    /// Event payload. Tags 10-16 align with the 7-variant Rust enum order.
-    #[prost(oneof="orchestration_event::Event", tags="10, 11, 12, 13, 14, 15, 16")]
+    /// Event payload. Tags 10-16 align with the original 7-variant Rust enum
+    /// order; tags 17-18 are additive browser-agent progress events (B4).
+    #[prost(oneof="orchestration_event::Event", tags="10, 11, 12, 13, 14, 15, 16, 17, 18")]
     pub event: ::core::option::Option<orchestration_event::Event>,
 }
 /// Nested message and enum types in `OrchestrationEvent`.
@@ -4411,7 +4633,50 @@ pub mod orchestration_event {
         #[prost(string, tag="2")]
         pub approval_id: ::prost::alloc::string::String,
     }
-    /// Event payload. Tags 10-16 align with the 7-variant Rust enum order.
+    /// The browser agent dispatched an action to the browser executor (Quarry).
+    /// Surfaced live so the UI run-event stream shows browser progress (B4).
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct BrowserActionDispatched {
+        /// Run this browser session belongs to (stream key).
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        /// Browser-agent plan id driving this session.
+        #[prost(string, tag="2")]
+        pub plan_id: ::prost::alloc::string::String,
+        /// Per-action id (e.g. `act_0001`).
+        #[prost(string, tag="3")]
+        pub action_id: ::prost::alloc::string::String,
+        /// Action type slug: goto|click|type|extract|observe|scroll|wait.
+        #[prost(string, tag="4")]
+        pub action_type: ::prost::alloc::string::String,
+        /// Target URL for navigations. Empty for non-goto actions.
+        #[prost(string, tag="5")]
+        pub url: ::prost::alloc::string::String,
+    }
+    /// The browser agent received an observation back from the executor (B4).
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct BrowserObservationReceived {
+        /// Run this browser session belongs to (stream key).
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        /// Browser-agent plan id driving this session.
+        #[prost(string, tag="2")]
+        pub plan_id: ::prost::alloc::string::String,
+        /// Id of the action that produced this observation.
+        #[prost(string, tag="3")]
+        pub action_id: ::prost::alloc::string::String,
+        /// Observation status slug: success|failed|timeout|blocked.
+        #[prost(string, tag="4")]
+        pub status: ::prost::alloc::string::String,
+        /// Page URL after the action settled. Empty when unavailable.
+        #[prost(string, tag="5")]
+        pub page_url: ::prost::alloc::string::String,
+        /// Page title after the action settled. Empty when unavailable.
+        #[prost(string, tag="6")]
+        pub page_title: ::prost::alloc::string::String,
+    }
+    /// Event payload. Tags 10-16 align with the original 7-variant Rust enum
+    /// order; tags 17-18 are additive browser-agent progress events (B4).
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Event {
         #[prost(message, tag="10")]
@@ -4428,7 +4693,25 @@ pub mod orchestration_event {
         RunPausedForApproval(RunPausedForApproval),
         #[prost(message, tag="16")]
         RunResumedAfterApproval(RunResumedAfterApproval),
+        #[prost(message, tag="17")]
+        BrowserActionDispatched(BrowserActionDispatched),
+        #[prost(message, tag="18")]
+        BrowserObservationReceived(BrowserObservationReceived),
     }
+}
+// --- RecordOrchestrationEvent ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordOrchestrationEventRequest {
+    /// The event to publish. The server assigns `event_id` and `at` when empty.
+    #[prost(message, optional, tag="1")]
+    pub event: ::core::option::Option<OrchestrationEvent>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordOrchestrationEventResponse {
+    /// Server-assigned monotonic id of the published event (ULID).
+    #[prost(string, tag="1")]
+    pub event_id: ::prost::alloc::string::String,
 }
 // --- Enums ---
 
@@ -4756,6 +5039,31 @@ impl SubagentRole {
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RoutingPolicyMessage {
+    /// The full RoutingPolicy as a JSON string (schema owned by inference-core).
+    #[prost(string, tag="1")]
+    pub config_json: ::prost::alloc::string::String,
+    /// Monotonic version, incremented on every SetPolicy.
+    #[prost(int64, tag="2")]
+    pub version: i64,
+    /// Identity (user/system id) that last wrote the policy.
+    #[prost(string, tag="3")]
+    pub updated_by: ::prost::alloc::string::String,
+    /// Unix seconds of the last write.
+    #[prost(int64, tag="4")]
+    pub updated_at: i64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRoutingPolicyRequest {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetRoutingPolicyRequest {
+    #[prost(string, tag="1")]
+    pub config_json: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub updated_by: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AcquireLeaseRequest {
     /// Thread or agent scope.
     #[prost(string, tag="1")]
@@ -5029,6 +5337,166 @@ pub struct CompactNowResponse {
     /// Human-readable summary of the compaction result.
     #[prost(string, tag="2")]
     pub summary: ::prost::alloc::string::String,
+}
+// --- UpsertAgentSkill (G7 learning loop) ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpsertAgentSkillRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub description: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub content: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="5")]
+    pub trigger_keywords: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="6")]
+    pub trigger_file_patterns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="7")]
+    pub tool_restrictions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag="8")]
+    pub enabled: bool,
+    /// Provenance: "user" or "background_review". A background_review upsert
+    /// must never overwrite a user-authored skill (enforced server-side).
+    #[prost(string, tag="9")]
+    pub origin: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpsertAgentSkillResponse {
+    /// The skill row id (ULID for inserts; existing id on update).
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    /// True if a new row was inserted; false if an existing skill was updated.
+    #[prost(bool, tag="2")]
+    pub created: bool,
+    /// True if the write was suppressed because the target is a protected
+    /// user-authored skill (no error — the loop simply yields to the human).
+    #[prost(bool, tag="3")]
+    pub skipped_protected: bool,
+}
+// --- ListAgentSkills (G7 read path: learned skills -> gateway MatchSkills) ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListAgentSkillsRequest {
+    /// Required. Only this org's skills are returned (per-org isolation).
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// When true, only enabled skills are returned (the gateway match-cache wants
+    /// active skills only); when false, all of the org's skills are returned.
+    #[prost(bool, tag="2")]
+    pub enabled_only: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentSkill {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub description: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub content: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="5")]
+    pub trigger_keywords: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="6")]
+    pub trigger_file_patterns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="7")]
+    pub tool_restrictions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag="8")]
+    pub enabled: bool,
+    /// Provenance: "user" or "background_review".
+    #[prost(string, tag="9")]
+    pub origin: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListAgentSkillsResponse {
+    #[prost(message, repeated, tag="1")]
+    pub skills: ::prost::alloc::vec::Vec<AgentSkill>,
+}
+// --- ListConversation (G7 transcript source) ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListConversationRequest {
+    /// Required. The owning org (per-org isolation — enforced via the thread).
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Required. The thread whose conversation to return.
+    #[prost(string, tag="2")]
+    pub thread_id: ::prost::alloc::string::String,
+}
+/// One conversation turn. Named SessionMessage (not ThreadMessage, which the
+/// gateway proto already defines in this package) to avoid a name collision.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SessionMessage {
+    /// "user" | "assistant" | "system" | "tool".
+    #[prost(string, tag="1")]
+    pub role: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub content: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListConversationResponse {
+    /// Messages in conversation order (by sequence).
+    #[prost(message, repeated, tag="1")]
+    pub messages: ::prost::alloc::vec::Vec<SessionMessage>,
+}
+// --- ListThreads (durable cross-device chat history) ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListThreadsRequest {
+    /// Required. Only this org's threads are returned.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Required. Only this user's threads are returned.
+    #[prost(string, tag="2")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Optional. 0 means server default.
+    #[prost(uint32, tag="3")]
+    pub limit: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ThreadSummary {
+    #[prost(string, tag="1")]
+    pub thread_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_key: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub preview: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="5")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="6")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListThreadsResponse {
+    #[prost(message, repeated, tag="1")]
+    pub threads: ::prost::alloc::vec::Vec<ThreadSummary>,
+}
+// --- SetRunMode (ROADMAP P3 run modes) ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetRunModeRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// One of: execute | plan | reactive | research.
+    #[prost(string, tag="2")]
+    pub mode: ::prost::alloc::string::String,
+    /// Server-authoritative org scope, forwarded from the gateway's authenticated
+    /// claims. The update is constrained to runs owned by this org so a caller can
+    /// never flip the mode of another org's run (per-org isolation invariant).
+    #[prost(string, tag="3")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetRunModeResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub mode: ::prost::alloc::string::String,
 }
 include!("model_plane.v1.tonic.rs");
 // @@protoc_insertion_point(module)

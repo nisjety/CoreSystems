@@ -51,6 +51,12 @@ type reviewBody struct {
 	Comment  string `json:"comment"`
 }
 
+type createAIActionBody struct {
+	ConversationID string         `json:"conversation_id"`
+	Kind           string         `json:"kind"`
+	Payload        map[string]any `json:"payload"`
+}
+
 type createTicketBody struct {
 	ConversationID      string   `json:"conversation_id"`
 	Status              string   `json:"status"`
@@ -996,6 +1002,33 @@ func (h *Handler) RemoveTag(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": detail})
+}
+
+// CreateAIAction queues a model-proposed action (e.g. a draft.reply) into the
+// HITL review queue. IDOR-clean: org is taken from the header context only and
+// the actor is the authenticated user — the request body org is never trusted.
+func (h *Handler) CreateAIAction(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body createAIActionBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	action, err := h.service.CreateAIAction(c.Request.Context(), conversation.CreateAIActionInput{
+		OrgID:          orgID,
+		ConversationID: body.ConversationID,
+		Kind:           body.Kind,
+		Payload:        body.Payload,
+		CreatedBy:      actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": action})
 }
 
 func (h *Handler) ListAIActions(c *gin.Context) {

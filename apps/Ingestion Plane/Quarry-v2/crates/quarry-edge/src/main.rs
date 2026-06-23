@@ -295,8 +295,17 @@ async fn main() -> anyhow::Result<()> {
     // is set to `grpc`, the runtime instead uses `GrpcIngestAdapter` —
     // protobuf over HTTP/2 with TLS. Both impls satisfy the
     // `DataPlaneIngest` trait so PageRunner stays transport-agnostic.
+    // Ingest (durable write) goes to the documents-api write route, which is a
+    // different service than the retrieval engine used for reads/vector search.
+    // Prefer the dedicated ingest URL; fall back to `data_plane_url` so older
+    // single-URL deployments keep working.
+    let ingest_url = cfg
+        .data_plane_ingest_url
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .or(cfg.data_plane_url.as_ref());
     let ingest: Option<Arc<dyn quarry_runtime::ingest_client::DataPlaneIngest>> =
-        match (&cfg.data_plane_url, &cfg.data_plane_api_key) {
+        match (ingest_url, &cfg.data_plane_api_key) {
             (Some(url), Some(key)) => {
                 let transport = cfg
                     .data_plane_transport
@@ -837,6 +846,41 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "browser-agent")]
     let agent_runs = agent_routes::new_runs();
 
+    // Phase-2 visual RAG — page-image producer. Online only when CAS bucket,
+    // Data Plane NATS, and edge base URL are all configured (browser-agent
+    // feature provides the real BrowserDriver). Reuses agent_driver + AWS_* env.
+    #[cfg(feature = "browser-agent")]
+    let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> =
+        match (
+            cfg.cas_bucket.as_deref().filter(|s| !s.is_empty()),
+            cfg.dataplane_nats_url.as_deref().filter(|s| !s.is_empty()),
+            cfg.edge_internal_base_url.as_deref().filter(|s| !s.is_empty()),
+        ) {
+            (Some(bucket), Some(nats_url), Some(base)) => {
+                match quarry_runtime::page_renderer::PageRenderer::connect(
+                    agent_driver.clone(),
+                    nats_url,
+                    bucket.to_string(),
+                    std::env::var("AWS_ENDPOINT_URL").ok(),
+                    base.to_string(),
+                )
+                .await
+                {
+                    Ok(r) => {
+                        tracing::info!(bucket, nats_url, "visual RAG page-image producer enabled");
+                        Some(std::sync::Arc::new(r))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "page-image producer connect failed; disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+    #[cfg(not(feature = "browser-agent"))]
+    let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> = None;
+
     let app_state = state::AppState {
         driver: default_driver,
         drivers,
@@ -889,6 +933,7 @@ async fn main() -> anyhow::Result<()> {
         scheduler: Some(std::sync::Arc::new(
             quarry_runtime::HostScheduler::with_defaults(),
         )),
+        page_renderer,
         #[cfg(feature = "browser-agent")]
         agent_driver,
         #[cfg(feature = "browser-agent")]

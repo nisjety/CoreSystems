@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, StartRunRequest, StartRunResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SetRunModeRequest, SetRunModeResponse, StartRunRequest, StartRunResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -106,6 +106,75 @@ export const SessionCore = {
       name: "CompactNow",
       I: CompactNowRequest,
       O: CompactNowResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Upsert a learned/edited agent skill body (closed learning loop, G7).
+     * session-core owns the `agent_skills` table (skill bodies); capability-core's
+     * registry is the catalog over these rows. Provenance-protected: a
+     * `background_review` upsert never overwrites a `user`-authored skill.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.UpsertAgentSkill
+     */
+    upsertAgentSkill: {
+      name: "UpsertAgentSkill",
+      I: UpsertAgentSkillRequest,
+      O: UpsertAgentSkillResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List an org's agent skills (the read path for the gateway's MatchSkills
+     * cache, G7's "last mile"): learned skills persisted via UpsertAgentSkill are
+     * read back here so they become usable in inference, not just stored.
+     * Org-scoped — only the caller's org's skills are returned.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ListAgentSkills
+     */
+    listAgentSkills: {
+      name: "ListAgentSkills",
+      I: ListAgentSkillsRequest,
+      O: ListAgentSkillsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List a thread's conversation messages in order (the durable transcript
+     * source for the G7 learning review). Distinct from the gateway's in-memory
+     * ListThreadMessages cache — this reads the session-core system-of-record.
+     * Org-scoped via the owning thread, so a caller reads only its own org's
+     * conversation.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ListConversation
+     */
+    listConversation: {
+      name: "ListConversation",
+      I: ListConversationRequest,
+      O: ListConversationResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List an authenticated user's durable conversation threads for cross-device
+     * chat history. Timestamps are based on creation/message writes, never reads.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ListThreads
+     */
+    listThreads: {
+      name: "ListThreads",
+      I: ListThreadsRequest,
+      O: ListThreadsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Set a run's mode (execute | plan | reactive | research) durably on the
+     * run record (ROADMAP P3). The gateway's in-memory plan-mode cache
+     * write-throughs here so plan mode survives restart — auditability/resume
+     * (GOAL.md §7). The in-memory cache stays authoritative for the request.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.SetRunMode
+     */
+    setRunMode: {
+      name: "SetRunMode",
+      I: SetRunModeRequest,
+      O: SetRunModeResponse,
       kind: MethodKind.Unary,
     },
   }

@@ -50,6 +50,7 @@ async fn spawn_app() -> SocketAddr {
         policy: quarry_runtime::RunPolicy::default(),
         scheduler: None,
         internal_signer: None,
+        page_renderer: None,
         #[cfg(feature = "postgres-queue")]
         event_history: None,
         usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),

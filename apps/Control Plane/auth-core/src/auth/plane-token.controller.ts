@@ -137,8 +137,16 @@ export class PlaneTokenController {
     }
 
     const role = (sessionContext.role ?? '').toLowerCase();
+    // Org owners/admins get the granular data-plane scopes that downstream
+    // services actually verify: retrieval-engine checks `org:data:read_all`
+    // (audited admin read-bypass, EXCLUDED from agent grounding) and
+    // documents-api checks `org:data:write_all` (create org-visible documents).
+    // `admin` is kept for any legacy coarse check. Non-admins get no scopes →
+    // strictly per-user ownership (private-until-shared).
     const scopes =
-      role === 'owner' || role === 'admin' ? ['admin'] : undefined;
+      role === 'owner' || role === 'admin'
+        ? ['admin', 'org:data:read_all', 'org:data:write_all']
+        : undefined;
 
     const bundle = this.convexTokenService.issuePlaneToken(
       audience as PlaneAudience,

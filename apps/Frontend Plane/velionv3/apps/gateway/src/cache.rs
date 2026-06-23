@@ -47,16 +47,26 @@ impl ResultCache {
             return Self::disabled();
         };
         match redis::Client::open(url) {
-            Ok(client) => match redis::aio::ConnectionManager::new(client).await {
-                Ok(conn) => {
-                    tracing::info!("gateway result cache connected");
-                    Self { conn: Some(conn) }
+            Ok(client) => {
+                // 3-second timeout so a missing/unreachable cache never blocks gateway startup.
+                let connect_fut = redis::aio::ConnectionManager::new(client);
+                match tokio::time::timeout(std::time::Duration::from_secs(3), connect_fut).await {
+                    Ok(Ok(conn)) => {
+                        tracing::info!("gateway result cache connected");
+                        Self { conn: Some(conn) }
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "gateway result cache unreachable; running without cache");
+                        Self::disabled()
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            "gateway result cache connect timed out (3s); running without cache"
+                        );
+                        Self::disabled()
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "gateway result cache unreachable; running without cache");
-                    Self::disabled()
-                }
-            },
+            }
             Err(error) => {
                 tracing::warn!(%error, "invalid GATEWAY_CACHE_REDIS_URL; running without cache");
                 Self::disabled()

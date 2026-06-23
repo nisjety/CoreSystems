@@ -139,6 +139,10 @@ pub struct AppState {
     pub skills: crate::skills::SkillStore,
     /// Wave 10g — MCP server registry + tool proxy client.
     pub mcp: crate::runtime_registries::McpRegistry,
+    /// Per-resource ownership + sharing (owner-private / shared / org-wide),
+    /// shared across the mcp/plugin/command/hook registries. Sits below tenant
+    /// isolation; see [`crate::ownership`].
+    pub ownership: crate::ownership::OwnershipStore,
     /// Wave 10h — plugin registry.
     pub plugins: crate::runtime_registries::PluginRegistry,
     /// Wave 10i — command, hook, permission, policy registries.
@@ -213,6 +217,7 @@ impl AppState {
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
             skills: crate::skills::SkillStore::new(),
             mcp: crate::runtime_registries::McpRegistry::new(),
+            ownership: crate::ownership::OwnershipStore::new(),
             plugins: crate::runtime_registries::PluginRegistry::new(),
             commands: crate::runtime_registries::CommandRegistry::new(),
             hooks: crate::runtime_registries::HookRegistry::new(),

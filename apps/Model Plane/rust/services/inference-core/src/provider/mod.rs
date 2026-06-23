@@ -105,7 +105,7 @@ pub struct InferChunk {
 }
 
 /// A unified embedding request used internally across providers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EmbedRequest {
     pub request_id: String,
     pub provider_hint: String,
@@ -116,6 +116,12 @@ pub struct EmbedRequest {
     /// residency enforcement here is a Phase-4 concern — this just carries the
     /// signal end-to-end (it does NOT by itself satisfy residency).
     pub zdr: bool,
+    /// Requested/required residency region for the embedding deployment (e.g.
+    /// `swedencentral`, `westeurope`). The fallback chain enforces this
+    /// deny-by-default: a non-EU region is rejected before any network call
+    /// unless `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` is set. Empty means the
+    /// caller expresses no preference and the configured EU deployment is used.
+    pub region: String,
 }
 
 /// Unified embedding response.
@@ -302,6 +308,89 @@ pub enum ProviderError {
     #[allow(dead_code)]
     #[error("unsupported model: {0}")]
     UnsupportedModel(String),
+
+    /// EU residency gate rejected this embedding before any network call
+    /// (deny-by-default). The configured/requested region is outside the EU
+    /// residency boundary and `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` is off.
+    #[error("residency violation: {0}")]
+    ResidencyViolation(String),
+}
+
+/// Canonical EU Azure regions permitted to serve embeddings under the EU
+/// residency boundary. Kept conservative (the regions where the embedding
+/// deployments actually live / can live) rather than an exhaustive Azure list;
+/// extend deliberately when a new EU deployment is provisioned.
+pub(crate) const EU_AZURE_REGIONS: &[&str] = &[
+    "swedencentral",
+    "westeurope",
+    "northeurope",
+    "francecentral",
+    "germanywestcentral",
+    "norwayeast",
+    "switzerlandnorth",
+];
+
+/// Normalize a region/endpoint token for matching: lowercase, strip spaces,
+/// hyphens and underscores so `Sweden Central`, `sweden-central` and
+/// `swedencentral` all collapse to the same canonical form.
+#[must_use]
+pub(crate) fn normalize_region_token(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_'))
+        .collect()
+}
+
+/// True when `region` names a region inside the EU residency boundary.
+///
+/// An empty region is treated as EU-safe: the caller expresses no preference,
+/// so the configured (EU-by-default) deployment is used and the endpoint-level
+/// check still applies. A non-empty, non-EU region is rejected by the gate.
+#[must_use]
+pub(crate) fn is_eu_region(region: &str) -> bool {
+    let token = normalize_region_token(region);
+    if token.is_empty() {
+        return true;
+    }
+    EU_AZURE_REGIONS.contains(&token.as_str())
+}
+
+/// Best-effort classification of whether an Azure endpoint URL resolves to an
+/// EU region. Azure `OpenAI` endpoints are typically
+/// `https://<resource>.openai.azure.com` (region not in the host), so the
+/// region is usually carried out-of-band (the request `region` field or an
+/// explicit `AZURE_OPENAI_REGION`). This helper only flags an endpoint as
+/// non-EU when a recognizable NON-EU region substring appears in the host
+/// (e.g. `eastus2`, `westus`), so a region-less Azure host is NOT falsely
+/// rejected — the explicit region/allow-flag remains the source of truth.
+#[must_use]
+pub(crate) fn endpoint_region_is_non_eu(endpoint: &str) -> bool {
+    const NON_EU_REGION_MARKERS: &[&str] = &[
+        "eastus",
+        "westus",
+        "centralus",
+        "southcentralus",
+        "northcentralus",
+        "canadacentral",
+        "canadaeast",
+        "brazilsouth",
+        "australiaeast",
+        "australiasoutheast",
+        "japaneast",
+        "japanwest",
+        "koreacentral",
+        "southeastasia",
+        "eastasia",
+        "centralindia",
+        "southindia",
+        "uaenorth",
+        "southafricanorth",
+    ];
+    let host = normalize_region_token(endpoint);
+    NON_EU_REGION_MARKERS
+        .iter()
+        .any(|marker| host.contains(marker))
 }
 
 #[cfg(test)]
@@ -330,5 +419,49 @@ mod tests {
         let json = serde_json::to_string(&caps).expect("serialize");
         assert!(json.contains("\"supports_vision\":true"));
         assert!(caps.serves_modality("vision"));
+    }
+
+    #[test]
+    fn eu_regions_are_recognized_in_any_form() {
+        for r in [
+            "swedencentral",
+            "Sweden Central",
+            "sweden-central",
+            "WESTEUROPE",
+            "norway_east",
+        ] {
+            assert!(is_eu_region(r), "{r:?} should classify as EU");
+        }
+    }
+
+    #[test]
+    fn non_eu_regions_are_rejected() {
+        for r in ["eastus2", "westus", "japaneast", "australiaeast"] {
+            assert!(!is_eu_region(r), "{r:?} should classify as non-EU");
+        }
+    }
+
+    #[test]
+    fn empty_region_is_eu_safe() {
+        // No preference → endpoint-level/config gate decides; treat as EU-safe.
+        assert!(is_eu_region(""));
+        assert!(is_eu_region("   "));
+    }
+
+    #[test]
+    fn endpoint_non_eu_marker_detection() {
+        assert!(endpoint_region_is_non_eu(
+            "https://my-resource-eastus2.openai.azure.com"
+        ));
+        assert!(endpoint_region_is_non_eu(
+            "https://acct.westus.cognitiveservices.azure.com"
+        ));
+        // Region-less Azure OpenAI hosts must NOT be falsely flagged non-EU.
+        assert!(!endpoint_region_is_non_eu(
+            "https://velion.openai.azure.com"
+        ));
+        assert!(!endpoint_region_is_non_eu(
+            "https://my-swedencentral-res.openai.azure.com"
+        ));
     }
 }

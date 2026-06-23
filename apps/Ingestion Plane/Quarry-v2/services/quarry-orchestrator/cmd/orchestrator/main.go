@@ -58,6 +58,10 @@ func main() {
 	if edgeToken == "" {
 		edgeToken = runtimeToken
 	}
+	// Shared HMAC secret for the run_page org-binding (matches the edge's
+	// QUARRY_EDGE__INTERNAL_SECRET). When set, RunPage stamps
+	// X-Quarry-Run-Sig so a leaked runtime bearer can't forge a tenant org.
+	edgeRunSecret := os.Getenv("QUARRY_INTERNAL_SECRET")
 
 	c, err := client.Dial(client.Options{HostPort: hostPort, Namespace: namespace})
 	if err != nil {
@@ -72,6 +76,7 @@ func main() {
 		ControlAuthToken: controlToken,
 		EdgeBaseURL:      edgeURL,
 		EdgeAuthToken:    edgeToken,
+		EdgeRunSecret:    edgeRunSecret,
 	})
 
 	w := worker.New(c, TaskQueue, worker.Options{})

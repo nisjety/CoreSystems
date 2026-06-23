@@ -161,6 +161,9 @@ impl InferenceCore for InferenceService {
             // today so residency enforcement is Phase-4 — this just threads it
             // so a future EU/ZDR provider can honor it.
             zdr: req.zdr,
+            // Requested residency region. The fallback chain enforces the EU
+            // residency gate (deny-by-default) before any network call.
+            region: req.region,
         };
 
         let result = self
@@ -175,7 +178,15 @@ impl InferenceCore for InferenceService {
                     error = %e,
                     "create_embedding failed"
                 );
-                Status::internal(e.to_string())
+                // A residency rejection is a precondition the caller can act on
+                // (request an EU region / opt in), not an internal fault — map
+                // it to FAILED_PRECONDITION rather than INTERNAL.
+                match e {
+                    provider::ProviderError::ResidencyViolation(msg) => {
+                        Status::failed_precondition(msg)
+                    }
+                    other => Status::internal(other.to_string()),
+                }
             })?;
 
         Ok(Response::new(pb::CreateEmbeddingResponse {
@@ -1106,6 +1117,11 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         }
         provider::ProviderError::RateLimited { retry_after_ms } => {
             Status::resource_exhausted(format!("rate limited: retry after {retry_after_ms}ms"))
+        }
+        // EU residency rejection is a precondition the caller can act on
+        // (request an EU region / opt in), not an internal fault.
+        provider::ProviderError::ResidencyViolation(message) => {
+            Status::failed_precondition(message)
         }
     }
 }

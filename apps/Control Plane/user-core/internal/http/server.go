@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
@@ -28,11 +29,15 @@ type Server struct {
 	httpClient  *http.Client
 	orgService  string
 	internalKey string
+	// publisher emits aqencia.controlplane.acl.resource_grants.changed on
+	// grant/revoke so the Data Plane retrieval visibility cache evicts the
+	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
+	publisher *nats.SharedPublisher
 }
 
 // NewServer creates a new HTTP server. aclRepo backs the per-user authz facade
 // (ListVisible/Check) consumed cross-plane by documents-api and retrieval.
-func NewServer(userService *users.Service, aclRepo *users.AclRepository, port string) *Server {
+func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedPublisher *nats.SharedPublisher, port string) *Server {
 	router := gin.New()
 
 	// Global middleware
@@ -50,6 +55,7 @@ func NewServer(userService *users.Service, aclRepo *users.AclRepository, port st
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 		orgService:  strings.TrimRight(strings.TrimSpace(os.Getenv("ORG_SERVICE_URL")), "/"),
 		internalKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
+		publisher:   sharedPublisher,
 	}
 
 	if s.orgService == "" {

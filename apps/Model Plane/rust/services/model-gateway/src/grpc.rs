@@ -19,7 +19,8 @@ use mp_contracts::model_plane::v1::{
     GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InferChunk, InferRequest,
     InferResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest,
     IsPlanModeResponse, ListCommandsRequest, ListCommandsResponse, ListHooksRequest,
-    ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListPendingApprovalsRequest,
+    ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListMcpToolsRequest,
+    ListMcpToolsResponse, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest,
     ListSkillsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest,
     ListThreadMessagesResponse, ListTrajectoriesRequest, ListTrajectoriesResponse, LspQueryRequest,
@@ -878,6 +879,17 @@ impl ModelGateway for GatewayService {
         let req = request.into_inner();
         let org_id = req.org_id.clone();
         let resp = runtime_registries::handle_register_mcp_server(&self.state.mcp, req)?;
+        // gRPC registrations carry no user context → org-scoped (visible to all
+        // org members). The user-private/share model is driven through the HTTP
+        // surface where the caller's identity + role are known.
+        if let Some(server) = resp.server.as_ref() {
+            self.state.ownership.set(
+                &org_id,
+                crate::ownership::KIND_MCP,
+                &server.server_id,
+                crate::ownership::Ownership::org(),
+            );
+        }
         // Best-effort write-through to capability-core, the registry
         // system-of-record (matrix §4.1/H.1): converge the gateway's in-memory
         // store toward the SoR instead of shadowing it. In-memory stays
@@ -887,7 +899,11 @@ impl ModelGateway for GatewayService {
         if !self.state.capability_core_base_url.is_empty() {
             if let Some(server) = resp.server.as_ref() {
                 if !org_id.is_empty() && !server.name.is_empty() {
-                    let payload = runtime_registries::mcp_capability_payload(&org_id, server);
+                    let payload = runtime_registries::mcp_capability_payload(
+                        &org_id,
+                        server,
+                        &crate::ownership::Ownership::org(),
+                    );
                     let url = format!("{}/api/v1/mcp", self.state.capability_core_base_url);
                     let client = self.state.http_client.clone();
                     tokio::spawn(async move {
@@ -922,6 +938,27 @@ impl ModelGateway for GatewayService {
         runtime_registries::handle_proxy_mcp_tool(&self.state.mcp, request.into_inner())
             .await
             .map(Response::new)
+    }
+
+    /// Agent-facing tool defs for the org's enabled MCP servers, namespaced
+    /// `mcp__<server_id>__<tool>` — the exposure bridge for the governed agent
+    /// loop (execution-core), reusing the same discovery the chat path uses.
+    async fn list_mcp_tools(
+        &self,
+        request: Request<ListMcpToolsRequest>,
+    ) -> Result<Response<ListMcpToolsResponse>, Status> {
+        let req = request.into_inner();
+        let tools = runtime_registries::mcp_tool_defs(
+            &self.state.mcp,
+            &self.state.ownership,
+            &req.org_id,
+            &req.user_id,
+        )
+        .await;
+        Ok(Response::new(ListMcpToolsResponse {
+            request_id: req.request_id,
+            tools,
+        }))
     }
 
     // ------------------------------------------------------------------

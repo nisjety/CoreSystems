@@ -402,6 +402,7 @@ func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
 	return workflows.ScrapeJobInput{
 		RunID: runID,
 		JobID: string(j.ID),
+		OrgID: orgFromParams(j.Params),
 		URL:   url,
 	}, nil
 }
@@ -421,6 +422,7 @@ func crawlInputFromJob(j job, runID string) (workflows.CrawlJobInput, error) {
 	return workflows.CrawlJobInput{
 		RunID:    runID,
 		JobID:    string(j.ID),
+		OrgID:    orgFromParams(j.Params),
 		Seeds:    seeds,
 		MaxDepth: uintFrom(j.Params["max_depth"]),
 		MaxPages: uintFrom(j.Params["max_pages"]),
@@ -435,8 +437,21 @@ func batchInputFromJob(j job, runID string) (workflows.BatchJobInput, error) {
 	return workflows.BatchJobInput{
 		RunID: runID,
 		JobID: string(j.ID),
+		OrgID: orgFromParams(j.Params),
 		URLs:  urls,
 	}, nil
+}
+
+// orgFromParams extracts the originating tenant id from a job's params.
+// The edge handoff stamps `org_id` (verified from the JWT claim) into the
+// job params, so the orchestrator forwards it into the workflow → the
+// run_page HMAC org-binding. Returns "" when absent (legacy jobs); the
+// edge enforces a non-empty org_id itself.
+func orgFromParams(params map[string]any) string {
+	if s, ok := params["org_id"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 func stringsFrom(v any) []string {

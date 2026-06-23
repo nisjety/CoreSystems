@@ -65,10 +65,21 @@ pub(crate) async fn proxy_model_json(
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
+    // Forward the session user's role so model-gateway can derive admin (it also
+    // accepts admin scopes on the verified token). `auth_role` originates from the
+    // validated Better Auth session, never the browser; a missing role degrades to
+    // the safe, non-privileged default `member`.
+    let user_role = user
+        .auth_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .unwrap_or("member");
     let mut req = state
         .client
         .request(method, url)
-        .header("x-user-id", &user.user_id);
+        .header("x-user-id", &user.user_id)
+        .header("x-user-role", user_role);
     if !org_id.trim().is_empty() {
         req = req.header("x-org-id", org_id);
     }

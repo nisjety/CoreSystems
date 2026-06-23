@@ -29,7 +29,8 @@ function summarize(action: AiAction): { label: string; detail: string } {
 
 /** HITL review queue for a single conversation: model-proposed actions awaiting a
  * human decision. Renders real items from conversation-core, an explicit empty
- * state when there are none, and records (never executes) the human's decision. */
+ * state when there are none, and on approve the live executor (cc-go consumer)
+ * promotes + routes the suggested ticket — the copy reads "Applied". */
 export function AiActionReviewPanel(props: { conversationId: string | undefined }) {
   const [actions, { refetch }] = createResource(
     () => props.conversationId,

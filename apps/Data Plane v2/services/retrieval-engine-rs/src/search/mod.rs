@@ -1,3 +1,4 @@
+pub mod colqwen;
 pub mod contradictions;
 pub mod dense;
 pub mod filters;

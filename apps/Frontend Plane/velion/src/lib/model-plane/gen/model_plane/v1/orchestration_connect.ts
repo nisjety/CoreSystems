@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AttachSubagentRequest, AttachSubagentResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
+import { AttachSubagentRequest, AttachSubagentResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -109,6 +109,23 @@ export const OrchestrationCoreService = {
       kind: MethodKind.Unary,
     },
     /**
+     * List all PENDING (state = REQUESTED) approvals, optionally scoped to one
+     * org. An empty org_id returns every pending approval across all orgs and is
+     * INTERNAL-ONLY — used by model-gateway to rehydrate its in-memory approval
+     * cache on boot so a restart never silently drops a pending HITL gate. A
+     * non-empty org_id scopes the result to that tenant (IDOR-safe read-through).
+     * (D-1) The request/response messages are org-suffixed to avoid colliding
+     * with the gateway-service ListPendingApprovals* messages in this package.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ListPendingApprovals
+     */
+    listPendingApprovals: {
+      name: "ListPendingApprovals",
+      I: OrgPendingApprovalsRequest,
+      O: OrgPendingApprovalsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Fetch a single approval by id.
      *
      * @generated from rpc model_plane.v1.OrchestrationCoreService.GetApproval
@@ -163,6 +180,23 @@ export const OrchestrationCoreService = {
       I: StreamRunEventsRequest,
       O: OrchestrationEvent,
       kind: MethodKind.ServerStreaming,
+    },
+    /**
+     * Publish a caller-supplied orchestration event into the run's broadcast
+     * (and bounded replay buffer) without owning the durable record behind it.
+     * Used by execution-core to surface live worker progress — e.g. the browser
+     * agent's dispatched actions and received observations — on the run-event
+     * stream. The server assigns the monotonic event_id and timestamp; callers
+     * leave them empty. Best-effort from the caller's perspective: a failure
+     * here must never fail the underlying work.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent
+     */
+    recordOrchestrationEvent: {
+      name: "RecordOrchestrationEvent",
+      I: RecordOrchestrationEventRequest,
+      O: RecordOrchestrationEventResponse,
+      kind: MethodKind.Unary,
     },
   }
 } as const;

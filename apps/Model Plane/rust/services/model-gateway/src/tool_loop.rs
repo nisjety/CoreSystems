@@ -859,7 +859,6 @@ pub async fn run_forced_web_search(
         id: format!("{request_id}-web-search"),
         name: "web_search".to_owned(),
         arguments_json: args.to_string(),
-        ..Default::default()
     };
     let outcome = dispatch_tool(state, org_id, user_id, thread_id, &call).await;
     let mut events = vec![

@@ -89,6 +89,10 @@ const OUTPUT_TRUNCATE: usize = 2000;
 fn data_category(tool_name: &str) -> &'static str {
     match tool_name {
         "knowledge_search" => "customer_private",
+        // External MCP tools can touch arbitrary data of unknown provenance —
+        // classify honestly as `unclassified` rather than over-claim that an
+        // external server returns only public, non-personal data.
+        name if name.starts_with("mcp__") => "unclassified",
         _ => "public_non_personal",
     }
 }
@@ -116,14 +120,26 @@ pub async fn run_agent(
     inference_channel: Channel,
     req: pb::RunAgentRequest,
 ) -> pb::RunAgentResponse {
-    run_agent_with_tools(
-        state,
-        session_channel,
-        inference_channel,
-        req,
-        offered_tool_defs(),
-    )
-    .await
+    let tools = merged_tool_defs(&req.org_id, &req.user_id).await;
+    run_agent_with_tools(state, session_channel, inference_channel, req, tools).await
+}
+
+/// The built-in [`offered_tool_defs`] plus the org's registered MCP tools,
+/// discovered best-effort via the gateway (matrix §G2). MCP tools are
+/// namespaced `mcp__<server>__<tool>`; appending them here both OFFERS them to
+/// the model AND admits them into the purpose-lock allowlist (derived from this
+/// Vec at ~line 154), so the `runtime_loop` dispatch arm can route them. A
+/// built-in name always wins a (vanishingly unlikely) collision.
+async fn merged_tool_defs(org_id: &str, user_id: &str) -> Vec<pb::ToolDefinition> {
+    let mut tools = offered_tool_defs();
+    if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
+        for tool in client.list_tools(org_id, user_id).await {
+            if !tools.iter().any(|existing| existing.name == tool.name) {
+                tools.push(tool);
+            }
+        }
+    }
+    tools
 }
 
 /// Loop body driving `req` with an explicit tool allowlist. The public

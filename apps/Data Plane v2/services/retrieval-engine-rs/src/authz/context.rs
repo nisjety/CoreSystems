@@ -188,6 +188,21 @@ impl AuthContext {
     }
 }
 
+/// Pin `org_id` from a verified [`AuthContext`] (Phase-1 GAP-1). Auxiliary read
+/// handlers (graph / wiki / contradictions / timeline / semantic-cache) use
+/// bespoke request structs rather than `RetrievalRequest`, so they can't call
+/// [`AuthContext::apply_to_request`]; this gives them the same org pin. The
+/// verified principal's org ALWAYS overrides a client-supplied body `org_id`, so
+/// a valid caller for org A can't read org B by putting B in the JSON body.
+/// No-op when there is no context (mirrors the `/v1/retrieve` Option pattern).
+pub fn pin_org_from_ctx(ctx: Option<&AuthContext>, org_id: &mut String) {
+    if let Some(ctx) = ctx {
+        if !ctx.org_id.is_empty() {
+            *org_id = ctx.org_id.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +249,23 @@ mod tests {
         let acl = EffectiveAcl::allow_all();
         assert!(acl.can_read && acl.can_write && acl.can_delete);
         assert!(acl.workspaces.is_empty());
+    }
+
+    #[test]
+    fn pin_org_overrides_body_org_from_verified_ctx() {
+        let ctx = AuthContext::org_scoped("org-a", AuthMethod::Jwt, "req".into());
+        let mut body_org = "org-b".to_string(); // attacker-supplied body org
+        pin_org_from_ctx(Some(&ctx), &mut body_org);
+        assert_eq!(body_org, "org-a", "verified ctx org must override body org");
+    }
+
+    #[test]
+    fn pin_org_is_noop_without_ctx() {
+        let mut body_org = "org-b".to_string();
+        pin_org_from_ctx(None, &mut body_org);
+        assert_eq!(
+            body_org, "org-b",
+            "no ctx → unchanged (same Option semantics as /v1/retrieve)"
+        );
     }
 }

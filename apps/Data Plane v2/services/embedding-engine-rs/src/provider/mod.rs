@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+pub mod visual;
+
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 500;
 
@@ -25,7 +27,10 @@ pub struct EmbeddingProvider {
 
 #[derive(Clone)]
 enum EmbeddingBackend {
-    ModelPlane(ModelPlaneEmbeddingClient),
+    // Boxed: the model-plane client (gRPC channel + config incl. the residency
+    // region) is the larger variant; boxing keeps `EmbeddingBackend` small and
+    // satisfies `clippy::large_enum_variant`.
+    ModelPlane(Box<ModelPlaneEmbeddingClient>),
     AzureOpenAi(AzureOpenAiEmbeddingClient),
 }
 
@@ -34,6 +39,9 @@ struct ModelPlaneEmbeddingClient {
     client: model_plane::v1::inference_core_client::InferenceCoreClient<Channel>,
     model: String,
     provider: String,
+    /// Requested residency region forwarded to inference-core, which enforces
+    /// the EU residency gate deny-by-default. Empty = no preference.
+    region: String,
     timeout: Duration,
     internal_api_key: Option<String>,
 }
@@ -69,6 +77,7 @@ impl EmbeddingProvider {
                 &cfg.model_plane_ai_core_grpc_url,
                 &cfg.azure_openai_embedding_deployment,
                 &cfg.model_plane_embedding_provider,
+                &cfg.embedding_region,
                 cfg.model_plane_embedding_timeout_ms,
                 cfg.internal_api_key.clone(),
             ),
@@ -87,6 +96,7 @@ impl EmbeddingProvider {
         grpc_url: &str,
         model: &str,
         provider: &str,
+        region: &str,
         timeout_ms: u64,
         internal_api_key: Option<String>,
     ) -> anyhow::Result<Self> {
@@ -97,13 +107,14 @@ impl EmbeddingProvider {
             .timeout(timeout)
             .connect_lazy();
         Ok(Self {
-            inner: EmbeddingBackend::ModelPlane(ModelPlaneEmbeddingClient {
+            inner: EmbeddingBackend::ModelPlane(Box::new(ModelPlaneEmbeddingClient {
                 client: model_plane::v1::inference_core_client::InferenceCoreClient::new(channel),
                 model: model.to_string(),
                 provider: provider.to_string(),
+                region: region.trim().to_string(),
                 timeout,
                 internal_api_key: internal_api_key.filter(|key| !key.is_empty()),
-            }),
+            })),
         })
     }
 
@@ -188,6 +199,10 @@ impl ModelPlaneEmbeddingClient {
             model: self.model.clone(),
             provider_hint: self.provider.clone(),
             zdr,
+            // Forward the requested residency region; inference-core enforces the
+            // EU residency gate deny-by-default. Empty = no preference (the EU
+            // deployment configured on inference-core is used).
+            region: self.region.clone(),
         }
     }
 
@@ -343,6 +358,7 @@ mod tests {
             "http://inference-core:9092",
             "text-embedding-3-large",
             "azure_openai",
+            "swedencentral",
             30_000,
             None,
         )
@@ -408,14 +424,16 @@ mod tests {
         );
     }
 
-    /// ModelPlane path: the ZDR signal is faithfully placed on the wire request
-    /// (both true and false round-trip from the caller's argument).
+    /// ModelPlane path: the ZDR signal and the residency region are faithfully
+    /// placed on the wire request (both true and false ZDR round-trip from the
+    /// caller's argument; the configured region is forwarded verbatim).
     #[tokio::test]
-    async fn model_plane_request_carries_zdr() {
+    async fn model_plane_request_carries_zdr_and_region() {
         let provider = EmbeddingProvider::model_plane(
             "http://inference-core:9092",
             "text-embedding-3-large",
             "azure_openai",
+            "swedencentral",
             30_000,
             None,
         )
@@ -430,6 +448,11 @@ mod tests {
         assert!(
             !inner.build_request("org-1", "hi", false).zdr,
             "zdr=false must propagate"
+        );
+        assert_eq!(
+            inner.build_request("org-1", "hi", false).region,
+            "swedencentral",
+            "residency region must propagate onto the wire request"
         );
     }
 }

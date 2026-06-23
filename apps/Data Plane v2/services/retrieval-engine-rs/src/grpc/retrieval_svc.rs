@@ -38,7 +38,28 @@ impl RetrievalService for RetrievalSvc {
         request: Request<RetrieveRequest>,
     ) -> Result<Response<Self::RetrieveStreamStream>, Status> {
         let pipeline = self.pipeline.clone();
-        let pipeline_req = grpc_to_pipeline(request.into_inner());
+        // GAP-2: bind org to the verified JWT principal (no-op on the API-key path).
+        let verified_org = super::interceptor::verified_org_from_metadata(request.metadata());
+        // Per-user ownership: bind the viewer from trusted transport (JWT sub or
+        // gateway-forwarded x-user-id); body user_id is not trusted.
+        let viewer = super::interceptor::user_id_from_metadata(request.metadata());
+        let inner = request.into_inner();
+        if let Some(vorg) = verified_org {
+            if vorg != inner.org_id {
+                return Err(Status::permission_denied(
+                    "org_id does not match the authenticated principal",
+                ));
+            }
+        }
+        if let (Some(b), Some(v)) = (inner.user_id.as_deref(), viewer.as_deref()) {
+            if b != v {
+                return Err(Status::permission_denied(
+                    "user_id does not match the authenticated principal",
+                ));
+            }
+        }
+        let mut pipeline_req = grpc_to_pipeline(inner);
+        pipeline_req.user_id = viewer;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<RetrievalChunk, Status>>(32);
         tokio::spawn(async move {
@@ -89,7 +110,30 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<RetrieveRequest>,
     ) -> Result<Response<RetrieveResponse>, Status> {
+        // GAP-2: when a JWT principal is present, its verified org must match the
+        // request body — defense-in-depth so a valid token for org A can't read
+        // org B. The API-key path carries no identity (gateway-trusted) → no-op.
+        let verified_org = super::interceptor::verified_org_from_metadata(request.metadata());
+        // Per-user ownership (agent grounding): bind the viewer from TRUSTED
+        // transport (verified JWT `sub` or gateway-forwarded `x-user-id`). The
+        // body `user_id` is never trusted — reject one that disagrees with the
+        // bound viewer (anti-spoof). No identity → `None` → org-scoped (legacy).
+        let viewer = super::interceptor::user_id_from_metadata(request.metadata());
         let req = request.into_inner();
+        if let Some(vorg) = verified_org {
+            if vorg != req.org_id {
+                return Err(Status::permission_denied(
+                    "org_id does not match the authenticated principal",
+                ));
+            }
+        }
+        if let (Some(b), Some(v)) = (req.user_id.as_deref(), viewer.as_deref()) {
+            if b != v {
+                return Err(Status::permission_denied(
+                    "user_id does not match the authenticated principal",
+                ));
+            }
+        }
 
         let filters = req.filters.clone().unwrap_or_default();
         let pipeline_req = PipelineReq {
@@ -116,7 +160,8 @@ impl RetrievalService for RetrievalSvc {
                 collections: filters.collection_ids,
                 acl_tags: vec![],
             },
-            user_id: req.user_id.clone(),
+            // Viewer bound from trusted transport (NOT the body) — see above.
+            user_id: viewer.clone(),
             query_expansion: req.query_expansion,
             reranker_model: req.reranker_model,
             zdr_mode: req.zdr_mode,

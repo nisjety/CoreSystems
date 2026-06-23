@@ -34,6 +34,13 @@ pub struct Config {
     pub cohere_api_key: Option<String>,
     #[serde(default = "default_reranker_model")]
     pub reranker_model: String,
+    // Rerank endpoint. Default = public Cohere. Set RERANK_ENDPOINT to an Azure
+    // AI Foundry serverless Cohere rerank URL (and RERANK_USE_API_KEY=true) to
+    // use the in-EU deployment instead of the public API.
+    #[serde(default = "default_rerank_endpoint")]
+    pub rerank_endpoint: String,
+    #[serde(default)]
+    pub rerank_use_api_key: bool,
 
     #[serde(default = "default_top_k")]
     pub retrieval_top_k: usize,
@@ -57,9 +64,39 @@ pub struct Config {
     pub w_graph: f32,
     #[serde(default = "default_w_wiki")]
     pub w_wiki: f32,
+    #[serde(default = "default_w_visual")]
+    pub w_visual: f32,
 
     #[serde(default = "default_collection")]
     pub qdrant_collection: String,
+    // Visual RAG arm — Cohere Embed v4 (Azure AI Foundry) page-image embeddings.
+    // `w_visual` defaults 0 (shadow). The page-image collection is written by
+    // embedding-engine; the query embedder hits the Embed v4 text route.
+    #[serde(default = "default_visual_collection")]
+    pub qdrant_visual_collection: String,
+    #[serde(default = "default_visual_dim")]
+    pub visual_embedding_dimension: usize,
+    #[serde(default)]
+    pub cohere_embed_v4_endpoint: String,
+    #[serde(default)]
+    pub cohere_embed_v4_api_key: String,
+    #[serde(default = "default_embed_v4_deployment")]
+    pub cohere_embed_v4_deployment: String,
+    #[serde(default = "default_embed_v4_api_version")]
+    pub cohere_embed_v4_api_version: String,
+
+    // ColQwen visual reranker (late-interaction MaxSim over Embed-v4's top-K
+    // page-image candidates). OFF by default. The model runs as a separate GPU
+    // inference server (local for verification, Hetzner/Azure for prod), reached
+    // over HTTP at `colqwen_endpoint_url`. When enabled, the orchestrator reorders
+    // the visual candidates by ColQwen relevance; any failure degrades to the
+    // Embed-v4 order (non-fatal).
+    #[serde(default)]
+    pub visual_rerank_enabled: bool,
+    #[serde(default)]
+    pub colqwen_endpoint_url: String,
+    #[serde(default = "default_visual_rerank_top_k")]
+    pub visual_rerank_top_k: usize,
 
     // Semantic *response* cache (Data-Plane-v2-owned vector tier for the
     // model-gateway SemanticCache seam). Opt-in via SEMANTIC_CACHE_ENABLED=true.
@@ -71,6 +108,13 @@ pub struct Config {
     pub semantic_cache_min_score: f32,
     #[serde(default = "default_semantic_cache_ttl_secs")]
     pub semantic_cache_ttl_secs: u64,
+    /// Authz gate for the semantic cache. When true (default), a cache
+    /// search/store with no `scope_key` fails closed (no-op) rather than risk
+    /// serving one principal's grounded answer to another in the same org. Set
+    /// false only for single-tenant / org-shared-only deployments to restore
+    /// org-wide sharing.
+    #[serde(default = "default_true")]
+    pub semantic_cache_require_scope: bool,
 
     #[serde(default = "default_sparse_search_backend")]
     pub sparse_search_backend: String,
@@ -135,6 +179,9 @@ fn default_embedding_dim() -> usize {
 fn default_reranker_model() -> String {
     "rerank-english-v3.0".into()
 }
+fn default_rerank_endpoint() -> String {
+    "https://api.cohere.ai/v1/rerank".into()
+}
 fn default_top_k() -> usize {
     100
 }
@@ -164,6 +211,24 @@ fn default_w_wiki() -> f32 {
 }
 fn default_collection() -> String {
     "dataplane_knowledge".into()
+}
+fn default_w_visual() -> f32 {
+    0.0
+}
+fn default_visual_collection() -> String {
+    "dataplane_page_images".into()
+}
+fn default_visual_dim() -> usize {
+    1536
+}
+fn default_visual_rerank_top_k() -> usize {
+    20
+}
+fn default_embed_v4_deployment() -> String {
+    "Cohere-embed-4".into()
+}
+fn default_embed_v4_api_version() -> String {
+    "2024-05-01-preview".into()
 }
 fn default_semantic_cache_collection() -> String {
     "semantic_response_cache".into()

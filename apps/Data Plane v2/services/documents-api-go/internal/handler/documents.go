@@ -41,6 +41,45 @@ func viewerID(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-User-Id"))
 }
 
+// callerHasAdminScope reports whether the request carries a VERIFIED admin scope
+// allowing org-global writes. HasScope returns false unless the JWT signature was
+// verified, so until authctx verification is enforced this is false for end users
+// (fail-closed) — only trusted system callers (no viewer) bypass the org gate.
+func callerHasAdminScope(r *http.Request) bool {
+	if claims, ok := authctx.FromContext(r.Context()); ok {
+		return claims.HasScope("org:data:write_all")
+	}
+	return false
+}
+
+// applyVisibilityPolicy resolves the document's visibility and enforces the
+// org-ownership write rules (step 10 + 11):
+//   - Default (empty visibility): an interactive end-user create defaults to
+//     PRIVATE (their data is private until shared); a system/ingest create (no
+//     viewer — Quarry crawls, connectors) defaults to ORG so shared knowledge
+//     stays org-visible and doesn't silently vanish.
+//   - Admin-gate: only an admin (verified scope) or a trusted system caller (no
+//     viewer) may create ORG-visible docs. An end user may create 'private' or
+//     'shared' (and share via grants) but never 'org'/tenant-global.
+//
+// Returns true if the caller is FORBIDDEN from the requested visibility.
+func applyVisibilityPolicy(r *http.Request, input *model.CreateDocumentInput) (forbidden bool) {
+	viewer := viewerID(r)
+	v := strings.ToLower(strings.TrimSpace(input.Visibility))
+	if v == "" {
+		if viewer != "" {
+			v = "private"
+		} else {
+			v = "org"
+		}
+	}
+	if v == "org" && viewer != "" && !callerHasAdminScope(r) {
+		return true
+	}
+	input.Visibility = v
+	return false
+}
+
 // grantedDocs resolves the viewer's explicit document grants. Fails OPEN: on any
 // error it returns nil so the viewer still sees owned + org/shared docs (never a
 // leak — at worst a doc shared specifically to them is briefly hidden).
@@ -125,6 +164,14 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		if v := viewerID(r); v != "" {
 			input.OwnerID = v
 		}
+	}
+
+	// Step 10+11: default visibility (private for users, org for system ingest)
+	// and admin-gate org-global writes.
+	if applyVisibilityPolicy(r, &input) {
+		writeError(w, http.StatusForbidden,
+			"only an admin can create org-visible documents; create as 'private' or 'shared' and share via grants")
+		return
 	}
 
 	if err := validate.OrgID(orgID); err != nil {
@@ -247,6 +294,12 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 		input.OrgID = orgID
 		if input.OwnerID == "" && bulkViewer != "" {
 			input.OwnerID = bulkViewer
+		}
+		// Step 10+11: default visibility + admin-gate org-global writes (per doc).
+		if applyVisibilityPolicy(r, &input) {
+			rejected++
+			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: only an admin can create org-visible documents", i))
+			continue
 		}
 		if err := validate.CreateDocument(&input); err != nil {
 			rejected++

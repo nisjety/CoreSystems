@@ -81,6 +81,14 @@ impl KnowledgeClient {
                 request.metadata_mut().insert("x-api-key", value);
             }
         }
+        // Forward the viewer as `x-user-id` metadata — the Data Plane binds
+        // per-user ownership from this (trusted transport), not the body. Matches
+        // the body user_id above so the DP's anti-spoof check passes.
+        if !user_id.is_empty() {
+            if let Ok(value) = MetadataValue::try_from(user_id) {
+                request.metadata_mut().insert("x-user-id", value);
+            }
+        }
         let response = self
             .client
             .clone()

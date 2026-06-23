@@ -72,6 +72,11 @@ pub struct AppState {
     /// forward; when `None`, calls go out unsigned (acceptable only
     /// in private-network single-tenant dev).
     pub internal_signer: Option<Arc<crate::internal_auth::InternalSigner>>,
+    /// Phase-2 visual RAG — page-image producer. `Some` when configured (CAS
+    /// bucket + Data Plane NATS + edge base URL, browser-agent feature on);
+    /// injected into every `PageRunner` so ingested pages get rendered → CAS →
+    /// `page_images.created`. `None` disables the producer.
+    pub page_renderer: Option<Arc<quarry_runtime::page_renderer::PageRenderer>>,
     /// C30.1 / cluster #7 — durable job-history store. When `Some`,
     /// the edge serves `/v1/runs/:id/events` locally from Postgres
     /// instead of forwarding to control plane. Gated behind the

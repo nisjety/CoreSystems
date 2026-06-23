@@ -364,6 +364,20 @@ pub async fn invoke_stream_sse(
                 defs.push(builtin);
             }
         }
+        // Expose the org's registered MCP servers' tools (matrix §G2) so newly
+        // added MCP tools reach the model without any code change — discovered
+        // via tools/list (cached, bounded), namespaced `mcp__<server>__<tool>`;
+        // `dispatch_tool` routes the call back through the registry. Existing
+        // client/builtin names win on collision (MCP names are namespaced, so a
+        // real collision is unlikely — this is purely defensive).
+        for mcp_def in
+            crate::runtime_registries::mcp_tool_defs(&state.mcp, &state.ownership, &org_id, &user_id)
+                .await
+        {
+            if !defs.iter().any(|d| d.name == mcp_def.name) {
+                defs.push(mcp_def);
+            }
+        }
         defs
     } else {
         Vec::new()
@@ -410,6 +424,36 @@ pub async fn invoke_stream_sse(
         .await;
         messages = rounds.messages;
         tool_events.extend(rounds.events);
+    }
+
+    // E5 — audit every inline tool call. The governed agentic path audits via
+    // execution-core → session-core; the inline chat tool loop must too, so ALL
+    // AI tool use is auditable (publishes velion.audit.v1.model.tool_action,
+    // which audit-core records). Best-effort — never blocks the turn.
+    if !tool_events.is_empty() {
+        use crate::sse_events::ChatEvent;
+        let mut tool_names: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for evt in &tool_events {
+            if let ChatEvent::ToolCall { id, name, .. } = evt {
+                tool_names.insert(id.as_str(), name.as_str());
+            }
+        }
+        for evt in &tool_events {
+            if let ChatEvent::ToolResult { id, status, .. } = evt {
+                let tool = tool_names.get(id.as_str()).copied().unwrap_or(id.as_str());
+                crate::audit::publish_inline_tool_action(
+                    &org_id,
+                    &user_id,
+                    &request_id,
+                    id,
+                    tool,
+                    status,
+                    req.zdr,
+                )
+                .await;
+            }
+        }
     }
 
     let grpc_req = InferRequest {
@@ -903,7 +947,7 @@ async fn load_recent_thread_messages(
         .rev()
         .find(|message| message.role == "user")
     {
-        Some(message) => message.content = current_user_content.to_owned(),
+        Some(message) => current_user_content.clone_into(&mut message.content),
         None => messages.push(ChatMessage {
             role: "user".to_owned(),
             content: current_user_content.to_owned(),
@@ -1028,7 +1072,7 @@ fn vision_stream(
 /// `artifact` + `attachment` events (gated on the artifacts family) plus a
 /// `chunk` carrying the image reference so plain clients still receive it
 /// (chat-parity §2).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn image_gen_stream(
     state: AppState,
     request_id: String,
@@ -2231,7 +2275,6 @@ mod tests {
                     run_id: "run-1".to_owned(),
                     from: 0,
                     to: 1,
-                    ..Default::default()
                 },
             )),
             ..Default::default()

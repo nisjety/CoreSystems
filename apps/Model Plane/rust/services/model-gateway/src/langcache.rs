@@ -15,7 +15,7 @@
 //!     than the semantic backend.
 //!
 //! `org_id` scoping keeps one tenant from reading another's cached responses.
-//! Selection precedence: managed LangCache → local Dragonfly → disabled (every
+//! Selection precedence: managed `LangCache` → local Dragonfly → disabled (every
 //! `Invoke` hits inference-core), matching the dev-friendly "disabled when
 //! unconfigured" pattern used elsewhere. Both backends are strictly best-effort:
 //! any transport/parse error degrades to a miss so inference still runs.
@@ -47,7 +47,7 @@ pub fn global() -> Option<&'static SemanticCache> {
 /// precedence (first match wins): managed Redis `LangCache` → local Dragonfly
 /// exact-match → disabled.
 pub enum SemanticCache {
-    /// Hosted Redis LangCache (server-side embeddings + similarity threshold).
+    /// Hosted Redis `LangCache` (server-side embeddings + similarity threshold).
     Managed(LangCacheClient),
     /// Data-Plane-v2-owned semantic (vector-similarity) cache, reached over HTTP.
     DataPlane(DataPlaneCache),
@@ -190,10 +190,10 @@ impl DragonflyCache {
     }
 
     async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+        use redis::AsyncCommands;
         if response.is_empty() {
             return;
         }
-        use redis::AsyncCommands;
         let Some(mut conn) = self.manager().await else {
             return;
         };
@@ -438,15 +438,12 @@ fn non_empty_env(key: &str) -> Option<String> {
 
 /// True when `key` is set to a truthy value (`1`/`true`/`yes`/`on`, any case).
 fn env_flag(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    std::env::var(key).ok().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Parse a search response that may be a bare JSON array of entries or a

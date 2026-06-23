@@ -30,6 +30,7 @@ const (
 	SessionCore_UpsertAgentSkill_FullMethodName   = "/model_plane.v1.SessionCore/UpsertAgentSkill"
 	SessionCore_ListAgentSkills_FullMethodName    = "/model_plane.v1.SessionCore/ListAgentSkills"
 	SessionCore_ListConversation_FullMethodName   = "/model_plane.v1.SessionCore/ListConversation"
+	SessionCore_ListThreads_FullMethodName        = "/model_plane.v1.SessionCore/ListThreads"
 	SessionCore_SetRunMode_FullMethodName         = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
@@ -77,6 +78,9 @@ type SessionCoreClient interface {
 	// Org-scoped via the owning thread, so a caller reads only its own org's
 	// conversation.
 	ListConversation(ctx context.Context, in *ListConversationRequest, opts ...grpc.CallOption) (*ListConversationResponse, error)
+	// List an authenticated user's durable conversation threads for cross-device
+	// chat history. Timestamps are based on creation/message writes, never reads.
+	ListThreads(ctx context.Context, in *ListThreadsRequest, opts ...grpc.CallOption) (*ListThreadsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -211,6 +215,16 @@ func (c *sessionCoreClient) ListConversation(ctx context.Context, in *ListConver
 	return out, nil
 }
 
+func (c *sessionCoreClient) ListThreads(ctx context.Context, in *ListThreadsRequest, opts ...grpc.CallOption) (*ListThreadsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListThreadsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ListThreads_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionCoreClient) SetRunMode(ctx context.Context, in *SetRunModeRequest, opts ...grpc.CallOption) (*SetRunModeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetRunModeResponse)
@@ -265,6 +279,9 @@ type SessionCoreServer interface {
 	// Org-scoped via the owning thread, so a caller reads only its own org's
 	// conversation.
 	ListConversation(context.Context, *ListConversationRequest) (*ListConversationResponse, error)
+	// List an authenticated user's durable conversation threads for cross-device
+	// chat history. Timestamps are based on creation/message writes, never reads.
+	ListThreads(context.Context, *ListThreadsRequest) (*ListThreadsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -312,6 +329,9 @@ func (UnimplementedSessionCoreServer) ListAgentSkills(context.Context, *ListAgen
 }
 func (UnimplementedSessionCoreServer) ListConversation(context.Context, *ListConversationRequest) (*ListConversationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListConversation not implemented")
+}
+func (UnimplementedSessionCoreServer) ListThreads(context.Context, *ListThreadsRequest) (*ListThreadsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListThreads not implemented")
 }
 func (UnimplementedSessionCoreServer) SetRunMode(context.Context, *SetRunModeRequest) (*SetRunModeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetRunMode not implemented")
@@ -528,6 +548,24 @@ func _SessionCore_ListConversation_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_ListThreads_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListThreadsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ListThreads(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ListThreads_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ListThreads(ctx, req.(*ListThreadsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionCore_SetRunMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetRunModeRequest)
 	if err := dec(in); err != nil {
@@ -592,6 +630,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListConversation",
 			Handler:    _SessionCore_ListConversation_Handler,
+		},
+		{
+			MethodName: "ListThreads",
+			Handler:    _SessionCore_ListThreads_Handler,
 		},
 		{
 			MethodName: "SetRunMode",

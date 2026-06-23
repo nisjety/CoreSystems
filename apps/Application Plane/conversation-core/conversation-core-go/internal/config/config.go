@@ -16,6 +16,18 @@ type Config struct {
 	NATSToken      string
 	ServiceName    string
 	InternalAPIKey string
+	// IntegrationBaseURL + IntegrationInternalKey configure the outbound client
+	// to integration-corev2 used by the draft.reply act-leg. Both are optional;
+	// when either is unset, draft.reply sending is disabled (the executor never
+	// claims a send it cannot perform — see DraftReplySendEnabled).
+	IntegrationBaseURL     string
+	IntegrationInternalKey string
+}
+
+// DraftReplySendEnabled reports whether the outbound-send (draft.reply) leg is
+// configured. Gating on this prevents a false send claim without configuration.
+func (c *Config) DraftReplySendEnabled() bool {
+	return c != nil && strings.TrimSpace(c.IntegrationBaseURL) != "" && strings.TrimSpace(c.IntegrationInternalKey) != ""
 }
 
 func Load() (*Config, error) {
@@ -28,6 +40,9 @@ func Load() (*Config, error) {
 		NATSToken:      strings.TrimSpace(getEnv("VELION_NATS_TOKEN", getEnv("NATS_SHARED_TOKEN", getEnv("NATS_TOKEN", "")))),
 		ServiceName:    strings.TrimSpace(getEnv("SERVICE_NAME", "conversation-core-go")),
 		InternalAPIKey: strings.TrimSpace(getEnv("INTERNAL_API_KEY", "")),
+		// Non-fatal when unset: draft.reply sending stays disabled until both are set.
+		IntegrationBaseURL:     strings.TrimSpace(getEnv("INTEGRATION_BASE_URL", getEnv("INTEGRATION_COREV2_URL", ""))),
+		IntegrationInternalKey: strings.TrimSpace(getEnv("INTEGRATION_INTERNAL_API_KEY", getEnv("INTERNAL_API_KEY", ""))),
 	}
 
 	if cfg.DatabaseURL == "" {

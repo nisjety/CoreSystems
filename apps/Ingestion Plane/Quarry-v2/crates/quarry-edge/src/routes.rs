@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     routing::{delete, get, post},
     Extension, Json, Router,
@@ -100,10 +100,23 @@ pub fn router(state: AppState) -> Router {
     // Go) persists baselines/diffs here on behalf of MANY tenants; org_id
     // travels in the request body (verified at schedule-creation) rather than
     // a JWT claim. The handler enforces the token itself.
-    let internal = Router::new().route(
-        "/v1/internal/change/record",
-        post(crate::change_routes::record_internal),
-    );
+    let internal = Router::new()
+        .route(
+            "/v1/internal/change/record",
+            post(crate::change_routes::record_internal),
+        )
+        // Phase-2 visual RAG — page-image serve for the embedding-engine consumer
+        // (no JWT; the content-hash in the path is the capability on the trusted bus).
+        .route(
+            "/v1/internal/page-images/:org/:doc/:page/:hash",
+            get(crate::resource_routes::get_page_image),
+        )
+        // Orchestrator page-execution activity. Authenticated by the shared
+        // runtime service token (QUARRY_EDGE__RUNTIME_AUTH_TOKEN), NOT a
+        // per-tenant JWT; the originating org travels in the request body
+        // (stamped by the orchestrator from the schedule memo, verified at
+        // schedule-creation). The handler enforces the token itself.
+        .route("/v1/internal/run_page", post(internal_run_page));
 
     // Protected surface — every /v1/* route. The auth middleware
     // verifies an `Authorization: Bearer <jwt>` against the Control
@@ -116,10 +129,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/scrape/stream", post(scrape_stream))
         .route("/v1/crawl", post(crawl_handoff))
         .route("/v1/batch", post(batch_handoff))
-        // Internal plane: orchestrator activities call here. Not exposed
-        // publicly in prod; same binary today — later a separate
-        // `quarry-runtime-svc` crate.
-        .route("/v1/internal/run_page", post(internal_run_page))
         .route("/v1/profiles", post(crate::profile_routes::save_profile))
         .route("/v1/profiles", get(crate::profile_routes::list_profiles))
         .route("/v1/profiles/:id", get(crate::profile_routes::load_profile))
@@ -368,6 +377,7 @@ async fn scrape(
             .clone()
             .map(RenderHints::from)
             .unwrap_or_default(),
+        page_renderer: state.page_renderer.clone(),
     };
 
     let run_id: RunKind = quarry_core::ids::Id::new();
@@ -597,20 +607,131 @@ pub struct InternalRunPageResult {
     pub branding: Option<serde_json::Value>,
 }
 
+/// The shared runtime service token, latched once at startup (mirrors
+/// `auth::dev_bypass_enabled`): re-reading per request is a syscall on the hot
+/// path and would let a post-boot env mutation silently swap the secret. Test
+/// builds skip the latch so each test can set the env independently.
+fn runtime_token() -> String {
+    #[cfg(test)]
+    {
+        read_runtime_token_from_env()
+    }
+    #[cfg(not(test))]
+    {
+        use std::sync::OnceLock;
+        static CACHED: OnceLock<String> = OnceLock::new();
+        CACHED.get_or_init(read_runtime_token_from_env).clone()
+    }
+}
+
+fn read_runtime_token_from_env() -> String {
+    std::env::var("QUARRY_EDGE__RUNTIME_AUTH_TOKEN")
+        .or_else(|_| std::env::var("RUNTIME_AUTH_TOKEN"))
+        .unwrap_or_default()
+}
+
+/// Verify the shared runtime service token the orchestrator presents on the
+/// internal execution route. Fail-closed: an unset token refuses the call.
+/// Service credential (NOT a per-tenant JWT); constant-time compared.
+fn verify_runtime_token(headers: &HeaderMap) -> Result<(), QuarryError> {
+    let expected = runtime_token();
+    if expected.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "run_page not configured (set QUARRY_EDGE__RUNTIME_AUTH_TOKEN)",
+        ));
+    }
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    if !provided.is_empty()
+        && crate::change_routes::ct_eq(provided.as_bytes(), expected.as_bytes())
+    {
+        Ok(())
+    } else {
+        tracing::warn!(
+            had_token = !provided.is_empty(),
+            "run_page runtime-token auth failed (possible probe)"
+        );
+        Err(QuarryError::new(
+            ErrorCode::Unauthorized,
+            "invalid runtime token",
+        ))
+    }
+}
+
 async fn internal_run_page(
     State(state): State<AppState>,
-    Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Json(req): Json<InternalRunPage>,
 ) -> Result<Json<InternalRunPageResult>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    // Internal orchestrator route (NOT a per-tenant JWT surface): enforce the
+    // shared runtime service token. The originating org travels in the request
+    // body, stamped by the orchestrator from the schedule memo (verified at
+    // schedule-creation), so we use it directly rather than a JWT claim.
+    verify_runtime_token(&headers).map_err(|e| {
+        (
+            StatusCode::from_u16(e.code.http_status()).unwrap_or(StatusCode::UNAUTHORIZED),
+            Json(Envelope::<()>::err(&request_id, e)),
+        )
+    })?;
+    let org_id = req.org_id.clone().unwrap_or_default();
+    if org_id.trim().is_empty() {
+        let err =
+            QuarryError::new(ErrorCode::BadRequest, "run_page requires org_id in the body");
+        return Err((
+            StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(Envelope::<()>::err(&request_id, err)),
+        ));
+    }
+
+    // HMAC org-binding. The runtime bearer token (above) authenticates the
+    // CALLER; this signature binds the TENANT identity so a leaked bearer
+    // can't be replayed against an arbitrary org_id. We sign over the body's
+    // raw `org_id` + "\n" + raw `url` (BEFORE URL-parsing, so the bytes the
+    // orchestrator signed are exactly the bytes we verify). When the edge
+    // has no shared secret configured we skip the check (runtime token only)
+    // and warn that the binding is unenforced.
+    if let Some(signer) = state.internal_signer.as_ref() {
+        let sig = headers
+            .get("x-quarry-run-sig")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !signer.verify_run_binding(&org_id, &req.url, sig) {
+            tracing::warn!(had_sig = !sig.is_empty(), "run_page HMAC org-binding failed");
+            let err =
+                QuarryError::new(ErrorCode::Unauthorized, "run_page org binding invalid");
+            return Err((
+                StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::UNAUTHORIZED),
+                Json(Envelope::<()>::err(&request_id, err)),
+            ));
+        }
+    } else {
+        // Fail CLOSED: run_page is a tenant-scoped execution surface, so a
+        // missing shared secret must refuse the request rather than silently
+        // degrade to runtime-token-only (which would re-open org-forgery).
+        // The edge needs QUARRY_EDGE__INTERNAL_SECRET for its control-plane
+        // HMAC peer anyway, so this is always configured in a real deployment.
+        tracing::error!(
+            "run_page rejected: QUARRY_EDGE__INTERNAL_SECRET not configured; cannot verify org binding"
+        );
+        let err = QuarryError::new(
+            ErrorCode::Unsupported,
+            "run_page org binding not configured (set QUARRY_EDGE__INTERNAL_SECRET)",
+        );
+        return Err((
+            StatusCode::from_u16(err.code.http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(Envelope::<()>::err(&request_id, err)),
+        ));
+    }
+
     let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
     let privacy = effective_privacy(req.privacy.clone(), zdr);
-    // Same tenant enforcement as the public /v1/scrape: ignore client
-    // org_id, use the verified JWT claim. /v1/internal/run_page is
-    // typically called by the orchestrator on behalf of a tenant, so the
-    // service token used must carry the originating org's claim.
-    let _ = &req.org_id;
-    let org_id = claims.org_id.clone();
 
     let url: Url = req.url.parse().map_err(|e| {
         let err = QuarryError::new(ErrorCode::BadRequest, format!("invalid url: {e}"));
@@ -648,6 +769,7 @@ async fn internal_run_page(
             .clone()
             .map(RenderHints::from)
             .unwrap_or_default(),
+        page_renderer: state.page_renderer.clone(),
     };
 
     let run_id: RunKind = match req.run_id.as_deref() {
@@ -760,6 +882,7 @@ async fn scrape_stream(
             scheduler: state.scheduler.clone(),
             autoscale: Some(quarry_runtime::global_autoscale()),
             render: req.render.clone().map(RenderHints::from).unwrap_or_default(),
+            page_renderer: state.page_renderer.clone(),
         };
         let run_id = RunKind::new();
         let mut rx = state.event_sink.subscribe(&run_id);
@@ -956,6 +1079,7 @@ mod tests {
             policy: RunPolicy::default(),
             scheduler: None,
             internal_signer: None,
+            page_renderer: None,
             #[cfg(feature = "postgres-queue")]
             event_history: None,
             #[cfg(feature = "postgres-queue")]

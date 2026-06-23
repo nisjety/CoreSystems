@@ -14,6 +14,13 @@ pub struct RerankClient {
     http: Client,
     api_key: String,
     model: String,
+    /// Full rerank URL. Defaults to public Cohere; set to an Azure AI Foundry
+    /// serverless Cohere rerank endpoint (`https://<deployment>.<region>.models.ai.azure.com/v2/rerank`)
+    /// to use the in-EU deployment instead of the public API.
+    endpoint: String,
+    /// Auth header style: `true` → `Authorization: Bearer <key>` (public Cohere);
+    /// `false` → `api-key: <key>` (Azure Foundry).
+    use_bearer: bool,
 }
 
 #[derive(Serialize)]
@@ -37,10 +44,34 @@ struct RerankResult {
 
 impl RerankClient {
     pub fn new(api_key: &str, model: &str) -> Self {
+        Self::with_endpoint(api_key, model, "https://api.cohere.ai/v1/rerank", true)
+    }
+
+    /// Build with an explicit endpoint + auth style. `endpoint` empty falls back
+    /// to public Cohere; an `*.azure.com` endpoint auto-selects the `api-key`
+    /// header unless `use_bearer` is forced.
+    pub fn with_endpoint(api_key: &str, model: &str, endpoint: &str, use_bearer: bool) -> Self {
+        let endpoint = if endpoint.trim().is_empty() {
+            "https://api.cohere.ai/v1/rerank".to_string()
+        } else {
+            endpoint.trim().to_string()
+        };
         Self {
             http: Client::new(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            endpoint,
+            use_bearer,
+        }
+    }
+
+    /// POST builder with the configured URL + auth header.
+    fn rerank_post(&self) -> reqwest::RequestBuilder {
+        let rb = self.http.post(&self.endpoint);
+        if self.use_bearer {
+            rb.header("Authorization", format!("Bearer {}", self.api_key))
+        } else {
+            rb.header("api-key", &self.api_key)
         }
     }
 
@@ -98,9 +129,7 @@ impl RerankClient {
                 }
 
                 let resp = match self
-                    .http
-                    .post("https://api.cohere.ai/v1/rerank")
-                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .rerank_post()
                     .json(&body)
                     .send()
                     .await
@@ -233,9 +262,7 @@ impl RerankClient {
         };
 
         let resp = self
-            .http
-            .post("https://api.cohere.ai/v1/rerank")
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .rerank_post()
             .json(&body)
             .send()
             .await

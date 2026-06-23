@@ -244,7 +244,7 @@ impl RealtimeProvider for OpenAiRealtimeProvider {
     }
 }
 
-/// Azure OpenAI realtime broker. Mints an ephemeral client secret via Azure's
+/// Azure `OpenAI` realtime broker. Mints an ephemeral client secret via Azure's
 /// realtime sessions endpoint using `api-key` auth (not Bearer). All URLs are
 /// env-overridable so an operator can match their resource's exact preview API
 /// surface without a rebuild.
@@ -350,7 +350,7 @@ impl RealtimeProvider for AzureRealtimeProvider {
             &voice,
             &self.websocket_url,
         )?;
-        parsed.provider_used = "azure".to_owned();
+        "azure".clone_into(&mut parsed.provider_used);
         Ok(parsed)
     }
 
@@ -370,9 +370,9 @@ impl RealtimeProvider for AzureRealtimeProvider {
 
 /// Azure preview realtime sessions (`/openai/realtimeapi/sessions`) takes a
 /// FLAT body (`model`=deployment, `voice`, `input_audio_format`, … at top
-/// level — the same params as `session.update`), NOT OpenAI v1's nested
+/// level — the same params as `session.update`), NOT `OpenAI` v1's nested
 /// `{session:{…}}`. Using the nested shape made Azure resolve no deployment →
-/// 404 DeploymentNotFound. Verified against MS Learn realtime REST reference.
+/// 404 `DeploymentNotFound`. Verified against MS Learn realtime REST reference.
 fn azure_realtime_session_body(req: &RealtimeSessionRequest, model: &str, voice: &str) -> Value {
     let input_audio_format = defaulted(&req.input_audio_format, DEFAULT_AUDIO_FORMAT);
     let output_audio_format = defaulted(&req.output_audio_format, DEFAULT_AUDIO_FORMAT);

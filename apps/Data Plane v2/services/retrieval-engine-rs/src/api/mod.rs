@@ -452,6 +452,13 @@ struct SemanticCacheSearchRequest {
     /// the embed layer's egress guard enforces it. Defaults to non-ZDR.
     #[serde(default)]
     zdr_mode: Option<String>,
+    /// Authorization scope that partitions the cache (PR-A). The Model Plane
+    /// gateway MUST pass the caller's per-user visible-document-set hash, or the
+    /// literal `"org-shared"` when grounding used only org-public docs. Absent
+    /// under a require-scope deployment ⇒ the cache no-ops (fail-closed), so a
+    /// response grounded on one user's private docs is never served to another.
+    #[serde(default)]
+    scope_key: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -462,6 +469,11 @@ struct SemanticCacheStoreRequest {
     response: String,
     #[serde(default)]
     zdr_mode: Option<String>,
+    /// See `SemanticCacheSearchRequest::scope_key`. For `store`, the gateway
+    /// should pass the hash of the visible-document set the response was grounded
+    /// on (or `"org-shared"`); it must match the scope used at search time.
+    #[serde(default)]
+    scope_key: Option<String>,
 }
 
 fn is_ephemeral_zdr(zdr_mode: &Option<String>) -> bool {
@@ -470,8 +482,11 @@ fn is_ephemeral_zdr(zdr_mode: &Option<String>) -> bool {
 
 async fn semantic_cache_search(
     State(pipeline): State<AppState>,
-    Json(req): Json<SemanticCacheSearchRequest>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<SemanticCacheSearchRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // GAP-1: pin org from the verified principal — never trust the body org_id.
+    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
     let hit = crate::cache::semantic::search(
         &pipeline.qdrant,
         &pipeline.embedder,
@@ -480,6 +495,7 @@ async fn semantic_cache_search(
         &req.model,
         &req.prompt,
         is_ephemeral_zdr(&req.zdr_mode),
+        req.scope_key.as_deref(),
     )
     .await?;
     Ok(match hit {
@@ -494,8 +510,11 @@ async fn semantic_cache_search(
 
 async fn semantic_cache_store(
     State(pipeline): State<AppState>,
-    Json(req): Json<SemanticCacheStoreRequest>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<SemanticCacheStoreRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // GAP-1: pin org from the verified principal — never trust the body org_id.
+    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
     crate::cache::semantic::store(
         &pipeline.qdrant,
         &pipeline.embedder,
@@ -505,6 +524,7 @@ async fn semantic_cache_store(
         &req.prompt,
         &req.response,
         is_ephemeral_zdr(&req.zdr_mode),
+        req.scope_key.as_deref(),
     )
     .await?;
     Ok(Json(serde_json::json!({ "stored": true })))
@@ -551,11 +571,24 @@ fn default_graph_entities() -> i32 {
 
 async fn retrieve_graph(
     State(pipeline): State<AppState>,
-    Json(req): Json<GraphRetrieveRequest>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<GraphRetrieveRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let entities =
-        graph::graph_expansion_search(&pipeline.pool, &req.query, &req.org_id, req.max_entities)
-            .await?;
+    // GAP-1: pin org from the verified principal — never trust the body org_id.
+    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
+    // Per-user ownership gate (mirrors the dense/sparse post-filter): graph nodes
+    // are filtered to those derived from documents the viewer can see. No viewer
+    // → org-scoped (legacy). Closes the graph-grounding leak (4-path test).
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    let entities = graph::graph_expansion_search(
+        &pipeline.pool,
+        &req.query,
+        &req.org_id,
+        req.max_entities,
+        viewer.as_deref(),
+        &granted,
+    )
+    .await?;
 
     let communities = if req.include_communities {
         let eids: Vec<String> = entities.iter().map(|e| e.entity_id.clone()).collect();
@@ -586,8 +619,11 @@ fn default_wiki_limit() -> i32 {
 
 async fn retrieve_wiki(
     State(pipeline): State<AppState>,
-    Json(req): Json<WikiRetrieveRequest>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<WikiRetrieveRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // GAP-1: pin org from the verified principal — never trust the body org_id.
+    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
     let pages = wiki::wiki_search(&pipeline.pool, &req.query, &req.org_id, req.limit).await?;
     Ok(Json(serde_json::json!({
         "pages": pages,
@@ -610,8 +646,11 @@ fn default_contra_limit() -> i32 {
 
 async fn retrieve_contradictions(
     State(pipeline): State<AppState>,
-    Json(req): Json<ContradictionsRequest>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<ContradictionsRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // GAP-1: pin org from the verified principal — never trust the body org_id.
+    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
     let results = contradictions::search_contradictions(
         &pipeline.pool,
         &req.org_id,
@@ -642,8 +681,11 @@ fn default_timeline_limit() -> i32 {
 
 async fn retrieve_timeline(
     State(pipeline): State<AppState>,
-    Json(req): Json<TimelineRequest>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<TimelineRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // GAP-1: pin org from the verified principal — never trust the body org_id.
+    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
     if let Some(tid) = &req.trace_id {
         let detail = timeline::replay_trace(&pipeline.pool, tid).await?;
         return Ok(Json(serde_json::json!({"replay": detail})));

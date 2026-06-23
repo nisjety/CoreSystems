@@ -45,6 +45,28 @@ use crate::search::sparse::{
 async fn main() -> anyhow::Result<()> {
     telemetry::init_tracing("retrieval-engine-rs");
 
+    // Verified-JWT path (per-user identity + audited admin read-bypass): the
+    // interceptor/HTTP middleware verify Bearer tokens against
+    // `JWT_PUBLIC_KEY_PEM`. We support a mounted key file too (secrets-as-files,
+    // matching auth-core's `CONVEX_AUTH_PUBLIC_KEY_FILE`) — hydrate the inline
+    // env from the file once at startup so the verify code stays unchanged.
+    // Unset file → no-op; the API-key + forwarded x-user-id path is unaffected.
+    if let Ok(path) = std::env::var("JWT_PUBLIC_KEY_FILE") {
+        let path = path.trim();
+        if !path.is_empty() {
+            match std::fs::read_to_string(path) {
+                Ok(pem) if !pem.trim().is_empty() => {
+                    std::env::set_var("JWT_PUBLIC_KEY_PEM", pem.trim());
+                    tracing::info!(file = path, "loaded JWT public key from file");
+                }
+                Ok(_) => tracing::warn!(file = path, "JWT_PUBLIC_KEY_FILE is empty"),
+                Err(e) => {
+                    tracing::warn!(file = path, error = %e, "failed to read JWT_PUBLIC_KEY_FILE")
+                }
+            }
+        }
+    }
+
     let cfg = Config::from_env()?;
     tracing::info!(
         http_port = cfg.http_port,
@@ -70,7 +92,14 @@ async fn main() -> anyhow::Result<()> {
         .cohere_api_key
         .as_ref()
         .filter(|k| !k.is_empty())
-        .map(|key| RerankClient::new(key, &cfg.reranker_model));
+        .map(|key| {
+            RerankClient::with_endpoint(
+                key,
+                &cfg.reranker_model,
+                &cfg.rerank_endpoint,
+                !cfg.rerank_use_api_key,
+            )
+        });
 
     // Redis-compatible cache (Dragonfly in compose; optional and degraded to
     // no-op if unavailable).
@@ -170,8 +199,11 @@ async fn main() -> anyhow::Result<()> {
     // grants from user-core's resource_grants facade. ALWAYS-ON (not gated by
     // CONTROL_PLANE_ENFORCEMENT); fail-open to empty when user-core is
     // unreachable so owner + org/shared visibility still apply.
+    // user-core HTTP listens on :3012 (NOT :8080 — that was a fail-open landmine:
+    // a wrong port makes every grant lookup error → empty grants → shares
+    // silently never resolve). Matches documents-api's USER_CORE_URL.
     let user_core_url =
-        std::env::var("USER_CORE_HTTP_URL").unwrap_or_else(|_| "http://user-core:8080".into());
+        std::env::var("USER_CORE_HTTP_URL").unwrap_or_else(|_| "http://user-core:3012".into());
     let visibility: std::sync::Arc<dyn authz::VisibilityClient> = std::sync::Arc::new(
         authz::HttpVisibilityClient::new(user_core_url, cfg.internal_api_key.clone()),
     );
@@ -180,6 +212,42 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref nats) = nats_client {
         authz::visibility::spawn_grant_invalidator(nats.clone(), visibility.clone());
     }
+
+    // Visual RAG arm query embedder (Cohere Embed v4). Online only when
+    // COHERE_EMBED_V4_ENDPOINT is set; otherwise the visual arm stays dark and
+    // `w_visual` has no effect (text-only deployment).
+    let visual_embedder = match crate::embed::visual::VisualQueryEmbedder::from_config(&cfg) {
+        Ok(Some(ve)) => {
+            tracing::info!("visual query embedder (Embed v4) enabled");
+            Some(ve)
+        }
+        Ok(None) => {
+            tracing::info!("visual query embedder disabled (COHERE_EMBED_V4_ENDPOINT unset)");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "visual query embedder misconfigured; visual arm disabled");
+            None
+        }
+    };
+
+    // ColQwen visual reranker — only when explicitly enabled AND an endpoint is
+    // set. The model runs as a separate GPU inference server (local for
+    // verification, Hetzner/Azure for prod); OFF by default everywhere else.
+    let colqwen = if cfg.visual_rerank_enabled {
+        match crate::search::colqwen::ColqwenClient::from_url(&cfg.colqwen_endpoint_url) {
+            Some(c) => {
+                tracing::info!(endpoint = %cfg.colqwen_endpoint_url, "ColQwen visual reranker enabled");
+                Some(c)
+            }
+            None => {
+                tracing::warn!("VISUAL_RERANK_ENABLED set but COLQWEN_ENDPOINT_URL is empty; visual reranker disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let pipeline = Arc::new(RetrievalPipeline {
         pool: pool.clone(),
@@ -192,6 +260,8 @@ async fn main() -> anyhow::Result<()> {
         visibility,
         nats: nats_client,
         sparse_backend,
+        visual_embedder,
+        colqwen,
     });
 
     // Prometheus metrics

@@ -269,6 +269,11 @@ The leads-core service was built, deployed, and live-verified against the REAL B
   run is the remaining step.
 
 ## PR-4 — W2 recurring monitoring — CORRECTLY DEFERRED
+> ⚠️ **SUPERSEDED (2026-06-20).** The user overrode the day-15 gate; W2 was subsequently **BUILT + live-verified**
+> in full. The authoritative status is the "PR-4 / W2 — recurring change-monitoring (BUILT this session)" +
+> "LIVE DoD VERIFICATION" sections below. This earlier "deferred / NOT built" section is retained only as the
+> chronological record of the pre-override decision — it does NOT reflect current state.
+
 The day-15 go/no-go is **2026-07-05** (not yet reached as of 2026-06-20). Per the plan, W2 proceeds only if
 Phase-1 Track C is merged-and-green at that gate; otherwise it defers wholesale to Phase 3. Building it now
 would violate the conditional gate, so it is intentionally NOT built (never half-shipped).
@@ -302,7 +307,9 @@ Remaining W2 build (the recurring layer on top of Phase-1 C's on-demand check), 
 4. change → run-event-log → existing `fanoutWebhooks` + one in-product notification; gateway monitoring read
    surface + minimal v3 tab (fixed hourly/daily/weekly presets only).
 
-**Status: NOT built.** Per the plan's absolute rule ("never half-ship W2 — fully persists+alerts with cross-org
+**Status: NOT built.** _(SUPERSEDED 2026-06-20 — W2 was subsequently built + live-verified; see the "BUILT this
+session" + "LIVE DoD VERIFICATION" sections below. This line reflects the pre-override decision only.)_ Per the
+plan's absolute rule ("never half-ship W2 — fully persists+alerts with cross-org
 isolation, OR cleanly deferred"), this multi-service Temporal engine + its live DoD (a real source on a daily
 preset persists a baseline + writes a diff on change + fires webhook + notification, cross-org isolated) require
 a focused build + a live Temporal/Quarry-stack verification — not safely completable as a no-half-ship unit in
@@ -416,3 +423,116 @@ Added the recurring-monitor CREATE/LIST/DELETE seam the monitoring domain's own 
 - Remaining (documented, not a silent gap): the SPA monitoring-tab CREATE **form** + a live gateway-session
   run through `/api/v1/monitoring/schedules`. The backend engine + edge create path are live-verified directly;
   the gateway routes are thin proxies over that verified path.
+
+---
+
+## POST-AUDIT GAP CLOSURE (2026-06-22)
+
+A full adversarial re-audit (one verifier per PR vs the plan DoD) flagged Phase 2 INCOMPLETE on 3 gaps. Closure log:
+
+### Gap 1 — W3 runtime was dark (PR-3) — ✅ CLOSED + proven with real data
+Root cause: the `insight-core` compose service (apps/Application Plane/docker-compose.yml) had no DATABASE_URL/NATS_URL/depends_on, so the deployed container took the in-memory branch and never started the metric subscriber — the code+tests were green but the durable real-event path was dark.
+Fix: wired `DATABASE_URL` (application-postgres/application_plane, mirroring leads-core), `NATS_URL=velion-nats:4222` + `NATS_TOKEN` (the bus conversation-core publishes `velion.application.>` to — its config resolves VELION_NATS_URL first), and `depends_on application-postgres`; corrected the stale "NO database and NO NATS" comment. Rebuilt the image (the running one predated the PR-3 code) + recreated.
+Proof: boot logs now show `durable metric store (Postgres) enabled` + `metric-subscriber subscribed to velion.application.> (durable=insight-core-metric-subscriber)`. The durable JetStream consumer REPLAYED real historical events into `insight_metric_events` — 12 rows from REAL lifecycle events: inbox/ai_actions_executed=2 (the exact approve→execute events from PR-1 W4 live verify), ai_actions_reviewed=3, messages_received/sent=2 each, tickets_suggested=2, social/publish_jobs_failed=1. No fabrication — every metric traces to an event a producer actually emitted. The gateway briefs.rs Preview gate (unit-tested) now reads a non-empty real-event store.
+
+### Gap 3 — E5 UI never rendered the tool NAME (PR-2) — ✅ CLOSED in code (tool name); source = honest deferral
+The backend carried the real tool name (details.tool, fixed in a05af4d8) and audit-client.ts aggregated
+`workspaceActivity.tools[]`, but TrustCenterSection.tsx only rendered data-category chips — the tool NAME string
+was never displayed. Fix: added a "Tools the AI invoked" chip row (Sparkles icon) rendering
+`workspaceActivity.tools` (real names from real tool_action rows), gated on totalEvents>0 so it never shows over
+empty. `pnpm typecheck` green. The DoD's other literal — per-connection "source" — stays a documented honest
+deferral: builtin agent tools aren't connection-bound, so attributing a source would fabricate; the UI shows
+"Attribution unavailable" rather than invent one. (Live UI render not re-verified — the velionv3 SPA stack is down.)
+
+### Doc-hygiene (audit-flagged inaccuracies) — fixed
+- gateway `domains/privacy.rs` header comment no longer falsely claims user-core enforces step-up re-auth (it
+  doesn't; step-up is a documented Phase-3 follow-up). 
+- `AiActionReviewPanel.tsx` JSDoc no longer says "records (never executes)" — the executor is live; copy is "Applied".
+- The two stale "W2 CORRECTLY DEFERRED / NOT built" sections above now carry SUPERSEDED banners pointing to the
+  authoritative BUILT + LIVE-VERIFIED sections.
+
+### Gap 2 — W6 single-org JOIN never demonstrated as one live pass (PR-6) — OPEN (operational, infra-gated)
+This is the headline DoD of PR-6 and the one genuinely-open item. All components are built + individually verified
+(leads-core live vs real Brreg; W4 approve→execute live; E5 backend + now W3 durable+real-events live), and a prior
+partial gateway run demonstrated leads-search/save/export + briefs-preview for Velion AS — but the COMPLETE chain
+(Brreg resolve → AI proposes → approve → W4 execute → E5/W3 in-region audit) has not been shown as a single live
+pass. It requires bringing up the Control Plane + gateway + velionv3 stacks, an authenticated session, and the
+'leads' billing entitlement; those stacks are currently down (and CP has known DB-password-drift fragility on
+container recreation). Not a code gap — an operational demonstration.
+
+### Gap 2 — W6 single-org JOIN — LIVE-TESTED 2026-06-22 (real admin session, NO dev-bypass)
+Full stack brought up (Control Plane + gateway :3185 + velionv3 SPA + Application + Ingestion + Model Plane).
+Dev account wired the real way: registered `local@velion.dev` via Better Auth, marked email-verified + role=admin in
+auth_service, real sign-in → session (NO dev-bypass), created org **Velion (org_1782152609927)** via the onboarding
+API (owner membership), granted the `leads` add-on + enterprise quotas via billing-core `PUT /orgs/{id}/account`
+(entitlement check now `allowed:true`). Then one pass through the gateway with that session cookie:
+
+1. **Brreg resolve (W1)** — `POST /api/v1/leads/search` → real Enhetsregisteret companies (1814SALMON AS 929369661,
+   A JOHANSEN AS …); `POST /lists` → org-scoped saved list; **`GET …/export.csv` → 200** (was 402 pre-entitlement),
+   company-data-only CSV. The metered monetization wedge works end-to-end with the real session + entitlement.
+2. **AI proposes** — invoked the live model via model-gateway `/v1/invoke`; **gpt-5-mini genuinely classified** the
+   Norwegian billing complaint → `{outcome:suggest_ticket, confidence:0.98, category:billing, priority:urgent,
+   team:Billing}`. Recorded as a real ticket.classification in cc-go (a real conversation was first created via the
+   ingest path). No fabrication — the model decided.
+3. **Approve → execute (W4)** — `POST /api/v1/inbox/ai-actions/{id}/approve` through the gateway (real session) →
+   the cc-go executor promoted the ticket **suggested → open** and applied the model's routing (billing / urgent /
+   Billing). The keystone approve→ACT, live, for Velion.
+4. **Brief (W3)** — `GET /api/v1/briefs` reflects **real Velion metrics** (inbox: ai_actions_executed 1 +
+   ai_actions_reviewed 1, mapped by insight-core's subscriber from the real lifecycle events), state=preview with the
+   honest "real counts, no trends inferred" disclosure (below the 5-event threshold). No fabrication.
+5. **Agent acts + audited in-region** — an agentic `chat/stream` run executed tools LIVE (the loop called `fetch_url`
+   and fetched the real Brreg Enhetsregisteret page for 929369661). The **lead_export audit landed for Velion**
+   (`audit_events`: `lead_export | org_1782152609927`) — proving the audit pipeline + org-attribution work live on
+   velion-nats.
+
+**Open tail (env-wiring, NOT a Phase-2 code gap):** the E5 `tool_action` audit ROW for the agentic tool run is not
+yet visible via `/api/v1/audit` — execution-core/session-core's tool_action audit must reach audit-core over the
+Model-Plane bus (`EXTRA_NATS_URLS=model-plane-nats-1`); audit-core now subscribes it, but no tool_action row arrived,
+so the Model-Plane audit publisher path needs re-establishing. E5's code (audit row carries the real tool NAME —
+PR-2; the UI renders it — Gap-3 fix) is proven; the lead_export audit proves delivery+attribution work.
+
+**Env finding:** App-Plane services (cc-go, insight-core) and audit-core lost their NATS at bring-up because they
+booted before the shared inter-plane / model-plane NATS was DNS-resolvable and don't retry ("NATS disabled: lookup
+… no such host"). A restart reconnects them (verified: cc-go executor re-subscribed, insight-core re-subscribed +
+received the JOIN's events, audit-core re-aggregated both buses). A `depends_on`/retry on the shared NATS would make
+bring-up order-independent — recommended follow-up, not a Phase-2 code defect.
+
+### Gap 2 tail — E5 tool_action audit — ✅ RESOLVED 2026-06-22 (live, real session)
+Not a code bug. The E5 audited path lives in execution-core, engaged only by the chat `agentic` feature
+(`model-gateway sse.rs:246` → `agentic_run_stream` → session-core StartRun → execution-core governed multi-tool
+loop → per-step tool_action audit). The earlier JOIN run sent `features:["tools"]`, which falls through to
+model-gateway's INLINE tool loop (tools executed in-process, NOT via execution-core → no session-core audit).
+Re-running chat/stream with `features:["agentic"]` routed the turn through execution-core
+(`run_agent: purpose-locked governed multi-tool run`, toolset incl. company_lookup), which used the Brreg
+`company_lookup` tool live (answer: "1814SALMON AS, Active (not bankrupt), Dal") and produced the audit row:
+`audit_events: tool_action | org_1782152609927 | {"tool":"company_lookup","data_category":"public_non_personal","zdr":false} | plane=model`,
+queryable via the gateway `GET /api/v1/audit?event=tool_action` with the real session — the REAL tool NAME, org-scoped.
+audit-core had to be reconnected to the model-plane bus first (the same boot-race restart as cc-go/insight-core).
+
+**W6 JOIN is now 7/7 legs LIVE for Velion through the gateway, no dev-bypass:** real auth → Brreg resolve +
+metered export → real-model proposes → approve → W4 execute → W3 brief (real metrics, Preview-gated) → agent acts
+live (company_lookup→Brreg) → **E5 audited in-region (real tool name)**.
+
+Observation (not a Phase-2 gap): the inline chat tool loop (`features:["tools"]` without `agentic`) executes tools
+without a tool_action audit — only the governed `agentic`/execution-core path audits. If chat-mode inline tool use
+should also be auditable, that's a separate Model-Plane design decision.
+
+### E5 audit coverage — inline chat tool loop now audited too (2026-06-22) — ✅ DONE + live
+Closed the observation from the JOIN: the inline chat tool loop (`features:["tools"]` WITHOUT `agentic`,
+`model-gateway sse.rs:246` fallback) executed builtin tools (fetch_url/web_search/knowledge_search…) directly in
+model-gateway WITHOUT emitting a tool_action audit — only the governed execution-core path audited. So AI tool use
+on the inline path was unauditable.
+- NEW `model-gateway/src/audit.rs`: a best-effort inline-tool audit emitter mirroring session-core's canonical
+  contract — publishes the SAME flat body to `velion.audit.v1.model.tool_action` (audit-core consumes it), with a
+  lazily-connected process-global NATS client (NATS_URL), an honest per-tool `data_category` map (public web/registry
+  tools → `public_non_personal`, the org-knowledge tool → `customer_private`, unknown → `unclassified` — never
+  fabricated), and the audit-core `AuditEvent` json shape (org_id/plane/event required). 3 unit tests.
+- `sse.rs`: after the inline tool loop finalizes `tool_events`, emit one tool_action audit per executed tool
+  (tool name resolved from the ToolCall, outcome from the ToolResult). Best-effort — never blocks the turn.
+- `cargo check`/`cargo test audit::` (3/3) green; clippy `-D warnings` clean on audit.rs (the 14 remaining
+  model-gateway clippy errors are pre-existing newer-clippy debt in other files, unrelated; Dockerfile builds with
+  `cargo build`). Rebuilt + recreated model-gateway.
+- LIVE: an inline `features:["tools"]` turn executed `fetch_url` ×3 (real Brreg API) → 3 NEW
+  `tool_action | org_1782152609927 | fetch_url | public_non_personal` rows in audit_events; `GET /api/v1/audit?event=tool_action`
+  via the gateway (real session) now returns BOTH paths' tools (`fetch_url` inline + `company_lookup` governed).
+  Every AI tool action is now auditable regardless of path.

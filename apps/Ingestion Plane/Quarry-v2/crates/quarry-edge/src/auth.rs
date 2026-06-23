@@ -264,7 +264,11 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
     validation.validate_nbf = true;
     validation.leeway = jwt_leeway_secs();
     if let Ok(expected_iss) = std::env::var("AUTH_CORE_ISSUER") {
-        validation.set_issuer(&[expected_iss]);
+        // An empty AUTH_CORE_ISSUER must NOT enforce iss="" (mirrors the
+        // model-gateway fix 672ed214) — skip issuer validation instead.
+        if !expected_iss.is_empty() {
+            validation.set_issuer(&[expected_iss]);
+        }
     }
     match std::env::var("AUTH_CORE_AUDIENCE") {
         Ok(expected_aud) => {

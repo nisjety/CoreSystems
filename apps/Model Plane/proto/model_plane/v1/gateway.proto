@@ -5,6 +5,9 @@ package model_plane.v1;
 option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
 
 import "google/protobuf/struct.proto";
+// ToolDefinition (name/description/parameters_json) — reused by ListMcpTools so
+// the governed agent loop (execution-core) can offer registered MCP tools.
+import "model_plane/v1/inference.proto";
 
 // ModelGateway — public boundary for HTTP/gRPC/SSE/WebSocket.
 // Owns: auth verification, request normalization, rate limiting, usage envelopes.
@@ -138,6 +141,11 @@ service ModelGateway {
   rpc RegisterMcpServer(RegisterMcpServerRequest) returns (RegisterMcpServerResponse);
   rpc ListMcpServers(ListMcpServersRequest) returns (ListMcpServersResponse);
   rpc ProxyMcpTool(ProxyMcpToolRequest) returns (ProxyMcpToolResponse);
+  // ListMcpTools — the discovered, agent-facing tool definitions for an org's
+  // enabled MCP servers, namespaced `mcp__<server_id>__<tool>`. Lets the
+  // governed agent loop (execution-core) offer them, then route calls back
+  // through ProxyMcpTool. Mirrors the in-process exposure the chat path uses.
+  rpc ListMcpTools(ListMcpToolsRequest) returns (ListMcpToolsResponse);
 
   // ===== Wave 10h — plugins =====
   rpc RegisterPlugin(RegisterPluginRequest) returns (RegisterPluginResponse);
@@ -1057,6 +1065,22 @@ message ListMcpServersRequest {
 message ListMcpServersResponse {
   string request_id = 1;
   repeated McpServer servers = 2;
+}
+
+message ListMcpToolsRequest {
+  string request_id = 1;
+  string org_id = 2;
+  // The run/caller user — exposure is filtered to tools this user may USE
+  // (org-wide, owned, or shared-to-them); never another user's private tools.
+  string user_id = 3;
+}
+
+// ListMcpToolsResponse — agent-facing tool definitions discovered across the
+// org's enabled MCP servers. `tools[].name` is the namespaced
+// `mcp__<server_id>__<tool>`; `parameters_json` is the tool's JSON Schema.
+message ListMcpToolsResponse {
+  string request_id = 1;
+  repeated ToolDefinition tools = 2;
 }
 
 // ProxyMcpToolRequest — invoke a tool exposed by a registered MCP

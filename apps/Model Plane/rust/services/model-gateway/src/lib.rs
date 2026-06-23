@@ -1,6 +1,7 @@
 //! model-gateway library crate — exposes modules for integration tests.
 
 pub mod approvals;
+pub mod audit;
 pub mod auth;
 pub mod budget;
 pub mod cancel_registry;
@@ -21,6 +22,7 @@ pub mod mcp_jsonrpc;
 pub mod moderation;
 pub mod nats_publisher;
 pub mod normalize;
+pub mod ownership;
 pub mod profile;
 pub mod quarry;
 pub mod rate_limit;

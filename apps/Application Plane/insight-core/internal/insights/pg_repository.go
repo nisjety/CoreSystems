@@ -11,6 +11,9 @@ import (
 // PGRepository is the durable (Postgres) metric-event store for W3. The connector
 // registry is static/in-code (org-independent), so ListConnectorSlots returns the
 // same registry the in-memory repo does — only per-org metric events are persisted.
+//
+// All queries are schema-qualified to `insight_core` (migration 002) so the store
+// never collides with another Application-Plane core sharing the database.
 type PGRepository struct {
 	pool       *pgxpool.Pool
 	connectors []ConnectorSlot
@@ -28,7 +31,7 @@ func (r *PGRepository) RecordMetricEvent(ctx context.Context, event MetricEvent)
 		return nil, err
 	}
 	if _, err := r.pool.Exec(ctx, `
-INSERT INTO insight_metric_events
+INSERT INTO insight_core.insight_metric_events
 	(id, org_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
 ON CONFLICT (id) DO NOTHING`,
@@ -46,7 +49,7 @@ ON CONFLICT (id) DO NOTHING`,
 func (r *PGRepository) ListMetricEvents(ctx context.Context, query OverviewQuery) ([]MetricEvent, error) {
 	rows, err := r.pool.Query(ctx, `
 SELECT id, org_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at
-FROM insight_metric_events
+FROM insight_core.insight_metric_events
 WHERE org_id = $1
   AND surface = ANY($2)
   AND ($3::timestamptz IS NULL OR occurred_at >= $3)
@@ -89,7 +92,7 @@ func (r *PGRepository) ListConnectorSlots(_ context.Context, _ string) ([]Connec
 func (r *PGRepository) ListOrgIDsWithMetricsSince(ctx context.Context, since time.Time) ([]string, error) {
 	rows, err := r.pool.Query(ctx, `
 SELECT DISTINCT org_id
-FROM insight_metric_events
+FROM insight_core.insight_metric_events
 WHERE occurred_at >= $1
 ORDER BY org_id`, since)
 	if err != nil {

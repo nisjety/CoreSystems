@@ -153,14 +153,20 @@ export function EmptyStateInline(props: {
   )
 }
 
-export function MetricCard(props: { Icon: StudioIcon; label: string; value: string }) {
+/**
+ * Phase 4 honesty sweep: when no measured value exists yet, MetricCard renders a
+ * neutral em-dash placeholder rather than a fabricated `0`. A real aggregate is
+ * passed only once a backend produces one — there is no measurement source on
+ * these preview surfaces today.
+ */
+export function MetricCard(props: { Icon: StudioIcon; label: string; value?: string }) {
   return (
     <div class="velion-panel p-5">
       <div class="flex items-center gap-2 text-[14px] font-semibold text-[#555B65] dark:text-[#D7DCE4]">
         <Dynamic component={props.Icon} class="size-5" />
         {props.label}
       </div>
-      <div class="mt-5 text-[30px] font-medium leading-none">{props.value}</div>
+      <div class="mt-5 text-[30px] font-medium leading-none text-[#8A909B] dark:text-[#AEB4C0]">{props.value ?? '—'}</div>
     </div>
   )
 }

@@ -786,6 +786,7 @@ mod tests {
             text: "hello".to_owned(),
             model: "text-embedding-3-small".to_owned(),
             zdr: false,
+            ..Default::default()
         };
 
         let openai_body = build_embedding_request_body(&req, true);

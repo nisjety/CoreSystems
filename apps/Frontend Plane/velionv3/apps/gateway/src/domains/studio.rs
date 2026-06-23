@@ -600,7 +600,7 @@ fn default_project(scope: &StudioScope, now: DateTime<Utc>) -> StudioProject {
         title: "Launch canvas".to_owned(),
         status: "draft",
         blocks: default_canvas_blocks(),
-        selected_block_id: Some("profile".to_owned()),
+        selected_block_id: None,
         social_draft_id: None,
         social_exported_at: None,
         created_at: now.clone(),
@@ -608,75 +608,12 @@ fn default_project(scope: &StudioScope, now: DateTime<Utc>) -> StudioProject {
     }
 }
 
+/// Phase 4 PR-3 seed strip: a freshly seeded Studio project starts as an honest
+/// empty canvas. The previous demo content (a fabricated persona plus stock
+/// imagery) implied real org content that does not exist, so the default project
+/// now carries no blocks — the user builds the canvas from empty.
 fn default_canvas_blocks() -> Vec<StudioBlock> {
-    vec![
-        StudioBlock {
-            id: "profile".to_owned(),
-            kind: "profile".to_owned(),
-            title: "Ava Berg".to_owned(),
-            body: Some("Creative lead, Velion".to_owned()),
-            image_url: Some("https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=420&q=80".to_owned()),
-            x: 92.0,
-            y: 82.0,
-            width: 390.0,
-            height: 300.0,
-        },
-        StudioBlock {
-            id: "positioning".to_owned(),
-            kind: "text".to_owned(),
-            title: "Campaign hook".to_owned(),
-            body: Some("Turn support signals into public trust. Show the workflow, not the promise.".to_owned()),
-            image_url: None,
-            x: 520.0,
-            y: 92.0,
-            width: 310.0,
-            height: 210.0,
-        },
-        StudioBlock {
-            id: "brand".to_owned(),
-            kind: "brand".to_owned(),
-            title: "VELION".to_owned(),
-            body: Some("Quiet operations, visible momentum".to_owned()),
-            image_url: None,
-            x: 868.0,
-            y: 90.0,
-            width: 330.0,
-            height: 220.0,
-        },
-        StudioBlock {
-            id: "workspace".to_owned(),
-            kind: "image".to_owned(),
-            title: "Product workspace".to_owned(),
-            body: Some("Dashboard crop for launch story".to_owned()),
-            image_url: Some("https://images.unsplash.com/photo-1497366811353-6870744d04b2?auto=format&fit=crop&w=520&q=80".to_owned()),
-            x: 1252.0,
-            y: 90.0,
-            width: 320.0,
-            height: 590.0,
-        },
-        StudioBlock {
-            id: "motion".to_owned(),
-            kind: "image".to_owned(),
-            title: "Motion background".to_owned(),
-            body: Some("Use as short-form opening scene".to_owned()),
-            image_url: Some("https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=780&q=80".to_owned()),
-            x: 92.0,
-            y: 420.0,
-            width: 690.0,
-            height: 270.0,
-        },
-        StudioBlock {
-            id: "x-card".to_owned(),
-            kind: "link".to_owned(),
-            title: "@velion on X".to_owned(),
-            body: Some("x.com/velion".to_owned()),
-            image_url: None,
-            x: 870.0,
-            y: 350.0,
-            width: 320.0,
-            height: 265.0,
-        },
-    ]
+    Vec::new()
 }
 
 fn scope_key(scope: &StudioScope) -> String {
@@ -771,9 +708,30 @@ mod tests {
         );
     }
 
+    fn sample_block(id: &str, title: &str) -> StudioBlock {
+        StudioBlock {
+            id: id.to_owned(),
+            kind: "text".to_owned(),
+            title: title.to_owned(),
+            body: None,
+            image_url: None,
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 180.0,
+        }
+    }
+
     #[test]
     fn social_draft_input_uses_canvas_blocks_and_deduplicates_platforms() {
-        let project = default_project(&scope("org_a", "user_a"), Utc::now());
+        // The seeded default project is an honest empty canvas (Phase 4 PR-3 seed
+        // strip), so build an explicit block to prove block content flows into the
+        // draft body and that platforms are deduplicated.
+        let mut project = default_project(&scope("org_a", "user_a"), Utc::now());
+        project.blocks = vec![StudioBlock {
+            body: Some("Turn support signals into public trust.".to_owned()),
+            ..sample_block("positioning", "Campaign hook")
+        }];
         let input = build_social_draft_input(
             &project,
             ExportSocialDraftBody {
@@ -797,8 +755,30 @@ mod tests {
     }
 
     #[test]
+    fn seeded_default_project_starts_with_an_empty_canvas() {
+        // Honesty guard: the seed strip must keep the default canvas empty so no
+        // fabricated demo persona or stock imagery is reintroduced.
+        let project = default_project(&scope("org_a", "user_a"), Utc::now());
+        assert!(project.blocks.is_empty());
+        assert!(project.selected_block_id.is_none());
+
+        let input = build_social_draft_input(
+            &project,
+            ExportSocialDraftBody {
+                title: None,
+                body: None,
+                platforms: None,
+                scheduled_at: None,
+            },
+            Utc::now(),
+        )
+        .expect("valid draft input");
+        assert_eq!(input.body, "Draft social content for Launch canvas.");
+    }
+
+    #[test]
     fn rejects_invalid_block_geometry() {
-        let mut block = default_canvas_blocks().remove(0);
+        let mut block = sample_block("positioning", "Campaign hook");
         block.width = f64::NAN;
 
         assert_eq!(

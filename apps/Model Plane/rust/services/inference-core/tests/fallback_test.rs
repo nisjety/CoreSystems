@@ -120,6 +120,7 @@ fn sample_embedding_request(provider_hint: &str) -> EmbedRequest {
         text: "hello".to_owned(),
         model: "embedding-model".to_owned(),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -271,6 +272,8 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         velion_intent_budget_usd: 50.0,
         session_core_url: None,
         router_policy_refresh_secs: 60,
+        azure_openai_region: None,
+        allow_non_eu_embedding: false,
     };
 
     let chain = FallbackChain::from_config(&cfg);
@@ -310,6 +313,8 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
         velion_intent_budget_usd: 50.0,
         session_core_url: None,
         router_policy_refresh_secs: 60,
+        azure_openai_region: None,
+        allow_non_eu_embedding: false,
     };
 
     let chain = FallbackChain::from_config(&cfg);

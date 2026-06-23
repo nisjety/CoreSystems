@@ -40,7 +40,7 @@ impl Interceptor for ApiKeyInterceptor {
         // request extensions for gRPC is wave-3.2 (Tonic's `extensions()` is
         // not a request-scoped Axum-style map — we'd need a Tower layer).
         if let Some(token) = bearer_token(&req) {
-            if verify_jwt_sync(&token).is_ok() {
+            if verify_jwt_claims(&token).is_ok() {
                 record_trace_context(&req);
                 return Ok(req);
             }
@@ -57,9 +57,10 @@ fn bearer_token(req: &Request<()>) -> Option<String> {
     value.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
-/// Synchronous JWT verification — interceptor runs on Tonic's gRPC thread
-/// and cannot await. PEM is loaded once via env; no JWKS fetch (deferred).
-fn verify_jwt_sync(token: &str) -> Result<(), ()> {
+/// Synchronous JWT verification returning the decoded claims — the interceptor
+/// runs on Tonic's gRPC thread and cannot await. PEM is loaded once via env; no
+/// JWKS fetch (deferred). Returning `Claims` lets callers bind org (GAP-2).
+fn verify_jwt_claims(token: &str) -> Result<crate::authz::Claims, ()> {
     let pem = std::env::var("JWT_PUBLIC_KEY_PEM")
         .ok()
         .filter(|p| !p.is_empty())
@@ -73,9 +74,43 @@ fn verify_jwt_sync(token: &str) -> Result<(), ()> {
     if let Ok(aud) = std::env::var("JWT_REQUIRED_AUDIENCE") {
         validation.set_audience(&[aud]);
     }
-    jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
-        .map(|_| ())
+    jsonwebtoken::decode::<crate::authz::Claims>(token, &key, &validation)
+        .map(|data| data.claims)
         .map_err(|_| ())
+}
+
+/// Defense-in-depth org binding for the gRPC path (Phase-1 GAP-2). When the
+/// caller presented a valid Bearer JWT, returns its verified `org_id` claim so a
+/// handler can reject a request body that names a different org. Returns `None`
+/// on the API-key path (no identity — gateway-trusted) or for a JWT with no org
+/// claim, in which case the handler falls back to its existing behavior.
+pub fn verified_org_from_metadata(md: &tonic::metadata::MetadataMap) -> Option<String> {
+    let value = md.get("authorization").and_then(|v| v.to_str().ok())?;
+    let token = value.strip_prefix("Bearer ")?;
+    verify_jwt_claims(token).ok().and_then(|c| c.org_id)
+}
+
+/// The viewer identity from TRUSTED transport, for per-user ownership binding on
+/// agent grounding. Prefers a verified JWT `sub`; falls back to the `x-user-id`
+/// metadata header forwarded by the gateway on the API-key path. Returns `None`
+/// when no identity is present (→ the handler stays org-scoped). The request
+/// BODY `user_id` is never consulted here — it must not be trusted.
+pub fn user_id_from_metadata(md: &tonic::metadata::MetadataMap) -> Option<String> {
+    if let Some(token) = md
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        if let Ok(c) = verify_jwt_claims(token) {
+            if !c.sub.is_empty() {
+                return Some(c.sub);
+            }
+        }
+    }
+    md.get("x-user-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn record_trace_context(req: &Request<()>) {

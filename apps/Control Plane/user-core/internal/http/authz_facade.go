@@ -155,6 +155,13 @@ func (s *Server) authzGrant(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Evict the Data Plane retrieval visibility cache for (subject_id, org_id) so
+	// the recipient sees the newly-shared resource within one query (TTL backstop).
+	if s.publisher != nil {
+		s.publisher.PublishResourceGrantsChanged(c.Request.Context(),
+			out.GrantID, out.OrgID, out.ResourceType, out.ResourceID,
+			out.SubjectType, out.SubjectID, out.Role, "grant")
+	}
 	c.JSON(http.StatusOK, grantView(out))
 }
 
@@ -181,6 +188,12 @@ func (s *Server) authzRevoke(c *gin.Context) {
 	if err := s.aclRepo.Revoke(c.Request.Context(), orgID, resourceType, resourceID, subjectType, subjectID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke grant"})
 		return
+	}
+	// Evict the Data Plane visibility cache so the revoke takes effect within one
+	// query (the DP keys eviction on subject_id+org_id; grant_id/role unused here).
+	if s.publisher != nil {
+		s.publisher.PublishResourceGrantsChanged(c.Request.Context(),
+			"", orgID, resourceType, resourceID, subjectType, subjectID, "", "revoke")
 	}
 	c.JSON(http.StatusOK, gin.H{"revoked": true})
 }

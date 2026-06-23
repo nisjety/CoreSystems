@@ -20,6 +20,12 @@ pub(crate) struct CachedToken {
 #[serde(rename_all = "camelCase")]
 struct TokenResponse {
     token: String,
+    // auth-core's plane-token endpoint reports the TTL as `expiresInSeconds`
+    // (the model-plane endpoint historically used `expiresIn`); accept both.
+    // Without the alias this is None → the cache fell back to a 3600s default
+    // and kept serving 5-minute plane tokens long after they expired — which
+    // the edge's real JWT `exp` verification (dev-bypass off) correctly rejects.
+    #[serde(alias = "expiresInSeconds")]
     expires_in: Option<u64>,
 }
 
@@ -60,7 +66,9 @@ pub(crate) async fn get_audience_token(
     }
 
     let token_resp = resp.json::<TokenResponse>().await.ok()?;
-    let expires_in = token_resp.expires_in.unwrap_or(3600);
+    // Safe default: plane tokens are short-lived (auth-core default 300s), so a
+    // missing TTL must NOT fall back to an hour of caching past a 5-minute exp.
+    let expires_in = token_resp.expires_in.unwrap_or(300).max(120);
     let ttl = Duration::from_secs(expires_in.saturating_sub(60));
 
     let token = token_resp.token.clone();

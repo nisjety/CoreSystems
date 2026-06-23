@@ -31,6 +31,7 @@ type runIDs struct {
 type ScrapeJobInput struct {
 	RunID  string `json:"run_id"`
 	JobID  string `json:"job_id,omitempty"`
+	OrgID  string `json:"org_id,omitempty"`
 	URL    string `json:"url"`
 	Policy Policy `json:"policy,omitempty"`
 }
@@ -57,6 +58,7 @@ type ChangeMonitorInput struct {
 type BatchJobInput struct {
 	RunID  string   `json:"run_id"`
 	JobID  string   `json:"job_id,omitempty"`
+	OrgID  string   `json:"org_id,omitempty"`
 	URLs   []string `json:"urls"`
 	Policy Policy   `json:"policy,omitempty"`
 }
@@ -65,6 +67,7 @@ type BatchJobInput struct {
 type CrawlJobInput struct {
 	RunID    string   `json:"run_id"`
 	JobID    string   `json:"job_id,omitempty"`
+	OrgID    string   `json:"org_id,omitempty"`
 	Seeds    []string `json:"seeds"`
 	MaxDepth uint32   `json:"max_depth"`
 	MaxPages uint32   `json:"max_pages"`
@@ -150,16 +153,24 @@ func deterministicEventID(idemHex string) quarrycontracts.ID {
 
 // runPage invokes the page activity and emits lifecycle events based on the
 // returned error's classification.
+//
+// org is the originating tenant id. It rides into the RunPageInput so the
+// activity can HMAC-bind org_id+url on the /v1/internal/run_page call (a
+// leaked runtime bearer can't then forge another tenant's org). Empty org
+// is allowed at this layer (the edge enforces a non-empty org_id itself);
+// passing it through is deterministic — no new wall-clock/rand calls.
 func runPage(
 	ctx workflow.Context,
 	a *activities.Activities,
 	ids runIDs,
+	org string,
 	url string,
 ) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
 		RunID: ids.RunID,
 		URL:   url,
+		OrgID: org,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -207,7 +218,7 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 		return err
 	}
 
-	if _, err := runPage(ctx, a, ids, in.URL); err != nil {
+	if _, err := runPage(ctx, a, ids, in.OrgID, in.URL); err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
 			"url":   in.URL,
 			"error": err.Error(),
@@ -298,7 +309,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 
 	var visited, failed uint32
 	for _, url := range in.URLs {
-		if _, err := runPage(ctx, a, ids, url); err != nil {
+		if _, err := runPage(ctx, a, ids, in.OrgID, url); err != nil {
 			failed++
 			continue
 		}
@@ -386,7 +397,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		cur := frontier[0]
 		frontier = frontier[1:]
 
-		res, err := runPage(ctx, a, ids, cur.URL)
+		res, err := runPage(ctx, a, ids, in.OrgID, cur.URL)
 		if err != nil {
 			pagesFailed++
 			ctrl.progress.Failed = pagesFailed

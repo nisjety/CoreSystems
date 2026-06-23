@@ -440,6 +440,10 @@ services:
       OTEL_SERVICE_NAME: execution-core
       SESSION_CORE_ADDR: http://session-core:9091
       INFERENCE_CORE_ADDR: http://inference-core:9092
+      # model-gateway gRPC — governed loop fetches/proxies an org's registered
+      # MCP tools (ListMcpTools + ProxyMcpTool). Same model-plane-network, so the
+      # service name resolves; best-effort (no MCP tools offered if unreachable).
+      MODEL_GATEWAY_ADDR: ${MODEL_GATEWAY_ADDR_EXEC:-http://model-gateway:9090}
       # Documented primary for the agent run driver (RunAgent) Infer round.
       INFERENCE_CORE_URL: http://inference-core:9092
       CAPABILITY_CORE_ADDR: http://capability-core:9097
@@ -454,6 +458,15 @@ services:
       # port. DATAPLANE_INTERNAL_KEY is sent as the x-api-key credential.
       DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL_EXEC:-http://host.docker.internal:50062}
       DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
+      # Information-core (Application Plane) — backs the real news / traffic /
+      # yr_weather / track_shipment agentic tools. execution-core is not on the
+      # inter-plane bus, so (like retrieval above) it reaches information-core via
+      # its host-published port rather than the in-network name (which NXDOMAINs
+      # from this network and surfaced as the tools' "dns error").
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL_EXEC:-http://host.docker.internal:3190}
+      # information-core gates /api/v1/* on x-internal-api-key (no-key → 401), so
+      # the info tools must present the shared internal key.
+      INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
     depends_on:
       postgres:
         condition: service_healthy

@@ -38,6 +38,85 @@ func TestOverviewIncludesAllVelionSurfaces(t *testing.T) {
 	}
 }
 
+func TestOverviewCitesRealEventSourcesNeverFabricates(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+
+	// Two events on the same metric from the same real producer.
+	for i := 0; i < 2; i++ {
+		if _, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+			OrgID:   "org-1",
+			Surface: SurfaceInbox,
+			Metric:  "ai_actions_executed",
+			Value:   1,
+			Source:  "conversation-core",
+		}); err != nil {
+			t.Fatalf("RecordMetricEvent error: %v", err)
+		}
+	}
+	// A metric with NO source must stay unattributed (never fabricated).
+	if _, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+		OrgID:   "org-1",
+		Surface: SurfaceInbox,
+		Metric:  "tickets_created",
+		Value:   1,
+	}); err != nil {
+		t.Fatalf("RecordMetricEvent error: %v", err)
+	}
+
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1", Surfaces: []string{SurfaceInbox}})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+
+	var executed, ticketsCreated *Scorecard
+	for i := range overview.Scorecards {
+		switch overview.Scorecards[i].Metric {
+		case "ai_actions_executed":
+			executed = &overview.Scorecards[i]
+		case "tickets_created":
+			ticketsCreated = &overview.Scorecards[i]
+		}
+	}
+	if executed == nil || ticketsCreated == nil {
+		t.Fatalf("missing scorecards: executed=%v ticketsCreated=%v", executed != nil, ticketsCreated != nil)
+	}
+	if executed.Source != "conversation-core" {
+		t.Errorf("scorecard source = %q, want %q (real producer citation)", executed.Source, "conversation-core")
+	}
+	if executed.Value != 2 {
+		t.Errorf("scorecard value = %v, want 2", executed.Value)
+	}
+	if ticketsCreated.Source != "" {
+		t.Errorf("unattributed metric must have an empty source, never fabricated; got %q", ticketsCreated.Source)
+	}
+}
+
+func TestOverviewJoinsMultipleDistinctSourcesSorted(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	for _, source := range []string{"social-core", "conversation-core"} {
+		if _, err := service.RecordMetricEvent(context.Background(), IngestMetricEventInput{
+			OrgID:   "org-1",
+			Surface: SurfaceSocial,
+			Metric:  "cross_producer_metric",
+			Value:   1,
+			Source:  source,
+		}); err != nil {
+			t.Fatalf("RecordMetricEvent error: %v", err)
+		}
+	}
+
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1", Surfaces: []string{SurfaceSocial}})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	if len(overview.Surfaces[0].Metrics) != 1 {
+		t.Fatalf("metrics = %#v, want one rolled-up metric", overview.Surfaces[0].Metrics)
+	}
+	if got := overview.Surfaces[0].Metrics[0].Source; got != "conversation-core, social-core" {
+		t.Errorf("distinct sources = %q, want sorted-joined %q", got, "conversation-core, social-core")
+	}
+}
+
 func TestOverviewDoesNotLeakEventsAcrossOrganizations(t *testing.T) {
 	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
 	for _, orgID := range []string{"org-1", "org-2"} {

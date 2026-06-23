@@ -128,6 +128,87 @@ describe('VelionIngestionsPage', () => {
     await waitFor(() => expect(screen.getByText(/blake3:deadbeefcafe/i)).toBeTruthy())
   })
 
+  it('creates and deletes a tracked web source from the Sources tab', async () => {
+    const sourceRecord = {
+      id: 'src_01',
+      name: 'Acme pricing',
+      url: 'https://acme.example/pricing',
+      kind: 'scrape',
+      status: 'active',
+      createdAt: '',
+      updatedAt: '',
+      config: {},
+    }
+    let createdOnce = false
+    const calls: Array<{ url: string; method: string; body: string }> = []
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : '' })
+
+        if (url.endsWith('/api/ingestions/runs')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/schedules')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/profiles')) return jsonResponse({ profiles: [] })
+        // POST create → mark created so the next list reflects it (no fabrication).
+        if (url.endsWith('/api/ingestions/sources') && method === 'POST') {
+          createdOnce = true
+          return jsonResponse({ source: sourceRecord }, 201)
+        }
+        // DELETE → 204-style success; subsequent list is empty again.
+        if (url.includes('/api/ingestions/sources/') && method === 'DELETE') {
+          createdOnce = false
+          return jsonResponse({ deleted: true, sourceId: 'src_01' })
+        }
+        if (url.endsWith('/api/ingestions/sources')) {
+          return jsonResponse({
+            integrations: [],
+            quarrySources: createdOnce ? [sourceRecord] : [],
+          })
+        }
+        return jsonResponse({ error: { code: 'not_found', message: `Unhandled ${url}` } }, 404)
+      }),
+    )
+
+    renderIngestions()
+    fireEvent.click(screen.getByRole('button', { name: /sources/i }))
+
+    // Honest empty state before anything is registered.
+    await waitFor(() => expect(screen.getByText(/no durable source records yet/i)).toBeTruthy())
+
+    // Fill + submit the create form.
+    fireEvent.input(screen.getByRole('textbox', { name: /^name$/i }), {
+      target: { value: 'Acme pricing' },
+    })
+    fireEvent.input(screen.getByRole('textbox', { name: /^url$/i }), {
+      target: { value: 'https://acme.example/pricing' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /add source/i }))
+
+    // The newly created source appears after the post-create refetch.
+    await waitFor(() => expect(screen.getByText('Acme pricing')).toBeTruthy())
+
+    const createCall = calls.find((c) => c.url.endsWith('/api/ingestions/sources') && c.method === 'POST')
+    expect(createCall).toBeTruthy()
+    const sentBody = JSON.parse(createCall!.body)
+    expect(sentBody.name).toBe('Acme pricing')
+    expect(sentBody.url).toBe('https://acme.example/pricing')
+    expect(sentBody.kind).toBe('crawl')
+    // IDOR hygiene at the client boundary: no org field is ever sent.
+    expect('org_id' in sentBody).toBe(false)
+    expect('orgId' in sentBody).toBe(false)
+
+    // Remove it; the list returns to the honest empty state.
+    fireEvent.click(screen.getByRole('button', { name: /remove/i }))
+    await waitFor(() => expect(screen.getByText(/no durable source records yet/i)).toBeTruthy())
+
+    const deleteCall = calls.find((c) => c.url.includes('/api/ingestions/sources/') && c.method === 'DELETE')
+    expect(deleteCall).toBeTruthy()
+    expect(deleteCall!.url).toContain('/api/ingestions/sources/src_01')
+  })
+
   it('keeps the v2 ingestion sidebar menu available on the v3 shell', () => {
     window.history.pushState(null, '', '/ingestions')
 

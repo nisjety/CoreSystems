@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { ExecuteStepRequest, ExecuteStepResponse, ResumeRunRequest, ResumeRunResponse } from "./execution_pbjs";
+import { ExecuteStepRequest, ExecuteStepResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { CancelRunRequest, CancelRunResponse } from "./runs_pbjs";
 
@@ -48,6 +48,21 @@ export const ExecutionCore = {
       name: "CancelRun",
       I: CancelRunRequest,
       O: CancelRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Drive a whole agent run to completion: plan → infer → persist → finalize.
+     * MVP no-tool slice — a single InferenceCore.Infer round persisted to the
+     * run's thread, with the run flipped to a terminal status. Dispatched by the
+     * gateway after StartRun so a chat turn produces a durable answer instead of
+     * stalling in `'queued'`.
+     *
+     * @generated from rpc model_plane.v1.ExecutionCore.RunAgent
+     */
+    runAgent: {
+      name: "RunAgent",
+      I: RunAgentRequest,
+      O: RunAgentResponse,
       kind: MethodKind.Unary,
     },
   }

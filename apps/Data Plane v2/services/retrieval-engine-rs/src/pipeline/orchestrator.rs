@@ -52,9 +52,100 @@ pub struct RetrievalPipeline {
     /// Sparse lexical search backend. Postgres remains the canonical fallback;
     /// Quickwit is a rebuildable read model when enabled.
     pub sparse_backend: DynSparseSearchBackend,
+    /// Visual RAG arm query embedder (Cohere Embed v4). `None` when the visual
+    /// arm is not configured (text-only deployment); when present and `w_visual`
+    /// > 0 the orchestrator embeds the query into Embed v4's multimodal space and
+    /// fuses page-image hits from `qdrant_visual_collection`.
+    pub visual_embedder: Option<crate::embed::visual::VisualQueryEmbedder>,
+    /// ColQwen visual reranker client. `Some` only when `VISUAL_RERANK_ENABLED`
+    /// and `COLQWEN_ENDPOINT_URL` are set. When present, the orchestrator reorders
+    /// Embed-v4's page-image candidates by ColQwen late-interaction (MaxSim)
+    /// relevance; any failure degrades to the Embed-v4 order (non-fatal).
+    pub colqwen: Option<crate::search::colqwen::ColqwenClient>,
+}
+
+/// A page-image candidate's fetchable `image_url`, read from its raw Qdrant
+/// payload metadata — or `None` if it isn't a page-image candidate / has no URL.
+fn page_image_url(c: &ScoredCandidate) -> Option<String> {
+    use qdrant_client::qdrant::value::Kind;
+    let kind = |k: &str| c.metadata.get(k).and_then(|v| v.kind.as_ref());
+    match kind("source_type") {
+        Some(Kind::StringValue(s)) if s == "page_image" => {}
+        _ => return None,
+    }
+    match kind("image_url") {
+        Some(Kind::StringValue(u)) if !u.is_empty() => Some(u.clone()),
+        _ => None,
+    }
 }
 
 impl RetrievalPipeline {
+    /// ColQwen visual reranker: reorder the page-image candidates in `fused` by
+    /// ColQwen late-interaction (MaxSim) relevance to `query`. Only the order
+    /// *among the visual candidates* changes — they keep the score band they
+    /// already occupy, so they don't leapfrog text candidates. Non-fatal: a ZDR
+    /// query or any client error returns `fused` unchanged (Embed-v4 order).
+    async fn visual_rerank(
+        &self,
+        query: &str,
+        mut fused: Vec<ScoredCandidate>,
+        embed_zdr: bool,
+    ) -> Vec<ScoredCandidate> {
+        let Some(ref client) = self.colqwen else {
+            return fused;
+        };
+        if embed_zdr {
+            // A ZDR query must not egress page images to the visual reranker.
+            return fused;
+        }
+        // Select page-image candidates (current order) with a fetchable image_url,
+        // capped at visual_rerank_top_k.
+        let cap = self.config.visual_rerank_top_k.max(1);
+        let mut idxs: Vec<usize> = Vec::new();
+        let mut urls: Vec<String> = Vec::new();
+        for (i, c) in fused.iter().enumerate() {
+            if let Some(u) = page_image_url(c) {
+                idxs.push(i);
+                urls.push(u);
+                if idxs.len() >= cap {
+                    break;
+                }
+            }
+        }
+        if urls.len() < 2 {
+            // 0 or 1 visual candidate — nothing to reorder.
+            return fused;
+        }
+        let scores = match client.rerank(query, &urls).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "visual reranker failed; keeping Embed-v4 order");
+                return fused;
+            }
+        };
+        // Pair each visual candidate with its ColQwen score and sort best-first.
+        let mut ranked: Vec<(ScoredCandidate, f32)> = idxs
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| (fused[i].clone(), scores[k]))
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // The score band the visual candidates currently occupy (desc), reused so
+        // the reordered subset interleaves with text candidates exactly as before.
+        let mut band: Vec<f32> = idxs.iter().map(|&i| fused[i].final_score).collect();
+        band.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        // Write the best ColQwen candidate into the earliest visual slot with the
+        // highest band score, and so on — reorders the subset in place.
+        for (rank, &slot) in idxs.iter().enumerate() {
+            let (mut cand, cq) = ranked[rank].clone();
+            cand.rerank_score = cq;
+            cand.final_score = band[rank];
+            fused[slot] = cand;
+        }
+        tracing::info!(reranked = urls.len(), "visual reranker (ColQwen) applied");
+        fused
+    }
+
     #[tracing::instrument(
         name = "retrieval.pipeline",
         skip(self),
@@ -117,6 +208,7 @@ impl RetrievalPipeline {
             self.config.w_bm25,
             self.config.w_graph,
             self.config.w_wiki,
+            self.config.w_visual,
         );
 
         // Best-tool routing: run only the engines the blend actually weights.
@@ -286,6 +378,76 @@ impl RetrievalPipeline {
         } else {
             fused_candidates
         };
+
+        // Visual arm — layer Cohere Embed v4 page-image hits into the fused list
+        // by `w_visual`. Embeds the TEXT query into Embed v4's multimodal space
+        // (`input_type=query`) and ANN-searches `qdrant_visual_collection`.
+        // Skipped when `w_visual`≈0, the visual embedder isn't configured, the
+        // query is ZDR (embedder fails closed), or the arm returns nothing/errors
+        // (e.g. collection not yet populated) — visual is purely additive.
+        let fused_candidates = if mix_for_scoring.w_visual > 0.0 {
+            if let Some(ref ve) = self.visual_embedder {
+                match ve.embed_query(&req.query, embed_zdr).await {
+                    // Guard the visual query vector against the configured visual
+                    // dimension — a misconfigured Embed v4 deployment returning a
+                    // different dim than the collection would otherwise error per
+                    // candidate; skip the arm cleanly instead.
+                    Ok(visual_vec)
+                        if visual_vec.len() == self.config.visual_embedding_dimension =>
+                    {
+                        match vector_search(
+                            &self.qdrant,
+                            &self.config.qdrant_visual_collection,
+                            visual_vec,
+                            &req.org_id,
+                            Vec::new(),
+                            top_k,
+                        )
+                        .await
+                        {
+                            Ok(visual) if !visual.is_empty() => reciprocal_rank_fusion(
+                                &fused_candidates,
+                                &visual,
+                                60.0,
+                                mix_for_scoring.w_visual,
+                            ),
+                            Ok(_) => fused_candidates,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "visual ANN arm failed; skipping");
+                                fused_candidates
+                            }
+                        }
+                    }
+                    Ok(visual_vec) => {
+                        tracing::warn!(
+                            got = visual_vec.len(),
+                            want = self.config.visual_embedding_dimension,
+                            "visual query embedding dim mismatch; skipping visual arm"
+                        );
+                        fused_candidates
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "visual query embed skipped; skipping visual arm");
+                        fused_candidates
+                    }
+                }
+            } else {
+                fused_candidates
+            }
+        } else {
+            fused_candidates
+        };
+
+        // Visual rerank (ColQwen late-interaction / MaxSim). Reorders the
+        // page-image candidates among themselves by ColQwen relevance, on top of
+        // Embed-v4's first-stage order. Gated by VISUAL_RERANK_ENABLED; entirely
+        // non-fatal (any failure or ZDR leaves the Embed-v4 order intact).
+        let fused_candidates = if self.config.visual_rerank_enabled && self.colqwen.is_some() {
+            self.visual_rerank(&req.query, fused_candidates, embed_zdr)
+                .await
+        } else {
+            fused_candidates
+        };
         let sparse_ms = sparse_start.elapsed().as_millis() as u64;
         let candidate_count_fused = fused_candidates.len();
 
@@ -308,16 +470,33 @@ impl RetrievalPipeline {
         // Trim to the (possibly over-fetched) candidate pool before rerank
         let pre_rerank: Vec<ScoredCandidate> = fused_candidates.into_iter().take(fetch_k).collect();
 
-        // 5. Rerank
+        // 5. Rerank. Honor an explicit `mode_mix.rerank = false` (caller opts
+        // out of the cross-encoder), and treat ANY reranker failure as
+        // NON-FATAL: degrade to the fused RRF order rather than 500-ing the
+        // whole retrieve when the rerank provider is unavailable or
+        // misconfigured. Reranking refines ordering; it must never be able to
+        // sink an otherwise-successful retrieval.
+        let rerank_requested = req
+            .mode_mix
+            .as_ref()
+            .and_then(|m| m.rerank)
+            .unwrap_or(true);
         let rerank_start = Instant::now();
-        let (reranked, rerank_used_count) = if let Some(ref reranker) = self.reranker {
-            let input_count = pre_rerank.len();
-            let out = reranker
-                .rerank(&req.query, &pre_rerank, rerank_out_n)
-                .await?;
-            (out, input_count)
-        } else {
-            (pre_rerank.into_iter().take(rerank_out_n).collect(), 0usize)
+        let (reranked, rerank_used_count) = match self.reranker {
+            Some(ref reranker) if rerank_requested => {
+                let input_count = pre_rerank.len();
+                match reranker.rerank(&req.query, &pre_rerank, rerank_out_n).await {
+                    Ok(out) => (out, input_count),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "reranker failed; degrading to fused order"
+                        );
+                        (pre_rerank.into_iter().take(rerank_out_n).collect(), 0usize)
+                    }
+                }
+            }
+            _ => (pre_rerank.into_iter().take(rerank_out_n).collect(), 0usize),
         };
         let rerank_ms = rerank_start.elapsed().as_millis() as u64;
 
@@ -618,8 +797,9 @@ impl RetrievalPipeline {
     ///   1. Liveness — drop candidates absent from canonical `documents`
     ///      (Qdrant/Quickwit are rebuildable read models that can lag a delete).
     ///   2. Per-user OWNERSHIP — when `viewer` is present, keep a document only
-    ///      if `owner_id = viewer OR visibility IN ('org','shared') OR it is in
-    ///      `granted_ids` (explicit resource_grants). Always-on when a viewer is
+    ///      if `owner_id = viewer OR visibility = 'org' OR it is in
+    ///      `granted_ids` (explicit resource_grants). 'shared' docs are NOT
+    ///      org-readable — they reach recipients ONLY via a grant. Always-on when a viewer is
     ///      present, decoupled from `CONTROL_PLANE_ENFORCEMENT`. When `viewer` is
     ///      `None` the ownership predicate is a no-op (legacy org-scoped path).
     ///
@@ -655,7 +835,7 @@ impl RetrievalPipeline {
               AND deleted_at IS NULL
               AND ($2::text IS NULL
                    OR owner_id = $2
-                   OR visibility IN ('org', 'shared')
+                   OR visibility = 'org'
                    OR document_id = ANY($3))
             "#,
         )

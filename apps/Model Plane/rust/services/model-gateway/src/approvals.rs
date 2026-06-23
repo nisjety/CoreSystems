@@ -362,9 +362,7 @@ pub async fn handle_request_approval<P: EventPublisher>(
     // (grpc.rs) re-persists it durably; the durable store collapses the retry
     // via its (org_id, idempotency_key) ON CONFLICT guard, so this stays a
     // no-op of record rather than a second gate.
-    if let Some(existing) =
-        store.find_pending_by_action(&req.org_id, &req.run_id, &req.action_id)
-    {
+    if let Some(existing) = store.find_pending_by_action(&req.org_id, &req.run_id, &req.action_id) {
         return Ok(RequestApprovalResponse {
             request_id: req.request_id,
             approval: Some(existing),
@@ -977,8 +975,7 @@ mod tests {
     #[tokio::test]
     async fn persist_request_failure_returns_unavailable() {
         // Lazy channel to a closed port: the first RPC attempt fails to connect.
-        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
-            .connect_lazy();
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let mut client = OrchestrationCoreServiceClient::new(channel);
         let approval = GatewayApproval {
             approval_id: "appr_p".into(),

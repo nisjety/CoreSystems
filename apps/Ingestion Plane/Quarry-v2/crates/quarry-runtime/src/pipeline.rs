@@ -76,6 +76,11 @@ pub struct PageRunner {
     /// Only the browser driver honours these; static / TLS-profile
     /// drivers ignore them. Default empty.
     pub render: RenderHints,
+    /// Phase-2 visual RAG — optional page-image producer. When `Some`, each
+    /// successfully-ingested web page is rendered to a PNG (in its own browser
+    /// session), stored in the CAS, and a `page_images.created` event is emitted
+    /// for the embedding-engine. `None` (default) disables the visual producer.
+    pub page_renderer: Option<Arc<crate::page_renderer::PageRenderer>>,
 }
 
 impl PageRunner {
@@ -629,6 +634,12 @@ impl PageRunner {
                 let ingest_run_id = run_id.clone();
                 let ingest_url = resp.final_url.to_string();
                 let cancel_token = self.cancel_token.clone();
+                // Phase-2 visual RAG producer — captured into the ingest task so
+                // the page render fires once the DP2 document_id is known.
+                let page_renderer = self.page_renderer.clone();
+                let render_org = org_id.clone();
+                let render_title = output.metadata.title.clone();
+                let render_zdr = self.zdr;
                 tokio::spawn(async move {
                     let ingest_fut = async {
                         match ingest.ingest(&ingest_req).await {
@@ -638,6 +649,23 @@ impl PageRunner {
                                     index_status = ?resp.index_status,
                                     "data plane ingest succeeded"
                                 );
+                                // Visual arm: render the page → CAS → emit
+                                // page_images.created. No-op when ZDR is on or the
+                                // producer is unconfigured; never fatal to ingest.
+                                if let Some(renderer) = &page_renderer {
+                                    if let Err(e) = renderer
+                                        .render_and_emit(
+                                            &render_org,
+                                            &resp.document_id,
+                                            &ingest_url,
+                                            render_title.clone(),
+                                            render_zdr,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, document_id = %resp.document_id, "page-image render/emit failed (non-fatal)");
+                                    }
+                                }
                                 event_sink
                                     .emit(
                                         ingest_run_id,

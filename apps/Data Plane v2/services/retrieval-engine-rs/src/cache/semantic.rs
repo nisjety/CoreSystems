@@ -5,8 +5,9 @@
 //! `retrieval.rs`: "the gateway does NOT embed a second RAG/vector store"), so
 //! the *semantic* (similarity) cache lives here, beside the embeddings + Qdrant
 //! this service already owns. A near-duplicate prompt (cosine ≥ threshold) from
-//! the same org + model + embedding namespace returns the previously-cached LLM
-//! response — the response text rides in the Qdrant point payload. The gateway's
+//! the same org + model + embedding namespace **and authz scope** returns the
+//! previously-cached LLM response — the response text rides in the Qdrant point
+//! payload. The gateway's
 //! Dragonfly exact-match KV tier stays where it is; this adds fuzzy recall.
 //!
 //! Both entry points are best-effort: callers treat any `Err`/`None` as a miss
@@ -87,16 +88,34 @@ fn now_secs() -> i64 {
 }
 
 /// Deterministic point id from the cache coordinates so re-storing the same
-/// `(namespace, org, model, prompt)` overwrites in place rather than
+/// `(namespace, org, model, scope, prompt)` overwrites in place rather than
 /// accumulating duplicate points. A 64-bit collision only ever yields a cache
-/// miss/overwrite (never a cross-tenant leak — search is org-filtered).
-fn point_id(namespace: &str, org_id: &str, model: &str, prompt: &str) -> u64 {
+/// miss/overwrite (never a cross-tenant leak — search is org- and scope-filtered).
+fn point_id(namespace: &str, org_id: &str, model: &str, scope: &str, prompt: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for part in [namespace, org_id, model, prompt] {
+    for part in [namespace, org_id, model, scope, prompt] {
         part.hash(&mut hasher);
         0u8.hash(&mut hasher); // domain separator between fields
     }
     hasher.finish()
+}
+
+/// Resolve the authorization scope that partitions the cache so a response
+/// grounded on one principal's *visible document set* can never be served to a
+/// different set — the cross-user leak the original org-only key allowed.
+///
+/// - `Some(key)` — the caller's scope token: a per-user visible-set hash, or the
+///   literal `"org-shared"` when the answer was grounded only on org-public docs.
+/// - `None` — no scope supplied. Fail closed when `semantic_cache_require_scope`
+///   (the default) → returns `None` so the cache no-ops rather than risk a leak.
+///   Operators of a single-tenant / org-shared-only deployment may set it false
+///   to fall back to org-wide sharing under the reserved `__org_wide__` bucket.
+fn resolve_scope(cfg: &Config, scope_key: Option<&str>) -> Option<String> {
+    match scope_key.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(s.to_string()),
+        None if cfg.semantic_cache_require_scope => None,
+        None => Some("__org_wide__".to_string()),
+    }
 }
 
 async fn ensure_collection(qdrant: &Qdrant, collection: &str, dim: u64) -> anyhow::Result<()> {
@@ -114,9 +133,11 @@ async fn ensure_collection(qdrant: &Qdrant, collection: &str, dim: u64) -> anyho
 }
 
 /// Look up a cached response for a semantically-near prompt, scoped to
-/// `org_id` + `model` + the active embedding namespace. Returns `None` on a
-/// miss, when the cache is disabled, when nothing has been stored yet, or when
-/// the nearest hit is older than the configured TTL.
+/// `org_id` + `model` + the active embedding namespace + the authz `scope_key`.
+/// Returns `None` on a miss, when the cache is disabled, when no scope is
+/// supplied and the cache requires one (fail-closed), when nothing has been
+/// stored yet, or when the nearest hit is older than the configured TTL.
+#[allow(clippy::too_many_arguments)]
 pub async fn search(
     qdrant: &Qdrant,
     embedder: &EmbeddingClient,
@@ -125,10 +146,17 @@ pub async fn search(
     model: &str,
     prompt: &str,
     zdr: bool,
+    scope_key: Option<&str>,
 ) -> anyhow::Result<Option<SemanticHit>> {
     if !cfg.semantic_cache_enabled {
         return Ok(None);
     }
+    // Authz gate: no scope under a require-scope deployment ⇒ fail closed before
+    // any network/embedder work, so a forgetful caller degrades to a miss (never
+    // a cross-principal hit).
+    let Some(scope) = resolve_scope(cfg, scope_key) else {
+        return Ok(None);
+    };
     let collection = &cfg.semantic_cache_collection;
     // Nothing stored yet → clean miss without touching the embedder.
     if !qdrant.collection_exists(collection).await? {
@@ -148,6 +176,7 @@ pub async fn search(
             keyword("org_id", org_id),
             keyword("model", model),
             keyword("embed_namespace", &namespace),
+            keyword("scope", &scope),
         ],
         ..Default::default()
     };
@@ -186,10 +215,11 @@ pub async fn search(
 
 /// Store a prompt/response pair for future semantically-near hits. Best-effort;
 /// lazily creates the collection sized to the embedding dimension. A no-op when
-/// the cache is disabled or the response is empty.
-// Adding the ZDR egress flag pushes this to 8 params; the function is an
-// internal best-effort cache helper with two call sites and each arg is a
-// distinct concern — a params struct would add indirection without value.
+/// the cache is disabled, the response is empty, or no authz scope is supplied
+/// under a require-scope deployment.
+// Each arg is a distinct concern (ZDR egress flag + authz scope) for an internal
+// best-effort cache helper with two call sites — a params struct would add
+// indirection without value.
 #[allow(clippy::too_many_arguments)]
 pub async fn store(
     qdrant: &Qdrant,
@@ -200,10 +230,16 @@ pub async fn store(
     prompt: &str,
     response: &str,
     zdr: bool,
+    scope_key: Option<&str>,
 ) -> anyhow::Result<()> {
     if !cfg.semantic_cache_enabled || response.is_empty() {
         return Ok(());
     }
+    // Authz gate (see `search`): never persist a response under a scope we
+    // cannot attribute, or it could later be served cross-principal.
+    let Some(scope) = resolve_scope(cfg, scope_key) else {
+        return Ok(());
+    };
     let collection = &cfg.semantic_cache_collection;
     let namespace = embedder.cache_namespace();
     // ZDR prompts must not egress to a retaining embedding provider; the embed
@@ -218,10 +254,11 @@ pub async fn store(
     payload.insert("org_id".into(), str_val(org_id));
     payload.insert("model".into(), str_val(model));
     payload.insert("embed_namespace".into(), str_val(namespace.clone()));
+    payload.insert("scope".into(), str_val(scope.clone()));
     payload.insert("response".into(), str_val(response));
     payload.insert("created_at".into(), int_val(now_secs()));
 
-    let id = point_id(&namespace, org_id, model, prompt);
+    let id = point_id(&namespace, org_id, model, &scope, prompt);
     let point = PointStruct::new(id, vector, payload);
     qdrant
         .upsert_points(UpsertPointsBuilder::new(collection, vec![point]).wait(false))
@@ -281,23 +318,83 @@ pub async fn prune(qdrant: &Qdrant, cfg: &Config, older_than_secs: i64) -> anyho
 mod tests {
     use super::*;
 
+    fn test_cfg(require_scope: bool) -> Config {
+        serde_json::from_value(serde_json::json!({
+            "database_url": "",
+            "qdrant_url": "",
+            "semantic_cache_require_scope": require_scope,
+        }))
+        .expect("minimal config from defaults")
+    }
+
     #[test]
     fn point_id_is_deterministic_and_field_scoped() {
-        let base = point_id("ns", "org-1", "m", "hello");
-        assert_eq!(base, point_id("ns", "org-1", "m", "hello"), "deterministic");
-        assert_ne!(base, point_id("ns", "org-2", "m", "hello"), "org-scoped");
-        assert_ne!(base, point_id("ns", "org-1", "m2", "hello"), "model-scoped");
+        let base = point_id("ns", "org-1", "m", "scope-1", "hello");
+        assert_eq!(
+            base,
+            point_id("ns", "org-1", "m", "scope-1", "hello"),
+            "deterministic"
+        );
         assert_ne!(
             base,
-            point_id("ns2", "org-1", "m", "hello"),
+            point_id("ns", "org-2", "m", "scope-1", "hello"),
+            "org-scoped"
+        );
+        assert_ne!(
+            base,
+            point_id("ns", "org-1", "m2", "scope-1", "hello"),
+            "model-scoped"
+        );
+        assert_ne!(
+            base,
+            point_id("ns", "org-1", "m", "scope-2", "hello"),
+            "authz-scope-sensitive"
+        );
+        assert_ne!(
+            base,
+            point_id("ns2", "org-1", "m", "scope-1", "hello"),
             "namespace-scoped"
         );
         assert_ne!(
             base,
-            point_id("ns", "org-1", "m", "HELLO"),
+            point_id("ns", "org-1", "m", "scope-1", "HELLO"),
             "prompt-sensitive"
         );
         // Domain separation: concatenation collisions must not occur.
-        assert_ne!(point_id("a", "b", "c", "d"), point_id("ab", "c", "d", ""));
+        assert_ne!(
+            point_id("a", "b", "c", "d", "e"),
+            point_id("ab", "c", "d", "e", "")
+        );
+    }
+
+    #[test]
+    fn resolve_scope_fails_closed_without_key() {
+        let cfg = test_cfg(true);
+        assert_eq!(resolve_scope(&cfg, None), None, "no scope → fail closed");
+        assert_eq!(
+            resolve_scope(&cfg, Some("   ")),
+            None,
+            "blank scope → fail closed"
+        );
+        assert_eq!(
+            resolve_scope(&cfg, Some("u:abc")).as_deref(),
+            Some("u:abc"),
+            "explicit scope passes through"
+        );
+    }
+
+    #[test]
+    fn resolve_scope_opt_out_falls_back_to_org_wide() {
+        let cfg = test_cfg(false);
+        assert_eq!(
+            resolve_scope(&cfg, None).as_deref(),
+            Some("__org_wide__"),
+            "opt-out → org-wide bucket"
+        );
+        assert_eq!(
+            resolve_scope(&cfg, Some("u:abc")).as_deref(),
+            Some("u:abc"),
+            "explicit scope still honored under opt-out"
+        );
     }
 }

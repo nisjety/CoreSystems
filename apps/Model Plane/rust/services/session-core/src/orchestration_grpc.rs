@@ -1015,7 +1015,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
             let approvals: Vec<proto::Approval> = rows.iter().map(approval_from_row).collect();
-            Ok(Response::new(proto::OrgPendingApprovalsResponse { approvals }))
+            Ok(Response::new(proto::OrgPendingApprovalsResponse {
+                approvals,
+            }))
         }
         .await;
         record_metrics("list_pending_approvals", started, result.is_ok());
@@ -1114,15 +1116,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 Some(new_id) => store::get_approval(&self.pool, &new_id)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?,
-                None if !req.idempotency_key.is_empty() => {
-                    store::get_approval_by_idempotency_key(
-                        &self.pool,
-                        &req.org_id,
-                        &req.idempotency_key,
-                    )
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?
-                }
+                None if !req.idempotency_key.is_empty() => store::get_approval_by_idempotency_key(
+                    &self.pool,
+                    &req.org_id,
+                    &req.idempotency_key,
+                )
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?,
                 None => store::get_approval(&self.pool, &id)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?,

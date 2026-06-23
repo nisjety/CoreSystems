@@ -22,7 +22,10 @@ pub mod event_bus;
 pub mod events;
 pub mod host_scheduler;
 pub mod intent_classifier;
+pub mod cas_store;
 pub mod nats_event_bus;
+pub mod page_image;
+pub mod page_renderer;
 
 pub mod agent_memory;
 pub mod autoprompt;

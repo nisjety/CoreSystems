@@ -8,6 +8,7 @@ import {
   KeyRound,
   Plug,
   Route,
+  ServerCog,
   Settings,
   ShieldCheck,
   TestTubeDiagonal,
@@ -42,6 +43,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'integrations', label: 'Integrations', icon: Plug, href: '/settings/integrations' },
   { id: 'router-policy', label: 'Router policy', icon: Route, href: '/settings/router-policy' },
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
+  { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
 ]
 const defaultAccountSectionId = accountSidebarSections[0]!.id
 const defaultSettingsSectionId = settingsSidebarSections[0]!.id
@@ -249,6 +251,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Router-policy', 'Router policy')
     case 'finetune':
       return i18n.tr('Finjusteringsjobber', 'Fine-tune jobs')
+    case 'mcp':
+      return i18n.tr('MCP-servere', 'MCP servers')
     default:
       return fallback
   }

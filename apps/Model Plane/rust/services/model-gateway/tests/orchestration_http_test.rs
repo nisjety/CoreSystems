@@ -13,8 +13,8 @@ use mp_contracts::model_plane::v1::{
     GetTodoRequest, GetTodoResponse, LineageEdge, ListApprovalsRequest, ListApprovalsResponse,
     ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
     OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
-    StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
-    TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
+    StreamRunEventsRequest, SubagentLineage, Todo, TodoState, TransitionPlanRequest,
+    TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
 };
 use std::{
     pin::Pin,

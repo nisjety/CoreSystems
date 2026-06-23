@@ -9,6 +9,10 @@ pub struct RetrievalRequest {
     pub top_k: Option<usize>,
     pub top_n: Option<usize>,
     pub filters: RetrievalFiltersInput,
+    /// Viewer identity. NEVER trusted from the request body — it is set only by
+    /// the auth layer from the verified principal (x-user-id / JWT `sub`).
+    /// `skip_deserializing` makes a body-supplied `user_id` impossible (anti-spoof).
+    #[serde(skip_deserializing)]
     pub user_id: Option<String>,
     pub query_expansion: Option<String>,
     pub reranker_model: Option<String>,
@@ -32,7 +36,7 @@ pub struct RetrievalRequest {
     /// the bypass is audited. Set ONLY from a verified JWT scope on the HTTP path
     /// — the agent/api-key path leaves it false, so admin bypass is EXCLUDED from
     /// agent grounding by construction.
-    #[serde(default)]
+    #[serde(default, skip_deserializing)]
     pub admin_read_all: bool,
 }
 
@@ -48,6 +52,9 @@ pub struct ModeMixWeights {
     pub w_graph: Option<f32>,
     #[serde(default)]
     pub w_wiki: Option<f32>,
+    /// Visual arm (Cohere Embed v4 page images). Defaults to 0 (shadow) until eval.
+    #[serde(default)]
+    pub w_visual: Option<f32>,
     /// `true` = run cross-encoder reranker after blending; `false` = skip.
     #[serde(default)]
     pub rerank: Option<bool>,
@@ -62,17 +69,20 @@ impl ModeMixWeights {
         default_bm25: f32,
         default_graph: f32,
         default_wiki: f32,
+        default_visual: f32,
     ) -> ResolvedWeights {
         let d = self.w_dense.unwrap_or(default_dense);
         let b = self.w_bm25.unwrap_or(default_bm25);
         let g = self.w_graph.unwrap_or(default_graph);
         let w = self.w_wiki.unwrap_or(default_wiki);
-        let sum = (d + b + g + w).max(f32::EPSILON);
+        let v = self.w_visual.unwrap_or(default_visual);
+        let sum = (d + b + g + w + v).max(f32::EPSILON);
         ResolvedWeights {
             w_dense: d / sum,
             w_bm25: b / sum,
             w_graph: g / sum,
             w_wiki: w / sum,
+            w_visual: v / sum,
             rerank: self.rerank.unwrap_or(true),
         }
     }
@@ -84,6 +94,7 @@ pub struct ResolvedWeights {
     pub w_bm25: f32,
     pub w_graph: f32,
     pub w_wiki: f32,
+    pub w_visual: f32,
     pub rerank: bool,
 }
 
@@ -233,6 +244,7 @@ mod tests {
             w_bm25,
             w_graph: 0.0,
             w_wiki: 0.0,
+            w_visual: 0.0,
             rerank: true,
         }
     }

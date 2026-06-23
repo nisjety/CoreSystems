@@ -1,6 +1,7 @@
 mod api;
 mod batch;
 mod config;
+mod image_consumer;
 mod provider;
 mod qdrant_writer;
 mod stream;
@@ -68,6 +69,38 @@ async fn main() -> anyhow::Result<()> {
     // and retry on failure, instead of best-effort core-NATS.
     if let Err(e) = wiki_consumer::spawn(js.clone(), qdrant.clone(), provider.clone()).await {
         tracing::warn!(error = %e, "wiki subscriber failed to start; continuing");
+    }
+
+    // Visual RAG arm — Cohere Embed v4 page-image embeddings. Online only when
+    // COHERE_EMBED_V4_ENDPOINT is configured; otherwise the visual collection and
+    // consumer are skipped (text-only deployment).
+    match crate::provider::visual::VisualEmbeddingProvider::from_config(&cfg) {
+        Ok(Some(visual)) => {
+            tracing::info!(model = visual.model_name(), "visual embedding (Embed v4) enabled");
+            if let Err(e) = qdrant_writer::ensure_collection(
+                &qdrant,
+                &cfg.qdrant_visual_collection,
+                cfg.visual_embedding_dimension,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "visual collection ensure failed; continuing");
+            }
+            if let Err(e) = image_consumer::spawn(
+                js.clone(),
+                qdrant.clone(),
+                visual,
+                cfg.qdrant_visual_collection.clone(),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "page-image subscriber failed to start; continuing");
+            }
+        }
+        Ok(None) => tracing::info!("visual embedding disabled (COHERE_EMBED_V4_ENDPOINT unset)"),
+        Err(e) => {
+            tracing::warn!(error = %e, "visual embedding misconfigured; continuing without visual arm")
+        }
     }
 
     let admin_app = api::router();

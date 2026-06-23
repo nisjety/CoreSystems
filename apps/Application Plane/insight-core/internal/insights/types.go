@@ -93,6 +93,11 @@ type MetricRollup struct {
 	Metric string  `json:"metric"`
 	Value  float64 `json:"value"`
 	Unit   string  `json:"unit,omitempty"`
+	// Source is the real producer(s) that emitted the underlying events for this
+	// metric (e.g. "conversation-core"), for honest citation. Multiple distinct
+	// producers are joined with ", " (sorted). Empty when no event carried a
+	// source — never fabricated.
+	Source string `json:"source,omitempty"`
 }
 
 type Scorecard struct {
@@ -102,6 +107,9 @@ type Scorecard struct {
 	Metric  string  `json:"metric"`
 	Value   float64 `json:"value"`
 	Unit    string  `json:"unit,omitempty"`
+	// Source cites the real producer(s) behind this scorecard's value, threaded
+	// from the rolled-up metric. Empty when unattributed — never fabricated.
+	Source string `json:"source,omitempty"`
 }
 
 type ConnectorSlot struct {

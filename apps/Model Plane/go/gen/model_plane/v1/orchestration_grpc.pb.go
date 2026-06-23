@@ -19,19 +19,21 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	OrchestrationCoreService_ListPlans_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/ListPlans"
-	OrchestrationCoreService_GetPlan_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/GetPlan"
-	OrchestrationCoreService_TransitionPlan_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
-	OrchestrationCoreService_ListTodos_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/ListTodos"
-	OrchestrationCoreService_GetTodo_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/GetTodo"
-	OrchestrationCoreService_TransitionTodo_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
-	OrchestrationCoreService_CreateApproval_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/CreateApproval"
-	OrchestrationCoreService_ListApprovals_FullMethodName      = "/model_plane.v1.OrchestrationCoreService/ListApprovals"
-	OrchestrationCoreService_GetApproval_FullMethodName        = "/model_plane.v1.OrchestrationCoreService/GetApproval"
-	OrchestrationCoreService_DecideApproval_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
-	OrchestrationCoreService_GetSubagentLineage_FullMethodName = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
-	OrchestrationCoreService_AttachSubagent_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
-	OrchestrationCoreService_StreamRunEvents_FullMethodName    = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents"
+	OrchestrationCoreService_ListPlans_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/ListPlans"
+	OrchestrationCoreService_GetPlan_FullMethodName                  = "/model_plane.v1.OrchestrationCoreService/GetPlan"
+	OrchestrationCoreService_TransitionPlan_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
+	OrchestrationCoreService_ListTodos_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/ListTodos"
+	OrchestrationCoreService_GetTodo_FullMethodName                  = "/model_plane.v1.OrchestrationCoreService/GetTodo"
+	OrchestrationCoreService_TransitionTodo_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
+	OrchestrationCoreService_CreateApproval_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/CreateApproval"
+	OrchestrationCoreService_ListApprovals_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ListApprovals"
+	OrchestrationCoreService_ListPendingApprovals_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
+	OrchestrationCoreService_GetApproval_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/GetApproval"
+	OrchestrationCoreService_DecideApproval_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_GetSubagentLineage_FullMethodName       = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
+	OrchestrationCoreService_AttachSubagent_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
+	OrchestrationCoreService_StreamRunEvents_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents"
+	OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordOrchestrationEvent"
 )
 
 // OrchestrationCoreServiceClient is the client API for OrchestrationCoreService service.
@@ -62,6 +64,14 @@ type OrchestrationCoreServiceClient interface {
 	CreateApproval(ctx context.Context, in *CreateApprovalRequest, opts ...grpc.CallOption) (*CreateApprovalResponse, error)
 	// List approvals for a run (and optionally scoped to a step).
 	ListApprovals(ctx context.Context, in *ListApprovalsRequest, opts ...grpc.CallOption) (*ListApprovalsResponse, error)
+	// List all PENDING (state = REQUESTED) approvals, optionally scoped to one
+	// org. An empty org_id returns every pending approval across all orgs and is
+	// INTERNAL-ONLY — used by model-gateway to rehydrate its in-memory approval
+	// cache on boot so a restart never silently drops a pending HITL gate. A
+	// non-empty org_id scopes the result to that tenant (IDOR-safe read-through).
+	// (D-1) The request/response messages are org-suffixed to avoid colliding
+	// with the gateway-service ListPendingApprovals* messages in this package.
+	ListPendingApprovals(ctx context.Context, in *OrgPendingApprovalsRequest, opts ...grpc.CallOption) (*OrgPendingApprovalsResponse, error)
 	// Fetch a single approval by id.
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
@@ -73,6 +83,14 @@ type OrchestrationCoreServiceClient interface {
 	// Stream orchestration events for a run. Server-streaming over gRPC;
 	// SSE-compatible at the gateway (/v1/runs/{id}/events).
 	StreamRunEvents(ctx context.Context, in *StreamRunEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OrchestrationEvent], error)
+	// Publish a caller-supplied orchestration event into the run's broadcast
+	// (and bounded replay buffer) without owning the durable record behind it.
+	// Used by execution-core to surface live worker progress — e.g. the browser
+	// agent's dispatched actions and received observations — on the run-event
+	// stream. The server assigns the monotonic event_id and timestamp; callers
+	// leave them empty. Best-effort from the caller's perspective: a failure
+	// here must never fail the underlying work.
+	RecordOrchestrationEvent(ctx context.Context, in *RecordOrchestrationEventRequest, opts ...grpc.CallOption) (*RecordOrchestrationEventResponse, error)
 }
 
 type orchestrationCoreServiceClient struct {
@@ -163,6 +181,16 @@ func (c *orchestrationCoreServiceClient) ListApprovals(ctx context.Context, in *
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) ListPendingApprovals(ctx context.Context, in *OrgPendingApprovalsRequest, opts ...grpc.CallOption) (*OrgPendingApprovalsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OrgPendingApprovalsResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ListPendingApprovals_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetApprovalResponse)
@@ -222,6 +250,16 @@ func (c *orchestrationCoreServiceClient) StreamRunEvents(ctx context.Context, in
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type OrchestrationCoreService_StreamRunEventsClient = grpc.ServerStreamingClient[OrchestrationEvent]
 
+func (c *orchestrationCoreServiceClient) RecordOrchestrationEvent(ctx context.Context, in *RecordOrchestrationEventRequest, opts ...grpc.CallOption) (*RecordOrchestrationEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordOrchestrationEventResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OrchestrationCoreServiceServer is the server API for OrchestrationCoreService service.
 // All implementations must embed UnimplementedOrchestrationCoreServiceServer
 // for forward compatibility.
@@ -250,6 +288,14 @@ type OrchestrationCoreServiceServer interface {
 	CreateApproval(context.Context, *CreateApprovalRequest) (*CreateApprovalResponse, error)
 	// List approvals for a run (and optionally scoped to a step).
 	ListApprovals(context.Context, *ListApprovalsRequest) (*ListApprovalsResponse, error)
+	// List all PENDING (state = REQUESTED) approvals, optionally scoped to one
+	// org. An empty org_id returns every pending approval across all orgs and is
+	// INTERNAL-ONLY — used by model-gateway to rehydrate its in-memory approval
+	// cache on boot so a restart never silently drops a pending HITL gate. A
+	// non-empty org_id scopes the result to that tenant (IDOR-safe read-through).
+	// (D-1) The request/response messages are org-suffixed to avoid colliding
+	// with the gateway-service ListPendingApprovals* messages in this package.
+	ListPendingApprovals(context.Context, *OrgPendingApprovalsRequest) (*OrgPendingApprovalsResponse, error)
 	// Fetch a single approval by id.
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
@@ -261,6 +307,14 @@ type OrchestrationCoreServiceServer interface {
 	// Stream orchestration events for a run. Server-streaming over gRPC;
 	// SSE-compatible at the gateway (/v1/runs/{id}/events).
 	StreamRunEvents(*StreamRunEventsRequest, grpc.ServerStreamingServer[OrchestrationEvent]) error
+	// Publish a caller-supplied orchestration event into the run's broadcast
+	// (and bounded replay buffer) without owning the durable record behind it.
+	// Used by execution-core to surface live worker progress — e.g. the browser
+	// agent's dispatched actions and received observations — on the run-event
+	// stream. The server assigns the monotonic event_id and timestamp; callers
+	// leave them empty. Best-effort from the caller's perspective: a failure
+	// here must never fail the underlying work.
+	RecordOrchestrationEvent(context.Context, *RecordOrchestrationEventRequest) (*RecordOrchestrationEventResponse, error)
 	mustEmbedUnimplementedOrchestrationCoreServiceServer()
 }
 
@@ -295,6 +349,9 @@ func (UnimplementedOrchestrationCoreServiceServer) CreateApproval(context.Contex
 func (UnimplementedOrchestrationCoreServiceServer) ListApprovals(context.Context, *ListApprovalsRequest) (*ListApprovalsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListApprovals not implemented")
 }
+func (UnimplementedOrchestrationCoreServiceServer) ListPendingApprovals(context.Context, *OrgPendingApprovalsRequest) (*OrgPendingApprovalsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPendingApprovals not implemented")
+}
 func (UnimplementedOrchestrationCoreServiceServer) GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetApproval not implemented")
 }
@@ -309,6 +366,9 @@ func (UnimplementedOrchestrationCoreServiceServer) AttachSubagent(context.Contex
 }
 func (UnimplementedOrchestrationCoreServiceServer) StreamRunEvents(*StreamRunEventsRequest, grpc.ServerStreamingServer[OrchestrationEvent]) error {
 	return status.Error(codes.Unimplemented, "method StreamRunEvents not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) RecordOrchestrationEvent(context.Context, *RecordOrchestrationEventRequest) (*RecordOrchestrationEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordOrchestrationEvent not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) mustEmbedUnimplementedOrchestrationCoreServiceServer() {
 }
@@ -476,6 +536,24 @@ func _OrchestrationCoreService_ListApprovals_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_ListPendingApprovals_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OrgPendingApprovalsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ListPendingApprovals(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ListPendingApprovals_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ListPendingApprovals(ctx, req.(*OrgPendingApprovalsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_GetApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetApprovalRequest)
 	if err := dec(in); err != nil {
@@ -559,6 +637,24 @@ func _OrchestrationCoreService_StreamRunEvents_Handler(srv interface{}, stream g
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type OrchestrationCoreService_StreamRunEventsServer = grpc.ServerStreamingServer[OrchestrationEvent]
 
+func _OrchestrationCoreService_RecordOrchestrationEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordOrchestrationEventRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).RecordOrchestrationEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).RecordOrchestrationEvent(ctx, req.(*RecordOrchestrationEventRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // OrchestrationCoreService_ServiceDesc is the grpc.ServiceDesc for OrchestrationCoreService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -599,6 +695,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _OrchestrationCoreService_ListApprovals_Handler,
 		},
 		{
+			MethodName: "ListPendingApprovals",
+			Handler:    _OrchestrationCoreService_ListPendingApprovals_Handler,
+		},
+		{
 			MethodName: "GetApproval",
 			Handler:    _OrchestrationCoreService_GetApproval_Handler,
 		},
@@ -613,6 +713,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AttachSubagent",
 			Handler:    _OrchestrationCoreService_AttachSubagent_Handler,
+		},
+		{
+			MethodName: "RecordOrchestrationEvent",
+			Handler:    _OrchestrationCoreService_RecordOrchestrationEvent_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -121,6 +121,20 @@ func (f *fakeRepository) ReviewAIAction(_ context.Context, input AIActionReview)
 	return f.reviewErr
 }
 
+func (f *fakeRepository) CreateAIAction(_ context.Context, input CreateAIActionInput) (*AIAction, error) {
+	action := AIAction{
+		ID:             "act-test",
+		OrgID:          input.OrgID,
+		ConversationID: input.ConversationID,
+		Kind:           input.Kind,
+		Status:         "suggested",
+		Payload:        input.Payload,
+		CreatedBy:      input.CreatedBy,
+	}
+	f.aiActions = append(f.aiActions, action)
+	return &action, nil
+}
+
 func (f *fakeRepository) ListAIActions(_ context.Context, filter AIActionListFilter) ([]AIAction, error) {
 	out := []AIAction{}
 	for _, action := range f.aiActions {
