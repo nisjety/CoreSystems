@@ -31,6 +31,7 @@ export function VelionHome() {
 					document.querySelectorAll<HTMLElement>("[data-nav-dark-section]"),
 				).some((section) => {
 					const rect = section.getBoundingClientRect();
+
 					return rect.top <= navProbeY && rect.bottom >= navProbeY;
 				});
 
@@ -40,7 +41,7 @@ export function VelionHome() {
 			frame = null;
 		};
 
-		const onScroll = () => {
+		const onScrollOrResize = () => {
 			if (frame !== null) {
 				return;
 			}
@@ -50,16 +51,16 @@ export function VelionHome() {
 
 		updateScrollState();
 
-		window.addEventListener("scroll", onScroll, { passive: true });
-		window.addEventListener("resize", onScroll);
+		window.addEventListener("scroll", onScrollOrResize, { passive: true });
+		window.addEventListener("resize", onScrollOrResize);
 
 		return () => {
 			if (frame !== null) {
 				window.cancelAnimationFrame(frame);
 			}
 
-			window.removeEventListener("scroll", onScroll);
-			window.removeEventListener("resize", onScroll);
+			window.removeEventListener("scroll", onScrollOrResize);
+			window.removeEventListener("resize", onScrollOrResize);
 		};
 	}, []);
 
@@ -94,7 +95,10 @@ export function VelionHome() {
 				);
 
 				if (hero && heroMedia && heroContent) {
-					gsap.set([heroMedia, heroContent], { yPercent: 0, force3D: true });
+					gsap.set([heroMedia, heroContent], {
+						yPercent: 0,
+						force3D: true,
+					});
 
 					if (!reduceMotion) {
 						const heroScrollTrigger = {
@@ -122,6 +126,34 @@ export function VelionHome() {
 							scrollTrigger: {
 								...heroScrollTrigger,
 								id: "velion-hero-content-parallax",
+							},
+						});
+					}
+				}
+
+				const footer =
+					homeRef.current?.querySelector<HTMLElement>("[data-footer-parallax]");
+				const footerMedia = homeRef.current?.querySelector<HTMLElement>(
+					"[data-footer-parallax-media]",
+				);
+
+				if (footer && footerMedia) {
+					gsap.set(footerMedia, {
+						yPercent: reduceMotion ? 0 : -8,
+						force3D: true,
+					});
+
+					if (!reduceMotion) {
+						gsap.to(footerMedia, {
+							yPercent: 0,
+							ease: "none",
+							scrollTrigger: {
+								trigger: footer,
+								start: "top bottom",
+								end: "bottom bottom",
+								scrub: true,
+								id: "velion-footer-parallax",
+								invalidateOnRefresh: true,
 							},
 						});
 					}
