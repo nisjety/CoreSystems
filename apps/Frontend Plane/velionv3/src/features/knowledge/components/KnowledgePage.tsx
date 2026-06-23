@@ -21,6 +21,9 @@ import { Dynamic } from 'solid-js/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
 import { KnowledgeDiagnosticsPanel } from '@/features/knowledge/components/KnowledgeDiagnosticsPanel'
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
+import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
+import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
+import { isGateOpen } from '@/shared/context/ownership-gate'
 import { executeAction } from '@/shared/actions/action-client'
 import {
   loadKnowledgeSources,
@@ -753,6 +756,13 @@ function OverviewCanvas(props: {
 }
 
 function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
+  // The document being shared (null = dialog closed). Only the id + visibility
+  // are needed; the ShareDialog itself is gated by the honesty gate.
+  const [shareTarget, setShareTarget] = createSignal<{
+    id: string
+    visibility?: 'private' | 'org' | 'shared'
+  } | null>(null)
+
   return (
     <section class="velion-panel knowledge-source-inspector">
       <div class="knowledge-source-inspector__header">
@@ -772,10 +782,26 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
             <article class="knowledge-source-evidence-card">
               <div class="knowledge-source-evidence-card__heading">
                 <div>
-                  <h3>{source.title}</h3>
+                  <div class="knowledge-source-evidence-card__title-row">
+                    <h3>{source.title}</h3>
+                    <PrivacyBadge visibility={source.visibility} />
+                  </div>
                   <p>{source.provider}</p>
                 </div>
-                <span>{source.status}</span>
+                <div class="knowledge-source-evidence-card__actions">
+                  <span>{source.status}</span>
+                  <Show when={isGateOpen()}>
+                    <button
+                      type="button"
+                      class="knowledge-source-share-button"
+                      onClick={() =>
+                        setShareTarget({ id: source.id, visibility: source.visibility })
+                      }
+                    >
+                      Share
+                    </button>
+                  </Show>
+                </div>
               </div>
               <p class="knowledge-source-evidence-card__copy">{source.description}</p>
               <div class="knowledge-tag-row">
@@ -787,6 +813,15 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
           )}
         </For>
       </div>
+      <Show when={shareTarget()}>
+        {(target) => (
+          <ShareDialog
+            docId={target().id}
+            visibility={target().visibility}
+            onClose={() => setShareTarget(null)}
+          />
+        )}
+      </Show>
     </section>
   )
 }

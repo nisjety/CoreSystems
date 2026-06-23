@@ -193,6 +193,12 @@ struct DocSummary {
     created_by: String,
     created_at: String,
     updated_at: String,
+    // Per-user ownership (PR-6). Surfaced so the SPA can render a visibility
+    // badge + Share affordance — gated by the honesty gate. These come straight
+    // from the documents-api columns retrieval enforces on; the badge derives
+    // from the SAME authority, never a separate display flag.
+    visibility: String,
+    owner_id: String,
 }
 
 async fn load_documents(
@@ -238,6 +244,8 @@ async fn load_documents(
                 created_by: str_any(doc, &["created_by", "createdBy"]),
                 created_at: str_any(doc, &["created_at", "createdAt"]),
                 updated_at: str_any(doc, &["updated_at", "updatedAt"]),
+                visibility: str_at(doc, "visibility"),
+                owner_id: str_any(doc, &["owner_id", "ownerId"]),
             })
         })
         .collect()
@@ -885,6 +893,11 @@ fn build_sources(
             json!({
                 "id": doc.id,
                 "title": doc.title,
+                // Per-user ownership (PR-6). The SAME columns documents-api +
+                // retrieval filter on — the SPA badge/Share affordance derive
+                // from these, gated by the honesty gate.
+                "visibility": doc.visibility,
+                "owner_id": doc.owner_id,
                 "description": format!("{} · {}", source_label(&doc.source), format_document_status(&doc.status)),
                 "type": document_source_type(doc),
                 "provider": source_label(&doc.source),
