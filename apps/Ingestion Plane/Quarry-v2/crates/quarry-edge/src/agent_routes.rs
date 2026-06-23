@@ -234,6 +234,10 @@ mod enabled {
         }))
     }
 
+    // reason: this test module is intentionally kept adjacent to `normalize_viewport`;
+    // the sibling route handlers (`step`, `close_run`, `agent_router`) follow it within
+    // the same `mod enabled`, so relocating the tests to the module end is not desirable.
+    #[allow(clippy::items_after_test_module)]
     #[cfg(test)]
     mod tests {
         use super::*;

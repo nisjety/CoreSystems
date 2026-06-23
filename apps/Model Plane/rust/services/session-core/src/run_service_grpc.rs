@@ -218,7 +218,7 @@ impl RunService for RunServiceImpl {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
 
-            let has_more = rows.len() as i64 > limit;
+            let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))

@@ -50,6 +50,8 @@ impl ExecutionService {
 
 #[tonic::async_trait]
 impl ExecutionCore for ExecutionService {
+    // single-step RPC: gate → execute → HITL → persist is one linear flow
+    #[allow(clippy::too_many_lines)]
     async fn execute_step(
         &self,
         request: Request<pb::ExecuteStepRequest>,

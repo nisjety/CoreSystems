@@ -4,11 +4,11 @@
 //! scores results, and writes a JSON scoreboard.
 //!
 //! Subcommands:
-//!   * (none)        — legacy fixture-based scoring
-//!   * `scoreboard`  — cycle 31: run every `BenchmarkSuite` from
-//!                     `quarry_core::benchmark::builtin_suites()`
-//!                     against each baseline producer, emit a
-//!                     ScorecardEntry-shaped JSON file.
+//! * (none)        — legacy fixture-based scoring
+//! * `scoreboard`  — cycle 31: run every `BenchmarkSuite` from
+//!   `quarry_core::benchmark::builtin_suites()`
+//!   against each baseline producer, emit a
+//!   ScorecardEntry-shaped JSON file.
 
 mod bench_runner;
 

@@ -236,9 +236,10 @@ async fn capture_one(provider: &Provider, endpoint: &str) -> EndpointCapture {
         "static" | "tls" => capture_via_static(endpoint).await,
         "browserless" => capture_via_browserless(provider, endpoint).await,
         "kernel" => capture_via_kernel(provider, endpoint).await,
-        "browserbase" => Err(format!(
+        "browserbase" => Err(
             "browserbase capture requires a CDP-driven page request; not supported via HTTP shim"
-        )),
+                .to_string(),
+        ),
         other => Err(format!("unknown provider kind: {other}")),
     };
     let latency_ms = started.elapsed().as_millis() as u64;

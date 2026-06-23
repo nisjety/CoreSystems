@@ -71,7 +71,7 @@ pub fn redact_sensitive(text: &str) -> String {
 
 fn split_trailing_punct(tok: &str) -> (&str, &str) {
     let idx = tok
-        .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '!' | '?'))
+        .trim_end_matches(['.', ',', ';', ':', ')', ']', '!', '?'])
         .len();
     tok.split_at(idx)
 }

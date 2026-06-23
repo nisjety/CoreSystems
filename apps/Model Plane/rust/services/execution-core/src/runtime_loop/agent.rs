@@ -1091,6 +1091,13 @@ mod tests {
             Err(Status::unimplemented("list_conversation not used"))
         }
 
+        async fn list_threads(
+            &self,
+            _: Request<pb::ListThreadsRequest>,
+        ) -> Result<Response<pb::ListThreadsResponse>, Status> {
+            Ok(Response::new(pb::ListThreadsResponse { threads: vec![] }))
+        }
+
         async fn set_run_mode(
             &self,
             _: Request<pb::SetRunModeRequest>,

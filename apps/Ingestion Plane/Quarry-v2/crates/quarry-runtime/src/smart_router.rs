@@ -1212,8 +1212,10 @@ mod tests {
             })
             .build()
             .unwrap();
-        let mut opts = SearchOptions::default();
-        opts.limit = 1;
+        let opts = SearchOptions {
+            limit: 1,
+            ..Default::default()
+        };
         let results =
             tokio::time::timeout(Duration::from_millis(100), router.search("OpenAI", &opts))
                 .await
@@ -1237,8 +1239,10 @@ mod tests {
             })
             .build()
             .unwrap();
-        let mut opts = SearchOptions::default();
-        opts.limit = 1;
+        let opts = SearchOptions {
+            limit: 1,
+            ..Default::default()
+        };
         let results =
             tokio::time::timeout(Duration::from_millis(100), router.search("OpenAI", &opts))
                 .await

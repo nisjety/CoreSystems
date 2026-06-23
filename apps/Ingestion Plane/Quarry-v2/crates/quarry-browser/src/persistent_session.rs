@@ -132,6 +132,10 @@ impl PersistentSessionRegistry {
         self.sessions.lock().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
+
     /// Reap idle sessions. Call from a periodic background task.
     pub async fn reap_idle(&self) -> Vec<String> {
         let mut guard = self.sessions.lock().await;

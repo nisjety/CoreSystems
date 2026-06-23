@@ -16,7 +16,7 @@
 //! `scripts/verify-sandbox-isolation.sh`).
 //!
 //! Wiring (DONE): `runtime_loop::execute_step` routes the `shell` tool to this
-//! primitive (`execute_shell` → `execute_sandboxed`) under a ReadOnly +
+//! primitive (`execute_shell` → `execute_sandboxed`) under a `ReadOnly` +
 //! no-network default policy, behind the same permission/hook gates as every
 //! other tool; non-shell tools keep the deterministic `tool_bridge` path by
 //! design. A broader per-call policy (a `policy` field on the shell input) is

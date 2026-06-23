@@ -204,6 +204,8 @@ pub async fn process_document(
     })
 }
 
+// Non-test helper items intentionally follow this module.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::orphaned_ids;

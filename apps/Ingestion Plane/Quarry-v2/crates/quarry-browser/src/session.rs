@@ -166,6 +166,9 @@ pub struct Cookie {
     pub expires: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// reason: the items below the test module are `#[cfg(feature = "chromiumoxide")]`-gated
+// imports/types used by `BrowserSession`; relocating the test module past them is awkward.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,18 +39,13 @@ use tokio::sync::RwLock;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     Low,
+    #[default]
     Default,
     High,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Default
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

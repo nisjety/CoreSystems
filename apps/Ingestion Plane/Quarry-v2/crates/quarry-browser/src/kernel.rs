@@ -734,7 +734,7 @@ mod tests {
 
         let driver = KernelDriver::new(KernelConfig::new(server.uri(), "k_test"));
         let session = driver.acquire(&make_lease()).await.unwrap();
-        assert!(session.lease.profile_id.to_string().len() > 0);
+        assert!(!session.lease.profile_id.to_string().is_empty());
         assert_eq!(driver.browser_id().await.as_deref(), Some("b_abc"));
         assert!(driver.cdp_url().await.unwrap().starts_with("wss://"));
         assert!(driver.live_view_url().await.is_some());

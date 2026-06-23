@@ -270,6 +270,57 @@ fn blocked_error(status: u16, attempts: Vec<serde_json::Value>) -> QuarryError {
     .with_details(json!({ "egress_attempts": attempts }))
 }
 
+#[async_trait]
+impl Driver for StaticDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind::Static
+    }
+
+    async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+        self.do_fetch(url, &FetchHints::default()).await
+    }
+
+    async fn fetch_conditional(
+        &self,
+        url: &Url,
+        hints: &FetchHints,
+    ) -> QuarryResult<FetchResponse> {
+        self.do_fetch(url, hints).await
+    }
+}
+
+/// Shared client builder used for both the direct-egress and proxy
+/// variants. Keeps the cookie store + decompression knobs identical
+/// across every client so swapping proxies mid-crawl doesn't change
+/// downstream parsing behaviour.
+fn build_client(
+    timeout: Duration,
+    user_agent: &str,
+    proxy: Option<&ProxyEntry>,
+) -> QuarryResult<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .cookie_store(true);
+    if let Some(p) = proxy {
+        // `Proxy::all` routes every scheme (http + https) through the
+        // proxy. Reqwest parses socks5/socks5h/http/https from the URI
+        // scheme; on parse failure we surface a clear error so misC-
+        // configured pools fail fast at startup.
+        let parsed = reqwest::Proxy::all(&p.uri).map_err(|e| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                format!("invalid proxy URI {}: {e}", p.uri),
+            )
+        })?;
+        builder = builder.proxy(parsed);
+    }
+    builder
+        .build()
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,55 +429,4 @@ mod tests {
             .and_then(|v| v.get("egress_attempts"))
             .is_some());
     }
-}
-
-#[async_trait]
-impl Driver for StaticDriver {
-    fn kind(&self) -> DriverKind {
-        DriverKind::Static
-    }
-
-    async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
-        self.do_fetch(url, &FetchHints::default()).await
-    }
-
-    async fn fetch_conditional(
-        &self,
-        url: &Url,
-        hints: &FetchHints,
-    ) -> QuarryResult<FetchResponse> {
-        self.do_fetch(url, hints).await
-    }
-}
-
-/// Shared client builder used for both the direct-egress and proxy
-/// variants. Keeps the cookie store + decompression knobs identical
-/// across every client so swapping proxies mid-crawl doesn't change
-/// downstream parsing behaviour.
-fn build_client(
-    timeout: Duration,
-    user_agent: &str,
-    proxy: Option<&ProxyEntry>,
-) -> QuarryResult<reqwest::Client> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent(user_agent)
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .cookie_store(true);
-    if let Some(p) = proxy {
-        // `Proxy::all` routes every scheme (http + https) through the
-        // proxy. Reqwest parses socks5/socks5h/http/https from the URI
-        // scheme; on parse failure we surface a clear error so misC-
-        // configured pools fail fast at startup.
-        let parsed = reqwest::Proxy::all(&p.uri).map_err(|e| {
-            QuarryError::new(
-                ErrorCode::Internal,
-                format!("invalid proxy URI {}: {e}", p.uri),
-            )
-        })?;
-        builder = builder.proxy(parsed);
-    }
-    builder
-        .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))
 }

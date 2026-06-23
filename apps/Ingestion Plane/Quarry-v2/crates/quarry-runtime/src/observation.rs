@@ -159,10 +159,7 @@ impl ObservationRunner {
             ctx.current_url = url.to_owned();
         }
 
-        let html_bytes = match self.browser.content(session).await {
-            Ok(b) => Some(b),
-            Err(_) => None,
-        };
+        let html_bytes = self.browser.content(session).await.ok();
 
         let dom_summary = html_bytes.as_ref().map(|bytes| {
             let html_str = String::from_utf8_lossy(bytes);
@@ -232,19 +229,17 @@ impl ObservationRunner {
             )
             .await
             .ok()
-            .and_then(|value| {
-                Some(PageState {
-                    url: value
-                        .get("url")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    title: value
-                        .get("title")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|title| !title.is_empty())
-                        .map(str::to_owned),
-                })
+            .map(|value| PageState {
+                url: value
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                title: value
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned),
             })
             .unwrap_or_default()
     }

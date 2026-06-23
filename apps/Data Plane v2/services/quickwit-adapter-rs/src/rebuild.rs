@@ -43,12 +43,14 @@ pub async fn rebuild_all(
         }
     }
 
-    let mut stats = RebuildStats::default();
-    stats.knowledge_units = rebuild_knowledge_units(&ctx, org_id.as_deref()).await?;
-    stats.wiki_versions = rebuild_wiki_versions(&ctx, org_id.as_deref()).await?;
-    stats.source_objects = rebuild_source_objects(&ctx, org_id.as_deref()).await?;
-    stats.retrieval_logs = rebuild_retrieval_logs(&ctx, org_id.as_deref()).await?;
-    stats.wiki_source_logs = rebuild_wiki_source_logs(&ctx, org_id.as_deref()).await?;
+    // Field order preserves the original sequential await order.
+    let stats = RebuildStats {
+        knowledge_units: rebuild_knowledge_units(&ctx, org_id.as_deref()).await?,
+        wiki_versions: rebuild_wiki_versions(&ctx, org_id.as_deref()).await?,
+        source_objects: rebuild_source_objects(&ctx, org_id.as_deref()).await?,
+        retrieval_logs: rebuild_retrieval_logs(&ctx, org_id.as_deref()).await?,
+        wiki_source_logs: rebuild_wiki_source_logs(&ctx, org_id.as_deref()).await?,
+    };
 
     tracing::info!(?stats, "Quickwit rebuild complete");
     Ok(stats)

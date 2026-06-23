@@ -154,6 +154,10 @@ impl RobotsCache {
     pub async fn len(&self) -> usize {
         self.cache.read().await.len()
     }
+
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
 }
 
 /// Production fetcher implementation that uses a reqwest client.

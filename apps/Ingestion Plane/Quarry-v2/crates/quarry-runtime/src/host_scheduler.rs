@@ -207,10 +207,8 @@ impl HostScheduler {
         let slow_threshold = slot
             .ewma_latency_ms
             .map(|e| e * self.config.slow_multiplier);
-        let is_soft_bad = match slow_threshold {
-            Some(t) if sample > t && has_prior_baseline => true,
-            _ => false,
-        };
+        let is_soft_bad =
+            matches!(slow_threshold, Some(t) if sample > t && has_prior_baseline);
         if is_soft_bad {
             slot.consecutive_good = 0;
             return;

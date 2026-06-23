@@ -189,7 +189,7 @@ fn score_element(el: ElementRef<'_>) -> f64 {
     };
 
     let tag = el.value().name().to_ascii_lowercase();
-    let is_role_main = el.value().attr("role").map_or(false, |r| r == "main");
+    let is_role_main = el.value().attr("role") == Some("main");
     let semantic_bonus = if SEMANTIC_CONTENT_TAGS.contains(&tag.as_str()) || is_role_main {
         200.0
     } else {

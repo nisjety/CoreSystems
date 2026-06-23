@@ -104,6 +104,11 @@ impl<D: BrowserDriver> LeasePool<D> {
     pub async fn len(&self) -> usize {
         self.entries.read().await.len()
     }
+
+    /// Whether the pool has no cached entries (test/diagnostic helper).
+    pub async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
 }
 
 /// RAII guard returned by [`LeasePool::acquire`]. Holds a semaphore

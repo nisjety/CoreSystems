@@ -388,7 +388,7 @@ mod recency_tests {
         // Ancient doc → approaches the floor, never below it.
         let ancient = now - 5_000 * DAY;
         let m = recency_multiplier(Some(ancient), now);
-        assert!(m >= RECENCY_FLOOR && m < RECENCY_FLOOR + 0.05);
+        assert!((RECENCY_FLOOR..RECENCY_FLOOR + 0.05).contains(&m));
     }
 
     #[test]
@@ -586,8 +586,10 @@ mod tests {
         }
         idx.flush().await.unwrap();
 
-        let mut opts = SearchOptions::default();
-        opts.limit = 5;
+        let opts = SearchOptions {
+            limit: 5,
+            ..Default::default()
+        };
         let results = idx.search("shared", &opts).await.unwrap();
         assert_eq!(results.len(), 5);
     }

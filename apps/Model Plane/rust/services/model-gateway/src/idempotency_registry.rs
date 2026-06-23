@@ -162,9 +162,9 @@ mod tests {
     #[test]
     fn concurrent_duplicate_while_pending_is_in_flight() {
         let reg = IdempotencyRegistry::new();
-        let _guard = match reg.claim("k2") {
-            Claim::Proceed(g) => g, // held = still pending
-            _ => panic!("first claim must Proceed"),
+        // held = still pending
+        let Claim::Proceed(_guard) = reg.claim("k2") else {
+            panic!("first claim must Proceed");
         };
         assert!(
             matches!(reg.claim("k2"), Claim::InFlight),
@@ -176,9 +176,8 @@ mod tests {
     fn dropped_guard_without_commit_releases_the_claim() {
         let reg = IdempotencyRegistry::new();
         {
-            let _guard = match reg.claim("k3") {
-                Claim::Proceed(g) => g,
-                _ => panic!("first claim must Proceed"),
+            let Claim::Proceed(_guard) = reg.claim("k3") else {
+                panic!("first claim must Proceed");
             };
             // guard dropped here without commit (simulates an errored request)
         }

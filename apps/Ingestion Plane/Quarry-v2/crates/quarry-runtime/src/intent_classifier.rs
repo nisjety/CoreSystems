@@ -112,7 +112,6 @@ impl MpIntentClassifier {
     /// trailing characters. Unknown tokens collapse to `Default`.
     fn parse(reply: &str) -> QueryIntent {
         let first = reply
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -316,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn rule_classifier_matches_free_function() {
-        let c = RuleClassifier::default();
+        let c = RuleClassifier;
         assert_eq!(c.classify("github.com").await, QueryIntent::Navigational);
         assert_eq!(c.classify("\"hello\"").await, QueryIntent::Phrase);
         assert_eq!(c.classify("breaking news").await, QueryIntent::Fresh);

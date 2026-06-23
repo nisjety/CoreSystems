@@ -2484,6 +2484,8 @@ mod tests {
     //        set_run_mode_and_upsert_skill_against_real_pg -- --ignored
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    // end-to-end PG integration test: sequential setup → exercise → assertions
+    #[allow(clippy::too_many_lines)]
     async fn set_run_mode_and_upsert_skill_against_real_pg() {
         use super::SessionService;
 

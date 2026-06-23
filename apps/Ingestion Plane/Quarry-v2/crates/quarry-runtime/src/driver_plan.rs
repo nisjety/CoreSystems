@@ -2,17 +2,12 @@ use quarry_core::output::DriverKind;
 use quarry_tls::TlsProfile;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum UrlType {
     Json,
     PlainText,
+    #[default]
     Default,
-}
-
-impl Default for UrlType {
-    fn default() -> Self {
-        UrlType::Default
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

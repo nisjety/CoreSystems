@@ -202,6 +202,8 @@ fn envelope(at: DateTime<Utc>, event: ProtoEvent) -> ProtoOrchestrationEvent {
 }
 
 impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
+    // exhaustive event-variant mapping; splitting would obscure the 1:1 shim
+    #[allow(clippy::too_many_lines)]
     fn from(ev: OrchestrationEvent) -> Self {
         match ev {
             OrchestrationEvent::PlanTransitioned {
