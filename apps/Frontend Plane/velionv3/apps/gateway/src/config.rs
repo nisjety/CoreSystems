@@ -17,6 +17,11 @@ pub(crate) struct AppState {
     /// ag-ui, search answer, crawl events) mid-stream and drop their terminal events.
     pub(crate) streaming_client: reqwest::Client,
     pub(crate) internal_api_key: String,
+    /// Ownership PR-4/PR-6 honesty gate. The SAME `CONTROL_PLANE_ENFORCEMENT`
+    /// value retrieval-engine reads (off|permissive|strict). The frontend's
+    /// privacy affordances (badges/ShareDialog) render ONLY when this is
+    /// "strict" AND viewer identity is live — surfaced via GET /api/v1/ownership/status.
+    pub(crate) enforcement_mode: String,
     pub(crate) auth_core_url: String,
     pub(crate) session_core_url: String,
     pub(crate) billing_core_url: String,
@@ -93,6 +98,13 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .tcp_keepalive(Duration::from_secs(20))
             .build()?,
         internal_api_key: internal_api_key()?,
+        // Same env var retrieval-engine reads; normalize + whitelist so an
+        // unknown/unset value can never accidentally read as "strict".
+        enforcement_mode: env::var("CONTROL_PLANE_ENFORCEMENT")
+            .ok()
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| matches!(v.as_str(), "off" | "permissive" | "strict"))
+            .unwrap_or_else(|| "off".to_string()),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         session_core_url: env_url("SESSION_CORE_URL", "http://session-core:3013"),
         billing_core_url: env_url("BILLING_CORE_URL", "http://billing-core:3017"),

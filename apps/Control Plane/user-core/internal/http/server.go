@@ -218,8 +218,13 @@ func (s *Server) setupRoutes() {
 			providers.POST("", s.linkProviderAccount)
 		}
 
-		// Internal orchestration endpoints (idempotent hooks from auth pipeline)
+		// Internal orchestration endpoints (idempotent hooks from auth pipeline).
+		// Internal-key ONLY for the WHOLE group: these mutate org membership and
+		// user profile, so a plain user Bearer token must NEVER reach them — else
+		// any authenticated user could self-join an arbitrary org (privilege
+		// escalation). Matches the documented "internal key" auth for these hooks.
 		internal := v1.Group("/internal")
+		internal.Use(s.requireInternalKeyOnly)
 		{
 			internal.POST("/memberships/ensure", s.ensureMembership)
 			internal.POST("/users/enrich-from-provider", s.enrichUserFromProvider)
@@ -233,6 +238,12 @@ func (s *Server) setupRoutes() {
 			{
 				authz.GET("/visible", s.authzVisible)
 				authz.GET("/check", s.authzCheck)
+				// Grant write surface backing the velionv3 ShareDialog (PR-6).
+				// Same internal-key-only guard; resource_grants is the single
+				// authority retrieval + documents-api enforce against.
+				authz.POST("/grant", s.authzGrant)
+				authz.DELETE("/grant", s.authzRevoke)
+				authz.GET("/grants", s.authzGrantsByResource)
 			}
 		}
 	}

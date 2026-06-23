@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 )
 
 // authz_facade.go exposes the per-user authorization facade over HTTP. These are
@@ -81,4 +83,132 @@ func (s *Server) authzCheck(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"allowed": allowed, "role": role})
+}
+
+// grantView is the JSON shape returned for a single grant. It mirrors the
+// resource_grants row but never exposes anything beyond the share relationship
+// the ShareDialog needs (who it's shared with, at what role, by whom, when).
+func grantView(g *users.ResourceGrant) gin.H {
+	return gin.H{
+		"grant_id":      g.GrantID,
+		"org_id":        g.OrgID,
+		"resource_type": g.ResourceType,
+		"resource_id":   g.ResourceID,
+		"subject_type":  g.SubjectType,
+		"subject_id":    g.SubjectID,
+		"role":          g.Role,
+		"granted_by":    g.GrantedBy,
+		"granted_at":    g.GrantedAt,
+	}
+}
+
+// authzGrant: POST /api/v1/internal/authz/grant
+// Body: { org_id, resource_type, resource_id, subject_id, subject_type?, role?, granted_by }
+// Upserts an explicit grant (MVP: subject_type=user, role=view). The Grant repo
+// method is the single authority retrieval + documents-api enforce against, so
+// the ShareDialog writes here rather than to any display-only flag. Idempotent.
+func (s *Server) authzGrant(c *gin.Context) {
+	var req struct {
+		OrgID        string `json:"org_id"`
+		ResourceType string `json:"resource_type"`
+		ResourceID   string `json:"resource_id"`
+		SubjectID    string `json:"subject_id"`
+		SubjectType  string `json:"subject_type"`
+		Role         string `json:"role"`
+		GrantedBy    string `json:"granted_by"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	req.OrgID = strings.TrimSpace(req.OrgID)
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	req.ResourceID = strings.TrimSpace(req.ResourceID)
+	req.SubjectID = strings.TrimSpace(req.SubjectID)
+	if req.OrgID == "" || req.ResourceType == "" || req.ResourceID == "" || req.SubjectID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "org_id, resource_type, resource_id and subject_id are required"})
+		return
+	}
+	if strings.TrimSpace(req.SubjectType) == "" {
+		req.SubjectType = "user"
+	}
+	if strings.TrimSpace(req.Role) == "" {
+		req.Role = "view"
+	}
+	if s.aclRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authz facade not configured"})
+		return
+	}
+
+	out, err := s.aclRepo.Grant(c.Request.Context(), &users.ResourceGrant{
+		OrgID:        req.OrgID,
+		ResourceType: req.ResourceType,
+		ResourceID:   req.ResourceID,
+		SubjectType:  req.SubjectType,
+		SubjectID:    req.SubjectID,
+		Role:         req.Role,
+		GrantedBy:    strings.TrimSpace(req.GrantedBy),
+	})
+	if err != nil {
+		// Grant fails closed on non-grantable types / unsupported subjects /
+		// bad role — surface as 400 so the UI shows a clear message.
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, grantView(out))
+}
+
+// authzRevoke: DELETE /api/v1/internal/authz/grant?org_id=&resource_type=&resource_id=&subject_id=[&subject_type=user]
+// Removes an explicit grant (the ShareDialog "remove" action). Idempotent.
+func (s *Server) authzRevoke(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Query("org_id"))
+	resourceType := strings.TrimSpace(c.Query("resource_type"))
+	resourceID := strings.TrimSpace(c.Query("resource_id"))
+	subjectID := strings.TrimSpace(c.Query("subject_id"))
+	subjectType := strings.TrimSpace(c.Query("subject_type"))
+	if subjectType == "" {
+		subjectType = "user"
+	}
+	if orgID == "" || resourceType == "" || resourceID == "" || subjectID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "org_id, resource_type, resource_id and subject_id are required"})
+		return
+	}
+	if s.aclRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authz facade not configured"})
+		return
+	}
+
+	if err := s.aclRepo.Revoke(c.Request.Context(), orgID, resourceType, resourceID, subjectType, subjectID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke grant"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"revoked": true})
+}
+
+// authzGrantsByResource: GET /api/v1/internal/authz/grants?org_id=&resource_type=&resource_id=
+// Lists every explicit grant on a resource — the ShareDialog's live "shared with"
+// list. Read from the same resource_grants authority retrieval enforces.
+func (s *Server) authzGrantsByResource(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Query("org_id"))
+	resourceType := strings.TrimSpace(c.Query("resource_type"))
+	resourceID := strings.TrimSpace(c.Query("resource_id"))
+	if orgID == "" || resourceType == "" || resourceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "org_id, resource_type and resource_id are required"})
+		return
+	}
+	if s.aclRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authz facade not configured"})
+		return
+	}
+
+	grants, err := s.aclRepo.ListByResource(c.Request.Context(), orgID, resourceType, resourceID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list grants"})
+		return
+	}
+	out := make([]gin.H, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, grantView(g))
+	}
+	c.JSON(http.StatusOK, gin.H{"grants": out})
 }
