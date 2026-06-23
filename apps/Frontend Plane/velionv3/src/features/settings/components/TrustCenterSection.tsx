@@ -18,6 +18,7 @@ import {
 } from '@/shared/api/integrations-client'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { getSession } from '@/shared/session/session-store'
+import { isGateOpen } from '@/shared/context/ownership-gate'
 
 /**
  * Trust Center — per-connected-app transparency.
@@ -169,6 +170,24 @@ export function TrustCenterSection() {
         description="Every app the workspace has connected, what it can access, and exactly what the AI has done with it."
       />
 
+      {/* Per-document privacy guarantee — gated on isGateOpen() so the claim
+          appears ONLY when the backend is actually enforcing per-user privacy
+          (strict + live identity). It states only what the retrieval path
+          delivers; no claim is shown when the gate is closed. */}
+      <Show when={isGateOpen()}>
+        <section class="velion-trust-activity" aria-label="Per-document privacy">
+          <header class="velion-trust-activity__head">
+            <h3>Per-document privacy</h3>
+          </header>
+          <p class="velion-trust-muted">
+            Documents marked Private are visible only to their owner and the people they're
+            explicitly shared with — enforced everywhere a document is read: list views, search,
+            retrieval, and the AI agent's grounding. Sharing grants are the single source of truth;
+            there is no separate display-only flag.
+          </p>
+        </section>
+      </Show>
+
       <Show when={actionError()}>
         {(message) => (
           <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">
@@ -231,6 +250,19 @@ export function TrustCenterSection() {
                       )}
                     </For>
                   </div>
+                  <Show when={loaded().workspaceActivity.tools.length > 0}>
+                    <p class="velion-settings-subnote">Tools the AI invoked</p>
+                    <div class="velion-trust-chips">
+                      <For each={loaded().workspaceActivity.tools}>
+                        {(tool) => (
+                          <span class="velion-trust-chip velion-trust-chip--tool">
+                            <Sparkles size={12} aria-hidden="true" />
+                            {tool}
+                          </span>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
                   <p class="velion-settings-subnote">
                     Counted across the whole workspace — per-connection attribution is shown in the
                     table below only where an event could be reliably attributed.
