@@ -68,6 +68,13 @@ export type LiveKnowledgeSource = {
   title: string
   type: LiveKnowledgeSourceType
   updated: string
+  /**
+   * Per-user ownership (the PR-2 documents columns retrieval + documents-api
+   * filter on — the SAME authority, never a separate display flag). Optional:
+   * when absent, no privacy badge renders (honest empty, not a fabricated state).
+   */
+  visibility?: 'private' | 'org' | 'shared'
+  owner_id?: string
 }
 
 export type LiveKnowledgeFile = {
