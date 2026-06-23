@@ -158,7 +158,7 @@ function OutputCard({ card }: { card: WorkflowCard }) {
 			<div className="relative aspect-[3/4] overflow-hidden bg-velion-c-white/8">
 				<img
 					alt=""
-					className="h-full w-full select-none object-cover opacity-78 saturate-[0.72] transition-transform duration-700 group-hover:scale-[1.035]"
+					className="h-full w-full select-none object-cover opacity-[0.78] saturate-[0.72] transition-transform duration-700 group-hover:scale-[1.035]"
 					draggable={false}
 					src={card.image}
 				/>
@@ -297,6 +297,7 @@ export function FeatureCardsSection() {
 		<section
 			aria-label="Velion workflow generator"
 			className="relative isolate min-h-[100svh] overflow-hidden bg-[#1f211c] text-velion-c-white"
+			data-nav-dark-section
 			id="product-loop"
 			ref={sectionRef}
 		>

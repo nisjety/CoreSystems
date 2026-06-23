@@ -6,7 +6,7 @@ import { MenuModal } from "@/components/ui/MenuModal";
 import { Footer } from "@/components/core/footer/Footer";
 import { HeroSection } from "./sections/HeroSection";
 import { BrandLogosSection } from "./sections/BrandLogosSection";
-import { FeatureCardsSection } from "./sections/FeatureCardsSection"
+import { FeatureCardsSection } from "./sections/FeatureCardsSection";
 import { PreFooterStatementSection } from "./sections/PreFooterStatementSection";
 
 
@@ -26,16 +26,24 @@ export function VelionHome() {
       });
 
       setIsNavOnDark((current) => {
+        const navProbeY = Math.min(96, window.innerHeight * 0.12);
+        const darkSectionIsActive = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-nav-dark-section]"),
+        ).some((section) => {
+          const rect = section.getBoundingClientRect();
+          return rect.top <= navProbeY && rect.bottom >= navProbeY;
+        });
         const prefooter = document.querySelector<HTMLElement>("[data-prefooter-scroll]");
 
         if (!prefooter) {
-          return current ? false : current;
+          return current === darkSectionIsActive ? current : darkSectionIsActive;
         }
 
         const rect = prefooter.getBoundingClientRect();
         const travel = Math.max(rect.height - window.innerHeight, 1);
         const progress = Math.min(Math.max(-rect.top / travel, 0), 1);
-        const next = rect.top <= 0 && rect.bottom >= window.innerHeight && progress >= 0.32;
+        const prefooterIsDark = rect.top <= 0 && rect.bottom >= window.innerHeight && progress >= 0.32;
+        const next = darkSectionIsActive || prefooterIsDark;
 
         return current === next ? current : next;
       });
