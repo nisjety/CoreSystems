@@ -252,7 +252,14 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
     validation.validate_nbf = true;
     validation.leeway = jwt_leeway_secs();
     if let Ok(expected_iss) = std::env::var("AUTH_CORE_ISSUER") {
-        validation.set_issuer(&[expected_iss]);
+        // Enforce `iss` only when a NON-EMPTY issuer is configured. A compose
+        // default of `${AUTH_CORE_ISSUER:-}` yields an empty string (Ok("")),
+        // which previously did set_issuer(&[""]) — rejecting every real token
+        // with InvalidIssuer. Empty/unset means "don't enforce" (iss is optional).
+        let expected_iss = expected_iss.trim().to_owned();
+        if !expected_iss.is_empty() {
+            validation.set_issuer(&[expected_iss]);
+        }
     }
     match std::env::var("AUTH_CORE_AUDIENCE") {
         Ok(expected_aud) => {
