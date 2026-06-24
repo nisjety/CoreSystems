@@ -34,10 +34,12 @@ import {
 } from '@/features/onboarding/lib/state'
 import { createOnboardingStepTransition } from '@/features/onboarding/lib/step-transition'
 import {
+  approxEmployeesFromSize,
   graphNodePosition,
   inferOrganizationQuery,
   rankBrregSuggestions,
   sizeFromEmployees,
+  sizeLabel,
   stepNumberFor,
 } from '@/features/onboarding/lib/view'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
@@ -213,7 +215,10 @@ export default function OnboardingPage() {
       organization: {
         name: state.organization.name,
         size: state.organization.size,
-        employeeCount: state.organization.employeeCount,
+        // Fall back to a size-band midpoint when the org wasn't Brreg-verified,
+        // so the AI (and the local heuristic's numeric tiering) still gets a
+        // head-count signal instead of nothing.
+        employeeCount: state.organization.employeeCount ?? approxEmployeesFromSize(state.organization.size),
       },
       website: {
         url: state.website.url,
@@ -230,6 +235,9 @@ export default function OnboardingPage() {
       orgNumber: state.organization.orgNumber,
       industry: state.organization.industry,
       orgForm: state.organization.orgForm,
+      // Honest head-count band (e.g. "51-250") from the size chip, so the model
+      // can frame team size without quoting the synthetic exact count above.
+      employeeBand: state.organization.size ? sizeLabel(state.organization.size) : undefined,
       goal: state.website.brief,
       branding: state.website.branding,
       websitePages: state.website.pages,
