@@ -1,4 +1,9 @@
-use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use reqwest::Method;
 use serde_json::{json, Value};
 
@@ -29,13 +34,14 @@ pub(crate) async fn create_organization(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<CreateOrganizationRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let name = input.name.trim().to_owned();
     if name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error("invalid_name", "Organization name is required.")),
-        );
+        )
+            .into_response();
     }
 
     let cookie = cookie_header(&headers);
@@ -49,7 +55,8 @@ pub(crate) async fn create_organization(
                 "unauthenticated",
                 "A signed-in session is required to create an organization.",
             )),
-        );
+        )
+            .into_response();
     }
 
     // Better Auth's organization endpoints enforce an Origin/CSRF check, so the
@@ -60,8 +67,8 @@ pub(crate) async fn create_organization(
     // 1. Dedupe: reuse an existing membership instead of creating a duplicate.
     if let Some(existing) = existing_org(&state, &cookie, origin.as_deref()).await {
         if let Some(org_id) = ba_org_id(&existing) {
-            set_active_org(&state, &cookie, origin.as_deref(), &org_id).await;
-            return (StatusCode::OK, Json(normalize_org(&existing)));
+            let cookies = set_active_org(&state, &cookie, origin.as_deref(), &org_id).await;
+            return respond_json(StatusCode::OK, normalize_org(&existing), cookies);
         }
     }
 
@@ -93,7 +100,8 @@ pub(crate) async fn create_organization(
                         "upstream_unavailable",
                         "Could not reach the identity service to create the organization.",
                     )),
-                );
+                )
+                    .into_response();
             }
         };
     if !ba_status.is_success() {
@@ -105,7 +113,8 @@ pub(crate) async fn create_organization(
         return (
             ba_status,
             Json(error(code, ba_error_message(&ba_org, ba_status))),
-        );
+        )
+            .into_response();
     }
 
     let Some(org_id) = ba_org_id(&ba_org) else {
@@ -115,11 +124,15 @@ pub(crate) async fn create_organization(
                 "create_failed",
                 "Identity service did not return an organization id.",
             )),
-        );
+        )
+            .into_response();
     };
 
-    // 3. Set-active — membership now exists, so this must succeed.
-    set_active_org(&state, &cookie, origin.as_deref(), &org_id).await;
+    // 3. Set-active — membership now exists, so this must succeed. Capture the
+    // refreshed Better Auth session cookie so the browser's cookie-cache
+    // reflects the new active org immediately (otherwise a `get-session` can
+    // read a stale null `activeOrganizationId` until the cookie-cache TTL).
+    let active_cookies = set_active_org(&state, &cookie, origin.as_deref(), &org_id).await;
 
     // 4. Mirror to org-core under the SAME id (best-effort, never fatal).
     let actor = actor_from_request(
@@ -147,7 +160,22 @@ pub(crate) async fn create_organization(
     )
     .await;
 
-    (StatusCode::CREATED, Json(normalize_org(&ba_org)))
+    respond_json(StatusCode::CREATED, normalize_org(&ba_org), active_cookies)
+}
+
+/// Build a JSON response, replaying any captured `Set-Cookie` headers (the
+/// refreshed Better Auth session-data cookie from set-active) onto it so the
+/// browser's cookie-cache reflects the new active org immediately instead of
+/// reading a stale value until the cache TTL elapses.
+fn respond_json(status: StatusCode, value: Value, set_cookies: Vec<Vec<u8>>) -> Response {
+    let mut response = (status, Json(value)).into_response();
+    let headers = response.headers_mut();
+    for cookie in set_cookies {
+        if let Ok(value) = HeaderValue::from_bytes(&cookie) {
+            headers.append(SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 fn cookie_header(headers: &HeaderMap) -> String {
@@ -230,19 +258,37 @@ async fn ba_post(
     Some((status, parsed))
 }
 
-/// Set the session's active organization via Better Auth. Best-effort: the response
-/// is ignored, the active org is persisted on the session row server-side.
-async fn set_active_org(state: &AppState, cookie: &str, origin: Option<&str>, org_id: &str) {
-    let _ = ba_post(
-        state,
-        cookie,
-        origin,
-        "set-active",
-        json!({ "organizationId": org_id }),
-    )
-    .await;
-    // The session-context cache is keyed by active org; the next scoped call re-reads
-    // a fresh session, so no explicit invalidation is required here.
+/// Set the session's active organization via Better Auth and return the
+/// refreshed `Set-Cookie` headers from that response. Better Auth re-issues the
+/// session-data (cookie-cache) cookie carrying the new `activeOrganizationId`;
+/// the caller replays those onto its own response so the browser reflects the
+/// active org immediately rather than serving a stale cache for the TTL window.
+/// Best-effort: returns an empty Vec on any failure — the active org is still
+/// persisted server-side and scoped calls fall back to membership resolution.
+async fn set_active_org(
+    state: &AppState,
+    cookie: &str,
+    origin: Option<&str>,
+    org_id: &str,
+) -> Vec<Vec<u8>> {
+    let url = format!("{}/api/auth/organization/set-active", state.auth_core_url);
+    let mut request = state
+        .client
+        .post(&url)
+        .header("cookie", cookie)
+        .json(&json!({ "organizationId": org_id }));
+    if let Some(origin) = origin.filter(|value| !value.trim().is_empty()) {
+        request = request.header("origin", origin);
+    }
+    match request.send().await {
+        Ok(response) => response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .map(|value| value.as_bytes().to_vec())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Extract a Better Auth organization id from a create/list entry. BA returns the

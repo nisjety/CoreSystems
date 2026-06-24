@@ -89,11 +89,25 @@ pub(super) async fn sign_out(State(state): State<AppState>, headers: HeaderMap) 
     .await
 }
 
+#[derive(Deserialize)]
+pub(super) struct GetSessionQuery {
+    /// When `true`, ask Better Auth to bypass its session-data cookie-cache and
+    /// read the session fresh from storage. The SPA passes this right after
+    /// changing the active org so `activeOrganizationId` reflects instantly
+    /// instead of serving a stale cached value for the cookie-cache TTL.
+    #[serde(rename = "disableCookieCache")]
+    disable_cookie_cache: Option<String>,
+}
+
 pub(super) async fn get_auth_session(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<GetSessionQuery>,
 ) -> Response {
-    let url = format!("{}/api/auth/get-session", state.auth_core_url);
+    let mut url = format!("{}/api/auth/get-session", state.auth_core_url);
+    if query.disable_cookie_cache.as_deref() == Some("true") {
+        url.push_str("?disableCookieCache=true");
+    }
     let cookie = cookie_header(&headers);
     let origin = browser_origin(&headers);
     proxy_auth(
