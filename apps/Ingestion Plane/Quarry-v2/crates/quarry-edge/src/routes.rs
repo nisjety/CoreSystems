@@ -204,6 +204,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/runs/:id/events",
             get(crate::resource_routes::list_run_events),
         )
+        // Crawl 0-pages fix — durable read keyed by the handoff `job_id`
+        // (a run_id is not assigned synchronously at handoff). Forwards to
+        // control's `/v1/jobs/{id}/events`; the gateway re-emits the JSON
+        // array as SSE for the SPA.
+        .route(
+            "/v1/jobs/:id/events",
+            get(crate::resource_routes::list_job_events),
+        )
         // C30.2 / cluster #9 — versioned change tracking.
         .route("/v1/change/check", post(crate::change_routes::check))
         .route("/v1/change/latest", get(crate::change_routes::latest))
@@ -570,6 +578,13 @@ async fn batch_handoff(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HandoffAck {
     pub job_id: String,
+    /// Temporal workflow run id, present once the orchestrator's jobs
+    /// dispatcher has flipped the job accepted → running and stamped it
+    /// (see control migration 006_jobs_run_id). Absent at first handoff —
+    /// the gateway therefore keys the SSE event stream off `job_id`, which
+    /// control indexes events by regardless of run_id assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -664,8 +679,7 @@ fn verify_runtime_token(headers: &HeaderMap) -> Result<(), QuarryError> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
         .unwrap_or("");
-    if !provided.is_empty()
-        && crate::change_routes::ct_eq(provided.as_bytes(), expected.as_bytes())
+    if !provided.is_empty() && crate::change_routes::ct_eq(provided.as_bytes(), expected.as_bytes())
     {
         Ok(())
     } else {
@@ -698,8 +712,10 @@ async fn internal_run_page(
     })?;
     let org_id = req.org_id.clone().unwrap_or_default();
     if org_id.trim().is_empty() {
-        let err =
-            QuarryError::new(ErrorCode::BadRequest, "run_page requires org_id in the body");
+        let err = QuarryError::new(
+            ErrorCode::BadRequest,
+            "run_page requires org_id in the body",
+        );
         return Err((
             StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
             Json(Envelope::<()>::err(&request_id, err)),
@@ -719,9 +735,11 @@ async fn internal_run_page(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if !signer.verify_run_binding(&org_id, &req.url, sig) {
-            tracing::warn!(had_sig = !sig.is_empty(), "run_page HMAC org-binding failed");
-            let err =
-                QuarryError::new(ErrorCode::Unauthorized, "run_page org binding invalid");
+            tracing::warn!(
+                had_sig = !sig.is_empty(),
+                "run_page HMAC org-binding failed"
+            );
+            let err = QuarryError::new(ErrorCode::Unauthorized, "run_page org binding invalid");
             return Err((
                 StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::UNAUTHORIZED),
                 Json(Envelope::<()>::err(&request_id, err)),

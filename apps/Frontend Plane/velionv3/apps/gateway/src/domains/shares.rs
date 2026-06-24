@@ -73,8 +73,16 @@ async fn list_shares(
         urlencoding::encode(&org_id),
         urlencoding::encode(&doc_id),
     );
-    let (status, body): (StatusCode, Json<Value>) =
-        proxy_json(&state, Method::GET, &url, None, Some(&org_id), Some(&actor), None).await;
+    let (status, body): (StatusCode, Json<Value>) = proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
     (status, body).into_response()
 }
 
@@ -135,8 +143,16 @@ async fn revoke_share(
         urlencoding::encode(&doc_id),
         urlencoding::encode(&subject_id),
     );
-    let (status, body): (StatusCode, Json<Value>) =
-        proxy_json(&state, Method::DELETE, &url, None, Some(&org_id), Some(&actor), None).await;
+    let (status, body): (StatusCode, Json<Value>) = proxy_json(
+        &state,
+        Method::DELETE,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
     (status, body).into_response()
 }
 
@@ -154,7 +170,15 @@ async fn shared_with_me(
         urlencoding::encode(&org_id),
         urlencoding::encode(&actor.user_id),
     );
-    let (status, body): (StatusCode, Json<Value>) =
-        proxy_json(&state, Method::GET, &url, None, Some(&org_id), Some(&actor), None).await;
+    let (status, body): (StatusCode, Json<Value>) = proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
     (status, body).into_response()
 }

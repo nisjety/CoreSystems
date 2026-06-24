@@ -850,34 +850,35 @@ async fn main() -> anyhow::Result<()> {
     // Data Plane NATS, and edge base URL are all configured (browser-agent
     // feature provides the real BrowserDriver). Reuses agent_driver + AWS_* env.
     #[cfg(feature = "browser-agent")]
-    let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> =
-        match (
-            cfg.cas_bucket.as_deref().filter(|s| !s.is_empty()),
-            cfg.dataplane_nats_url.as_deref().filter(|s| !s.is_empty()),
-            cfg.edge_internal_base_url.as_deref().filter(|s| !s.is_empty()),
-        ) {
-            (Some(bucket), Some(nats_url), Some(base)) => {
-                match quarry_runtime::page_renderer::PageRenderer::connect(
-                    agent_driver.clone(),
-                    nats_url,
-                    bucket.to_string(),
-                    std::env::var("AWS_ENDPOINT_URL").ok(),
-                    base.to_string(),
-                )
-                .await
-                {
-                    Ok(r) => {
-                        tracing::info!(bucket, nats_url, "visual RAG page-image producer enabled");
-                        Some(std::sync::Arc::new(r))
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "page-image producer connect failed; disabled");
-                        None
-                    }
+    let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> = match (
+        cfg.cas_bucket.as_deref().filter(|s| !s.is_empty()),
+        cfg.dataplane_nats_url.as_deref().filter(|s| !s.is_empty()),
+        cfg.edge_internal_base_url
+            .as_deref()
+            .filter(|s| !s.is_empty()),
+    ) {
+        (Some(bucket), Some(nats_url), Some(base)) => {
+            match quarry_runtime::page_renderer::PageRenderer::connect(
+                agent_driver.clone(),
+                nats_url,
+                bucket.to_string(),
+                std::env::var("AWS_ENDPOINT_URL").ok(),
+                base.to_string(),
+            )
+            .await
+            {
+                Ok(r) => {
+                    tracing::info!(bucket, nats_url, "visual RAG page-image producer enabled");
+                    Some(std::sync::Arc::new(r))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "page-image producer connect failed; disabled");
+                    None
                 }
             }
-            _ => None,
-        };
+        }
+        _ => None,
+    };
     #[cfg(not(feature = "browser-agent"))]
     let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> = None;
 

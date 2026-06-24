@@ -341,8 +341,13 @@ async fn list_monitors(
     if !status.is_success() {
         return forward(status, body);
     }
-    let monitors: Vec<Value> = unwrap_data(body)
-        .as_array()
+    // The edge returns a `Page` envelope (`{data:{items:[...]}}`); tolerate a
+    // bare `{data:[...]}` array too. Then keep only change-monitor schedules.
+    let data = unwrap_data(body);
+    let monitors: Vec<Value> = data
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| data.as_array())
         .map(|rows| {
             rows.iter()
                 .filter(|s| s.get("target_kind").and_then(Value::as_str) == Some("change_monitor"))

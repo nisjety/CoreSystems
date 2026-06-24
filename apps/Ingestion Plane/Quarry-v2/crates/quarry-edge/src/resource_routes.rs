@@ -18,7 +18,10 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{header, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Response,
+    },
     Extension, Json,
 };
 use serde::Deserialize;
@@ -28,9 +31,8 @@ use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::{ArtifactKind, RequestKind};
 use quarry_core::pagination::{ListFilter, Page};
 use quarry_core::resources::{
-    ArtifactSummary, BenchmarkSummary, JobResourceKind, JobSummary, RequestQueueSummary,
-    ScheduleSummary, Snapshot, Source, TeamActivityEntry, TeamConcurrency, TeamCreditUsage,
-    TeamQueueStatus, TeamTokenUsage,
+    ArtifactSummary, BenchmarkSummary, JobResourceKind, JobSummary, RequestQueueSummary, Snapshot,
+    Source, TeamActivityEntry, TeamConcurrency, TeamCreditUsage, TeamQueueStatus, TeamTokenUsage,
 };
 
 use crate::state::AppState;
@@ -315,12 +317,38 @@ where
             format!("control-plane GET {path} returned {status}: {body}"),
         ));
     }
-    resp.json::<Page<T>>().await.map_err(|e| {
+    // Tolerate BOTH shapes control serves on its list endpoints: a raw `Page`
+    // (`{items,next_cursor,total_estimated}`, e.g. listSourcesHandler) AND an
+    // httpx.WriteJSON envelope (`{data: <Page|array>}`, e.g. listSchedulesHandler
+    // which wraps a bare `[]scheduleWire`). Decoding strictly as `Page<T>` 500'd
+    // on the latter; unwrap `data` when present and accept a bare array as items.
+    let raw: serde_json::Value = resp.json().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane GET {path} parse: {e}"),
+            format!("control-plane GET {path} read: {e}"),
         )
-    })
+    })?;
+    let inner = raw.get("data").cloned().unwrap_or(raw);
+    if inner.is_array() {
+        let items: Vec<T> = serde_json::from_value(inner).map_err(|e| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                format!("control-plane GET {path} parse items: {e}"),
+            )
+        })?;
+        Ok(Page {
+            items,
+            next_cursor: None,
+            total_estimated: None,
+        })
+    } else {
+        serde_json::from_value::<Page<T>>(inner).map_err(|e| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                format!("control-plane GET {path} parse: {e}"),
+            )
+        })
+    }
 }
 
 pub async fn list_sources(
@@ -698,10 +726,15 @@ pub async fn list_schedules(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<Envelope<Page<ScheduleSummary>>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<Page<serde_json::Value>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
-    let page = forward_list::<ScheduleSummary>(
+    // control's /v1/schedules serves the orchestrator-facing `scheduleWire`
+    // projection (id / target_kind / target_ref / enabled / created_at-as-unix),
+    // NOT the generic `ScheduleSummary` resource shape. Pass items through as raw
+    // JSON so the gateway's change-monitor filter (which keys on `target_kind`)
+    // sees the real fields instead of failing a strict decode (was a 500).
+    let page = forward_list::<serde_json::Value>(
         &state,
         &request_id,
         &claims.org_id,
@@ -923,6 +956,102 @@ pub async fn list_run_events(
     .await
     .map_err(|e| err_response(&request_id, e))?;
     Ok(Json(Envelope::ok(request_id, page)))
+}
+
+// =============================================================================
+// Crawl 0-pages fix — GET /v1/jobs/:id/events
+//
+// The durable crawl handoff (`/v1/crawl`, `/v1/batch`) returns a control
+// `job_id`, not a `run_id`: the orchestrator only stamps the Temporal
+// `run_id` once the job flips accepted → running, so it is not available
+// synchronously at handoff time. `list_run_events` above parses its path
+// segment as a `RunKind`, so a `job_id` would 400 there.
+//
+// This route resolves the job → its events by forwarding to control's
+// `GET /v1/jobs/{id}/events` (control indexes events by BOTH job_id and
+// run_id — see EmitEvent), which works the instant the first event lands,
+// regardless of run_id assignment.
+//
+// It emits a real `text/event-stream`: one SSE frame per control `Event`
+// (`event: <type>` / `data: <json>`), then a terminal `done`. The events
+// are finite for a completed/queued crawl, so we drain control once and
+// close — this matches the SPA's `readSseStream` consumer and lets the
+// gateway forward the bytes verbatim via `proxy_sse_stream`, unlike the
+// JSON-returning `/v1/runs/:id/events` which the SSE reader can't parse.
+// =============================================================================
+pub async fn list_job_events(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(job_id): Path<String>,
+    Query(q): Query<RunEventsQuery>,
+) -> Response {
+    let request_id = RequestKind::new().to_string();
+    // Validate the id is a job id (job_*) so we never proxy garbage / a
+    // run id (which belongs on /v1/runs/:id/events) to control.
+    if let Err(e) = job_id.parse::<quarry_core::ids::kinds::JobKind>() {
+        return err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, format!("invalid job_id: {e}")),
+        )
+        .into_response();
+    }
+    let limit = q.limit.unwrap_or(500).clamp(1, 1000).to_string();
+
+    let events: Vec<serde_json::Value> = if state.control_base_url.is_empty() {
+        tracing::debug!(%job_id, "control_base_url unset; emitting empty job-events stream");
+        Vec::new()
+    } else {
+        let path = format!("/v1/jobs/{job_id}/events");
+        match forward_one::<serde_json::Value>(
+            &state,
+            &request_id,
+            &claims.org_id,
+            &path,
+            &[("limit", limit)],
+        )
+        .await
+        {
+            // Control serves these events through `httpx.WriteJSON`, which
+            // wraps the `[]Event` slice in an envelope: `{"data": [ ... ]}`
+            // (and `{"data": null}` when there are none). It is NOT a bare
+            // top-level array. Unwrap `data` first — same tolerance as
+            // `forward_list` — then accept the inner array; otherwise we'd
+            // fall through to `Vec::new()` on every real response and emit
+            // only the terminal `done`, which is the 0-pages bug.
+            Ok(Some(raw)) => {
+                let inner = raw.get("data").cloned().unwrap_or(raw);
+                match inner {
+                    serde_json::Value::Array(items) => items,
+                    _ => Vec::new(),
+                }
+            }
+            Ok(None) => Vec::new(),
+            Err(e) => return err_response(&request_id, e).into_response(),
+        }
+    };
+
+    let stream = async_stream::stream! {
+        for event in events {
+            // `type` is the SSE event name; the whole event object is the
+            // data payload (so the SPA can read payload.pages_visited etc.).
+            let name = event
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("event")
+                .to_owned();
+            match Event::default().event(name).json_data(&event) {
+                Ok(ev) => yield Ok::<Event, std::convert::Infallible>(ev),
+                Err(err) => {
+                    tracing::warn!(error = %err, "job-event serialize failed; skipping frame");
+                }
+            }
+        }
+        // Terminal marker so the SPA's onDone fires even when the crawl
+        // emitted no terminal `run_completed`/`run_failed` yet (queued job).
+        yield Ok(Event::default().data("done"));
+    };
+
+    Sse::new(stream).into_response()
 }
 
 #[cfg(test)]

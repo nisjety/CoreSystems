@@ -75,6 +75,7 @@ pub async fn forward_to_orchestrator(
 
     Ok(HandoffAck {
         job_id: job.id,
+        run_id: job.run_id,
         accepted_at: chrono::Utc::now(),
     })
 }
@@ -87,6 +88,11 @@ struct ControlJobEnvelope {
 #[derive(Debug, Deserialize)]
 struct ControlJob {
     id: String,
+    /// Populated by the orchestrator once the job is running; `None` at
+    /// initial handoff. Threaded into `HandoffAck.run_id` for consumers
+    /// that prefer the run-keyed event stream.
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
 fn truncate(s: &str, max: usize) -> String {

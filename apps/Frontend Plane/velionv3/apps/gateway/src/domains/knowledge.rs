@@ -161,5 +161,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/runs/:id/events",
             get(quarry::crawl_run_events),
         )
+        // Crawl 0-pages fix — durable crawl event stream keyed off the
+        // handoff job_id (the normalized handoff's `eventStream` points
+        // here). The edge emits real SSE; this forwards it verbatim.
+        .route(
+            "/api/v1/knowledge/jobs/:id/events",
+            get(quarry::crawl_job_events),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

@@ -517,6 +517,14 @@ export type CrawlWorkflowEvent = {
   event?: string
   progress?: number
   status?: string
+  /** Pages successfully fetched so far / at completion. Read from a
+   * `run_completed` / `run_*` event's `pages_visited` (or the canonical
+   * JobHistoryEvent `completed`). Drives the "N pages" UI count. */
+  pagesVisited?: number
+  /** Pages that failed during the crawl, when reported. */
+  pagesFailed?: number
+  /** Best-estimate total work, when the producer can compute it. */
+  total?: number
 }
 
 export type CrawlWorkflowHandlers = {
@@ -530,9 +538,19 @@ export async function streamCrawlRunEvents(
   runId: string,
   handlers: CrawlWorkflowHandlers,
   signal?: AbortSignal,
+  // Server-provided event-stream path (from the crawl handoff's
+  // `eventStream`). Honor it verbatim — the gateway now points it at the
+  // job-id-keyed `/jobs/{id}/events` SSE route (the run-id is not assigned
+  // synchronously at handoff). Falls back to the same job-events path built
+  // from the id we were given, NOT the old `/runs/{id}/events` JSON route
+  // that the SSE reader could not parse (the 0-pages bug).
+  streamPath?: string,
 ): Promise<void> {
+  const path = streamPath && streamPath.trim()
+    ? streamPath
+    : `/api/v1/knowledge/jobs/${encodeURIComponent(runId)}/events`
   await readSseStream(
-    `/api/v1/knowledge/runs/${encodeURIComponent(runId)}/events`,
+    path,
     { headers: orgHeaders(orgId), signal },
     (event) => {
       const parsed = normalizeCrawlEvent(event.event, event.data)
@@ -618,20 +636,87 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
     const parsed = JSON.parse(data) as unknown
     const record = asRecord(parsed)
     if (!record) return { detail: data, event }
-    const status = stringField(record, 'status') ?? stringField(record, 'state') ?? stringField(record, 'phase')
-    const detail = stringField(record, 'message')
+
+    // Quarry/control events carry their stage-specific fields under
+    // `payload` (e.g. run_completed → { pages_visited, pages_failed });
+    // the canonical JobHistoryEvent puts counts at the top level
+    // (completed/total). Read from both so the UI sees the real count
+    // regardless of which transport produced the frame.
+    const payload = asRecord(record.payload) ?? {}
+
+    // The SSE `event:` name is the event `type` (e.g. "run_completed").
+    // A run_* terminal event maps to a terminal crawl status so onDone
+    // fires and the job renders complete; `state`/`status`/`phase` cover
+    // the JobHistoryEvent-style frames.
+    const type = event ?? stringField(record, 'type')
+    const status = mapEventTypeToStatus(type)
+      ?? stringField(record, 'status')
+      ?? stringField(record, 'state')
+      ?? stringField(record, 'phase')
+
+    const pagesVisited = numberField(payload, 'pages_visited')
+      ?? numberField(record, 'pages_visited')
+      ?? numberField(record, 'completed')
+    const pagesFailed = numberField(payload, 'pages_failed')
+      ?? numberField(record, 'pages_failed')
+    const total = numberField(payload, 'total')
+      ?? numberField(record, 'total')
+
+    const detail = stringField(payload, 'url')
+      ?? stringField(record, 'message')
       ?? stringField(record, 'detail')
       ?? stringField(record, 'url')
+      ?? summarizeCount(type, pagesVisited, pagesFailed)
       ?? status
       ?? event
       ?? 'Crawl updated.'
     const progress = numberField(record, 'progress')
       ?? numberField(record, 'progressPct')
       ?? numberField(record, 'progress_pct')
-    return { detail, event, progress, status }
+      ?? numberField(payload, 'progress')
+
+    return {
+      detail,
+      event,
+      ...(progress !== undefined ? { progress } : {}),
+      ...(status ? { status } : {}),
+      ...(pagesVisited !== undefined ? { pagesVisited } : {}),
+      ...(pagesFailed !== undefined ? { pagesFailed } : {}),
+      ...(total !== undefined ? { total } : {}),
+    }
   } catch {
     return { detail: data, event }
   }
+}
+
+/** Map a quarry event `type` to a crawl status so terminal run events
+ * (`run_completed` / `run_failed` / `run_cancelled`) drive onDone and the
+ * completed UI state. Non-terminal types return undefined so the frame's
+ * own status/phase wins. */
+function mapEventTypeToStatus(type: string | undefined): string | undefined {
+  switch (type) {
+    case 'run_completed':
+      return 'completed'
+    case 'run_failed':
+      return 'failed'
+    case 'run_cancelled':
+      return 'cancelled'
+    default:
+      return undefined
+  }
+}
+
+/** Human-readable detail for a terminal run event carrying page counts,
+ * e.g. "Crawled 5 pages" / "Crawled 5 pages (1 failed)". */
+function summarizeCount(
+  type: string | undefined,
+  pagesVisited: number | undefined,
+  pagesFailed: number | undefined,
+): string | undefined {
+  if (type !== 'run_completed' && type !== 'run_failed' && type !== 'run_cancelled') return undefined
+  if (pagesVisited === undefined) return undefined
+  const base = `Crawled ${pagesVisited} ${pagesVisited === 1 ? 'page' : 'pages'}`
+  return pagesFailed && pagesFailed > 0 ? `${base} (${pagesFailed} failed)` : base
 }
 
 function isTerminalCrawlStatus(status: string): boolean {

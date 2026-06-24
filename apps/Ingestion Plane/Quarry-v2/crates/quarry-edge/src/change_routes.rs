@@ -381,7 +381,12 @@ async fn record_check(
         );
         let artifact_run: RunKind = run_kind.unwrap_or_else(RunKind::new);
         let handle = artifacts
-            .put(&artifact_run, &req.fresh_fingerprint, "raw", summary.clone().into_bytes())
+            .put(
+                &artifact_run,
+                &req.fresh_fingerprint,
+                "raw",
+                summary.clone().into_bytes(),
+            )
             .await?;
 
         let diff_id = format!("diff_{}", ArtifactKind::new().ulid());

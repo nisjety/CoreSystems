@@ -244,10 +244,19 @@ pub(super) async fn start_crawl(
         return (status, Json(resp)).into_response();
     }
 
-    let id = crawl_job_id(&resp).unwrap_or_else(|| format!("{kind}_{}", user.user_id));
+    // The durable handoff (`/v1/crawl`, `/v1/batch`) returns a control
+    // `job_id`; the Temporal `run_id` is only stamped once the job starts
+    // running, so it is usually absent here. The event stream must key off
+    // `job_id` (control indexes events by both) and point at the edge's
+    // SSE-emitting `/v1/jobs/{id}/events` — the old `/runs/{id}/events`
+    // path 400s on a job_id and returns JSON the SPA SSE reader can't read,
+    // which is why the UI showed 0 pages.
+    let job_id = crawl_handoff_job_id(&resp).unwrap_or_else(|| format!("{kind}_{}", user.user_id));
+    let run_id = first_string(&resp, &["/run_id", "/runId", "/data/run_id", "/data/runId"]);
     let normalized = json!({
-        "id": id.clone(),
-        "jobId": id.clone(),
+        "id": job_id.clone(),
+        "jobId": job_id.clone(),
+        "runId": run_id,
         "kind": kind,
         "status": crawl_job_status(&resp).unwrap_or("queued"),
         "acceptedAt": first_string(&resp, &[
@@ -256,7 +265,7 @@ pub(super) async fn start_crawl(
             "/data/accepted_at",
             "/data/acceptedAt",
         ]),
-        "eventStream": format!("/api/v1/knowledge/runs/{}/events", id),
+        "eventStream": format!("/api/v1/knowledge/jobs/{}/events", job_id),
         "upstream": resp,
     });
 
@@ -626,20 +635,22 @@ fn browser_driver_unavailable(value: &Value) -> bool {
         || serialized.contains("no drivers succeeded in fallback chain")
 }
 
-fn crawl_job_id(value: &Value) -> Option<String> {
+/// Resolve the durable `job_id` from a crawl/batch handoff envelope.
+///
+/// We must NOT fall back to `run_id` here, because the event stream is keyed
+/// off the `job_id` (control indexes events by both, and the `run_id` is
+/// usually absent at handoff). We prefer the explicit job-id fields, then the
+/// generic `id` field the edge `HandoffAck` envelope uses.
+fn crawl_handoff_job_id(value: &Value) -> Option<String> {
     first_string(
         value,
         &[
-            "/id",
             "/job_id",
             "/jobId",
-            "/run_id",
-            "/runId",
-            "/data/id",
             "/data/job_id",
             "/data/jobId",
-            "/data/run_id",
-            "/data/runId",
+            "/id",
+            "/data/id",
         ],
     )
     .map(str::to_owned)
@@ -851,6 +862,40 @@ pub(super) async fn crawl_run_events(
     let token = shared::quarry_token(&state, &user, &cookie).await;
     let url = format!(
         "{}/v1/runs/{}/events{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&id),
+        shared::qs(&uri)
+    );
+    proxy_sse_stream(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+        None,
+        false,
+    )
+    .await
+}
+
+/// Crawl 0-pages fix — durable crawl event stream keyed off the handoff
+/// `job_id`. The edge emits real `text/event-stream` SSE at
+/// `/v1/jobs/{id}/events` (one frame per control event, terminal `done`),
+/// so we forward the bytes verbatim. This is what the normalized handoff's
+/// `eventStream` now points at, replacing the broken `/runs/{id}/events`
+/// hop that 400'd on a job_id and returned un-streamable JSON.
+pub(super) async fn crawl_job_events(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    uri: Uri,
+) -> impl IntoResponse {
+    let cookie = shared::cookie_header(&headers);
+    let token = shared::quarry_token(&state, &user, &cookie).await;
+    let url = format!(
+        "{}/v1/jobs/{}/events{}",
         state.quarry_edge_url,
         urlencoding::encode(&id),
         shared::qs(&uri)

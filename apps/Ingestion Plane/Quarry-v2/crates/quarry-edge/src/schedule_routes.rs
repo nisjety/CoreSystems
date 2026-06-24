@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::RequestKind;
-use quarry_core::resources::{JobResourceKind, OverlapPolicy, ScheduleSummary};
+use quarry_core::resources::{JobResourceKind, OverlapPolicy};
 
 use crate::state::AppState;
 
@@ -201,10 +201,33 @@ where
             format!("control-plane {method} {path} returned {status}: {body}"),
         ));
     }
-    resp.json::<TResp>().await.map_err(|e| {
+    // Read the body as text first so we can tolerate three shapes:
+    //   * empty body (204 No Content from DELETE / no-content POSTs),
+    //   * a `{data: ...}` envelope (control's standard mutating response),
+    //   * a bare object (older routes).
+    // All current callers type TResp as `serde_json::Value`, so an empty
+    // body decodes to `Value::Null` rather than erroring.
+    let text = resp.text().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane {method} {path} parse: {e}"),
+            format!("control-plane {method} {path} read: {e}"),
+        )
+    })?;
+    let inner = if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        let raw: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                format!("control-plane {method} {path} parse: {e}"),
+            )
+        })?;
+        raw.get("data").cloned().unwrap_or(raw)
+    };
+    serde_json::from_value::<TResp>(inner).map_err(|e| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            format!("control-plane {method} {path} decode: {e}"),
         )
     })
 }
@@ -217,7 +240,7 @@ pub async fn create_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<CreateScheduleRequest>,
-) -> Result<Json<Envelope<ScheduleSummary>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
 
     // W2 change-monitoring path: `preset` signals a recurring change
@@ -269,7 +292,7 @@ pub async fn create_schedule(
             enabled: true,
             preset: Some(preset.to_string()),
         };
-        let summary = forward_json::<ControlScheduleCreate, ScheduleSummary>(
+        let summary = forward_json::<ControlScheduleCreate, serde_json::Value>(
             &state,
             reqwest::Method::POST,
             "/v1/schedules",
@@ -304,7 +327,7 @@ pub async fn create_schedule(
             ));
         }
     }
-    let summary = forward_json::<CreateScheduleRequest, ScheduleSummary>(
+    let summary = forward_json::<CreateScheduleRequest, serde_json::Value>(
         &state,
         reqwest::Method::POST,
         "/v1/schedules",
@@ -320,10 +343,10 @@ pub async fn pause_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
-) -> Result<Json<Envelope<ScheduleSummary>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     let path = format!("/v1/schedules/{id}/pause");
-    let summary = forward_json::<(), ScheduleSummary>(
+    let summary = forward_json::<(), serde_json::Value>(
         &state,
         reqwest::Method::POST,
         &path,
@@ -339,10 +362,10 @@ pub async fn unpause_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
-) -> Result<Json<Envelope<ScheduleSummary>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     let path = format!("/v1/schedules/{id}/unpause");
-    let summary = forward_json::<(), ScheduleSummary>(
+    let summary = forward_json::<(), serde_json::Value>(
         &state,
         reqwest::Method::POST,
         &path,
@@ -358,10 +381,10 @@ pub async fn trigger_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
-) -> Result<Json<Envelope<ScheduleSummary>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     let path = format!("/v1/schedules/{id}/trigger");
-    let summary = forward_json::<(), ScheduleSummary>(
+    let summary = forward_json::<(), serde_json::Value>(
         &state,
         reqwest::Method::POST,
         &path,
@@ -378,7 +401,7 @@ pub async fn backfill_schedule(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
     Json(req): Json<BackfillRequest>,
-) -> Result<Json<Envelope<ScheduleSummary>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     if req.end_at <= req.start_at {
         return Err(err_response(
@@ -390,7 +413,7 @@ pub async fn backfill_schedule(
         ));
     }
     let path = format!("/v1/schedules/{id}/backfill");
-    let summary = forward_json::<BackfillRequest, ScheduleSummary>(
+    let summary = forward_json::<BackfillRequest, serde_json::Value>(
         &state,
         reqwest::Method::POST,
         &path,
