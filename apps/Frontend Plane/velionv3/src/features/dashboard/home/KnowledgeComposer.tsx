@@ -72,6 +72,8 @@ type IngestJob = {
   key: string
   kind: IngestKind
   label: string
+  /** Pages fetched, surfaced from the crawl's run_completed event. */
+  pages?: number
   progress?: number
   status: string
 }
@@ -183,6 +185,7 @@ export function KnowledgeComposer(props: {
         events,
         ...(event.progress !== undefined ? { progress: event.progress } : {}),
         ...(event.status ? { status: event.status } : {}),
+        ...(event.pagesVisited !== undefined ? { pages: event.pagesVisited } : {}),
       }
     }))
   }
@@ -253,7 +256,8 @@ export function KnowledgeComposer(props: {
 
   const startCrawlEventStream = (key: string, runId: string) => {
     const id = orgId()
-    if (!id || crawlStreams.has(key) || isTerminal(jobs().find((job) => job.key === key)?.status ?? '')) return
+    const job = jobs().find((entry) => entry.key === key)
+    if (!id || crawlStreams.has(key) || isTerminal(job?.status ?? '')) return
     const controller = new AbortController()
     crawlStreams.set(key, controller)
     void streamCrawlRunEvents(
@@ -268,6 +272,8 @@ export function KnowledgeComposer(props: {
         },
       },
       controller.signal,
+      // Honor the server-provided event-stream path (job-id-keyed SSE).
+      job?.eventStream,
     ).finally(() => {
       crawlStreams.delete(key)
       stopPollingIfIdle()
@@ -939,7 +945,7 @@ function IngestJobRow(props: { job: IngestJob }) {
       <span class="dashboard-knowledge-composer__job-body">
         <span class="dashboard-knowledge-composer__job-label">{props.job.label}</span>
         <span class="dashboard-knowledge-composer__job-detail">
-          {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : statusLabel(props.job.status, i18n))}
+          {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : terminalDetail(props.job, i18n))}
         </span>
         <Show when={progress() !== null}>
           <span class="dashboard-knowledge-composer__job-progress">
@@ -964,6 +970,21 @@ function statusLabel(status: string, i18n: ReturnType<typeof useI18n>): string {
   if (normalized === 'failed' || normalized === 'error') return i18n.tr('Mislyktes', 'Failed')
   if (normalized === 'cancelled') return i18n.tr('Avbrutt', 'Cancelled')
   return status
+}
+
+/** Terminal-row detail: status label, plus the crawled page count when the
+ * run reported one (so a completed crawl reads "Indexed · 5 pages" rather
+ * than dropping to a bare status with 0 pages). */
+function terminalDetail(job: IngestJob, i18n: ReturnType<typeof useI18n>): string {
+  const label = statusLabel(job.status, i18n)
+  if (job.kind === 'crawl' && job.pages !== undefined) {
+    const pages = i18n.tr(
+      `${job.pages} ${job.pages === 1 ? 'side' : 'sider'}`,
+      `${job.pages} ${job.pages === 1 ? 'page' : 'pages'}`,
+    )
+    return `${label} · ${pages}`
+  }
+  return label
 }
 
 function knowledgeUrlPlaceholder(mode: IngestMode, i18n: ReturnType<typeof useI18n>): string {
