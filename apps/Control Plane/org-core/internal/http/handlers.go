@@ -74,6 +74,7 @@ func (s *Server) getUserOrganizations(c *gin.Context) {
 
 func (s *Server) createOrganization(c *gin.Context) {
 	var req struct {
+		ID        string         `json:"id,omitempty"`
 		Name      string         `json:"name" binding:"required"`
 		Slug      string         `json:"slug,omitempty"`
 		Plan      string         `json:"plan,omitempty"`
@@ -93,8 +94,17 @@ func (s *Server) createOrganization(c *gin.Context) {
 		return
 	}
 
+	// Honour an externally-supplied id so an upstream identity provider (Better
+	// Auth, which owns org membership) can mirror an org into org-core under the
+	// SAME id. The upsert below is idempotent, so re-mirroring an existing id is
+	// safe. Fall back to a generated id when none is provided (legacy callers).
+	orgID := strings.TrimSpace(req.ID)
+	if orgID == "" {
+		orgID = generateOrgID()
+	}
+
 	newOrg := org.Organization{
-		ID:     generateOrgID(),
+		ID:     orgID,
 		Name:   req.Name,
 		Slug:   req.Slug,
 		Plan:   "free",

@@ -144,6 +144,7 @@ mod tests {
             client: reqwest::Client::new(),
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
+            enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
