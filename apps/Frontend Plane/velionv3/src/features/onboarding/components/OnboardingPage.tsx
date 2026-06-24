@@ -207,21 +207,44 @@ export default function OnboardingPage() {
   })
   const recommendedPlan = createMemo(() => state.recommendation?.planId ?? 'trial')
   const activePlan = createMemo(() => state.plan ?? recommendedPlan())
-  const recommendationContext = createMemo<Record<string, unknown>>(() => ({
-    organization: {
-      name: state.organization.name,
-      size: state.organization.size,
-      employeeCount: state.organization.employeeCount,
-    },
-    website: {
-      url: state.website.url,
-      agentBrief: state.website.brief,
-    },
-    websites: state.website.url ? [{ url: state.website.url, agentBrief: state.website.brief }] : [],
-    connectors: state.connectors.map((item) => ({ id: item.id, label: item.label })),
-    locale: 'nb',
-    sourceCount: state.connectors.length + (state.website.url ? 1 : 0),
-  }))
+  const recommendationContext = createMemo<Record<string, unknown>>(() => {
+    const graph = graphQuery.data
+    return {
+      organization: {
+        name: state.organization.name,
+        size: state.organization.size,
+        employeeCount: state.organization.employeeCount,
+      },
+      website: {
+        url: state.website.url,
+        agentBrief: state.website.brief,
+      },
+      websites: state.website.url ? [{ url: state.website.url, agentBrief: state.website.brief }] : [],
+      connectors: state.connectors.map((item) => ({ id: item.id, label: item.label })),
+      locale: 'nb',
+      sourceCount: state.connectors.length + (state.website.url ? 1 : 0),
+      // --- Rich personalization signals (top-level so the gateway's
+      // flatten-passthrough carries them through to the Model Plane prompt,
+      // which explicitly reads goal/industry/connected-systems and
+      // `context.dataPlane` graph evidence). ---
+      orgNumber: state.organization.orgNumber,
+      industry: state.organization.industry,
+      orgForm: state.organization.orgForm,
+      goal: state.website.brief,
+      branding: state.website.branding,
+      websitePages: state.website.pages,
+      ...(graph
+        ? {
+            dataPlane: {
+              nodeCount: graph.counts?.nodes ?? graph.nodes.length,
+              edgeCount: graph.counts?.edges ?? graph.edges.length,
+              groupCount: graph.counts?.groups,
+              sampleNodes: graph.nodes.slice(0, 12).map((node) => node.label),
+            },
+          }
+        : {}),
+    }
+  })
   const recommendationQuery = createPlanRecommendationQuery(
     actions,
     () => recommendationContext(),
@@ -265,6 +288,10 @@ export default function OnboardingPage() {
     setState('organization', 'orgNumber', item.organisasjonsnummer)
     setState('organization', 'employeeCount', item.antallAnsatte)
     setState('organization', 'size', sizeFromEmployees(item.antallAnsatte))
+    // Capture industry + org form from the Brreg entry — strong, specific
+    // signals the AI plan recommender uses to personalize its reasoning.
+    setState('organization', 'industry', item.naeringskode1?.beskrivelse)
+    setState('organization', 'orgForm', item.organisasjonsform?.beskrivelse)
 
     // Pre-fill the website from the Brreg registry entry so a downstream ingest
     // has a URL to crawl — but never clobber a site the user already entered or

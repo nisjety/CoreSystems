@@ -10,6 +10,13 @@ pub(crate) struct RecommendContext {
     #[serde(alias = "source_count")]
     pub(crate) source_count: Option<u32>,
     pub(crate) locale: Option<String>,
+    /// Additional onboarding signals the SPA sends beyond the typed fields above
+    /// (e.g. `dataPlane` graph evidence, `goal`, `industry`, `orgForm`,
+    /// `branding`, `websitePages`). Captured verbatim and flattened back out so
+    /// they reach the Model Plane recommendation prompt. The typed fields drive
+    /// the local-fallback heuristic; this carries the rest through for the AI.
+    #[serde(flatten, default)]
+    pub(crate) extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

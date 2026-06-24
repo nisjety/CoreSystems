@@ -58,6 +58,11 @@ export type OnboardingState = {
     orgNumber?: string
     employeeCount?: number
     size?: OrgSize
+    /** Brreg industry (naeringskode1.beskrivelse) — a strong personalization
+     * signal for the AI plan recommendation. */
+    industry?: string
+    /** Brreg organisasjonsform.beskrivelse (e.g. "Aksjeselskap"). */
+    orgForm?: string
   }
   connectors: ConnectedSource[]
   recommendation?: PlanRecommendation
