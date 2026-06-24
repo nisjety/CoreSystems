@@ -40,11 +40,17 @@ export interface UserSettings {
   value: unknown
 }
 
+export type CrawlIngestMode = 'auto' | 'never' | 'prompt'
+
 export interface UserPreferences {
   theme?: string
   language?: string
   timezone?: string
   notifications?: Record<string, boolean>
+  // Phase 6 selective ingest: whether crawl/scrape results are saved to the
+  // knowledge base. 'never' (default) = browsing only; 'auto' = always save;
+  // 'prompt' = ask after each crawl. Drives the `ingest` flag on crawl requests.
+  crawlIngestMode?: CrawlIngestMode
 }
 
 export interface ApiKey {
@@ -144,10 +150,14 @@ function normalizeUserProfile(payload: unknown): UserProfile {
 function normalizePreferences(payload: unknown): UserPreferences {
   const preferences = innerRecord(payload, 'preferences')
   const notifications = asRecord(preferences.notifications)
+  const rawMode = stringField(preferences, 'crawlIngestMode')
+  const crawlIngestMode: CrawlIngestMode | undefined =
+    rawMode === 'auto' || rawMode === 'never' || rawMode === 'prompt' ? rawMode : undefined
   return {
     theme: stringField(preferences, 'theme') || undefined,
     language: stringField(preferences, 'language') || undefined,
     timezone: stringField(preferences, 'timezone') || undefined,
+    crawlIngestMode,
     notifications: notifications
       ? Object.fromEntries(
           Object.entries(notifications).filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'),

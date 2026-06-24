@@ -400,7 +400,9 @@ func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
 		return workflows.ScrapeJobInput{}, errors.New("scrape job missing params.url")
 	}
 	return workflows.ScrapeJobInput{
-		RunID: runID,
+		UserID: userFromParams(j.Params),
+		Ingest: ingestFromParams(j.Params),
+		RunID:  runID,
 		JobID: string(j.ID),
 		OrgID: orgFromParams(j.Params),
 		URL:   url,
@@ -420,6 +422,8 @@ func crawlInputFromJob(j job, runID string) (workflows.CrawlJobInput, error) {
 		return workflows.CrawlJobInput{}, errors.New("crawl job missing params.url or params.seeds")
 	}
 	return workflows.CrawlJobInput{
+		UserID:   userFromParams(j.Params),
+		Ingest:   ingestFromParams(j.Params),
 		RunID:    runID,
 		JobID:    string(j.ID),
 		OrgID:    orgFromParams(j.Params),
@@ -435,11 +439,37 @@ func batchInputFromJob(j job, runID string) (workflows.BatchJobInput, error) {
 		return workflows.BatchJobInput{}, errors.New("batch job missing params.urls")
 	}
 	return workflows.BatchJobInput{
-		RunID: runID,
+		UserID: userFromParams(j.Params),
+		Ingest: ingestFromParams(j.Params),
+		RunID:  runID,
 		JobID: string(j.ID),
 		OrgID: orgFromParams(j.Params),
 		URLs:  urls,
 	}, nil
+}
+
+// ingestFromParams reads the selective-ingest flag (Phase 2) from a job's
+// params. The edge handoff stamps `ingest` (set by the gateway from the user's
+// crawl_ingest_mode). false/absent = working-set only (default NEVER); true =
+// persist+embed each crawled page into the Data Plane.
+func ingestFromParams(params map[string]any) bool {
+	if b, ok := params["ingest"].(bool); ok {
+		return b
+	}
+	return false
+}
+
+// userFromParams extracts the initiating user id from a job's params. The
+// edge handoff stamps `user_id` (verified from the JWT claim) alongside
+// `org_id`; the orchestrator forwards it into the workflow → run_page body,
+// and the edge forwards it as x-user-id on ingest so crawled docs are
+// owner-stamped private (private-by-default). "" when absent → system/legacy
+// job → org-visible.
+func userFromParams(params map[string]any) string {
+	if s, ok := params["user_id"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // orgFromParams extracts the originating tenant id from a job's params.

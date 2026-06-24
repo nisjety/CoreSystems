@@ -366,6 +366,7 @@ async fn scrape(
         zdr,
         ingest: ingest_client,
         org_id: Some(org_id.clone()),
+        user_id: Some(claims.user_id.clone()),
         privacy: privacy.clone(),
         cancel_token: None,
         local_index: state.local_index.clone(),
@@ -429,6 +430,12 @@ pub struct CrawlRequest {
     pub url: String,
     #[serde(default)]
     pub max_pages: Option<u32>,
+    /// Selective ingest (Phase 2): true = successful crawled pages are durably
+    /// persisted+embedded into the Data Plane (owner=initiator/private via
+    /// Phase 1). Absent/false = working-set only (default NEVER). The gateway
+    /// sets this from the user's crawl_ingest_mode (auto|never|prompt).
+    #[serde(default)]
+    pub ingest: Option<bool>,
 }
 
 async fn crawl_handoff(
@@ -475,6 +482,7 @@ async fn crawl_handoff(
             "max_pages": req.max_pages,
             "org_id": org_id,
             "user_id": claims.user_id,
+            "ingest": req.ingest,
         }),
     )
     .await;
@@ -509,6 +517,10 @@ async fn crawl_handoff(
 #[derive(Debug, Deserialize)]
 pub struct BatchRequest {
     pub urls: Vec<String>,
+    /// Selective ingest (Phase 2): true = persist+embed crawled pages; absent
+    /// = working-set only (default NEVER). Gateway sets from crawl_ingest_mode.
+    #[serde(default)]
+    pub ingest: Option<bool>,
 }
 
 async fn batch_handoff(
@@ -525,6 +537,7 @@ async fn batch_handoff(
             "urls": req.urls,
             "org_id": claims.org_id,
             "user_id": claims.user_id,
+            "ingest": req.ingest,
         }),
     )
     .await;
@@ -581,6 +594,10 @@ pub struct InternalRunPage {
     pub ingest: Option<bool>,
     #[serde(default)]
     pub org_id: Option<String>,
+    /// Initiating user id, set by the orchestrator from the verified Edge JWT.
+    /// Threaded into PageRunner so durable ingests are owner-stamped private.
+    #[serde(default)]
+    pub user_id: Option<String>,
     #[serde(default)]
     pub render: Option<RenderHintsRequest>,
     #[serde(default)]
@@ -758,6 +775,7 @@ async fn internal_run_page(
         zdr,
         ingest: ingest_client,
         org_id: Some(org_id),
+        user_id: req.user_id.clone(),
         privacy,
         cancel_token: None,
         local_index: state.local_index.clone(),
@@ -875,6 +893,7 @@ async fn scrape_stream(
             zdr,
             ingest: ingest_client,
             org_id: Some(org_id.clone()),
+            user_id: Some(claims.user_id.clone()),
             privacy: privacy.clone(),
             cancel_token: None,
             local_index: state.local_index.clone(),

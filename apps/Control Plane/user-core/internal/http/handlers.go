@@ -881,6 +881,16 @@ func (s *Server) getPreferences(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
 		return
 	}
+	// Phase 6 selective ingest: crawl_ingest_mode defaults to "never" (browsing
+	// != remembering — nothing is persisted to the knowledge base unless the
+	// user opts in). The gateway reads this to set the per-request ingest flag.
+	knowledgeDefaults := map[string]interface{}{"crawlIngestMode": "never"}
+	knowledgeSettings, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "knowledge", knowledgeDefaults)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get knowledge settings")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
+		return
+	}
 
 	// Build compact preferences object
 	notifEmail, _ := notifSettings["emailNotifications"].(bool)
@@ -888,9 +898,10 @@ func (s *Server) getPreferences(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"preferences": map[string]interface{}{
-			"theme":    appearance["theme"],
-			"language": langSettings["language"],
-			"timezone": langSettings["region"],
+			"theme":           appearance["theme"],
+			"language":        langSettings["language"],
+			"timezone":        langSettings["region"],
+			"crawlIngestMode": knowledgeSettings["crawlIngestMode"],
 			"notifications": map[string]bool{
 				"email": notifEmail,
 				"push":  notifPush,
@@ -905,6 +916,10 @@ type UpdatePreferencesRequest struct {
 	Language      *string         `json:"language,omitempty"`
 	Timezone      *string         `json:"timezone,omitempty"`
 	Notifications map[string]bool `json:"notifications,omitempty"`
+	// CrawlIngestMode (Phase 6 selective ingest): auto | never | prompt. Controls
+	// whether crawl/scrape results are persisted+embedded into the knowledge base.
+	// The gateway reads this and sets the per-request `ingest` flag accordingly.
+	CrawlIngestMode *string `json:"crawlIngestMode,omitempty"`
 }
 
 // updatePreferences updates user preferences
@@ -961,6 +976,21 @@ func (s *Server) updatePreferences(c *gin.Context) {
 		}
 		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "notifications", notifPatch); err != nil {
 			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update notification preference")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
+			return
+		}
+	}
+	// Phase 6 selective ingest: persist crawl_ingest_mode in the "knowledge"
+	// settings category. Validate against the allowed set (fail-closed to a
+	// clear 400 rather than storing a value the gateway can't interpret).
+	if req.CrawlIngestMode != nil {
+		mode := *req.CrawlIngestMode
+		if mode != "auto" && mode != "never" && mode != "prompt" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "crawlIngestMode must be one of: auto, never, prompt"})
+			return
+		}
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "knowledge", map[string]interface{}{"crawlIngestMode": mode}); err != nil {
+			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update knowledge preference")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
 			return
 		}

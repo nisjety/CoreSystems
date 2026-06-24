@@ -104,6 +104,24 @@ pub async fn process_document(
 
     let mut knowledge_ids = Vec::with_capacity(chunks.len());
 
+    // Phase 5 cost graft — near-duplicate detection. Token-Jaccard >= 0.95
+    // means "effectively unchanged" (e.g. a footer/date line churned on
+    // re-crawl). Used below to reuse an already-embedded chunk instead of
+    // paying to embed a trivially-different one.
+    fn near_duplicate(a: &str, b: &str) -> bool {
+        use std::collections::HashSet;
+        let ta: HashSet<String> = a.to_lowercase().split_whitespace().map(str::to_string).collect();
+        let tb: HashSet<String> = b.to_lowercase().split_whitespace().map(str::to_string).collect();
+        if ta.is_empty() && tb.is_empty() {
+            return true;
+        }
+        let union = ta.union(&tb).count();
+        if union == 0 {
+            return false;
+        }
+        ta.intersection(&tb).count() as f64 / union as f64 >= 0.95
+    }
+
     for chunk in &chunks {
         let hash = content_hash(&chunk.text);
         let kid = stable_chunk_id(&event.document_id, chunk.index, &hash);
@@ -120,6 +138,30 @@ pub async fn process_document(
             tracing::debug!(knowledge_id = %kid, "chunk already exists, skipping");
             knowledge_ids.push(kid);
             continue;
+        }
+
+        // Phase 5 near-dup: this exact hash is new, but if a 'done' unit already
+        // exists for this (document, chunk_index) and the text is ~unchanged,
+        // reuse its embedding rather than re-embedding footer/whitespace churn.
+        if let Some((prior_kid, prior_text)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT knowledge_id, text FROM knowledge_units \
+             WHERE document_id = $1 AND chunk_index = $2 AND embedding_status = 'done' \
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(&event.document_id)
+        .bind(chunk.index as i32)
+        .fetch_optional(pool)
+        .await?
+        {
+            if near_duplicate(&prior_text, &chunk.text) {
+                tracing::debug!(
+                    document_id = %event.document_id,
+                    chunk_index = chunk.index,
+                    "near-duplicate chunk; reusing existing embedding (skip re-embed)"
+                );
+                knowledge_ids.push(prior_kid);
+                continue;
+            }
         }
 
         let metadata = serde_json::json!({

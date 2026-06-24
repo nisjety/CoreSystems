@@ -142,6 +142,18 @@ pub struct DataPlaneIngestRequest {
     pub privacy_policy: Option<PrivacyPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_trace: Option<SourceTrace>,
+    /// Per-user ownership (Ownership phase). The initiating user's id, carried
+    /// from the verified Edge JWT through the orchestrator. When present, the
+    /// Quarry→Data Plane ingest forwards it as `x-user-id` so documents-api
+    /// stamps `owner_id = <user>` and (absent an explicit `visibility`) defaults
+    /// the doc to `private`. Absent = system/connector ingest → org-visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator_user_id: Option<String>,
+    /// Explicit document visibility override (`private` | `org` | `shared`).
+    /// Normally `None` → documents-api decides from viewer presence
+    /// (viewer→private, no viewer→org). Set by the promote-to-org flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -186,7 +186,12 @@ pub async fn bm25_search(
         FROM knowledge_units
         WHERE org_id = $2
           AND content_tsv @@ plainto_tsquery('english', $1)
-          AND embedding_status = 'done'
+          -- Phase 4 read-your-writes: the sparse (FTS) arm needs no vectors, so
+          -- surface just-chunked content immediately (status 'pending') instead
+          -- of waiting for the async embed. Exclude only 'failed'. The ownership
+          -- post-filter still gates by viewer; the dense arm joins once embedded
+          -- and RRF fusion dedups by knowledge_id (no double-count).
+          AND embedding_status <> 'failed'
         ORDER BY rank_score DESC
         LIMIT $3
         "#,

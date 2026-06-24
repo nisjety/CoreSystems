@@ -789,7 +789,11 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
                   <p>{source.provider}</p>
                 </div>
                 <div class="knowledge-source-evidence-card__actions">
-                  <span>{source.status}</span>
+                  {/* Phase 6 freshness chip: 'Indexed' (embedded_at set) → Ready;
+                      Pending review / Re-indexing surface as the live indexing state. */}
+                  <span class="knowledge-status-chip" data-status={source.status}>
+                    {source.status === 'Indexed' ? 'Ready' : source.status}
+                  </span>
                   <Show when={isGateOpen()}>
                     <button
                       type="button"

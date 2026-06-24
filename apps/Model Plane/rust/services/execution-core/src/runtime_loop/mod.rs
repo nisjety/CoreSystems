@@ -141,6 +141,23 @@ pub async fn execute_step(
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };
+    // Phase 8 promote-on-use (default OFF — PROMOTE_ON_USE_ENABLED): count a
+    // successful web_fetch as a grounded use of its URL; the trigger promotes
+    // the live page into the durable KB past a threshold. Fire-and-forget —
+    // never alters the tool result.
+    if tool_name == WEB_FETCH_TOOL && exec.error.is_none() {
+        if let Some(url) = serde_json::from_str::<serde_json::Value>(tool_input)
+            .ok()
+            .and_then(|v| {
+                v.get("url")
+                    .and_then(|u| u.as_str())
+                    .or_else(|| v.get("urls").and_then(|a| a.get(0)).and_then(|u| u.as_str()))
+                    .map(str::to_owned)
+            })
+        {
+            crate::promote_on_use::maybe_promote(org_id, user_id, &url).await;
+        }
+    }
     if let Some(error) = exec.error {
         return StepOutcome::failed(&error);
     }

@@ -123,10 +123,13 @@ CREATE TABLE IF NOT EXISTS knowledge_units (
     metadata          JSONB        NOT NULL DEFAULT '{}',
     error_message     TEXT,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- Phase 3 freshness seam: set when vectors are upserted (embedding_status='done').
+    embedded_at       TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_ku_document_id      ON knowledge_units (document_id);
+CREATE INDEX IF NOT EXISTS idx_ku_embedded_at      ON knowledge_units (embedded_at);
 CREATE INDEX IF NOT EXISTS idx_ku_org_id           ON knowledge_units (org_id);
 CREATE INDEX IF NOT EXISTS idx_ku_embedding_status ON knowledge_units (embedding_status);
 CREATE INDEX IF NOT EXISTS idx_ku_content_hash     ON knowledge_units (content_hash);

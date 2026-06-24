@@ -80,6 +80,9 @@ pub async fn process_batch(
             "title": doc.title,
             "embedding_model": provider.model_name(),
             "embedding_provider": provider.provider_name(),
+            // Phase 3 freshness: the moment this doc became retrievable. The
+            // gateway/UI use this to flip an Indexing→Ready signal honestly.
+            "embedded_at": chrono::Utc::now().to_rfc3339(),
             "idempotency_key": idempotency_key,
         });
         let _ = nats
@@ -154,7 +157,9 @@ async fn embed_items_by_org(
 
 async fn mark_units_done(pool: &PgPool, knowledge_ids: &[String]) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE knowledge_units SET embedding_status = 'done' WHERE knowledge_id = ANY($1)",
+        // Phase 3 freshness: stamp embedded_at when vectors land in Qdrant so
+        // consumers can tell "embedded/retrievable" from "ingested/chunked".
+        "UPDATE knowledge_units SET embedding_status = 'done', embedded_at = NOW() WHERE knowledge_id = ANY($1)",
     )
     .bind(knowledge_ids)
     .execute(pool)

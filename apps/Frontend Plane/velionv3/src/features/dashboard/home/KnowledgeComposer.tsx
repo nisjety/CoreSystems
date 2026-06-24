@@ -44,6 +44,7 @@ import {
   type Product,
   type ProductExtraction,
 } from '@/shared/api/knowledge-client'
+import { getPreferences } from '@/shared/api/settings-client'
 import { cn } from '@/shared/lib/cn'
 import { useI18n } from '@/shared/i18n'
 import { readClientJson, writeClientJson } from '@/shared/session/client-storage'
@@ -302,6 +303,21 @@ export function KnowledgeComposer(props: {
   const startCrawlJob = async (target: string) => {
     setDiscovery(null)
     const maxPages = crawlMaxPages()
+    // Phase 6 selective ingest: resolve the user's crawl_ingest_mode → ingest
+    // flag. auto = always save; never = working-set only; prompt = ask now.
+    // (The promote capability is quarry's /v1/crawl|/v1/batch with ingest=true,
+    // wired in Phase 2 — owner=user, private. 'prompt' simply gates it on a
+    // confirm so nothing is saved unless the user says so.) Default never.
+    const ingestMode = (await getPreferences().catch(() => null))?.crawlIngestMode ?? 'never'
+    const ingest =
+      ingestMode === 'auto' ||
+      (ingestMode === 'prompt' &&
+        window.confirm(
+          i18n.tr(
+            'Lagre disse sidene i kunnskapsbasen din? (privat for deg til du deler dem)',
+            'Save these pages to your knowledge base? (private to you until you share them)',
+          ),
+        ))
     const key = addJob({
       agentMode: agentMode(),
       detail: agentMode()
@@ -318,6 +334,7 @@ export function KnowledgeComposer(props: {
           type: 'human',
           userId: ctx()?.userId ?? '',
         }, {
+          ingest,
           maxPages,
           url: target,
         })
@@ -328,7 +345,7 @@ export function KnowledgeComposer(props: {
         })
         startCrawlEventStream(key, execution.runId)
       } else {
-        const job = await startCrawl(orgId(), { maxPages, url: target })
+        const job = await startCrawl(orgId(), { ingest, maxPages, url: target })
         updateJob(key, { eventStream: job.eventStream, id: job.id, status: job.status || 'running' })
         startCrawlEventStream(key, job.id)
       }

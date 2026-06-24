@@ -73,6 +73,14 @@ type RunPageInput struct {
 	// org_id from the body, not a JWT) AND is HMAC-bound via the
 	// X-Quarry-Run-Sig header so it can't be forged with a leaked bearer.
 	OrgID string `json:"org_id"`
+	// UserID is the verified-JWT initiator, threaded from the workflow input.
+	// It travels in the run_page body; the edge forwards it as x-user-id on
+	// ingest so crawled docs are owner-stamped private (private-by-default).
+	// Empty = system/scheduled run → org-visible (legacy).
+	UserID string `json:"user_id,omitempty"`
+	// Ingest (Phase 2 selective ingest): true = the edge persists+embeds this
+	// page into the Data Plane; absent/false = working-set only (default NEVER).
+	Ingest bool `json:"ingest,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -95,7 +103,7 @@ type RunPageResult struct {
 // RunPage executes a single page via Quarry Runtime.
 func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResult, error) {
 	const op = "activities.RunPage"
-	body, err := json.Marshal(map[string]string{"url": in.URL, "org_id": in.OrgID})
+	body, err := json.Marshal(map[string]any{"url": in.URL, "org_id": in.OrgID, "user_id": in.UserID, "ingest": in.Ingest})
 	if err != nil {
 		return RunPageResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
 	}

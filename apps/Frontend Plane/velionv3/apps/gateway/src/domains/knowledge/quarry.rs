@@ -292,6 +292,13 @@ fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
         body["max_pages"] = json!(max_pages.min(5_000));
     }
 
+    // Phase 6 selective ingest: forward the resolved ingest decision (the SPA
+    // maps crawl_ingest_mode auto→true / never→false / prompt→false+stage).
+    // Quarry defaults to NEVER when absent, so a missing flag = working-set only.
+    if let Some(ingest) = input.get("ingest").and_then(Value::as_bool) {
+        body["ingest"] = json!(ingest);
+    }
+
     Ok(body)
 }
 
@@ -332,7 +339,13 @@ fn normalize_batch_body(input: &Value) -> Result<Value, String> {
     if urls.is_empty() {
         return Err("Select at least one valid page to crawl.".to_owned());
     }
-    Ok(json!({ "urls": urls }))
+    let mut body = json!({ "urls": urls });
+    // Phase 6 selective ingest: forward the resolved ingest decision (default
+    // NEVER at quarry when absent).
+    if let Some(ingest) = input.get("ingest").and_then(Value::as_bool) {
+        body["ingest"] = json!(ingest);
+    }
+    Ok(body)
 }
 
 /// Build quarry `/v1/map` input from a dashboard discover request. Only the seed

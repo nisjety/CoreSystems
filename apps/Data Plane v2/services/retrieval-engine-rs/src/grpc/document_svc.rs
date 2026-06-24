@@ -310,8 +310,11 @@ impl DocumentService for DocumentSvc {
         let req = request.into_inner();
 
         let chunk_row = sqlx::query_as::<_, (i64, i64, i64)>(
+            // embedding-engine writes status 'done' (batch/mod.rs mark_units_done);
+            // the prior 'completed' literal never matched, so the embedded count
+            // was always 0. Align to 'done'.
             "SELECT COUNT(*),
-                    COUNT(*) FILTER (WHERE embedding_status = 'completed'),
+                    COUNT(*) FILTER (WHERE embedding_status = 'done'),
                     COUNT(*) FILTER (WHERE embedding_status = 'failed')
              FROM knowledge_units WHERE document_id = $1 AND org_id = $2",
         )

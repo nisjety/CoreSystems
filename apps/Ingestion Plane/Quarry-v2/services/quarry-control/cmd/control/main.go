@@ -21,6 +21,7 @@ import (
 	"github.com/triodelab/quarry-v2/pkg/quarryotel"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/dispatcher"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/janitor"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/resources"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
@@ -175,6 +176,9 @@ func main() {
 
 	dCtx, dCancel := context.WithCancel(context.Background())
 	go dispatcher.Run(dCtx, db, nil, dispatcher.Options{Workers: 4}, log.Logger)
+	// Phase 7 retention sweep — INERT unless QUARRY_RETENTION_DAYS>0, and only
+	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.
+	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)
 
 	srv := &http.Server{
 		Addr:              addr,

@@ -1,6 +1,7 @@
 import { Download, Loader2, ShieldAlert, Trash2 } from 'lucide-solid'
-import { createSignal, For, Show } from 'solid-js'
+import { createSignal, For, onMount, Show } from 'solid-js'
 import { signIn, signOut } from '@/shared/api/auth-client'
+import { getPreferences, updatePreferences, type CrawlIngestMode } from '@/shared/api/settings-client'
 import {
   CONTROL_PLANE_DSAR_DISCLOSURE,
   eraseMyAccount,
@@ -53,6 +54,33 @@ export function PrivacyDataSection() {
     anchor.download = `velion-data-export-${data.subject_id}.json`
     anchor.click()
     URL.revokeObjectURL(url)
+  }
+
+  // ── Knowledge ingestion (Phase 6 selective ingest) ─────────────────────────
+  const [ingestMode, setIngestMode] = createSignal<CrawlIngestMode>('never')
+  const [savingMode, setSavingMode] = createSignal(false)
+  const [modeError, setModeError] = createSignal<string | null>(null)
+
+  onMount(() => {
+    void getPreferences()
+      .then((prefs) => setIngestMode(prefs.crawlIngestMode ?? 'never'))
+      .catch(() => undefined)
+  })
+
+  async function changeIngestMode(mode: CrawlIngestMode) {
+    const previous = ingestMode()
+    if (mode === previous) return
+    setIngestMode(mode)
+    setSavingMode(true)
+    setModeError(null)
+    try {
+      await updatePreferences({ crawlIngestMode: mode })
+    } catch (error) {
+      setIngestMode(previous) // revert optimistic change on failure
+      setModeError(errorMessage(error))
+    } finally {
+      setSavingMode(false)
+    }
   }
 
   // ── Erase (Art. 17) ─────────────────────────────────────────────────────────
@@ -148,6 +176,38 @@ export function PrivacyDataSection() {
                 <Download size={14} aria-hidden="true" /> Download JSON
               </SettingsButton>
             </div>
+          )}
+        </Show>
+      </div>
+
+      <div class="velion-privacy-block">
+        <div class="velion-privacy-block__head">
+          <h3>Knowledge ingestion</h3>
+          <Show when={savingMode()}>
+            <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" />
+          </Show>
+        </div>
+        <p class="velion-privacy-danger__note">
+          Controls whether pages you crawl or scrape are saved to your knowledge base
+          (private to you until you share them). Browsing never saves automatically.
+        </p>
+        <label class="velion-settings-field">
+          <span>Crawl ingestion mode</span>
+          <select
+            value={ingestMode()}
+            disabled={savingMode()}
+            onChange={(event) => void changeIngestMode(event.currentTarget.value as CrawlIngestMode)}
+          >
+            <option value="never">Never save — browse only (default)</option>
+            <option value="auto">Always save to my knowledge base</option>
+            <option value="prompt">Ask me after each crawl</option>
+          </select>
+        </label>
+        <Show when={modeError()}>
+          {(message) => (
+            <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">
+              {message()}
+            </p>
           )}
         </Show>
       </div>

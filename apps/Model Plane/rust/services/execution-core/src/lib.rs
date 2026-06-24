@@ -13,6 +13,7 @@ pub mod llm_planner;
 pub mod mcp_gateway;
 pub mod permission;
 pub mod policy;
+pub mod promote_on_use;
 pub mod quarry_agent;
 pub mod runtime_loop;
 pub mod sandbox;

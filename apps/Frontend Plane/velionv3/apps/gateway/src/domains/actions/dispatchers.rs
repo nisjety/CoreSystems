@@ -132,6 +132,11 @@ pub(super) async fn dispatch_crawl_site(
     if let Some(max_pages) = input.get("maxPages").and_then(|v| v.as_u64()) {
         crawl_body["max_pages"] = json!(max_pages);
     }
+    // Phase 6 selective ingest: forward the resolved decision (default NEVER at
+    // quarry when absent → working-set only).
+    if let Some(ingest) = input.get("ingest").and_then(|v| v.as_bool()) {
+        crawl_body["ingest"] = json!(ingest);
+    }
 
     let (status, Json(resp)) = proxy_bearer_json(
         state,

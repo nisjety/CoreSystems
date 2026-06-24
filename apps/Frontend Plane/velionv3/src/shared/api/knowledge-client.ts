@@ -105,6 +105,8 @@ export interface ScrapeRequest {
 export interface CrawlRequest {
   url: string
   maxPages?: number
+  /** Phase 6 selective ingest: true = persist+embed; omitted = working-set only (default never). */
+  ingest?: boolean
 }
 
 /** A single page surfaced by `/crawl/discover` (quarry `/v1/map`). */
@@ -367,6 +369,9 @@ export async function startCrawl(
     body: JSON.stringify({
       url: body.url,
       ...(body.maxPages ? { maxPages: body.maxPages } : {}),
+      // Phase 6 selective ingest: forward the resolved decision so the gateway
+      // gates persistence (omitted → quarry default NEVER = working-set only).
+      ...(body.ingest === undefined ? {} : { ingest: body.ingest }),
     }),
     headers: orgHeaders(orgId),
     signal,

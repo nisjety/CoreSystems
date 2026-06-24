@@ -81,13 +81,22 @@ impl IngestClient {
         let body = CreateDocumentBody::from_request(request);
         let url = format!("{}/v1/documents", self.base_url.trim_end_matches('/'));
 
-        let resp = self
+        let mut req_builder = self
             .http
             .post(&url)
             .header("authorization", format!("Bearer {}", self.api_key))
             .header("x-internal-api-key", &self.api_key)
             .header("x-org-id", &request.org_id)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        // Private-by-default ownership: forward the initiating user so
+        // documents-api stamps owner=user + visibility=private. Absent →
+        // system/connector ingest → org-visible (legacy behavior preserved).
+        if let Some(uid) = request.initiator_user_id.as_deref() {
+            if !uid.is_empty() {
+                req_builder = req_builder.header("x-user-id", uid);
+            }
+        }
+        let resp = req_builder
             .json(&body)
             .send()
             .await

@@ -45,6 +45,12 @@ pub struct PageRunner {
     /// entirely (used in test harnesses and dev mode).
     pub ingest: Option<Arc<dyn DataPlaneIngest>>,
     pub org_id: Option<String>,
+    /// Initiating user id (verified Edge JWT `sub`, threaded through the
+    /// orchestrator for crawl/batch or taken from `claims` for scrape). When
+    /// set, every durable ingest from this run is forwarded with `x-user-id`
+    /// so the Data Plane stamps the doc owner = this user, visibility = private
+    /// (private-by-default). `None` = system ingest → org-visible (legacy).
+    pub user_id: Option<String>,
     pub privacy: PrivacyPolicy,
     /// Optional cancellation token. When set, the spawned ingest task
     /// races against this token and aborts cleanly when the parent run
@@ -627,6 +633,12 @@ impl PageRunner {
                     retention_policy: self.privacy.retention_policy.clone(),
                     privacy_policy: Some(self.privacy.clone().with_zdr(self.zdr)),
                     source_trace: Some(source_trace),
+                    // Private-by-default: forward the initiating user so the Data
+                    // Plane stamps owner=user, visibility=private. `None` (system
+                    // ingest) → org-visible. We don't set `visibility` explicitly
+                    // here; documents-api derives it from viewer presence.
+                    initiator_user_id: self.user_id.clone(),
+                    visibility: None,
                 };
 
                 let ingest = ingest.clone();

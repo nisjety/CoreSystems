@@ -29,6 +29,10 @@ type runIDs struct {
 
 // ScrapeJobInput drives a single-URL run.
 type ScrapeJobInput struct {
+	// UserID is the verified-JWT initiator (private-by-default ownership).
+	UserID string `json:"user_id,omitempty"`
+	// Ingest (Phase 2 selective ingest): true = persist+embed; default NEVER.
+	Ingest bool `json:"ingest,omitempty"`
 	RunID  string `json:"run_id"`
 	JobID  string `json:"job_id,omitempty"`
 	OrgID  string `json:"org_id,omitempty"`
@@ -56,6 +60,10 @@ type ChangeMonitorInput struct {
 
 // BatchJobInput drives a fan-out over a bounded URL list.
 type BatchJobInput struct {
+	// UserID is the verified-JWT initiator (private-by-default ownership).
+	UserID string `json:"user_id,omitempty"`
+	// Ingest (Phase 2 selective ingest): true = persist+embed; default NEVER.
+	Ingest bool `json:"ingest,omitempty"`
 	RunID  string   `json:"run_id"`
 	JobID  string   `json:"job_id,omitempty"`
 	OrgID  string   `json:"org_id,omitempty"`
@@ -65,6 +73,10 @@ type BatchJobInput struct {
 
 // CrawlJobInput drives a bounded BFS crawl.
 type CrawlJobInput struct {
+	// UserID is the verified-JWT initiator (private-by-default ownership).
+	UserID string `json:"user_id,omitempty"`
+	// Ingest (Phase 2 selective ingest): true = persist+embed; default NEVER.
+	Ingest bool `json:"ingest,omitempty"`
 	RunID    string   `json:"run_id"`
 	JobID    string   `json:"job_id,omitempty"`
 	OrgID    string   `json:"org_id,omitempty"`
@@ -164,13 +176,17 @@ func runPage(
 	a *activities.Activities,
 	ids runIDs,
 	org string,
+	userID string,
+	ingest bool,
 	url string,
 ) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
-		RunID: ids.RunID,
-		URL:   url,
-		OrgID: org,
+		RunID:  ids.RunID,
+		URL:    url,
+		OrgID:  org,
+		UserID: userID,
+		Ingest: ingest,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -218,7 +234,7 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 		return err
 	}
 
-	if _, err := runPage(ctx, a, ids, in.OrgID, in.URL); err != nil {
+	if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, in.URL); err != nil {
 		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunFailed, map[string]any{
 			"url":   in.URL,
 			"error": err.Error(),
@@ -309,7 +325,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 
 	var visited, failed uint32
 	for _, url := range in.URLs {
-		if _, err := runPage(ctx, a, ids, in.OrgID, url); err != nil {
+		if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, url); err != nil {
 			failed++
 			continue
 		}
@@ -397,7 +413,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		cur := frontier[0]
 		frontier = frontier[1:]
 
-		res, err := runPage(ctx, a, ids, in.OrgID, cur.URL)
+		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, cur.URL)
 		if err != nil {
 			pagesFailed++
 			ctrl.progress.Failed = pagesFailed
