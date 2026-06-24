@@ -594,7 +594,9 @@ fn azure_doc_to_item(
         // Summary carries no per-item Azure fields, and ContentSafety is
         // unreachable here (served by the LLM provider, never Azure) — both
         // fall back to the default item.
-        LanguageOperation::Summary | LanguageOperation::ContentSafety => LanguageAnalysisItem::default(),
+        LanguageOperation::Summary | LanguageOperation::ContentSafety => {
+            LanguageAnalysisItem::default()
+        }
     }
 }
 

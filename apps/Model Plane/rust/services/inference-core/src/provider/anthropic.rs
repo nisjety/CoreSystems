@@ -150,13 +150,13 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         "temperature": req.temperature,
     });
 
-    if let Some(schema) = &req.structured_output_schema {
-        if !schema.is_empty() {
-            body["metadata"] = serde_json::json!({
-                "structured_output_schema": schema,
-            });
-        }
-    }
+    // The Anthropic Messages API has no OpenAI-style json-schema `response_format`
+    // and rejects unknown `metadata` keys (it 400s with
+    // "metadata.structured_output_schema: Extra inputs are not permitted"). A
+    // requested `structured_output_schema` is therefore honored via the caller's
+    // prompt (e.g. "Reply with ONLY a JSON object" + the schema in-context)
+    // rather than forwarded as an API parameter — sending it broke every
+    // structured-output inference (e.g. the onboarding plan recommendation).
 
     // chat-parity §2 function-calling: translate tool definitions to the
     // Anthropic `tools`/`tool_choice` shape. Empty → omitted.

@@ -222,9 +222,27 @@ fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
     if let Some(schema) = &req.structured_output_schema {
         if !schema.is_empty() {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(schema) {
+                // OpenAI's `response_format: json_schema` requires a NAMED wrapper
+                // `{ name, schema, strict? }`. Passing the bare schema 400s with
+                // "Missing required parameter: 'response_format.json_schema.name'".
+                // Accept either a bare schema object or an already-wrapped one, and
+                // always ensure a regex-valid `name` is present. `strict` is left
+                // unset (lenient) so schemas with optional fields are not rejected.
+                let json_schema = if parsed.get("schema").is_some() {
+                    let mut wrapper = parsed;
+                    if wrapper.get("name").is_none() {
+                        wrapper["name"] = serde_json::json!("structured_output");
+                    }
+                    wrapper
+                } else {
+                    serde_json::json!({
+                        "name": "structured_output",
+                        "schema": parsed,
+                    })
+                };
                 body["response_format"] = serde_json::json!({
                     "type": "json_schema",
-                    "json_schema": parsed,
+                    "json_schema": json_schema,
                 });
             }
         }
