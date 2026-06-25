@@ -424,6 +424,18 @@ export const auth: any = betterAuth({
     max: 100, // 100 requests per window
     storage: 'secondary-storage', // Use Redis (already wired) — avoids rate_limit table write on every request
     customRules: {
+      // Session status / recovery read. It is polled by the SPA AND
+      // re-validated by the gateway on EVERY authenticated request
+      // (require_session → get-session), so a single page load fans out ~10+
+      // get-session calls and multiple users share one egress IP (NAT). The
+      // global 100/window cap is trivially exhausted, which 429s get-session
+      // and cascades to 401s across the app (require_session can no longer
+      // validate). Give this cheap, Redis-backed read generous headroom; the
+      // sensitive mutations below stay tightly limited.
+      '/get-session': {
+        window: 60,
+        max: parsePositiveInt(process.env.RATE_LIMIT_SESSION_MAX, 1000),
+      },
       '/sign-in/email': {
         window: 10,
         max: 3,

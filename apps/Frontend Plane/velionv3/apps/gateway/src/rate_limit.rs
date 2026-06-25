@@ -39,7 +39,13 @@ use dashmap::DashMap;
 use crate::middleware::AuthenticatedUser;
 
 /// Default requests-per-minute when `GATEWAY_RATE_LIMIT_RPM` is unset/invalid.
-const DEFAULT_RPM: f64 = 120.0;
+///
+/// Generous because this limiter runs BEFORE `require_session`, so it keys by
+/// client IP rather than user: a single SPA page load fans out ~10-15 authed
+/// calls across components, and multiple users can share one egress IP (NAT).
+/// The previous 120 was low enough that a normal burst — or co-located clients
+/// (e.g. dev tooling on the same host) — tripped a 429 and cascaded to 401s.
+const DEFAULT_RPM: f64 = 600.0;
 
 /// Forwarded-for header values longer than this are rejected outright — a sane
 /// upper bound that defends against an unbounded-allocation key from a hostile
@@ -197,6 +203,15 @@ pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Respo
     let Some(limiter) = request.extensions().get::<RateLimiter>().cloned() else {
         return next.run(request).await;
     };
+
+    // Never rate-limit the session status/recovery poll. The SPA calls it to
+    // discover that it is logged out and to recover; because this layer keys by
+    // IP (it runs before `require_session`), letting a burst from one IP 429 it
+    // would lock every co-located client out of the very endpoint they need to
+    // log back in. It is a cheap, side-effect-free read auth-core can absorb.
+    if request.uri().path() == "/api/v1/auth/session" {
+        return next.run(request).await;
+    }
 
     let user = request.extensions().get::<AuthenticatedUser>().cloned();
     let (key, source) = rate_limit_key(user.as_ref(), request.headers());
