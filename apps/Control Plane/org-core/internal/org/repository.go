@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -50,11 +51,16 @@ func scanOrg(row orgScanner) (Organization, error) {
 }
 
 type Repository struct {
+	// db carries WithOrgScope, used by the single-org request paths so RLS
+	// (migration 009) enforces a hard tenant filter at the DB.
+	db *database.DB
+	// pool is db.Pool, kept for the genuinely cross-org / multi-org / lookup
+	// paths that intentionally run unscoped (superuser, RLS-bypassing).
 	pool *pgxpool.Pool
 }
 
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+func NewRepository(db *database.DB) *Repository {
+	return &Repository{db: db, pool: db.Pool}
 }
 
 // Ping verifies the database is reachable and this pool can authenticate, by
@@ -72,14 +78,22 @@ SELECT id, name, COALESCE(slug, ''), plan, status, COALESCE(primary_domain, ''),
 FROM organizations
 WHERE id = $1 AND deleted_at IS NULL`
 
-	org, err := scanOrg(r.pool.QueryRow(ctx, q, id))
+	var out *Organization
+	err := r.db.WithOrgScope(ctx, id, func(tx pgx.Tx) error {
+		org, err := scanOrg(tx.QueryRow(ctx, q, id))
+		if err != nil {
+			return err
+		}
+		out = &org
+		return nil
+	})
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("query org: %w", err)
 	}
-	return &org, nil
+	return out, nil
 }
 
 func (r *Repository) UpsertOrganization(ctx context.Context, org Organization) error {
@@ -133,34 +147,38 @@ DO UPDATE SET
 		}
 	}
 
-	if _, err := r.pool.Exec(ctx, q,
-		org.ID, org.Name, org.Slug, org.Plan, org.Status, org.PrimaryDomain, region, defaultLocale, metaBuf,
-		org.OrgNumber, verificationStatus, brregBuf,
-	); err != nil {
-		return fmt.Errorf("upsert org: %w", err)
-	}
-	return nil
+	return r.db.WithOrgScope(ctx, org.ID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q,
+			org.ID, org.Name, org.Slug, org.Plan, org.Status, org.PrimaryDomain, region, defaultLocale, metaBuf,
+			org.OrgNumber, verificationStatus, brregBuf,
+		); err != nil {
+			return fmt.Errorf("upsert org: %w", err)
+		}
+		return nil
+	})
 }
 
 func (r *Repository) SetDefaultEntitlements(ctx context.Context, orgID string) error {
-	// Batch all inserts into one round-trip instead of N sequential Exec calls
-	batch := &pgx.Batch{}
 	const q = `
 INSERT INTO org_entitlements (org_id, entitlement_key, enabled)
 VALUES ($1, $2, $3)
 ON CONFLICT (org_id, entitlement_key)
 DO NOTHING`
-	for _, ent := range defaultEntitlements {
-		batch.Queue(q, orgID, ent.Key, ent.Enabled)
-	}
-	results := r.pool.SendBatch(ctx, batch)
-	defer results.Close()
-	for range defaultEntitlements {
-		if _, err := results.Exec(); err != nil {
-			return fmt.Errorf("set default entitlements: %w", err)
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		// Batch all inserts into one round-trip instead of N sequential Exec calls
+		batch := &pgx.Batch{}
+		for _, ent := range defaultEntitlements {
+			batch.Queue(q, orgID, ent.Key, ent.Enabled)
 		}
-	}
-	return nil
+		results := tx.SendBatch(ctx, batch)
+		defer results.Close()
+		for range defaultEntitlements {
+			if _, err := results.Exec(); err != nil {
+				return fmt.Errorf("set default entitlements: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (r *Repository) GetEntitlements(ctx context.Context, orgID string) ([]Entitlement, error) {
@@ -170,22 +188,26 @@ FROM org_entitlements
 WHERE org_id = $1
 ORDER BY entitlement_key`
 
-	rows, err := r.pool.Query(ctx, q, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("query entitlements: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]Entitlement, 0, 8)
-	for rows.Next() {
-		var e Entitlement
-		if err := rows.Scan(&e.Key, &e.Enabled); err != nil {
-			return nil, fmt.Errorf("scan entitlements: %w", err)
+	var items []Entitlement
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, orgID)
+		if err != nil {
+			return fmt.Errorf("query entitlements: %w", err)
 		}
-		items = append(items, e)
-	}
-	if rows.Err() != nil {
-		return nil, rows.Err()
+		defer rows.Close()
+
+		items = make([]Entitlement, 0, 8)
+		for rows.Next() {
+			var e Entitlement
+			if err := rows.Scan(&e.Key, &e.Enabled); err != nil {
+				return fmt.Errorf("scan entitlements: %w", err)
+			}
+			items = append(items, e)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
 	if len(items) == 0 {
 		return nil, ErrNotFound
@@ -273,10 +295,12 @@ DO UPDATE SET
   status = 'active',
   updated_at = NOW()`
 
-	if _, err := r.pool.Exec(ctx, q, orgID, userID, role); err != nil {
-		return fmt.Errorf("add organization member: %w", err)
-	}
-	return nil
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q, orgID, userID, role); err != nil {
+			return fmt.Errorf("add organization member: %w", err)
+		}
+		return nil
+	})
 }
 
 // AddPendingInvite records an email-based invitation for a user who hasn't registered yet.
@@ -288,8 +312,14 @@ VALUES ($1, $2, $3, $4, 'invited', $5, $6, NOW())
 ON CONFLICT (org_id, user_id)
 DO UPDATE SET role = EXCLUDED.role, invited_email = EXCLUDED.invited_email, updated_at = NOW()`
 
-	if _, err := r.pool.Exec(ctx, q, memberID, orgID, memberID, role, invitedBy, invitedEmail); err != nil {
-		return "", fmt.Errorf("add pending invite: %w", err)
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q, memberID, orgID, memberID, role, invitedBy, invitedEmail); err != nil {
+			return fmt.Errorf("add pending invite: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	return memberID, nil
 }
@@ -338,10 +368,12 @@ DO UPDATE SET
 		return fmt.Errorf("marshal domains: %w", err)
 	}
 
-	if _, err := r.pool.Exec(ctx, q, link.OrgID, provider, link.MicrosoftTenantID, link.Verified, domainsBuf, link.DisplayNameFromTenant); err != nil {
-		return fmt.Errorf("upsert org tenant link: %w", err)
-	}
-	return nil
+	return r.db.WithOrgScope(ctx, link.OrgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q, link.OrgID, provider, link.MicrosoftTenantID, link.Verified, domainsBuf, link.DisplayNameFromTenant); err != nil {
+			return fmt.Errorf("upsert org tenant link: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpsertOrgOnboardingState creates or updates onboarding state for an organization.
@@ -364,10 +396,12 @@ DO UPDATE SET
 		return fmt.Errorf("marshal onboarding steps: %w", err)
 	}
 
-	if _, err := r.pool.Exec(ctx, q, state.OrgID, state.Status, stepsBuf); err != nil {
-		return fmt.Errorf("upsert org onboarding state: %w", err)
-	}
-	return nil
+	return r.db.WithOrgScope(ctx, state.OrgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q, state.OrgID, state.Status, stepsBuf); err != nil {
+			return fmt.Errorf("upsert org onboarding state: %w", err)
+		}
+		return nil
+	})
 }
 
 // ListOrganizationMembers returns all active members of an organization.
@@ -382,20 +416,26 @@ FROM organization_members
 WHERE org_id = $1 AND status != 'removed'
 ORDER BY COALESCE(joined_at, created_at) ASC`
 
-	rows, err := r.pool.Query(ctx, q, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("list organization members: %w", err)
-	}
-	defer rows.Close()
-
 	var members []OrgMember
-	for rows.Next() {
-		var m OrgMember
-		if err := rows.Scan(&m.ID, &m.OrgID, &m.UserID, &m.Role, &m.Status,
-			&m.InvitedBy, &m.InvitedEmail, &m.JoinedAt, &m.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan org member: %w", err)
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, orgID)
+		if err != nil {
+			return fmt.Errorf("list organization members: %w", err)
 		}
-		members = append(members, m)
+		defer rows.Close()
+
+		for rows.Next() {
+			var m OrgMember
+			if err := rows.Scan(&m.ID, &m.OrgID, &m.UserID, &m.Role, &m.Status,
+				&m.InvitedBy, &m.InvitedEmail, &m.JoinedAt, &m.UpdatedAt); err != nil {
+				return fmt.Errorf("scan org member: %w", err)
+			}
+			members = append(members, m)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
 	return members, nil
 }
@@ -411,8 +451,14 @@ SELECT EXISTS (
   WHERE org_id = $1 AND user_id = $2 AND status = 'active'
 )`
 	var exists bool
-	if err := r.pool.QueryRow(ctx, q, orgID, userID).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check active membership: %w", err)
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, q, orgID, userID).Scan(&exists); err != nil {
+			return fmt.Errorf("check active membership: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return exists, nil
 }
@@ -424,10 +470,12 @@ UPDATE organization_members
 SET status = 'removed', updated_at = NOW()
 WHERE org_id = $1 AND user_id = $2`
 
-	if _, err := r.pool.Exec(ctx, q, orgID, userID); err != nil {
-		return fmt.Errorf("remove organization member: %w", err)
-	}
-	return nil
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, q, orgID, userID); err != nil {
+			return fmt.Errorf("remove organization member: %w", err)
+		}
+		return nil
+	})
 }
 
 // ============================================

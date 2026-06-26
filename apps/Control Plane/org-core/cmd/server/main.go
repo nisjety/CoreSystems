@@ -75,7 +75,7 @@ func main() {
 		log.Fatalf("run migrations: %v", err)
 	}
 
-	repo := orgcore.NewRepository(db.Pool)
+	repo := orgcore.NewRepository(db)
 	// U6-3 (ui-ux-velion-gap.md §10): role/permission editor backend.
 	rbacRepo := rbac.NewRepository(db.Pool)
 
