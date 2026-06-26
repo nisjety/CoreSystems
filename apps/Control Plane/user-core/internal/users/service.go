@@ -70,6 +70,16 @@ type SharedPublisher interface {
 	)
 }
 
+// AuditPublisher emits raw audit events over CORE NATS on the local
+// control-plane bus (controlplane-nats), where audit-core's primary
+// QueueSubscribe listens. Satisfied by *nats.Client (its Publish uses core NATS,
+// not JetStream). Defined here (not importing nats) to avoid import cycles.
+// Kept distinct from the cross-plane SharedPublisher (velion-nats) so audit
+// delivery never depends on the shared bus being up.
+type AuditPublisher interface {
+	Publish(subject string, data interface{}) error
+}
+
 // Service handles user business logic
 type Service struct {
 	repo             *Repository
@@ -77,6 +87,7 @@ type Service struct {
 	betterAuthClient interface{}        // Better Auth client (optional, can be nil)
 	eventPublisher   interface{}        // NATS publisher (optional, can be nil)
 	sharedPublisher  SharedPublisher    // cross-plane events on velion-nats
+	auditPublisher   AuditPublisher     // velion.audit.v1.* on local controlplane-nats
 	cache            *rediscache.Client // optional, nil if Redis disabled
 	authPool         *pgxpool.Pool      // secondary pool to auth_service DB for GDPR procs (nil if unset)
 }
@@ -94,6 +105,12 @@ func NewService(repo *Repository, betterAuthClient interface{}, eventPublisher i
 		svc.cache = cache[0]
 	}
 	return svc
+}
+
+// SetAuditPublisher wires the local control-plane bus publisher used to emit
+// velion.audit.v1.* events to audit-core. nil disables audit emission.
+func (s *Service) SetAuditPublisher(ap AuditPublisher) {
+	s.auditPublisher = ap
 }
 
 // SetSharedPublisher wires the cross-plane NATS publisher for controlplane.user.* subjects.

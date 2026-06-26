@@ -235,14 +235,12 @@ func (s *Service) BuildDSARExport(ctx context.Context, userID string) (*DSARExpo
 	return export, nil
 }
 
-// PublishErasureAudit emits a durable audit record + the cross-plane erasure
-// fan-out via the shared publisher. Best-effort (no-ops when shared NATS is
-// disabled), matching the existing user domain-event publishers.
+// PublishErasureAudit emits a durable audit record on the local control-plane
+// bus (controlplane-nats, where audit-core listens) plus the cross-plane erasure
+// fan-out on the shared velion-nats bus. The two transports are independent: a
+// disabled local audit publisher does not suppress the fan-out, and vice versa.
+// Both are best-effort and silently no-op when their connection is unavailable.
 func (s *Service) PublishErasureAudit(orgID, subjectType, subjectID, actorID, actorRole, outcome string, receipt any) {
-	sp := s.sharedPublisher
-	if sp == nil {
-		return
-	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	var details map[string]any
@@ -251,38 +249,48 @@ func (s *Service) PublishErasureAudit(orgID, subjectType, subjectID, actorID, ac
 			_ = json.Unmarshal(b, &details)
 		}
 	}
-	sp.PublishPlain(ErasureAuditSubject, map[string]any{
-		"occurred_at": now,
-		"org_id":      orgID,
-		"user_id":     actorID,
-		"actor_role":  actorRole,
-		"plane":       "control",
-		"event":       "erasure",
-		"subject":     subjectType + ":" + subjectID,
-		"resource_id": subjectID,
-		"outcome":     outcome,
-		"details":     details,
-	})
 
-	if outcome == "ok" {
-		sp.PublishPlain(GDPRErasureFanoutSubject, map[string]any{
-			"subject_type": subjectType,
-			"subject_id":   subjectID,
-			"org_id":       orgID,
-			"requested_by": actorID,
-			"ts":           now,
+	// Durable audit event → LOCAL control-plane bus via CORE publish, matching
+	// audit-core's core QueueSubscribe on velion.audit.v1.>.
+	if ap := s.auditPublisher; ap != nil {
+		_ = ap.Publish(ErasureAuditSubject, map[string]any{
+			"occurred_at": now,
+			"org_id":      orgID,
+			"user_id":     actorID,
+			"actor_role":  actorRole,
+			"plane":       "control",
+			"event":       "erasure",
+			"subject":     subjectType + ":" + subjectID,
+			"resource_id": subjectID,
+			"outcome":     outcome,
+			"details":     details,
 		})
+	}
+
+	// Cross-plane erasure fan-out → SHARED velion-nats bus (Model/Data plane
+	// purge their side). Fires only on erasure success.
+	if outcome == "ok" {
+		if sp := s.sharedPublisher; sp != nil {
+			sp.PublishPlain(GDPRErasureFanoutSubject, map[string]any{
+				"subject_type": subjectType,
+				"subject_id":   subjectID,
+				"org_id":       orgID,
+				"requested_by": actorID,
+				"ts":           now,
+			})
+		}
 	}
 }
 
-// PublishDSARAudit emits a durable audit record for a DSAR export. DSAR is a
-// read, so it does NOT emit the erasure fan-out.
+// PublishDSARAudit emits a durable audit record for a DSAR export on the local
+// control-plane bus (controlplane-nats). DSAR is a read, so it does NOT emit the
+// erasure fan-out. Best-effort; no-ops when the local audit publisher is unset.
 func (s *Service) PublishDSARAudit(orgID, subjectID, actorID, actorRole, outcome string) {
-	sp := s.sharedPublisher
-	if sp == nil {
+	ap := s.auditPublisher
+	if ap == nil {
 		return
 	}
-	sp.PublishPlain(DSARExportAuditSubject, map[string]any{
+	_ = ap.Publish(DSARExportAuditSubject, map[string]any{
 		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"org_id":      orgID,
 		"user_id":     actorID,

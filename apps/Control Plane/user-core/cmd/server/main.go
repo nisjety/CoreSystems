@@ -284,6 +284,15 @@ func main() {
 		log.Println("✅ user-core service connected to shared NATS for event publishing")
 	}
 
+	// Wire the local control-plane bus (controlplane-nats) as the audit
+	// publisher so velion.audit.v1.control.* (erasure/DSAR) events reach
+	// audit-core's primary subscription. Kept separate from the shared
+	// velion-nats bus, which carries cross-plane domain/ACL/fan-out events.
+	if natsClient != nil {
+		userService.SetAuditPublisher(natsClient)
+		log.Println("✅ user-core audit events wired to local control-plane bus (controlplane-nats)")
+	}
+
 	// Wire the secondary auth_service DB pool used by GDPR erasure to invoke
 	// gdpr_hard_delete_user / gdpr_anonymize_user (those procs live in the
 	// auth_service DB, not user-core's user_service DB). When AUTH_DATABASE_URL

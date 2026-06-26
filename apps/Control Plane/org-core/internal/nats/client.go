@@ -66,6 +66,25 @@ func (c *Client) Publish(ctx context.Context, subject string, payload map[string
 	return nil
 }
 
+// PublishCore sends a raw JSON payload over core NATS (no JetStream, no stream
+// binding). Audit events (velion.audit.v1.<plane>.*) are consumed by
+// audit-core's core QueueSubscribe on the control-plane bus (controlplane-nats),
+// which is this local connection — NOT the shared velion-nats bus, which is
+// reserved for cross-plane domain/ACL events (aqencia.controlplane.*).
+// A JetStream publish here would fail (no stream covers velion.audit.* on
+// controlplane-nats), so audit must use core publish, matching the producers
+// audit-core expects.
+func (c *Client) PublishCore(subject string, payload map[string]any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal event: %w", err)
+	}
+	if err := c.conn.Publish(subject, body); err != nil {
+		return fmt.Errorf("core publish %s: %w", subject, err)
+	}
+	return nil
+}
+
 func (c *Client) EnsureStream(ctx context.Context, name string, subjects []string) error {
 	_, err := c.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      name,

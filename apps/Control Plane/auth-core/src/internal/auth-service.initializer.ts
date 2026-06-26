@@ -8,7 +8,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AuthIntegrationService } from './auth-integration.service';
 import { AuthEventPublisher } from './auth-event.publisher';
-import { SharedNatsService } from '../nats/shared-nats.service';
+import { DirectNatsService } from '../nats/direct-nats.service';
 import { setAuthIntegrationService } from '../auth/user-service-integration.plugin';
 import { setOrganizationEventPublisher } from '../auth/organization-hooks';
 import { setOrganizationEventPublisher as setPluginEventPublisher } from '../auth/organization-events.plugin';
@@ -21,7 +21,7 @@ export class AuthServiceInitializer implements OnModuleInit {
   constructor(
     private authIntegrationService: AuthIntegrationService,
     private authEventPublisher: AuthEventPublisher,
-    private sharedNats: SharedNatsService,
+    private directNats: DirectNatsService,
   ) {}
 
   async onModuleInit() {
@@ -36,9 +36,12 @@ export class AuthServiceInitializer implements OnModuleInit {
       setPluginEventPublisher(this.authEventPublisher);
       this.logger.log('Organization event publisher initialized');
 
-      // Wire SharedNatsService into the audit plugin for velion.audit.v1.* emission
-      setAuditNatsPublisher(this.sharedNats);
-      this.logger.log('Audit NATS publisher initialized');
+      // Wire the LOCAL control-plane bus (DirectNatsService → controlplane-nats)
+      // into the audit plugin for velion.audit.v1.control.* emission. audit-core's
+      // primary subscription listens there; the shared velion-nats bus is reserved
+      // for cross-plane domain/ACL events.
+      setAuditNatsPublisher(this.directNats);
+      this.logger.log('Audit NATS publisher initialized (local control-plane bus)');
 
       this.logger.log('Auth service integration initialized successfully', {
         // user-core authenticates against auth-core during its own startup, so

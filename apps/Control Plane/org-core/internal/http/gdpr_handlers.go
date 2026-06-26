@@ -95,43 +95,50 @@ func (s *Server) authorizeOrgErasure(c *gin.Context, orgID string) (string, stri
 	return callerID, role, true
 }
 
-// publishErasureAudit emits a durable audit record + the cross-plane fan-out.
-// Best-effort: a nil/disconnected shared publisher silently no-ops, exactly
-// like the existing org domain-event publishers.
+// publishErasureAudit emits a durable audit record on the local control-plane
+// bus (controlplane-nats, where audit-core listens) plus the cross-plane erasure
+// fan-out on the shared velion-nats bus. The two are independent: a disabled
+// local audit publisher does not suppress the fan-out, and vice versa. Both are
+// best-effort and silently no-op when their connection is unavailable.
 func (s *Server) publishErasureAudit(orgID, subjectType, subjectID, actorID, actorRole, outcome string, receipt json.RawMessage) {
-	sp := s.orgService.SharedPub()
-	if sp == nil {
-		return
-	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	// Durable audit event (audit-core schema: occurred_at/org_id/plane/event/...).
 	var details map[string]any
 	if len(receipt) > 0 {
 		_ = json.Unmarshal(receipt, &details)
 	}
-	sp.PublishPlain(erasureAuditSubject, map[string]any{
-		"occurred_at": now,
-		"org_id":      orgID,
-		"user_id":     actorID,
-		"actor_role":  actorRole,
-		"plane":       "control",
-		"event":       "erasure",
-		"subject":     subjectType + ":" + subjectID,
-		"resource_id": subjectID,
-		"outcome":     outcome,
-		"details":     details,
-	})
 
-	// Cross-plane fan-out contract (emit-only MVP).
-	if outcome == "ok" {
-		sp.PublishPlain(gdprErasureFanoutSubject, map[string]any{
-			"subject_type": subjectType,
-			"subject_id":   subjectID,
-			"org_id":       orgID,
-			"requested_by": actorID,
-			"ts":           now,
+	// Durable audit event → LOCAL control-plane bus (controlplane-nats), via
+	// CORE publish to match audit-core's core QueueSubscribe on velion.audit.v1.>.
+	// audit-core schema: occurred_at/org_id/plane/event/...
+	if ap := s.orgService.AuditPub(); ap != nil {
+		_ = ap.PublishCore(erasureAuditSubject, map[string]any{
+			"occurred_at": now,
+			"org_id":      orgID,
+			"user_id":     actorID,
+			"actor_role":  actorRole,
+			"plane":       "control",
+			"event":       "erasure",
+			"subject":     subjectType + ":" + subjectID,
+			"resource_id": subjectID,
+			"outcome":     outcome,
+			"details":     details,
 		})
+	}
+
+	// Cross-plane fan-out contract (emit-only MVP) → SHARED velion-nats bus,
+	// where Model/Data plane subscribers purge their side. Fires only on
+	// irreversible erasure success.
+	if outcome == "ok" {
+		if sp := s.orgService.SharedPub(); sp != nil {
+			sp.PublishPlain(gdprErasureFanoutSubject, map[string]any{
+				"subject_type": subjectType,
+				"subject_id":   subjectID,
+				"org_id":       orgID,
+				"requested_by": actorID,
+				"ts":           now,
+			})
+		}
 	}
 }
 
