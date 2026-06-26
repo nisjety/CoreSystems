@@ -5,6 +5,7 @@ import {
   CalendarDays,
   CheckCheck,
   CircleUserRound,
+  Coins,
   CreditCard,
   Fingerprint,
   Flame,
@@ -252,6 +253,7 @@ export const sidebarSections: SidebarSection[] = [
         label: 'Agenter',
         items: [
           { id: 'agents-all', label: 'Alle agenter', href: '/agents', icon: Bot, description: 'Se og konfigurer agentroller.' },
+          { id: 'agents-cost', label: 'Kostnad', href: '/agents/cost', icon: Coins, description: 'Reell modellbruk og kostnad per kjøring fra hovedboken.' },
           { id: 'agents-chat', label: 'Arbeidsflate', href: '/chat', icon: Sparkles, description: 'Test agenten i chat-arbeidsflaten.' },
         ],
       },

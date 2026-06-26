@@ -85,6 +85,11 @@ pub struct AppState {
     pub capability_core_base_url: String,
     /// Shared reqwest client for HTTP proxy calls to capability-core.
     pub http_client: reqwest::Client,
+    /// Phase 7 B5 — model price catalogue cache (cost-core `GET /api/v1/pricing`).
+    /// Computes the streamed `Usage.cost_usd` off the same catalogue cost-core
+    /// prices the durable ledger with, so the SSE and the ledger agree. Returns
+    /// `None` (null cost) when cost-core is unreachable — never a fake figure.
+    pub pricing: crate::pricing::PricingCache,
     // --- Data Plane v2 clients ---
     pub retrieval_client: RetrievalServiceClient<Channel>,
     pub document_client: DocumentServiceClient<Channel>,
@@ -192,6 +197,9 @@ impl AppState {
             capability_client: CapabilityCoreClient::new(capability_channel),
             capability_core_base_url: "http://localhost:8085".to_owned(),
             http_client: reqwest::Client::new(),
+            // Pricing disabled by default (no cost-core URL); `from_env` wires it
+            // from COST_CORE_URL. A disabled cache emits a null cost, never a fake.
+            pricing: crate::pricing::PricingCache::new(None, reqwest::Client::new()),
             retrieval_client: RetrievalServiceClient::new(dp_retrieval_channel),
             document_client: DocumentServiceClient::new(dp_documents_channel),
             knowledge_client: KnowledgeServiceClient::new(dp_knowledge_channel),
@@ -313,6 +321,10 @@ impl AppState {
         let capability_core_base_url = std::env::var("CAPABILITY_CORE_HTTP_URL")
             .unwrap_or_else(|_| "http://localhost:8085".to_owned());
         let http_client = reqwest::Client::new();
+        // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
+        // Shared between both publisher branches below; cheap clone (Arc inner).
+        let pricing_cache =
+            crate::pricing::PricingCache::new(std::env::var("COST_CORE_URL").ok(), http_client.clone());
 
         // Data Plane v2 clients — retrieval-engine-rs serves Retrieval+Document+Knowledge on one port
         let retrieval_client = RetrievalServiceClient::new(Self::lazy_channel(
@@ -403,6 +415,7 @@ impl AppState {
             state.capability_client = capability_client;
             state.capability_core_base_url = capability_core_base_url;
             state.http_client = http_client;
+            state.pricing = pricing_cache.clone();
             state.retrieval_client = retrieval_client;
             state.document_client = document_client;
             state.knowledge_client = knowledge_client;
@@ -432,6 +445,7 @@ impl AppState {
             state.capability_client = capability_client;
             state.capability_core_base_url = capability_core_base_url;
             state.http_client = http_client;
+            state.pricing = pricing_cache;
             state.retrieval_client = retrieval_client;
             state.document_client = document_client;
             state.knowledge_client = knowledge_client;

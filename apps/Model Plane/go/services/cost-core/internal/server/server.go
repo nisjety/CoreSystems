@@ -12,19 +12,32 @@ import (
 	"time"
 
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
+	"github.com/triodelab/model-plane/services/cost-core/internal/pricing"
 	"github.com/triodelab/model-plane/services/cost-core/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Server is the cost-core HTTP server backed by a ledger implementation.
+// Server is the cost-core HTTP server backed by a ledger implementation and a
+// price catalogue (the resolver that turns tokens into a USD cost when a usage
+// event arrives without one).
 type Server struct {
-	ledger ledger.Ledger
+	ledger  ledger.Ledger
+	pricing *pricing.Resolver
 }
 
-// NewServer constructs a Server with the provided ledger.
+// NewServer constructs a Server with the provided ledger and the built-in
+// default price catalogue. Call SetPricing to swap in a DB-backed catalogue.
 func NewServer(l ledger.Ledger) *Server {
-	return &Server{ledger: l}
+	return &Server{ledger: l, pricing: pricing.Default()}
+}
+
+// SetPricing replaces the price catalogue (e.g. with one loaded from Postgres).
+// A nil resolver is ignored so the server always has a usable catalogue.
+func (s *Server) SetPricing(p *pricing.Resolver) {
+	if p != nil {
+		s.pricing = p
+	}
 }
 
 // recordRequest is the JSON body accepted by the record endpoint.
@@ -89,6 +102,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/cost/run", s.handleGetRunUsage)
 	mux.HandleFunc("GET /api/v1/cost/aggregate", s.handleAggregate)
 	mux.HandleFunc("GET /api/v1/cost/entries", s.handleListEntries)
+	mux.HandleFunc("GET /api/v1/pricing", s.handleListPricing)
 	mux.HandleFunc("POST /api/v1/budget/check", s.handleBudgetCheck)
 }
 
@@ -270,19 +284,28 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 		attribute.String("org_id", req.OrgID),
 	))
 
-	userID := req.UserID
-	if userID == "" {
-		userID = "__org__"
+	// Budget scope: an empty user_id means an ORG-WIDE budget — the intent layer
+	// (inference-core) sends no per-user scope, so aggregate across all of the
+	// org's users. A specific user_id keeps the per-user rollup. The legacy
+	// "__org__" sentinel is gone: it never matched stored rows (entries carry the
+	// real user_id), so the org budget always read $0 and the posture never left
+	// Healthy — the downgrade could not fire even with a fed ledger.
+	var usage *ledger.Usage
+	var usageErr error
+	if req.UserID == "" {
+		usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID})
+	} else {
+		usage, usageErr = s.ledger.GetUsage(r.Context(), req.OrgID, req.UserID)
 	}
 
 	var currentCost float64
 	var currentTokens int64
-	if usage, usageErr := s.ledger.GetUsage(r.Context(), req.OrgID, userID); usageErr == nil {
+	if usageErr == nil && usage != nil {
 		currentCost = usage.TotalCostUSD
 		currentTokens = usage.TotalInputTokens + usage.TotalOutputTokens
 	}
 
-	err := s.ledger.CheckBudget(r.Context(), req.OrgID, userID, req.MaxCostUSD, req.MaxTokens)
+	err := budgetDecision(req.MaxCostUSD, req.MaxTokens, currentCost, currentTokens)
 	resp := budgetCheckResponse{
 		Allowed:        err == nil,
 		CurrentCostUSD: currentCost,
@@ -298,9 +321,43 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// handleListPricing returns the model price catalogue (USD per 1M tokens). The
+// gateway reads this to compute the SSE display cost off the same source as the
+// ledger; the cost dashboard renders it as the per-model rate card.
+func (s *Server) handleListPricing(w http.ResponseWriter, r *http.Request) {
+	telemetry.RequestsTotal.Add(r.Context(), 1, metric.WithAttributes(
+		attribute.String("method", "GET"),
+		attribute.String("path", "/api/v1/pricing"),
+	))
+	rates := s.pricing.Rates()
+	writeJSON(w, map[string]any{"rates": rates, "count": len(rates)})
+}
+
+// budgetDecision reports whether accumulated usage is within the caps, reusing
+// the ledger's sentinel errors so budgetOutcome can classify the cap type. A
+// cap <= 0 disables that check. Mirrors ledger.Store.CheckBudget but operates
+// on already-aggregated totals, so an org-wide aggregate is checked without a
+// per-user rollup.
+func budgetDecision(maxCostUSD float64, maxTokens int64, cost float64, tokens int64) error {
+	if maxCostUSD > 0 && cost >= maxCostUSD {
+		return fmt.Errorf("%w: current %.6f >= limit %.6f", ledger.ErrBudgetExceededCost, cost, maxCostUSD)
+	}
+	if maxTokens > 0 && tokens >= maxTokens {
+		return fmt.Errorf("%w: current %d >= limit %d", ledger.ErrBudgetExceededTokens, tokens, maxTokens)
+	}
+	return nil
+}
+
 // RecordUsage writes a cost event into the ledger and emits telemetry. It is
 // used both by the HTTP record endpoint and the USAGE_ENVELOPE subscriber.
+//
+// When the event carries no pre-computed cost (the common case — the gateway
+// publishes token counts only), cost-core prices it authoritatively from the
+// catalogue so the dollar ledger and the budget posture are real, never $0.
 func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
+	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil {
+		e.CostUSD = s.pricing.Cost(e.Model, e.InputTokens, e.OutputTokens)
+	}
 	if err := s.ledger.RecordEntry(ctx, e); err != nil {
 		slog.Error("failed to record usage", "org_id", e.OrgID, "error", err)
 		return err

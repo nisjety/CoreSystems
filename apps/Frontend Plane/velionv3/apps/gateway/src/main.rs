@@ -80,6 +80,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::billing::router(state.clone()))
         .merge(domains::briefs::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
+        .merge(domains::cost::router(state.clone()))
         .merge(domains::finetune::router(state.clone()))
         .merge(domains::inbox::router(state.clone()))
         .merge(domains::information::router(state.clone()))
@@ -164,6 +165,7 @@ mod tests {
             auth_core_url: "http://127.0.0.1:1".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
+            cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),

@@ -123,6 +123,7 @@ mod tests {
             auth_core_url: "http://127.0.0.1:1".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
+            cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),

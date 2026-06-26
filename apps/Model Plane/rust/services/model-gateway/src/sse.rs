@@ -148,6 +148,7 @@ pub async fn invoke_stream_sse(
 
     let publisher = state.publisher.clone();
     let stream_buffers = state.stream_buffers.clone();
+    let pricing = state.pricing.clone();
     let req_id = request_id.clone();
     let org_clone = org_id.clone();
     let user_clone = user_id.clone();
@@ -712,13 +713,17 @@ pub async fn invoke_stream_sse(
                     }
 
                     // chat-parity §17: opt-in usage event (real tokens + latency)
-                    // before the terminal done. cost_usd/confidence are wired in
-                    // later slices (cost-core / reasoning) — null until then,
-                    // never faked.
+                    // before the terminal done. Phase 7 B5 — cost_usd is priced
+                    // from cost-core's catalogue (same source as the durable
+                    // ledger); `None` only when cost-core is unreachable, never
+                    // faked. `confidence` is wired in B6.
+                    let cost_usd = pricing
+                        .cost_usd(&model_used, i64::from(input_tokens), i64::from(output_tokens))
+                        .await;
                     let usage_event = crate::sse_events::ChatEvent::Usage {
                         input_tokens,
                         output_tokens,
-                        cost_usd: None,
+                        cost_usd,
                         latency_ms,
                         confidence: None,
                     };
@@ -1435,10 +1440,16 @@ fn infer_fallback_stream(
                     .await;
 
                 // chat-parity §17: opt-in usage event (real tokens + latency).
+                // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
+                // source as the durable ledger); `None` only when unreachable.
+                let cost_usd = state
+                    .pricing
+                    .cost_usd(&model_used, i64::from(input_tokens), i64::from(output_tokens))
+                    .await;
                 let usage_event = crate::sse_events::ChatEvent::Usage {
                     input_tokens,
                     output_tokens,
-                    cost_usd: None,
+                    cost_usd,
                     latency_ms,
                     confidence: None,
                 };

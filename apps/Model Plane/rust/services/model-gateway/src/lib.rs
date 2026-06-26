@@ -23,6 +23,7 @@ pub mod moderation;
 pub mod nats_publisher;
 pub mod normalize;
 pub mod ownership;
+pub mod pricing;
 pub mod profile;
 pub mod quarry;
 pub mod rate_limit;

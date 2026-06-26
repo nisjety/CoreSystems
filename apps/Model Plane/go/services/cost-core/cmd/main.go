@@ -24,6 +24,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 	"github.com/triodelab/model-plane/services/cost-core/internal/postgres"
+	"github.com/triodelab/model-plane/services/cost-core/internal/pricing"
 	"github.com/triodelab/model-plane/services/cost-core/internal/server"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -71,6 +72,7 @@ func main() {
 
 	store := buildLedger(ctx)
 	srv := server.NewServer(store)
+	srv.SetPricing(buildPricing(ctx))
 
 	// HTTP server on :8089 (health + API)
 	mux := http.NewServeMux()
@@ -138,6 +140,30 @@ func buildLedger(ctx context.Context) ledger.Ledger {
 	}
 	slog.Info("using durable Postgres ledger")
 	return pgStore
+}
+
+// buildPricing loads the model price catalogue from Postgres when DATABASE_URL
+// is set, falling back to the built-in default catalogue otherwise (or on any
+// load error) so cost is always priceable. Returns a non-nil resolver.
+func buildPricing(ctx context.Context) *pricing.Resolver {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		slog.Info("DATABASE_URL not set; using built-in default price catalogue")
+		return pricing.Default()
+	}
+	pool, err := postgres.Connect(ctx, dsn)
+	if err != nil {
+		slog.Warn("pricing: postgres connect failed; using default price catalogue", "error", err)
+		return pricing.Default()
+	}
+	defer pool.Close()
+	resolver, err := pricing.LoadFromPool(ctx, pool)
+	if err != nil {
+		slog.Warn("pricing: catalogue load failed; using default price catalogue", "error", err)
+		return pricing.Default()
+	}
+	slog.Info("loaded model price catalogue from Postgres")
+	return resolver
 }
 
 // subscribeUsageEnvelopes connects to NATS and subscribes to per-org usage

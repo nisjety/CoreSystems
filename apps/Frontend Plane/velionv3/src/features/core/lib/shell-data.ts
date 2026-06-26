@@ -31,6 +31,7 @@ export type VelionRoute =
   | '/leads'
   | '/agents'
   | '/agents/runs'
+  | '/agents/cost'
   | '/account'
   | '/settings'
   | '/settings/workspace'

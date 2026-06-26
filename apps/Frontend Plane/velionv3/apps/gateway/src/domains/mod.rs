@@ -10,6 +10,7 @@ pub mod billing;
 pub mod briefs;
 pub mod browser;
 pub mod chat;
+pub mod cost;
 pub mod finetune;
 pub mod inbox;
 pub mod information;

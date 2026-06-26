@@ -11,6 +11,7 @@ const InboxPage = lazy(() => import('@/features/inbox/components/InboxPage'))
 const TicketingPage = lazy(() => import('@/features/tickets/components/TicketingPage'))
 const AgentsPage = lazy(() => import('@/features/agents/components/AgentsPage'))
 const AgentRunConsole = lazy(() => import('@/features/agents/components/AgentRunConsole'))
+const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
 const SocialOperationsPage = lazy(() => import('@/features/social/components/SocialOperationsPage'))
 const InsightsPage = lazy(() => import('@/features/insights/components/InsightsPage'))
@@ -163,6 +164,7 @@ export default function App() {
         <Route path="/insights/experiments" component={() => <InsightsPage section="experiments" />} />
         <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/runs" component={AgentRunConsole} />
+        <Route path="/agents/cost" component={CostDashboardPage} />
         <Route path="/ingestions" component={VelionIngestionsPage} />
         <Route path="/knowledge" component={KnowledgePage} />
         <Route path="/knowledge/shared" component={SharedWithMePage} />

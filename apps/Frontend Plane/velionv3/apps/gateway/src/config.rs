@@ -36,6 +36,7 @@ pub(crate) struct AppState {
     pub(crate) quarry_control_url: String,
     pub(crate) model_recommend_url: String,
     pub(crate) model_gateway_url: String,
+    pub(crate) cost_core_url: String,
     pub(crate) model_gateway_dev_bearer: String,
     pub(crate) inference_core_url: String,
     pub(crate) documents_api_url: String,
@@ -130,6 +131,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
             "http://model-gateway:8080/v1/recommend/plan",
         ),
         model_gateway_url: env_url("MODEL_GATEWAY_URL", "http://model-gateway:8080"),
+        // Phase 7 B5 — Model Plane cost ledger (cost-core HTTP API). Reachable
+        // over the inter-plane-bus alias; backs the cost/usage dashboard.
+        cost_core_url: env_url("COST_CORE_URL", "http://model-plane-cost-core-1:8089"),
         model_gateway_dev_bearer: env::var("MODEL_GATEWAY_DEV_BEARER")
             .unwrap_or_default()
             .trim()
