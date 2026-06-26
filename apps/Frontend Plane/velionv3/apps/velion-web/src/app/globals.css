@@ -1,7 +1,5 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:is(.dark *));
-
 @font-face {
 	font-family: Arbeit;
 	font-style: normal;
@@ -33,6 +31,8 @@
 	src: url("/fonts/protokoll-medium/ProtokollMedium-Web.woff2") format("woff2");
 	font-display: swap;
 }
+
+
 
 :root {
 	color: var(--foreground);
@@ -82,7 +82,8 @@
 	--velion-border: #e7e7e5;
 	--velion-border-soft: #eeeeec;
 	--velion-border-strong: #d8d8d4;
-  --velion-footer-bg: #f6f6f4;
+
+	--velion-footer-bg: #f6f6f4;
 
 	--velion-primary: #171717;
 	--velion-primary-hover: #34363d;
@@ -117,6 +118,58 @@
 	--velion-h-ink-warm: #251f21;
 	--velion-j-text: #171717;
 	--velion-j-text-soft: #34363d;
+
+	/* ---------------------------------------------------------------------
+	 * Design system — documented in DESIGN.md
+	 * ------------------------------------------------------------------- */
+
+	/* Type scale (fluid). One source of truth for headline + body sizing.
+	 * In Tailwind v4 these also generate `text-display`, `text-h2`, … utilities. */
+	--text-display: clamp(3.35rem, 6.2vw, 8.2rem);
+	--text-display--line-height: 0.9;
+	--text-h1: clamp(3rem, 4.9vw, 6.2rem);
+	--text-h1--line-height: 0.94;
+	--text-h2: clamp(2.5rem, 3.9vw, 4.7rem);
+	--text-h2--line-height: 0.98;
+	--text-h3: clamp(1.55rem, 1.7vw, 2.2rem);
+	--text-h3--line-height: 1.04;
+	--text-body-lg: clamp(1.08rem, 1.1vw, 1.32rem);
+	--text-body-lg--line-height: 1.5;
+	--text-body: clamp(1rem, 1vw, 1.15rem);
+	--text-body--line-height: 1.55;
+	--text-body-sm: clamp(0.92rem, 0.92vw, 1.02rem);
+	--text-body-sm--line-height: 1.45;
+	--text-eyebrow: clamp(0.72rem, 0.74vw, 0.82rem);
+	--text-label: clamp(0.68rem, 0.7vw, 0.76rem);
+
+	/* Tracking presets paired with the scale */
+	--tracking-display: -0.072em;
+	--tracking-heading: -0.055em;
+	--tracking-eyebrow: 0.28em;
+	--tracking-label: 0.14em;
+
+	/* Elevation — cards, panels, floating surfaces */
+	--velion-shadow-sm: 0 10px 28px rgba(23, 23, 23, 0.035);
+	--velion-shadow-md: 0 24px 70px rgba(31, 31, 29, 0.09);
+	--velion-shadow-lg: 0 48px 140px rgba(31, 31, 29, 0.13);
+	--velion-shadow-hero: 0 34px 120px rgba(0, 0, 0, 0.18);
+
+	/* Motion language — three tiers: micro (hover), reveal (scroll), cinematic (hero) */
+	--velion-dur-micro: 320ms;
+	--velion-dur-reveal: 640ms;
+	--velion-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+	--velion-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+	/* Sovereign / trust accent — restrained terracotta tints reserved for
+	 * trust + governance surfaces (badges, residency markers, focus). */
+	--velion-trust-tint: #fff1e7;
+	--velion-trust-line: color-mix(in srgb, var(--velion-coral) 28%, var(--velion-border-strong));
+	--velion-status-live: #2f7d55;
+	--velion-status-live-soft: #e7f1ea;
+	--velion-status-progress: var(--velion-coral);
+	--velion-status-progress-soft: var(--velion-coral-soft);
+	--velion-status-planned: #7a7a7f;
+	--velion-status-planned-soft: #efefee;
 }
 
 @theme inline {
@@ -158,7 +211,7 @@
 	--color-velion-border: var(--velion-border);
 	--color-velion-border-soft: var(--velion-border-soft);
 	--color-velion-border-strong: var(--velion-border-strong);
-  --color-velion-footer-bg: var(--velion-footer-bg);
+	--color-velion-footer-bg: var(--velion-footer-bg);
 
 	--color-velion-coral: var(--velion-coral);
 	--color-velion-coral-hover: var(--velion-coral-hover);
@@ -171,7 +224,6 @@
 	--color-velion-h-ink-warm: var(--velion-h-ink-warm);
 	--color-velion-j-text: var(--velion-j-text);
 	--color-velion-j-text-soft: var(--velion-j-text-soft);
-  
 
 	--font-arbeit: Arbeit, sans-serif;
 	--font-protokoll: Protokoll, sans-serif;
@@ -184,15 +236,9 @@
 	--radius-xl: calc(var(--radius) + 4px);
 }
 
-@media (prefers-color-scheme: dark) {
-	:root {
-		--background: #171717;
-		--foreground: #f8f8f7;
-	}
-}
-
 html {
 	scroll-behavior: smooth;
+	background: var(--background);
 }
 
 *,
@@ -236,6 +282,28 @@ canvas {
 	max-width: 100%;
 }
 
+.fade-out-top {
+	mask-image: linear-gradient(transparent 0, #000 300px);
+	mask-position: 0 -300px;
+	mask-repeat: no-repeat;
+	mask-size: 100% 5000%;
+
+	-webkit-mask-image: linear-gradient(transparent 0, #000 300px);
+	-webkit-mask-position: 0 -300px;
+	-webkit-mask-repeat: no-repeat;
+	-webkit-mask-size: 100% 5000%;
+}
+
+@media (max-width: 640px) {
+	.fade-out-top {
+		mask-image: linear-gradient(transparent 0, #000 80px);
+		mask-position: 0 -80px;
+
+		-webkit-mask-image: linear-gradient(transparent 0, #000 80px);
+		-webkit-mask-position: 0 -80px;
+	}
+}
+
 ::selection {
 	background: var(--velion-coral);
 	color: #ffffff;
@@ -252,5 +320,215 @@ canvas {
 	to {
 		opacity: 1;
 		transform: translateY(0);
+	}
+}
+
+@keyframes velion-detail-frame {
+	0%,
+	100% {
+		opacity: 0.46;
+		transform: translateY(0) scale(1);
+	}
+	50% {
+		opacity: 0.82;
+		transform: translateY(-10px) scale(1.015);
+	}
+}
+
+.velion-hero-load__frame {
+	box-shadow: 0 34px 120px rgba(0, 0, 0, 0.18);
+	transform-origin: center center;
+	will-change: clip-path, opacity, transform;
+}
+
+.velion-hero-load__intro {
+	filter: brightness(0.78) contrast(1.04) saturate(0.96);
+	transform-origin: center center;
+	will-change: opacity, transform;
+}
+
+.velion-hero-load__ambient {
+	background:
+		linear-gradient(
+			90deg,
+			rgba(4, 5, 6, 0.92) 0%,
+			rgba(8, 9, 10, 0.72) 29%,
+			rgba(8, 9, 10, 0.18) 62%,
+			rgba(4, 5, 6, 0.34) 100%
+		),
+		linear-gradient(
+			180deg,
+			rgba(6, 7, 8, 0.34),
+			rgba(6, 7, 8, 0.16) 46%,
+			rgba(6, 7, 8, 0.74)
+		);
+}
+
+.velion-hero-load__organic-shadows {
+	background:
+		radial-gradient(
+			78% 92% at -13% 58%,
+			rgba(4, 5, 6, 0.92) 0 43%,
+			rgba(4, 5, 6, 0.72) 50%,
+			transparent 51%
+		),
+		radial-gradient(
+			46% 76% at 79% -5%,
+			rgba(36, 31, 34, 0.68) 0 53%,
+			transparent 54%
+		),
+		radial-gradient(
+			47% 68% at 88% 76%,
+			rgba(8, 8, 8, 0.58) 0 48%,
+			transparent 49%
+		),
+		radial-gradient(
+			34% 44% at 49% 39%,
+			rgba(247, 244, 238, 0.08) 0 22%,
+			transparent 62%
+		);
+}
+
+.velion-hero-load__fabric {
+	background-image:
+		repeating-linear-gradient(
+			86deg,
+			rgba(255, 255, 255, 0.05) 0 1px,
+			transparent 1px 4px
+		),
+		repeating-linear-gradient(
+			-6deg,
+			rgba(0, 0, 0, 0.12) 0 1px,
+			transparent 1px 5px
+		),
+		linear-gradient(
+			135deg,
+			rgba(247, 244, 238, 0.1),
+			transparent 32%,
+			rgba(238, 122, 80, 0.08) 64%,
+			transparent
+		);
+	background-size:
+		5px 100%,
+		100% 6px,
+		100% 100%;
+	mix-blend-mode: overlay;
+	opacity: 0.54;
+}
+
+@media (max-width: 760px) {
+	.velion-hero-load__organic-shadows {
+		background:
+			radial-gradient(
+				110% 72% at -36% 60%,
+				rgba(4, 5, 6, 0.92) 0 48%,
+				rgba(4, 5, 6, 0.72) 56%,
+				transparent 57%
+			),
+			radial-gradient(
+				80% 58% at 94% 8%,
+				rgba(36, 31, 34, 0.62) 0 52%,
+				transparent 53%
+			),
+			linear-gradient(180deg, transparent 0%, rgba(4, 5, 6, 0.42) 100%);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-hero-load__frame,
+	.velion-hero-load__intro {
+		will-change: auto;
+	}
+
+	/* Safety net: neutralise decorative CSS keyframe loops for users who
+	 * ask for reduced motion (detail frames, ambient drift, etc.). */
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.001ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* ---------------------------------------------------------------------
+ * Design-system utility classes (see DESIGN.md)
+ * Semantic, token-backed type + surface helpers used by new sections
+ * (Trust Center, primitives) and available for opportunistic migration.
+ * ------------------------------------------------------------------- */
+
+.velion-eyebrow {
+	font-family: var(--font-protokoll), sans-serif;
+	font-size: var(--text-eyebrow);
+	font-weight: 500;
+	line-height: 1;
+	text-transform: uppercase;
+	letter-spacing: var(--tracking-eyebrow);
+	color: color-mix(in srgb, var(--velion-j-text) 42%, transparent);
+}
+
+.velion-display {
+	font-family: var(--font-arbeit), sans-serif;
+	font-size: var(--text-display);
+	font-weight: 300;
+	line-height: var(--text-display--line-height);
+	letter-spacing: var(--tracking-display);
+	color: var(--velion-j-text);
+}
+
+.velion-h2 {
+	font-family: var(--font-arbeit), sans-serif;
+	font-size: var(--text-h2);
+	font-weight: 300;
+	line-height: var(--text-h2--line-height);
+	letter-spacing: var(--tracking-heading);
+	color: var(--velion-j-text);
+}
+
+.velion-h3 {
+	font-family: var(--font-arbeit), sans-serif;
+	font-size: var(--text-h3);
+	font-weight: 300;
+	line-height: var(--text-h3--line-height);
+	letter-spacing: -0.04em;
+	color: var(--velion-j-text);
+}
+
+.velion-body-lg {
+	font-family: var(--font-protokoll), sans-serif;
+	font-size: var(--text-body-lg);
+	font-weight: 300;
+	line-height: var(--text-body-lg--line-height);
+	color: var(--velion-text-muted);
+}
+
+.velion-body {
+	font-family: var(--font-protokoll), sans-serif;
+	font-size: var(--text-body);
+	font-weight: 300;
+	line-height: var(--text-body--line-height);
+	color: var(--velion-text-muted);
+}
+
+/* Reveal: token-backed scroll-in used by motion-light sections. JS adds
+ * `data-revealed` (or it shows immediately under reduced motion). */
+.velion-reveal {
+	opacity: 0;
+	transform: translateY(24px);
+	transition:
+		opacity var(--velion-dur-reveal) var(--velion-ease-out),
+		transform var(--velion-dur-reveal) var(--velion-ease-out);
+}
+
+.velion-reveal[data-revealed="true"] {
+	opacity: 1;
+	transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-reveal {
+		opacity: 1;
+		transform: none;
 	}
 }

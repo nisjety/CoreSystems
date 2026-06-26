@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useRef } from "react";
 import { VelionComposerPreview } from "@/components/ui/VelionComposerPreview";
 
@@ -17,7 +18,7 @@ const promptText =
 
 const workflowCards: WorkflowCard[] = [
 	{
-		href: "#technology",
+		href: "#kunnskap",
 		image: "/velion-product-shots/chat-draft-answer-top.png",
 		kicker: "Reply",
 		link: "Draft replies",
@@ -25,7 +26,7 @@ const workflowCards: WorkflowCard[] = [
 		text: "Compose email, chat, and social answers with visible source trails before anything is sent.",
 	},
 	{
-		href: "#partnership",
+		href: "#plattform",
 		image: "/velion-product-shots/dashboard-composer-prompt-state.png",
 		kicker: "Build",
 		link: "Create chatbot",
@@ -33,7 +34,7 @@ const workflowCards: WorkflowCard[] = [
 		text: "Connect help center, products, and policies, then publish a customer-facing assistant.",
 	},
 	{
-		href: "#company",
+		href: "#flyt",
 		image: "/velion-product-shots/chat-agent-steps.png",
 		kicker: "Govern",
 		link: "Route risk",
@@ -41,7 +42,7 @@ const workflowCards: WorkflowCard[] = [
 		text: "Find slow cases, classify urgency, and ask the right human before escalation.",
 	},
 	{
-		href: "#contact",
+		href: "#kontakt",
 		image: "/velion-product-shots/inbox-empty-workspace.png",
 		kicker: "Trace",
 		link: "Audit action",
@@ -83,14 +84,16 @@ function CardArrowLabel({ children }: { children: string }) {
 function SourceFrame() {
 	return (
 		<div
-			className="relative mx-auto mb-[clamp(82px,13vh,142px)] aspect-[3/4] w-[min(29vh,270px)] max-w-[270px] overflow-visible border border-velion-j-text/10 bg-[linear-gradient(180deg,#f8f8f7_0%,#ecebea_100%)] shadow-[0_10px_28px_rgba(23,23,23,0.035)] will-change-transform"
+			className="relative mx-auto mb-[clamp(72px,11vh,124px)] aspect-[3/4] w-[min(28vh,260px)] max-w-[260px] overflow-visible border border-velion-j-text/10 bg-[linear-gradient(180deg,#f8f8f7_0%,#ecebea_100%)] shadow-[0_10px_28px_rgba(23,23,23,0.035)] will-change-transform"
 			data-feature-source
 		>
 			<div className="absolute inset-0 overflow-hidden">
-				<img
+				<Image
 					alt=""
 					className="h-full w-full select-none object-cover opacity-70 saturate-[0.72]"
 					draggable={false}
+					fill
+					sizes="260px"
 					src="/velion-vibe/human-haze.png"
 				/>
 			</div>
@@ -125,7 +128,7 @@ function SourceFrame() {
 function PromptComposer() {
 	return (
 		<div
-			className="absolute bottom-[clamp(58px,10vh,108px)] left-1/2 z-[5] w-[min(91vw,760px)] origin-bottom -translate-x-1/2 opacity-100 will-change-transform"
+			className="absolute bottom-[clamp(102px,15vh,154px)] left-1/2 z-[5] w-[min(91vw,760px)] origin-bottom -translate-x-1/2 opacity-100 will-change-transform max-[899px]:relative max-[899px]:bottom-auto max-[899px]:left-auto max-[899px]:z-auto max-[899px]:mt-8 max-[899px]:w-full max-[899px]:translate-x-0"
 			data-feature-prompt
 		>
 			<VelionComposerPreview animateCharacters prompt={promptText} />
@@ -150,10 +153,12 @@ function OutputCard({ card }: { card: WorkflowCard }) {
 			</div>
 
 			<div className="relative aspect-[3/4] overflow-hidden border border-velion-j-text/8 bg-white/55 shadow-[0_10px_28px_rgba(23,23,23,0.035)]">
-				<img
+				<Image
 					alt=""
 					className="h-full w-full select-none object-cover opacity-[0.76] saturate-[0.72] transition-transform duration-700 group-hover:scale-[1.035]"
 					draggable={false}
+					fill
+					sizes="(max-width: 899px) 92vw, 22vw"
 					src={card.image}
 				/>
 				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.08),rgba(248,248,247,0.72))]" />
@@ -436,40 +441,38 @@ export function FeatureCardsSection() {
 	return (
 		<section
 			aria-label="Velion workflow generator"
-			className="relative isolate min-h-[100svh] overflow-hidden bg-background text-velion-j-text"
-			id="product-loop"
+			className="relative isolate min-h-svh overflow-hidden bg-background text-velion-j-text min-[900px]:h-svh max-[899px]:overflow-visible"
+			id="feature-cards"
 			ref={sectionRef}
 		>
-			<span className="absolute top-0" id="partnership" />
-
 			<div
 				aria-hidden="true"
 				className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(circle_at_50%_34%,rgba(238,122,80,0.06),transparent_26%),radial-gradient(circle_at_12%_18%,rgba(79,125,243,0.08),transparent_24%),linear-gradient(180deg,rgba(23,23,23,0.018),transparent_44%)]"
 			/>
 
-			<div className="relative z-[1] mx-auto flex min-h-[100svh] w-full max-w-[1760px] flex-col items-center px-[clamp(24px,4vw,72px)] py-[clamp(92px,11vh,128px)]">
+			<div className="relative z-[1] mx-auto flex min-h-svh w-full max-w-[1760px] flex-col items-center px-[clamp(24px,4vw,72px)] py-24 min-[900px]:h-svh min-[900px]:min-h-0 min-[900px]:py-[clamp(56px,7vh,82px)]">
 				<div className="mx-auto max-w-[660px] text-center">
 					<p className="mb-4 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-velion-j-text/38">
 						Agentic intelligence
 					</p>
 
-					<h2 className="m-0 font-arbeit text-[clamp(3.35rem,5.25vw,7.35rem)] font-light leading-[0.93] tracking-[-0.072em] text-velion-j-text">
+					<h2 className="m-0 font-arbeit text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-velion-j-text">
 						Thinking, in workflows
 					</h2>
 
-					<p className="mx-auto mt-6 max-w-[520px] font-protokoll text-[clamp(0.98rem,1vw,1.12rem)] font-light leading-[1.48] text-velion-text-muted">
+					<p className="mx-auto mt-4 max-w-[520px] font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-velion-text-muted">
 						One customer signal can become a reply, a route, a policy check,
 						and an audited action.
 					</p>
 				</div>
 
-				<div className="relative mt-[clamp(42px,5vh,64px)] flex flex-1 items-center justify-center overflow-visible max-[899px]:w-full">
+				<div className="relative mt-[clamp(28px,3.6vh,42px)] flex flex-1 items-center justify-center overflow-visible max-[899px]:w-full">
 					<div className="relative flex w-full flex-col items-center justify-center overflow-visible px-5">
 						<SourceFrame />
 						<PromptComposer />
 
 						<div
-							className="absolute bottom-[clamp(16px,4vh,44px)] grid w-[min(90vw,1180px)] grid-cols-4 gap-[clamp(14px,1.4vw,24px)] max-[899px]:static max-[899px]:mt-16 max-[899px]:grid-cols-1 max-[899px]:opacity-100"
+							className="absolute bottom-[clamp(36px,5vh,66px)] grid w-[min(90vw,1180px,max(860px,calc(214svh_-_706px)))] grid-cols-4 gap-[clamp(12px,1.25vw,22px)] max-[899px]:static max-[899px]:mt-16 max-[899px]:w-full max-[899px]:grid-cols-1 max-[899px]:opacity-100"
 							data-feature-output-stage
 						>
 							{workflowCards.map((card) => (

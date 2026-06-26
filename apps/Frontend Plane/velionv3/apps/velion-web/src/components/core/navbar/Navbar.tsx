@@ -6,10 +6,10 @@ type NavbarProps = {
 };
 
 const navItems = [
-	{ href: "#product-loop", label: "Product" },
-	{ href: "#partnership", label: "Workflow" },
-	{ href: "#technology", label: "System" },
-	{ href: "#contact", label: "Access" },
+	{ href: "#produkt", label: "Produkt" },
+	{ href: "#plattform", label: "Plattform" },
+	{ href: "/trust", label: "Tillit" },
+	{ href: "#kontakt", label: "Kontakt" },
 ];
 
 export function Navbar({
@@ -32,9 +32,10 @@ export function Navbar({
 					? "text-[color-mix(in_srgb,var(--velion-c-white)_76%,transparent)]"
 					: tone,
 			].join(" ")}
+			data-site-nav=""
 		>
 			<a
-				aria-label="Velion home"
+				aria-label="Velion hjem"
 				className="pointer-events-auto justify-self-start font-arbeit text-base font-normal uppercase leading-none tracking-[0.44em] max-[760px]:text-[0.86rem] max-[760px]:tracking-[0.34em]"
 				href="#top"
 			>
@@ -42,7 +43,7 @@ export function Navbar({
 			</a>
 
 			<nav
-				aria-label="Primary navigation"
+				aria-label="Hovednavigasjon"
 				className="pointer-events-auto flex items-center gap-[clamp(42px,5.25vw,90px)] justify-self-center max-[760px]:hidden"
 			>
 				{navItems.map((item, index) => (
@@ -63,9 +64,9 @@ export function Navbar({
 
 			<div className="pointer-events-auto flex items-center gap-[30px] justify-self-end max-[760px]:gap-[22px]">
 				<a
-					aria-label="Search"
+					aria-label="Søk"
 					className="grid size-[34px] place-items-center text-[color-mix(in_srgb,currentColor_58%,transparent)] transition-colors hover:text-current max-[760px]:size-8"
-					href="#contact"
+					href="#kontakt"
 				>
 					<svg
 						aria-hidden="true"
@@ -79,7 +80,7 @@ export function Navbar({
 
 				<button
 					aria-expanded={isMenuOpen}
-					aria-label="Open menu"
+					aria-label="Åpne meny"
           
 					className="group grid w-[50px] cursor-pointer gap-1.5 border-0 bg-transparent py-2.5 text-[color-mix(in_srgb,currentColor_68%,transparent)] transition-colors hover:text-current max-[760px]:w-11"
 					onClick={onOpen}

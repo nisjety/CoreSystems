@@ -43,12 +43,15 @@ export function PreFooterStatementSection() {
 				const secondPhase = section.querySelector<HTMLElement>(
 					"[data-prefooter-second-phase]",
 				);
+				const secondPhaseButtons = section.querySelector<HTMLElement>(
+					"[data-prefooter-second-buttons]",
+				);
 				const dots = section.querySelector<HTMLElement>("[data-prefooter-dots]");
 				const cards = section.querySelectorAll<HTMLElement>(
 					"[data-prefooter-card]",
 				);
 
-				if (!footerBg || !firstPhase || !secondPhase) {
+				if (!footerBg || !firstPhase || !secondPhase || !secondPhaseButtons) {
 					return;
 				}
 
@@ -56,6 +59,7 @@ export function PreFooterStatementSection() {
 					gsap.set(footerBg, { autoAlpha: 1 });
 					gsap.set(firstPhase, { autoAlpha: 0 });
 					gsap.set(secondPhase, { autoAlpha: 1, y: 0, scale: 1 });
+					gsap.set(secondPhaseButtons, { y: 0 });
 					gsap.set(dots, { autoAlpha: 0.16 });
 					gsap.set(cards, { autoAlpha: 1, y: 0, scale: 1, rotate: 0 });
 					return;
@@ -64,6 +68,7 @@ export function PreFooterStatementSection() {
 				gsap.set(footerBg, { autoAlpha: 0 });
 				gsap.set(firstPhase, { autoAlpha: 1, y: 0, scale: 1 });
 				gsap.set(secondPhase, { autoAlpha: 0, y: 42, scale: 0.985 });
+				gsap.set(secondPhaseButtons, { y: 0 });
 				gsap.set(dots, { autoAlpha: 0.12, scale: 1.02 });
 
 				gsap.set(cards, {
@@ -136,6 +141,15 @@ export function PreFooterStatementSection() {
 							duration: 0.36,
 						},
 						0.5,
+					)
+					.to(
+						secondPhaseButtons,
+						{
+							y: () => Math.min(window.innerHeight * 0.28, 260),
+							ease: "none",
+							duration: 0.34,
+						},
+						0.66,
 					);
 			}, sectionRef);
 
@@ -153,8 +167,8 @@ export function PreFooterStatementSection() {
 	return (
 		<section
 			ref={sectionRef}
-			aria-label="Velion pre-footer statement"
-			className="relative min-h-[145svh] overflow-clip bg-background text-velion-j-text"
+			aria-label="Velion avsluttende oppfordring"
+			className="relative min-h-[145svh] overflow-clip bg-velion-footer-bg text-velion-j-text"
 			data-prefooter-scroll
 		>
 			<div className="sticky top-0 z-[1] h-[72svh] min-h-[560px] overflow-hidden bg-background">
@@ -252,7 +266,7 @@ export function PreFooterStatementSection() {
 						data-prefooter-first-phase
 					>
 						<h2 className="m-0 max-w-none whitespace-nowrap font-arbeit text-[clamp(1.5rem,4vw,5.5rem)] font-light leading-[0.88] tracking-[-0.08em] text-velion-j-text max-[760px]:whitespace-normal">
-							Every customer is different.
+							Hver kunde er forskjellig.
 						</h2>
 					</div>
 
@@ -261,20 +275,23 @@ export function PreFooterStatementSection() {
 						data-prefooter-second-phase
 					>
 						<h2 className="m-0 max-w-none whitespace-nowrap font-arbeit text-[clamp(1.5rem,4vw,5.5rem)] font-light leading-[0.88] tracking-[-0.08em] text-velion-j-text max-[760px]:whitespace-normal">
-							Your AI worker should be too.
+							Det bør AI-en din også være.
 						</h2>
 
-						<div className="mt-[clamp(32px,4vw,58px)] flex flex-wrap items-center justify-center gap-5">
+						<div
+							className="mt-[clamp(32px,4vw,58px)] flex flex-wrap items-center justify-center gap-5 will-change-transform"
+							data-prefooter-second-buttons
+						>
 							<Button
 								asChild
 								className="h-auto min-h-[52px] rounded-full border-velion-j-text/15 bg-transparent px-7 font-protokoll text-base font-light text-velion-j-text/75 hover:border-velion-j-text/30 hover:bg-velion-j-text/5 hover:text-velion-j-text"
 								variant="outline"
 							>
-								<a href="#product-loop">Try demo</a>
+								<a href="#produkt">Prøv demo</a>
 							</Button>
 
-							<ArrowButton href="#contact" variant="dark">
-								Contact sales
+							<ArrowButton href="#kontakt" variant="dark">
+								Kontakt salg
 							</ArrowButton>
 						</div>
 					</div>

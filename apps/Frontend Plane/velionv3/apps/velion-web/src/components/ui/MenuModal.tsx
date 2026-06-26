@@ -6,10 +6,10 @@ type MenuModalProps = {
 };
 
 const menuItems = [
-	{ href: "#product-loop", label: "Demo", number: "001" },
-	{ href: "#workflows", label: "Workflows", number: "002" },
-	{ href: "#trust", label: "Trust", number: "003" },
-	{ href: "#contact", label: "Access", number: "004" },
+	{ href: "#produkt", label: "Produkt", number: "001" },
+	{ href: "#plattform", label: "Plattform", number: "002" },
+	{ href: "/trust", label: "Trust Center", number: "003" },
+	{ href: "#kontakt", label: "Kontakt", number: "004" },
 ];
 
 const socialLinks = ["Instagram", "LinkedIn", "YouTube"];
@@ -21,14 +21,14 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 
 	return (
 		<div
-			aria-label="Velion menu"
+			aria-label="Velion meny"
 			aria-modal="true"
 			className="fixed inset-0 z-[100] grid grid-rows-[auto_1fr_auto] bg-[linear-gradient(115deg,rgba(121,56,25,0.78),transparent_52%),linear-gradient(135deg,var(--velion-a-earth),var(--velion-h-ink-warm)_68%,#080707)] px-[clamp(24px,4vw,56px)] pb-14 pt-[54px] text-velion-c-white animate-[velion-menu-enter_420ms_ease_both] max-[760px]:pb-[34px] max-[760px]:pt-[34px]"
 			role="dialog"
 		>
 			<div className="flex items-start justify-between">
 				<a
-					aria-label="Velion home"
+					aria-label="Velion hjem"
 					className="relative font-protokoll text-[3.4rem] font-medium leading-none before:absolute before:left-0 before:top-[0.56em] before:h-0.5 before:w-[1.1em] before:-translate-x-[0.38em] before:bg-current before:content-['']"
 					href="#top"
 					onClick={onClose}
@@ -37,7 +37,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 				</a>
 
 				<button
-					aria-label="Close menu"
+					aria-label="Lukk meny"
 					className="grid h-[58px] w-[58px] cursor-pointer place-items-center border-0 bg-transparent p-0 text-current transition-opacity hover:opacity-70"
 					onClick={onClose}
 					type="button"
@@ -53,7 +53,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 			</div>
 
 			<nav
-				aria-label="Primary menu"
+				aria-label="Hovedmeny"
 				className="grid grid-cols-4 gap-7 self-center max-[1100px]:grid-cols-2 max-[760px]:grid-cols-1 max-[760px]:gap-[22px]"
 			>
 				{menuItems.map((item, index) => (
@@ -76,15 +76,15 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 			</nav>
 
 			<div
-				aria-label="Social links"
+				aria-label="Sosiale lenker"
 				className="grid justify-items-start gap-2 font-arbeit text-base text-[color-mix(in_srgb,var(--velion-c-white)_74%,transparent)]"
 			>
-				<span>Follow us:</span>
+				<span>Følg oss:</span>
 
 				{socialLinks.map((link) => (
 					<a
 						className="transition-colors hover:text-velion-c-white"
-						href="#contact"
+						href="#kontakt"
 						key={link}
 						onClick={onClose}
 					>

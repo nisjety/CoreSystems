@@ -1,23 +1,23 @@
+// Section links use absolute "/#anchor" form so they resolve from any route
+// (e.g. the /trust page), not just the homepage.
 const footerColumns = [
 	[
-		{ href: "#product-loop", label: "Product" },
-		{ href: "#workflows", label: "Workflows" },
-		{ href: "#trust", label: "Trust" },
+		{ href: "/#produkt", label: "Produkt" },
+		{ href: "/#plattform", label: "Plattform" },
+		{ href: "/#kunnskap", label: "Kunnskap" },
 	],
 	[
-		{ href: "#technology", label: "System" },
-		{ href: "#company", label: "Company" },
-		{ href: "#reports", label: "Reports" },
+		{ href: "/#produksjon", label: "Produksjon" },
+		{ href: "/#flyt", label: "Arbeidssløyfen" },
 	],
 	[
-		{ href: "#updates", label: "News" },
-		{ href: "#demo", label: "Velion Console ↗" },
-		{ href: "#careers", label: "Careers" },
+		{ href: "/trust", label: "Trust Center ↗" },
+		{ href: "/#trust", label: "Datasuverenitet" },
+		{ href: "/trust", label: "Underleverandører ↗" },
 	],
 	[
-		{ href: "#contact", label: "Contact" },
-		{ href: "#security", label: "Security ↗" },
-		{ href: "#access", label: "Early Access" },
+		{ href: "/#kontakt", label: "Kontakt" },
+		{ href: "/#kontakt", label: "Tidlig tilgang" },
 	],
 ];
 
@@ -29,7 +29,7 @@ export function Footer() {
 	return (
 		<footer
 			className="relative overflow-hidden bg-velion-footer-bg text-velion-j-text"
-			id="contact"
+			id="kontakt"
 			data-footer-parallax=""
 		>
 			<div
@@ -46,9 +46,10 @@ export function Footer() {
                 VELION
               </a>
 
-              <p className="m-0 max-w-[280px] font-protokoll text-[clamp(0.86rem,0.9vw,1rem)] font-light uppercase leading-[1.35] tracking-[0.02em] text-velion-j-text/45">
-                VELION IS BUILT FOR COMPANIES THAT WANT AI TO DO REAL CUSTOMER WORK WITH
-                SOURCES, APPROVALS, AUDIT HISTORY, AND HUMANS STILL IN CONTROL.
+              <p className="m-0 max-w-[300px] font-protokoll text-[clamp(0.86rem,0.9vw,1rem)] font-light uppercase leading-[1.35] tracking-[0.02em] text-velion-j-text/45">
+                VELION ER BYGGET FOR VIRKSOMHETER SOM VIL AT AI SKAL GJØRE EKTE
+                KUNDEARBEID — MED KILDER, GODKJENNINGER, REVISJONSSPOR OG MENNESKET
+                FORTSATT I KONTROLL.
               </p>
             </div>
 
@@ -73,43 +74,43 @@ export function Footer() {
 
 						<div className="col-start-1 mt-[clamp(42px,7vw,128px)] max-[900px]:col-start-auto max-[900px]:mt-8">
 							<h4 className="mb-8 font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-velion-j-text/70">
-								Headquarters
+								Hovedkontor
 							</h4>
 
 							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-velion-j-text/35">
-								Oslo, Norway
+								Oslo, Norge
 								<br />
-								Remote-first team
+								Distribuert team
 								<br />
-								AI operations platform
+								Data i EU/EØS (Sweden Central)
 							</p>
 						</div>
 
 						<div className="col-start-2 mt-[clamp(42px,7vw,128px)] max-[900px]:col-start-auto max-[900px]:mt-8">
 							<h4 className="mb-8 font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-velion-j-text/70">
-								Contact us
+								Kontakt oss
 							</h4>
 
 							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-velion-j-text/35">
 								<a
 									className="transition-colors hover:text-velion-j-text"
-									href="mailto:hello@velion.ai"
+									href="mailto:hei@velion.ai"
 								>
-									hello@velion.ai
+									hei@velion.ai
 								</a>
 								<br />
 								<a
 									className="transition-colors hover:text-velion-j-text"
-									href="#access"
+									href="/trust"
 								>
-									Request early access
+									Kontakt sikkerhet
 								</a>
 							</p>
 						</div>
 
 						<div className="col-start-1 self-end max-[900px]:col-start-auto">
 							<h4 className="font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-velion-j-text/70">
-								Follow us
+								Følg oss
 							</h4>
 						</div>
 
@@ -117,7 +118,7 @@ export function Footer() {
 							className="col-start-4 self-end justify-self-start font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light text-velion-j-text/80 transition-colors hover:text-velion-j-text max-[900px]:col-start-auto"
 							href="#top"
 						>
-							<span aria-hidden="true">↑</span> To top
+							<span aria-hidden="true">↑</span> Til toppen
 						</a>
 					</div>
 				</div>
@@ -142,13 +143,13 @@ export function Footer() {
 
 						<a
 							className="justify-self-center transition-colors hover:text-velion-j-text max-[900px]:justify-self-start"
-							href="#top"
+							href="/trust"
 						>
-							Design & Concept by Velion
+							Personvern & vilkår
 						</a>
 
 						<small className="justify-self-end font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light max-[900px]:justify-self-start">
-							© 2024-{currentYear} Velion AS
+							© 2024–{currentYear} Velion AS
 						</small>
 					</div>
 				</div>
