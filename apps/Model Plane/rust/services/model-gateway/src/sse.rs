@@ -1854,6 +1854,7 @@ fn spawn_run_dispatch(
 /// direct inference so a reply is always returned. Known contracts only
 /// (`StartRun`, `StreamRunEvents`, `ListConversation`, `Infer`).
 #[allow(clippy::too_many_arguments)] // cohesive stream entry — all are request context
+#[allow(clippy::too_many_lines)] // cohesive agentic-run stream: spawn → dispatch → observe → answer → lifecycle
 fn agentic_run_stream(
     state: AppState,
     request_id: String,
@@ -1899,6 +1900,18 @@ fn agentic_run_stream(
             .send(Ok(Event::default()
                 .event("connected")
                 .data(connected.to_string())))
+            .await;
+
+        // Phase 7 B12 — publish the RUN_STARTED lifecycle event so insight-core's
+        // agents producer records it (surface=agents). The live agentic path runs
+        // through execution-core's RunAgent, not orchestrator-core's Temporal
+        // workflow, so nobody was emitting run lifecycle events; the metrics view
+        // stayed empty for real runs. Metadata-only (no content) → never ZDR.
+        let run_started =
+            build_stream_envelope(&request_id, "RUN_STARTED", &org_id, &user_id, &model);
+        let _ = state
+            .publisher
+            .publish(&subjects::run_event_subject(&run.run_id), &run_started)
             .await;
 
         // 1b. Dispatch the run to execution-core's agent driver (RunAgent) —
@@ -1978,6 +1991,15 @@ fn agentic_run_stream(
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
         }
+
+        // Phase 7 B12 — RUN_COMPLETED lifecycle event (the run produced its answer)
+        // so insight-core records agent_runs_completed (surface=agents).
+        let run_completed =
+            build_stream_envelope(&request_id, "RUN_COMPLETED", &org_id, &user_id, &model);
+        let _ = state
+            .publisher
+            .publish(&subjects::run_event_subject(&run.run_id), &run_completed)
+            .await;
 
         let done = json!({
             "done": true,

@@ -575,6 +575,13 @@ services:
       # the existing JetStream stream rather than a divergent one.
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
       NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      # Phase 7 B12 — the model-plane-agents producer leg. The Model Plane runs
+      # on its own isolated NATS cluster; the agent subscriber dual-connects via
+      # the inter-plane-bus alias and records run/tool/approval lifecycle events
+      # (mp.v1.run.*.event) as surface=agents metrics. Without this the agents
+      # surface stays empty even when agent runs are executing.
+      MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-plane-nats-1:4222}
+      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:-}
     ports:
       - "${INSIGHT_CORE_HOST_PORT:-3163}:3163"
     depends_on:
