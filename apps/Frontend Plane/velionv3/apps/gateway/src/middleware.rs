@@ -5,9 +5,27 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{config::AppState, envelope::error};
+
+/// TTL for a cached *positive* session validation, keyed on a hash of the raw
+/// session cookie. Short by design: a cached entry can outlive a server-side
+/// revocation/expiry by at most this window, so we keep it to a few seconds.
+/// Overridable via `GATEWAY_SESSION_CACHE_TTL_SECS` and clamped to [5, 15] so a
+/// misconfiguration can never extend a revoked session for an unsafe duration.
+const SESSION_VALIDATION_TTL_DEFAULT_SECS: u64 = 10;
+const SESSION_VALIDATION_TTL_MIN_SECS: u64 = 5;
+const SESSION_VALIDATION_TTL_MAX_SECS: u64 = 15;
+
+/// Resolve the configured session-validation cache TTL, clamped to the safe band.
+fn session_validation_ttl_secs() -> u64 {
+    std::env::var("GATEWAY_SESSION_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(SESSION_VALIDATION_TTL_DEFAULT_SECS)
+        .clamp(SESSION_VALIDATION_TTL_MIN_SECS, SESSION_VALIDATION_TTL_MAX_SECS)
+}
 
 const STRIPPED_HEADERS: &[&str] = &[
     "x-user-id",
@@ -35,7 +53,10 @@ const STRIPPED_HEADERS: &[&str] = &[
 ];
 
 /// User identity extracted from a validated Better Auth session.
-#[derive(Clone, Debug)]
+///
+/// `Serialize`/`Deserialize` so a *positive* validation can round-trip through
+/// the short-TTL session-validation cache (see [`validate_session_cookie`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct AuthenticatedUser {
     pub(crate) user_id: String,
     pub(crate) user_email: String,
@@ -207,6 +228,32 @@ pub(crate) async fn validate_session_cookie(
         return None;
     }
 
+    // B1: collapse the per-request auth-core `/get-session` fan-out. Every
+    // authenticated gateway request runs through `require_session`, which used to
+    // call auth-core once per request — a single SPA page load fans out ~10-15
+    // authed calls, so a busy tab hit auth-core's Better Auth get-session rate
+    // limit (the 429→401 cascade the rate-limit raise only masked).
+    //
+    // We cache the *positive* validation result keyed on a hash of the exact
+    // session cookie, for a short TTL (5-15s). Safety properties:
+    //   * Key is the cookie hash → a different cookie never reads another's entry,
+    //     and a rotated/cleared cookie misses the cache and re-validates live.
+    //   * Only positive validations are cached, and only briefly — a revoked or
+    //     expired session is honored within at most one TTL window, after which
+    //     the entry ages out and the next request re-validates against auth-core.
+    //   * Negative results are never cached, so a freshly-signed-in cookie is
+    //     never pinned to a stale "unauthenticated" answer.
+    //   * Degrade-safe: a disabled/unreachable cache simply means every request
+    //     validates live, exactly as before.
+    let ttl = session_validation_ttl_secs();
+    let cache_key = crate::cache::cache_key("session-validation", &[cookie_header]);
+    if let Some(cached) = state.cache.lookup_within(&cache_key, ttl).await {
+        if let Ok(user) = serde_json::from_value::<AuthenticatedUser>(cached) {
+            return Some(user);
+        }
+        // A malformed/legacy cache entry: fall through to a live validation.
+    }
+
     let resp = state
         .client
         .get(format!("{}/api/auth/get-session", state.auth_core_url))
@@ -227,7 +274,7 @@ pub(crate) async fn validate_session_cookie(
         .filter(|id| !id.is_empty());
     let user = data.user?;
 
-    Some(AuthenticatedUser {
+    let authenticated = AuthenticatedUser {
         user_id: user.id,
         user_email: user.email,
         user_name: user.name.unwrap_or_default(),
@@ -235,7 +282,15 @@ pub(crate) async fn validate_session_cookie(
         email_verified: user.email_verified,
         auth_role: user.role,
         active_org_id,
-    })
+    };
+
+    // Cache only this positive validation, for the short TTL. Failures are
+    // ignored inside `store_for_secs` (degrade-safe).
+    if let Ok(value) = serde_json::to_value(&authenticated) {
+        state.cache.store_for_secs(&cache_key, &value, ttl).await;
+    }
+
+    Some(authenticated)
 }
 
 #[cfg(test)]
@@ -275,5 +330,64 @@ mod tests {
     fn stripped_headers_includes_velion_org_id() {
         assert!(STRIPPED_HEADERS.contains(&"x-velion-org-id"));
         assert!(STRIPPED_HEADERS.contains(&"x-org-id"));
+    }
+
+    /// B1: the session-validation cache TTL must stay inside the safe [5, 15]s
+    /// band regardless of env input, so a misconfiguration can never extend a
+    /// revoked session for an unsafe duration. Serial because it mutates a
+    /// process-global env var.
+    #[test]
+    fn session_validation_ttl_is_clamped_to_safe_band() {
+        let key = "GATEWAY_SESSION_CACHE_TTL_SECS";
+        let prev = std::env::var(key).ok();
+
+        std::env::remove_var(key);
+        assert_eq!(
+            super::session_validation_ttl_secs(),
+            super::SESSION_VALIDATION_TTL_DEFAULT_SECS,
+            "unset → default"
+        );
+
+        std::env::set_var(key, "3");
+        assert_eq!(super::session_validation_ttl_secs(), 5, "below floor → floor");
+
+        std::env::set_var(key, "120");
+        assert_eq!(super::session_validation_ttl_secs(), 15, "above ceiling → ceiling");
+
+        std::env::set_var(key, "8");
+        assert_eq!(super::session_validation_ttl_secs(), 8, "in-band → as-is");
+
+        std::env::set_var(key, "not-a-number");
+        assert_eq!(
+            super::session_validation_ttl_secs(),
+            super::SESSION_VALIDATION_TTL_DEFAULT_SECS,
+            "unparseable → default"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// B1: a positive `AuthenticatedUser` must round-trip through serde so the
+    /// cache store→lookup path returns an identical identity.
+    #[test]
+    fn authenticated_user_round_trips_through_serde() {
+        let user = AuthenticatedUser {
+            user_id: "u_1".into(),
+            user_email: "a@b.no".into(),
+            user_name: "Alice".into(),
+            user_image: Some("https://img".into()),
+            email_verified: true,
+            auth_role: Some("admin".into()),
+            active_org_id: Some("org_1".into()),
+        };
+        let value = serde_json::to_value(&user).expect("serialize");
+        let back: AuthenticatedUser = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.user_id, user.user_id);
+        assert_eq!(back.user_email, user.user_email);
+        assert_eq!(back.active_org_id, user.active_org_id);
+        assert_eq!(back.email_verified, user.email_verified);
     }
 }
