@@ -9,6 +9,7 @@ import {
   CreditCard,
   Fingerprint,
   Flame,
+  Gauge,
   Home,
   Inbox,
   MessageSquare,
@@ -254,6 +255,7 @@ export const sidebarSections: SidebarSection[] = [
         items: [
           { id: 'agents-all', label: 'Alle agenter', href: '/agents', icon: Bot, description: 'Se og konfigurer agentroller.' },
           { id: 'agents-cost', label: 'Kostnad', href: '/agents/cost', icon: Coins, description: 'Reell modellbruk og kostnad per kjøring fra hovedboken.' },
+          { id: 'agents-quality', label: 'Kvalitet', href: '/agents/quality', icon: Gauge, description: 'Nøyaktighet, drift og kvalitetssignal fra kjøringshistorikken.' },
           { id: 'agents-chat', label: 'Arbeidsflate', href: '/chat', icon: Sparkles, description: 'Test agenten i chat-arbeidsflaten.' },
         ],
       },

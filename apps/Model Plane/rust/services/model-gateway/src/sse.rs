@@ -716,16 +716,22 @@ pub async fn invoke_stream_sse(
                     // before the terminal done. Phase 7 B5 — cost_usd is priced
                     // from cost-core's catalogue (same source as the durable
                     // ledger); `None` only when cost-core is unreachable, never
-                    // faked. `confidence` is wired in B6.
+                    // faked. Phase 7 B6 — confidence is a heuristic answer-quality
+                    // score over the real completion (grounded = carried citations).
                     let cost_usd = pricing
                         .cost_usd(&model_used, i64::from(input_tokens), i64::from(output_tokens))
                         .await;
+                    let grounded = grounding
+                        .as_ref()
+                        .is_some_and(|g| !g.citations.is_empty());
+                    let confidence =
+                        crate::confidence::score(&assistant_output, output_tokens, 1024, grounded);
                     let usage_event = crate::sse_events::ChatEvent::Usage {
                         input_tokens,
                         output_tokens,
                         cost_usd,
                         latency_ms,
-                        confidence: None,
+                        confidence,
                     };
                     if usage_event.should_emit(&features) {
                         let _ = tx.send(Ok(usage_event.to_sse(&req_id))).await;
@@ -1442,16 +1448,22 @@ fn infer_fallback_stream(
                 // chat-parity §17: opt-in usage event (real tokens + latency).
                 // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
                 // source as the durable ledger); `None` only when unreachable.
+                // Phase 7 B6 — confidence is the heuristic answer-quality score.
                 let cost_usd = state
                     .pricing
                     .cost_usd(&model_used, i64::from(input_tokens), i64::from(output_tokens))
                     .await;
+                let grounded = grounding
+                    .as_ref()
+                    .is_some_and(|g| !g.citations.is_empty());
+                let confidence =
+                    crate::confidence::score(&resp.content, output_tokens, 1024, grounded);
                 let usage_event = crate::sse_events::ChatEvent::Usage {
                     input_tokens,
                     output_tokens,
                     cost_usd,
                     latency_ms,
-                    confidence: None,
+                    confidence,
                 };
                 if usage_event.should_emit(&features) {
                     let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
@@ -1856,6 +1868,7 @@ fn agentic_run_stream(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
         let _idem_guard = idem_guard;
+        let start = std::time::Instant::now();
 
         // 1. Spawn the run (session-core StartRun; also persists the user turn).
         let run =
@@ -1948,6 +1961,24 @@ fn agentic_run_stream(
                 return;
             }
         }
+        // Phase 7 B6 — emit the quality signal for the agentic run so the Agent
+        // Run Console's confidence column goes live. Token-level cost is not
+        // available at this layer (the run records 0 tokens here; its real
+        // per-inference cost is captured by execution-core's usage envelopes →
+        // the cost-core ledger / cost dashboard), so cost_usd stays null rather
+        // than a fabricated 0. Confidence is scored over the run's final answer.
+        let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let usage_event = crate::sse_events::ChatEvent::Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: None,
+            latency_ms,
+            confidence: crate::confidence::score(&final_text, 0, 1024, false),
+        };
+        if usage_event.should_emit(&features) {
+            let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
+        }
+
         let done = json!({
             "done": true,
             "modelUsed": model,

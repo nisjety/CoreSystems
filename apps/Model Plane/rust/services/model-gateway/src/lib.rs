@@ -6,6 +6,7 @@ pub mod auth;
 pub mod budget;
 pub mod cancel_registry;
 pub mod capability_consumer;
+pub mod confidence;
 pub mod coordinator;
 pub mod dataplane;
 pub mod doc_indexed_consumer;

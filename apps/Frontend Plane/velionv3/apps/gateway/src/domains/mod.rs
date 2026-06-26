@@ -11,6 +11,7 @@ pub mod briefs;
 pub mod browser;
 pub mod chat;
 pub mod cost;
+pub mod eval;
 pub mod finetune;
 pub mod inbox;
 pub mod information;
