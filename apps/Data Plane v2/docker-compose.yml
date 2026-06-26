@@ -44,6 +44,32 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-shot deploy-time migrator (B3). Runs the versioned `migrator up` against
+  # Postgres BEFORE any data service starts serving — so `make up` (docker
+  # compose up -d) auto-applies pending migrations instead of leaving them to a
+  # manual `make migrate-up` (the root cause of the missing operating_maps 500s).
+  # Idempotent (skips already-applied versions via schema_migrations) and
+  # run-once (exits after applying; dependents gate on
+  # service_completed_successfully, mirroring minio-init → quickwit).
+  migrate:
+    build:
+      context: ./tools/migrator
+      dockerfile: Dockerfile
+    image: dpv2-migrate
+    container_name: dpv2-migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}?sslmode=disable
+    volumes:
+      # Bind-mount the migrations read-only so adding a migration needs no image
+      # rebuild; the migrator resolves ./infra/postgres/migrations from WORKDIR.
+      - ./infra/postgres/migrations:/app/infra/postgres/migrations:ro
+    networks:
+      - dpv2-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   dragonfly:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
     container_name: dpv2-dragonfly
@@ -310,6 +336,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       qdrant:
         condition: service_healthy
       dragonfly:
@@ -349,6 +377,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     healthcheck:
@@ -410,6 +440,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       qdrant:
         condition: service_healthy
       nats:
@@ -444,6 +476,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     healthcheck:
@@ -478,6 +512,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       quickwit:
@@ -518,6 +554,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     healthcheck:
@@ -549,6 +587,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8011/readyz || exit 1"]
       interval: 10s
@@ -574,6 +614,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     healthcheck:
@@ -600,6 +642,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8013/readyz || exit 1"]
       interval: 10s
