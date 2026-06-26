@@ -131,6 +131,7 @@ pub(crate) async fn require_session(
         .to_owned();
 
     if let Some(user) = validate_session_cookie(&state, &cookie_header).await {
+        record_tenant_observability(&user);
         stamp_trusted_identity(&mut request, &user);
         request.extensions_mut().insert(user);
         return next.run(request).await;
@@ -140,6 +141,7 @@ pub(crate) async fn require_session(
     // ALLOW_DEV_AUTH_BYPASS is explicitly enabled (see `dev_bypass_user`). It
     // can never downgrade or impersonate an authenticated user.
     if let Some(user) = dev_bypass_user(&state, request.headers()) {
+        record_tenant_observability(&user);
         stamp_trusted_identity(&mut request, &user);
         request.extensions_mut().insert(user);
         return next.run(request).await;
@@ -150,6 +152,21 @@ pub(crate) async fn require_session(
         Json(error("unauthorized", "Authentication required")),
     )
         .into_response()
+}
+
+/// Emit per-tenant observability for a validated request (Phase 6 B13): an
+/// org/tenant-labeled Prometheus counter plus a tracing event carrying the
+/// org/tenant + user, so a request can be traced through the cores by tenant.
+/// The org is the authoritative id from the validated session ("none" if unset).
+fn record_tenant_observability(user: &AuthenticatedUser) {
+    let org = user.active_org_id.as_deref().unwrap_or("none");
+    crate::observability::record_authenticated_request(org);
+    tracing::info!(
+        org_id = %org,
+        tenant = %org,
+        user_id = %user.user_id,
+        "gateway authenticated request"
+    );
 }
 
 fn dev_bypass_user(state: &AppState, headers: &axum::http::HeaderMap) -> Option<AuthenticatedUser> {

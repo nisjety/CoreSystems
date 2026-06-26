@@ -1,0 +1,49 @@
+# Application-Plane Prometheus scrape configuration (Phase 6 B13).
+#
+# Prometheus runs on app-net to reach the Application-Plane services by container
+# name. The Go services (conversation-core-go, social-core, insight-core,
+# leads-core, information-core, notification-core) expose a promhttp /metrics
+# server on container port 9091 once instrumented with the same pattern already
+# applied to the Control-Plane cores — until then those targets read DOWN, while
+# the stack itself is in place and scraping. (App-plane service /metrics
+# instrumentation is the tracked follow-up.)
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    plane: application
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: conversation-core
+    static_configs:
+      - targets: ['conversation-core-go:9091']
+        labels: { service: conversation-core }
+
+  - job_name: social-core
+    static_configs:
+      - targets: ['social-core:9091']
+        labels: { service: social-core }
+
+  - job_name: insight-core
+    static_configs:
+      - targets: ['insight-core:9091']
+        labels: { service: insight-core }
+
+  - job_name: leads-core
+    static_configs:
+      - targets: ['leads-core:9091']
+        labels: { service: leads-core }
+
+  - job_name: information-core
+    static_configs:
+      - targets: ['information-core:9091']
+        labels: { service: information-core }
+
+  - job_name: notification-core
+    static_configs:
+      - targets: ['notification-core:9091']
+        labels: { service: notification-core }

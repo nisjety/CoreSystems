@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/handlers"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/http"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/internalkey"
+	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/metrics"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
@@ -317,12 +319,22 @@ func main() {
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, httpPort)
 
+	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
+	// Control-Plane Prometheus (Phase 6 B13).
+	metricsPort := 9091
+	if v := strings.TrimSpace(os.Getenv("METRICS_PORT")); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+			metricsPort = n
+		}
+	}
+	metricsServer := metricsserver.NewServer(metricsPort)
+
 	// Handle shutdown gracefully
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Start servers in goroutines
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 3)
 
 	// Start gRPC server
 	go func() {
@@ -335,6 +347,13 @@ func main() {
 	go func() {
 		log.Println("✅ HTTP/REST server starting...")
 		if err := httpServer.Start(); err != nil {
+			errChan <- err
+		}
+	}()
+
+	// Start Prometheus metrics server
+	go func() {
+		if err := metricsServer.Start(); err != nil {
 			errChan <- err
 		}
 	}()
@@ -356,6 +375,9 @@ func main() {
 	log.Println("Shutting down HTTP server...")
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics server shutdown error: %v", err)
 	}
 
 	log.Println("Shutdown complete")

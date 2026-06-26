@@ -25,6 +25,7 @@ import (
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/grpc"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/http"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/internalkey"
+	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/metrics"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/redis"
 )
@@ -177,7 +178,17 @@ func main() {
 	server := httpserver.NewServer(cfg.HTTPPort, billingService)
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
 
-	errCh := make(chan error, 2)
+	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
+	// Control-Plane Prometheus (Phase 6 B13).
+	metricsPort := 9091
+	if v := strings.TrimSpace(os.Getenv("METRICS_PORT")); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+			metricsPort = n
+		}
+	}
+	metricsServer := metricsserver.NewServer(metricsPort)
+
+	errCh := make(chan error, 3)
 	go func() {
 		if err := server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http server: %w", err)
@@ -186,6 +197,11 @@ func main() {
 	go func() {
 		if err := grpcServer.Start(); err != nil {
 			errCh <- fmt.Errorf("gRPC server: %w", err)
+		}
+	}()
+	go func() {
+		if err := metricsServer.Start(); err != nil {
+			errCh <- fmt.Errorf("metrics server: %w", err)
 		}
 	}()
 
@@ -208,6 +224,9 @@ func main() {
 	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown error: %v", err)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics shutdown error: %v", err)
 	}
 }
 

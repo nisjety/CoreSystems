@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/controlplane/audit-core/internal/api"
+	metricsserver "github.com/triodelab/controlplane/audit-core/internal/metrics"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
 	"github.com/triodelab/controlplane/audit-core/internal/subscriber"
 )
@@ -110,6 +111,15 @@ func main() {
 		}
 	}()
 
+	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
+	// Control-Plane Prometheus (Phase 6 B13).
+	metricsSrv := metricsserver.NewServer(cfg.MetricsPort)
+	go func() {
+		if err := metricsSrv.Start(); err != nil {
+			log.Error().Err(err).Msg("metrics server error")
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -117,6 +127,7 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	_ = srv.Shutdown(shutdownCtx)
+	_ = metricsSrv.Shutdown(shutdownCtx)
 }
 
 // retentionInterval is how often the retention sweep runs. The window is
@@ -163,6 +174,7 @@ type config struct {
 	NATSURL        string
 	NATSToken      string
 	HTTPPort       int
+	MetricsPort    int
 	InternalAPIKey string
 	RetentionDays  int
 	ExtraNATSURLs  []string
@@ -182,6 +194,13 @@ func loadConfig() (*config, error) {
 		var p int
 		if _, err := fmt.Sscanf(v, "%d", &p); err == nil && p > 0 {
 			port = p
+		}
+	}
+	metricsPort := 9091 // default Prometheus scrape port; override with METRICS_PORT
+	if v := os.Getenv("METRICS_PORT"); v != "" {
+		var p int
+		if _, err := fmt.Sscanf(v, "%d", &p); err == nil && p > 0 {
+			metricsPort = p
 		}
 	}
 	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
@@ -222,6 +241,7 @@ func loadConfig() (*config, error) {
 		NATSURL:        natsURL,
 		NATSToken:      os.Getenv("NATS_TOKEN"),
 		HTTPPort:       port,
+		MetricsPort:    metricsPort,
 		InternalAPIKey: internalAPIKey,
 		RetentionDays:  retentionDays,
 		ExtraNATSURLs:  extraNATS,

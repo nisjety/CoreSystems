@@ -759,6 +759,63 @@ services:
       retries: 5
       start_period: 5s
 
+  # ==============================================
+  # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
+  # ==============================================
+
+  application-prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: application-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - application-prometheus-data:/prometheus
+    ports:
+      - "9096:9090" # host 9096 avoids collision with the Control-Plane Prometheus (9095)
+    networks:
+      - app-net
+      - inter-plane-bus
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  application-grafana:
+    image: grafana/grafana:11.2.0
+    container_name: application-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - application-grafana-data:/var/lib/grafana
+    ports:
+      - "3010:3000" # host 3010 for the Application-Plane Grafana UI
+    networks:
+      - app-net
+    depends_on:
+      - application-prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
 volumes:
   convex-data:
     driver: local
@@ -771,6 +828,10 @@ volumes:
   application-dragonfly-data:
     driver: local
   app-nats-data:
+    driver: local
+  application-prometheus-data:
+    driver: local
+  application-grafana-data:
     driver: local
 
 networks:

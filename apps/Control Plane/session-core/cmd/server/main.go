@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/database"
 	internalhttp "github.com/I-Dacosta/CoreSystem/apps/session-core/internal/http"
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/internalkey"
+	metricsserver "github.com/I-Dacosta/CoreSystem/apps/session-core/internal/metrics"
 	internalnats "github.com/I-Dacosta/CoreSystem/apps/session-core/internal/nats"
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/redis"
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/repository"
@@ -156,6 +159,21 @@ func main() {
 		}
 	}()
 
+	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
+	// Control-Plane Prometheus (Phase 6 B13).
+	metricsPort := 9091
+	if v := strings.TrimSpace(os.Getenv("METRICS_PORT")); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+			metricsPort = n
+		}
+	}
+	metricsServer := metricsserver.NewServer(metricsPort)
+	go func() {
+		if err := metricsServer.Start(); err != nil {
+			log.Error().Err(err).Msg("metrics server error")
+		}
+	}()
+
 	if cfg.Server.GRPCPort != "" {
 		go func() {
 			lis, err := net.Listen("tcp", ":"+cfg.Server.GRPCPort)
@@ -180,6 +198,9 @@ func main() {
 	}
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("HTTP server shutdown failed")
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("metrics server shutdown failed")
 	}
 	if natsLocal != nil {
 		natsLocal.Close()

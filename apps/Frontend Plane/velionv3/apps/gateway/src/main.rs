@@ -18,6 +18,7 @@ mod contracts;
 mod domains;
 mod envelope;
 mod middleware;
+mod observability;
 mod onboarding;
 mod public_url;
 mod rate_limit;
@@ -35,8 +36,21 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
+    // Prometheus recorder for the /metrics endpoint (Phase 6 B13). Installed
+    // once, globally, before the router so the request-tracking middleware and
+    // the auth path can record into it.
+    let prometheus_handle = observability::install_recorder()?;
+
     let state = build_state().await?;
-    let app = build_router(state);
+    let app = build_router(state)
+        .route(
+            "/metrics",
+            get(move || {
+                let handle = prometheus_handle.clone();
+                async move { handle.render() }
+            }),
+        )
+        .layer(axum::middleware::from_fn(observability::track_metrics));
 
     let port = env::var("PORT")
         .ok()

@@ -1,0 +1,47 @@
+# Control-Plane Prometheus scrape configuration (Phase 6 B13).
+#
+# Prometheus runs on controlplane-net (to reach the cores by container name) and
+# inter-plane-bus (to reach the Frontend-Plane gateway). Each Go core exposes a
+# promhttp /metrics server on container port 9091 (org-core's proven pattern);
+# the gateway exposes /metrics on its main port 3185.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    plane: control
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: org-core
+    static_configs:
+      - targets: ['org-core-service:9091']
+        labels: { service: org-core }
+
+  - job_name: billing-core
+    static_configs:
+      - targets: ['billing-core-service:9091']
+        labels: { service: billing-core }
+
+  - job_name: user-core
+    static_configs:
+      - targets: ['user-service:9091']
+        labels: { service: user-core }
+
+  - job_name: session-core
+    static_configs:
+      - targets: ['session-core-service:9091']
+        labels: { service: session-core }
+
+  - job_name: audit-core
+    static_configs:
+      - targets: ['audit-core-service:9091']
+        labels: { service: audit-core }
+
+  - job_name: velion-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['velion-gateway-rs:3185']
+        labels: { service: gateway, plane: frontend }

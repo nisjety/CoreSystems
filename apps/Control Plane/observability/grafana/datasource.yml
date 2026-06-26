@@ -1,0 +1,10 @@
+# Grafana datasource provisioning (Phase 6 B13) — points at the Control-Plane
+# Prometheus so dashboards work out of the box with no manual setup.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://controlplane-prometheus:9090
+    isDefault: true
+    editable: true
