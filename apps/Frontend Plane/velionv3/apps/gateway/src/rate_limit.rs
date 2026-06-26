@@ -1,7 +1,7 @@
 //! Inbound token-bucket rate limiter for the velionv3 BFF gateway.
 //!
-//! Ported from the Model Plane `model-gateway` limiter (per-key token bucket
-//! over a `DashMap`, configurable RPM, `429 TOO_MANY_REQUESTS` + `Retry-After`).
+//! Ported from the Model Plane `model-gateway` limiter (per-key token bucket,
+//! configurable RPM, `429 TOO_MANY_REQUESTS` + `Retry-After`).
 //!
 //! ## Key selection
 //!
@@ -18,11 +18,20 @@
 //!    identity nor a parseable client IP is available, so an attacker cannot
 //!    escape the limiter by simply omitting the forwarded header.
 //!
-//! ## Caveat
+//! ## Bucket storage: distributed, with an in-process fallback
 //!
-//! Buckets live in-process. This is per-instance, NOT distributed: each gateway
-//! replica enforces its own limit. Mirrors the `model-gateway` caveat; a
-//! distributed limiter (e.g. Dragonfly-backed) is a separate follow-up.
+//! When the gateway's Dragonfly connection (the same `GATEWAY_CACHE_REDIS_URL`
+//! link the [`crate::cache::ResultCache`] uses) is available, buckets live in
+//! Dragonfly and are refilled+consumed atomically by a single Lua `EVAL` per
+//! request. Refill is driven by Redis server `TIME`, so the limit holds
+//! fleet-wide across every horizontally-scaled gateway replica regardless of any
+//! per-process clock.
+//!
+//! If the connection is absent (cache disabled) or any Redis call errors, the
+//! limiter transparently falls back to a per-process [`DashMap`] token bucket —
+//! fail-open by design: a Dragonfly blip must never reject legitimate traffic.
+//! The DashMap path is the original per-instance behaviour and remains fully
+//! covered by tests.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -35,6 +44,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
+use redis::Script;
 
 use crate::middleware::AuthenticatedUser;
 
@@ -52,6 +62,46 @@ const DEFAULT_RPM: f64 = 600.0;
 /// proxy hop while comfortably fitting a realistic proxy chain.
 const MAX_FORWARDED_LEN: usize = 256;
 
+/// Atomic token-bucket refill+consume, evaluated server-side in one round trip.
+///
+/// `KEYS[1]` is the bucket key. `ARGV[1]` is the capacity / refill burst (rpm),
+/// `ARGV[2]` the refill rate in tokens/second, `ARGV[3]` the TTL to set on the
+/// key (seconds). The bucket's `tokens` + `ts` (last-refill unix seconds, with
+/// microsecond fraction) live in a hash; refill is driven by the Redis server's
+/// own `TIME`, so it is correct no matter which replica runs the script and
+/// independent of any client clock. Returns `{allowed, retry_after_secs}` where
+/// `allowed` is 1/0 and `retry_after_secs` is a ceil'd >=1 hint when denied.
+const TOKEN_BUCKET_LUA: &str = r#"
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local t = redis.call('TIME')
+local now = tonumber(t[1]) + (tonumber(t[2]) / 1000000)
+local data = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(data[1])
+local ts = tonumber(data[2])
+if tokens == nil then
+  tokens = capacity
+  ts = now
+end
+local elapsed = now - ts
+if elapsed < 0 then elapsed = 0 end
+tokens = math.min(capacity, tokens + elapsed * refill_rate)
+local allowed = 0
+local retry_after = 0
+if tokens >= 1.0 then
+  tokens = tokens - 1.0
+  allowed = 1
+else
+  local deficit = 1.0 - tokens
+  retry_after = math.ceil(deficit / refill_rate)
+  if retry_after < 1 then retry_after = 1 end
+end
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('EXPIRE', KEYS[1], ttl)
+return {allowed, retry_after}
+"#;
+
 /// Tracks token count and last refill timestamp for a single bucket.
 struct TokenBucket {
     tokens: f64,
@@ -59,34 +109,95 @@ struct TokenBucket {
 }
 
 /// Shared rate-limiter state keyed by caller identity (org / user / client IP).
+///
+/// `conn` is the optional shared Dragonfly link (distributed buckets); `buckets`
+/// is the always-present in-process fallback used when `conn` is `None` or a
+/// Redis call errors.
 #[derive(Clone)]
 pub(crate) struct RateLimiter {
+    conn: Option<redis::aio::ConnectionManager>,
     buckets: Arc<DashMap<String, TokenBucket>>,
     rpm: f64,
 }
 
-impl RateLimiter {
-    /// Build a limiter from environment configuration.
-    ///
-    /// Reads `GATEWAY_RATE_LIMIT_RPM` (requests per minute), defaulting to
-    /// [`DEFAULT_RPM`]. A non-positive or unparseable value falls back to the
-    /// default rather than disabling the limiter.
-    pub(crate) fn from_env() -> Self {
-        let rpm = std::env::var("GATEWAY_RATE_LIMIT_RPM")
-            .ok()
-            .and_then(|value| value.trim().parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or(DEFAULT_RPM);
+/// Read `GATEWAY_RATE_LIMIT_RPM` (requests per minute), defaulting to
+/// [`DEFAULT_RPM`]. A non-positive or unparseable value falls back to the
+/// default rather than disabling the limiter.
+fn rpm_from_env() -> f64 {
+    std::env::var("GATEWAY_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_RPM)
+}
 
+impl RateLimiter {
+    /// Build a limiter that backs its buckets with the gateway's existing
+    /// Dragonfly connection (reused from the [`crate::cache::ResultCache`]).
+    ///
+    /// When the cache is disabled (connection `None`) the limiter runs purely
+    /// in-process — the fail-open fallback path. The RPM is read from
+    /// `GATEWAY_RATE_LIMIT_RPM` ([`DEFAULT_RPM`] otherwise).
+    pub(crate) fn from_cache(cache: &crate::cache::ResultCache) -> Self {
         Self {
+            conn: cache.connection(),
             buckets: Arc::new(DashMap::new()),
-            rpm,
+            rpm: rpm_from_env(),
         }
     }
 
     /// Try to consume one token for `key`. Returns `Ok(())` if allowed, or
     /// `Err(retry_after_secs)` (>= 1) if the bucket is exhausted.
-    fn try_acquire(&self, key: &str) -> Result<(), u64> {
+    ///
+    /// Prefers the distributed (Dragonfly) bucket so the limit holds fleet-wide.
+    /// Any connection error — or no connection at all — transparently falls back
+    /// to the in-process bucket (fail-open: a Redis blip never rejects traffic).
+    async fn try_acquire(&self, key: &str) -> Result<(), u64> {
+        if let Some(conn) = self.conn.clone() {
+            match self.try_acquire_distributed(conn, key).await {
+                Ok(result) => return result,
+                Err(error) => {
+                    // Degrade to the in-process bucket rather than failing the
+                    // request. Log the error class only — never the key value.
+                    tracing::warn!(
+                        %error,
+                        "distributed rate-limit backend errored; falling back to in-process bucket"
+                    );
+                }
+            }
+        }
+        self.try_acquire_local(key)
+    }
+
+    /// Distributed token bucket: one atomic Lua `EVAL` against Dragonfly.
+    async fn try_acquire_distributed(
+        &self,
+        mut conn: redis::aio::ConnectionManager,
+        key: &str,
+    ) -> Result<Result<(), u64>, redis::RedisError> {
+        let refill_rate = self.rpm / 60.0; // tokens per second
+        // TTL: long enough that an idle bucket isn't reaped mid-burst, bounded
+        // so abandoned keys self-evict. One full refill window + a margin.
+        let ttl_secs = (self.rpm / refill_rate).ceil() as u64 + 60;
+        let redis_key = distributed_key(key);
+
+        let (allowed, retry_after): (i64, i64) = Script::new(TOKEN_BUCKET_LUA)
+            .key(redis_key)
+            .arg(self.rpm)
+            .arg(refill_rate)
+            .arg(ttl_secs)
+            .invoke_async(&mut conn)
+            .await?;
+
+        if allowed == 1 {
+            Ok(Ok(()))
+        } else {
+            Ok(Err((retry_after.max(1)) as u64))
+        }
+    }
+
+    /// In-process token bucket (per-instance fallback). The original behaviour.
+    fn try_acquire_local(&self, key: &str) -> Result<(), u64> {
         let now = Instant::now();
         let refill_rate = self.rpm / 60.0; // tokens per second
 
@@ -112,6 +223,13 @@ impl RateLimiter {
             Err(retry_after.max(1))
         }
     }
+}
+
+/// Namespaced Dragonfly key for a caller's bucket. Shares the `velion:gw:`
+/// prefix convention with [`crate::cache::cache_key`] and carries `ratelimit`
+/// so operators can scan/inspect throttling state (`KEYS '*ratelimit*'`).
+fn distributed_key(key: &str) -> String {
+    format!("velion:gw:ratelimit:{key}")
 }
 
 /// Derive the rate-limit key for a request, preferring validated identity.
@@ -216,7 +334,7 @@ pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Respo
     let user = request.extensions().get::<AuthenticatedUser>().cloned();
     let (key, source) = rate_limit_key(user.as_ref(), request.headers());
 
-    match limiter.try_acquire(&key) {
+    match limiter.try_acquire(&key).await {
         Ok(()) => next.run(request).await,
         Err(retry_after) => {
             // Log the key SOURCE, never the key value (it can be a user/org id).
@@ -240,8 +358,12 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    /// In-process (fallback-path) limiter for the bucket-arithmetic tests. The
+    /// distributed path is exercised live against Dragonfly in the rebuild/verify
+    /// step; the Lua arithmetic mirrors `try_acquire_local` exactly.
     fn limiter(rpm: f64) -> RateLimiter {
         RateLimiter {
+            conn: None,
             buckets: Arc::new(DashMap::new()),
             rpm,
         }
@@ -251,17 +373,17 @@ mod tests {
     fn allows_requests_within_limit() {
         let limiter = limiter(10.0);
         for _ in 0..10 {
-            assert!(limiter.try_acquire("org:org_1").is_ok());
+            assert!(limiter.try_acquire_local("org:org_1").is_ok());
         }
     }
 
     #[test]
     fn rejects_when_exhausted_with_retry_after() {
         let limiter = limiter(2.0);
-        assert!(limiter.try_acquire("user:u1").is_ok());
-        assert!(limiter.try_acquire("user:u1").is_ok());
+        assert!(limiter.try_acquire_local("user:u1").is_ok());
+        assert!(limiter.try_acquire_local("user:u1").is_ok());
         let retry_after = limiter
-            .try_acquire("user:u1")
+            .try_acquire_local("user:u1")
             .expect_err("third request must be throttled");
         assert!(retry_after >= 1, "Retry-After must be at least 1 second");
     }
@@ -269,9 +391,9 @@ mod tests {
     #[test]
     fn isolates_keys() {
         let limiter = limiter(1.0);
-        assert!(limiter.try_acquire("ip:1.1.1.1").is_ok());
-        assert!(limiter.try_acquire("ip:2.2.2.2").is_ok());
-        assert!(limiter.try_acquire("ip:1.1.1.1").is_err());
+        assert!(limiter.try_acquire_local("ip:1.1.1.1").is_ok());
+        assert!(limiter.try_acquire_local("ip:2.2.2.2").is_ok());
+        assert!(limiter.try_acquire_local("ip:1.1.1.1").is_err());
     }
 
     #[test]
@@ -280,23 +402,43 @@ mod tests {
         // 1/60 token per second. Exhaust it, rewind the refill clock by a full
         // minute to simulate elapsed time, and confirm a token has returned.
         let limiter = limiter(1.0);
-        assert!(limiter.try_acquire("org:refill").is_ok());
-        assert!(limiter.try_acquire("org:refill").is_err());
+        assert!(limiter.try_acquire_local("org:refill").is_ok());
+        assert!(limiter.try_acquire_local("org:refill").is_err());
 
         if let Some(mut bucket) = limiter.buckets.get_mut("org:refill") {
             bucket.last_refill = Instant::now() - Duration::from_secs(60);
         }
         assert!(
-            limiter.try_acquire("org:refill").is_ok(),
+            limiter.try_acquire_local("org:refill").is_ok(),
             "bucket should refill after elapsed time"
         );
     }
 
+    #[tokio::test]
+    async fn try_acquire_falls_back_to_local_without_conn() {
+        // No Dragonfly connection ⇒ the async entrypoint must transparently use
+        // the in-process bucket and still throttle at the limit.
+        let limiter = limiter(1.0);
+        assert!(limiter.try_acquire("org:fallback").await.is_ok());
+        assert!(limiter.try_acquire("org:fallback").await.is_err());
+    }
+
+    #[test]
+    fn distributed_key_is_namespaced_and_scannable() {
+        // Operators scan throttling state with `KEYS '*ratelimit*'`.
+        assert_eq!(
+            distributed_key("org:org_42"),
+            "velion:gw:ratelimit:org:org_42"
+        );
+        assert!(distributed_key("ip:1.2.3.4").contains("ratelimit"));
+    }
+
     #[test]
     fn from_env_rejects_non_positive_and_keeps_default() {
-        // Set a bogus value; from_env must fall back to DEFAULT_RPM.
+        // Set a bogus value; RPM parsing must fall back to DEFAULT_RPM. Built via
+        // from_cache against a disabled cache (no connection ⇒ in-process path).
         std::env::set_var("GATEWAY_RATE_LIMIT_RPM", "not-a-number");
-        let limiter = RateLimiter::from_env();
+        let limiter = RateLimiter::from_cache(&crate::cache::ResultCache::disabled());
         assert_eq!(limiter.rpm, DEFAULT_RPM);
         std::env::remove_var("GATEWAY_RATE_LIMIT_RPM");
     }

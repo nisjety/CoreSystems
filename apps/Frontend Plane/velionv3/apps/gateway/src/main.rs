@@ -27,7 +27,7 @@ mod utils;
 
 use config::{build_cors_layer, build_state};
 use middleware::strip_inbound_identity_headers;
-use rate_limit::{rate_limit_middleware, RateLimiter};
+use rate_limit::rate_limit_middleware;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -110,9 +110,11 @@ fn build_router(state: config::AppState) -> Router {
         // CORS/tracing, so throttled requests do the least work. The
         // `Extension(RateLimiter)` layer must sit OUTER of the middleware so the
         // limiter is in extensions by the time `rate_limit_middleware` reads it.
-        // Per-instance / not distributed — see `rate_limit.rs`.
+        // Distributed (Dragonfly-backed) when the cache is connected, with an
+        // in-process fallback — see `rate_limit.rs`. Reuses the cache's shared
+        // Dragonfly connection via `AppState.rate_limiter`.
         .layer(axum::middleware::from_fn(rate_limit_middleware))
-        .layer(axum::Extension(RateLimiter::from_env()))
+        .layer(axum::Extension(state.rate_limiter.clone()))
         .layer(axum::middleware::from_fn(strip_inbound_identity_headers))
         // Minimal security response headers on every API response. `if_not_present`
         // never clobbers a value an upstream already set, and these are passive
@@ -196,6 +198,9 @@ mod tests {
             audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
             browser_run_store: crate::domains::browser::new_browser_run_store(),
             cache: crate::cache::ResultCache::disabled(),
+            rate_limiter: crate::rate_limit::RateLimiter::from_cache(
+                &crate::cache::ResultCache::disabled(),
+            ),
             chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers,

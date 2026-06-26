@@ -156,6 +156,7 @@ mod tests {
             zammad_api_token: String::new(),
             audience_token_cache: new_audience_token_cache(),
             browser_run_store: crate::domains::browser::new_browser_run_store(),
+            rate_limiter: crate::rate_limit::RateLimiter::from_cache(&ResultCache::disabled()),
             cache: ResultCache::disabled(),
             chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),

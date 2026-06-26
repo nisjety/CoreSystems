@@ -127,6 +127,16 @@ impl ResultCache {
         };
         let _: Result<(), redis::RedisError> = conn.del(key).await;
     }
+
+    /// Hand out a clone of the underlying connection manager, if the cache is
+    /// connected. `ConnectionManager` is cheaply clonable (it shares one
+    /// multiplexed connection), so other subsystems — e.g. the distributed
+    /// [`crate::rate_limit::RateLimiter`] — can reuse the same Dragonfly link
+    /// instead of opening a second one. `None` when the cache is disabled, so
+    /// callers degrade exactly as the cache itself does.
+    pub(crate) fn connection(&self) -> Option<redis::aio::ConnectionManager> {
+        self.conn.clone()
+    }
 }
 
 fn now_secs() -> u64 {

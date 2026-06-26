@@ -59,6 +59,10 @@ pub(crate) struct AppState {
     pub(crate) audience_token_cache: AudienceTokenCache,
     pub(crate) browser_run_store: crate::domains::browser::BrowserRunStore,
     pub(crate) cache: crate::cache::ResultCache,
+    /// Fleet-wide inbound rate limiter. Backed by the same Dragonfly connection
+    /// as `cache` (distributed token buckets), degrading to an in-process bucket
+    /// when the cache is disabled. Wired as an `Extension` layer in `main.rs`.
+    pub(crate) rate_limiter: crate::rate_limit::RateLimiter,
     pub(crate) chat_history_store: crate::domains::chat::history::ChatHistoryStore,
     pub(crate) studio_store: crate::domains::studio::StudioStore,
     pub(crate) allow_dev_actor_headers: bool,
@@ -170,6 +174,10 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .to_owned(),
         audience_token_cache: new_audience_token_cache(),
         browser_run_store: crate::domains::browser::new_browser_run_store(),
+        // Reuse the cache's Dragonfly connection for fleet-wide rate limiting.
+        // Built before `cache` is moved into the struct below (literal fields
+        // evaluate top-to-bottom, so this borrow happens first).
+        rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
         cache,
         chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
         studio_store: crate::domains::studio::StudioStore::new(),
