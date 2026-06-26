@@ -57,6 +57,23 @@ func TestTrialElevationGrantsIntegrations(t *testing.T) {
 	}
 }
 
+func TestLeadsEntitlementByPlan(t *testing.T) {
+	// The Brreg lead-builder add-on (`leads`) must be granted on the trial
+	// effective plan (Pro) so a fresh org's lead-builder routes stop 402-ing,
+	// and on the standard/pro/enterprise paid tiers. It must NOT be granted on
+	// free/hobby.
+	for _, plan := range []string{TrialPlan, "trial", "standard", "pro", "enterprise"} {
+		if !defaultEntitlementsForPlan(plan)["leads"] {
+			t.Fatalf("plan %q must grant the `leads` entitlement", plan)
+		}
+	}
+	for _, plan := range []string{"free", "hobby"} {
+		if defaultEntitlementsForPlan(plan)["leads"] {
+			t.Fatalf("plan %q must NOT grant the `leads` entitlement", plan)
+		}
+	}
+}
+
 func TestTrialDurationDaysDefault(t *testing.T) {
 	t.Setenv("TRIAL_DURATION_DAYS", "")
 	if got := trialDurationDays(); got != DefaultTrialDays {

@@ -16,6 +16,10 @@ var defaultEntitlementsByPlan = map[string]map[string]bool{
 		"feature.audit_logs":   true,
 		"feature.integrations": false,
 		"feature.sso":          false,
+		// Brreg lead-builder add-on. Granted on the trial tier so a fresh org can
+		// try the (company-data-only, metered, audited) lead builder before the
+		// paywall, matching the integrations unlock during onboarding.
+		"leads": true,
 	},
 	"hobby": {
 		"feature.chat":         true,
@@ -30,6 +34,7 @@ var defaultEntitlementsByPlan = map[string]map[string]bool{
 		"feature.audit_logs":   true,
 		"feature.integrations": true,
 		"feature.sso":          false,
+		"leads":                true,
 	},
 	"pro": {
 		"feature.chat":         true,
@@ -37,6 +42,11 @@ var defaultEntitlementsByPlan = map[string]map[string]bool{
 		"feature.audit_logs":   true,
 		"feature.integrations": true,
 		"feature.sso":          true,
+		// Also the EFFECTIVE plan during the onboarding trial (see trial.go
+		// TrialPlan = "pro"), so granting `leads` here unlocks the lead-builder
+		// for every org in its trial window — the gateway's `leads` entitlement
+		// gate (domains/leads.rs) opens instead of 402-ing.
+		"leads": true,
 	},
 	"enterprise": {
 		"feature.chat":         true,
@@ -44,6 +54,7 @@ var defaultEntitlementsByPlan = map[string]map[string]bool{
 		"feature.audit_logs":   true,
 		"feature.integrations": true,
 		"feature.sso":          true,
+		"leads":                true,
 	},
 }
 
