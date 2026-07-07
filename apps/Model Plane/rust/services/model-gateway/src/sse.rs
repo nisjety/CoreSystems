@@ -125,8 +125,15 @@ pub async fn invoke_stream_sse(
 
     // Resolve the harness profile → approval posture. Recorded on the opened
     // envelope so the run loop and operator surfaces agree (HARNESS_PHASE1 §1).
+    //
+    // SECURITY (approval-enforcement audit): the client-supplied `profile` is
+    // NOT trusted for the approval-relevant decision. It keeps its benign role
+    // (SSE stream shape — see `sse_events`), but the approval POSTURE is
+    // resolved server-side from the authenticated principal and the client can
+    // only ratchet it STRICTER — never send `profile:"chat"` to disable gating.
     let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
-    let posture = profile.posture().as_permission_mode();
+    let posture = crate::profile::resolve_posture(posture_floor(&claims), profile)
+        .as_permission_mode();
 
     let start = std::time::Instant::now();
 
@@ -1811,6 +1818,41 @@ async fn direct_infer(
 /// by the `StreamRunEvents` tail) and appends the assistant answer (returned by
 /// `read_latest_assistant`). Spawned so the stream tail starts observing
 /// immediately. On transport error the run isn't driven; the
+/// `read_latest_assistant` / `direct_infer` fallback still returns a reply, so
+/// Server-side approval-posture floor for the authenticated principal.
+///
+/// Reads the (server-signed) JWT scopes on `claims`. A principal carrying an
+/// autonomous / deployed-agent scope is pinned to `Ask` (never un-gated),
+/// regardless of the client-supplied profile. Every other principal gets the
+/// configurable base floor (default `Auto`, so interactive chat is unchanged).
+///
+/// Config (both optional, safe defaults):
+///   - `HARNESS_AUTONOMOUS_SCOPES` — CSV of scopes that mark an autonomous
+///     identity (default `agent:autonomous,agent:deployed,deployed_agent`).
+///   - `HARNESS_POSTURE_FLOOR` — base floor for non-autonomous principals:
+///     `ask` to fail safe fleet-wide, anything else → `auto` (default).
+fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {
+    use crate::profile::ApprovalPosture;
+    let base_floor = match std::env::var("HARNESS_POSTURE_FLOOR")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("ask") => ApprovalPosture::Ask,
+        _ => ApprovalPosture::Auto,
+    };
+    let autonomous_env = std::env::var("HARNESS_AUTONOMOUS_SCOPES")
+        .unwrap_or_else(|_| "agent:autonomous,agent:deployed,deployed_agent".to_owned());
+    let autonomous: Vec<&str> = autonomous_env
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    crate::profile::floor_from_scopes(&claims.scopes, &autonomous, base_floor)
+}
+
 /// `read_latest_assistant` / `direct_infer` fallback still returns a reply, so
 /// the stream is never failed.
 fn spawn_run_dispatch(
