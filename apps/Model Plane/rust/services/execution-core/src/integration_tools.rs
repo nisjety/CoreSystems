@@ -110,7 +110,9 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         "slack",
         &[
             CatalogOp { operation: "message.send", is_write: true, summary: "Post a Slack message. params.channel, body.text." },
-            CatalogOp { operation: "channels", is_write: false, summary: "List Slack channels." },
+            // Real executor op is `channels.list` (GET /conversations.list) — the
+            // bare `channels` string matched no case arm and always failed.
+            CatalogOp { operation: "channels.list", is_write: false, summary: "List Slack channels." },
         ],
     ),
     (
@@ -122,7 +124,14 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
     ),
     (
         "notion",
-        &[CatalogOp { operation: "search", is_write: false, summary: "Search the connected Notion workspace. body.query." }],
+        // The real integration-corev2 executor implements user/databases/pages —
+        // there is NO `search` op, so the previous entry was non-functional.
+        // Expose the real read operations instead (docs/actions-surface-operations.md).
+        &[
+            CatalogOp { operation: "databases", is_write: false, summary: "List the Notion databases shared with the connection." },
+            CatalogOp { operation: "pages", is_write: false, summary: "List pages; with params.databaseId, query that database's rows." },
+            CatalogOp { operation: "user", is_write: false, summary: "Read the connected Notion bot user (workspace identity)." },
+        ],
     ),
     (
         "shopify",
@@ -524,6 +533,22 @@ mod tests {
         assert_eq!(operation_is_write("slack.message.send"), Some(true));
         assert_eq!(operation_is_write("Github.Issues.List"), Some(false));
         assert_eq!(operation_is_write("meta.pages.list"), Some(false));
+    }
+
+    #[test]
+    fn phase6_fixed_operation_strings_are_catalogued() {
+        // Slack: the real op `channels.list` resolves (read); the old bare
+        // `channels` string (which matched no gateway case arm) is gone.
+        assert_eq!(operation_is_write("channels.list"), Some(false));
+        assert_eq!(operation_is_write("slack.channels.list"), Some(false));
+        assert_eq!(operation_is_write("channels"), None);
+        // Notion: the real read ops resolve; the old non-functional `search` op
+        // (no such executor case) is gone.
+        assert_eq!(operation_is_write("databases"), Some(false));
+        assert_eq!(operation_is_write("pages"), Some(false));
+        assert_eq!(operation_is_write("user"), Some(false));
+        assert_eq!(operation_is_write("notion.databases"), Some(false));
+        assert_eq!(operation_is_write("search"), None);
     }
 
     #[test]
