@@ -23,6 +23,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
+	"github.com/triodelab/integration-corev2/internal/webhookorg"
 )
 
 func main() {
@@ -91,7 +92,16 @@ func main() {
 		Discovery: discovery.NewService(cfg, &http.Client{Timeout: 8 * time.Second}),
 		Actions:   actions.NewService(cfg, &http.Client{Timeout: 15 * time.Second}),
 		HotPath:   hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
-		Logger:    &logger,
+		WebhookOrg: &webhookorg.Resolver{
+			Store: repo,
+			Meta: &webhookorg.GraphAssetLister{
+				BaseURL: cfg.FacebookAPIBaseURL,
+				Tokens:  service,
+				HTTP:    &http.Client{Timeout: 15 * time.Second},
+			},
+			Logger: &logger,
+		},
+		Logger: &logger,
 	})
 
 	errCh := make(chan error, 1)

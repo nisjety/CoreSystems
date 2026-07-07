@@ -207,6 +207,15 @@ type Repository interface {
 	// per connection, read + advanced by the email sync worker each cycle.
 	GetEmailSyncState(ctx context.Context, connectionID string) (EmailSyncState, error)
 	UpsertEmailSyncState(ctx context.Context, state EmailSyncState) error
+	// FindConnectionByWebhookAccount resolves the tenant that owns an
+	// account-wide provider webhook: matches accountID against
+	// provider_account_id, tenant_id (Slack team_id lives there), or the
+	// comma-separated provider_context["webhook_account_ids"] enrichment
+	// (Meta page / IG-account / WABA / phone-number ids).
+	FindConnectionByWebhookAccount(ctx context.Context, providerKeys []string, accountID string) (Connection, error)
+	// UpdateConnectionProviderContext replaces a connection's provider
+	// context (used to persist webhook-account enrichment).
+	UpdateConnectionProviderContext(ctx context.Context, id string, providerContext map[string]string) (Connection, error)
 	Close()
 }
 

@@ -70,7 +70,7 @@ func TestSend_NestedSlackMessageTS(t *testing.T) {
 	}))
 	defer srv.Close()
 	cl := newTestClient(t, srv.URL)
-	res, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", BodyText: "x"})
+	res, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", ProviderThreadID: "C123", BodyText: "x"})
 	if err != nil {
 		t.Fatalf("Send err = %v", err)
 	}
@@ -106,7 +106,7 @@ func TestSend_4xx_IsTerminal(t *testing.T) {
 	}))
 	defer srv.Close()
 	cl := newTestClient(t, srv.URL)
-	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", BodyText: "x"})
+	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", ProviderThreadID: "C123", BodyText: "x"})
 	if err == nil {
 		t.Fatal("Send err = nil, want terminal error")
 	}
@@ -122,7 +122,7 @@ func TestSend_5xx_IsTransient(t *testing.T) {
 	}))
 	defer srv.Close()
 	cl := newTestClient(t, srv.URL)
-	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", BodyText: "x"})
+	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", ProviderThreadID: "C123", BodyText: "x"})
 	if err == nil {
 		t.Fatal("Send err = nil, want transient error")
 	}
@@ -138,7 +138,7 @@ func TestSend_Timeout_IsTransient(t *testing.T) {
 	}))
 	defer srv.Close()
 	cl := newTestClient(t, srv.URL)
-	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", BodyText: "x"})
+	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", ProviderThreadID: "C123", BodyText: "x"})
 	if err == nil {
 		t.Fatal("Send err = nil, want transient timeout error")
 	}
@@ -162,7 +162,7 @@ func TestSend_UnsupportedProvider_IsTerminal(t *testing.T) {
 
 func TestSend_NotConfigured_IsTerminal(t *testing.T) {
 	cl := NewClient("", "")
-	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", BodyText: "x"})
+	_, err := cl.Send(context.Background(), SendRequest{Provider: "slack", ConnectionID: "c1", ProviderThreadID: "C123", BodyText: "x"})
 	if err == nil || !IsTerminal(err) {
 		t.Fatalf("unconfigured client err = %v, want terminal", err)
 	}
@@ -290,7 +290,7 @@ func TestSend_PerProviderOperationMapping(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"result":{"id":"m1"}}}}`))
 		}))
 		_, err := newTestClient(t, srv.URL).Send(context.Background(), SendRequest{
-			Provider: provider, ConnectionID: "c1", BodyText: "hi", To: []string{"x@y.no"},
+			Provider: provider, ConnectionID: "c1", ProviderThreadID: "C123", BodyText: "hi", To: []string{"x@y.no"},
 		})
 		srv.Close()
 		if err != nil {
@@ -354,5 +354,55 @@ func TestSend_Instagram_ResolvesLinkedPageServerSide(t *testing.T) {
 	}
 	if res.ProviderMessageID != "ig_m_1" {
 		t.Errorf("ProviderMessageID = %q", res.ProviderMessageID)
+	}
+}
+
+func TestBuildSendOperation_SlackThreadRefSplit(t *testing.T) {
+	// Threaded reply: composite channel:thread_ts must split — the previous
+	// behavior sent the whole composite as thread_ts (invalid ts).
+	op, params, body, err := buildSendOperation(SendRequest{
+		Provider:         "slack",
+		ProviderThreadID: "C0GENERAL:1751968800.000100",
+		BodyText:         "svar",
+	})
+	if err != nil {
+		t.Fatalf("threaded: %v", err)
+	}
+	if op != "message.send" {
+		t.Errorf("operation = %q", op)
+	}
+	if params["channel"] != "C0GENERAL" || body["channel"] != "C0GENERAL" {
+		t.Errorf("channel = %v", body["channel"])
+	}
+	if body["thread_ts"] != "1751968800.000100" {
+		t.Errorf("thread_ts = %v, want the parent ts only", body["thread_ts"])
+	}
+
+	// Top-level reply: bare channel ref, no thread_ts at all.
+	_, params, body, err = buildSendOperation(SendRequest{
+		Provider:         "slack",
+		ProviderThreadID: "C0GENERAL",
+		BodyText:         "svar",
+	})
+	if err != nil {
+		t.Fatalf("top-level: %v", err)
+	}
+	if params["channel"] != "C0GENERAL" {
+		t.Errorf("channel = %v", params["channel"])
+	}
+	if _, present := body["thread_ts"]; present {
+		t.Error("thread_ts must be absent for top-level channel replies")
+	}
+}
+
+func TestBuildSendOperation_SlackWithoutChannelErrors(t *testing.T) {
+	_, _, _, err := buildSendOperation(SendRequest{Provider: "slack", BodyText: "x"})
+	if err == nil {
+		t.Fatal("expected an addressing error without a channel ref")
+	}
+	// The addressing error must NOT mark slack unsupported — SupportsSend
+	// derives from ErrUnsupportedProvider specifically.
+	if !SupportsSend("slack") {
+		t.Fatal("SupportsSend(slack) must remain true")
 	}
 }

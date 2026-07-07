@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -113,8 +115,10 @@ func (c *WebhookReceivedConsumer) process(ctx context.Context, ev ingestionEvent
 	}
 
 	providerKey := strings.ToLower(strings.TrimSpace(ev.ProviderKey))
-	if providerKey != "whatsapp" && providerKey != "facebook" && providerKey != "meta" && providerKey != "instagram" {
-		// Not a channel this consumer handles (e.g. slack, github, shopify).
+	switch providerKey {
+	case "whatsapp", "facebook", "meta", "instagram", "slack":
+	default:
+		// Not a channel this consumer handles (e.g. github, shopify).
 		return outcomeAck
 	}
 
@@ -128,14 +132,19 @@ func (c *WebhookReceivedConsumer) process(ctx context.Context, ev ingestionEvent
 		return outcomeAck
 	}
 
-	events, err := normalizeMetaWebhookPayload(stored.Payload)
+	var events []conversation.InboundEvent
+	if providerKey == "slack" {
+		events, err = normalizeSlackWebhookPayload(stored.Payload)
+	} else {
+		events, err = normalizeMetaWebhookPayload(stored.Payload)
+	}
 	if err != nil {
 		log.Printf("[cc-go/webhook-received] normalize payload (org=%s id=%s): %v", orgID, webhookEventID, err)
 		return outcomeAck
 	}
 	if len(events) == 0 {
-		// A real Meta callback with no message content (status/delivery/read
-		// receipts, verification pings) — nothing to store.
+		// A real callback with no message content (status/delivery/read
+		// receipts, verification pings, bot echoes) — nothing to store.
 		return outcomeAck
 	}
 
@@ -180,6 +189,8 @@ func (c *WebhookReceivedConsumer) resolveConnectionID(ctx context.Context, orgID
 		// IG DMs ride the Messenger Platform via the linked Page, so any of
 		// the Meta-family connections can carry the reply.
 		candidates = []string{"instagram", "meta", "facebook"}
+	case "slack":
+		candidates = []string{"slack"}
 	default:
 		return ""
 	}
@@ -384,4 +395,73 @@ func stringFromMap(m map[string]any, key string) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// normalizeSlackWebhookPayload extracts inbound human messages from a Slack
+// Events API callback (the signed event_callback envelope). Only
+// event.type=="message" items become Inbox messages; bot-authored events
+// (bot_id set) and every message subtype (message_changed, message_deleted,
+// bot_message, channel_join, …) are skipped — subtypes are edits/system
+// notices, and storing bot echoes would loop our own replies back into the
+// inbox. The thread ref is "channel" for top-level messages and
+// "channel:thread_ts" for threaded replies, which buildSendOperation splits so
+// outbound replies land in the right Slack thread.
+func normalizeSlackWebhookPayload(payload map[string]any) ([]conversation.InboundEvent, error) {
+	if payload == nil {
+		return nil, fmt.Errorf("payload is empty")
+	}
+	if stringFromMap(payload, "type") != "event_callback" {
+		// url_verification handshakes and other envelope types carry no
+		// message content.
+		return nil, nil
+	}
+	event, ok := payload["event"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	if stringFromMap(event, "type") != "message" {
+		return nil, nil
+	}
+	if stringFromMap(event, "bot_id") != "" || stringFromMap(event, "subtype") != "" {
+		return nil, nil
+	}
+	channel := stringFromMap(event, "channel")
+	user := stringFromMap(event, "user")
+	text := strings.TrimSpace(stringFromMap(event, "text"))
+	ts := stringFromMap(event, "ts")
+	if channel == "" || user == "" || text == "" || ts == "" {
+		return nil, nil
+	}
+
+	threadRef := channel
+	if threadTS := stringFromMap(event, "thread_ts"); threadTS != "" && threadTS != ts {
+		threadRef = channel + ":" + threadTS
+	}
+	eventID := stringFromMap(payload, "event_id")
+	if eventID == "" {
+		eventID = channel + ":" + ts
+	}
+	return []conversation.InboundEvent{{
+		Provider:          "slack",
+		ProviderEventID:   eventID,
+		ProviderMessageID: ts,
+		ProviderThreadID:  threadRef,
+		Direction:         conversation.DirectionInbound,
+		Subject:           "Slack message",
+		From:              conversation.ParticipantInput{Name: user},
+		BodyText:          text,
+		OccurredAt:        slackTimestamp(ts),
+	}}, nil
+}
+
+// slackTimestamp converts a Slack ts ("1712345678.123456", seconds.micros)
+// to a wall-clock time; zero time on parse failure (normalizeInboundEvent
+// stamps now() for zero OccurredAt).
+func slackTimestamp(ts string) time.Time {
+	seconds, _, _ := strings.Cut(ts, ".")
+	parsed, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil || parsed <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(parsed, 0).UTC()
 }

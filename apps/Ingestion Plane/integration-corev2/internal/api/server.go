@@ -31,6 +31,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/providers"
 	"github.com/triodelab/integration-corev2/internal/store"
+	"github.com/triodelab/integration-corev2/internal/webhookorg"
 )
 
 type ServerConfig struct {
@@ -45,7 +46,10 @@ type ServerConfig struct {
 	Discovery *discovery.Service
 	Actions   *actions.Service
 	HotPath   hotpath.WebhookNormalizer
-	Logger    *zerolog.Logger
+	// WebhookOrg resolves the owning tenant for account-wide provider
+	// webhooks (Meta/Slack callbacks carry no Velion org id). Nil-safe.
+	WebhookOrg *webhookorg.Resolver
+	Logger     *zerolog.Logger
 }
 
 const requestIDHeader = "X-Request-ID"
@@ -633,12 +637,31 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err := verifyProviderWebhook(c, cfg.Config, providerKey); err != nil {
 			return apiError(c, fiber.StatusUnauthorized, "invalid_webhook_signature", err.Error())
 		}
+		// Slack's Events API subscription handshake POSTs a signed
+		// url_verification envelope and expects the challenge echoed back at
+		// the TOP level of the response (the standard success envelope would
+		// fail Slack's check).
+		if providerKey == "slack" {
+			if challenge := slackURLVerificationChallenge(c.Body()); challenge != "" {
+				return c.JSON(fiber.Map{"challenge": challenge})
+			}
+		}
 		normalized, err := normalizeWebhookEvent(c, cfg, providerKey)
 		if err != nil {
 			if errors.Is(err, hotpath.ErrInvalidJSON) {
 				return apiError(c, fiber.StatusBadRequest, "invalid_json", "Webhook payload must be valid JSON.")
 			}
 			return apiError(c, fiber.StatusBadGateway, "webhook_normalize_failed", err.Error())
+		}
+		// Real provider callbacks carry no Velion org id; without this
+		// resolution the event is stored org-less and every downstream
+		// consumer silently drops it (2026-07-07 verification finding).
+		resolvedConnectionID := ""
+		if normalized.OrganizationID == "" && cfg.WebhookOrg != nil {
+			if resolution, ok := cfg.WebhookOrg.Resolve(c.UserContext(), providerKey, normalized.Payload); ok {
+				normalized.OrganizationID = resolution.OrganizationID
+				resolvedConnectionID = resolution.ConnectionID
+			}
 		}
 		event := store.WebhookEvent{
 			ID:             normalized.EventID,
@@ -659,6 +682,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			_ = cfg.Events.Publish(c.UserContext(), events.Event{
 				Type:           "velion.ingestion.integration.webhook_received",
 				OrganizationID: event.OrganizationID,
+				ConnectionID:   resolvedConnectionID,
 				ProviderKey:    event.ProviderKey,
 				Data:           map[string]any{"eventType": event.EventType, "webhookEventId": event.ID, "normalizedBy": normalized.NormalizedBy},
 			})
@@ -1817,6 +1841,23 @@ func verifyStripeWebhookSignature(c *fiber.Ctx, secret string) error {
 		}
 	}
 	return errors.New("Stripe-Signature is invalid")
+}
+
+// slackURLVerificationChallenge extracts the challenge from a Slack Events
+// API url_verification handshake body; empty when the body is any other
+// event. Runs AFTER signature verification — Slack signs handshakes too.
+func slackURLVerificationChallenge(body []byte) string {
+	var probe struct {
+		Type      string `json:"type"`
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return ""
+	}
+	if probe.Type != "url_verification" {
+		return ""
+	}
+	return strings.TrimSpace(probe.Challenge)
 }
 
 func verifySlackWebhookSignature(c *fiber.Ctx, secret string, now func() time.Time) error {

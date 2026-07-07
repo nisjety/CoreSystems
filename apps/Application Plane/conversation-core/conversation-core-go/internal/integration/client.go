@@ -377,16 +377,28 @@ func buildSendOperation(req SendRequest) (operation string, params, body map[str
 		}
 		return operation, params, body, nil
 	case "slack":
+		// Slack replies address a channel, optionally inside a thread. The
+		// inbound consumer writes "channel" for top-level messages and
+		// "channel:thread_ts" for threaded ones — sending the whole composite
+		// as thread_ts (the previous behavior) produced an invalid ts and
+		// broke threaded replies.
 		operation = "message.send"
 		body = map[string]any{
 			"text": text,
 		}
 		params = map[string]any{}
-		if req.ProviderThreadID != "" {
-			// Slack threads reply by parent message ts.
-			params["channel"] = req.ProviderThreadID
-			body["channel"] = req.ProviderThreadID
-			body["thread_ts"] = req.ProviderThreadID
+		channel, threadTS := splitChannelThreadID(req.ProviderThreadID)
+		if channel == "" {
+			// Un-threaded refs carry just the channel id (no separator).
+			channel, threadTS = threadTS, ""
+		}
+		if channel == "" {
+			return "", nil, nil, fmt.Errorf("slack send requires a channel id on the thread ref")
+		}
+		params["channel"] = channel
+		body["channel"] = channel
+		if threadTS != "" {
+			body["thread_ts"] = threadTS
 		}
 		return operation, params, body, nil
 	case "google":

@@ -527,3 +527,65 @@ func (r *MemoryRepository) UpsertEmailSyncState(_ context.Context, state EmailSy
 	r.emailSyncStates[state.ConnectionID] = state
 	return nil
 }
+
+func (r *MemoryRepository) FindConnectionByWebhookAccount(_ context.Context, providerKeys []string, accountID string) (Connection, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || len(providerKeys) == 0 {
+		return Connection{}, ErrNotFound
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	allowed := map[string]bool{}
+	for _, key := range providerKeys {
+		allowed[key] = true
+	}
+	var best *Connection
+	for _, conn := range r.connections {
+		if !allowed[conn.ProviderKey] || conn.DeletedAt != nil {
+			continue
+		}
+		if conn.Status != "active" && conn.Status != "needs_refresh" {
+			continue
+		}
+		if !connectionMatchesWebhookAccount(conn, accountID) {
+			continue
+		}
+		if best == nil || conn.UpdatedAt.After(best.UpdatedAt) {
+			matched := conn
+			best = &matched
+		}
+	}
+	if best == nil {
+		return Connection{}, ErrNotFound
+	}
+	return *best, nil
+}
+
+func connectionMatchesWebhookAccount(conn Connection, accountID string) bool {
+	if conn.ProviderAccountID == accountID || conn.TenantID == accountID {
+		return true
+	}
+	enriched := conn.ProviderContext["webhook_account_ids"]
+	if enriched == "" {
+		return false
+	}
+	for _, id := range strings.Split(enriched, ",") {
+		if strings.TrimSpace(id) == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *MemoryRepository) UpdateConnectionProviderContext(_ context.Context, id string, providerContext map[string]string) (Connection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	conn, ok := r.connections[id]
+	if !ok {
+		return Connection{}, ErrNotFound
+	}
+	conn.ProviderContext = cloneStringMap(providerContext)
+	conn.UpdatedAt = time.Now().UTC()
+	r.connections[id] = conn
+	return conn, nil
+}

@@ -248,7 +248,9 @@ func TestWebhookReceived_UnsupportedProvider_AcksWithoutFetching(t *testing.T) {
 	ingester := &fakeIngester{}
 	c := &WebhookReceivedConsumer{fetcher: fetcher, ingester: ingester}
 
-	ev := ingestionEvent{OrganizationID: "org-1", ProviderKey: "slack", Data: map[string]any{"webhookEventId": "wh-5"}}
+	// github is a genuinely unhandled channel here (slack graduated to a
+	// supported inbox channel in the Slack-inbound build).
+	ev := ingestionEvent{OrganizationID: "org-1", ProviderKey: "github", Data: map[string]any{"webhookEventId": "wh-5"}}
 	if got := c.process(context.Background(), ev); got != outcomeAck {
 		t.Fatalf("outcome = %v, want outcomeAck", got)
 	}
@@ -397,5 +399,147 @@ func TestNormalize_WhatsAppObject_NeverRunsMessagingExtractors(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("want 0 events (no changes[].value.messages), got %+v", events)
+	}
+}
+
+// ── Slack ────────────────────────────────────────────────────────────────────
+
+const slackMessagePayload = `{
+	"type": "event_callback",
+	"team_id": "T0EXAMPLE",
+	"event_id": "Ev12345678",
+	"event_time": 1751968800,
+	"event": {
+		"type": "message",
+		"channel": "C0GENERAL",
+		"channel_type": "channel",
+		"user": "U0KARI",
+		"text": "Hei, trenger hjelp med faktura",
+		"ts": "1751968800.000100"
+	}
+}`
+
+const slackThreadedPayload = `{
+	"type": "event_callback",
+	"team_id": "T0EXAMPLE",
+	"event_id": "Ev87654321",
+	"event": {
+		"type": "message",
+		"channel": "C0GENERAL",
+		"user": "U0KARI",
+		"text": "Svar i tråden",
+		"ts": "1751968900.000200",
+		"thread_ts": "1751968800.000100"
+	}
+}`
+
+const slackBotEchoPayload = `{
+	"type": "event_callback",
+	"team_id": "T0EXAMPLE",
+	"event_id": "Ev00000001",
+	"event": {
+		"type": "message",
+		"channel": "C0GENERAL",
+		"user": "U0BOT",
+		"bot_id": "B0OURBOT",
+		"text": "Automated reply",
+		"ts": "1751969000.000300"
+	}
+}`
+
+const slackEditedPayload = `{
+	"type": "event_callback",
+	"team_id": "T0EXAMPLE",
+	"event_id": "Ev00000002",
+	"event": {
+		"type": "message",
+		"subtype": "message_changed",
+		"channel": "C0GENERAL",
+		"user": "U0KARI",
+		"text": "edited text",
+		"ts": "1751969100.000400"
+	}
+}`
+
+func TestNormalizeSlack_TopLevelMessage(t *testing.T) {
+	events, err := normalizeSlackWebhookPayload(decodePayload(t, slackMessagePayload))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Provider != "slack" || event.ProviderEventID != "Ev12345678" || event.ProviderMessageID != "1751968800.000100" {
+		t.Errorf("identity fields: %+v", event)
+	}
+	if event.ProviderThreadID != "C0GENERAL" {
+		t.Errorf("thread ref = %q, want bare channel for top-level messages", event.ProviderThreadID)
+	}
+	if event.From.Name != "U0KARI" || event.BodyText != "Hei, trenger hjelp med faktura" {
+		t.Errorf("content fields: %+v", event)
+	}
+	if event.OccurredAt.IsZero() {
+		t.Error("occurredAt should parse from ts")
+	}
+}
+
+func TestNormalizeSlack_ThreadedMessageCompositeRef(t *testing.T) {
+	events, err := normalizeSlackWebhookPayload(decodePayload(t, slackThreadedPayload))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].ProviderThreadID != "C0GENERAL:1751968800.000100" {
+		t.Errorf("thread ref = %q, want channel:thread_ts composite", events[0].ProviderThreadID)
+	}
+}
+
+func TestNormalizeSlack_SkipsBotEchoesAndSubtypes(t *testing.T) {
+	for name, payload := range map[string]string{
+		"bot echo": slackBotEchoPayload,
+		"edited":   slackEditedPayload,
+		"handshake": `{"type": "url_verification", "challenge": "abc"}`,
+	} {
+		events, err := normalizeSlackWebhookPayload(decodePayload(t, payload))
+		if err != nil {
+			t.Fatalf("%s: normalize: %v", name, err)
+		}
+		if len(events) != 0 {
+			t.Errorf("%s: events = %d, want 0", name, len(events))
+		}
+	}
+}
+
+func TestWebhookReceived_SlackMessage_StoresInboundEvent(t *testing.T) {
+	fetcher := &fakeWebhookFetcher{
+		payloads:     map[string]map[string]any{"wh-slack": decodePayload(t, slackMessagePayload)},
+		connectionID: "conn-slack-1",
+	}
+	ingester := &fakeIngester{}
+	c := &WebhookReceivedConsumer{fetcher: fetcher, ingester: ingester}
+
+	ev := ingestionEvent{
+		OrganizationID: "org-1",
+		ProviderKey:    "slack",
+		Data:           map[string]any{"webhookEventId": "wh-slack"},
+	}
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if ingester.count() != 1 {
+		t.Fatalf("IngestEvent called %d times, want 1", ingester.count())
+	}
+	event := ingester.events[0]
+	if event.OrgID != "org-1" || event.Provider != "slack" {
+		t.Errorf("org/provider mismatch: %+v", event)
+	}
+	if event.ConnectionID != "conn-slack-1" {
+		t.Errorf("connection_id = %q, want resolved slack connection", event.ConnectionID)
+	}
+	if len(fetcher.connectionKeys) != 1 || fetcher.connectionKeys[0][0] != "slack" {
+		t.Errorf("expected slack connection candidates, got %+v", fetcher.connectionKeys)
 	}
 }

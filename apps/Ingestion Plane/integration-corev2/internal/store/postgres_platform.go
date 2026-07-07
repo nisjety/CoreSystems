@@ -559,3 +559,53 @@ func (s *anyMapJSON) Scan(value any) error {
 	*s.target = decoded
 	return nil
 }
+
+func (r *PostgresRepository) FindConnectionByWebhookAccount(ctx context.Context, providerKeys []string, accountID string) (Connection, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || len(providerKeys) == 0 {
+		return Connection{}, ErrNotFound
+	}
+	var connection Connection
+	err := r.pool.QueryRow(ctx, `
+		SELECT `+connectionColumns+`
+		FROM integration_connections
+		WHERE provider_key = ANY($1)
+		  AND deleted_at IS NULL
+		  AND status IN ('active', 'needs_refresh')
+		  AND (
+			provider_account_id = $2
+			OR tenant_id = $2
+			OR ',' || COALESCE(provider_context->>'webhook_account_ids', '') || ',' LIKE '%,' || $2 || ',%'
+		  )
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`, providerKeys, accountID).Scan(connectionScanDest(&connection)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, ErrNotFound
+		}
+		return Connection{}, fmt.Errorf("find connection by webhook account: %w", err)
+	}
+	return connection, nil
+}
+
+func (r *PostgresRepository) UpdateConnectionProviderContext(ctx context.Context, id string, providerContext map[string]string) (Connection, error) {
+	encoded, err := json.Marshal(providerContext)
+	if err != nil {
+		return Connection{}, fmt.Errorf("marshal provider context: %w", err)
+	}
+	var connection Connection
+	err = r.pool.QueryRow(ctx, `
+		UPDATE integration_connections
+		SET provider_context = $2, updated_at = now()
+		WHERE id = $1
+		RETURNING `+connectionColumns,
+		id, encoded).Scan(connectionScanDest(&connection)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, ErrNotFound
+		}
+		return Connection{}, fmt.Errorf("update connection provider context: %w", err)
+	}
+	return connection, nil
+}
