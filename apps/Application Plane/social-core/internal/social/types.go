@@ -60,6 +60,9 @@ const (
 var (
 	ErrInvalidInput = errors.New("invalid input")
 	ErrNotFound     = errors.New("social resource not found")
+	// ErrApprovalRequired is returned when a publish or schedule is attempted for
+	// a post that requires human approval but has no approved approval record.
+	ErrApprovalRequired = errors.New("post is not approved for publishing")
 )
 
 type Repository interface {
@@ -71,6 +74,9 @@ type Repository interface {
 	CreatePost(ctx context.Context, input CreatePostInput) (*Post, error)
 	ListApprovals(ctx context.Context, filter ListApprovalsFilter) ([]Approval, error)
 	DecideApproval(ctx context.Context, input DecideApprovalInput) (*Approval, error)
+	// PostApprovalStatus reports whether the post requires approval and whether a
+	// genuine approved approval record exists for it. ErrNotFound if absent.
+	PostApprovalStatus(ctx context.Context, orgID, postID string) (requiresApproval bool, approved bool, err error)
 	UpdatePostSchedule(ctx context.Context, input SchedulePostInput) (*Post, error)
 	EnqueuePublishJob(ctx context.Context, input EnqueuePublishInput) (*PublishJob, error)
 	GetPublishJob(ctx context.Context, orgID, jobID string) (*PublishJob, error)

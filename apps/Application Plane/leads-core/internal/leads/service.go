@@ -186,16 +186,35 @@ var csvHeader = []string{
 	"registreringsdato", "hjemmeside", "konkurs", "under_avvikling",
 }
 
+// sanitizeCSVField guards the export against CSV formula injection: a cell
+// whose first character is one a spreadsheet interprets as a formula (= + - @,
+// or a leading tab/CR) is prefixed with a single quote so it renders as text.
+// Brreg is authoritative company data, but the CSV is opened in Excel/Sheets,
+// so this is defense in depth at the export boundary.
+func sanitizeCSVField(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	default:
+		return value
+	}
+}
+
 func companyRow(c brreg.Company) []string {
 	ansatte := ""
 	if c.AntallAnsatte != nil {
 		ansatte = strconv.Itoa(*c.AntallAnsatte)
 	}
 	return []string{
-		c.Organisasjonsnummer, c.Navn, c.Organisasjonsform, c.Naeringskode,
-		c.NaeringBeskrivelse, c.Kommunenummer, c.Poststed, ansatte,
-		c.Registreringsdato, c.Hjemmeside, strconv.FormatBool(c.Konkurs),
-		strconv.FormatBool(c.UnderAvvikling),
+		sanitizeCSVField(c.Organisasjonsnummer), sanitizeCSVField(c.Navn),
+		sanitizeCSVField(c.Organisasjonsform), sanitizeCSVField(c.Naeringskode),
+		sanitizeCSVField(c.NaeringBeskrivelse), sanitizeCSVField(c.Kommunenummer),
+		sanitizeCSVField(c.Poststed), ansatte,
+		sanitizeCSVField(c.Registreringsdato), sanitizeCSVField(c.Hjemmeside),
+		strconv.FormatBool(c.Konkurs), strconv.FormatBool(c.UnderAvvikling),
 	}
 }
 

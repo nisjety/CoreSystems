@@ -114,6 +114,56 @@ func TestExportCSVIsCompanyOnly(t *testing.T) {
 	}
 }
 
+func TestSanitizeCSVFieldNeutralizesFormulaInjection(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"formula equals", "=1+1", "'=1+1"},
+		{"formula plus", "+cmd", "'+cmd"},
+		{"formula minus", "-2+3", "'-2+3"},
+		{"formula at", "@SUM(A1)", "'@SUM(A1)"},
+		{"leading tab", "\tvalue", "'\tvalue"},
+		{"safe name", "AQUATIQ AS", "AQUATIQ AS"},
+		{"empty", "", ""},
+		{"org number", "923609016", "923609016"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeCSVField(tc.in); got != tc.want {
+				t.Fatalf("sanitizeCSVField(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExportCSVNeutralizesFormulaInjectionInCompanyName(t *testing.T) {
+	repo := &fakeRepo{list: &SavedList{
+		ID:    "list_1",
+		OrgID: "org-1",
+		Name:  "Test",
+		Companies: []brreg.Company{{
+			Organisasjonsnummer: "923609016",
+			Navn:                `=HYPERLINK("http://evil")`,
+			Organisasjonsform:   "AS",
+		}},
+	}}
+	svc := NewService(repo, nil)
+
+	csvBytes, _, err := svc.ExportCSV(context.Background(), "org-1", "list_1", "user-1")
+	if err != nil {
+		t.Fatalf("ExportCSV error: %v", err)
+	}
+	records, err := csv.NewReader(strings.NewReader(string(csvBytes))).ReadAll()
+	if err != nil {
+		t.Fatalf("CSV not parseable: %v", err)
+	}
+	if got, want := records[1][1], `'=HYPERLINK("http://evil")`; got != want {
+		t.Fatalf("company name not neutralized: got %q, want %q", got, want)
+	}
+}
+
 // brregStub returns an httptest server that serves a single /enheter page with
 // the given companies, salted with person-ish fields the endpoint never returns,
 // plus /underenheter branches keyed by parent orgnr.

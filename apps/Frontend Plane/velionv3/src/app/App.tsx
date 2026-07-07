@@ -15,6 +15,7 @@ const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDash
 const OpsQualityPage = lazy(() => import('@/features/quality/components/OpsQualityPage'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
 const SocialOperationsPage = lazy(() => import('@/features/social/components/SocialOperationsPage'))
+const SocialCommercePage = lazy(() => import('@/features/social/components/SocialCommercePage'))
 const InsightsPage = lazy(() => import('@/features/insights/components/InsightsPage'))
 const KnowledgePage = lazy(() => import('@/features/knowledge/components/KnowledgePage'))
 const SharedWithMePage = lazy(() => import('@/features/knowledge/components/SharedWithMePage'))
@@ -156,6 +157,7 @@ export default function App() {
         <Route path="/social/competitors" component={() => <SocialOperationsPage section="competitors" />} />
         <Route path="/social/trends" component={() => <SocialOperationsPage section="trends" />} />
         <Route path="/social/evergreen" component={() => <SocialOperationsPage section="evergreen" />} />
+        <Route path="/social/commerce" component={SocialCommercePage} />
         <Route path="/insights" component={() => <InsightsPage section="overview" />} />
         <Route path="/insights/overview" component={() => <InsightsPage section="overview" />} />
         <Route path="/insights/social" component={() => <InsightsPage section="social" />} />

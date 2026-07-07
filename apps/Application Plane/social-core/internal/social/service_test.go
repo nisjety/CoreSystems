@@ -227,6 +227,21 @@ func (r *fakeRepository) FinishPublishJob(ctx context.Context, input FinishPubli
 	return &PublishJob{ID: input.JobID, OrgID: input.OrgID, Status: input.Status, LastError: input.LastError}, nil
 }
 
+func (r *fakeRepository) PostApprovalStatus(ctx context.Context, orgID, postID string) (bool, bool, error) {
+	post := r.posts[postID]
+	if post == nil || post.OrgID != orgID {
+		return false, false, ErrNotFound
+	}
+	approved := false
+	for _, approval := range r.approvals {
+		if approval.OrgID == orgID && approval.PostID == postID && approval.State == ApprovalApproved {
+			approved = true
+			break
+		}
+	}
+	return post.ApprovalRequired, approved, nil
+}
+
 type fakeAccountSource struct {
 	accounts []Account
 }
@@ -442,10 +457,12 @@ func TestSchedulePostPersistsScheduleAndQueuesPublishJob(t *testing.T) {
 	repo := newFakeRepository()
 	events := &fakeEventPublisher{}
 	service := NewService(repo, WithNow(func() time.Time { return now }), WithEventPublisher(events))
+	approvalNotRequired := false
 	post, err := repo.CreatePost(context.Background(), CreatePostInput{
-		OrgID:     "org_1",
-		Body:      "Scheduled copy",
-		Platforms: []string{"linkedin"},
+		OrgID:            "org_1",
+		Body:             "Scheduled copy",
+		Platforms:        []string{"linkedin"},
+		ApprovalRequired: &approvalNotRequired,
 	})
 	if err != nil {
 		t.Fatalf("seed post: %v", err)
@@ -497,6 +514,16 @@ func TestProcessDuePublishJobsBlocksWhenAccountsAreMissing(t *testing.T) {
 	repo := newFakeRepository()
 	events := &fakeEventPublisher{}
 	service := NewService(repo, WithNow(func() time.Time { return now }), WithEventPublisher(events))
+	// The post exists and does not require approval, so the approval gate passes
+	// and the job proceeds to the missing-account block path under test.
+	repo.posts["post_1"] = &Post{
+		ID:               "post_1",
+		OrgID:            "org_1",
+		Body:             "Publish me",
+		Platforms:        []string{"linkedin", "x"},
+		ApprovalRequired: false,
+		ApprovalState:    ApprovalNotRequired,
+	}
 	repo.claimedJobs = []PublishJob{{
 		ID:     "job_1",
 		OrgID:  "org_1",
@@ -528,6 +555,142 @@ func TestProcessDuePublishJobsBlocksWhenAccountsAreMissing(t *testing.T) {
 	}
 	if got, want := events.events[0].subject, SubjectPublishJobBlocked; got != want {
 		t.Fatalf("event subject = %s, want %s", got, want)
+	}
+}
+
+func TestEnqueuePublishRequiresApproval(t *testing.T) {
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	repo := newFakeRepository()
+	events := &fakeEventPublisher{}
+	service := NewService(repo, WithNow(func() time.Time { return now }), WithEventPublisher(events))
+	post, err := service.CreatePost(context.Background(), CreatePostInput{
+		OrgID:       "org_1",
+		Body:        "Needs approval",
+		Platforms:   []string{"linkedin"},
+		ActorUserID: "author_1",
+	})
+	if err != nil {
+		t.Fatalf("CreatePost returned error: %v", err)
+	}
+
+	_, err = service.EnqueuePublish(context.Background(), EnqueuePublishInput{
+		OrgID:  "org_1",
+		PostID: post.ID,
+	})
+	if !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("error = %v, want ErrApprovalRequired", err)
+	}
+	if len(repo.queuedJobs) != 0 {
+		t.Fatalf("queued jobs = %d, want 0 (publish must not enqueue without approval)", len(repo.queuedJobs))
+	}
+}
+
+func TestEnqueuePublishAllowsApprovedPost(t *testing.T) {
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	repo := newFakeRepository()
+	events := &fakeEventPublisher{}
+	service := NewService(repo, WithNow(func() time.Time { return now }), WithEventPublisher(events))
+	post, err := service.CreatePost(context.Background(), CreatePostInput{
+		OrgID:       "org_1",
+		Body:        "Approve then publish",
+		Platforms:   []string{"linkedin"},
+		ActorUserID: "author_1",
+	})
+	if err != nil {
+		t.Fatalf("CreatePost returned error: %v", err)
+	}
+	if _, err := service.DecideApproval(context.Background(), DecideApprovalInput{
+		OrgID:       "org_1",
+		ApprovalID:  "socapr_test",
+		Decision:    "approve",
+		ActorUserID: "approver_1",
+	}); err != nil {
+		t.Fatalf("DecideApproval returned error: %v", err)
+	}
+
+	job, err := service.EnqueuePublish(context.Background(), EnqueuePublishInput{
+		OrgID:  "org_1",
+		PostID: post.ID,
+	})
+	if err != nil {
+		t.Fatalf("EnqueuePublish returned error: %v", err)
+	}
+	if job == nil || len(repo.queuedJobs) != 1 {
+		t.Fatalf("queued jobs = %d, want 1 after approval", len(repo.queuedJobs))
+	}
+}
+
+func TestSchedulePostRequiresApproval(t *testing.T) {
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	repo := newFakeRepository()
+	service := NewService(repo, WithNow(func() time.Time { return now }))
+	post, err := service.CreatePost(context.Background(), CreatePostInput{
+		OrgID:       "org_1",
+		Body:        "Needs approval before scheduling",
+		Platforms:   []string{"linkedin"},
+		ActorUserID: "author_1",
+	})
+	if err != nil {
+		t.Fatalf("CreatePost returned error: %v", err)
+	}
+
+	_, err = service.SchedulePost(context.Background(), SchedulePostInput{
+		OrgID:       "org_1",
+		PostID:      post.ID,
+		ScheduledAt: now.Add(time.Hour),
+		ActorUserID: "user_1",
+	})
+	if !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("error = %v, want ErrApprovalRequired", err)
+	}
+	if len(repo.queuedJobs) != 0 || repo.lastSchedule != nil {
+		t.Fatal("schedule/enqueue must not occur without approval")
+	}
+}
+
+func TestProcessDuePublishJobsBlocksUnapprovedPost(t *testing.T) {
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	repo := newFakeRepository()
+	events := &fakeEventPublisher{}
+	service := NewService(repo, WithNow(func() time.Time { return now }), WithEventPublisher(events))
+	// A post that still requires approval and holds only a pending record.
+	repo.posts["post_pending"] = &Post{
+		ID:               "post_pending",
+		OrgID:            "org_1",
+		Body:             "Publish me",
+		Platforms:        []string{"linkedin"},
+		ApprovalRequired: true,
+		ApprovalState:    ApprovalPending,
+	}
+	repo.approvals["apr_pending"] = &Approval{
+		ID:     "apr_pending",
+		OrgID:  "org_1",
+		PostID: "post_pending",
+		State:  ApprovalPending,
+	}
+	repo.claimedJobs = []PublishJob{{
+		ID:     "job_pending",
+		OrgID:  "org_1",
+		PostID: "post_pending",
+		Status: JobStatusRunning,
+		Post:   repo.posts["post_pending"],
+	}}
+
+	processed, err := service.ProcessDuePublishJobs(context.Background(), "worker_1", 10)
+	if err != nil {
+		t.Fatalf("ProcessDuePublishJobs returned error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if repo.finishedJob == nil || repo.finishedJob.Status != JobStatusBlocked {
+		t.Fatalf("finished job = %#v, want blocked", repo.finishedJob)
+	}
+	if len(repo.finishedJob.Attempts) != 0 {
+		t.Fatalf("attempts = %d, want 0 (no external publish for an unapproved post)", len(repo.finishedJob.Attempts))
+	}
+	if repo.finishedJob.LastError == "" {
+		t.Fatal("expected a blocking reason on the finished job")
 	}
 }
 

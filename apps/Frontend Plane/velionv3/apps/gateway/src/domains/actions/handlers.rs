@@ -12,9 +12,11 @@ use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_crawl_site, dispatch_import_source,
     dispatch_operating_map_blueprint, dispatch_operating_map_generate,
-    dispatch_operating_map_review, dispatch_recrawl, dispatch_scrape_url, dispatch_ticket_assign,
-    dispatch_ticket_classify, dispatch_ticket_create, dispatch_ticket_link_resource,
-    dispatch_ticket_resolve, dispatch_ticket_update, dispatch_toggle_policy, dispatch_upload_files,
+    dispatch_operating_map_review, dispatch_recrawl, dispatch_scrape_url,
+    dispatch_social_create_draft, dispatch_social_publish_post, dispatch_social_schedule_post,
+    dispatch_ticket_assign, dispatch_ticket_classify, dispatch_ticket_create,
+    dispatch_ticket_link_resource, dispatch_ticket_resolve, dispatch_ticket_update,
+    dispatch_toggle_policy, dispatch_upload_files,
 };
 
 #[derive(Deserialize)]
@@ -62,6 +64,11 @@ pub(super) async fn execute_action(
         "tickets.assign" => dispatch_ticket_assign(&state, &user, &body.input).await,
         "tickets.link_resource" => dispatch_ticket_link_resource(&state, &user, &body.input).await,
         "tickets.resolve" => dispatch_ticket_resolve(&state, &user, &body.input).await,
+        // Social actions -> social-core via the dedicated dispatchers (real
+        // ApprovalState is enforced by social-core before publish/schedule).
+        "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,
+        "social.schedule_post" => dispatch_social_schedule_post(&state, &user, &body.input).await,
+        "social.publish_post" => dispatch_social_publish_post(&state, &user, &body.input).await,
         other => (
             StatusCode::NOT_IMPLEMENTED,
             Json(error(
