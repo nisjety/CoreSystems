@@ -519,6 +519,48 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  integration-email-worker:
+    build:
+      context: ./integration-corev2
+      dockerfile: Dockerfile
+    container_name: integration-email-worker
+    entrypoint: ["/app/email-worker"]
+    restart: unless-stopped
+    env_file:
+      - ./integration-corev2/.env
+    environment:
+      SERVICE_NAME: integration-email-worker
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
+      # This worker decrypts real provider OAuth tokens — the vault key is
+      # load-bearing here (unlike finspo-worker) and has NO insecure default.
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY must be set}
+      # conversation-ingest-rs lives on the Application Plane; both sides sit
+      # on the shared inter-plane-bus network.
+      CONVERSATION_INGEST_URL: ${CONVERSATION_INGEST_URL:-http://conversation-ingest-rs:3161}
+      EMAIL_SYNC_INTERVAL: ${EMAIL_SYNC_INTERVAL:-60s}
+      EMAIL_SYNC_BACKFILL_WINDOW: ${EMAIL_SYNC_BACKFILL_WINDOW:-24h}
+      EMAIL_SYNC_MAX_PER_CYCLE: ${EMAIL_SYNC_MAX_PER_CYCLE:-25}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.20"
+        reservations:
+          memory: 32M
+    depends_on:
+      integration-api:
+        condition: service_healthy
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   integration-webhook-normalizer:
     build:
       context: ./integration-corev2/services/webhook-normalizer-rs

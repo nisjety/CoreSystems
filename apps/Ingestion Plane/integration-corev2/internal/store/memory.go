@@ -19,6 +19,8 @@ type MemoryRepository struct {
 	tokenLeases map[string]TokenLease
 	scimTokens  map[string]memorySCIMToken
 	audit       []AuditEvent
+
+	emailSyncStates map[string]EmailSyncState
 }
 
 type memorySCIMToken struct {
@@ -38,6 +40,8 @@ func NewMemoryRepository() *MemoryRepository {
 		tokenLeases: map[string]TokenLease{},
 		scimTokens:  map[string]memorySCIMToken{},
 		audit:       []AuditEvent{},
+
+		emailSyncStates: map[string]EmailSyncState{},
 	}
 }
 
@@ -501,4 +505,25 @@ func cloneAnyMap(input map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func (r *MemoryRepository) GetEmailSyncState(_ context.Context, connectionID string) (EmailSyncState, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	state, ok := r.emailSyncStates[connectionID]
+	if !ok {
+		return EmailSyncState{}, ErrNotFound
+	}
+	return state, nil
+}
+
+func (r *MemoryRepository) UpsertEmailSyncState(_ context.Context, state EmailSyncState) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.emailSyncStates == nil {
+		r.emailSyncStates = map[string]EmailSyncState{}
+	}
+	state.UpdatedAt = time.Now().UTC()
+	r.emailSyncStates[state.ConnectionID] = state
+	return nil
 }

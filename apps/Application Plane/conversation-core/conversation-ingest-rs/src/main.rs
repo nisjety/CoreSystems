@@ -17,6 +17,16 @@ async fn main() -> Result<()> {
     let conversation_core_url = env::var("CONVERSATION_CORE_URL")
         .unwrap_or_else(|_| "http://conversation-core-go:3160".into());
     let internal_api_key = env::var("INTERNAL_API_KEY").unwrap_or_default();
+    // Fail closed (fleet policy): this bridge writes real Inbox conversations,
+    // so it refuses to boot keyless unless the operator explicitly opts into
+    // the insecure dev mode.
+    if internal_api_key.trim().is_empty()
+        && env::var("ALLOW_INSECURE_DEV_DEFAULTS").as_deref() != Ok("1")
+    {
+        anyhow::bail!(
+            "INTERNAL_API_KEY is required (set ALLOW_INSECURE_DEV_DEFAULTS=1 to run keyless in dev)"
+        );
+    }
 
     let state = AppState {
         conversation_core_url: conversation_core_url.trim_end_matches('/').to_owned(),

@@ -203,7 +203,25 @@ type Repository interface {
 	MarkSCIMTokenUsed(ctx context.Context, id string, usedAt time.Time) error
 	RevokeSCIMToken(ctx context.Context, organizationID, id string, revokedAt time.Time) (SCIMToken, error)
 	InsertAuditEvent(ctx context.Context, event AuditEvent) error
+	// Email inbound sync cursors (Gmail historyId / Graph deltaLink) — one row
+	// per connection, read + advanced by the email sync worker each cycle.
+	GetEmailSyncState(ctx context.Context, connectionID string) (EmailSyncState, error)
+	UpsertEmailSyncState(ctx context.Context, state EmailSyncState) error
 	Close()
+}
+
+// EmailSyncState is the per-connection inbound-email cursor. Cursor semantics
+// are provider-specific: google stores the Gmail historyId used as
+// startHistoryId on the next users.history.list call; microsoft stores the
+// full @odata.deltaLink URL for /me/mailFolders/inbox/messages/delta.
+type EmailSyncState struct {
+	ConnectionID string    `json:"connectionId"`
+	ProviderKey  string    `json:"providerKey"`
+	Cursor       string    `json:"cursor"`
+	LastSyncedAt time.Time `json:"lastSyncedAt"`
+	LastError    string    `json:"lastError,omitempty"`
+	FailureCount int       `json:"failureCount"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type ConnectionRefreshLocker interface {

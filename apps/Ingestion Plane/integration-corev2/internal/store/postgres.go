@@ -342,3 +342,43 @@ func nullableTime(value time.Time) any {
 	}
 	return value
 }
+
+func (r *PostgresRepository) GetEmailSyncState(ctx context.Context, connectionID string) (EmailSyncState, error) {
+	var state EmailSyncState
+	var lastSyncedAt *time.Time
+	err := r.pool.QueryRow(ctx, `
+		SELECT connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, updated_at
+		FROM email_sync_state
+		WHERE connection_id = $1
+	`, connectionID).Scan(
+		&state.ConnectionID, &state.ProviderKey, &state.Cursor,
+		&lastSyncedAt, &state.LastError, &state.FailureCount, &state.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EmailSyncState{}, ErrNotFound
+		}
+		return EmailSyncState{}, fmt.Errorf("get email sync state: %w", err)
+	}
+	if lastSyncedAt != nil {
+		state.LastSyncedAt = *lastSyncedAt
+	}
+	return state, nil
+}
+
+func (r *PostgresRepository) UpsertEmailSyncState(ctx context.Context, state EmailSyncState) error {
+	if _, err := r.pool.Exec(ctx, `
+		INSERT INTO email_sync_state (connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now())
+		ON CONFLICT (connection_id) DO UPDATE SET
+			provider_key = EXCLUDED.provider_key,
+			cursor = EXCLUDED.cursor,
+			last_synced_at = EXCLUDED.last_synced_at,
+			last_error = EXCLUDED.last_error,
+			failure_count = EXCLUDED.failure_count,
+			updated_at = now()
+	`, state.ConnectionID, state.ProviderKey, state.Cursor, nullableTime(state.LastSyncedAt), state.LastError, state.FailureCount); err != nil {
+		return fmt.Errorf("upsert email sync state: %w", err)
+	}
+	return nil
+}

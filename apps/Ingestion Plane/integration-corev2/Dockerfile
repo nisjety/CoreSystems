@@ -17,7 +17,8 @@ COPY . .
 ARG TARGETOS TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/integration-corev2 ./cmd/api && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/finspo-worker ./cmd/finspo-worker
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/finspo-worker ./cmd/finspo-worker && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/email-worker ./cmd/email-worker
 
 FROM alpine:3.21
 RUN --mount=type=cache,target=/var/cache/apk \
@@ -26,5 +27,6 @@ USER app
 WORKDIR /app
 COPY --from=build /out/integration-corev2 /app/integration-corev2
 COPY --from=build /out/finspo-worker /app/finspo-worker
+COPY --from=build /out/email-worker /app/email-worker
 EXPOSE 3026
 ENTRYPOINT ["/app/integration-corev2"]

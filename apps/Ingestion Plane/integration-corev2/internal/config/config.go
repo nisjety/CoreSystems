@@ -27,6 +27,10 @@ type Config struct {
 	FinspoCoreURL              string
 	FinspoCoreAPIKey           string
 	FinspoCoreAPIKeyHeader     string
+	ConversationIngestURL      string
+	EmailSyncInterval          time.Duration
+	EmailSyncBackfillWindow    time.Duration
+	EmailSyncMaxPerCycle       int
 	DataPlaneDocumentsURL      string
 	DataPlaneInternalAPIKey    string
 	DataPlaneInternalAPIHeader string
@@ -187,6 +191,10 @@ func Load() (Config, error) {
 		FinspoCoreURL:              envOr("FINSPO_CORE_URL", envOr("FINSPO_API_URL", "http://finspo-api:3130")),
 		FinspoCoreAPIKey:           strings.TrimSpace(os.Getenv("FINSPO_API_KEY")),
 		FinspoCoreAPIKeyHeader:     envOr("FINSPO_API_KEY_HEADER", "X-API-Key"),
+		ConversationIngestURL:      strings.TrimRight(envOr("CONVERSATION_INGEST_URL", "http://conversation-ingest-rs:3161"), "/"),
+		EmailSyncInterval:          envDuration("EMAIL_SYNC_INTERVAL", 60*time.Second),
+		EmailSyncBackfillWindow:    envDuration("EMAIL_SYNC_BACKFILL_WINDOW", 24*time.Hour),
+		EmailSyncMaxPerCycle:       envInt("EMAIL_SYNC_MAX_PER_CYCLE", 25),
 		DataPlaneDocumentsURL:      envOr("DATA_PLANE_DOCUMENTS_URL", envOr("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")),
 		DataPlaneInternalAPIKey:    strings.TrimSpace(envOr("DATA_PLANE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
 		DataPlaneInternalAPIHeader: envOr("DATA_PLANE_INTERNAL_API_KEY_HEADER", "X-Internal-Api-Key"),
@@ -351,6 +359,26 @@ func (c Config) ValidateFinspoWorkerRuntime() error {
 	}
 	if c.FinspoCoreAPIKey == "" {
 		return fmt.Errorf("FINSPO_API_KEY is required")
+	}
+	return nil
+}
+
+// ValidateEmailWorkerRuntime checks the env the email inbound sync worker
+// needs: direct DB access (connections + cursors), the token vault key, the
+// conversation-ingest bridge target, and the internal key it authenticates
+// to that bridge with.
+func (c Config) ValidateEmailWorkerRuntime() error {
+	if c.DatabaseURL == "" {
+		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if len(c.EncryptionKey) == 0 {
+		return fmt.Errorf("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required")
+	}
+	if c.ConversationIngestURL == "" {
+		return fmt.Errorf("CONVERSATION_INGEST_URL is required")
+	}
+	if c.InternalAPIKey == "" {
+		return fmt.Errorf("INTERNAL_API_KEY is required")
 	}
 	return nil
 }

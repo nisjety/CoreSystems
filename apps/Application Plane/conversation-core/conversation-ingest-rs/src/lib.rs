@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -108,12 +108,38 @@ pub enum NormalizeError {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    // Internal auth runs as MIDDLEWARE (not in the handler) so it precedes
+    // body deserialization: an unauthenticated caller gets 401 even for
+    // malformed payloads, and never exercises the parse path.
+    let ingest = Router::new()
+        .route("/internal/ingest/email", post(ingest_email))
+        .route("/internal/ingest/normalized-email", post(ingest_email))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_internal_key,
+        ));
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(health))
-        .route("/internal/ingest/email", post(ingest_email))
-        .route("/internal/ingest/normalized-email", post(ingest_email))
+        .merge(ingest)
         .with_state(state)
+}
+
+async fn require_internal_key(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !internal_key_matches(&state.internal_api_key, request.headers()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(
+                serde_json::json!({"error": {"code": "unauthorized", "message": "missing or invalid x-internal-api-key"}}),
+            ),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 async fn health() -> impl IntoResponse {
@@ -172,6 +198,37 @@ async fn ingest_email(
             ),
         ),
     }
+}
+
+/// Constant-time-ish comparison of the inbound `x-internal-api-key` header
+/// against the configured key. An EMPTY configured key rejects everything —
+/// the binary refuses to boot without a key unless the operator explicitly
+/// sets `ALLOW_INSECURE_DEV_DEFAULTS=1` (see main.rs), and that dev override
+/// keeps auth open rather than silently disabling it here.
+pub fn internal_key_matches(expected: &str, headers: &HeaderMap) -> bool {
+    if expected.is_empty() {
+        // Dev-override mode (boot allowed the empty key): accept, matching
+        // the pre-hardening behavior only when explicitly opted into.
+        return std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").as_deref() == Ok("1");
+    }
+    let Some(provided) = headers
+        .get("x-internal-api-key")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    constant_time_eq(provided.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub fn normalize_email_event(mut raw: RawEmailEvent) -> Result<CanonicalEvent, NormalizeError> {
@@ -393,5 +450,59 @@ mod tests {
         let left = normalize_email_event(raw_event()).expect("left");
         let right = normalize_email_event(raw_event()).expect("right");
         assert_eq!(left.idempotency_key, right.idempotency_key);
+    }
+
+    fn test_state() -> AppState {
+        AppState {
+            conversation_core_url: "http://conversation-core-go.invalid".into(),
+            internal_api_key: "fleet-key".into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    async fn post_ingest(router: Router, key: Option<&str>, body: serde_json::Value) -> StatusCode {
+        use tower::util::ServiceExt;
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/internal/ingest/email")
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request.header("x-internal-api-key", key);
+        }
+        let request = request
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("request");
+        router.oneshot(request).await.expect("response").status()
+    }
+
+    #[tokio::test]
+    async fn ingest_email_rejects_missing_internal_key() {
+        let status = post_ingest(build_router(test_state()), None, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ingest_email_rejects_wrong_internal_key() {
+        let status = post_ingest(
+            build_router(test_state()),
+            Some("wrong-key"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ingest_email_with_valid_key_reaches_validation() {
+        // Correct key + invalid payload → the request passes auth and fails
+        // VALIDATION (422), proving auth no longer blocks legitimate callers
+        // without needing a live conversation-core.
+        let status = post_ingest(
+            build_router(test_state()),
+            Some("fleet-key"),
+            serde_json::json!({"org_id": "", "from": {"name": "", "email": ""}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
