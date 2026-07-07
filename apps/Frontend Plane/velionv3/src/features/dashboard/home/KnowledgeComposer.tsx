@@ -53,7 +53,8 @@ import { readClientJson, writeClientJson } from '@/shared/session/client-storage
 import { CrawlPagePicker } from './CrawlPagePicker'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
-import { attachBrowserSession } from './browser-session'
+import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
+import { attachBrowserSession, withStepRationale, type BrowserStepRationale } from './browser-session'
 import {
   hostnameOf,
   normalizeUrl,
@@ -96,6 +97,7 @@ type BrowserSessionAttempt = {
 const TERMINAL = new Set(['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled'])
 const POLL_INTERVAL_MS = 2500
 const BROWSER_SESSION_TIMEOUT_MS = 30000
+const BROWSER_AI_LOOP_MAX_STEPS = 5
 const crawlJobsStoragePrefix = 'velion.dashboard.crawl.jobs'
 const isolatedProfileChoice = 'isolated'
 const newProfileChoice = 'new'
@@ -141,6 +143,14 @@ export function KnowledgeComposer(props: {
   const [browserProfileProbe, setBrowserProfileProbe] = createSignal<BrowserProfileRestoreProbe | null>(null)
   const [browserProfileProbing, setBrowserProfileProbing] = createSignal(false)
   const [browserProfileError, setBrowserProfileError] = createSignal<string | null>(null)
+  const [browserLoopState, setBrowserLoopState] = createSignal<BrowserLoopState>({
+    error: null,
+    goal: '',
+    status: 'idle',
+    step: 0,
+  })
+  const browserLoop = createBrowserLoopController(setBrowserLoopState)
+  const [browserRationales, setBrowserRationales] = createSignal<BrowserStepRationale[]>([])
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -488,6 +498,11 @@ export function KnowledgeComposer(props: {
   }
 
   const loadLinkPreview = async (target: string) => {
+    // A new link replaces any current preview: stop a running AI loop, close
+    // the old browser session, and drop rationales so nothing dangles.
+    browserLoop.requestStop()
+    closePreviewBrowserSession(preview())
+    setBrowserRationales([])
     let browserSessionPromise: Promise<BrowserSessionAttempt> | null = null
     try {
       browserSessionPromise = tryCreateBrowserSession(target)
@@ -559,7 +574,9 @@ export function KnowledgeComposer(props: {
 
   const clearPreview = () => {
     const current = preview()
+    browserLoop.requestStop()
     closePreviewBrowserSession(current)
+    setBrowserRationales([])
     setPreview(null)
   }
 
@@ -580,6 +597,27 @@ export function KnowledgeComposer(props: {
     }
   }
 
+  // The model rationale for each AI-driven step, keyed by the step number of
+  // the observation the executed action produced. Rendered verbatim in the
+  // timeline detail panel — the rationale is exactly what Model Plane returned.
+  const recordBrowserRationale = (
+    goal: string,
+    suggestion: BrowserActionSuggestionResponse,
+    result: BrowserSessionResponse,
+  ) => {
+    const step = result.observation?.step
+    if (typeof step !== 'number') return
+    setBrowserRationales((current) => withStepRationale(current, {
+      actionType: suggestion.suggestion.action?.type ?? null,
+      confidence: suggestion.suggestion.confidence ?? null,
+      done: suggestion.suggestion.done ?? false,
+      goal,
+      modelUsed: suggestion.model_used ?? null,
+      reason: suggestion.suggestion.reason ?? null,
+      step,
+    }))
+  }
+
   const performBrowserSuggestedAction = async (goal: string): Promise<BrowserActionSuggestionResponse | null> => {
     const current = preview()
     const sessionId = current?.browserSession?.session.id
@@ -595,12 +633,58 @@ export function KnowledgeComposer(props: {
       const action = suggestion.suggestion.action
       if (action && !suggestion.suggestion.done) {
         const nextSession = await runBrowserAction(id, sessionId, action)
+        recordBrowserRationale(goal, suggestion, nextSession)
         setPreview(attachBrowserSession(current, nextSession))
       }
       return suggestion
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : i18n.tr('AI-steget kunne ikke fullføres.', 'The AI browser step could not be completed.'))
       return null
+    } finally {
+      setBrowserBusy(false)
+    }
+  }
+
+  const performBrowserAutoRun = async (goal: string): Promise<BrowserActionSuggestionResponse | null> => {
+    let current = preview()
+    const id = orgId()
+    const sessionId = current?.browserSession?.session.id
+    if (!current || !sessionId || !id || browserBusy()) return null
+    if (!browserLoop.begin(goal)) return null
+    setBrowserBusy(true)
+    setFormError(null)
+    let lastSuggestion: BrowserActionSuggestionResponse | null = null
+    try {
+      for (let step = 0; step < BROWSER_AI_LOOP_MAX_STEPS; step += 1) {
+        // User interrupts (pause/stop) take effect here — between steps, never
+        // mid-action, so the session state always matches the last observation.
+        if ((await browserLoop.gate()) === 'stopped') return lastSuggestion
+        browserLoop.markSuggesting()
+        const suggestion = await suggestBrowserAction(id, sessionId, {
+          goal,
+          includeScreenshot: Boolean(current.browserSession?.session.frame?.artifactId),
+        })
+        lastSuggestion = suggestion
+        const action = suggestion.suggestion.action
+        if (!action || suggestion.suggestion.done) {
+          browserLoop.finish('done')
+          return lastSuggestion
+        }
+        if ((await browserLoop.gate()) === 'stopped') return lastSuggestion
+        browserLoop.markActing()
+        const nextSession = await runBrowserAction(id, sessionId, action)
+        recordBrowserRationale(goal, suggestion, nextSession)
+        current = attachBrowserSession(current, nextSession)
+        setPreview(current)
+        browserLoop.markStepDone()
+      }
+      browserLoop.finish('done')
+      return lastSuggestion
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : i18n.tr('AI-loopen kunne ikke fullføres.', 'The AI browser loop could not be completed.')
+      browserLoop.finish('stopped', message)
+      setFormError(message)
+      return lastSuggestion
     } finally {
       setBrowserBusy(false)
     }
@@ -659,7 +743,9 @@ export function KnowledgeComposer(props: {
         sourceUrl: current.url,
       })
       updateJob(key, { status: 'completed' })
+      browserLoop.requestStop()
       closePreviewBrowserSession(current)
+      setBrowserRationales([])
       setPreview(null)
       setUrl('')
     } catch (reason) {
@@ -872,11 +958,18 @@ export function KnowledgeComposer(props: {
           <ScrapePreviewPanel
             adding={adding()}
             browserBusy={browserBusy()}
+            browserLoop={browserLoopState()}
+            browserRationales={browserRationales()}
             onBrowserAction={(action) => void performBrowserAction(action)}
+            onBrowserAutoRun={performBrowserAutoRun}
+            onBrowserLoopPause={() => browserLoop.requestPause()}
+            onBrowserLoopResume={() => browserLoop.requestResume()}
+            onBrowserLoopStop={() => browserLoop.requestStop()}
             onBrowserSuggestAction={performBrowserSuggestedAction}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
             onDiscard={clearPreview}
             preview={current}
+            profileProbe={browserProfileProbe()}
           />
         )}
       </Show>

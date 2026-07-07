@@ -5,6 +5,7 @@ import {
   Camera,
   Check,
   Code2,
+  Cookie,
   ExternalLink,
   Eye,
   Globe2,
@@ -16,18 +17,34 @@ import {
   MousePointer2,
   Navigation,
   Network,
+  Pause,
+  Play,
   RefreshCw,
   Send,
   ShieldCheck,
   Sparkles,
+  Square,
   Terminal,
   TextCursorInput,
   Timer,
   X,
 } from 'lucide-solid'
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX } from 'solid-js'
-import type { BrowserAction, BrowserActionSuggestionResponse } from '@/shared/api/browser-client'
-import { browserSessionFromPreview, type BrowserSessionViewModel } from './browser-session'
+import type {
+  BrowserAction,
+  BrowserActionSuggestionResponse,
+  BrowserProfileRestoreProbe,
+} from '@/shared/api/browser-client'
+import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
+import {
+  browserSessionFromPreview,
+  evidenceIsEphemeral,
+  rationaleForStep,
+  timelineDetail,
+  type BrowserSessionViewModel,
+  type BrowserStepRationale,
+} from './browser-session'
+import { BrowserTimelineDetailPanel, compactBrowserUrl, consoleTone, networkTone } from './BrowserTimelineDetail'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
 // Inline markdown → safe JSX. We only resolve the tokens that are reliable to
@@ -213,33 +230,85 @@ function ScrapeRegion(props: {
   )
 }
 
-function compactBrowserUrl(value: string): string {
-  try {
-    const url = new URL(value)
-    const path = `${url.pathname}${url.search}`.replace(/\/$/, '')
-    return `${url.hostname}${path || '/'}`
-  } catch {
-    return value
-  }
-}
-
 function compactArtifactId(value: string): string {
   if (value.length <= 22) return value
   return `${value.slice(0, 9)}...${value.slice(-8)}`
 }
 
-function consoleTone(level: string): 'error' | 'warn' | 'info' {
-  const normalized = level.toLowerCase()
-  if (normalized.includes('error')) return 'error'
-  if (normalized.includes('warn')) return 'warn'
-  return 'info'
+const SESSION_STATUS_LABELS: Record<BrowserSessionViewModel['status'], string> = {
+  closed: 'Lukket',
+  degraded: 'Degradert',
+  live: 'Live',
 }
 
-function networkTone(status: number): 'error' | 'warn' | 'redirect' | 'ok' {
-  if (status >= 500) return 'error'
-  if (status >= 400) return 'warn'
-  if (status >= 300) return 'redirect'
-  return 'ok'
+const RENDER_MODE_LABELS: Record<BrowserSessionViewModel['renderMode'], string> = {
+  chromium: 'Chromium',
+  dom_snapshot: 'DOM-snapshot',
+  readability_fallback: 'Readability',
+}
+
+const PROFILE_SCOPE_LABELS: Record<BrowserSessionViewModel['profileScope'], string> = {
+  ephemeral: 'Efemer',
+  org_shared: 'Org-delt',
+  run_scoped: 'Kjøringsscopet',
+  user_private: 'Privat',
+}
+
+const LOOP_STATUS_LABELS: Record<BrowserLoopState['status'], string> = {
+  acting: 'Utfører',
+  done: 'Ferdig',
+  idle: 'Inaktiv',
+  paused: 'Pauset',
+  stopped: 'Stoppet',
+  suggesting: 'Foreslår',
+}
+
+/**
+ * Active-profile status strip: scope, name, persisted-or-not, and an explicit
+ * ephemeral/ZDR marker so a session without persistence never implies it.
+ * Probe data (cookies etc.) is shown when the composer probed this profile.
+ */
+function BrowserProfileStrip(props: {
+  profileProbe?: BrowserProfileRestoreProbe | null
+  session: BrowserSessionViewModel
+}) {
+  const probe = () => {
+    const current = props.profileProbe
+    return current && current.profile_id === props.session.profileId ? current : null
+  }
+  return (
+    <div class="knowledge-browser-profile-strip" aria-label="Aktiv nettleserprofil">
+      <span class="knowledge-browser-profile-strip__chip">
+        <Cookie class="size-3.5" aria-hidden="true" />
+        {PROFILE_SCOPE_LABELS[props.session.profileScope]}
+      </span>
+      <Show when={props.session.profileId}>
+        {(profileId) => (
+          <span class="knowledge-browser-profile-strip__chip" title={profileId()}>
+            <code>{compactArtifactId(profileId())}</code>
+          </span>
+        )}
+      </Show>
+      <span
+        class="knowledge-browser-profile-strip__chip"
+        classList={{ 'knowledge-browser-profile-strip__chip--persistent': props.session.profileStorage === 'persistent' }}
+      >
+        {props.session.profileStorage === 'persistent' ? 'Cookies lagres i profilen' : 'Cookies lagres ikke'}
+      </span>
+      <Show when={probe()}>
+        {(currentProbe) => (
+          <span class="knowledge-browser-profile-strip__chip">
+            {currentProbe().cookies_count} cookies · {currentProbe().restorable ? 'gjenopprettbar' : 'ikke gjenopprettbar'}
+          </span>
+        )}
+      </Show>
+      <Show when={evidenceIsEphemeral(props.session)}>
+        <span class="knowledge-browser-profile-strip__chip knowledge-browser-profile-strip__chip--zdr">
+          <ShieldCheck class="size-3.5" aria-hidden="true" /> ZDR — flyktig evidens, ingen lagring
+        </span>
+      </Show>
+    </div>
+  )
 }
 
 function BrowserObservationInspector(props: { session: BrowserSessionViewModel }) {
@@ -374,8 +443,14 @@ function BrowserObservationInspector(props: { session: BrowserSessionViewModel }
 
 function BrowserSessionSurface(props: {
   browserBusy?: boolean
+  browserLoop?: BrowserLoopState
+  browserRationales?: BrowserStepRationale[]
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
+  onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserLoopPause?: () => void
+  onBrowserLoopResume?: () => void
+  onBrowserLoopStop?: () => void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onEnter: (index: number) => void
   onLeave: (index: number) => void
@@ -383,6 +458,7 @@ function BrowserSessionSurface(props: {
   onSelectNone: () => void
   onToggle: (index: number) => void
   preview: ScrapePreview
+  profileProbe?: BrowserProfileRestoreProbe | null
   selected: Set<number>
   selectedChars: number
   selectedCount: number
@@ -397,11 +473,21 @@ function BrowserSessionSurface(props: {
   const [keyInput, setKeyInput] = createSignal('Enter')
   const [goalInput, setGoalInput] = createSignal('Capture useful evidence from this page')
   const [lastSuggestion, setLastSuggestion] = createSignal<BrowserActionSuggestionResponse | null>(null)
+  const [selectedTimelineStep, setSelectedTimelineStep] = createSignal<number | null>(null)
   const allSelected = () => props.total > 0 && props.selectedCount === props.total
   const isLive = () => session().renderMode === 'chromium'
   const controlsDisabled = () => !isLive() || props.browserBusy || !session().sessionId
+  const loopStatus = () => props.browserLoop?.status ?? 'idle'
+  const loopRunning = () => isBrowserLoopRunning(loopStatus())
+  const selectedTimelineEntry = () => {
+    const selected = selectedTimelineStep()
+    if (selected === null) return null
+    return session().timeline.find((entry) => entry.step === selected) ?? null
+  }
+  const selectedTimelineDetail = () => timelineDetail(session().timeline, selectedTimelineStep())
+  const selectedRationale = () => rationaleForStep(props.browserRationales ?? [], selectedTimelineStep())
   const frameUrl = () => {
-    const url = session().frameUrl
+    const url = selectedTimelineEntry()?.screenshotUrl ?? session().frameUrl
     return url && brokenFrameUrl() !== url ? url : null
   }
   const runAction = (action: BrowserAction) => {
@@ -414,6 +500,7 @@ function BrowserSessionSurface(props: {
   const keyValue = () => keyInput().trim() || 'Enter'
   const selectorActionDisabled = () => controlsDisabled() || selector().length === 0
   const typeActionDisabled = () => selectorActionDisabled() || textValue().length === 0
+  const modelLoopDisabled = () => controlsDisabled() || !props.onBrowserAutoRun
   const modelActionDisabled = () => controlsDisabled() || !props.onBrowserSuggestAction
   const navigateFromAddress = () => {
     const target = address() || session().url
@@ -425,12 +512,26 @@ function BrowserSessionSurface(props: {
     const suggestion = await props.onBrowserSuggestAction?.(goalInput().trim())
     setLastSuggestion(suggestion ?? null)
   }
+  const runModelLoop = async () => {
+    if (modelLoopDisabled()) return
+    setSelectedTimelineStep(null)
+    const suggestion = await props.onBrowserAutoRun?.(goalInput().trim())
+    setLastSuggestion(suggestion ?? null)
+  }
 
   createEffect(() => {
     const url = session().url
     if (url && lastObservedUrl() !== url) {
       setAddressInput(url)
       setLastObservedUrl(url)
+    }
+  })
+
+  createEffect(() => {
+    const selected = selectedTimelineStep()
+    if (selected === null) return
+    if (!session().timeline.some((entry) => entry.step === selected)) {
+      setSelectedTimelineStep(null)
     }
   })
 
@@ -520,6 +621,10 @@ function BrowserSessionSurface(props: {
         </span>
       </div>
 
+      <Show when={isLive()}>
+        <BrowserProfileStrip profileProbe={props.profileProbe} session={session()} />
+      </Show>
+
       <div class="knowledge-browser-canvas">
         <div class="knowledge-browser-canvas__meta">
           <span><Maximize2 class="size-3.5" /> {session().viewport.width} × {session().viewport.height}</span>
@@ -577,12 +682,19 @@ function BrowserSessionSurface(props: {
         >
           <div class="knowledge-browser-live-surface" aria-label="Live nettleserobservasjon">
             <div class="knowledge-browser-live-surface__toolbar">
-              <span>{session().status}</span>
-              <span>{session().profileLabel}</span>
+              <span
+                class={`knowledge-browser-status knowledge-browser-status--${session().status}`}
+                title={`Øktstatus: ${SESSION_STATUS_LABELS[session().status]}`}
+              >
+                {SESSION_STATUS_LABELS[session().status]}
+              </span>
+              <span class="knowledge-browser-mode-badge" title={`Gjengivelsesmodus: ${session().renderMode}`}>
+                {RENDER_MODE_LABELS[session().renderMode]}
+              </span>
               <span>{session().domNodes.length}/{session().nodeCount ?? session().domNodes.length} DOM</span>
               <span>{session().networkEntries.length} network</span>
               <Show when={session().frameArtifactId ?? session().screenshotArtifactId}>
-                {(artifactId) => <span>shot {artifactId()}</span>}
+                {(artifactId) => <span title={artifactId()}>shot {compactArtifactId(artifactId())}</span>}
               </Show>
               <Show when={session().visualObservationArtifactId}>
                 <span><Eye class="size-3.5" /> vision</span>
@@ -660,6 +772,50 @@ function BrowserSessionSurface(props: {
                 </button>
                 <button
                   type="button"
+                  aria-label="Kjør flere AI-foreslåtte nettlesersteg"
+                  title="AI-loop"
+                  disabled={modelLoopDisabled()}
+                  onClick={() => void runModelLoop()}
+                >
+                  <Play class="size-3.5" />
+                </button>
+                <Show when={loopRunning()}>
+                  <Show
+                    when={loopStatus() === 'paused'}
+                    fallback={
+                      <button
+                        type="button"
+                        class="knowledge-browser-loop-control"
+                        aria-label="Pause AI-loopen mellom steg"
+                        title="Pause AI-loop"
+                        onClick={() => props.onBrowserLoopPause?.()}
+                      >
+                        <Pause class="size-3.5" />
+                      </button>
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="knowledge-browser-loop-control"
+                      aria-label="Fortsett AI-loopen"
+                      title="Fortsett AI-loop"
+                      onClick={() => props.onBrowserLoopResume?.()}
+                    >
+                      <Play class="size-3.5" />
+                    </button>
+                  </Show>
+                  <button
+                    type="button"
+                    class="knowledge-browser-loop-control knowledge-browser-loop-control--stop"
+                    aria-label="Stopp AI-loopen"
+                    title="Stopp AI-loop"
+                    onClick={() => props.onBrowserLoopStop?.()}
+                  >
+                    <Square class="size-3.5" />
+                  </button>
+                </Show>
+                <button
+                  type="button"
                   aria-label="Klikk valgt selector"
                   title="Klikk"
                   disabled={selectorActionDisabled()}
@@ -705,6 +861,25 @@ function BrowserSessionSurface(props: {
                 </button>
               </div>
             </div>
+            <Show when={loopStatus() !== 'idle'}>
+              <div
+                class={`knowledge-browser-loop-state knowledge-browser-loop-state--${loopStatus()}`}
+                role="status"
+                aria-label="AI-loopstatus"
+              >
+                <Sparkles class="size-3.5" aria-hidden="true" />
+                <span>{LOOP_STATUS_LABELS[loopStatus()]}</span>
+                <Show when={(props.browserLoop?.step ?? 0) > 0}>
+                  <strong>{props.browserLoop?.step} steg utført</strong>
+                </Show>
+                <Show when={props.browserLoop?.goal}>
+                  {(goal) => <p title={goal()}>{goal()}</p>}
+                </Show>
+                <Show when={props.browserLoop?.error}>
+                  {(loopError) => <em>{loopError()}</em>}
+                </Show>
+              </div>
+            </Show>
             <Show when={lastSuggestion()?.suggestion.reason}>
               {(reason) => (
                 <div class="knowledge-browser-model-suggestion">
@@ -712,6 +887,51 @@ function BrowserSessionSurface(props: {
                   <span>{lastSuggestion()?.suggestion.done ? 'done' : lastSuggestion()?.suggestion.action?.type ?? 'no-action'}</span>
                   <p>{reason()}</p>
                 </div>
+              )}
+            </Show>
+            <Show when={session().timeline.length > 0}>
+              <div class="knowledge-browser-timeline" aria-label="Nettleserhistorikk">
+                <button
+                  type="button"
+                  classList={{ 'knowledge-browser-timeline__step--active': selectedTimelineStep() === null }}
+                  onClick={() => setSelectedTimelineStep(null)}
+                >
+                  <span>live</span>
+                  <strong>{session().title}</strong>
+                </button>
+                <For each={session().timeline.slice(-8)}>
+                  {(entry) => (
+                    <button
+                      type="button"
+                      classList={{ 'knowledge-browser-timeline__step--active': selectedTimelineStep() === entry.step }}
+                      title="Vis stegdetaljer med evidens"
+                      onClick={() => setSelectedTimelineStep((current) => (current === entry.step ? null : entry.step))}
+                    >
+                      <span>#{entry.step}</span>
+                      <strong>{entry.title || compactBrowserUrl(entry.url || session().url)}</strong>
+                      <Show when={rationaleForStep(props.browserRationales ?? [], entry.step) || entry.visualObservationArtifactId}>
+                        <span class="knowledge-browser-timeline__markers">
+                          <Show when={rationaleForStep(props.browserRationales ?? [], entry.step)}>
+                            <Sparkles class="size-3" aria-label="AI-foreslått steg" />
+                          </Show>
+                          <Show when={entry.visualObservationArtifactId}>
+                            <Eye class="size-3" aria-label="Visuell observasjon tilgjengelig" />
+                          </Show>
+                        </span>
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <Show when={selectedTimelineDetail()}>
+              {(detail) => (
+                <BrowserTimelineDetailPanel
+                  detail={detail()}
+                  onClose={() => setSelectedTimelineStep(null)}
+                  rationale={selectedRationale()}
+                  sessionId={session().sessionId}
+                />
               )}
             </Show>
             <div class="knowledge-browser-live-surface__workspace">
@@ -817,11 +1037,18 @@ function BrowserSessionSurface(props: {
 export function ScrapePreviewPanel(props: {
   adding: boolean
   browserBusy?: boolean
+  browserLoop?: BrowserLoopState
+  browserRationales?: BrowserStepRationale[]
   onBrowserAction?: (action: BrowserAction) => void
+  onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserLoopPause?: () => void
+  onBrowserLoopResume?: () => void
+  onBrowserLoopStop?: () => void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
   preview: ScrapePreview
+  profileProbe?: BrowserProfileRestoreProbe | null
 }) {
   // Mounted fresh per scrape (parent <Show keyed>), so default-select every block.
   const total = createMemo(() => props.preview.blocks.length)
@@ -892,8 +1119,14 @@ export function ScrapePreviewPanel(props: {
       >
         <BrowserSessionSurface
           browserBusy={props.browserBusy}
+          browserLoop={props.browserLoop}
+          browserRationales={props.browserRationales}
           hovered={hovered()}
           onBrowserAction={props.onBrowserAction}
+          onBrowserAutoRun={props.onBrowserAutoRun}
+          onBrowserLoopPause={props.onBrowserLoopPause}
+          onBrowserLoopResume={props.onBrowserLoopResume}
+          onBrowserLoopStop={props.onBrowserLoopStop}
           onBrowserSuggestAction={props.onBrowserSuggestAction}
           onEnter={enter}
           onLeave={leave}
@@ -901,6 +1134,7 @@ export function ScrapePreviewPanel(props: {
           onSelectNone={selectNone}
           onToggle={toggle}
           preview={props.preview}
+          profileProbe={props.profileProbe}
           selected={selected()}
           selectedChars={selectedChars()}
           selectedCount={selectedCount()}
