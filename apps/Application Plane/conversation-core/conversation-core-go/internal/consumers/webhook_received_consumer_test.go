@@ -326,3 +326,76 @@ func TestWebhookReceived_EventConnectionIDTakesPrecedenceOverLookup(t *testing.T
 		t.Errorf("looked up a connection despite the event already carrying one: %+v", fetcher.connectionKeys)
 	}
 }
+
+// --- object-field channel branching (Instagram vs Messenger) ----------------
+
+func metaMessagingPayload(object, entryID, senderID, text string) map[string]any {
+	return map[string]any{
+		"object": object,
+		"entry": []any{
+			map[string]any{
+				"id": entryID,
+				"messaging": []any{
+					map[string]any{
+						"sender":  map[string]any{"id": senderID},
+						"message": map[string]any{"mid": "m-1", "text": text},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestNormalize_InstagramObject_LabelsInstagram(t *testing.T) {
+	events, err := normalizeMetaWebhookPayload(metaMessagingPayload("instagram", "17841400000000000", "893000000000001", "Er dette på lager?"))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	if events[0].Provider != "instagram" {
+		t.Fatalf("provider = %q, want instagram", events[0].Provider)
+	}
+	if events[0].Subject != "Instagram message" {
+		t.Fatalf("subject = %q", events[0].Subject)
+	}
+	if events[0].ProviderThreadID != "17841400000000000:893000000000001" {
+		t.Fatalf("thread = %q, want igAccountId:igsid composite", events[0].ProviderThreadID)
+	}
+}
+
+func TestNormalize_PageObject_StaysMessenger(t *testing.T) {
+	events, err := normalizeMetaWebhookPayload(metaMessagingPayload("page", "page-1", "psid-1", "hello"))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(events) != 1 || events[0].Provider != "messenger" {
+		t.Fatalf("want 1 messenger event, got %+v", events)
+	}
+}
+
+func TestNormalize_UnknownObject_FallsBackToShapeSniffing(t *testing.T) {
+	payload := metaMessagingPayload("", "page-1", "psid-1", "hello")
+	delete(payload, "object")
+	events, err := normalizeMetaWebhookPayload(payload)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(events) != 1 || events[0].Provider != "messenger" {
+		t.Fatalf("legacy payloads without object must keep working; got %+v", events)
+	}
+}
+
+func TestNormalize_WhatsAppObject_NeverRunsMessagingExtractors(t *testing.T) {
+	// A whatsapp_business_account payload that ALSO carries a messaging[] shape
+	// must not produce a messenger/instagram event.
+	payload := metaMessagingPayload("whatsapp_business_account", "waba-1", "psid-1", "hello")
+	events, err := normalizeMetaWebhookPayload(payload)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("want 0 events (no changes[].value.messages), got %+v", events)
+	}
+}

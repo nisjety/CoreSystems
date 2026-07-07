@@ -113,7 +113,7 @@ func (c *WebhookReceivedConsumer) process(ctx context.Context, ev ingestionEvent
 	}
 
 	providerKey := strings.ToLower(strings.TrimSpace(ev.ProviderKey))
-	if providerKey != "whatsapp" && providerKey != "facebook" && providerKey != "meta" {
+	if providerKey != "whatsapp" && providerKey != "facebook" && providerKey != "meta" && providerKey != "instagram" {
 		// Not a channel this consumer handles (e.g. slack, github, shopify).
 		return outcomeAck
 	}
@@ -176,6 +176,10 @@ func (c *WebhookReceivedConsumer) resolveConnectionID(ctx context.Context, orgID
 		candidates = []string{"whatsapp", "meta"}
 	case "messenger":
 		candidates = []string{"facebook", "meta"}
+	case "instagram":
+		// IG DMs ride the Messenger Platform via the linked Page, so any of
+		// the Meta-family connections can carry the reply.
+		candidates = []string{"instagram", "meta", "facebook"}
 	default:
 		return ""
 	}
@@ -187,15 +191,21 @@ func (c *WebhookReceivedConsumer) resolveConnectionID(ctx context.Context, orgID
 	return connectionID
 }
 
-// normalizeMetaWebhookPayload extracts WhatsApp Cloud API and Messenger Send
-// API inbound message events from a raw Meta webhook body (the "object" +
-// "entry" envelope common to all Meta webhook callbacks). Non-message entries
-// (statuses, delivery, read, postback) are skipped, not errored — they are
-// valid Meta callbacks this consumer simply has nothing to store for.
+// normalizeMetaWebhookPayload extracts WhatsApp Cloud API, Messenger, and
+// Instagram Messaging inbound message events from a raw Meta webhook body (the
+// "object" + "entry" envelope common to all Meta webhook callbacks). The
+// top-level "object" field is authoritative for the channel: Instagram DMs use
+// the same entry[].messaging[] shape as Messenger, so shape-sniffing alone
+// mislabels them (confirmed 2026-07-07). Payloads without a recognized object
+// fall back to shape-sniffing for backward compatibility with stored events.
+// Non-message entries (statuses, delivery, read, postback) are skipped, not
+// errored — they are valid Meta callbacks this consumer has nothing to store
+// for.
 func normalizeMetaWebhookPayload(payload map[string]any) ([]conversation.InboundEvent, error) {
 	if payload == nil {
 		return nil, nil
 	}
+	object := strings.ToLower(strings.TrimSpace(stringFromMap(payload, "object")))
 	entries, _ := payload["entry"].([]any)
 	var events []conversation.InboundEvent
 	for _, rawEntry := range entries {
@@ -203,8 +213,17 @@ func normalizeMetaWebhookPayload(payload map[string]any) ([]conversation.Inbound
 		if !ok {
 			continue
 		}
-		events = append(events, normalizeWhatsAppEntry(entry)...)
-		events = append(events, normalizeMessengerEntry(entry)...)
+		switch object {
+		case "whatsapp_business_account":
+			events = append(events, normalizeWhatsAppEntry(entry)...)
+		case "page":
+			events = append(events, normalizeMessengerEntry(entry)...)
+		case "instagram":
+			events = append(events, normalizeInstagramEntry(entry)...)
+		default:
+			events = append(events, normalizeWhatsAppEntry(entry)...)
+			events = append(events, normalizeMessengerEntry(entry)...)
+		}
 	}
 	return events, nil
 }
@@ -311,6 +330,46 @@ func normalizeMessengerEntry(entry map[string]any) []conversation.InboundEvent {
 			Direction:         conversation.DirectionInbound,
 			Subject:           "Messenger message",
 			From:              conversation.ParticipantInput{Name: psid},
+			BodyText:          text,
+		})
+	}
+	return events
+}
+
+// normalizeInstagramEntry extracts Instagram Messaging inbound DMs. The wire
+// shape is identical to Messenger (entry[].messaging[]) — only the top-level
+// "object" distinguishes them — but the ids differ: entry.id is the IG
+// business-account id (not a page id) and sender.id is an IGSID. The composite
+// thread id therefore carries "igAccountId:igsid", which the outbound send op
+// (instagram.messages.send) resolves to the linked Page server-side.
+func normalizeInstagramEntry(entry map[string]any) []conversation.InboundEvent {
+	var events []conversation.InboundEvent
+	messaging, _ := entry["messaging"].([]any)
+	igAccountID := stringFromMap(entry, "id")
+	for _, rawItem := range messaging {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		message, ok := item["message"].(map[string]any)
+		if !ok {
+			// delivery/read/reaction events — not a message to store.
+			continue
+		}
+		sender, _ := item["sender"].(map[string]any)
+		igsid := stringFromMap(sender, "id")
+		text := strings.TrimSpace(stringFromMap(message, "text"))
+		if igsid == "" || text == "" {
+			continue
+		}
+		events = append(events, conversation.InboundEvent{
+			Provider:          "instagram",
+			ProviderEventID:   stringFromMap(message, "mid"),
+			ProviderMessageID: stringFromMap(message, "mid"),
+			ProviderThreadID:  fmt.Sprintf("%s:%s", igAccountID, igsid),
+			Direction:         conversation.DirectionInbound,
+			Subject:           "Instagram message",
+			From:              conversation.ParticipantInput{Name: igsid},
 			BodyText:          text,
 		})
 	}

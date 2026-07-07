@@ -726,6 +726,24 @@ func (s *Service) executeMeta(ctx context.Context, providerKey, token, operation
 			return nil, fmt.Errorf("body is required for messenger.messages.send")
 		}
 		return s.postBearer(ctx, pageToken, graphBase+"/"+url.PathEscape(pageID)+"/messages", body, nil)
+	case "instagram.messages.send":
+		// Instagram DMs send through the LINKED Facebook Page's /messages edge
+		// (Messenger Platform) with the IGSID as recipient — there is no
+		// IG-account-scoped send edge. Callers supply the IG business-account
+		// id (what inbound webhooks carry); the page + page token are resolved
+		// here.
+		igAccountID, err := requiredStringParam(params, "igAccountId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for instagram.messages.send")
+		}
+		igPageID, igPageToken, err := s.metaPageForInstagramAccount(ctx, graphBase, token, igAccountID)
+		if err != nil {
+			return nil, err
+		}
+		return s.postBearer(ctx, igPageToken, graphBase+"/"+url.PathEscape(igPageID)+"/messages", body, nil)
 	case "messenger.subscribed_apps":
 		pageID, err := requiredStringParam(params, "pageId")
 		if err != nil {
@@ -1020,6 +1038,39 @@ func (s *Service) metaPageAccessToken(ctx context.Context, graphBase, userToken,
 		return "", fmt.Errorf("Meta Page %s did not return an access token", pageID)
 	}
 	return token, nil
+}
+
+// metaPageForInstagramAccount resolves the Facebook Page linked to an Instagram
+// business account, returning the page id and page access token. Pages are
+// listed via /me/accounts with the instagram_business_account field expanded;
+// the match is on the IG business-account id (the id inbound IG webhooks carry
+// as entry.id).
+func (s *Service) metaPageForInstagramAccount(ctx context.Context, graphBase, userToken, igAccountID string) (string, string, error) {
+	resp, err := s.getBearerMap(ctx, userToken, graphBase+"/me/accounts?"+url.Values{
+		"fields": {"id,access_token,instagram_business_account{id}"},
+		"limit":  {"100"},
+	}.Encode(), nil)
+	if err != nil {
+		return "", "", err
+	}
+	pages, _ := resp["data"].([]any)
+	for _, raw := range pages {
+		page, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ig, _ := page["instagram_business_account"].(map[string]any)
+		if ig == nil || stringFromAny(ig["id"]) != igAccountID {
+			continue
+		}
+		pageID := stringFromAny(page["id"])
+		pageToken := stringFromAny(page["access_token"])
+		if pageID == "" || pageToken == "" {
+			return "", "", fmt.Errorf("Meta Page linked to Instagram account %s did not return an id/access token", igAccountID)
+		}
+		return pageID, pageToken, nil
+	}
+	return "", "", fmt.Errorf("no Meta Page linked to Instagram business account %s is reachable with this token", igAccountID)
 }
 
 func (s *Service) oktaHeaders(token string) (map[string]string, error) {

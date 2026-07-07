@@ -306,7 +306,7 @@ func TestSupportsSend(t *testing.T) {
 	// Every provider buildSendOperation maps must be reported as sendable —
 	// including whatsapp and messenger, the channels the human-reply fix targets.
 	// Case/whitespace are normalized like buildSendOperation does.
-	for _, p := range []string{"whatsapp", "messenger", "microsoft", "slack", "google", "WhatsApp", " Messenger "} {
+	for _, p := range []string{"whatsapp", "messenger", "instagram", "microsoft", "slack", "google", "WhatsApp", " Messenger "} {
 		if !SupportsSend(p) {
 			t.Errorf("SupportsSend(%q) = false, want true", p)
 		}
@@ -317,5 +317,42 @@ func TestSupportsSend(t *testing.T) {
 		if SupportsSend(p) {
 			t.Errorf("SupportsSend(%q) = true, want false", p)
 		}
+	}
+}
+
+func TestSend_Instagram_ResolvesLinkedPageServerSide(t *testing.T) {
+	var gotOp string
+	var gotParams, gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed actionRequestBody
+		_ = json.Unmarshal(raw, &parsed)
+		gotOp, gotParams, gotBody = parsed.Operation, parsed.Params, parsed.Body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"result":{"message_id":"ig_m_1"}}}}`))
+	}))
+	defer srv.Close()
+
+	res, err := newTestClient(t, srv.URL).Send(context.Background(), SendRequest{
+		Provider:         "instagram",
+		ConnectionID:     "c1",
+		ProviderThreadID: "17841400000000000:893000000000001",
+		BodyText:         "Ja, det er på lager!",
+	})
+	if err != nil {
+		t.Fatalf("instagram send err = %v", err)
+	}
+	if gotOp != "instagram.messages.send" {
+		t.Errorf("operation = %q, want instagram.messages.send", gotOp)
+	}
+	if gotParams["igAccountId"] != "17841400000000000" {
+		t.Errorf("igAccountId = %v, want the IG business-account id from the composite thread id", gotParams["igAccountId"])
+	}
+	recip, _ := gotBody["recipient"].(map[string]any)
+	if recip["id"] != "893000000000001" {
+		t.Errorf("recipient.id = %#v, want the IGSID", gotBody["recipient"])
+	}
+	if res.ProviderMessageID != "ig_m_1" {
+		t.Errorf("ProviderMessageID = %q", res.ProviderMessageID)
 	}
 }

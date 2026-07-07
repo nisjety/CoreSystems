@@ -2518,7 +2518,7 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "social.media.upload", true
 		case "whatsapp.business_accounts", "whatsapp.accounts", "whatsapp.phone_numbers", "whatsapp.templates", "whatsapp.messages.send":
 			return "social.whatsapp.manage", true
-		case "messenger.messages.send", "messenger.subscribed_apps":
+		case "messenger.messages.send", "messenger.subscribed_apps", "instagram.messages.send":
 			return "social.messenger.manage", true
 		case "ads.adaccounts", "meta.adaccounts", "ads.campaigns", "ads.campaign.create", "app_ads.campaign.create",
 			"ads.adsets", "ads.ads", "ads.creatives":
@@ -2593,6 +2593,7 @@ func actionRequiresApproval(providerKey, operation string) bool {
 			"instagram.media.create", "instagram.media.publish",
 			"whatsapp.messages.send",
 			"messenger.messages.send", "messenger.subscribed_apps",
+			"instagram.messages.send",
 			"ads.campaign.create", "app_ads.campaign.create",
 			"catalog.product.upsert", "catalog.batch",
 			"threads.container.create", "threads.publish":

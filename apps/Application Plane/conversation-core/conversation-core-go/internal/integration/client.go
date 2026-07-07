@@ -451,6 +451,30 @@ func buildSendOperation(req SendRequest) (operation string, params, body map[str
 			"messaging_type": "RESPONSE",
 		}
 		return operation, params, body, nil
+	case "instagram":
+		// Instagram DM send rides the Messenger Platform through the LINKED
+		// Facebook Page — integration-corev2 resolves the page + page token
+		// from the IG business-account id server-side. ProviderThreadID is the
+		// composite "igAccountId:igsid" written by the inbound webhook
+		// consumer; To[0] overrides the recipient IGSID.
+		igAccountID, igsid := splitChannelThreadID(req.ProviderThreadID)
+		if len(req.To) > 0 && strings.TrimSpace(req.To[0]) != "" {
+			igsid = strings.TrimSpace(req.To[0])
+		}
+		if igAccountID == "" {
+			return "", nil, nil, fmt.Errorf("instagram send requires an IG business-account id (composite provider_thread_id)")
+		}
+		if igsid == "" {
+			return "", nil, nil, fmt.Errorf("instagram send requires a recipient IGSID")
+		}
+		operation = "instagram.messages.send"
+		params = map[string]any{"igAccountId": igAccountID}
+		body = map[string]any{
+			"recipient":      map[string]any{"id": igsid},
+			"message":        map[string]any{"text": text},
+			"messaging_type": "RESPONSE",
+		}
+		return operation, params, body, nil
 	case "discord":
 		// Discord message delivery requires a bot token + gateway/REST bot
 		// integration, not the per-user OAuth token this path leases. Fail

@@ -1756,6 +1756,7 @@ func TestMetaActionCapabilityAndApprovalGates(t *testing.T) {
 		{operation: "pages.post", wantCap: "social.post.write"},
 		{operation: "whatsapp.messages.send", wantCap: "social.whatsapp.manage"},
 		{operation: "messenger.messages.send", wantCap: "social.messenger.manage"},
+		{operation: "instagram.messages.send", wantCap: "social.messenger.manage"},
 		{operation: "ads.campaign.create", wantCap: "social.ads.manage"},
 		{operation: "catalog.product.upsert", wantCap: "social.catalog.manage"},
 		{operation: "threads.publish", wantCap: "social.threads.manage"},

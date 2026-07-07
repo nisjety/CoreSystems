@@ -561,3 +561,76 @@ func TestExecuteRejectsUnsupportedOperation(t *testing.T) {
 		t.Fatalf("expected unsupported operation error")
 	}
 }
+
+func TestExecuteInstagramMessagesSendResolvesLinkedPage(t *testing.T) {
+	var sentBody map[string]any
+	var sentAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/accounts":
+			if got := r.Header.Get("Authorization"); got != "Bearer user-token" {
+				t.Fatalf("accounts Authorization = %q, want user token", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"id": "page-77", "access_token": "page-token-77",
+					"instagram_business_account": map[string]any{"id": "1784140000"}},
+				map[string]any{"id": "page-88", "access_token": "page-token-88"},
+			}})
+		case "/page-77/messages":
+			sentAuth = r.Header.Get("Authorization")
+			_ = json.NewDecoder(r.Body).Decode(&sentBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message_id": "ig_m_1"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{FacebookAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "instagram"},
+		AccessToken: "user-token",
+		Operation:   "instagram.messages.send",
+		Params:      map[string]any{"igAccountId": "1784140000"},
+		Body: map[string]any{
+			"recipient":      map[string]any{"id": "8930000001"},
+			"message":        map[string]any{"text": "Ja, på lager!"},
+			"messaging_type": "RESPONSE",
+		},
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	_ = result
+	if sentAuth != "Bearer page-token-77" {
+		t.Fatalf("send Authorization = %q, want the LINKED PAGE token", sentAuth)
+	}
+	recip, _ := sentBody["recipient"].(map[string]any)
+	if recip["id"] != "8930000001" {
+		t.Fatalf("recipient = %#v, want the IGSID", sentBody["recipient"])
+	}
+}
+
+func TestExecuteInstagramMessagesSendNoLinkedPageFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me/accounts" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"id": "page-88", "access_token": "page-token-88"},
+		}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{FacebookAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "instagram"},
+		AccessToken: "user-token",
+		Operation:   "instagram.messages.send",
+		Params:      map[string]any{"igAccountId": "1784140000"},
+		Body:        map[string]any{"recipient": map[string]any{"id": "x"}},
+	})
+	if err == nil {
+		t.Fatal("want error when no linked page matches the IG account")
+	}
+}
