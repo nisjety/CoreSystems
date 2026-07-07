@@ -319,6 +319,62 @@ export function artifactsForTimelineEntry(entry: BrowserTimelineViewEntry): Brow
   return artifacts
 }
 
+// --- Browser chrome open-state -------------------------------------------------
+
+export type BrowserChromePanel = 'actions' | 'devtools' | 'evidence'
+export type BrowserChromePopover = 'overflow' | 'profile'
+
+/**
+ * Open-state for the unified browser chrome: collapsible panels (manual action
+ * bar, right devtools panel, bottom evidence drawer) plus at most one anchored
+ * popover (profile/security from the padlock, or the overflow menu).
+ */
+export type BrowserChromeState = {
+  actionsOpen: boolean
+  devtoolsOpen: boolean
+  evidenceOpen: boolean
+  popover: BrowserChromePopover | null
+}
+
+export const initialBrowserChromeState: BrowserChromeState = {
+  actionsOpen: false,
+  devtoolsOpen: false,
+  evidenceOpen: false,
+  popover: null,
+}
+
+/**
+ * Immutably toggle one collapsible chrome panel. Panels are independent of one
+ * another, but any open popover closes: a popover is transient chrome and never
+ * survives a layout-changing interaction.
+ */
+export function toggleBrowserChromePanel(
+  state: BrowserChromeState,
+  panel: BrowserChromePanel,
+): BrowserChromeState {
+  switch (panel) {
+    case 'actions':
+      return { ...state, actionsOpen: !state.actionsOpen, popover: null }
+    case 'devtools':
+      return { ...state, devtoolsOpen: !state.devtoolsOpen, popover: null }
+    case 'evidence':
+      return { ...state, evidenceOpen: !state.evidenceOpen, popover: null }
+  }
+}
+
+/** Immutably toggle a popover; popovers are mutually exclusive. */
+export function toggleBrowserChromePopover(
+  state: BrowserChromeState,
+  popover: BrowserChromePopover,
+): BrowserChromeState {
+  return { ...state, popover: state.popover === popover ? null : popover }
+}
+
+/** Close any open popover; returns the same state object when nothing is open. */
+export function closeBrowserChromePopover(state: BrowserChromeState): BrowserChromeState {
+  return state.popover === null ? state : { ...state, popover: null }
+}
+
 // --- Model rationale (AI-suggested steps) -------------------------------------
 
 export type BrowserStepRationale = {

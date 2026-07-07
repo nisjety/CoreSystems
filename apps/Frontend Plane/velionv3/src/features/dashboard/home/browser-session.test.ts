@@ -4,10 +4,14 @@ import {
   artifactsForTimelineEntry,
   attachBrowserSession,
   browserSessionFromPreview,
+  closeBrowserChromePopover,
   describeTimelineDelta,
   evidenceIsEphemeral,
+  initialBrowserChromeState,
   rationaleForStep,
   timelineDetail,
+  toggleBrowserChromePanel,
+  toggleBrowserChromePopover,
   withStepRationale,
   type BrowserStepRationale,
   type BrowserTimelineViewEntry,
@@ -342,6 +346,61 @@ describe('artifact descriptors', () => {
 
   it('omits artifacts the gateway did not return', () => {
     expect(artifactsForTimelineEntry({ step: 4 })).toEqual([])
+  })
+})
+
+describe('browser chrome open-state', () => {
+  it('starts with every panel closed and no popover', () => {
+    expect(initialBrowserChromeState).toEqual({
+      actionsOpen: false,
+      devtoolsOpen: false,
+      evidenceOpen: false,
+      popover: null,
+    })
+  })
+
+  it('toggles one panel immutably without touching the others', () => {
+    const withDevtools = toggleBrowserChromePanel(initialBrowserChromeState, 'devtools')
+
+    expect(withDevtools).not.toBe(initialBrowserChromeState)
+    expect(initialBrowserChromeState.devtoolsOpen).toBe(false)
+    expect(withDevtools.devtoolsOpen).toBe(true)
+    expect(withDevtools.actionsOpen).toBe(false)
+    expect(withDevtools.evidenceOpen).toBe(false)
+
+    expect(toggleBrowserChromePanel(withDevtools, 'devtools').devtoolsOpen).toBe(false)
+  })
+
+  it('lets devtools, evidence, and the action bar be open at the same time', () => {
+    const state = toggleBrowserChromePanel(
+      toggleBrowserChromePanel(toggleBrowserChromePanel(initialBrowserChromeState, 'devtools'), 'evidence'),
+      'actions',
+    )
+
+    expect(state).toEqual({ actionsOpen: true, devtoolsOpen: true, evidenceOpen: true, popover: null })
+  })
+
+  it('closes any open popover when a panel is toggled', () => {
+    const withProfile = toggleBrowserChromePopover(initialBrowserChromeState, 'profile')
+
+    expect(toggleBrowserChromePanel(withProfile, 'evidence').popover).toBeNull()
+  })
+
+  it('keeps popovers mutually exclusive and toggleable', () => {
+    const withProfile = toggleBrowserChromePopover(initialBrowserChromeState, 'profile')
+    expect(withProfile.popover).toBe('profile')
+
+    const withOverflow = toggleBrowserChromePopover(withProfile, 'overflow')
+    expect(withOverflow.popover).toBe('overflow')
+
+    expect(toggleBrowserChromePopover(withOverflow, 'overflow').popover).toBeNull()
+  })
+
+  it('close is a no-op returning the same reference when nothing is open', () => {
+    const withProfile = toggleBrowserChromePopover(initialBrowserChromeState, 'profile')
+
+    expect(closeBrowserChromePopover(withProfile).popover).toBeNull()
+    expect(closeBrowserChromePopover(initialBrowserChromeState)).toBe(initialBrowserChromeState)
   })
 })
 

@@ -303,7 +303,7 @@ export function BrowserTimelineDetailPanel(props: {
           </header>
           <For
             each={consoleEntries()}
-            fallback={<p class="knowledge-browser-inspector__empty">Ingen console-hendelser i dette steget.</p>}
+            fallback={<p class="knowledge-browser-empty">Ingen console-hendelser i dette steget.</p>}
           >
             {(line) => (
               <div class={`knowledge-browser-console-row knowledge-browser-console-row--${consoleTone(line.level)}`}>
@@ -320,7 +320,7 @@ export function BrowserTimelineDetailPanel(props: {
           </header>
           <For
             each={networkEntries()}
-            fallback={<p class="knowledge-browser-inspector__empty">Ingen nettverkskall i dette steget.</p>}
+            fallback={<p class="knowledge-browser-empty">Ingen nettverkskall i dette steget.</p>}
           >
             {(call) => (
               <div class={`knowledge-browser-network-row knowledge-browser-network-row--${networkTone(call.status)}`}>
@@ -336,7 +336,7 @@ export function BrowserTimelineDetailPanel(props: {
       <div class="knowledge-browser-detail__artifacts">
         <For
           each={artifacts()}
-          fallback={<p class="knowledge-browser-inspector__empty">Ingen artefakter returnert for dette steget.</p>}
+          fallback={<p class="knowledge-browser-empty">Ingen artefakter returnert for dette steget.</p>}
         >
           {(artifact) => <ArtifactCard artifact={artifact} sessionId={props.sessionId} />}
         </For>
