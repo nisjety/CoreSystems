@@ -349,18 +349,18 @@ func (r *PGRepository) AddMessage(ctx context.Context, input AddMessageInput) (*
 WITH inserted AS (
 	INSERT INTO conversation_messages (
 		id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
-		body_text, body_html, internal, occurred_at, created_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+		body_text, body_html, internal, provider, provider_message_id, occurred_at, created_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
 	RETURNING id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
 		body_text, body_html, internal, provider, provider_message_id, provider_event_id, occurred_at, created_at
 ), updated AS (
 	UPDATE conversations
-	SET last_message_preview = $8, last_message_at = $11, updated_at = $11
+	SET last_message_preview = $8, last_message_at = $13, updated_at = $13
 	WHERE org_id = $2 AND id = $3
 )
 SELECT * FROM inserted`,
 		messageID, input.OrgID, input.ConversationID, input.Direction, senderType, input.ActorName,
-		input.ActorEmail, input.BodyText, input.BodyHTML, input.Internal, input.OccurredAt)
+		input.ActorEmail, input.BodyText, input.BodyHTML, input.Internal, input.Provider, input.ProviderMessageID, input.OccurredAt)
 	message, err := scanMessage(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

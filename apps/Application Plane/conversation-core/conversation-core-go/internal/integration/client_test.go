@@ -301,3 +301,21 @@ func TestSend_PerProviderOperationMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestSupportsSend(t *testing.T) {
+	// Every provider buildSendOperation maps must be reported as sendable —
+	// including whatsapp and messenger, the channels the human-reply fix targets.
+	// Case/whitespace are normalized like buildSendOperation does.
+	for _, p := range []string{"whatsapp", "messenger", "microsoft", "slack", "google", "WhatsApp", " Messenger "} {
+		if !SupportsSend(p) {
+			t.Errorf("SupportsSend(%q) = false, want true", p)
+		}
+	}
+	// discord is honestly unsupported; a plain email inbox / unknown provider has
+	// no send op and must stay store-only rather than erroring.
+	for _, p := range []string{"discord", "email", "", "fax", "unknown"} {
+		if SupportsSend(p) {
+			t.Errorf("SupportsSend(%q) = true, want false", p)
+		}
+	}
+}

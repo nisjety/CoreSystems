@@ -340,6 +340,19 @@ func classifyError(terminal bool, status int, respBytes []byte) *SendError {
 	}
 }
 
+// SupportsSend reports whether buildSendOperation has a real send mapping for
+// the given channel provider (whatsapp, messenger, microsoft, slack, google —
+// anything but discord/unknown). The human-reply path in conversation-core's
+// Service uses it to decide up front whether a conversation is deliverable
+// through this client, so a channel with no send op (e.g. a plain email inbox)
+// stays store-only instead of surfacing a terminal "unsupported provider"
+// error. It delegates to buildSendOperation so the supported-provider set can
+// never drift from the real send mapping.
+func SupportsSend(provider string) bool {
+	_, _, _, err := buildSendOperation(SendRequest{Provider: provider})
+	return !errors.Is(err, ErrUnsupportedProvider)
+}
+
 // buildSendOperation maps the channel provider to its integration-corev2 send
 // operation + request shape. Unknown providers are a terminal error.
 func buildSendOperation(req SendRequest) (operation string, params, body map[string]any, err error) {

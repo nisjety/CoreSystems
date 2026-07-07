@@ -7,11 +7,23 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 )
+
+// OutboundSender delivers a human agent's reply to the customer through
+// integration-corev2. *integration.Client satisfies it. A nil sender disables
+// outbound delivery: replies are stored but not sent (used in tests and when no
+// integration client is configured), so the Service never claims a send it
+// cannot perform.
+type OutboundSender interface {
+	Send(ctx context.Context, req integration.SendRequest) (*integration.SendResult, error)
+}
 
 type Service struct {
 	repository Repository
 	publisher  EventPublisher
+	sender     OutboundSender
 	now        func() time.Time
 }
 
@@ -22,6 +34,14 @@ func WithNow(now func() time.Time) Option {
 		if now != nil {
 			s.now = now
 		}
+	}
+}
+
+// WithSender wires the outbound delivery client used to actually send human
+// agent replies to channel-backed conversations (whatsapp, messenger, …).
+func WithSender(sender OutboundSender) Option {
+	return func(s *Service) {
+		s.sender = sender
 	}
 }
 
@@ -106,6 +126,20 @@ func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Messa
 	if input.OrgID == "" || input.ConversationID == "" || input.BodyText == "" {
 		return nil, fmt.Errorf("%w: org_id, conversation_id, and body_text are required", ErrInvalidInput)
 	}
+	// Human replies (outbound, non-internal) to a conversation backed by a
+	// channel with a real send operation must actually reach the customer. Send
+	// FIRST, then persist — so a send failure surfaces a real error and no
+	// phantom "sent" row is stored, instead of the previous false success where
+	// the row was written but nothing was delivered. Internal notes, store-only
+	// conversations (no channel ref) and channels with no send op are unaffected.
+	if !input.Internal && input.Direction == DirectionOutbound && s.sender != nil {
+		provider, providerMessageID, err := s.deliverReply(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		input.Provider = provider
+		input.ProviderMessageID = providerMessageID
+	}
 	message, err := s.repository.AddMessage(ctx, input)
 	if err != nil {
 		return nil, err
@@ -116,6 +150,49 @@ func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Messa
 	}
 	s.publish(ctx, subject, &ConversationDetail{ConversationSummary: ConversationSummary{ID: input.ConversationID, OrgID: input.OrgID}}, message, input.ActorUserID, nil)
 	return message, nil
+}
+
+// deliverReply sends a human agent's outbound reply to the customer through
+// integration-corev2 when the conversation is backed by a channel with a real
+// send operation. It returns the provider + provider message id to record on
+// the stored message. It is deliberately conservative about NOT sending:
+//   - a conversation with no channel thread ref (ErrNotFound) is store-only
+//     (returns "", "", nil) — preserving prior behavior for internal-only or
+//     unbound conversations;
+//   - a channel whose provider has no send mapping (e.g. a plain email inbox)
+//     is also store-only, so we never turn an undeliverable channel into a hard
+//     error for the agent.
+//
+// A send that IS attempted but fails returns ErrSendFailed (wrapping the
+// underlying cause) so the caller never persists a message the customer never
+// received and the Inbox never shows a phantom "Reply sent".
+func (s *Service) deliverReply(ctx context.Context, input AddMessageInput) (provider, providerMessageID string, err error) {
+	ref, refErr := s.repository.GetChannelThreadRefByConversation(ctx, input.OrgID, input.ConversationID)
+	if errors.Is(refErr, ErrNotFound) {
+		return "", "", nil
+	}
+	if refErr != nil {
+		return "", "", refErr
+	}
+	if !integration.SupportsSend(ref.Provider) {
+		return "", "", nil
+	}
+	result, sendErr := s.sender.Send(ctx, integration.SendRequest{
+		OrgID:            input.OrgID,
+		ActorUserID:      input.ActorUserID,
+		Provider:         ref.Provider,
+		ConnectionID:     ref.ConnectionID,
+		ProviderThreadID: ref.ProviderThreadID,
+		BodyText:         input.BodyText,
+		BodyHTML:         input.BodyHTML,
+	})
+	if sendErr != nil {
+		return "", "", fmt.Errorf("%w: %v", ErrSendFailed, sendErr)
+	}
+	if result != nil {
+		providerMessageID = result.ProviderMessageID
+	}
+	return ref.Provider, providerMessageID, nil
 }
 
 func (s *Service) UpdateStatus(ctx context.Context, input StatusUpdate) (*ConversationDetail, error) {

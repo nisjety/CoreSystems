@@ -68,20 +68,31 @@ func main() {
 	}
 
 	repository := conversation.NewRepository(db.Pool)
-	service := conversation.NewService(repository, publisher)
 
-	// PR-6 act-leg: outbound client to integration-corev2 for draft.reply sends.
-	// Constructed only when configured, so the executor never claims a send it
-	// cannot perform (a nil sender disables draft.reply execution honestly).
+	// Outbound client to integration-corev2, shared by the draft.reply act-leg
+	// AND the human-typed Inbox reply path. Constructed only when configured, so
+	// neither the executor nor the reply path ever claims a send it cannot
+	// perform (a nil sender disables outbound delivery honestly).
 	var sender consumers.OutboundSender
 	var integrationClient *integration.Client
 	if cfg.DraftReplySendEnabled() {
 		integrationClient = integration.NewClient(cfg.IntegrationBaseURL, cfg.IntegrationInternalKey)
 		sender = integrationClient
-		log.Printf("conversation-core-go: draft.reply outbound-send enabled via %s", cfg.IntegrationBaseURL)
+		log.Printf("conversation-core-go: outbound-send enabled via %s", cfg.IntegrationBaseURL)
 	} else {
-		log.Printf("conversation-core-go: draft.reply outbound-send disabled (INTEGRATION_BASE_URL / key unset)")
+		log.Printf("conversation-core-go: outbound-send disabled (INTEGRATION_BASE_URL / key unset)")
 	}
+
+	// The Service delivers human agent replies to channel-backed conversations
+	// (whatsapp, messenger, …) through the same integration client, so a "Reply
+	// sent" in the Inbox reflects a real delivery. When unconfigured, replies are
+	// stored without a false send claim. Only wire the sender when a real client
+	// exists — passing a typed-nil would make the Service attempt (and fail) sends.
+	serviceOpts := []conversation.Option{}
+	if integrationClient != nil {
+		serviceOpts = append(serviceOpts, conversation.WithSender(integrationClient))
+	}
+	service := conversation.NewService(repository, publisher, serviceOpts...)
 
 	// W4 HITL executor: when a human approves an action, promote the ticket
 	// (ticket.classification) or send the reply (draft.reply). Only runs when
