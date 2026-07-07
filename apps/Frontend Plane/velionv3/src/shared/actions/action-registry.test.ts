@@ -25,30 +25,17 @@ describe('action registry', () => {
     expect(pack.redactionPolicy).toBe('ids-and-summaries-only')
   })
 
-  it('keeps external URL security actions approval-gated', () => {
-    const reputation = getActionDescriptor('security.check_url_reputation')
-    const investigation = getActionDescriptor('security.investigate_url')
-
-    expect(reputation).toBeDefined()
-    expect(investigation).toBeDefined()
-    if (!reputation || !investigation) throw new Error('Expected security actions to be registered')
-
-    expect(reputation.requiresApproval).toBe(true)
-    expect(reputation.reversible).toBe(false)
-    expect(investigation.requiresApproval).toBe(true)
-    expect(investigation.reversible).toBe(false)
-
-    expect(reputation.inputSchema.safeParse({
-      url: 'https://example.com/docs',
-      allowExternalLookup: true,
-    }).success).toBe(true)
-
-    expect(investigation.inputSchema.safeParse({
-      url: 'https://example.com/suspicious',
-      allowExternalSubmission: true,
-      dataClass: 'customer',
-      visibility: 'unlisted',
-    }).success).toBe(false)
+  it('does not expose actions that have no reachable backend', () => {
+    // security.check_url_reputation / security.investigate_url described Web Risk
+    // and urlscan.io connectors that do not exist (absent from the frozen
+    // actions-surface contract, integration-corev2, and the gateway dispatcher),
+    // and agents.deploy_channel targeted the Channel Plane, which is docs-only
+    // today. An action contract without a backend is a misleading surface for
+    // humans and agents alike, so these ids must stay unregistered.
+    const ids = actionRegistry.map((action) => action.id)
+    expect(ids).not.toContain('security.check_url_reputation')
+    expect(ids).not.toContain('security.investigate_url')
+    expect(ids).not.toContain('agents.deploy_channel')
   })
 
   it('keeps social publishing approval-gated', () => {

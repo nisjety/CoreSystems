@@ -65,6 +65,11 @@ import {
   listRuns,
   type RunDetail,
 } from '@/shared/api/runs-client'
+import {
+  humanizeToolName,
+  summarizeToolArgs,
+  summarizeToolResult,
+} from '@/features/chat/components/chat-normalizers'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -492,22 +497,30 @@ export default function AgentRunConsole() {
       },
       onToolCall: (event) => {
         if (!event.id) return
+        // The wire carries the real tool name + args (provider/operation/params);
+        // surface them instead of a generic "Running…" placeholder so the console
+        // shows what the agent is actually invoking.
+        const summary = summarizeToolArgs(event.args)
         upsertById({
           id: `tool-${event.id}`,
           kind: 'tool',
-          title: event.name ?? 'Tool call',
-          detail: 'Running…',
+          title: humanizeToolName(event.name ?? 'Tool call'),
+          detail: summary || 'Running…',
           status: 'running',
           at: new Date().toISOString(),
         })
       },
       onToolResult: (event) => {
         if (!event.id) return
+        // Preserve the tool name captured on the matching tool_call — the result
+        // event has no name, and upsertById would otherwise clobber it with a
+        // generic "Tool result" label.
+        const priorTitle = state.timeline.find((item) => item.id === `tool-${event.id}`)?.title
         upsertById({
           id: `tool-${event.id}`,
           kind: 'tool',
-          title: 'Tool result',
-          detail: event.error ?? event.output ?? 'Completed.',
+          title: priorTitle ?? 'Tool result',
+          detail: summarizeToolResult(event),
           status: event.error ? 'error' : (event.status ?? 'done'),
           at: new Date().toISOString(),
         })

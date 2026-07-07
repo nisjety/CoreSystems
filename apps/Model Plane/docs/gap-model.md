@@ -53,7 +53,7 @@ Go durable control:
 
 Python labs:
   ✅ graph-lab-py         LangGraph/LangChain/Deep Agents prototyping only                — IMPLEMENTED (ReasoningGraph, BFS/DFS traversal, networkx export, tests)
-  ✅ eval-lab-py          regression/replay/model/agent evals only                        — IMPLEMENTED (EvalCase/EvalSuite/EvalRunner, exact-match scoring, tests)
+  ⚠️ eval-lab-py          exact-match eval scaffold only (unused)                         — SCAFFOLD: EvalCase/EvalSuite/EvalRunner + exact-string-match scoring + unit tests, but UNUSED — zero non-test references, not wired into any service, CI, or replay/regression loop (no real eval harness exists yet)
   ✅ provider-research-py SDK experiments only                                            — IMPLEMENTED (ProviderProfile/ModelProfile, cost ranking, capability matrix, budget filtering, tests)
 
 Cross-language infra (not in target list but implemented):

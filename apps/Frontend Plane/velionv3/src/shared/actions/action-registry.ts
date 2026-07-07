@@ -51,11 +51,6 @@ const ticketResolveInput = z.object({
   resolution: z.string().trim().max(500).optional(),
 })
 
-const agentInput = z.object({
-  agentId: z.string().min(1),
-  channel: z.enum(['chatbot', 'email', 'social']),
-})
-
 const workflowInput = z.object({
   workflowId: z.string().min(1),
   enabled: z.boolean(),
@@ -131,43 +126,6 @@ const brregLookupInput = z.object({
   size: z.number().int().min(1).max(20).default(8),
 })
 
-const httpUrl = z.string().trim().url().refine(
-  (value) => {
-    try {
-      const url = new URL(value)
-      return url.protocol === 'http:' || url.protocol === 'https:'
-    } catch {
-      return false
-    }
-  },
-  { message: 'URL must use http or https' },
-)
-
-const externalSecurityUrlInput = z.object({
-  url: httpUrl,
-  dataClass: z.enum(['public', 'organization', 'customer']).default('public'),
-  reason: z.string().trim().min(1).max(280).optional(),
-})
-
-const urlReputationInput = externalSecurityUrlInput.extend({
-  provider: z.literal('google_web_risk').default('google_web_risk'),
-  purpose: z.enum(['ingestion_guard', 'manual_review', 'model_tool']).default('manual_review'),
-  allowExternalLookup: z.literal(true),
-})
-
-const urlInvestigationInput = externalSecurityUrlInput.extend({
-  provider: z.literal('urlscan_io').default('urlscan_io'),
-  visibility: z.enum(['private', 'unlisted', 'public']).default('private'),
-  tags: z.array(z.string().trim().min(1).max(48)).max(10).optional(),
-  allowExternalSubmission: z.literal(true),
-}).refine(
-  (input) => input.dataClass === 'public' || input.visibility === 'private',
-  {
-    message: 'Non-public URLs require private scan visibility',
-    path: ['visibility'],
-  },
-)
-
 const runOutput = z.object({
   runId: z.string(),
   status: z.enum(['queued', 'planning', 'waiting_approval', 'executing', 'completed', 'failed']),
@@ -198,32 +156,6 @@ const ticketOutput = z.object({
 const scrapeOutput = z.object({
   title: z.string().optional(),
   url: z.string().optional(),
-})
-
-const urlReputationOutput = z.object({
-  id: z.string(),
-  checkedAt: z.string(),
-  verdict: z.enum(['safe', 'suspicious', 'malicious', 'unknown']),
-  provider: z.enum(['google_web_risk', 'local_feeds', 'policy_cache']).optional(),
-  matches: z.array(z.object({
-    provider: z.string(),
-    threatType: z.enum(['malware', 'social_engineering', 'unwanted_software', 'potentially_harmful_application', 'unknown']),
-    expiresAt: z.string().optional(),
-  })).default([]),
-  policy: z.object({
-    externalLookupUsed: z.boolean(),
-    nextAction: z.enum(['allow', 'warn', 'block', 'require_approval']),
-  }).optional(),
-})
-
-const urlInvestigationOutput = z.object({
-  id: z.string(),
-  status: z.enum(['queued', 'submitted', 'running', 'completed', 'failed', 'blocked_by_policy']),
-  provider: z.literal('urlscan_io'),
-  visibility: z.enum(['private', 'unlisted', 'public']),
-  submittedAt: z.string().optional(),
-  resultUrl: z.string().url().optional(),
-  verdict: z.enum(['safe', 'suspicious', 'malicious', 'unknown']).optional(),
 })
 
 // Registry entries are the product contract shared by humans and the Model Plane.
@@ -350,28 +282,6 @@ export const actionRegistry = [
     outputSchema: brregLookupOutput,
   },
   {
-    id: 'security.check_url_reputation',
-    label: 'Check URL reputation',
-    description: 'Ask the gateway to check a URL against the approved Web Risk connector before crawl, import, or model use.',
-    ownerPlane: 'ingestion',
-    risk: 'medium',
-    requiresApproval: true,
-    reversible: false,
-    inputSchema: urlReputationInput,
-    outputSchema: urlReputationOutput,
-  },
-  {
-    id: 'security.investigate_url',
-    label: 'Investigate URL',
-    description: 'Submit a URL to the approved urlscan.io connector with explicit visibility and audit controls.',
-    ownerPlane: 'ingestion',
-    risk: 'high',
-    requiresApproval: true,
-    reversible: false,
-    inputSchema: urlInvestigationInput,
-    outputSchema: urlInvestigationOutput,
-  },
-  {
     id: 'tickets.create',
     label: 'Create ticket',
     description: 'Create a durable support ticket from a conversation.',
@@ -469,17 +379,6 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: socialPublishInput,
     outputSchema: socialPostOutput,
-  },
-  {
-    id: 'agents.deploy_channel',
-    label: 'Deploy channel',
-    description: 'Publish an approved agent role to a selected customer channel.',
-    ownerPlane: 'application',
-    risk: 'high',
-    requiresApproval: true,
-    reversible: true,
-    inputSchema: agentInput,
-    outputSchema: runOutput,
   },
   {
     id: 'workflows.toggle_policy',

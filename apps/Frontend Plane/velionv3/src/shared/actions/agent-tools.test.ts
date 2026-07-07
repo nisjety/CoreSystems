@@ -36,13 +36,15 @@ describe('agent tool surface', () => {
 
   it('creates TanStack tool definitions with approval metadata', () => {
     const definitions = createVelionActionToolDefinitions()
-    const deploy = definitions.find((tool) => tool.name === 'agents.deploy_channel')
+    const blueprint = definitions.find(
+      (tool) => tool.name === 'operating_map.create_agent_blueprint',
+    )
 
-    expect(deploy?.needsApproval).toBe(true)
-    expect(deploy?.metadata).toMatchObject({
-      actionId: 'agents.deploy_channel',
+    expect(blueprint?.needsApproval).toBe(true)
+    expect(blueprint?.metadata).toMatchObject({
+      actionId: 'operating_map.create_agent_blueprint',
       ownerPlane: 'application',
-      risk: 'high',
+      risk: 'medium',
       reversible: true,
     })
   })

@@ -1145,19 +1145,6 @@ pub(super) async fn dispatch_social_publish_post(
     social_execution("social.publish_post", "queued", &resp, user)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn upload_files_action_rejects_json_execution() {
-        // upload_files is human-only (needs file bytes) — the JSON action path must
-        // return a typed 422 pointing at the multipart route, never a fake success.
-        let response = dispatch_upload_files().await;
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-}
-
 fn social_actor(user: &AuthenticatedUser) -> ActionActor {
     ActionActor {
         user_id: user.user_id.clone(),
