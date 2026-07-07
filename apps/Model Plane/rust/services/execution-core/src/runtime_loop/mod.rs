@@ -132,7 +132,11 @@ pub async fn execute_step(
     }
 
     let mode = PermissionMode::from_wire(permission_mode);
-    match permission::evaluate(mode, tool_name) {
+    // Operation-aware gate: `execute_provider_action` is classified by the
+    // `operation` embedded in `tool_input` (a read proceeds, a write pauses)
+    // rather than by tool name alone; `browser_agent` and other write-capable
+    // tools are gated by name.
+    match permission::evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
         PermissionDecision::AwaitApproval => return StepOutcome::awaiting_approval(),
         PermissionDecision::Allow => {}
