@@ -60,6 +60,11 @@ func newRouter(handler *Handler, internalKey string) *gin.Engine {
 		api.GET("/lists/:id", handler.GetList)
 		api.DELETE("/lists/:id", handler.DeleteList)
 		api.GET("/lists/:id/export.csv", handler.ExportCSV)
+
+		// Provider lead sync (PERSON DATA — provider_leads only; see
+		// internal/providerleads). Manual trigger + org-scoped GDPR erasure.
+		gated.POST("/internal/sync/provider-leads", handler.SyncProviderLeads)
+		gated.DELETE("/api/v1/provider-leads", handler.DeleteProviderLeads)
 	}
 
 	return router

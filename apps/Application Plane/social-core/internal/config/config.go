@@ -21,6 +21,8 @@ type Config struct {
 	PublishWorkerEnabled      bool
 	PublishWorkerPollInterval time.Duration
 	PublishWorkerBatchSize    int
+	MetricsWorkerEnabled      bool
+	MetricsWorkerPollInterval time.Duration
 	LinkedInAPIBaseURL        string
 	LinkedInAPIVersion        string
 	XAPIBaseURL               string
@@ -28,6 +30,13 @@ type Config struct {
 	FacebookGraphAPIBaseURL   string
 	TikTokAPIBaseURL          string
 	SnapchatAPIBaseURL        string
+	// Ads system wiring. Meta ads ride the same Graph API base as Pages; the
+	// Marketing API is versioned in lockstep with Graph. Google Ads API calls
+	// additionally require a developer token (`developer-token` header, from a
+	// Google Ads manager account's API Center) on top of the OAuth adwords
+	// scope — campaign workflows stay disabled until it is supplied.
+	GoogleAdsAPIBaseURL     string
+	GoogleAdsDeveloperToken string
 }
 
 func Load() (*Config, error) {
@@ -44,13 +53,17 @@ func Load() (*Config, error) {
 		PublishWorkerEnabled:      getEnvBool("SOCIAL_PUBLISH_WORKER_ENABLED", true),
 		PublishWorkerPollInterval: getEnvDuration("SOCIAL_PUBLISH_WORKER_POLL_INTERVAL", 5*time.Second),
 		PublishWorkerBatchSize:    getEnvInt("SOCIAL_PUBLISH_WORKER_BATCH_SIZE", 10),
+		MetricsWorkerEnabled:      getEnvBool("SOCIAL_METRICS_WORKER_ENABLED", true),
+		MetricsWorkerPollInterval: getEnvDuration("SOCIAL_METRICS_WORKER_POLL_INTERVAL", 6*time.Hour),
 		LinkedInAPIBaseURL:        strings.TrimRight(strings.TrimSpace(getEnv("LINKEDIN_API_BASE_URL", "https://api.linkedin.com")), "/"),
 		LinkedInAPIVersion:        strings.TrimSpace(getEnv("LINKEDIN_API_VERSION", "202606")),
 		XAPIBaseURL:               strings.TrimRight(strings.TrimSpace(getEnv("X_API_BASE_URL", "https://api.x.com")), "/"),
-		InstagramGraphAPIBaseURL:  strings.TrimRight(strings.TrimSpace(getEnv("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v23.0")), "/"),
-		FacebookGraphAPIBaseURL:   strings.TrimRight(strings.TrimSpace(getEnv("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v23.0")), "/"),
+		InstagramGraphAPIBaseURL:  strings.TrimRight(strings.TrimSpace(getEnv("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")), "/"),
+		FacebookGraphAPIBaseURL:   strings.TrimRight(strings.TrimSpace(getEnv("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")), "/"),
 		TikTokAPIBaseURL:          strings.TrimRight(strings.TrimSpace(getEnv("TIKTOK_API_BASE_URL", "https://open.tiktokapis.com")), "/"),
 		SnapchatAPIBaseURL:        strings.TrimRight(strings.TrimSpace(getEnv("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1")), "/"),
+		GoogleAdsAPIBaseURL:       strings.TrimRight(strings.TrimSpace(getEnv("GOOGLE_ADS_API_BASE_URL", "https://googleads.googleapis.com/v24")), "/"),
+		GoogleAdsDeveloperToken:   strings.TrimSpace(getEnv("GOOGLE_ADS_DEVELOPER_TOKEN", "")),
 	}
 
 	if cfg.DatabaseURL == "" {

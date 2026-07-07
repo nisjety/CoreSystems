@@ -613,21 +613,31 @@ func TestHTTPPublisherBlocksWithoutPublishCapability(t *testing.T) {
 	}
 }
 
-func TestHTTPPublisherPostsFacebookPageFeedWithLeasedToken(t *testing.T) {
-	var gotAuth string
+func TestHTTPPublisherPostsFacebookPageFeedWithExchangedPageToken(t *testing.T) {
+	var gotTokenLookupAuth, gotFeedAuth string
 	var gotBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/page_1/feed" {
-			t.Fatalf("path = %s, want /page_1/feed", r.URL.Path)
+		switch {
+		case r.URL.Path == "/page_1" && r.URL.Query().Get("fields") == "access_token":
+			// Meta requires a Page-scoped token for /feed and /photos, never
+			// the connecting user's own token — this exchange must happen
+			// before the actual publish call, and must be authorized with
+			// the ORIGINAL leased (user) token, not a page token.
+			gotTokenLookupAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"access_token":"page-scoped-token"}`))
+		case r.URL.Path == "/page_1/feed":
+			gotFeedAuth = r.Header.Get("Authorization")
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request: %v", err)
+			}
+			gotBody = string(data)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"page_1_post_1"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 		}
-		gotAuth = r.Header.Get("Authorization")
-		data, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read request: %v", err)
-		}
-		gotBody = string(data)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"page_1_post_1"}`))
 	}))
 	defer server.Close()
 
@@ -658,11 +668,164 @@ func TestHTTPPublisherPostsFacebookPageFeedWithLeasedToken(t *testing.T) {
 	if attempt.ExternalID != "page_1_post_1" {
 		t.Fatalf("external id = %q, want page_1_post_1", attempt.ExternalID)
 	}
-	if gotAuth != "Bearer leased-token" {
-		t.Fatalf("Authorization = %q, want leased token", gotAuth)
+	if gotTokenLookupAuth != "Bearer leased-token" {
+		t.Fatalf("page-token lookup Authorization = %q, want the leased user token", gotTokenLookupAuth)
+	}
+	if gotFeedAuth != "Bearer page-scoped-token" {
+		t.Fatalf("feed post Authorization = %q, want the exchanged page token, not the raw user token", gotFeedAuth)
 	}
 	if !strings.Contains(gotBody, "message=Native+Facebook+copy") {
 		t.Fatalf("request body = %q, want encoded Facebook message", gotBody)
+	}
+}
+
+func TestHTTPPublisherFacebookFailsClearlyWhenPageTokenLookupFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/page_1" {
+			t.Fatalf("unexpected request reached %s — should have failed before posting", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"insufficient permission"}`))
+	}))
+	defer server.Close()
+
+	broker := &fakeTokenBroker{token: &TokenLease{AccessToken: "leased-token"}}
+	publisher := NewHTTPPublisher(broker, server.Client(), PublisherConfig{FacebookGraphAPIBaseURL: server.URL})
+	attempt := publisher.Publish(context.Background(), PublishJob{
+		ID: "job_1", OrgID: "org_1", PostID: "post_1",
+	}, Post{
+		ID: "post_1", OrgID: "org_1", Body: "Facebook copy", Platforms: []string{"facebook"},
+	}, Account{
+		OrgID: "org_1", ProviderKey: "facebook", ConnectionID: "conn_1", Handle: "page_1",
+		Status: AccountStatusConnected, Capabilities: []string{"social.post.write"},
+	})
+
+	if attempt.Status != AttemptStatusFailed {
+		t.Fatalf("attempt status = %s, want failed", attempt.Status)
+	}
+}
+
+func TestHTTPPublisherInstagramWaitsForVideoProcessingBeforePublishing(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path+"?"+r.URL.RawQuery)
+		switch {
+		case r.URL.Path == "/ig_1/media":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"container_1"}`))
+		case r.URL.Path == "/container_1":
+			// Reports FINISHED on the very first poll — a video/REELS
+			// container must be checked at least once before media_publish
+			// is ever called, per Meta's async processing requirement.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status_code":"FINISHED"}`))
+		case r.URL.Path == "/ig_1/media_publish":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"ig_post_1"}`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	broker := &fakeTokenBroker{token: &TokenLease{AccessToken: "leased-token"}}
+	publisher := NewHTTPPublisher(broker, server.Client(), PublisherConfig{InstagramGraphAPIBaseURL: server.URL})
+	attempt := publisher.Publish(context.Background(), PublishJob{
+		ID: "job_1", OrgID: "org_1", PostID: "post_1",
+	}, Post{
+		ID: "post_1", OrgID: "org_1", Body: "Reel copy", Platforms: []string{"instagram"},
+		Media: []MediaRef{{Type: "video", URL: "https://cdn.test/reel.mp4"}},
+	}, Account{
+		OrgID: "org_1", ProviderKey: "instagram", ConnectionID: "conn_1", Handle: "ig_1",
+		Status: AccountStatusConnected, Capabilities: []string{"social.post.write"},
+	})
+
+	if attempt.Status != AttemptStatusSucceeded {
+		t.Fatalf("attempt status = %s, want succeeded: %#v", attempt.Status, attempt)
+	}
+	wantOrder := []string{"/ig_1/media?", "/container_1?fields=status_code", "/ig_1/media_publish?"}
+	if len(calls) != len(wantOrder) {
+		t.Fatalf("calls = %v, want %v", calls, wantOrder)
+	}
+	for i, want := range wantOrder {
+		if calls[i] != want {
+			t.Fatalf("call[%d] = %q, want %q (status must be checked before publish)", i, calls[i], want)
+		}
+	}
+}
+
+func TestHTTPPublisherInstagramFailsWithoutPublishingWhenVideoProcessingErrors(t *testing.T) {
+	publishCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ig_1/media":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"container_1"}`))
+		case "/container_1":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status_code":"ERROR"}`))
+		case "/ig_1/media_publish":
+			publishCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"ig_post_1"}`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	broker := &fakeTokenBroker{token: &TokenLease{AccessToken: "leased-token"}}
+	publisher := NewHTTPPublisher(broker, server.Client(), PublisherConfig{InstagramGraphAPIBaseURL: server.URL})
+	attempt := publisher.Publish(context.Background(), PublishJob{
+		ID: "job_1", OrgID: "org_1", PostID: "post_1",
+	}, Post{
+		ID: "post_1", OrgID: "org_1", Body: "Reel copy", Platforms: []string{"instagram"},
+		Media: []MediaRef{{Type: "video", URL: "https://cdn.test/reel.mp4"}},
+	}, Account{
+		OrgID: "org_1", ProviderKey: "instagram", ConnectionID: "conn_1", Handle: "ig_1",
+		Status: AccountStatusConnected, Capabilities: []string{"social.post.write"},
+	})
+
+	if attempt.Status != AttemptStatusFailed {
+		t.Fatalf("attempt status = %s, want failed", attempt.Status)
+	}
+	if publishCalled {
+		t.Fatal("media_publish must not be called when the container reports ERROR")
+	}
+}
+
+func TestHTTPPublisherInstagramSkipsStatusPollForImages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ig_1/media":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"container_1"}`))
+		case "/ig_1/media_publish":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"ig_post_1"}`))
+		default:
+			// Images process near-instantly and Meta does not document a
+			// wait requirement for them -- a status-check call here would
+			// mean the image fast path regressed.
+			t.Fatalf("unexpected request for an image post: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	broker := &fakeTokenBroker{token: &TokenLease{AccessToken: "leased-token"}}
+	publisher := NewHTTPPublisher(broker, server.Client(), PublisherConfig{InstagramGraphAPIBaseURL: server.URL})
+	attempt := publisher.Publish(context.Background(), PublishJob{
+		ID: "job_1", OrgID: "org_1", PostID: "post_1",
+	}, Post{
+		ID: "post_1", OrgID: "org_1", Body: "Photo copy", Platforms: []string{"instagram"},
+		Media: []MediaRef{{Type: "image", URL: "https://cdn.test/photo.jpg"}},
+	}, Account{
+		OrgID: "org_1", ProviderKey: "instagram", ConnectionID: "conn_1", Handle: "ig_1",
+		Status: AccountStatusConnected, Capabilities: []string{"social.post.write"},
+	})
+
+	if attempt.Status != AttemptStatusSucceeded {
+		t.Fatalf("attempt status = %s, want succeeded: %#v", attempt.Status, attempt)
 	}
 }
 

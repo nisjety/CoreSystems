@@ -15,7 +15,9 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/database"
 	apphttp "github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/http"
+	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/integration"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/leads"
+	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/providerleads"
 )
 
 func main() {
@@ -37,7 +39,21 @@ func main() {
 	repository := leads.NewRepository(db.Pool)
 	service := leads.NewService(repository, brreg.NewClient())
 
-	// Optional best-effort per-export audit → NATS → audit-core.
+	// Provider lead sync (LinkedIn Lead Gen forms via integration-corev2's
+	// actions gateway). PERSON DATA is confined to provider_leads — see
+	// internal/providerleads and README.md ("PII posture").
+	var syncer *providerleads.Syncer
+	providerLeadRepo := providerleads.NewRepository(db.Pool)
+	if cfg.IntegrationCoreURL != "" {
+		syncer = providerleads.NewSyncer(integration.NewClient(integration.Config{
+			BaseURL:        cfg.IntegrationCoreURL,
+			InternalAPIKey: cfg.InternalAPIKey,
+		}), providerLeadRepo)
+	} else {
+		log.Printf("leads-core: provider-lead sync disabled (INTEGRATION_CORE_URL is empty)")
+	}
+
+	// Optional best-effort per-export + per-sync-run audit → NATS → audit-core.
 	if cfg.NATSURL != "" {
 		publisher, perr := audit.Connect(cfg.NATSURL, cfg.NATSToken, cfg.ServiceName)
 		if perr != nil {
@@ -45,11 +61,23 @@ func main() {
 		} else {
 			defer publisher.Close()
 			service.SetAudit(publisher)
+			if syncer != nil {
+				syncer.SetAudit(publisher)
+			}
 			log.Printf("leads-core: per-export audit enabled")
 		}
 	}
 
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+	if syncer != nil && cfg.ProviderLeadSyncEnabled {
+		worker := providerleads.NewWorker(syncer, cfg.ProviderLeadSyncInterval)
+		go worker.Start(workerCtx)
+		log.Printf("leads-core: provider-lead sync worker enabled (interval %s)", cfg.ProviderLeadSyncInterval)
+	}
+
 	handler := apphttp.NewHandler(cfg, service)
+	handler.SetProviderLeads(syncer, providerLeadRepo)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
 
 	errCh := make(chan error, 1)

@@ -200,7 +200,12 @@ func (c *Client) do(req *http.Request, target any) error {
 
 func isSocialProvider(providerKey string) bool {
 	switch providerKey {
-	case "linkedin", "x", "instagram", "facebook", "tiktok", "snapchat":
+	// "meta" is the unified Meta connection (Facebook Pages + Instagram +
+	// WhatsApp + Meta Ads in one grant); the four legacy keys stay accepted for
+	// pre-consolidation connections. Ads readiness is expressed via the
+	// social.ads.manage capability carried on the account, not a separate
+	// provider.
+	case "linkedin", "x", "meta", "instagram", "facebook", "whatsapp", "meta-ads", "tiktok", "snapchat":
 		return true
 	default:
 		return false
@@ -217,6 +222,12 @@ func normalizeProvider(value string) string {
 		return "tiktok"
 	case "facebook-page", "facebook-pages", "meta-facebook":
 		return "facebook"
+	case "meta-business", "meta-suite", "facebook-business", "meta-unified":
+		return "meta"
+	case "meta_ads", "facebook-ads", "facebook-marketing", "meta-marketing":
+		return "meta-ads"
+	case "whatsapp-business", "whatsapp-cloud":
+		return "whatsapp"
 	case "snap", "snapchat-ads", "snapchat-marketing":
 		return "snapchat"
 	default:

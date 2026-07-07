@@ -64,6 +64,10 @@ type drainPublishBody struct {
 	Limit int `json:"limit"`
 }
 
+type snapshotMetricsBody struct {
+	OrgID string `json:"org_id"`
+}
+
 func (h *Handler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "service": h.cfg.ServiceName})
 }
@@ -312,6 +316,84 @@ func (h *Handler) DrainPublishJobs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"processed": processed}})
+}
+
+// SnapshotMetrics is the manual trigger for the metrics worker, mirroring
+// DrainPublishJobs. Org scope is optional: x-org-id (or org_id in the body)
+// snapshots one org; otherwise every org with synced accounts is covered.
+func (h *Handler) SnapshotMetrics(c *gin.Context) {
+	var body snapshotMetricsBody
+	_ = decodeJSONBody(c, &body)
+	orgID := strings.TrimSpace(c.GetHeader("x-org-id"))
+	if orgID == "" {
+		orgID = strings.TrimSpace(body.OrgID)
+	}
+	summary, err := h.service.SnapshotProviderMetrics(c.Request.Context(), orgID)
+	if err != nil {
+		log.Printf("social-core: manual metrics snapshot failed: %v", err)
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": summary})
+}
+
+// ListMetrics is the read side of SnapshotMetrics: internal-only (same
+// requireInternalKey gate as the rest of /api/v1/social), used by
+// insight-core to fetch real metric values after a metrics.snapshotted event
+// (which intentionally carries only a summary count, not the values).
+func (h *Handler) ListMetrics(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	filter := social.ProviderMetricsFilter{
+		OrgID:     orgID,
+		AccountID: c.Query("accountId"),
+	}
+	if raw := strings.TrimSpace(c.Query("snapshotDate")); raw != "" {
+		parsed, err := time.Parse("2006-01-02", raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, errorPayload("invalid_snapshot_date", "snapshotDate must be YYYY-MM-DD"))
+			return
+		}
+		filter.SnapshotDate = parsed
+	}
+	metrics, err := h.service.ListProviderMetrics(c.Request.Context(), filter)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": metrics})
+}
+
+// ListCatalogs and ListCatalogProducts are the read-only commerce/catalog
+// surface (task #29 — see internal/social/catalog.go for the owner
+// decision). Meta Commerce Catalog only; Shopify commerce data is a
+// conversation-core concern, not implemented here.
+func (h *Handler) ListCatalogs(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	catalogs, err := h.service.ListCatalogs(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": catalogs})
+}
+
+func (h *Handler) ListCatalogProducts(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	products, err := h.service.ListCatalogProducts(c.Request.Context(), orgID, c.Query("accountId"), c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": products})
 }
 
 func decodeJSONBody(c *gin.Context, target any) error {
