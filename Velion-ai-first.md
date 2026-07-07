@@ -1,5 +1,30 @@
 # Velion — AI-First Audit & Roadmap
 
+> **Update 2026-07-07 — remediation LANDED on main.** The follow-up audits of 2026-07-05
+> (integration surfacing; isolation/KB/boundaries) and the five-stream remediation program
+> they triggered are merged and verified: Stream 1 Model Plane trust chain (server-pinned
+> Auto/Ask posture, durable approval binding replacing the hardcoded marker, operation-aware
+> read/write risk gating incl. `browser_agent`, `ExecuteStep` user_id cross-user-leak fix,
+> browser planner through the cost-aware intent layer) · Stream 2 Data/Ingestion knowledge
+> integrity (GDPR/ZDR metadata survives the ingest wire, SharePoint/Notion real content
+> capture, GitHub/Slack sync worker, embedding + graph extraction routed through Model Plane —
+> live-smoke-tested e2e) · Stream 3a Inbox (WhatsApp/Messenger send-before-persist — the
+> silent reply-drop false-success bug is dead; tickets.* dispatchers wired; `inbox.draft_reply`
+> registry orphan removed) · Stream 3b Social (metrics/catalog gateway routes + UI, REAL
+> ApprovalState check before publish/schedule, leads CSV formula-injection guard) · Stream 3c
+> Workspace/Agents (AgentRunConsole shows real tool args, backend-less `security.*`/
+> `agents.deploy_channel` registry entries dropped, eval-lab-py "IMPLEMENTED" claim corrected).
+> Additionally landed the same day: org-core RLS verified ACTIVE on the live DB (functional
+> probe), full Instagram DM channel (object-aware webhook branching + `instagram.messages.send`),
+> conversation-core ZDR tripwire, eval-harness MVP scope (`docs/EVAL_HARNESS_MVP.md`).
+> Verification: gateway 160/160 (clean-room at merged HEAD), model-gateway 285/285,
+> execution-core 117/117, quarry-runtime 392/392, all Go suites green. The 2026-06-19 IDOR
+> and fabricated-trust-UI findings below were already fixed earlier and remain closed
+> (regression-tested). Still open: shared INTERNAL_API_KEY split (proposal:
+> `apps/Model Plane/docs/internal-api-key-split-proposal.md`), Gmail/Outlook inbound +
+> Snapchat publisher + Shopify context card + eval harness (approved build wave), Discord
+> bot (phase after). Sections below are retained as the 2026-06-19 baseline snapshot.
+
 > **Date:** 2026-06-19 · **Scope:** Velion v3 (main app) + every CoreSystem plane and core.
 > **Method:** Structural audit via codegraph (3,076 files / 56k symbols indexed) + context-mode, a 16-agent parallel audit workflow (2.48M tokens, 325 tool calls), an 18-area competitive benchmark mapping, and a 5-persona advisory **council** with chair synthesis. Findings captured to MemPalace (KG + diary + drawer), context-mode index, and Logseq.
 > **Product thesis:** *An intelligence-to-action workbench for the Norwegian market — extract data, monitor change, generate briefs, route through inbox/tickets, and publish, all after human approval.*
