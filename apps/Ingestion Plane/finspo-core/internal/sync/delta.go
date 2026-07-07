@@ -54,6 +54,15 @@ type PermissionAwareSourceObjectSink interface {
 	UpsertSourceObjectWithPermissions(ctx context.Context, source store.Source, item store.Item, permissions []store.Permission) error
 }
 
+// ContentSink forwards a synced file's extracted text to Data Plane v2 as a
+// content-bearing document. Optional and nil-safe: when unset the engine
+// captures metadata only (the historical behavior). Implemented by
+// *content.Ingestor. Calls are best-effort — one file's failure is logged and
+// the page continues.
+type ContentSink interface {
+	IngestItemContent(ctx context.Context, source store.Source, item store.Item) error
+}
+
 // PermissionsFetcher is the narrow Graph surface the engine needs to capture
 // ACLs. Implemented by *sharepoint.PermissionsClient.
 type PermissionsFetcher interface {
@@ -78,6 +87,7 @@ type Engine struct {
 	permissionsFetcher PermissionsFetcher
 	permissionsStore   PermissionsStore
 	capturePerms       bool
+	content            ContentSink
 	subjects           events.Subjects
 	logger             zerolog.Logger
 	pageLimit          int
@@ -101,6 +111,10 @@ type Config struct {
 	PermissionsStore   PermissionsStore
 	CapturePermissions bool
 
+	// Content, when non-nil, forwards each synced file's extracted text to Data
+	// Plane v2 as a document. Nil keeps the metadata-only behavior.
+	Content ContentSink
+
 	// PageLimit caps the number of delta pages followed in a single SyncDrive
 	// call. 0 means "no cap" — useful for tests, but production deployments
 	// should set a finite value so a runaway initial crawl cannot starve
@@ -119,6 +133,7 @@ func NewEngine(cfg Config) *Engine {
 		permissionsFetcher: cfg.PermissionsFetcher,
 		permissionsStore:   cfg.PermissionsStore,
 		capturePerms:       cfg.CapturePermissions,
+		content:            cfg.Content,
 		subjects:           cfg.Subjects,
 		logger:             cfg.Logger,
 		pageLimit:          cfg.PageLimit,
@@ -306,6 +321,17 @@ func (e *Engine) processPage(ctx context.Context, source store.Source, page shar
 				}
 			} else if err := e.sink.UpsertSourceObject(ctx, source, res.Item); err != nil {
 				return upserts, deletes, fmt.Errorf("upsert data-plane source object %s: %w", item.ID, err)
+			}
+		}
+		// Content ingest is best-effort and gated on a configured ContentSink:
+		// a single unreadable/oversized file must not abort the page or fail the
+		// metadata sync it rides alongside. Folders are skipped inside the sink.
+		if e.content != nil && !item.IsFolder() {
+			if err := e.content.IngestItemContent(ctx, source, res.Item); err != nil {
+				e.logger.Warn().Err(err).
+					Str("source_id", source.ID.String()).
+					Str("item_id", item.ID).
+					Msg("content ingest failed; continuing")
 			}
 		}
 		upserts++

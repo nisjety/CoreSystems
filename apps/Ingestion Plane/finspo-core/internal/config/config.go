@@ -30,8 +30,17 @@ type Config struct {
 	DataPlaneAPIKey       string
 
 	// Phase 3 — scheduler + permission capture knobs.
-	SyncInterval        time.Duration
-	CapturePermissions  bool
+	SyncInterval       time.Duration
+	CapturePermissions bool
+
+	// Content capture — download each synced file's bytes, extract text, and
+	// forward a content-bearing document to Data Plane v2. Defaults OFF: it is a
+	// heavier operation (a download + extraction per file) with PII/cost
+	// implications, so a deployment opts in explicitly. Requires
+	// DataPlaneDocumentsURL + DataPlaneAPIKey to be set as well.
+	CaptureContent           bool
+	ContentMaxBytes          int64
+	ContentZDRClassification string
 
 	// Phase 5 — governance execution knobs.
 	// AllowExecution is a hard kill-switch for destructive Graph operations.
@@ -68,25 +77,40 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Port:                  port,
-		APIKey:                apiKey,
-		APIKeyHeader:          apiKeyHeader,
-		GraphBaseURL:          graphBaseURL,
-		IntegrationCoreURL:    integrationCoreURL,
-		InternalAPIKey:        internalAPIKey,
-		Environment:           envOr("ENVIRONMENT", "dev"),
-		ServiceName:           envOr("SERVICE_NAME", "finspo-core"),
-		DatabaseURL:           databaseURL,
-		NATSURL:               strings.TrimSpace(os.Getenv("NATS_URL")),
-		NATSSubjectPrefix:     envOr("NATS_SUBJECT_PREFIX", "finspo"),
-		OTELExporterEndpoint:  strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
-		DataPlaneDocumentsURL: strings.TrimSpace(os.Getenv("DATA_PLANE_DOCUMENTS_BASE_URL")),
-		DataPlaneAPIKey:       strings.TrimSpace(os.Getenv("DATA_PLANE_INTERNAL_API_KEY")),
-		SyncInterval:          envDuration("FINSPO_SYNC_INTERVAL", 5*time.Minute),
-		CapturePermissions:    envBool("FINSPO_CAPTURE_PERMISSIONS", true),
-		AllowExecution:        envBool("FINSPO_ALLOW_EXECUTION", false),
-		ArchiveFolderID:       strings.TrimSpace(os.Getenv("FINSPO_ARCHIVE_FOLDER_ID")),
+		Port:                     port,
+		APIKey:                   apiKey,
+		APIKeyHeader:             apiKeyHeader,
+		GraphBaseURL:             graphBaseURL,
+		IntegrationCoreURL:       integrationCoreURL,
+		InternalAPIKey:           internalAPIKey,
+		Environment:              envOr("ENVIRONMENT", "dev"),
+		ServiceName:              envOr("SERVICE_NAME", "finspo-core"),
+		DatabaseURL:              databaseURL,
+		NATSURL:                  strings.TrimSpace(os.Getenv("NATS_URL")),
+		NATSSubjectPrefix:        envOr("NATS_SUBJECT_PREFIX", "finspo"),
+		OTELExporterEndpoint:     strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+		DataPlaneDocumentsURL:    strings.TrimSpace(os.Getenv("DATA_PLANE_DOCUMENTS_BASE_URL")),
+		DataPlaneAPIKey:          strings.TrimSpace(os.Getenv("DATA_PLANE_INTERNAL_API_KEY")),
+		SyncInterval:             envDuration("FINSPO_SYNC_INTERVAL", 5*time.Minute),
+		CapturePermissions:       envBool("FINSPO_CAPTURE_PERMISSIONS", true),
+		CaptureContent:           envBool("FINSPO_CAPTURE_CONTENT", false),
+		ContentMaxBytes:          envInt64("FINSPO_CONTENT_MAX_BYTES", 0),
+		ContentZDRClassification: envOr("FINSPO_CONTENT_ZDR_CLASSIFICATION", "internal"),
+		AllowExecution:           envBool("FINSPO_ALLOW_EXECUTION", false),
+		ArchiveFolderID:          strings.TrimSpace(os.Getenv("FINSPO_ARCHIVE_FOLDER_ID")),
 	}, nil
+}
+
+func envInt64(key string, fallback int64) int64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
