@@ -49,6 +49,12 @@ def _get_client() -> httpx.AsyncClient:
     return http_client
 
 
+def get_http_client() -> httpx.AsyncClient:
+    """Public accessor for the shared httpx client (used by the knowledge-sync
+    actions-gateway wiring in main.py)."""
+    return _get_client()
+
+
 async def _get_shared_nats_publisher():
     """Get the global shared NATS publisher from main.py."""
     try:

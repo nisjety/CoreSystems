@@ -47,6 +47,11 @@ class Settings(BaseSettings):
         alias="AUTH_CORE_URL",
     )
 
+    # integration-corev2 base URL for the GitHub/Slack knowledge content-sync
+    # worker (connections + actions surface). Empty disables the worker (the
+    # trigger endpoint returns 503 "not configured"). Auth reuses internal_api_key.
+    integration_core_url: str = Field(default="", alias="INTEGRATION_CORE_URL")
+
     temporal_enabled: bool = Field(default=False, alias="TEMPORAL_ENABLED")
     temporal_host_port: str = Field(default="localhost:7233", alias="TEMPORAL_HOST_PORT")
     temporal_namespace: str = Field(default="default", alias="TEMPORAL_NAMESPACE")
