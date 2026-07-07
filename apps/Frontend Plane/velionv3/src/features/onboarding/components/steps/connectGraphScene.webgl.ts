@@ -389,7 +389,7 @@ export function createConnectGraphScene(
       graph.graph2ScreenCoords(node.x, node.y + radius, node.z),
       graph.graph2ScreenCoords(node.x, node.y, node.z + radius),
     ]
-      .filter((coords): coords is { x: number; y: number } => Boolean(coords))
+      .filter((coords): coords is { x: number; y: number; z: number } => Boolean(coords))
       .map((coords) => Math.hypot(coords.x - center.x, coords.y - center.y))
 
     const projectedRadius = Math.max(...projectedRadii, 7) * 0.92
