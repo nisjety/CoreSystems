@@ -53,7 +53,9 @@ pub(crate) struct BrowserRunMetadata {
     profile_id: Option<String>,
     persistent_profile: bool,
     last_observation: Option<Value>,
+    observation_history: Vec<Value>,
     viewport: Viewport,
+    zdr: bool,
 }
 
 pub(crate) fn new_browser_run_store() -> BrowserRunStore {
@@ -91,6 +93,11 @@ const DEFAULT_VIEWPORT: Viewport = Viewport {
 };
 const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
+const MAX_MODEL_VISUAL_JSON_BYTES: u64 = 1024 * 1024;
+const MAX_BROWSER_TIMELINE_ENTRIES: usize = 32;
+const MAX_TIMELINE_CONSOLE_ENTRIES: usize = 20;
+const MAX_TIMELINE_NETWORK_ENTRIES: usize = 30;
+const MAX_TIMELINE_POLICY_DENIALS: usize = 10;
 
 fn default_include_screenshot() -> bool {
     true
@@ -149,6 +156,9 @@ async fn create_session(
     let token = quarry_token(&state, &user, &cookie).await;
     let allowed_domain = hostname(&target);
 
+    // ZDR sessions are a Phase-3 concern; the flag is threaded through metadata
+    // so the SPA renders persistence state from data instead of assuming it.
+    let zdr = false;
     let mut start_body = json!({
         "constraints": {
             "max_steps": 12,
@@ -159,7 +169,7 @@ async fn create_session(
             "width": viewport.width,
             "height": viewport.height
         },
-        "zdr": false
+        "zdr": zdr
     });
     if let Some(profile_id) = profile_id {
         start_body["profile_id"] = Value::String(profile_id.to_owned());
@@ -231,7 +241,9 @@ async fn create_session(
         profile_id: returned_profile_id,
         persistent_profile: requested_persistent_profile,
         last_observation: Some(observation.clone()),
+        observation_history: vec![observation.clone()],
         viewport,
+        zdr,
     };
     if let Ok(mut runs) = state.browser_run_store.lock() {
         runs.insert(run_id.clone(), metadata.clone());
@@ -348,16 +360,26 @@ async fn suggest_action(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let visual_artifact_id = visual_observation_artifact_id(&observation);
+    let visual_observation = match visual_artifact_id.as_deref() {
+        Some(artifact_id) => {
+            match fetch_visual_observation(&state, &user, quarry_bearer.as_deref(), artifact_id)
+                .await
+            {
+                Ok(value) => value,
+                Err(response) => return response,
+            }
+        }
+        None => Value::Null,
+    };
 
     let mut request_body = json!({
         "goal": trimmed_goal(&body.goal),
         "url": observation.get("url").and_then(Value::as_str).unwrap_or_default(),
         "title": observation.get("title").and_then(Value::as_str).unwrap_or_default(),
         "observation": observation,
-        "visual_observation_artifact_id": observation
-            .get("visual_observation_artifact_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
+        "visual_observation": visual_observation,
+        "visual_observation_artifact_id": visual_artifact_id.as_deref().unwrap_or_default(),
     });
     if let Some((mime_type, content_base64)) = screenshot_payload {
         request_body["screenshot_mime_type"] = Value::String(mime_type);
@@ -645,10 +667,69 @@ fn browser_response(
             },
             "frame": frame,
             "visual": visual,
+            "timeline": browser_timeline(run_id, &metadata.observation_history),
+            "zdr": metadata.zdr,
             "capabilities": ["navigate", "back", "forward", "click", "type", "press", "scroll", "wait_for", "select", "inspect_dom", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
         },
         "observation": observation
     })
+}
+
+fn browser_timeline(run_id: &str, observations: &[Value]) -> Vec<Value> {
+    observations
+        .iter()
+        .enumerate()
+        .map(|(index, observation)| {
+            let screenshot_artifact_id = observation
+                .get("screenshot_artifact_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|artifact_id| is_valid_artifact_id(artifact_id));
+            let visual_observation_artifact_id = observation
+                .get("visual_observation_artifact_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|artifact_id| is_valid_artifact_id(artifact_id));
+
+            json!({
+                "step": observation
+                    .get("step")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::try_from(index).unwrap_or(0)),
+                "url": observation.get("url").and_then(Value::as_str).unwrap_or_default(),
+                "title": observation.get("title").and_then(Value::as_str).unwrap_or_default(),
+                "observedAt": observation.get("observed_at").and_then(Value::as_str).unwrap_or_default(),
+                "screenshotArtifactId": screenshot_artifact_id,
+                "screenshotUrl": screenshot_artifact_id.map(|artifact_id| artifact_url(run_id, artifact_id)),
+                "visualObservationArtifactId": visual_observation_artifact_id,
+                "visualObservationUrl": visual_observation_artifact_id.map(|artifact_id| artifact_url(run_id, artifact_id)),
+                "consoleSummary": capped_observation_array(observation, "console_summary", MAX_TIMELINE_CONSOLE_ENTRIES),
+                "networkSummary": capped_observation_array(observation, "network_summary", MAX_TIMELINE_NETWORK_ENTRIES),
+                "policyDenials": capped_observation_array(observation, "policy_denials", MAX_TIMELINE_POLICY_DENIALS),
+                "domNodeCount": observation
+                    .get("dom_summary")
+                    .and_then(|summary| summary.get("node_count"))
+                    .and_then(Value::as_u64),
+                "domInteractiveCount": observation
+                    .get("dom_summary")
+                    .and_then(|summary| summary.get("interactive_elements"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+            })
+        })
+        .collect()
+}
+
+/// A bounded copy of an observation's array field, so timeline payloads stay
+/// small even for chatty pages. Entries are passed through verbatim.
+fn capped_observation_array(observation: &Value, key: &str, cap: usize) -> Value {
+    Value::Array(
+        observation
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().take(cap).cloned().collect())
+            .unwrap_or_default(),
+    )
 }
 
 fn artifact_frame(run_id: &str, artifact_id: &str, kind: &str, media_type: &str) -> Value {
@@ -674,7 +755,12 @@ fn update_browser_observation(
     observation: Value,
 ) -> BrowserRunMetadata {
     let mut metadata = browser_run_metadata(state, session_id);
-    metadata.last_observation = Some(observation);
+    metadata.last_observation = Some(observation.clone());
+    metadata.observation_history.push(observation);
+    if metadata.observation_history.len() > MAX_BROWSER_TIMELINE_ENTRIES {
+        let remove_count = metadata.observation_history.len() - MAX_BROWSER_TIMELINE_ENTRIES;
+        metadata.observation_history.drain(0..remove_count);
+    }
     if let Ok(mut runs) = state.browser_run_store.lock() {
         runs.insert(session_id.to_owned(), metadata.clone());
     }
@@ -692,13 +778,24 @@ fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadat
             profile_id: None,
             persistent_profile: false,
             last_observation: None,
+            observation_history: Vec::new(),
             viewport: DEFAULT_VIEWPORT,
+            zdr: false,
         })
 }
 
 fn screenshot_artifact_id(observation: &Value) -> Option<String> {
     observation
         .get("screenshot_artifact_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|artifact_id| is_valid_artifact_id(artifact_id))
+        .map(str::to_owned)
+}
+
+fn visual_observation_artifact_id(observation: &Value) -> Option<String> {
+    observation
+        .get("visual_observation_artifact_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|artifact_id| is_valid_artifact_id(artifact_id))
@@ -713,12 +810,56 @@ fn trimmed_goal(value: &str) -> String {
     trimmed.chars().take(1200).collect()
 }
 
+async fn fetch_visual_observation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    artifact_id: &str,
+) -> Result<Value, Response> {
+    let Some((bytes, _content_type)) =
+        fetch_quarry_artifact_bytes(state, user, token, artifact_id, MAX_MODEL_VISUAL_JSON_BYTES)
+            .await?
+    else {
+        return Ok(Value::Null);
+    };
+    serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "browser_visual_observation_invalid",
+                "The browser visual observation artifact is not valid JSON.",
+            )),
+        )
+            .into_response()
+    })
+}
+
 async fn fetch_model_screenshot(
     state: &AppState,
     user: &AuthenticatedUser,
     token: Option<&str>,
     artifact_id: &str,
 ) -> Result<Option<(String, String)>, Response> {
+    let Some((bytes, upstream_content_type)) =
+        fetch_quarry_artifact_bytes(state, user, token, artifact_id, MAX_MODEL_SCREENSHOT_BYTES)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let content_type = safe_model_screenshot_content_type(upstream_content_type.as_deref());
+    Ok(Some((
+        content_type.to_owned(),
+        BASE64_STANDARD.encode(bytes.as_ref()),
+    )))
+}
+
+async fn fetch_quarry_artifact_bytes(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    artifact_id: &str,
+    max_bytes: u64,
+) -> Result<Option<(bytes::Bytes, Option<String>)>, Response> {
     let url = format!(
         "{}/v1/artifacts/{}",
         state.quarry_edge_url,
@@ -741,26 +882,25 @@ async fn fetch_model_screenshot(
     if !status.is_success() {
         return Ok(None);
     }
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE.as_str())
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     if upstream
         .content_length()
-        .is_some_and(|length| length > MAX_MODEL_SCREENSHOT_BYTES)
+        .is_some_and(|length| length > max_bytes)
     {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(error(
-                "browser_screenshot_too_large",
-                "The browser screenshot is too large for model vision.",
+                "browser_artifact_too_large",
+                "The browser artifact is too large for model reasoning.",
             )),
         )
             .into_response());
     }
 
-    let content_type = safe_model_screenshot_content_type(
-        upstream
-            .headers()
-            .get(header::CONTENT_TYPE.as_str())
-            .and_then(|value| value.to_str().ok()),
-    );
     let bytes = upstream.bytes().await.map_err(|err| {
         (
             StatusCode::BAD_GATEWAY,
@@ -768,21 +908,18 @@ async fn fetch_model_screenshot(
         )
             .into_response()
     })?;
-    if bytes.len() as u64 > MAX_MODEL_SCREENSHOT_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(error(
-                "browser_screenshot_too_large",
-                "The browser screenshot is too large for model vision.",
+                "browser_artifact_too_large",
+                "The browser artifact is too large for model reasoning.",
             )),
         )
             .into_response());
     }
 
-    Ok(Some((
-        content_type.to_owned(),
-        BASE64_STANDARD.encode(bytes.as_ref()),
-    )))
+    Ok(Some((bytes, content_type)))
 }
 
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
@@ -995,7 +1132,14 @@ mod tests {
             profile_id: None,
             persistent_profile: false,
             last_observation: None,
+            observation_history: vec![json!({
+                "step": 0,
+                "url": "https://example.com",
+                "title": "Example",
+                "screenshot_artifact_id": "art_01JZ9XM7EXAMPLESHOT00001"
+            })],
             viewport: DEFAULT_VIEWPORT,
+            zdr: false,
         };
         let response = browser_response(
             "run_browser_01",
@@ -1012,6 +1156,10 @@ mod tests {
             "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLESHOT00001"
         );
         assert_eq!(response["session"]["frame"]["mediaType"], "image/png");
+        assert_eq!(
+            response["session"]["timeline"][0]["screenshotUrl"],
+            "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLESHOT00001"
+        );
     }
 
     #[test]
@@ -1021,7 +1169,13 @@ mod tests {
             profile_id: None,
             persistent_profile: false,
             last_observation: None,
+            observation_history: vec![json!({
+                "step": 0,
+                "url": "https://example.com",
+                "visual_observation_artifact_id": "art_01JZ9XM7EXAMPLEVISION0001"
+            })],
             viewport: DEFAULT_VIEWPORT,
+            zdr: false,
         };
         let response = browser_response(
             "run_browser_01",
@@ -1041,11 +1195,61 @@ mod tests {
             response["session"]["visual"]["observationUrl"],
             "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLEVISION0001"
         );
+        assert_eq!(
+            response["session"]["timeline"][0]["visualObservationUrl"],
+            "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLEVISION0001"
+        );
         assert!(response["session"]["capabilities"]
             .as_array()
             .expect("capabilities array")
             .iter()
             .any(|capability| capability == "visual_observation"));
+    }
+
+    #[test]
+    fn browser_timeline_entries_carry_bounded_step_evidence() {
+        let console: Vec<Value> = (0..30)
+            .map(|index| json!({ "level": "info", "text": format!("line {index}") }))
+            .collect();
+        let metadata = BrowserRunMetadata {
+            lease_id: None,
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: None,
+            observation_history: vec![json!({
+                "step": 3,
+                "url": "https://example.com/kontakt",
+                "title": "Kontakt",
+                "console_summary": console,
+                "network_summary": [
+                    { "method": "GET", "status": 200, "url": "https://example.com/kontakt" }
+                ],
+                "policy_denials": ["Blocked navigation to unknown.example"],
+                "dom_summary": {
+                    "node_count": 42,
+                    "interactive_elements": [
+                        { "tag": "a", "selector": "a[href=\"/\"]" }
+                    ]
+                }
+            })],
+            viewport: DEFAULT_VIEWPORT,
+            zdr: false,
+        };
+        let response = browser_response("run_browser_01", &metadata, None);
+        let entry = &response["session"]["timeline"][0];
+
+        assert_eq!(
+            entry["consoleSummary"].as_array().expect("console").len(),
+            MAX_TIMELINE_CONSOLE_ENTRIES
+        );
+        assert_eq!(entry["networkSummary"][0]["status"], 200);
+        assert_eq!(
+            entry["policyDenials"][0],
+            "Blocked navigation to unknown.example"
+        );
+        assert_eq!(entry["domNodeCount"], 42);
+        assert_eq!(entry["domInteractiveCount"], 1);
+        assert_eq!(response["session"]["zdr"], false);
     }
 
     #[test]
@@ -1120,6 +1324,22 @@ mod tests {
         assert_eq!(
             screenshot_artifact_id(&json!({
                 "screenshot_artifact_id": "../secret"
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn visual_observation_artifact_id_uses_strict_artifact_ids() {
+        assert_eq!(
+            visual_observation_artifact_id(&json!({
+                "visual_observation_artifact_id": "art_01JZ9XM7EXAMPLEVISION0001"
+            })),
+            Some("art_01JZ9XM7EXAMPLEVISION0001".to_owned())
+        );
+        assert_eq!(
+            visual_observation_artifact_id(&json!({
+                "visual_observation_artifact_id": "https://example.com/art.json"
             })),
             None
         );
