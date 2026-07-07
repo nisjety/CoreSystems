@@ -59,7 +59,7 @@ services:
       ORG_CORE_URL: http://org-core:8080
       BILLING_CORE_URL: http://billing-core:3014
       SESSION_CORE_URL: http://session-core:3017
-      INTEGRATION_INTERNAL_API_KEY: ${INTEGRATION_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTEGRATION_INTERNAL_API_KEY: ${INTEGRATION_INTERNAL_API_KEY:?INTEGRATION_INTERNAL_API_KEY must be set (no insecure default)}
       INTEGRATION_CORE_URL: http://integration-api:3026
       GRAPH_INDEX_URL: http://dpv2-graph-index:9203
       DATA_PLANE_DOCUMENTS_URL: http://dpv2-documents-api:8010
@@ -78,7 +78,7 @@ services:
       # port. CONVEX_INTERNAL_SERVICE_KEY must match the convex-core deployment
       # env (it gates the search-history mutations via assertServiceKey).
       CONVEX_API_URL: ${CONVEX_API_URL:-http://convex-backend:3210}
-      CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-change-me-internal-service-secret}
+      CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set (no insecure default)}
       NEXT_PUBLIC_CONVEX_URL: ${NEXT_PUBLIC_CONVEX_URL:-http://localhost:3210}
     command:
       [

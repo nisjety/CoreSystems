@@ -190,6 +190,22 @@ log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
 }
 
+# _strip_env_quotes — strip one matching pair of surrounding double or single
+# quotes from a raw `.env` value (KEY="value" / KEY='value' both parse to
+# `value` under normal dotenv semantics; a bare grep-and-cut extraction does
+# not do this, which caused a false "drift" positive between two files holding
+# the identical secret in different quoting styles). Values with no matching
+# surrounding quotes pass through unchanged.
+_strip_env_quotes() {
+  local v="$1"
+  if [[ "$v" == \"*\" && ${#v} -ge 2 ]]; then
+    v="${v#\"}"; v="${v%\"}"
+  elif [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then
+    v="${v#\'}"; v="${v%\'}"
+  fi
+  printf '%s' "$v"
+}
+
 run() {
   if [[ "$DRY_RUN" == "true" ]]; then
     printf '[dry-run] %q' "$1"
@@ -967,6 +983,121 @@ verify_ownership_phase() {
   return 0
 }
 
+# verify_internal_api_key_consistency — fleet-wide PRE-flight gate (2026-07-07
+# decision: consolidate every plane on ONE Control-Plane-owned INTERNAL_API_KEY
+# rather than a per-core key split). Runs before anything is built or started
+# (pure file check, no containers required) and catches the two failure modes
+# that actually bit this repo:
+#   1. A plane .env edited in isolation drifts from the others — the classic
+#      "rotated one file, forgot the rest" mistake, which silently breaks that
+#      plane's calls to everyone else instead of failing loudly.
+#   2. A known-insecure placeholder value (change-me-internal-service-secret,
+#      dev-super-secret-internal-api-key) slips back into a .env or a compose
+#      default — both were found and removed from source on 2026-07-07; this
+#      catches a regression of either.
+#
+# Control Plane owns identity, so `apps/Control Plane/.env` is authoritative;
+# every other plane .env that sets INTERNAL_API_KEY must match it byte-for-byte.
+# convex-core's CONVEX_INTERNAL_SERVICE_KEY is intentionally a SEPARATE, distinct
+# secret (better isolation) and is never compared — only its own INTERNAL_API_KEY
+# fallback line, if present, is checked like any other plane.
+#
+# Tolerant by default (WARN, continue) — set STRICT_INTERNAL_KEY_CHECK=1 to fail
+# the build on drift or a placeholder value (recommended for CI). Skip entirely
+# with VERIFY_INTERNAL_KEY=0. Never prints the key value itself, only file paths.
+verify_internal_api_key_consistency() {
+  if [[ "${VERIFY_INTERNAL_KEY:-1}" == "0" ]]; then
+    log "Internal API key consistency check disabled (VERIFY_INTERNAL_KEY=0)"
+    return 0
+  fi
+
+  local canonical_file="$CORE_ROOT/apps/Control Plane/.env"
+  if [[ ! -f "$canonical_file" ]]; then
+    printf '[internal-key] WARN: %s not found; skipping consistency check\n' "$canonical_file" >&2
+    return 0
+  fi
+
+  local canonical_line canonical
+  canonical_line="$(grep -m1 '^INTERNAL_API_KEY=' "$canonical_file")" || true
+  canonical="${canonical_line#INTERNAL_API_KEY=}"
+  canonical="$(_strip_env_quotes "$canonical")"
+
+  if [[ -z "$canonical" || "$canonical" == *"change-me"* || "$canonical" == *"CHANGE_ME"* \
+        || "$canonical" == *"dev-super-secret"* || ${#canonical} -lt 32 ]]; then
+    printf '[internal-key] ERROR: Control Plane INTERNAL_API_KEY is empty, a known placeholder, or too short (<32 chars). Generate a real one: openssl rand -hex 32\n' >&2
+    if [[ "${STRICT_INTERNAL_KEY_CHECK:-0}" == "1" ]]; then
+      return 1
+    fi
+    printf '[internal-key] Continuing (set STRICT_INTERNAL_KEY_CHECK=1 to fail the build here).\n' >&2
+    return 0
+  fi
+
+  log "Verifying INTERNAL_API_KEY consistency across the fleet (Control Plane is the source of truth)"
+
+  local drifted=()
+  local scanned=0
+  local f
+  while IFS= read -r -d '' f; do
+    [[ "$f" == "$canonical_file" ]] && continue
+    local line value
+    line="$(grep -m1 '^INTERNAL_API_KEY=' "$f")" || true
+    [[ -z "$line" ]] && continue
+    value="${line#INTERNAL_API_KEY=}"
+    value="$(_strip_env_quotes "$value")"
+    # An unexpanded ${...} reference isn't a literal value to compare — it's a
+    # compose-interpolation placeholder, normally shadowed by that service's own
+    # `environment:` block in its docker-compose.yml (which reads the real value
+    # from this same Control Plane .env). Not drift.
+    [[ "$value" == '${'*'}' ]] && continue
+    scanned=$((scanned + 1))
+    if [[ "$value" != "$canonical" ]]; then
+      drifted+=("$f")
+    fi
+  done < <(find "$CORE_ROOT/apps" \
+      \( -name node_modules -o -name .next -o -name dist -o -name target -o -name .git \) -prune -o \
+      -type f \( -name '.env' -o -name '.env.*' -o -name '*.env' \) \
+      -not -name '*.example' -not -name '*.sample' -not -name '*.bak*' \
+      -not -name '*.env.production' \
+      -print0 2>/dev/null)
+
+  # -n (not -l) so we can filter out comment-only mentions before collapsing
+  # back to a file list — a source comment EXPLAINING why a placeholder is
+  # rejected (e.g. the gateway's own change-me* guard) is the fix, not a
+  # regression of the bug; only a real fallback/default usage should trip this.
+  local placeholder_files=()
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    placeholder_files+=("$f")
+  done < <(grep -rnE 'change-me-internal-service-secret|dev-super-secret-internal-api-key' \
+      "$CORE_ROOT/apps" \
+      --include='*.yml' --include='*.yaml' --include='*.ts' --include='*.go' --include='*.rs' \
+      --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=target --exclude-dir=.next \
+      2>/dev/null \
+    | grep -vE '_test\.|\.test\.' \
+    | grep -vE ':[[:space:]]*//' \
+    | cut -d: -f1 | sort -u || true)
+
+  if (( ${#drifted[@]} == 0 )) && (( ${#placeholder_files[@]} == 0 )); then
+    printf '[internal-key] OK — %d plane .env files agree with Control Plane\n' "$scanned"
+    return 0
+  fi
+
+  if (( ${#drifted[@]} > 0 )); then
+    printf '[internal-key] DRIFT: INTERNAL_API_KEY does NOT match Control Plane in:\n' >&2
+    printf '  %s\n' "${drifted[@]}" >&2
+  fi
+  if (( ${#placeholder_files[@]} > 0 )); then
+    printf '[internal-key] INSECURE DEFAULT still present in source:\n' >&2
+    printf '  %s\n' "${placeholder_files[@]}" >&2
+  fi
+
+  if [[ "${STRICT_INTERNAL_KEY_CHECK:-0}" == "1" ]]; then
+    return 1
+  fi
+  printf '[internal-key] Continuing (set STRICT_INTERNAL_KEY_CHECK=1 to fail the build here).\n' >&2
+  return 0
+}
+
 # prune_all — tear down every plane's compose project, prune any
 # straggling containers/volumes, and remove `inter-plane-bus`. Idempotent:
 # safe to run when nothing is up.
@@ -1087,6 +1218,10 @@ compose_bootstrap() {
 }
 
 main() {
+  if [[ "$MODE" != "prune" && "$MODE" != "status" ]]; then
+    verify_internal_api_key_consistency
+  fi
+
   case "$MODE" in
     compose-bootstrap)
       compose_bootstrap

@@ -22,9 +22,10 @@ async function testNatsRequestReply() {
 
   const sc = StringCodec();
   const sharedInternalSecret =
-    process.env.INTERNAL_SERVICE_SECRET ||
-    process.env.INTERNAL_API_KEY ||
-    'dev-super-secret-internal-api-key';
+    process.env.INTERNAL_SERVICE_SECRET || process.env.INTERNAL_API_KEY;
+  if (!sharedInternalSecret) {
+    throw new Error('INTERNAL_SERVICE_SECRET or INTERNAL_API_KEY must be set');
+  }
 
   // Set up subscriber that mimics what NestJS should do
   console.log('👂 Setting up subscriber for service.authenticate...');

@@ -27,7 +27,7 @@ services:
       # separator `__`); plain DATABASE_URL is NOT read.
       QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_edge?sslmode=disable
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
-      QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
+      QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
       QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
@@ -158,7 +158,7 @@ services:
       QUARRY_CONTROL_ADDR: ":8081"
       QUARRY_CONTROL_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_v2?sslmode=disable
       QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
-      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
       # W2: deliver the one in-product change notification to notification-core
       # (Application Plane) over the shared inter-plane-bus network.
@@ -218,7 +218,7 @@ services:
       # edge's QUARRY_EDGE__INTERNAL_SECRET). Binds org_id+url on the
       # /v1/internal/run_page call so a leaked runtime bearer can't forge
       # another tenant's org.
-      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:-dev-super-secret-internal-api-key}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
     depends_on:
@@ -318,20 +318,20 @@ services:
       SERVICE_NAME: integration-corev2
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:9091}
       BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
       AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:3015}
       FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
-      FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}}
+      FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}}
       FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
       DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
-      DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_INTERNAL_API_KEY:-${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}}
+      DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_INTERNAL_API_KEY:-${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}}
       DATA_PLANE_INTERNAL_API_KEY_HEADER: ${DATA_PLANE_INTERNAL_API_KEY_HEADER:-X-Internal-Api-Key}
       DATA_PLANE_GRAPH_INDEX_URL: ${DATA_PLANE_GRAPH_INDEX_URL:-${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}}
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
@@ -488,12 +488,12 @@ services:
       SERVICE_NAME: integration-finspo-worker
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
       FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
-      FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}}}
+      FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}}
       FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
       # config.Load still initializes the shared vault even though this worker
       # never decrypts provider tokens.
@@ -566,7 +566,7 @@ services:
       FINSPO_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
       FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
       INTEGRATION_CORE_URL: http://integration-api:3026
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       # Phase 1 — Postgres + NATS + Data Plane wiring.
       FINSPO_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/finspo?sslmode=disable
       NATS_URL: ${FINSPO_NATS_URL:-nats://nats:4222}
@@ -632,7 +632,7 @@ services:
       INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
       INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY must be set (no insecure default)}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       CONNECTOR_RUNTIME_BASE_URL: ${CONNECTOR_RUNTIME_BASE_URL:-http://connector-runtime-engine:3003}
       CONNECTOR_RUNTIME_SECRET: ${CONNECTOR_RUNTIME_SECRET:?CONNECTOR_RUNTIME_SECRET is required}
@@ -693,7 +693,7 @@ services:
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY must be set (no insecure default)}
       MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
       GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
       SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
@@ -745,9 +745,9 @@ services:
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY must be set (no insecure default)}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
       GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
       SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}

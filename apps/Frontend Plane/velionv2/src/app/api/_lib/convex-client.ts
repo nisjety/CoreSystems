@@ -26,13 +26,15 @@ const CONVEX_ADMIN_KEY =
   process.env.CONVEX_ADMIN_KEY || process.env.CONVEX_SELF_HOSTED_ADMIN_KEY || "";
 
 // The service key the convex-core deployment expects (CONVEX_INTERNAL_SERVICE_KEY
-// on the deployment, default "change-me-internal-service-secret"). Kept aligned
-// here so assertServiceKey passes.
+// on the deployment). No hardcoded fallback: convex-core's validator now rejects
+// an unset/placeholder key outright, so a real value here is required, not
+// optional — falling back to a literal would just send a value guaranteed to be
+// refused.
 export const CONVEX_INTERNAL_SERVICE_KEY =
   process.env.CONVEX_INTERNAL_SERVICE_KEY ||
   process.env.INTERNAL_API_KEY ||
   process.env.INTERNAL_SERVICE_SECRET ||
-  "change-me-internal-service-secret";
+  "";
 
 export function getConvexClient(): ConvexHttpClient {
   const client = new ConvexHttpClient(CONVEX_API_URL, {
