@@ -390,6 +390,36 @@ RETURNING id, org_id, title, body, status, platforms, media, source, previews, a
 	return post, err
 }
 
+// PostApprovalStatus reports whether the post requires approval and whether a
+// genuine approved approval record exists for it. It never trusts a single
+// denormalized column alone: the approved flag is derived from the
+// social_approvals table (the human-in-the-loop record), which DecideApproval
+// is the only writer of. Returns ErrNotFound when the post does not exist.
+func (r *PGRepository) PostApprovalStatus(ctx context.Context, orgID, postID string) (bool, bool, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return false, false, err
+	}
+	var requiresApproval bool
+	if err := r.pool.QueryRow(ctx, `
+SELECT approval_required
+FROM social_posts
+WHERE org_id = $1 AND id = $2`, orgID, postID).Scan(&requiresApproval); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, false, ErrNotFound
+		}
+		return false, false, err
+	}
+	var approved bool
+	if err := r.pool.QueryRow(ctx, `
+SELECT EXISTS(
+	SELECT 1 FROM social_approvals
+	WHERE org_id = $1 AND post_id = $2 AND state = $3
+)`, orgID, postID, ApprovalApproved).Scan(&approved); err != nil {
+		return false, false, err
+	}
+	return requiresApproval, approved, nil
+}
+
 func (r *PGRepository) EnqueuePublishJob(ctx context.Context, input EnqueuePublishInput) (*PublishJob, error) {
 	if err := r.ensureConfigured(); err != nil {
 		return nil, err

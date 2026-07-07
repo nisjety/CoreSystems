@@ -214,6 +214,9 @@ func (s *Service) SchedulePost(ctx context.Context, input SchedulePostInput) (*S
 		return nil, fmt.Errorf("%w: scheduled_at must not be in the past", ErrInvalidInput)
 	}
 	input.ScheduledAt = scheduledAt
+	if err := s.ensurePublishApproved(ctx, input.OrgID, input.PostID); err != nil {
+		return nil, err
+	}
 	post, err := s.repository.UpdatePostSchedule(ctx, input)
 	if err != nil {
 		return nil, err
@@ -253,6 +256,9 @@ func (s *Service) EnqueuePublish(ctx context.Context, input EnqueuePublishInput)
 	}
 	if input.IdempotencyKey == "" {
 		input.IdempotencyKey = manualIdempotencyKey(input.OrgID, input.PostID, input.RequestedByUserID, input.ScheduledFor)
+	}
+	if err := s.ensurePublishApproved(ctx, input.OrgID, input.PostID); err != nil {
+		return nil, err
 	}
 	job, err := s.repository.EnqueuePublishJob(ctx, input)
 	if err != nil {
@@ -298,6 +304,16 @@ func (s *Service) ProcessDuePublishJobs(ctx context.Context, workerID string, li
 func (s *Service) processPublishJob(ctx context.Context, job PublishJob, now time.Time) error {
 	if job.Post == nil {
 		return s.finishJob(ctx, job, JobStatusFailed, "post payload was not loaded", nil, now)
+	}
+	// Defense in depth: re-verify approval at execution time. A job could have
+	// been queued while approved and then had its approval revoked (or a stale
+	// job could exist) — never publish to a real external account for a post
+	// that is not currently approved.
+	if err := s.ensurePublishApproved(ctx, job.OrgID, job.PostID); err != nil {
+		if IsApprovalRequired(err) {
+			return s.finishJob(ctx, job, JobStatusBlocked, "post is not approved for publishing", nil, now)
+		}
+		return err
 	}
 	accounts, err := s.ListAccounts(ctx, job.OrgID)
 	if err != nil {
@@ -701,4 +717,25 @@ func manualIdempotencyKey(orgID, postID, userID string, scheduledFor time.Time) 
 
 func IsInvalidInput(err error) bool {
 	return errors.Is(err, ErrInvalidInput)
+}
+
+func IsApprovalRequired(err error) bool {
+	return errors.Is(err, ErrApprovalRequired)
+}
+
+// ensurePublishApproved is the server-side enforcement of the "publish with
+// approval" contract. A post that requires human approval may only be scheduled
+// or published once a genuine approved approval record exists (the same
+// social_approvals HITL record DecideApproval writes). Posts created without an
+// approval requirement (approval_required = false) pass through. This never
+// trusts a client-supplied flag — it re-reads the authoritative record.
+func (s *Service) ensurePublishApproved(ctx context.Context, orgID, postID string) error {
+	requiresApproval, approved, err := s.repository.PostApprovalStatus(ctx, orgID, postID)
+	if err != nil {
+		return err
+	}
+	if requiresApproval && !approved {
+		return fmt.Errorf("%w: approve the post before scheduling or publishing", ErrApprovalRequired)
+	}
+	return nil
 }

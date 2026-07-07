@@ -429,6 +429,8 @@ func writeServiceError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, social.ErrNotFound):
 		c.JSON(http.StatusNotFound, errorPayload("not_found", "Social resource was not found."))
+	case social.IsApprovalRequired(err):
+		c.JSON(http.StatusConflict, errorPayload("approval_required", err.Error()))
 	case social.IsInvalidInput(err):
 		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", err.Error()))
 	default:
