@@ -11,17 +11,19 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import text
 
+from app.actions_gateway import ActionsGateway
 from app.config import get_settings
 from app.control_plane_subscriber import ControlPlaneSubscriber
 from app.db import engine, run_sql_migrations
 from app.events import event_publisher
 from app.auth_middleware import require_internal_auth, AuthContext
+from app.knowledge_sync import KnowledgeSyncer
 from app.m365_provider_handler import get_m365_handler
 from app.orchestration import orchestrator
 from app.parsers import UnsupportedFileTypeError, parse_uploaded_file
 from app.progress import progress_hub
 from app.schemas import JobDetailResponse, JobItemResponse, JobResponse, SourceImportRequest
-from app.service import close_http_client, import_service, init_http_client
+from app.service import close_http_client, get_http_client, import_service, init_http_client
 from app.shared_nats import SharedNatsPublisher
 
 
@@ -209,6 +211,65 @@ async def create_source_job(
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create import job")
     return _job_to_response(job)
+
+
+class _NatsKnowledgeSyncAudit:
+    """Best-effort audit sink that publishes knowledge-sync run outcomes to NATS."""
+
+    _SUBJECT = "imports.knowledge_sync.run"
+
+    async def publish_sync(self, audit: dict) -> None:
+        await event_publisher.publish(self._SUBJECT, audit)
+
+
+@app.post("/api/v1/import/jobs/knowledge-sync")
+async def knowledge_sync(
+    auth: AuthContext = Depends(require_internal_auth),
+) -> JSONResponse:
+    """Pull GitHub/Slack content for the caller's org through the integration
+    actions gateway and forward it into the import pipeline (which persists to
+    Data Plane v2). Honest 503 when the gateway is not configured."""
+    org_id = auth.org_id
+    gateway = ActionsGateway(
+        settings.integration_core_url,
+        settings.internal_api_key,
+        get_http_client(),
+    )
+    if not gateway.configured():
+        raise HTTPException(
+            status_code=503,
+            detail="knowledge-sync unavailable: INTEGRATION_CORE_URL/INTERNAL_API_KEY not configured",
+        )
+
+    syncer = KnowledgeSyncer(gateway, audit=_NatsKnowledgeSyncAudit())
+    result = await syncer.sync(org_id)
+
+    job_id = None
+    if result.documents:
+        allowed = await import_service.check_quota(org_id=org_id, items=len(result.documents))
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Import quota exceeded")
+        documents = result.documents
+        job_id = await import_service.create_job(
+            org_id=org_id,
+            user_id=auth.user_id,
+            source_type="knowledge-sync",
+            documents=documents,
+            metadata={"source": "knowledge-sync", "count": len(documents)},
+        )
+        await orchestrator.dispatch(
+            job_id, lambda current_job_id: import_service.run_job(current_job_id, documents)
+        )
+
+    return JSONResponse(
+        {
+            "outcome": result.outcome,
+            "connections": result.connections,
+            "documents": len(result.documents),
+            "skipped": result.skipped,
+            "job_id": str(job_id) if job_id else None,
+        }
+    )
 
 
 @app.get("/api/v1/import/jobs/{job_id}", response_model=JobDetailResponse)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/triodelab/finspo/internal/api"
 	"github.com/triodelab/finspo/internal/config"
+	"github.com/triodelab/finspo/internal/content"
 	"github.com/triodelab/finspo/internal/dataplane"
 	"github.com/triodelab/finspo/internal/db"
 	"github.com/triodelab/finspo/internal/events"
@@ -79,20 +80,43 @@ func run() error {
 		BaseURL:       cfg.GraphBaseURL,
 		TokenProvider: tokenProvider,
 	})
+
+	// Content capture (opt-in): when enabled AND Data Plane documents are
+	// configured, download each synced file, extract text, and forward a real
+	// content-bearing document to Data Plane v2. Left nil otherwise, so the
+	// engine keeps the metadata-only behavior.
+	var contentSink sync.ContentSink
+	if cfg.CaptureContent && cfg.DataPlaneDocumentsURL != "" && cfg.DataPlaneAPIKey != "" {
+		contentClient := sharepoint.NewContentClient(sharepoint.ContentClientConfig{
+			BaseURL:       cfg.GraphBaseURL,
+			TokenProvider: tokenProvider,
+			MaxBytes:      cfg.ContentMaxBytes,
+		})
+		documentsClient := dataplane.NewDocumentsClient(cfg.DataPlaneDocumentsURL, cfg.DataPlaneAPIKey)
+		contentSink = content.NewIngestor(content.Config{
+			Fetcher:           contentClient,
+			Docs:              documentsClient,
+			Logger:            logger,
+			ZDRClassification: cfg.ContentZDRClassification,
+		})
+		logger.Info().Msg("finspo content capture ENABLED: synced files will be forwarded to Data Plane v2 documents")
+	}
+
 	subjects := events.NewSubjects(cfg.NATSSubjectPrefix)
 	syncEngine := sync.NewEngine(sync.Config{
-		Fetcher:             deltaClient,
-		Sources:             st.Sources(),
-		Items:               st.Items(),
-		Cursors:             st.Cursors(),
-		Publisher:           publisher,
-		Sink:                sourceObjectSink,
-		PermissionsFetcher:  permissionsClient,
-		PermissionsStore:    st.Permissions(),
-		CapturePermissions:  cfg.CapturePermissions,
-		Subjects:            subjects,
-		Logger:              logger,
-		PageLimit:           100,
+		Fetcher:            deltaClient,
+		Sources:            st.Sources(),
+		Items:              st.Items(),
+		Cursors:            st.Cursors(),
+		Publisher:          publisher,
+		Sink:               sourceObjectSink,
+		PermissionsFetcher: permissionsClient,
+		PermissionsStore:   st.Permissions(),
+		CapturePermissions: cfg.CapturePermissions,
+		Content:            contentSink,
+		Subjects:           subjects,
+		Logger:             logger,
+		PageLimit:          100,
 	})
 
 	executor := sync.NewExecutor(sync.ExecutorConfig{

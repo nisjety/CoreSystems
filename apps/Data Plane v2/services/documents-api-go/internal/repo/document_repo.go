@@ -130,14 +130,21 @@ type SourceCount struct {
 // document count per source. Implements U1-2 (ui-ux-velion-gap.md §10):
 // Quarry-v2 writes every scrape into this table with its `source` URL,
 // so the dashboard's sources count = COUNT(DISTINCT source) here.
-func (r *DocumentRepo) SourcesFacet(ctx context.Context, orgID string) ([]SourceCount, int, error) {
+//
+// The per-viewer visibility predicate is IDENTICAL to Get/List so the facet can
+// never leak the existence (or count) of documents the viewer cannot read: only
+// the viewer's own docs, ORG-visible docs, or docs explicitly granted to them
+// are counted. An empty viewerID keeps the legacy org-scoped behaviour (no
+// identity → back-compat), matching the other read paths.
+func (r *DocumentRepo) SourcesFacet(ctx context.Context, orgID, viewerID string, grantedIDs []string) ([]SourceCount, int, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT source, COUNT(*) AS document_count
 		FROM documents
 		WHERE org_id = $1 AND deleted_at IS NULL AND COALESCE(source, '') <> ''
+		  AND ($2 = '' OR owner_id = $2 OR visibility = 'org' OR document_id = ANY($3))
 		GROUP BY source
 		ORDER BY document_count DESC, source ASC
-	`, orgID)
+	`, orgID, viewerID, normalizeGranted(grantedIDs))
 	if err != nil {
 		return nil, 0, fmt.Errorf("sources facet: %w", err)
 	}

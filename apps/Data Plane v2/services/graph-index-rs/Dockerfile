@@ -56,6 +56,10 @@ FROM cooker AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY services/ services/
+# Shared cross-plane inference proto: build.rs resolves ../../../Model Plane/proto
+# from /build/services/graph-index-rs, i.e. "/Model Plane/proto" — vendored from
+# the model-plane-proto additional build context (same pattern as embedding-engine).
+COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
 # target/ IS cache-mounted here, so the compiled binary lives inside the cache
 # and is NOT in the image layer — copy it out within the same RUN to a non-cache
 # path that the runtime stage can COPY from.

@@ -17,6 +17,7 @@ use quarry_core::contracts::{
     DataPlaneIngestRequest, DataPlaneIngestResponse, EmbeddingStatus, IndexStatus,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use quarry_core::privacy::{PrivacyClassification, PrivacyPolicy};
 use quarry_core::zdr::ZdrMode;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -271,10 +272,43 @@ struct CreateDocumentBody {
     title: String,
     content: String,
     metadata: serde_json::Value,
+    /// GDPR/ZDR classification on Data Plane v2's allow-list
+    /// (`internal` | `public` | `sensitive` | `restricted`). Derived from the
+    /// upstream `PrivacyPolicy.privacy_classification` so the real classification
+    /// computed by Quarry actually reaches the document row — previously this was
+    /// dropped, leaving documents-api to hardcode `zdr_classification='internal'`
+    /// and rendering retrieval-engine's `reject`-mode restricted-content filter
+    /// (which keys off `zdr_classification='restricted'`) dead for Quarry traffic.
+    /// Empty is skipped so the receiver's own default still applies when no policy
+    /// was computed.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    zdr_classification: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     extraction_trace: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "String::is_empty")]
     idempotency_key: String,
+}
+
+/// Map Quarry's `PrivacyClassification` onto Data Plane v2's `zdr_classification`
+/// allow-list (`internal` | `public` | `sensitive` | `restricted`, validated in
+/// documents-api-go `internal/validate`). This is the load-bearing translation
+/// that makes retrieval-engine's restricted-content enforcement operate on real
+/// data: `CredentialOrSecret` and `ZdrEphemeral` map to `restricted` so they are
+/// filtered out of `reject`-mode retrieval, personal data maps to `sensitive`,
+/// and the default `CustomerPrivate` maps to `internal` (matching the receiver's
+/// prior default, so callers that set no policy see no behavior change).
+fn zdr_classification_for(policy: Option<&PrivacyPolicy>) -> &'static str {
+    let classification = policy
+        .map(|p| p.privacy_classification)
+        .unwrap_or_default();
+    match classification {
+        PrivacyClassification::PublicNonPersonal => "public",
+        PrivacyClassification::CustomerPrivate => "internal",
+        PrivacyClassification::Personal | PrivacyClassification::SensitivePersonal => "sensitive",
+        PrivacyClassification::CredentialOrSecret | PrivacyClassification::ZdrEphemeral => {
+            "restricted"
+        }
+    }
 }
 
 impl CreateDocumentBody {
@@ -297,6 +331,19 @@ impl CreateDocumentBody {
             meta.insert("run_id".to_string(), run_id);
         }
 
+        // Preserve the FULL GDPR policy contract (purpose_id, lawful_basis,
+        // retention_policy, residency, allow_third_party_processing,
+        // processor_id, ...) in metadata for audit/DSAR provenance. documents-api
+        // only has a first-class column for the classification (mapped onto
+        // `zdr_classification` below); the remaining fields ride in metadata so
+        // the contract Quarry computes survives the wire hop instead of being
+        // silently discarded.
+        if let Some(policy) = &request.privacy_policy {
+            if let Ok(policy_value) = serde_json::to_value(policy) {
+                meta.insert("privacy_policy".to_string(), policy_value);
+            }
+        }
+
         // Title is required & non-empty at the Data Plane boundary; fall back
         // to the source URL when the page yielded no title.
         let title = request
@@ -317,6 +364,7 @@ impl CreateDocumentBody {
             title,
             content: request.markdown.clone().unwrap_or_default(),
             metadata: serde_json::Value::Object(meta),
+            zdr_classification: zdr_classification_for(request.privacy_policy.as_ref()).to_string(),
             extraction_trace,
             // A URL-stable idempotency key (NOT the content fingerprint) makes
             // re-ingest correct: Data Plane looks up `(org_id, key)` and, on a
@@ -583,5 +631,62 @@ mod tests {
         let key = v["idempotency_key"].as_str().unwrap();
         assert!(key.starts_with("quarry-url:"));
         assert_ne!(key, "blake3:abc"); // not the content fingerprint
+
+        // The default policy (CustomerPrivate) maps to "internal" and the full
+        // policy contract is preserved in metadata for audit/DSAR provenance.
+        assert_eq!(v["zdr_classification"], "internal");
+        assert_eq!(v["metadata"]["privacy_policy"]["privacy_classification"], "customer_private");
+    }
+
+    #[test]
+    fn zdr_classification_maps_privacy_classification_to_data_plane_allowlist() {
+        use quarry_core::privacy::PrivacyClassification as C;
+        // (Quarry classification, Data Plane allow-list value). The allow-list is
+        // {internal, public, sensitive, restricted} per documents-api-go validate.
+        let cases = [
+            (C::PublicNonPersonal, "public"),
+            (C::CustomerPrivate, "internal"),
+            (C::Personal, "sensitive"),
+            (C::SensitivePersonal, "sensitive"),
+            (C::CredentialOrSecret, "restricted"),
+            (C::ZdrEphemeral, "restricted"),
+        ];
+        for (classification, expected) in cases {
+            let policy = PrivacyPolicy {
+                privacy_classification: classification,
+                ..PrivacyPolicy::default()
+            };
+            assert_eq!(
+                zdr_classification_for(Some(&policy)),
+                expected,
+                "classification {classification:?} should map to {expected}"
+            );
+        }
+        // No policy → the receiver's own default still applies (empty, skipped).
+        assert_eq!(zdr_classification_for(None), "internal");
+    }
+
+    #[test]
+    fn from_request_carries_restricted_classification_for_credentials() {
+        // A CredentialOrSecret document MUST reach documents-api as "restricted"
+        // so retrieval-engine's reject-mode filter (WHERE zdr_classification =
+        // 'restricted') actually removes it. Before this fix the field was
+        // dropped and the row defaulted to "internal" — never filtered.
+        let mut req = make_request();
+        req.privacy_policy = Some(PrivacyPolicy {
+            privacy_classification: PrivacyClassification::CredentialOrSecret,
+            purpose_id: Some("support_triage".into()),
+            lawful_basis: Some("legitimate_interest".into()),
+            residency: Some("eu".into()),
+            ..PrivacyPolicy::default()
+        });
+        let body = CreateDocumentBody::from_request(&req);
+        let v = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(v["zdr_classification"], "restricted");
+        // Full contract survives in metadata.
+        assert_eq!(v["metadata"]["privacy_policy"]["purpose_id"], "support_triage");
+        assert_eq!(v["metadata"]["privacy_policy"]["lawful_basis"], "legitimate_interest");
+        assert_eq!(v["metadata"]["privacy_policy"]["residency"], "eu");
     }
 }
