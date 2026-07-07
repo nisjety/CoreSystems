@@ -15,6 +15,13 @@ const LIVE_ACTIONS = new Set<ActionId>([
   'operating_map.review_proposal',
   'operating_map.create_agent_blueprint',
   'workflows.toggle_policy',
+  // Live server-side via the gateway /actions/execute dispatchers. brreg is
+  // dispatched to org-core; the social.* actions proxy to social-core's real
+  // draft/schedule/publish routes (social-core enforces the approval gate).
+  'brreg.lookup_organization',
+  'social.create_draft',
+  'social.schedule_post',
+  'social.publish_post',
 ])
 
 const riskCost = {

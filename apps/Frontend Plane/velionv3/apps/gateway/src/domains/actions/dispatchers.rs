@@ -635,6 +635,233 @@ pub(super) async fn dispatch_operating_map_blueprint(
         .into_response()
 }
 
+// --- Social action dispatchers ----------------------------------------------
+//
+// The social.* registry entries are backed by real social-core routes. These
+// dispatchers make them reachable through the generic /actions/execute path
+// (mirroring the knowledge.* and brreg dispatchers) by proxying to social-core
+// with the server-resolved org — never a client-supplied org header, so the
+// path is IDOR-clean. social-core remains authoritative for approval: an
+// unapproved publish/schedule returns 409 from social-core (Phase 2 gate),
+// which is surfaced verbatim, never coerced into a fake success.
+
+fn social_actor(user: &AuthenticatedUser) -> ActionActor {
+    ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    }
+}
+
+fn no_active_org() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error(
+            "no_active_org",
+            "No active organization is resolved for this session.",
+        )),
+    )
+        .into_response()
+}
+
+/// Build the ActionExecution envelope from a social-core mutation response,
+/// deriving the runId from the real returned post/job id.
+fn social_execution(
+    action_id: &str,
+    status: &str,
+    resp: &Value,
+    user: &AuthenticatedUser,
+) -> Response {
+    let run_id = resp
+        .pointer("/data/job/id")
+        .or_else(|| resp.pointer("/data/id"))
+        .or_else(|| resp.pointer("/data/post/id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("social_{}", user.user_id));
+    let execution = ok(json!({
+        "actionId": action_id,
+        "runId": run_id,
+        "status": status,
+        "auditId": format!("audit_{}_{}", action_id.replace('.', "_"), run_id),
+        "eventStream": "",
+    }));
+    (StatusCode::OK, Json(execution)).into_response()
+}
+
+pub(super) async fn dispatch_social_create_draft(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let title = input
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let body_text = input
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let platforms = input
+        .get("platforms")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if body_text.is_empty() || platforms.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_input",
+                "social.create_draft requires a non-empty 'body' and at least one platform",
+            )),
+        )
+            .into_response();
+    }
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return no_active_org();
+    }
+    let source_kind = input
+        .get("sourceKind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("manual");
+    let mut source = json!({ "kind": source_kind });
+    if let Some(source_id) = input
+        .get("sourceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        source["metadata"] = json!({ "source_id": source_id });
+    }
+    let core_body = json!({
+        "title": title,
+        "body": body_text,
+        "platforms": platforms,
+        "source": source,
+    });
+    let actor = social_actor(user);
+    let url = format!("{}/api/v1/social/posts", state.social_core_url);
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(core_body),
+        Some(&org_id),
+        Some(&actor),
+        Some("application/json"),
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+    social_execution("social.create_draft", "completed", &resp, user)
+}
+
+pub(super) async fn dispatch_social_schedule_post(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let post_id = input
+        .get("postId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let scheduled_at = input
+        .get("scheduledAt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if post_id.is_empty() || scheduled_at.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_input",
+                "social.schedule_post requires 'postId' and 'scheduledAt'",
+            )),
+        )
+            .into_response();
+    }
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return no_active_org();
+    }
+    let actor = social_actor(user);
+    let url = format!(
+        "{}/api/v1/social/posts/{}/schedule",
+        state.social_core_url,
+        urlencoding::encode(post_id)
+    );
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({ "scheduled_at": scheduled_at })),
+        Some(&org_id),
+        Some(&actor),
+        Some("application/json"),
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+    social_execution("social.schedule_post", "queued", &resp, user)
+}
+
+pub(super) async fn dispatch_social_publish_post(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let post_id = input
+        .get("postId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if post_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_input",
+                "social.publish_post requires 'postId'",
+            )),
+        )
+            .into_response();
+    }
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return no_active_org();
+    }
+    let actor = social_actor(user);
+    // social-core enforces the approval gate on this endpoint (Phase 2): an
+    // unapproved post yields 409 approval_required, surfaced as-is below.
+    let url = format!(
+        "{}/api/v1/social/posts/{}/publish-jobs",
+        state.social_core_url,
+        urlencoding::encode(post_id)
+    );
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({})),
+        Some(&org_id),
+        Some(&actor),
+        Some("application/json"),
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+    social_execution("social.publish_post", "queued", &resp, user)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

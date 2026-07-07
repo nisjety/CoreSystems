@@ -12,8 +12,9 @@ use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_crawl_site, dispatch_import_source,
     dispatch_operating_map_blueprint, dispatch_operating_map_generate,
-    dispatch_operating_map_review, dispatch_recrawl, dispatch_scrape_url, dispatch_toggle_policy,
-    dispatch_upload_files,
+    dispatch_operating_map_review, dispatch_recrawl, dispatch_scrape_url,
+    dispatch_social_create_draft, dispatch_social_publish_post, dispatch_social_schedule_post,
+    dispatch_toggle_policy, dispatch_upload_files,
 };
 
 #[derive(Deserialize)]
@@ -51,6 +52,9 @@ pub(super) async fn execute_action(
             dispatch_operating_map_blueprint(&state, &user, &body.input).await
         }
         "workflows.toggle_policy" => dispatch_toggle_policy(&state, &user, &body.input).await,
+        "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,
+        "social.schedule_post" => dispatch_social_schedule_post(&state, &user, &body.input).await,
+        "social.publish_post" => dispatch_social_publish_post(&state, &user, &body.input).await,
         other => (
             StatusCode::NOT_IMPLEMENTED,
             Json(error(
