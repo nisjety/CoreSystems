@@ -55,17 +55,19 @@ describe('executeAction wiring', () => {
     })
   }
 
-  it('still refuses actions with no gateway dispatcher instead of fabricating a run', async () => {
+  it('refuses unknown/undispatched actions honestly instead of fabricating a run', async () => {
     vi.stubGlobal('fetch', vi.fn())
 
-    // security.check_url_reputation is registered but intentionally NOT wired to
-    // the generic executor — it must fail honestly, and never hit the network.
+    // Every action registered today has a dispatcher (the registry/executor
+    // reconciliation removed the orphans), so a registered-but-undispatched id
+    // can no longer be constructed from real registry data. The reachable
+    // refusal is the unknown-action guard: it must throw and never hit the
+    // network — no fabricated runs either way.
     await expect(
-      executeAction('security.check_url_reputation', actor, {
+      executeAction('future.not_yet_dispatched' as Parameters<typeof executeAction>[0], actor, {
         url: 'https://example.com/docs',
-        allowExternalLookup: true,
       }),
-    ).rejects.toThrow('action_not_available')
+    ).rejects.toThrow('Unknown action')
     expect(vi.mocked(fetch)).not.toHaveBeenCalled()
   })
 })
