@@ -11,6 +11,14 @@
 //! to the deterministic planner. inference-core's gRPC hop is unauthenticated
 //! (provider API keys live inside that service); the address comes from
 //! `INFERENCE_CORE_URL` / `INFERENCE_CORE_ADDR` (default `http://localhost:9092`).
+//!
+//! Cost governance (Phase 5): the planner does NOT pin a concrete model. It
+//! defaults to a **Velion intent mode** (`velion-balance`) so inference-core's
+//! Budget/Balance/Genius intent layer picks the model (complexity × the org's
+//! budget posture), and it forwards the run's org as `x-org-id` gRPC metadata so
+//! inference-core's cost-core budget guard counts and caps these calls — instead
+//! of a hardcoded model that bypassed both. `QUARRY_BROWSER_AGENT_MODEL` still
+//! overrides the model (e.g. to pin one when the intent layer is disabled).
 
 // See quarry_agent.rs — scoped-allow the two low-signal doc pedantic lints.
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
@@ -34,8 +42,23 @@ const ACTION_SCHEMA: &str = r#"{
   "required": ["action"]
 }"#;
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+/// Default planner model — a **Velion intent mode**, NOT a pinned id, so the
+/// browser-agent planner routes through inference-core's Budget/Balance/Genius
+/// intent layer + cost-core budget guard instead of bypassing them.
+const DEFAULT_MODEL: &str = "velion-balance";
 const DEFAULT_ADDR: &str = "http://localhost:9092";
+
+/// Resolve the planner model: an explicit non-empty `QUARRY_BROWSER_AGENT_MODEL`
+/// wins (lets ops pin a concrete model when the intent layer is disabled);
+/// otherwise the Velion intent-mode default so the call participates in
+/// budget-aware model selection.
+fn resolve_planner_model() -> String {
+    std::env::var("QUARRY_BROWSER_AGENT_MODEL")
+        .ok()
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
 
 /// gRPC planner backed by inference-core.
 #[derive(Clone)]
@@ -60,8 +83,7 @@ impl LlmPlanner {
             .or_else(|_| std::env::var("INFERENCE_CORE_ADDR"))
             .unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
         let channel = Channel::from_shared(url).ok()?.connect_lazy();
-        let model = std::env::var("QUARRY_BROWSER_AGENT_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+        let model = resolve_planner_model();
         Some(Self {
             client: InferenceCoreClient::new(channel),
             model,
@@ -114,10 +136,20 @@ impl LlmPlanner {
             ..Default::default()
         };
 
+        // Route through the intent layer's budget guard: inference-core reads
+        // the tenant scope for its cost-core budget check from gRPC metadata
+        // (`x-org-id`), not the request body — so forward the run's org here or
+        // the budget gate degrades to an unenforced "Unknown" posture.
+        let mut grpc_request = tonic::Request::new(request);
+        if !config.org_id.trim().is_empty() {
+            if let Ok(value) = tonic::metadata::MetadataValue::try_from(config.org_id.as_str()) {
+                grpc_request.metadata_mut().insert("x-org-id", value);
+            }
+        }
         let response = self
             .client
             .clone()
-            .infer(request)
+            .infer(grpc_request)
             .await
             .map_err(|e| format!("inference infer rpc failed: {e}"))?
             .into_inner();
@@ -240,5 +272,25 @@ mod tests {
             .into_browser_action()
             .expect("scroll is not terminal");
         assert_eq!(action.action_type, ActionType::Scroll);
+    }
+
+    #[test]
+    fn planner_model_resolution_defaults_to_velion_intent_mode() {
+        // Phase 5: the default must be a Velion intent mode (routes through the
+        // Budget/Balance/Genius selection + budget guard), NOT a pinned model.
+        // Sequential (not two tests) to avoid racing on the shared env var.
+        std::env::remove_var("QUARRY_BROWSER_AGENT_MODEL");
+        assert_eq!(resolve_planner_model(), "velion-balance");
+        assert_eq!(DEFAULT_MODEL, "velion-balance");
+
+        // An explicit override is honored (ops pin a model when intent is off).
+        std::env::set_var("QUARRY_BROWSER_AGENT_MODEL", "gpt-4o-mini");
+        assert_eq!(resolve_planner_model(), "gpt-4o-mini");
+
+        // A blank override falls back to the intent-mode default.
+        std::env::set_var("QUARRY_BROWSER_AGENT_MODEL", "   ");
+        assert_eq!(resolve_planner_model(), "velion-balance");
+
+        std::env::remove_var("QUARRY_BROWSER_AGENT_MODEL");
     }
 }
