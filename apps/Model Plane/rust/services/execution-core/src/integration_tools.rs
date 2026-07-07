@@ -323,6 +323,34 @@ fn catalog_for(provider_key: &str) -> Option<&'static [CatalogOp]> {
         .map(|(_, ops)| *ops)
 }
 
+/// Classify a provider-action operation as write (`true`) or read (`false`)
+/// using the frozen actions-surface catalog above (mirrors
+/// docs/actions-surface-operations.md's approval column). Matches both the bare
+/// operation (`pages.post`) and the provider-prefixed alias (`meta.pages.post`),
+/// case-insensitively — the exhaustive gateway is stricter about case, so a
+/// looser match here only ever ADDS caution.
+///
+/// Returns `None` when the operation is not catalogued. Callers MUST treat an
+/// unknown operation as a write for gating purposes: integration-corev2 leaves
+/// unmapped operations UNGATED (docs/actions-surface-operations.md §3), so
+/// exec-core must never assume an unknown operation is a harmless read.
+#[must_use]
+pub fn operation_is_write(operation: &str) -> Option<bool> {
+    let op = operation.trim();
+    if op.is_empty() {
+        return None;
+    }
+    for (provider, ops) in CATALOG {
+        for c in *ops {
+            let aliased = format!("{provider}.{}", c.operation);
+            if op.eq_ignore_ascii_case(c.operation) || op.eq_ignore_ascii_case(&aliased) {
+                return Some(c.is_write);
+            }
+        }
+    }
+    None
+}
+
 fn render_provider_actions(connections: &[ConnectionSummary]) -> String {
     if connections.is_empty() {
         return "No provider connections exist for this organization yet. Connect a provider \
@@ -474,5 +502,36 @@ mod tests {
 
         let long = "x".repeat(MAX_RESULT_CHARS + 500);
         assert!(truncate(&long).contains("[truncated 500 more chars]"));
+    }
+
+    #[test]
+    fn operation_is_write_classifies_reads_and_writes() {
+        // Writes (outbound side effects) → true.
+        assert_eq!(operation_is_write("pages.post"), Some(true));
+        assert_eq!(operation_is_write("whatsapp.messages.send"), Some(true));
+        assert_eq!(operation_is_write("message.send"), Some(true));
+        assert_eq!(operation_is_write("issues.create"), Some(true));
+        // Reads → false.
+        assert_eq!(operation_is_write("pages.list"), Some(false));
+        assert_eq!(operation_is_write("ads.insights"), Some(false));
+        assert_eq!(operation_is_write("issues.list"), Some(false));
+        assert_eq!(operation_is_write("calendar.events"), Some(false));
+    }
+
+    #[test]
+    fn operation_is_write_accepts_provider_prefixed_aliases_case_insensitively() {
+        assert_eq!(operation_is_write("meta.pages.post"), Some(true));
+        assert_eq!(operation_is_write("slack.message.send"), Some(true));
+        assert_eq!(operation_is_write("Github.Issues.List"), Some(false));
+        assert_eq!(operation_is_write("meta.pages.list"), Some(false));
+    }
+
+    #[test]
+    fn operation_is_write_returns_none_for_unknown_and_empty() {
+        // Unknown / uncatalogued operations are None — callers gate them as writes.
+        assert_eq!(operation_is_write("okta.user.suspend"), None); // not catalogued here
+        assert_eq!(operation_is_write("totally.made.up"), None);
+        assert_eq!(operation_is_write(""), None);
+        assert_eq!(operation_is_write("   "), None);
     }
 }

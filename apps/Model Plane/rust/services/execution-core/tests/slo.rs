@@ -37,6 +37,9 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         "",   // empty hook context → not blocked
         "",   // empty org id → noop tool path does not use it
         "",   // empty user id → noop tool path does not use it
+        "",   // empty run id → noop tool path does not use it
+        "",   // empty step id → noop tool path does not use it
+        None, // no session channel → noop tool path does not use it
         None, // no browser event sink → noop tool path does not use it
     )
     .await

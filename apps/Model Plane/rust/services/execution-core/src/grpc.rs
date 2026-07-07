@@ -81,6 +81,11 @@ impl ExecutionCore for ExecutionService {
             // Follow-up: add user_id to ExecuteStepRequest so this path is
             // viewer-scoped too (tracked for PR-4).
             "",
+            // run_id + step_id let a provider write bind its durable approval
+            // record; the shared session channel reaches the approval store.
+            &req.run_id,
+            &req.step_id,
+            Some(self.session_channel.clone()),
             Some(&browser_sink),
         )
         .await;

@@ -5,7 +5,7 @@ use execution_core::runtime_loop;
 
 #[tokio::test]
 async fn deny_mode_blocks_execution() {
-    let outcome = runtime_loop::execute_step("echo", "payload", "deny", "", "", "", None).await;
+    let outcome = runtime_loop::execute_step("echo", "payload", "deny", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "permission_denied");
     assert!(!outcome.error.is_empty());
 }
@@ -16,13 +16,13 @@ async fn ask_mode_requires_approval_for_tools() {
     // reads proceed (see permission::evaluate). Use a risky tool name so this
     // exercises the AwaitApproval path.
     let outcome =
-        runtime_loop::execute_step("delete_account", "payload", "ask", "", "", "", None).await;
+        runtime_loop::execute_step("delete_account", "payload", "ask", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "awaiting_approval");
 }
 
 #[tokio::test]
 async fn auto_mode_executes_tool() {
-    let outcome = runtime_loop::execute_step("echo", "hello", "auto", "", "", "", None).await;
+    let outcome = runtime_loop::execute_step("echo", "hello", "auto", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "completed");
     assert_eq!(outcome.output, "hello");
 }
@@ -31,14 +31,14 @@ async fn auto_mode_executes_tool() {
 async fn hook_can_block_step() {
     let hook_context = r#"{"block_execution": true}"#;
     let outcome =
-        runtime_loop::execute_step("echo", "hello", "auto", hook_context, "", "", None).await;
+        runtime_loop::execute_step("echo", "hello", "auto", hook_context, "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "failed");
     assert!(outcome.error.contains("hook"));
 }
 
 #[tokio::test]
 async fn fail_tool_returns_error() {
-    let outcome = runtime_loop::execute_step("fail", "payload", "auto", "", "", "", None).await;
+    let outcome = runtime_loop::execute_step("fail", "payload", "auto", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "failed");
     assert!(!outcome.error.is_empty());
 }
@@ -46,7 +46,7 @@ async fn fail_tool_returns_error() {
 #[tokio::test]
 async fn subagent_spawn_appends_summary() {
     let outcome =
-        runtime_loop::execute_step("subagent.xyz", "payload", "auto", "", "", "", None).await;
+        runtime_loop::execute_step("subagent.xyz", "payload", "auto", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "completed");
     assert!(outcome.output.contains(" ["));
 }
@@ -54,14 +54,14 @@ async fn subagent_spawn_appends_summary() {
 #[tokio::test]
 async fn compaction_triggers_when_output_large() {
     let big = "x".repeat(2100);
-    let outcome = runtime_loop::execute_step("echo", &big, "auto", "", "", "", None).await;
+    let outcome = runtime_loop::execute_step("echo", &big, "auto", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "completed");
     assert!(outcome.compaction_triggered);
 }
 
 #[tokio::test]
 async fn reasoning_step_without_tool() {
-    let outcome = runtime_loop::execute_step("", "payload", "auto", "", "", "", None).await;
+    let outcome = runtime_loop::execute_step("", "payload", "auto", "", "", "", "", "", None, None).await;
     assert_eq!(outcome.status, "completed");
     assert_eq!(outcome.output, "reasoning_step_completed");
 }
