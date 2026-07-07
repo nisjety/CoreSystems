@@ -515,6 +515,64 @@ export function humanizeToolName(name: string): string {
     .replace(/^\w/, (match) => match.toUpperCase()) || 'Tool'
 }
 
+/**
+ * Compact, single-line summary of tool-call arguments for dense run timelines.
+ *
+ * Agent tool args are heterogeneous (integration tools carry `provider` /
+ * `operation`; web tools carry `query` / `provider`; others are free-form), so
+ * this surfaces the salient routing keys first, then a few remaining primitive
+ * params — e.g. "provider: slack · operation: send_message · channel: #ops".
+ * Returns '' when there is nothing meaningful to show, so callers can fall back
+ * to a neutral running label instead of a fabricated one.
+ */
+export function summarizeToolArgs(args: unknown, maxLength = 180): string {
+  if (args == null) return ''
+  if (typeof args === 'string') return truncateText(args.trim(), maxLength)
+  if (typeof args !== 'object') return truncateText(String(args), maxLength)
+  if (Array.isArray(args)) {
+    try {
+      return truncateText(JSON.stringify(args), maxLength)
+    } catch {
+      return ''
+    }
+  }
+
+  const record = args as Record<string, unknown>
+  const priorityKeys = ['provider', 'operation', 'action', 'capability', 'query', 'url', 'path', 'id']
+  const parts: string[] = []
+  const seen = new Set<string>()
+
+  const pushPart = (key: string, value: unknown): void => {
+    const rendered = renderArgValue(value)
+    if (rendered) parts.push(`${key}: ${rendered}`)
+  }
+
+  for (const key of priorityKeys) {
+    if (key in record) {
+      seen.add(key)
+      pushPart(key, record[key])
+    }
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (parts.length >= 6) break
+    if (seen.has(key)) continue
+    pushPart(key, value)
+  }
+
+  return truncateText(parts.join(' · '), maxLength)
+}
+
+function renderArgValue(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return truncateText(value.trim(), 64)
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try {
+    return truncateText(JSON.stringify(value), 64)
+  } catch {
+    return ''
+  }
+}
+
 export function summarizeToolResult(event: { output?: string; error?: string; status?: string }): string {
   if (event.error) return truncateText(event.error, 260)
   if (event.output) return truncateText(event.output, 260)
