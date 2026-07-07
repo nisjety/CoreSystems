@@ -17,6 +17,7 @@ type AutoresearchConfig struct {
 	BudgetUSD      float64 `json:"budget_usd"`
 	TimeoutMinutes int     `json:"timeout_minutes"`
 	OrgID          string  `json:"org_id"`
+	UserID         string  `json:"user_id"`
 	RunID          string  `json:"run_id"`
 }
 
@@ -102,6 +103,8 @@ func AutoresearchWorkflow(ctx workflow.Context, cfg AutoresearchConfig) (Autores
 			Goal:     fmt.Sprintf("generate experiment plan for hypothesis: %s (iteration %d)", cfg.Hypothesis, i),
 			Policy:   "research-plan",
 			MaxTurns: 3,
+			OrgID:    cfg.OrgID,
+			UserID:   cfg.UserID,
 		}
 
 		var planOutput activities.StepLoopOutput
@@ -138,6 +141,8 @@ func AutoresearchWorkflow(ctx workflow.Context, cfg AutoresearchConfig) (Autores
 			Goal:     fmt.Sprintf("execute experiment: %s", plan.Plan),
 			Policy:   "research-exec",
 			MaxTurns: 5,
+			OrgID:    cfg.OrgID,
+			UserID:   cfg.UserID,
 		}
 
 		var execOutput activities.StepLoopOutput
@@ -158,6 +163,8 @@ func AutoresearchWorkflow(ctx workflow.Context, cfg AutoresearchConfig) (Autores
 			Goal:     fmt.Sprintf("evaluate experiment result: %s", execOutput.Summary),
 			Policy:   "research-eval",
 			MaxTurns: 3,
+			OrgID:    cfg.OrgID,
+			UserID:   cfg.UserID,
 		}
 
 		var evalOutput activities.StepLoopOutput

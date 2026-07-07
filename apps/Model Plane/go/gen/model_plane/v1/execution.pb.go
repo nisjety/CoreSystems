@@ -224,7 +224,11 @@ type ExecuteStepRequest struct {
 	// Hook context as JSON string (hooks evaluated before execution).
 	HookContext string `protobuf:"bytes,6,opt,name=hook_context,json=hookContext,proto3" json:"hook_context,omitempty"`
 	// Tenant identifier.
-	OrgId         string `protobuf:"bytes,7,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	OrgId string `protobuf:"bytes,7,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Acting user identifier (viewer). Threaded into the step so knowledge-search
+	// (and any other viewer-scoped tool) filters to the caller's visible set, not
+	// the whole org. Empty = org-scoped only (legacy/unauthenticated primitive).
+	UserId        string `protobuf:"bytes,8,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -304,6 +308,13 @@ func (x *ExecuteStepRequest) GetHookContext() string {
 func (x *ExecuteStepRequest) GetOrgId() string {
 	if x != nil {
 		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ExecuteStepRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
 	}
 	return ""
 }
@@ -528,7 +539,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
-	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\"\xe3\x01\n" +
+	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\"\xfc\x01\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -537,7 +548,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_input\x18\x04 \x01(\tR\ttoolInput\x12'\n" +
 	"\x0fpermission_mode\x18\x05 \x01(\tR\x0epermissionMode\x12!\n" +
 	"\fhook_context\x18\x06 \x01(\tR\vhookContext\x12\x15\n" +
-	"\x06org_id\x18\a \x01(\tR\x05orgId\"\xa7\x01\n" +
+	"\x06org_id\x18\a \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\b \x01(\tR\x06userId\"\xa7\x01\n" +
 	"\x13ExecuteStepResponse\x12\x17\n" +
 	"\astep_id\x18\x01 \x01(\tR\x06stepId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n" +

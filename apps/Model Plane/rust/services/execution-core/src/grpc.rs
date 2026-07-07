@@ -75,12 +75,11 @@ impl ExecutionCore for ExecutionService {
             &req.permission_mode,
             &req.hook_context,
             &req.org_id,
-            // ExecuteStepRequest carries no user_id (proto gap) — this primitive
-            // step RPC runs org-scoped. The agentic grounding path is RunAgent
-            // (runtime_loop/agent.rs), which threads the run's verified user_id.
-            // Follow-up: add user_id to ExecuteStepRequest so this path is
-            // viewer-scoped too (tracked for PR-4).
-            "",
+            // Viewer scope: ExecuteStepRequest now carries user_id (proto field
+            // 8), so a knowledge-search (or any viewer-scoped tool) run through
+            // this primitive filters to the caller's visible set, not the whole
+            // org. Empty = org-scoped (legacy/unauthenticated caller).
+            &req.user_id,
             // run_id + step_id let a provider write bind its durable approval
             // record; the shared session channel reaches the approval store.
             &req.run_id,
