@@ -35,6 +35,27 @@ const NEWS_TOOL: &str = "news";
 const TRACK_SHIPMENT_TOOL: &str = "track_shipment";
 const COMPANY_LOOKUP_TOOL: &str = "company_lookup";
 
+/// Freight tools backed by the Ingestion Plane `shipping-core` aggregator
+/// (`shipping_tools`): read-only quote comparison + fleet listing, and the
+/// write-side `book_shipment` — which places a REAL freight order and is
+/// therefore in `permission::is_risky_tool`, so under `ask` posture the run
+/// pauses for explicit human approval before it executes. shipping-core's
+/// own two-step token gate is chained inside the tool after that approval.
+const GET_SHIPPING_QUOTES_TOOL: &str = "get_shipping_quotes";
+const SHIPPING_CARRIERS_TOOL: &str = "shipping_carriers";
+const BOOK_SHIPMENT_TOOL: &str = "book_shipment";
+
+/// Provider-action tools backed by the Ingestion Plane `integration-corev2`
+/// actions gateway (`integration_tools`): `list_provider_actions` is
+/// read-only discovery (org's live connections × the operations catalog);
+/// `execute_provider_action` runs one operation and is in
+/// `permission::is_risky_tool`, so under `ask` posture the run pauses for
+/// explicit human approval before any provider write. The approval reference
+/// is forwarded to the gateway as `approvalId` to satisfy its own
+/// write-approval check.
+const LIST_PROVIDER_ACTIONS_TOOL: &str = "list_provider_actions";
+const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
+
 /// Namespace prefix for tools proxied to a registered MCP server
 /// (`mcp__<server_id>__<tool>`). Routed back through the gateway's
 /// `ProxyMcpTool` (matrix §G2) — exec-core holds no MCP registry of its own.
@@ -136,6 +157,16 @@ pub async fn execute_step(
         execute_track_shipment(tool_input).await
     } else if tool_name == COMPANY_LOOKUP_TOOL {
         execute_company_lookup(tool_input).await
+    } else if tool_name == GET_SHIPPING_QUOTES_TOOL {
+        execute_get_shipping_quotes(tool_input).await
+    } else if tool_name == SHIPPING_CARRIERS_TOOL {
+        execute_shipping_carriers().await
+    } else if tool_name == BOOK_SHIPMENT_TOOL {
+        execute_book_shipment(tool_input, user_id).await
+    } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
+        execute_list_provider_actions(org_id).await
+    } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
+        execute_provider_action(tool_input, org_id).await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
         execute_mcp(tool_name, tool_input, org_id).await
     } else {
@@ -151,7 +182,11 @@ pub async fn execute_step(
             .and_then(|v| {
                 v.get("url")
                     .and_then(|u| u.as_str())
-                    .or_else(|| v.get("urls").and_then(|a| a.get(0)).and_then(|u| u.as_str()))
+                    .or_else(|| {
+                        v.get("urls")
+                            .and_then(|a| a.get(0))
+                            .and_then(|u| u.as_str())
+                    })
                     .map(str::to_owned)
             })
         {
@@ -241,7 +276,11 @@ async fn execute_web_search(tool_input: &str) -> tool_bridge::ToolExecution {
 /// (never model input); the server is selected by the namespaced name, and the
 /// gateway enforces the server's enabled flag + tool allowlist. Best-effort: a
 /// missing gateway or remote error returns a clear tool error to the model.
-async fn execute_mcp(tool_name: &str, tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+async fn execute_mcp(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+) -> tool_bridge::ToolExecution {
     let Some((server_id, remote_tool)) = crate::mcp_gateway::parse_mcp_tool_name(tool_name) else {
         return tool_error(format!(
             "malformed MCP tool '{tool_name}' (expected mcp__<server>__<tool>)"
@@ -438,6 +477,71 @@ async fn execute_track_shipment(tool_input: &str) -> tool_bridge::ToolExecution 
     }
 }
 
+/// `get_shipping_quotes` tool — input mirrors shipping-core's `QuoteRequest`
+/// (from/to addresses + package dims + segment). Fans out to the carrier
+/// fleet via the Ingestion Plane aggregator; read-only (no booking exists).
+async fn execute_get_shipping_quotes(tool_input: &str) -> tool_bridge::ToolExecution {
+    let input: crate::shipping_tools::QuoteInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid get_shipping_quotes input: {e}")),
+    };
+    let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
+        return tool_error(
+            "get_shipping_quotes unavailable: shipping tools client could not be built".to_owned(),
+        );
+    };
+    match client.get_quotes(&input).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `shipping_carriers` tool — no input. Lists the aggregator's registered
+/// carrier fleet (and whether each runs on demo or live agreement prices).
+async fn execute_shipping_carriers() -> tool_bridge::ToolExecution {
+    let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
+        return tool_error(
+            "shipping_carriers unavailable: shipping tools client could not be built".to_owned(),
+        );
+    };
+    match client.list_carriers().await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `book_shipment` tool — WRITE side: places a real freight order. Reaches
+/// here only after the HITL approval gate (`permission::is_risky_tool`
+/// matches this name, so `ask` posture pauses the run for a human). The
+/// acting user id from the run context is recorded as the booking actor.
+async fn execute_book_shipment(tool_input: &str, user_id: &str) -> tool_bridge::ToolExecution {
+    let mut input: crate::shipping_tools::BookInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid book_shipment input: {e}")),
+    };
+    if input.booked_by.trim().is_empty() {
+        input.booked_by = user_id.to_owned();
+    }
+    let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
+        return tool_error(
+            "book_shipment unavailable: shipping tools client could not be built".to_owned(),
+        );
+    };
+    match client.book_shipment(&input).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
 /// `company_lookup` tool — input JSON `{"query": String}`. A 9-digit query is an
 /// org number; otherwise a name search against the public Brønnøysund registry.
 /// Read-only, public, non-personal data.
@@ -456,6 +560,77 @@ async fn execute_company_lookup(tool_input: &str) -> tool_bridge::ToolExecution 
         );
     };
     match client.company_lookup(&input.query).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `list_provider_actions` tool — read-only discovery of the org's connected
+/// providers and their callable operations. `org_id` comes from the run
+/// context (tenant scope). No approval gate.
+async fn execute_list_provider_actions(org_id: &str) -> tool_bridge::ToolExecution {
+    let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
+        return tool_error(
+            "list_provider_actions unavailable: integration client could not be built".to_owned(),
+        );
+    };
+    match client.list_provider_actions(org_id).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// Marker forwarded to integration-corev2 as `approvalId` on provider writes.
+/// The gateway requires human-approval metadata on write operations; by the
+/// time this code runs, the Model Plane permission gate has already been
+/// satisfied — either the run paused for explicit human approval (`ask`
+/// posture, `permission::is_risky_tool` matched `execute_provider_action`) and
+/// resumed, or gating is intentionally off (`auto`/chat posture, where the
+/// interactive human is the approver). The gateway's check is presence-only,
+/// so this marker honestly asserts that provenance rather than fabricating a
+/// stored approval id.
+const MODEL_PLANE_APPROVAL_MARKER: &str = "model-plane-governed-loop";
+
+/// `execute_provider_action` tool — WRITE-capable: runs one operation on a
+/// connected provider via integration-corev2. Reaches here only after the
+/// permission gate (`permission::is_risky_tool` matches this name, so `ask`
+/// posture pauses the run for a human first). `org_id` scopes the call.
+async fn execute_provider_action(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct ActionInput {
+        connection_id: String,
+        operation: String,
+        #[serde(default)]
+        params: serde_json::Value,
+        #[serde(default)]
+        body: serde_json::Value,
+    }
+    let input: ActionInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid execute_provider_action input: {e}")),
+    };
+    let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
+        return tool_error(
+            "execute_provider_action unavailable: integration client could not be built".to_owned(),
+        );
+    };
+    match client
+        .execute_action(
+            org_id,
+            &input.connection_id,
+            &input.operation,
+            input.params,
+            input.body,
+            Some(MODEL_PLANE_APPROVAL_MARKER),
+        )
+        .await
+    {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,

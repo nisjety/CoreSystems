@@ -36,8 +36,12 @@ struct Config {
 fn config() -> &'static Config {
     static CFG: OnceLock<Config> = OnceLock::new();
     CFG.get_or_init(|| Config {
-        enabled: std::env::var("PROMOTE_ON_USE_ENABLED").map(|v| v == "true").unwrap_or(false),
-        execute: std::env::var("PROMOTE_ON_USE_EXECUTE").map(|v| v == "true").unwrap_or(false),
+        enabled: std::env::var("PROMOTE_ON_USE_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(false),
+        execute: std::env::var("PROMOTE_ON_USE_EXECUTE")
+            .map(|v| v == "true")
+            .unwrap_or(false),
         threshold: std::env::var("PROMOTE_ON_USE_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())

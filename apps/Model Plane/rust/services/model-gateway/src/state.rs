@@ -323,8 +323,10 @@ impl AppState {
         let http_client = reqwest::Client::new();
         // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
         // Shared between both publisher branches below; cheap clone (Arc inner).
-        let pricing_cache =
-            crate::pricing::PricingCache::new(std::env::var("COST_CORE_URL").ok(), http_client.clone());
+        let pricing_cache = crate::pricing::PricingCache::new(
+            std::env::var("COST_CORE_URL").ok(),
+            http_client.clone(),
+        );
 
         // Data Plane v2 clients — retrieval-engine-rs serves Retrieval+Document+Knowledge on one port
         let retrieval_client = RetrievalServiceClient::new(Self::lazy_channel(

@@ -103,7 +103,8 @@ impl McpGatewayClient {
 /// itself contain `__`; a `server_id` ULID does not).
 #[must_use]
 pub fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
-    name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__"))
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
 }
 
 #[cfg(test)]

@@ -19,18 +19,20 @@ type stubClient struct {
 	lastReq any
 	err     error
 
-	listPlansResp          *mpv1.ListPlansResponse
-	getPlanResp            *mpv1.GetPlanResponse
-	transitionPlanResp     *mpv1.TransitionPlanResponse
-	listTodosResp          *mpv1.ListTodosResponse
-	getTodoResp            *mpv1.GetTodoResponse
-	transitionTodoResp     *mpv1.TransitionTodoResponse
-	listApprovalsResp      *mpv1.ListApprovalsResponse
-	getApprovalResp        *mpv1.GetApprovalResponse
-	createApprovalResp     *mpv1.CreateApprovalResponse
-	decideApprovalResp     *mpv1.DecideApprovalResponse
-	getSubagentLineageResp *mpv1.GetSubagentLineageResponse
-	attachSubagentResp     *mpv1.AttachSubagentResponse
+	listPlansResp                *mpv1.ListPlansResponse
+	getPlanResp                  *mpv1.GetPlanResponse
+	transitionPlanResp           *mpv1.TransitionPlanResponse
+	listTodosResp                *mpv1.ListTodosResponse
+	getTodoResp                  *mpv1.GetTodoResponse
+	transitionTodoResp           *mpv1.TransitionTodoResponse
+	listApprovalsResp            *mpv1.ListApprovalsResponse
+	listPendingApprovalsResp     *mpv1.OrgPendingApprovalsResponse
+	recordOrchestrationEventResp *mpv1.RecordOrchestrationEventResponse
+	getApprovalResp              *mpv1.GetApprovalResponse
+	createApprovalResp           *mpv1.CreateApprovalResponse
+	decideApprovalResp           *mpv1.DecideApprovalResponse
+	getSubagentLineageResp       *mpv1.GetSubagentLineageResponse
+	attachSubagentResp           *mpv1.AttachSubagentResponse
 }
 
 func (s *stubClient) ListPlans(ctx context.Context, in *mpv1.ListPlansRequest, opts ...grpc.CallOption) (*mpv1.ListPlansResponse, error) {
@@ -60,6 +62,14 @@ func (s *stubClient) TransitionTodo(ctx context.Context, in *mpv1.TransitionTodo
 func (s *stubClient) ListApprovals(ctx context.Context, in *mpv1.ListApprovalsRequest, opts ...grpc.CallOption) (*mpv1.ListApprovalsResponse, error) {
 	s.lastReq = in
 	return s.listApprovalsResp, s.err
+}
+func (s *stubClient) ListPendingApprovals(ctx context.Context, in *mpv1.OrgPendingApprovalsRequest, opts ...grpc.CallOption) (*mpv1.OrgPendingApprovalsResponse, error) {
+	s.lastReq = in
+	return s.listPendingApprovalsResp, s.err
+}
+func (s *stubClient) RecordOrchestrationEvent(ctx context.Context, in *mpv1.RecordOrchestrationEventRequest, opts ...grpc.CallOption) (*mpv1.RecordOrchestrationEventResponse, error) {
+	s.lastReq = in
+	return s.recordOrchestrationEventResp, s.err
 }
 func (s *stubClient) GetApproval(ctx context.Context, in *mpv1.GetApprovalRequest, opts ...grpc.CallOption) (*mpv1.GetApprovalResponse, error) {
 	s.lastReq = in

@@ -635,8 +635,13 @@ mod mcp_exposure_tests {
                 enabled: true,
             },
         );
-        let defs =
-            mcp_tool_defs(&reg, &crate::ownership::OwnershipStore::new(), "org-1", "u1").await;
+        let defs = mcp_tool_defs(
+            &reg,
+            &crate::ownership::OwnershipStore::new(),
+            "org-1",
+            "u1",
+        )
+        .await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mcp__fs__read_file"), "got {names:?}");
         assert!(names.contains(&"mcp__fs__list_dir"), "got {names:?}");
@@ -675,11 +680,14 @@ mod mcp_exposure_tests {
                 enabled: true,
             },
         );
-        assert!(
-            mcp_tool_defs(&reg, &crate::ownership::OwnershipStore::new(), "org-2", "u1")
-                .await
-                .is_empty()
-        );
+        assert!(mcp_tool_defs(
+            &reg,
+            &crate::ownership::OwnershipStore::new(),
+            "org-2",
+            "u1"
+        )
+        .await
+        .is_empty());
     }
 
     #[tokio::test]

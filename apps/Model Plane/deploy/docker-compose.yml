@@ -471,6 +471,16 @@ services:
       # information-core gates /api/v1/* on x-internal-api-key (no-key → 401), so
       # the info tools must present the shared internal key.
       INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # shipping-core (Ingestion Plane) — backs get_shipping_quotes /
+      # shipping_carriers. Same host-published-port pattern as the URLs above
+      # (host port 3156 → container 8080).
+      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL_EXEC:-http://host.docker.internal:3156}
+      # integration-corev2 (Ingestion Plane) — backs list_provider_actions /
+      # execute_provider_action (the agent's typed bridge to every
+      # OAuth-connected provider operation). Host-published port 3026, same
+      # cross-plane pattern. The gateway gates /api/v1/* on x-internal-api-key.
+      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL_EXEC:-http://host.docker.internal:3026}
+      INTEGRATION_COREV2_INTERNAL_KEY: ${INTEGRATION_COREV2_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
     depends_on:
       postgres:
         condition: service_healthy

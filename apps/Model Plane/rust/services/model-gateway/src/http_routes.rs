@@ -1052,7 +1052,7 @@ async fn ai_chat(
 
 /// Versioned system prompt for the onboarding plan recommender. Bumping the
 /// version string changes the inference-core prompt-cache key.
-const RECOMMEND_PLAN_MODEL_VERSION: &str = "recommend-plan-v6";
+const RECOMMEND_PLAN_MODEL_VERSION: &str = "recommend-plan-v9";
 
 const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
     "Velion product context: Velion is both the product name and the AI worker at the center of the product. ",
@@ -1075,26 +1075,35 @@ const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
     "launch estimates. ",
     "Recommendation task: you are Velion's senior onboarding consultant writing a live AI recommendation ",
     "for a customer who just connected their website and tools. Recommend exactly one Velion plan. ",
-    "Plans (id -> name): ",
-    "trial -> Free (14-day Pro trial, no card); ",
-    "hobby -> Essential (small team, single chatbot); ",
-    "standard -> Advanced (automation, routing, multiple sources/inboxes); ",
-    "pro -> Expert (SSO, SLA, reporting, multibrand, larger teams); ",
-    "enterprise -> Custom (governance, volume, dedicated onboarding). ",
+    "Plans (id -> name and terms): ",
+    "trial -> Free, 0 NOK/month, 14-day trial, no card, upgrade later; ",
+    "hobby -> Essential, 299 NOK/month, 4 NOK per AI-resolved inquiry, chatbot + shared inbox, website and knowledge sources, small-team/simple chatbot validation; ",
+    "standard -> Advanced, 999 NOK/month, 3.50 NOK per AI-resolved inquiry, automation and routing, multiple team inboxes, 20 Lite seats, multiple sources/inboxes; ",
+    "pro -> Expert, 1499 NOK/month, 2.90 NOK per AI-resolved inquiry, SSO and identity controls, SLA/reporting/multibrand, 50 Lite seats, larger support teams; ",
+    "enterprise -> Custom, volume pricing per AI answer, custom terms, extended onboarding, dedicated success team, governance/volume. ",
     "Heuristics: more employees, more connected sources, and intent signals like ",
     "automation/SLA/SSO/governance push toward higher tiers; little or no signal -> trial. ",
     "Write like a thoughtful product specialist, not a pricing template. ",
     "Use the actual organization name, employee count if provided, website host, and connected systems. ",
+    "Counts are authoritative: context.connectedSourceCount/context.sourceSummary.connectedSourceCount is the number of ",
+    "connected source streams to call 'tilkoblede kilder'; context.sourceCount includes those connected streams plus ",
+    "the website as one source. Never invent a smaller source count or reuse an older count. ",
+    "If context.websiteContent is present, it holds real title+excerpt snippets Velion just crawled from the ",
+    "customer's site; read them to state concretely what the company does, sells, or serves, and reference that ",
+    "in the reason/summary so the recommendation is visibly grounded in their own site — never invent facts not ",
+    "present in those snippets. If context.industry is present, use it to frame the company's sector. ",
     "If context.dataPlane is present, use its graph counts, groups, sample nodes and sample edges as evidence; ",
     "do not invent document contents that are not in the JSON. ",
     "Paraphrase the user's goal and correct obvious spelling/grammar mistakes; never quote raw user input. ",
     "Explain why this plan fits now, what Velion already appears to understand, and what the customer can expect ",
     "in the first launch window. Expected outcomes must be rough directional estimates, not guarantees. ",
     "Avoid generic phrases such as 'select this plan', 'static FAQ', or 'you can change later'. ",
+    "Be terse: prefer the fewest words that stay grounded and specific; no filler. ",
     "Reply with ONLY a JSON object: {\"planId\": one of trial|hobby|standard|pro|enterprise, ",
-    "\"reason\": a short natural sentence addressed to the user, \"summary\": two concise sentences, ",
-    "\"proofPoints\": 2-4 concrete evidence bullets, \"scopeSignals\": 2-4 scope bullets, ",
-    "\"opportunities\": 2-4 likely first improvements, ",
+    "\"reason\": ONE short sentence addressed to the user, \"summary\": exactly ONE tight sentence, ",
+    "\"proofPoints\": at most 3 short bullets (max ~8 words each, not full sentences), ",
+    "\"scopeSignals\": at most 3 short bullets (max ~8 words each), ",
+    "\"opportunities\": at most 2 short bullets (max ~8 words each), ",
     "\"expectedOutcomes\": 2-3 objects with {label,value,detail}, ",
     "\"confidence\": number 0..1}. Write all user-facing text in the requested locale ",
     "(nb = natural Norwegian Bokmål, en = English)."
@@ -1185,9 +1194,9 @@ async fn recommend_plan(
         .get("summary")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let proof_points = string_array_field(&parsed, "proofPoints", 4);
-    let scope_signals = string_array_field(&parsed, "scopeSignals", 4);
-    let opportunities = string_array_field(&parsed, "opportunities", 4);
+    let proof_points = string_array_field(&parsed, "proofPoints", 3);
+    let scope_signals = string_array_field(&parsed, "scopeSignals", 3);
+    let opportunities = string_array_field(&parsed, "opportunities", 2);
     let expected_outcomes = expected_outcomes_field(&parsed, 3);
     let confidence = parsed.get("confidence").and_then(Value::as_f64);
 
