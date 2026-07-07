@@ -75,6 +75,22 @@ export type BrowserVisualEvidence = {
   observationUrl?: string | null
 }
 
+export type BrowserTimelineEntry = {
+  consoleSummary?: Array<{ level: string; text: string }> | null
+  domInteractiveCount?: number | null
+  domNodeCount?: number | null
+  networkSummary?: Array<{ content_type?: string | null; method: string; status: number; url: string }> | null
+  observedAt?: string | null
+  policyDenials?: string[] | null
+  screenshotArtifactId?: string | null
+  screenshotUrl?: string | null
+  step: number
+  title?: string | null
+  url?: string | null
+  visualObservationArtifactId?: string | null
+  visualObservationUrl?: string | null
+}
+
 export type BrowserSession = {
   capabilities: string[]
   frame?: BrowserFrame | null
@@ -87,6 +103,7 @@ export type BrowserSession = {
   }
   renderMode: BrowserRenderMode
   status: BrowserSessionStatus
+  timeline?: BrowserTimelineEntry[]
   title: string
   url: string
   visual?: BrowserVisualEvidence | null
@@ -94,6 +111,8 @@ export type BrowserSession = {
     height: number
     width: number
   }
+  /** Zero Data Retention marker as reported by the gateway for this run. */
+  zdr?: boolean
 }
 
 export type BrowserSessionResponse = {

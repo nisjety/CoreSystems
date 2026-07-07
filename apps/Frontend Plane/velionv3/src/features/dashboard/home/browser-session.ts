@@ -1,6 +1,7 @@
 import type {
   BrowserObservation,
   BrowserSession,
+  BrowserTimelineEntry,
   BrowserSessionResponse,
 } from '@/shared/api/browser-client'
 import { gatewayBaseUrl } from '@/shared/api/config'
@@ -27,6 +28,11 @@ export type BrowserNetworkEntry = {
   url: string
 }
 
+export type BrowserTimelineViewEntry = BrowserTimelineEntry & {
+  screenshotUrl?: string | null
+  visualObservationUrl?: string | null
+}
+
 export type BrowserSessionViewModel = {
   capabilities: string[]
   commentAnchors: Array<{
@@ -46,12 +52,16 @@ export type BrowserSessionViewModel = {
   nodeCount?: number | null
   observation?: BrowserObservation | null
   policyDenials: string[]
+  profileId: string | null
   profileLabel: string
+  profileScope: BrowserSession['profile']['scope']
+  profileStorage: BrowserSession['profile']['storage']
   renderMode: BrowserSurfaceMode
   screenshotArtifactId?: string | null
   sessionId?: string
   sourceLabel: string
   status: BrowserSession['status']
+  timeline: BrowserTimelineViewEntry[]
   title: string
   url: string
   visualObservationArtifactId?: string | null
@@ -60,6 +70,7 @@ export type BrowserSessionViewModel = {
     height: number
     width: number
   }
+  zdr: boolean
 }
 
 const fallbackViewport = { width: 1280, height: 800 }
@@ -69,6 +80,7 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
   const observation = preview.browserSession?.observation ?? null
   const session = preview.browserSession?.session
   const frameUrl = resolveBrowserArtifactUrl(session?.frame?.url)
+  const timeline = normalizeTimeline(session?.timeline)
   const visualObservationArtifactId =
     session?.visual?.observationArtifactId ?? observation?.visual_observation_artifact_id ?? null
   const visualObservationUrl =
@@ -98,18 +110,34 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     nodeCount: observation?.dom_summary?.node_count ?? null,
     observation,
     policyDenials: observation?.policy_denials ?? [],
+    profileId: session?.profile.id ?? null,
     profileLabel: profileLabel(session),
+    profileScope: session?.profile.scope ?? 'run_scoped',
+    profileStorage: session?.profile.storage ?? 'isolated',
     renderMode: mode,
     screenshotArtifactId: observation?.screenshot_artifact_id ?? null,
     sessionId: session?.id,
     sourceLabel: frameUrl ? 'Chromium frame' : sourceLabel(mode),
     status: session?.status ?? 'degraded',
+    timeline,
     title: observation?.title || session?.title || preview.title,
     url: observation?.url || session?.url || preview.url,
     visualObservationArtifactId,
     visualObservationUrl,
     viewport: session?.viewport ?? fallbackViewport,
+    zdr: session?.zdr ?? false,
   }
+}
+
+/**
+ * Whether the session's captured visual evidence is ephemeral. Only ZDR runs
+ * make evidence ephemeral — for regular sessions Quarry retains artifacts per
+ * its normal retention even when the browser profile is isolated (profile and
+ * cookie non-persistence is surfaced separately via `profileStorage`). The UI
+ * renders an explicit marker for ZDR sessions so they never imply persistence.
+ */
+export function evidenceIsEphemeral(model: Pick<BrowserSessionViewModel, 'zdr'>): boolean {
+  return model.zdr
 }
 
 export function attachBrowserSession(
@@ -131,7 +159,11 @@ export function attachBrowserSession(
       storage: session.profile.id ? session.profile.storage : previous?.profile.storage ?? session.profile.storage,
     },
     visual: session.visual ?? previous?.visual ?? null,
+    timeline: session.timeline?.length
+      ? session.timeline
+      : previous?.timeline ?? [],
     viewport: session.viewport ?? previous?.viewport,
+    zdr: session.zdr ?? previous?.zdr ?? false,
   }
   const mergedBrowserSession: BrowserSessionResponse = {
     ...browserSession,
@@ -195,4 +227,123 @@ function resolveVisualObservationUrl(sessionId?: string, artifactId?: string | n
   return resolveBrowserArtifactUrl(
     `/api/v1/browser/sessions/${encodeURIComponent(normalizedSessionId)}/artifacts/${encodeURIComponent(normalizedArtifactId)}`,
   )
+}
+
+function normalizeTimeline(entries?: BrowserTimelineEntry[] | null): BrowserTimelineViewEntry[] {
+  return (entries ?? []).map((entry) => ({
+    ...entry,
+    screenshotUrl: resolveBrowserArtifactUrl(entry.screenshotUrl),
+    visualObservationUrl: resolveBrowserArtifactUrl(entry.visualObservationUrl),
+  }))
+}
+
+/** Gateway artifact URL for a session-scoped artifact id, or null when either id is unusable. */
+export function browserArtifactUrl(sessionId?: string | null, artifactId?: string | null): string | null {
+  return resolveVisualObservationUrl(sessionId ?? undefined, artifactId)
+}
+
+// --- Timeline detail selection ---------------------------------------------
+
+export type BrowserTimelineDetail = {
+  entry: BrowserTimelineViewEntry
+  previous: BrowserTimelineViewEntry | null
+}
+
+/** The timeline entry for a step plus the preceding entry (for before/after evidence). */
+export function timelineDetail(
+  timeline: BrowserTimelineViewEntry[],
+  step: number | null,
+): BrowserTimelineDetail | null {
+  if (step === null) return null
+  const index = timeline.findIndex((entry) => entry.step === step)
+  if (index < 0) return null
+  const entry = timeline[index]
+  if (!entry) return null
+  return { entry, previous: index > 0 ? timeline[index - 1] ?? null : null }
+}
+
+export type BrowserTimelineDelta = {
+  domNodeDelta: number | null
+  titleChanged: boolean
+  urlChanged: boolean
+}
+
+/**
+ * Deterministic delta between two observed timeline entries. Values are
+ * computed only from fields the gateway returned; anything unavailable is null.
+ */
+export function describeTimelineDelta(detail: BrowserTimelineDetail): BrowserTimelineDelta {
+  const { entry, previous } = detail
+  const currentNodes = entry.domNodeCount ?? null
+  const previousNodes = previous?.domNodeCount ?? null
+  return {
+    domNodeDelta: currentNodes !== null && previousNodes !== null ? currentNodes - previousNodes : null,
+    titleChanged: Boolean(previous) && (previous?.title ?? '') !== (entry.title ?? ''),
+    urlChanged: Boolean(previous) && (previous?.url ?? '') !== (entry.url ?? ''),
+  }
+}
+
+// --- Artifact descriptors ----------------------------------------------------
+
+export type BrowserArtifactMediaKind = 'image' | 'json'
+
+export type BrowserArtifactDescriptor = {
+  artifactId: string
+  kind: 'screenshot' | 'visual_observation'
+  label: string
+  mediaKind: BrowserArtifactMediaKind
+  url: string
+}
+
+/** The artifacts the gateway returned for one timeline entry, typed for the viewer. */
+export function artifactsForTimelineEntry(entry: BrowserTimelineViewEntry): BrowserArtifactDescriptor[] {
+  const artifacts: BrowserArtifactDescriptor[] = []
+  if (entry.screenshotArtifactId && entry.screenshotUrl) {
+    artifacts.push({
+      artifactId: entry.screenshotArtifactId,
+      kind: 'screenshot',
+      label: 'screenshot.png',
+      mediaKind: 'image',
+      url: entry.screenshotUrl,
+    })
+  }
+  if (entry.visualObservationArtifactId && entry.visualObservationUrl) {
+    artifacts.push({
+      artifactId: entry.visualObservationArtifactId,
+      kind: 'visual_observation',
+      label: 'visual_observation.json',
+      mediaKind: 'json',
+      url: entry.visualObservationUrl,
+    })
+  }
+  return artifacts
+}
+
+// --- Model rationale (AI-suggested steps) -------------------------------------
+
+export type BrowserStepRationale = {
+  actionType: string | null
+  confidence: number | null
+  done: boolean
+  goal: string
+  modelUsed: string | null
+  reason: string | null
+  /** Step number of the observation produced by executing the suggested action. */
+  step: number
+}
+
+export function rationaleForStep(
+  rationales: BrowserStepRationale[],
+  step: number | null,
+): BrowserStepRationale | null {
+  if (step === null) return null
+  return rationales.find((rationale) => rationale.step === step) ?? null
+}
+
+/** Immutably record a rationale for a step, replacing any previous record for that step. */
+export function withStepRationale(
+  rationales: BrowserStepRationale[],
+  rationale: BrowserStepRationale,
+): BrowserStepRationale[] {
+  return [...rationales.filter((existing) => existing.step !== rationale.step), rationale]
 }
