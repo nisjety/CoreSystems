@@ -933,46 +933,6 @@ pub(super) async fn dispatch_ticket_resolve(
     .await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn upload_files_action_rejects_json_execution() {
-        // upload_files is human-only (needs file bytes) — the JSON action path must
-        // return a typed 422 pointing at the multipart route, never a fake success.
-        let response = dispatch_upload_files().await;
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[test]
-    fn ticket_remap_maps_camel_to_snake_and_omits_absent_or_null() {
-        let input = json!({
-            "conversationId": "conv_1",
-            "priority": "high",
-            "category": null,
-        });
-        let out = ticket_remap(
-            &input,
-            &[
-                ("conversationId", "conversation_id"),
-                ("priority", "priority"),
-                ("severity", "severity"),
-                ("category", "category"),
-            ],
-        );
-        assert_eq!(
-            out.get("conversation_id").and_then(|v| v.as_str()),
-            Some("conv_1")
-        );
-        assert_eq!(out.get("priority").and_then(|v| v.as_str()), Some("high"));
-        // absent field is omitted (not sent as null)...
-        assert!(!out.contains_key("severity"));
-        // ...and an explicit null is omitted too, so it never clobbers upstream state.
-        assert!(!out.contains_key("category"));
-    }
-}
-
 pub(super) async fn dispatch_social_create_draft(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -1188,4 +1148,44 @@ fn social_execution(
         "eventStream": "",
     }));
     (StatusCode::OK, Json(execution)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upload_files_action_rejects_json_execution() {
+        // upload_files is human-only (needs file bytes) — the JSON action path must
+        // return a typed 422 pointing at the multipart route, never a fake success.
+        let response = dispatch_upload_files().await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn ticket_remap_maps_camel_to_snake_and_omits_absent_or_null() {
+        let input = json!({
+            "conversationId": "conv_1",
+            "priority": "high",
+            "category": null,
+        });
+        let out = ticket_remap(
+            &input,
+            &[
+                ("conversationId", "conversation_id"),
+                ("priority", "priority"),
+                ("severity", "severity"),
+                ("category", "category"),
+            ],
+        );
+        assert_eq!(
+            out.get("conversation_id").and_then(|v| v.as_str()),
+            Some("conv_1")
+        );
+        assert_eq!(out.get("priority").and_then(|v| v.as_str()), Some("high"));
+        // absent field is omitted (not sent as null)...
+        assert!(!out.contains_key("severity"));
+        // ...and an explicit null is omitted too, so it never clobbers upstream state.
+        assert!(!out.contains_key("category"));
+    }
 }

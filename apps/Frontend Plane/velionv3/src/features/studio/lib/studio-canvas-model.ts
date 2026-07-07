@@ -40,7 +40,7 @@ export async function loadStudioWorkspace(): Promise<{
   source: StudioPersistenceSource
 }> {
   const ctx = await getSessionContext().catch(() => null)
-  const activeOrgId = ctx?.orgs[0]?.id ?? ctx?.orgId ?? ''
+  const activeOrgId = ctx?.orgs?.[0]?.id ?? ctx?.orgId ?? ''
 
   if (!activeOrgId) {
     return { orgId: '', project: null, source: 'fallback' }
