@@ -2,6 +2,11 @@
 
 pub mod agent;
 
+use mp_contracts::model_plane::v1::{
+    self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
+};
+use tonic::transport::Channel;
+
 use crate::hook;
 use crate::permission::{self, PermissionDecision, PermissionMode};
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
@@ -109,6 +114,7 @@ impl StepOutcome {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
     tool_name: &str,
     tool_input: &str,
@@ -116,6 +122,9 @@ pub async fn execute_step(
     hook_context: &str,
     org_id: &str,
     user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
 ) -> StepOutcome {
     if hook::is_blocked(hook_context) {
@@ -123,7 +132,11 @@ pub async fn execute_step(
     }
 
     let mode = PermissionMode::from_wire(permission_mode);
-    match permission::evaluate(mode, tool_name) {
+    // Operation-aware gate: `execute_provider_action` is classified by the
+    // `operation` embedded in `tool_input` (a read proceeds, a write pauses)
+    // rather than by tool name alone; `browser_agent` and other write-capable
+    // tools are gated by name.
+    match permission::evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
         PermissionDecision::AwaitApproval => return StepOutcome::awaiting_approval(),
         PermissionDecision::Allow => {}
@@ -166,7 +179,16 @@ pub async fn execute_step(
     } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
         execute_list_provider_actions(org_id).await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
-        execute_provider_action(tool_input, org_id).await
+        execute_provider_action(
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            permission_mode,
+            session_channel.clone(),
+        )
+        .await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
         execute_mcp(tool_name, tool_input, org_id).await
     } else {
@@ -586,22 +608,38 @@ async fn execute_list_provider_actions(org_id: &str) -> tool_bridge::ToolExecuti
     }
 }
 
-/// Marker forwarded to integration-corev2 as `approvalId` on provider writes.
-/// The gateway requires human-approval metadata on write operations; by the
-/// time this code runs, the Model Plane permission gate has already been
-/// satisfied — either the run paused for explicit human approval (`ask`
-/// posture, `permission::is_risky_tool` matched `execute_provider_action`) and
-/// resumed, or gating is intentionally off (`auto`/chat posture, where the
-/// interactive human is the approver). The gateway's check is presence-only,
-/// so this marker honestly asserts that provenance rather than fabricating a
-/// stored approval id.
-const MODEL_PLANE_APPROVAL_MARKER: &str = "model-plane-governed-loop";
-
 /// `execute_provider_action` tool — WRITE-capable: runs one operation on a
-/// connected provider via integration-corev2. Reaches here only after the
-/// permission gate (`permission::is_risky_tool` matches this name, so `ask`
-/// posture pauses the run for a human first). `org_id` scopes the call.
-async fn execute_provider_action(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+/// connected provider via integration-corev2.
+///
+/// Approval binding (audit fix, Phase 2): a WRITE operation forwards a REAL,
+/// per-decision durable approval id (session-core `appr_…`) as `approvalId`,
+/// NOT a shared constant. The id is resolved from the durable approval store
+/// keyed on this run+step (`resolve_write_approval`):
+///   - `ask` (deployed-agent) posture: the id is forwarded ONLY when the durable
+///     record shows the human GRANTED it; otherwise the write is blocked. This
+///     is real server-side enforcement of the "requires approval" promise.
+///   - `auto` (chat) posture: the interactive user is the live approver, so the
+///     decision is recorded durably (attributed to that user) and its real id is
+///     forwarded — an auditable per-call record, never a shared constant.
+///
+/// Read operations forward no `approvalId` (integration-corev2 does not gate
+/// reads).
+///
+/// NOTE (remaining work — Stream 2 / integration-corev2): the downstream gateway
+/// check (`requireActionCapability` / `actionApprovalRef`, Ingestion Plane) is
+/// still presence-only. It must be upgraded to LOOK UP the forwarded id against
+/// the durable approvals table and verify `state = granted` for this org/action
+/// to fully close the loop. That file is owned by another stream and is out of
+/// scope here.
+async fn execute_provider_action(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    permission_mode: &str,
+    session_channel: Option<Channel>,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct ActionInput {
         connection_id: String,
@@ -615,6 +653,31 @@ async fn execute_provider_action(tool_input: &str, org_id: &str) -> tool_bridge:
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid execute_provider_action input: {e}")),
     };
+
+    // Only WRITE operations require an approval reference. Unknown operations are
+    // treated as writes (fail safe — see `integration_tools::operation_is_write`).
+    let is_write = crate::integration_tools::operation_is_write(&input.operation).unwrap_or(true);
+    let approval_ref = if is_write {
+        match resolve_write_approval(
+            session_channel.as_ref(),
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            permission_mode,
+            &input.operation,
+        )
+        .await
+        {
+            Ok(id) => Some(id),
+            // Fail closed: never send a write to integration-corev2 without a
+            // real, verifiable approval reference behind it.
+            Err(e) => return tool_error(e),
+        }
+    } else {
+        None
+    };
+
     let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
         return tool_error(
             "execute_provider_action unavailable: integration client could not be built".to_owned(),
@@ -627,7 +690,7 @@ async fn execute_provider_action(tool_input: &str, org_id: &str) -> tool_bridge:
             &input.operation,
             input.params,
             input.body,
-            Some(MODEL_PLANE_APPROVAL_MARKER),
+            approval_ref.as_deref(),
         )
         .await
     {
@@ -636,6 +699,101 @@ async fn execute_provider_action(tool_input: &str, org_id: &str) -> tool_bridge:
             error: None,
         },
         Err(e) => tool_error(e),
+    }
+}
+
+/// Resolve the REAL durable approval id to forward as `approvalId` for a
+/// provider WRITE. Never returns a shared constant.
+///
+/// Uses session-core's durable approval store (idempotent on
+/// `(org_id, idempotency_key)`, key = `{run_id}:{step_id}` — the SAME key the
+/// HITL pause path mints under). Under `ask` the record must already be human-
+/// GRANTED; under `auto` the interactive user's live authorization is recorded
+/// durably and its id returned. Any failure to establish a verifiable record is
+/// an `Err`, so the caller blocks the write (fail closed).
+async fn resolve_write_approval(
+    session_channel: Option<&Channel>,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    permission_mode: &str,
+    operation: &str,
+) -> Result<String, String> {
+    let Some(channel) = session_channel else {
+        return Err(
+            "provider write blocked: no session-core channel to establish a verifiable approval \
+             record"
+                .to_owned(),
+        );
+    };
+    if run_id.trim().is_empty() || step_id.trim().is_empty() {
+        return Err(
+            "provider write blocked: run/step context required to bind a durable approval"
+                .to_owned(),
+        );
+    }
+
+    let mut client = OrchestrationCoreServiceClient::new(channel.clone());
+    // Idempotent: returns the existing durable approval for this (org, run:step)
+    // when the HITL pause path already minted one, else creates a fresh record.
+    let created = client
+        .create_approval(pb::CreateApprovalRequest {
+            run_id: run_id.to_owned(),
+            step_id: step_id.to_owned(),
+            kind: pb::ApprovalKind::ToolCall as i32,
+            requested_of: org_id.to_owned(),
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            reason: format!("provider write '{operation}' requires approval"),
+            expires_in_seconds: 3600,
+            client_approval_id: String::new(),
+            idempotency_key: format!("{run_id}:{step_id}"),
+        })
+        .await
+        .map_err(|e| format!("provider write blocked: could not reach approval store: {e}"))?
+        .into_inner();
+
+    let approval = created.approval.ok_or_else(|| {
+        "provider write blocked: approval store returned no record".to_owned()
+    })?;
+    let granted = approval.state == pb::ApprovalState::Granted as i32;
+
+    if PermissionMode::from_wire(permission_mode) == PermissionMode::Ask {
+        // Deployed-agent posture: a human must have granted this exact record.
+        if granted {
+            Ok(approval.id)
+        } else {
+            Err(format!(
+                "provider write blocked: approval {} is not granted (a human must approve \
+                 this action under the deployed-agent posture)",
+                approval.id
+            ))
+        }
+    } else {
+        // Chat/interactive posture: the interactive user is the live approver.
+        // Record that decision durably (idempotent — a re-run finds it granted),
+        // then forward the real id.
+        if !granted {
+            let decided_by = if user_id.trim().is_empty() {
+                org_id.to_owned()
+            } else {
+                user_id.to_owned()
+            };
+            client
+                .decide_approval(pb::DecideApprovalRequest {
+                    approval_id: approval.id.clone(),
+                    decision: pb::ApprovalState::Granted as i32,
+                    decided_by,
+                    decision_reason: "auto (chat) posture: interactive user is the live approver"
+                        .to_owned(),
+                })
+                .await
+                .map_err(|e| {
+                    format!("provider write blocked: could not record interactive approval: {e}")
+                })?;
+        }
+        Ok(approval.id)
     }
 }
 
@@ -663,6 +821,9 @@ mod tests {
             "",
             "org_test",
             "user_test",
+            "run_test",
+            "step_test",
+            None,
             None,
         )
         .await;
@@ -679,6 +840,9 @@ mod tests {
             "",
             "org_test",
             "user_test",
+            "run_test",
+            "step_test",
+            None,
             None,
         )
         .await;
@@ -694,6 +858,9 @@ mod tests {
             "",
             "org_test",
             "user_test",
+            "run_test",
+            "step_test",
+            None,
             None,
         )
         .await;
@@ -709,6 +876,9 @@ mod tests {
             "",
             "org_test",
             "user_test",
+            "run_test",
+            "step_test",
+            None,
             None,
         )
         .await;
@@ -725,9 +895,37 @@ mod tests {
             "",
             "org_test",
             "user_test",
+            "run_test",
+            "step_test",
+            None,
             None,
         )
         .await;
         assert_eq!(out.status, "permission_denied");
+    }
+
+    // ── Phase 2: provider-write approval binding (fail-closed guarantees) ──────
+    // A provider WRITE must never be forwarded to integration-corev2 without a
+    // real, verifiable durable approval reference behind it. These exercise the
+    // fail-closed branches of `resolve_write_approval` that do not require the
+    // approval store (the granted-forwarding / interactive-record happy paths
+    // round-trip through session-core and are covered by the agent-loop tests).
+
+    #[tokio::test]
+    async fn provider_write_without_session_channel_is_blocked() {
+        let r = resolve_write_approval(None, "org", "user", "run", "step", "auto", "pages.post")
+            .await;
+        assert!(r.is_err(), "a write with no approval store must be blocked");
+        assert!(r.unwrap_err().contains("session-core"));
+    }
+
+    #[tokio::test]
+    async fn provider_write_without_run_context_is_blocked() {
+        // Channel present (lazy — never dialed), but no run/step to bind to.
+        let ch = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let r =
+            resolve_write_approval(Some(&ch), "org", "user", "", "", "auto", "pages.post").await;
+        assert!(r.is_err(), "a write with no run/step context must be blocked");
+        assert!(r.unwrap_err().contains("run/step"));
     }
 }

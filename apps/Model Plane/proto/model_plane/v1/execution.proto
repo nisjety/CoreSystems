@@ -96,6 +96,11 @@ message ExecuteStepRequest {
 
   // Tenant identifier.
   string org_id = 7;
+
+  // Acting user identifier (viewer). Threaded into the step so knowledge-search
+  // (and any other viewer-scoped tool) filters to the caller's visible set, not
+  // the whole org. Empty = org-scoped only (legacy/unauthenticated primitive).
+  string user_id = 8;
 }
 
 // ExecuteStepResponse — result of a single step execution.

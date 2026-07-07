@@ -86,6 +86,8 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 		Goal:     input.Goal,
 		Policy:   input.Policy,
 		MaxTurns: defaultMaxTurns,
+		OrgID:    input.OrgID,
+		UserID:   input.UserID,
 	}
 
 	var stepOutput activities.StepLoopOutput

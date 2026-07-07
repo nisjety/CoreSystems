@@ -42,6 +42,12 @@ type StepLoopInput struct {
 	Goal     string
 	Policy   string
 	MaxTurns int
+	// OrgID is the tenant scope for the step's tools.
+	OrgID string
+	// UserID is the acting viewer. Threaded to ExecuteStep.user_id so
+	// viewer-scoped tools (knowledge-search) filter to the caller's visible set
+	// rather than the whole org. Empty = org-scoped (legacy).
+	UserID string
 }
 type StepLoopOutput struct {
 	Steps     []StepResult
@@ -164,6 +170,18 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 
 // ── Activity 2: ExecuteStepLoopActivity ──────────────────────────────────────
 
+// executeStepRequest builds the ExecuteStep RPC request from the loop input.
+// OrgID (tenant) and UserID (viewer) are threaded so execution-core scopes
+// viewer-scoped tools (knowledge-search) to the caller, not the whole org
+// (ExecuteStepRequest.user_id, proto field 8). Empty UserID = org-scoped.
+func executeStepRequest(input StepLoopInput) *mpv1.ExecuteStepRequest {
+	return &mpv1.ExecuteStepRequest{
+		RunId:  input.RunID,
+		OrgId:  input.OrgID,
+		UserId: input.UserID,
+	}
+}
+
 func (a *Activities) ExecuteStepLoopActivity(ctx context.Context, input StepLoopInput) (StepLoopOutput, error) {
 	if input.MaxTurns <= 0 {
 		input.MaxTurns = 10
@@ -177,9 +195,7 @@ func (a *Activities) ExecuteStepLoopActivity(ctx context.Context, input StepLoop
 		}
 		step := StepResult{StepIndex: i, ToolName: "pending", Completed: false}
 		if a.clients != nil && a.clients.ExecutionCore != nil {
-			resp, err := mpv1.NewExecutionCoreClient(a.clients.ExecutionCore).ExecuteStep(ctx, &mpv1.ExecuteStepRequest{
-				RunId: input.RunID,
-			})
+			resp, err := mpv1.NewExecutionCoreClient(a.clients.ExecutionCore).ExecuteStep(ctx, executeStepRequest(input))
 			if err != nil {
 				if status.Code(err) == codes.Unavailable {
 					a.logger.Warn("ExecutionCore unavailable", "method", "ExecuteStep")

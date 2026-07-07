@@ -21,6 +21,8 @@ type TaskStep struct {
 type DeepTaskInput struct {
 	ParentRunID string     `json:"parent_run_id"`
 	Steps       []TaskStep `json:"steps"`
+	OrgID       string     `json:"org_id"`
+	UserID      string     `json:"user_id"`
 }
 
 // DeepTaskOutput collects the outputs from all sequential steps.
@@ -68,6 +70,8 @@ func DeepTaskWorkflow(ctx workflow.Context, input DeepTaskInput) (DeepTaskOutput
 			Goal:     step.Goal,
 			Policy:   step.Policy,
 			MaxTurns: defaultMaxTurns,
+			OrgID:    input.OrgID,
+			UserID:   input.UserID,
 		}
 
 		var output activities.StepLoopOutput

@@ -283,6 +283,12 @@ async fn run_agent_with_tools(
                 continue;
             }
 
+            // Stable per-(run, step) id computed BEFORE dispatch so it is shared
+            // by the gate, the durable approval binding (a provider write forwards
+            // this step's real approval id), and the audit step record.
+            step_seq += 1;
+            let step_id = tool_step_id(&req.run_id, step_seq, call);
+
             let outcome = runtime_loop::execute_step(
                 &call.name,
                 &call.arguments_json,
@@ -290,6 +296,9 @@ async fn run_agent_with_tools(
                 "",
                 &req.org_id,
                 &req.user_id,
+                &req.run_id,
+                &step_id,
+                Some(session_channel.clone()),
                 None,
             )
             .await;
@@ -298,8 +307,6 @@ async fn run_agent_with_tools(
             // (same path as the ExecuteStep RPC), flip the run AwaitingApproval,
             // and return early — resume re-invokes run_agent.
             if outcome.status == "awaiting_approval" {
-                step_seq += 1;
-                let step_id = tool_step_id(&req.run_id, step_seq, call);
                 return pause_for_approval(
                     state,
                     &session_channel,
@@ -313,8 +320,6 @@ async fn run_agent_with_tools(
 
             // Non-terminal per-tool step (status "running") carrying the GDPR
             // audit detail. NEVER a terminal status — that's the final step's job.
-            step_seq += 1;
-            let step_id = tool_step_id(&req.run_id, step_seq, call);
             record_tool_step(
                 &session_channel,
                 &req.run_id,
@@ -806,6 +811,7 @@ mod tests {
         completed: Vec<(String, String)>,  // (step_id, status)
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
+        decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
     }
 
     type SharedRecorder = Arc<Mutex<Recorder>>;
@@ -1228,8 +1234,20 @@ mod tests {
                 .lock()
                 .unwrap()
                 .approvals
-                .push((req.step_id, req.reason));
-            Ok(Response::new(pb::CreateApprovalResponse { approval: None }))
+                .push((req.step_id.clone(), req.reason));
+            // Return a real durable-style record (state REQUESTED) so callers that
+            // resolve an approval id (e.g. execute_provider_action) get a genuine
+            // per-decision id instead of nothing.
+            let approval = pb::Approval {
+                id: format!("appr_{}", req.idempotency_key.replace(':', "_")),
+                run_id: req.run_id,
+                step_id: req.step_id,
+                state: pb::ApprovalState::Requested as i32,
+                ..Default::default()
+            };
+            Ok(Response::new(pb::CreateApprovalResponse {
+                approval: Some(approval),
+            }))
         }
 
         async fn list_approvals(
@@ -1255,9 +1273,24 @@ mod tests {
 
         async fn decide_approval(
             &self,
-            _: Request<pb::DecideApprovalRequest>,
+            request: Request<pb::DecideApprovalRequest>,
         ) -> Result<Response<pb::DecideApprovalResponse>, Status> {
-            Err(Status::unimplemented("decide_approval not used"))
+            let req = request.into_inner();
+            self.rec
+                .lock()
+                .unwrap()
+                .decisions
+                .push((req.approval_id.clone(), req.decision));
+            let approval = pb::Approval {
+                id: req.approval_id,
+                state: req.decision,
+                decided_by: req.decided_by,
+                decision_reason: req.decision_reason,
+                ..Default::default()
+            };
+            Ok(Response::new(pb::DecideApprovalResponse {
+                approval: Some(approval),
+            }))
         }
 
         async fn get_subagent_lineage(
@@ -1584,6 +1617,71 @@ mod tests {
         assert_eq!(
             state.get_or_create("run_test").status,
             crate::state::RunStatus::AwaitingApproval
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_write_auto_records_and_forwards_real_approval() {
+        // Phase 2: under `auto` (chat) posture a provider WRITE is allowed to run,
+        // and instead of forwarding a shared constant marker it binds a REAL
+        // per-decision durable approval — created AND recorded as granted
+        // (interactive user is the live approver). The integration client is
+        // absent in tests, so the action itself errors (non-fatal); the point is
+        // the durable approval binding.
+        std::env::set_var("INTEGRATION_COREV2_URL", "http://127.0.0.1:1"); // fast connection refuse
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+
+        let call = pb::ToolCall {
+            id: "pa-1".to_owned(),
+            name: "execute_provider_action".to_owned(),
+            arguments_json:
+                r#"{"connection_id":"c1","operation":"message.send","body":{"text":"hi"}}"#
+                    .to_owned(),
+        };
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![call],
+            },
+            Scripted::Answer("done".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let tools = vec![pb::ToolDefinition {
+            name: "execute_provider_action".to_owned(),
+            description: "Run one provider operation.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        let resp =
+            run_agent_with_tools(&state, session_channel, inference_channel, req, tools).await;
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.approvals.len(),
+            1,
+            "one durable approval created for the provider write"
+        );
+        assert_eq!(
+            r.decisions.len(),
+            1,
+            "the write's approval was recorded as decided (not a shared constant)"
+        );
+        assert_eq!(
+            r.decisions[0].1,
+            pb::ApprovalState::Granted as i32,
+            "auto posture records the interactive user's grant on the real approval id"
+        );
+        assert!(
+            r.decisions[0].0.starts_with("appr_"),
+            "a real durable approval id is threaded, got {}",
+            r.decisions[0].0
         );
     }
 }

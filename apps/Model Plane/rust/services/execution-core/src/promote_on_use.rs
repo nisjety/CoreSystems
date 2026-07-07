@@ -19,7 +19,7 @@
 //!      executed promote would attribute the doc to the service principal, not
 //!      the agent's user. A per-user (data-plane/quarry) token must be minted so
 //!      the promoted doc lands owner=user, visibility=private.
-//!   2. Signal — "grounded use" here is a successful web_fetch; a truer signal
+//!   2. Signal — "grounded use" here is a successful `web_fetch`; a truer signal
 //!      is the page actually being CITED in the model's answer. The counter is
 //!      also process-local (in-memory); a durable per-org store survives
 //!      restarts.

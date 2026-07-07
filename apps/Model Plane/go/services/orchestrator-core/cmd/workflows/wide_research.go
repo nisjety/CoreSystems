@@ -15,6 +15,8 @@ type WideResearchInput struct {
 	Queries       []string `json:"queries"`
 	MaxBranches   int      `json:"max_branches"`
 	MergeStrategy string   `json:"merge_strategy"` // "concat", "dedupe", "summarize"
+	OrgID         string   `json:"org_id"`
+	UserID        string   `json:"user_id"`
 }
 
 // ResearchBranchResult is the output from a single research branch.
@@ -81,6 +83,8 @@ func WideResearchWorkflow(ctx workflow.Context, input WideResearchInput) (WideRe
 			Goal:     q,
 			Policy:   "research",
 			MaxTurns: 5,
+			OrgID:    input.OrgID,
+			UserID:   input.UserID,
 		}
 
 		future := workflow.ExecuteActivity(actCtx,
