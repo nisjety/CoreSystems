@@ -621,6 +621,7 @@ async fn execute_list_provider_actions(org_id: &str) -> tool_bridge::ToolExecuti
 ///   - `auto` (chat) posture: the interactive user is the live approver, so the
 ///     decision is recorded durably (attributed to that user) and its real id is
 ///     forwarded — an auditable per-call record, never a shared constant.
+///
 /// Read operations forward no `approvalId` (integration-corev2 does not gate
 /// reads).
 ///
@@ -758,44 +759,41 @@ async fn resolve_write_approval(
     })?;
     let granted = approval.state == pb::ApprovalState::Granted as i32;
 
-    match PermissionMode::from_wire(permission_mode) {
+    if PermissionMode::from_wire(permission_mode) == PermissionMode::Ask {
         // Deployed-agent posture: a human must have granted this exact record.
-        PermissionMode::Ask => {
-            if granted {
-                Ok(approval.id)
-            } else {
-                Err(format!(
-                    "provider write blocked: approval {} is not granted (a human must approve \
-                     this action under the deployed-agent posture)",
-                    approval.id
-                ))
-            }
+        if granted {
+            Ok(approval.id)
+        } else {
+            Err(format!(
+                "provider write blocked: approval {} is not granted (a human must approve \
+                 this action under the deployed-agent posture)",
+                approval.id
+            ))
         }
+    } else {
         // Chat/interactive posture: the interactive user is the live approver.
         // Record that decision durably (idempotent — a re-run finds it granted),
         // then forward the real id.
-        _ => {
-            if !granted {
-                let decided_by = if user_id.trim().is_empty() {
-                    org_id.to_owned()
-                } else {
-                    user_id.to_owned()
-                };
-                client
-                    .decide_approval(pb::DecideApprovalRequest {
-                        approval_id: approval.id.clone(),
-                        decision: pb::ApprovalState::Granted as i32,
-                        decided_by,
-                        decision_reason:
-                            "auto (chat) posture: interactive user is the live approver".to_owned(),
-                    })
-                    .await
-                    .map_err(|e| {
-                        format!("provider write blocked: could not record interactive approval: {e}")
-                    })?;
-            }
-            Ok(approval.id)
+        if !granted {
+            let decided_by = if user_id.trim().is_empty() {
+                org_id.to_owned()
+            } else {
+                user_id.to_owned()
+            };
+            client
+                .decide_approval(pb::DecideApprovalRequest {
+                    approval_id: approval.id.clone(),
+                    decision: pb::ApprovalState::Granted as i32,
+                    decided_by,
+                    decision_reason: "auto (chat) posture: interactive user is the live approver"
+                        .to_owned(),
+                })
+                .await
+                .map_err(|e| {
+                    format!("provider write blocked: could not record interactive approval: {e}")
+                })?;
         }
+        Ok(approval.id)
     }
 }
 
