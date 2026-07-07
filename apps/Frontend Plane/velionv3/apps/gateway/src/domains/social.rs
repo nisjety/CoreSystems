@@ -49,6 +49,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/social/posts/:id/schedule", post(schedule_post))
         .route("/api/v1/social/posts/:id/publish", post(publish_post))
+        .route("/api/v1/social/metrics", get(list_metrics))
+        .route("/api/v1/social/catalogs", get(list_catalogs))
+        .route(
+            "/api/v1/social/catalogs/:id/products",
+            get(list_catalog_products),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -64,6 +70,270 @@ fn social_core_unavailable() -> axum::response::Response {
         )),
     )
         .into_response()
+}
+
+// --- Metrics + commerce catalog reads ---------------------------------------
+//
+// social-core already exposes real, per-provider ad metric snapshots
+// (`GET /api/v1/social/metrics`) and read-only Meta Commerce Catalog reads
+// (`GET /api/v1/social/catalogs`, `.../catalogs/:id/products`). Both were
+// routed and tested in social-core but had no browser-facing gateway route.
+// These proxies close that gap. Reads degrade to an honest empty payload
+// tagged `meta.source = "unavailable"` — never fabricated data.
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SocialMetricsQuery {
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    snapshot_date: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SocialCatalogProductsQuery {
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+/// One recorded provider metric value. Every field is sourced from a real
+/// social-core snapshot row — the gateway never synthesizes a value.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SocialMetric {
+    account_id: String,
+    connection_id: String,
+    provider_key: String,
+    metric_name: String,
+    metric_value: f64,
+    dimensions: Value,
+    snapshot_date: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricsList {
+    metrics: Vec<SocialMetric>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogList {
+    catalogs: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogProductList {
+    products: Vec<Value>,
+}
+
+/// Build an upstream path with optional query parameters, dropping any that are
+/// blank and URL-encoding the values. Keeps the org out of the query — the org
+/// is always forwarded server-side as `x-org-id` by `social_core_json`.
+fn social_query_path(base: &str, params: &[(&str, String)]) -> String {
+    let active: Vec<String> = params
+        .iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, value)| format!("{key}={}", urlencoding::encode(value.trim())))
+        .collect();
+    if active.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}?{}", active.join("&"))
+    }
+}
+
+/// Map a social-core metric row into the typed browser contract. Rows without a
+/// metric name are skipped (they cannot be rendered), never coerced to zero.
+fn core_metric_from_value(value: &Value) -> Option<SocialMetric> {
+    let obj = value.as_object()?;
+    let metric_name = obj
+        .get("metric_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    Some(SocialMetric {
+        account_id: obj
+            .get("account_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        connection_id: obj
+            .get("connection_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        provider_key: obj
+            .get("provider_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        metric_name,
+        metric_value: obj
+            .get("metric_value")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        dimensions: obj.get("dimensions").cloned().unwrap_or(Value::Null),
+        snapshot_date: obj
+            .get("snapshot_date")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+async fn list_metrics(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(query): Query<SocialMetricsQuery>,
+) -> axum::response::Response {
+    let org_id = match authorized_social_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
+    match load_core_metrics(&state, &user, &org_id, &query).await {
+        CoreRead::Ready(metrics) => Json(ok(MetricsList { metrics })).into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => Json(ok_with_source(
+            MetricsList { metrics: vec![] },
+            "unavailable",
+        ))
+        .into_response(),
+    }
+}
+
+async fn list_catalogs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> axum::response::Response {
+    let org_id = match authorized_social_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
+    match load_core_catalogs(&state, &user, &org_id).await {
+        CoreRead::Ready(catalogs) => Json(ok(CatalogList { catalogs })).into_response(),
+        CoreRead::Error(_) | CoreRead::Unavailable => Json(ok_with_source(
+            CatalogList { catalogs: vec![] },
+            "unavailable",
+        ))
+        .into_response(),
+    }
+}
+
+async fn list_catalog_products(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(catalog_id): Path<String>,
+    Query(query): Query<SocialCatalogProductsQuery>,
+) -> axum::response::Response {
+    let org_id = match authorized_social_org_id(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
+    match load_core_catalog_products(&state, &user, &org_id, &catalog_id, &query).await {
+        CoreRead::Ready(products) => Json(ok(CatalogProductList { products })).into_response(),
+        CoreRead::Error(response) => response,
+        CoreRead::Unavailable => Json(ok_with_source(
+            CatalogProductList { products: vec![] },
+            "unavailable",
+        ))
+        .into_response(),
+    }
+}
+
+async fn load_core_metrics(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    query: &SocialMetricsQuery,
+) -> CoreRead<Vec<SocialMetric>> {
+    let path = social_query_path(
+        "/api/v1/social/metrics",
+        &[
+            ("accountId", query.account_id.clone().unwrap_or_default()),
+            (
+                "snapshotDate",
+                query.snapshot_date.clone().unwrap_or_default(),
+            ),
+        ],
+    );
+    let (status, body) = social_core_json(state, user, org_id, Method::GET, &path, None).await;
+    if core_unavailable(status, &body) {
+        return CoreRead::Unavailable;
+    }
+    if !status.is_success() {
+        return CoreRead::Error((status, Json(body)).into_response());
+    }
+    let metrics = body
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(core_metric_from_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    CoreRead::Ready(metrics)
+}
+
+async fn load_core_catalogs(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> CoreRead<Vec<Value>> {
+    let (status, body) = social_core_json(
+        state,
+        user,
+        org_id,
+        Method::GET,
+        "/api/v1/social/catalogs",
+        None,
+    )
+    .await;
+    if core_unavailable(status, &body) {
+        return CoreRead::Unavailable;
+    }
+    if !status.is_success() {
+        return CoreRead::Error((status, Json(body)).into_response());
+    }
+    let catalogs = body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    CoreRead::Ready(catalogs)
+}
+
+async fn load_core_catalog_products(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    catalog_id: &str,
+    query: &SocialCatalogProductsQuery,
+) -> CoreRead<Vec<Value>> {
+    let path = social_query_path(
+        &format!(
+            "/api/v1/social/catalogs/{}/products",
+            urlencoding::encode(catalog_id)
+        ),
+        &[("accountId", query.account_id.clone().unwrap_or_default())],
+    );
+    let (status, body) = social_core_json(state, user, org_id, Method::GET, &path, None).await;
+    if core_unavailable(status, &body) {
+        return CoreRead::Unavailable;
+    }
+    if !status.is_success() {
+        return CoreRead::Error((status, Json(body)).into_response());
+    }
+    let products = body
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    CoreRead::Ready(products)
 }
 
 #[derive(Debug, Serialize)]
@@ -2752,5 +3022,67 @@ mod tests {
             ),
             "/api/v1/social/approvals?state=pending%20review&limit=10"
         );
+    }
+
+    #[test]
+    fn social_query_path_drops_blank_params_and_encodes_values() {
+        assert_eq!(
+            social_query_path("/api/v1/social/metrics", &[]),
+            "/api/v1/social/metrics"
+        );
+        assert_eq!(
+            social_query_path(
+                "/api/v1/social/metrics",
+                &[
+                    ("accountId", "  ".to_owned()),
+                    ("snapshotDate", "2026-07-07".to_owned()),
+                ],
+            ),
+            "/api/v1/social/metrics?snapshotDate=2026-07-07"
+        );
+        assert_eq!(
+            social_query_path(
+                "/api/v1/social/catalogs/cat_1/products",
+                &[("accountId", "soc acc/1".to_owned())],
+            ),
+            "/api/v1/social/catalogs/cat_1/products?accountId=soc%20acc%2F1"
+        );
+    }
+
+    #[test]
+    fn maps_core_metric_row_to_typed_metric() {
+        let row = json!({
+            "org_id": "org_1",
+            "account_id": "soc_acct_1",
+            "connection_id": "conn_1",
+            "provider_key": "facebook",
+            "metric_name": "impressions",
+            "metric_value": 1234.0,
+            "dimensions": { "campaign": "launch" },
+            "snapshot_date": "2026-07-07T00:00:00Z"
+        });
+
+        let metric = core_metric_from_value(&row).expect("metric");
+        assert_eq!(metric.account_id, "soc_acct_1");
+        assert_eq!(metric.provider_key, "facebook");
+        assert_eq!(metric.metric_name, "impressions");
+        assert_eq!(metric.metric_value, 1234.0);
+        assert_eq!(metric.snapshot_date, "2026-07-07T00:00:00Z");
+        assert_eq!(
+            metric
+                .dimensions
+                .pointer("/campaign")
+                .and_then(Value::as_str),
+            Some("launch")
+        );
+    }
+
+    #[test]
+    fn skips_metric_row_without_metric_name() {
+        assert!(
+            core_metric_from_value(&json!({ "provider_key": "x", "metric_value": 1.0 })).is_none()
+        );
+        assert!(core_metric_from_value(&json!({ "metric_name": "  " })).is_none());
+        assert!(core_metric_from_value(&json!("not-an-object")).is_none());
     }
 }

@@ -295,3 +295,53 @@ export function listSocialEvergreenItems(orgId: string) {
     headers: { 'x-velion-org-id': orgId },
   })
 }
+
+// One recorded per-provider ad/analytics metric snapshot value. Every field is
+// sourced from a real social-core snapshot row served by the gateway — the SPA
+// never synthesizes a metric.
+export type SocialMetric = {
+  accountId: string
+  connectionId: string
+  providerKey: string
+  metricName: string
+  metricValue: number
+  dimensions: Record<string, unknown> | null
+  snapshotDate: string
+}
+
+// Meta Commerce Catalog rows and their products are arbitrary provider objects
+// (snake_case, passed through verbatim by the gateway), so they stay opaque
+// records; the UI reads known fields defensively.
+export type SocialCatalog = Record<string, unknown>
+export type SocialCatalogProduct = Record<string, unknown>
+
+export type SocialMetricsQuery = {
+  accountId?: string
+  snapshotDate?: string
+}
+
+export function listSocialMetrics(orgId: string, query: SocialMetricsQuery = {}) {
+  const params = new URLSearchParams()
+  if (query.accountId?.trim()) params.set('accountId', query.accountId.trim())
+  if (query.snapshotDate?.trim()) params.set('snapshotDate', query.snapshotDate.trim())
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  return requestJson<{ metrics: SocialMetric[] }>(`/api/v1/social/metrics${suffix}`, {
+    headers: { 'x-velion-org-id': orgId },
+  })
+}
+
+export function listSocialCatalogs(orgId: string) {
+  return requestJson<{ catalogs: SocialCatalog[] }>('/api/v1/social/catalogs', {
+    headers: { 'x-velion-org-id': orgId },
+  })
+}
+
+export function listSocialCatalogProducts(orgId: string, catalogId: string, accountId: string) {
+  const params = new URLSearchParams({ accountId })
+  return requestJson<{ products: SocialCatalogProduct[] }>(
+    `/api/v1/social/catalogs/${encodeURIComponent(catalogId)}/products?${params.toString()}`,
+    {
+      headers: { 'x-velion-org-id': orgId },
+    },
+  )
+}

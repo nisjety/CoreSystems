@@ -240,6 +240,14 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'social-evergreen', label: 'Evergreen queue', href: '/social/evergreen', icon: Repeat2, description: 'Gjenbrukbart innhold og aktive workflow-lenker.' },
         ],
       },
+      {
+        id: 'social-commerce',
+        label: 'Commerce',
+        defaultExpanded: true,
+        items: [
+          { id: 'social-commerce-metrics', label: 'Ad metrics & catalogs', href: '/social/commerce', icon: BarChart3, description: 'Annonsemålinger per kanal og Meta Commerce-kataloger.' },
+        ],
+      },
     ],
   },
   {

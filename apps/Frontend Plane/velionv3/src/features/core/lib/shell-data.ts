@@ -19,6 +19,7 @@ export type VelionRoute =
   | '/social/competitors'
   | '/social/trends'
   | '/social/evergreen'
+  | '/social/commerce'
   | '/insights'
   | '/insights/overview'
   | '/insights/social'
