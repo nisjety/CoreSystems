@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	StreamName      = "VELION_APPLICATION"
-	ModelStreamName = "VELION_MODEL"
+	StreamName          = "VELION_APPLICATION"
+	ModelStreamName     = "VELION_MODEL"
+	IngestionStreamName = "VELION_INGESTION"
 )
 
 type Publisher struct {
@@ -58,6 +59,34 @@ func (p *Publisher) EnsureModelStream() error {
 	_, err = p.js.AddStream(&nats.StreamConfig{
 		Name:      ModelStreamName,
 		Subjects:  []string{"velion.model.>"},
+		Retention: nats.LimitsPolicy,
+		MaxAge:    14 * 24 * time.Hour,
+		MaxMsgs:   200_000,
+		Storage:   nats.FileStorage,
+	})
+	return err
+}
+
+// EnsureIngestionStream creates the JetStream stream covering the Ingestion
+// Plane subject namespace (velion.ingestion.>). integration-corev2 publishes
+// webhook_received (and other) events via plain core-NATS Publish, not
+// js.Publish — but a JetStream stream captures any message published to a
+// matching subject regardless of which API the publisher used, so this
+// stream is what makes those events durably consumable (survives a
+// conversation-core restart between publish and delivery) rather than
+// fire-and-forget core-NATS pub/sub.
+func (p *Publisher) EnsureIngestionStream() error {
+	if p == nil || p.js == nil {
+		return nil
+	}
+	_, err := p.js.StreamInfo(IngestionStreamName)
+	if err == nil {
+		return nil
+	}
+	log.Printf("conversation-core-go: creating JetStream stream %s", IngestionStreamName)
+	_, err = p.js.AddStream(&nats.StreamConfig{
+		Name:      IngestionStreamName,
+		Subjects:  []string{"velion.ingestion.>"},
 		Retention: nats.LimitsPolicy,
 		MaxAge:    14 * 24 * time.Hour,
 		MaxMsgs:   200_000,

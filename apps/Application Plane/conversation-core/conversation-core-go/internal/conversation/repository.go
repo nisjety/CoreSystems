@@ -126,6 +126,65 @@ func (r *PGRepository) GetConversation(ctx context.Context, orgID, conversationI
 	return &ConversationDetail{ConversationSummary: *summary, Messages: messages}, nil
 }
 
+// channelForProvider maps a connection provider key to the logical inbox/
+// conversation channel. email/microsoft/google all map to "email" —
+// preserving the exact pre-existing behavior for those providers, which is
+// the only channel this repository originally supported. Anything else
+// (whatsapp, messenger, …) gets its own channel so contacts/conversations
+// never mix across providers; an unrecognized provider falls back to itself
+// rather than silently joining the email inbox.
+func channelForProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "email", "microsoft", "google":
+		return "email"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
+
+// channelLabel is the human-readable inbox name for a channel key.
+func channelLabel(channel string) string {
+	switch channel {
+	case "email":
+		return "Email"
+	case "whatsapp":
+		return "WhatsApp"
+	case "messenger":
+		return "Messenger"
+	default:
+		if channel == "" {
+			return "Inbox"
+		}
+		return strings.ToUpper(channel[:1]) + channel[1:]
+	}
+}
+
+// contactIdentityKey picks the identifier that uniquely names this event's
+// sender within the org: email when present (the original design), else
+// phone (WhatsApp), else a provider+event-scoped reference as a last resort
+// so two different senders on a channel with neither never collide onto one
+// contact record. The returned kind is namespaced into the hash input so an
+// email and phone that happen to share literal text can't collide either.
+func contactIdentityKey(event InboundEvent) (key, kind string) {
+	if email := strings.TrimSpace(event.From.Email); email != "" {
+		return strings.ToLower(email), "email"
+	}
+	if phone := strings.TrimSpace(event.From.Phone); phone != "" {
+		return phone, "phone"
+	}
+	ref := firstNonEmptyString(event.ProviderThreadID, event.ProviderEventID, event.From.Name)
+	return event.Provider + ":" + ref, "ref"
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func (r *PGRepository) StoreInboundEvent(ctx context.Context, event InboundEvent) (*StoredEventResult, error) {
 	if err := r.ensureConfigured(); err != nil {
 		return nil, err
@@ -153,21 +212,32 @@ func (r *PGRepository) StoreInboundEvent(ctx context.Context, event InboundEvent
 		return nil, err
 	}
 
-	inboxID := stableInboxID(event.OrgID, "email")
+	channel := channelForProvider(event.Provider)
+	inboxID := stableInboxID(event.OrgID, channel)
 	if _, err := tx.Exec(ctx, `
 INSERT INTO conversation_inboxes (id, org_id, name, channel)
-VALUES ($1, $2, 'Email', 'email')
-ON CONFLICT (org_id, channel) DO UPDATE SET updated_at = NOW()`, inboxID, event.OrgID); err != nil {
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (org_id, channel) DO UPDATE SET updated_at = NOW()`, inboxID, event.OrgID, channelLabel(channel), channel); err != nil {
 		return nil, err
 	}
 
-	contactID := stableContactID(event.OrgID, event.From.Email)
+	// Contact identity key: email when present (matches the original,
+	// email-only design), else phone (WhatsApp), else a provider-scoped
+	// reference (Messenger PSID, or any channel with neither) so distinct
+	// customers on non-email channels never collide on one contact record.
+	// stableContactID's output IS the row's primary key, so ON CONFLICT (id)
+	// upserts correctly regardless of which identity key produced it.
+	contactKey, contactKeyKind := contactIdentityKey(event)
+	contactID := stableContactID(event.OrgID, contactKeyKind+":"+contactKey)
 	if _, err := tx.Exec(ctx, `
-INSERT INTO conversation_contacts (id, org_id, name, email, updated_at)
-VALUES ($1, $2, $3, $4, NOW())
-ON CONFLICT (org_id, lower(email)) WHERE email <> ''
-DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), conversation_contacts.name), updated_at = NOW()`,
-		contactID, event.OrgID, event.From.Name, event.From.Email); err != nil {
+INSERT INTO conversation_contacts (id, org_id, name, email, phone, updated_at)
+VALUES ($1, $2, $3, $4, $5, NOW())
+ON CONFLICT (id) DO UPDATE SET
+	name = COALESCE(NULLIF(EXCLUDED.name, ''), conversation_contacts.name),
+	email = COALESCE(NULLIF(EXCLUDED.email, ''), conversation_contacts.email),
+	phone = COALESCE(NULLIF(EXCLUDED.phone, ''), conversation_contacts.phone),
+	updated_at = NOW()`,
+		contactID, event.OrgID, event.From.Name, event.From.Email, event.From.Phone); err != nil {
 		return nil, err
 	}
 
@@ -186,8 +256,8 @@ DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name, ''), conversation_contacts.n
 INSERT INTO conversations (
 	id, org_id, inbox_id, contact_id, title, status, priority, channel, provider,
 	provider_thread_id, last_message_preview, last_message_at, created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, 'open', 'normal', 'email', $6, $7, $8, $9, $9, $9)`,
-			conversationID, event.OrgID, inboxID, contactID, title, event.Provider, event.ProviderThreadID, preview(event.BodyText, event.BodyHTML), event.OccurredAt); err != nil {
+) VALUES ($1, $2, $3, $4, $5, 'open', 'normal', $6, $7, $8, $9, $10, $10, $10)`,
+			conversationID, event.OrgID, inboxID, contactID, title, channel, event.Provider, event.ProviderThreadID, preview(event.BodyText, event.BodyHTML), event.OccurredAt); err != nil {
 			return nil, err
 		}
 		createdConversation = true

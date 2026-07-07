@@ -176,6 +176,104 @@ func TestSend_MissingConnection_IsTerminal(t *testing.T) {
 	}
 }
 
+func TestSend_WhatsApp_UsesCloudAPIShape(t *testing.T) {
+	var gotOp string
+	var gotParams, gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed actionRequestBody
+		_ = json.Unmarshal(raw, &parsed)
+		gotOp, gotParams, gotBody = parsed.Operation, parsed.Params, parsed.Body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"result":{"messages":[{"id":"wamid.HBgL123"}]}}}}`))
+	}))
+	defer srv.Close()
+
+	res, err := newTestClient(t, srv.URL).Send(context.Background(), SendRequest{
+		Provider:         "whatsapp",
+		ConnectionID:     "c1",
+		ProviderThreadID: "1067xxxxphone:4790012345",
+		BodyText:         "Hei!",
+	})
+	if err != nil {
+		t.Fatalf("whatsapp send err = %v", err)
+	}
+	if gotOp != "whatsapp.messages.send" {
+		t.Errorf("operation = %q, want whatsapp.messages.send", gotOp)
+	}
+	if gotParams["phoneNumberId"] != "1067xxxxphone" {
+		t.Errorf("phoneNumberId = %v, want the business id from the composite thread id", gotParams["phoneNumberId"])
+	}
+	if gotBody["to"] != "4790012345" || gotBody["type"] != "text" {
+		t.Errorf("body = %#v, want to=recipient type=text", gotBody)
+	}
+	if txt, _ := gotBody["text"].(map[string]any); txt["body"] != "Hei!" {
+		t.Errorf("text.body = %#v, want the message text", gotBody["text"])
+	}
+	if res.ProviderMessageID != "wamid.HBgL123" {
+		t.Errorf("provider_message_id = %q, want the wamid from messages[0].id", res.ProviderMessageID)
+	}
+}
+
+func TestSend_Messenger_UsesSendAPIShape(t *testing.T) {
+	var gotOp string
+	var gotParams, gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed actionRequestBody
+		_ = json.Unmarshal(raw, &parsed)
+		gotOp, gotParams, gotBody = parsed.Operation, parsed.Params, parsed.Body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"result":{"message_id":"m_AG5Hc2"}}}}`))
+	}))
+	defer srv.Close()
+
+	res, err := newTestClient(t, srv.URL).Send(context.Background(), SendRequest{
+		Provider:         "messenger",
+		ConnectionID:     "c1",
+		ProviderThreadID: "1094page:73940psid",
+		BodyText:         "Takk for meldingen",
+	})
+	if err != nil {
+		t.Fatalf("messenger send err = %v", err)
+	}
+	if gotOp != "messenger.messages.send" {
+		t.Errorf("operation = %q, want messenger.messages.send", gotOp)
+	}
+	if gotParams["pageId"] != "1094page" {
+		t.Errorf("pageId = %v, want the page id from the composite thread id", gotParams["pageId"])
+	}
+	recip, _ := gotBody["recipient"].(map[string]any)
+	if recip["id"] != "73940psid" {
+		t.Errorf("recipient.id = %#v, want the PSID", gotBody["recipient"])
+	}
+	if res.ProviderMessageID != "m_AG5Hc2" {
+		t.Errorf("provider_message_id = %q, want the messenger message_id", res.ProviderMessageID)
+	}
+}
+
+func TestSend_WhatsApp_MissingBusinessID_IsTerminal(t *testing.T) {
+	// No ":" in the thread id → no business phone-number id → cannot route.
+	_, err := newTestClient(t, "http://unused").Send(context.Background(), SendRequest{
+		Provider:         "whatsapp",
+		ConnectionID:     "c1",
+		ProviderThreadID: "4790012345",
+		BodyText:         "hi",
+	})
+	if err == nil || !IsTerminal(err) {
+		t.Fatalf("err = %v, want terminal for missing business id", err)
+	}
+}
+
+func TestSend_Discord_IsHonestlyUnsupported(t *testing.T) {
+	_, err := newTestClient(t, "http://unused").Send(context.Background(), SendRequest{
+		Provider: "discord", ConnectionID: "c1", BodyText: "hi",
+	})
+	if err == nil || !IsTerminal(err) {
+		t.Fatalf("err = %v, want terminal for discord", err)
+	}
+}
+
 func TestSend_PerProviderOperationMapping(t *testing.T) {
 	cases := map[string]string{
 		"microsoft": "mail.send",

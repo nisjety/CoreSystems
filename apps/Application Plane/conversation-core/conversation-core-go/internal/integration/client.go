@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -228,6 +229,106 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (*SendResult, error)
 	}
 }
 
+// WebhookEvent is the stored payload integration-corev2 returns for
+// GET /internal/webhooks/events/{id} — the full body a webhook_received NATS
+// event (metadata-only, by design) points at via its webhookEventId.
+type WebhookEvent struct {
+	ID          string         `json:"id"`
+	ProviderKey string         `json:"providerKey"`
+	EventType   string         `json:"eventType"`
+	Payload     map[string]any `json:"payload"`
+}
+
+// FetchWebhookEvent retrieves the full payload for a webhook_received event
+// by id, org-scoped. Returns an error (not a *SendError — this isn't an
+// outbound send) on any non-2xx response, including "not found" for a
+// missing/mismatched-org event.
+func (c *Client) FetchWebhookEvent(ctx context.Context, orgID, webhookEventID string) (*WebhookEvent, error) {
+	if c == nil || c.baseURL == "" || c.apiKey == "" {
+		return nil, fmt.Errorf("integration client is not configured")
+	}
+	if strings.TrimSpace(webhookEventID) == "" {
+		return nil, fmt.Errorf("webhookEventID is required")
+	}
+	url := fmt.Sprintf("%s/internal/webhooks/events/%s?organizationId=%s",
+		c.baseURL, webhookEventID, neturl.QueryEscape(orgID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build webhook event request: %w", err)
+	}
+	req.Header.Set(c.apiKeyHdr, c.apiKey)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call webhook event lookup: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("webhook event lookup returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+	var decoded struct {
+		Data struct {
+			WebhookEvent WebhookEvent `json:"webhookEvent"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBytes, &decoded); err != nil {
+		return nil, fmt.Errorf("decode webhook event response: %w", err)
+	}
+	return &decoded.Data.WebhookEvent, nil
+}
+
+// FetchActiveConnectionID resolves the connection to reply through for an
+// org, trying each candidate provider key in order (e.g. "whatsapp" then the
+// unified "meta" fallback) and returning the first active connection's id.
+// Inbound Meta webhooks are account-wide, not connection-scoped, so replies
+// must resolve a connection out-of-band; returns "" (no error) when no
+// candidate has an active connection, letting the caller store the inbound
+// event without a reply target rather than fail ingestion over it.
+func (c *Client) FetchActiveConnectionID(ctx context.Context, orgID string, providerKeys ...string) (string, error) {
+	if c == nil || c.baseURL == "" || c.apiKey == "" {
+		return "", fmt.Errorf("integration client is not configured")
+	}
+	for _, providerKey := range providerKeys {
+		providerKey = strings.TrimSpace(providerKey)
+		if providerKey == "" {
+			continue
+		}
+		url := fmt.Sprintf("%s/api/v1/connections?organizationId=%s&providerKey=%s",
+			c.baseURL, neturl.QueryEscape(orgID), neturl.QueryEscape(providerKey))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return "", fmt.Errorf("build connections list request: %w", err)
+		}
+		req.Header.Set(c.apiKeyHdr, c.apiKey)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("call connections list: %w", err)
+		}
+		respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("connections list returned status %d: %s", resp.StatusCode, string(respBytes))
+		}
+		var decoded struct {
+			Data struct {
+				Connections []struct {
+					ID     string `json:"id"`
+					Status string `json:"status"`
+				} `json:"connections"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(respBytes, &decoded); err != nil {
+			return "", fmt.Errorf("decode connections list response: %w", err)
+		}
+		for _, conn := range decoded.Data.Connections {
+			if strings.EqualFold(conn.Status, "active") {
+				return conn.ID, nil
+			}
+		}
+	}
+	return "", nil
+}
+
 func classifyError(terminal bool, status int, respBytes []byte) *SendError {
 	var decoded actionResponse
 	_ = json.Unmarshal(respBytes, &decoded)
@@ -289,9 +390,78 @@ func buildSendOperation(req SendRequest) (operation string, params, body map[str
 			body["threadId"] = req.ProviderThreadID
 		}
 		return operation, params, body, nil
+	case "whatsapp":
+		// WhatsApp Cloud API send via integration-corev2 (which auto-injects
+		// messaging_product and validates to/type). The gateway needs the
+		// business WABA phone-number id in params and the customer address in
+		// the body. ProviderThreadID is the composite "phoneNumberId:waId"
+		// written by the inbound webhook consumer; To[0] overrides the
+		// recipient when the caller supplies one explicitly.
+		businessID, recipient := splitChannelThreadID(req.ProviderThreadID)
+		if len(req.To) > 0 && strings.TrimSpace(req.To[0]) != "" {
+			recipient = strings.TrimSpace(req.To[0])
+		}
+		if businessID == "" {
+			return "", nil, nil, fmt.Errorf("whatsapp send requires a WABA phone-number id (composite provider_thread_id)")
+		}
+		if recipient == "" {
+			return "", nil, nil, fmt.Errorf("whatsapp send requires a recipient wa_id")
+		}
+		operation = "whatsapp.messages.send"
+		params = map[string]any{"phoneNumberId": businessID}
+		body = map[string]any{
+			"to":   recipient,
+			"type": "text",
+			"text": map[string]any{"body": text},
+		}
+		return operation, params, body, nil
+	case "messenger":
+		// Messenger Send API via integration-corev2 (which exchanges the page
+		// token server-side). params carries the page id; body is the Send
+		// API envelope. ProviderThreadID is the composite "pageId:psid" from
+		// the inbound webhook consumer; To[0] overrides the recipient PSID.
+		pageID, psid := splitChannelThreadID(req.ProviderThreadID)
+		if len(req.To) > 0 && strings.TrimSpace(req.To[0]) != "" {
+			psid = strings.TrimSpace(req.To[0])
+		}
+		if pageID == "" {
+			return "", nil, nil, fmt.Errorf("messenger send requires a page id (composite provider_thread_id)")
+		}
+		if psid == "" {
+			return "", nil, nil, fmt.Errorf("messenger send requires a recipient PSID")
+		}
+		operation = "messenger.messages.send"
+		params = map[string]any{"pageId": pageID}
+		body = map[string]any{
+			"recipient":      map[string]any{"id": psid},
+			"message":        map[string]any{"text": text},
+			"messaging_type": "RESPONSE",
+		}
+		return operation, params, body, nil
+	case "discord":
+		// Discord message delivery requires a bot token + gateway/REST bot
+		// integration, not the per-user OAuth token this path leases. Fail
+		// honestly rather than attempt an unsupported send.
+		return "", nil, nil, fmt.Errorf("%w: discord outbound requires a bot integration, not user OAuth", ErrUnsupportedProvider)
 	default:
 		return "", nil, nil, fmt.Errorf("%w: %q", ErrUnsupportedProvider, req.Provider)
 	}
+}
+
+// splitChannelThreadID splits a composite provider thread id of the form
+// "businessId:recipientId" (used by the WhatsApp/Messenger inbound consumer to
+// carry both the business-side sender id and the customer address on a single
+// thread ref). A value with no separator is treated as the recipient with an
+// empty business id, letting callers surface a clear addressing error.
+func splitChannelThreadID(threadID string) (businessID, recipientID string) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return "", ""
+	}
+	if biz, rec, found := strings.Cut(threadID, ":"); found {
+		return strings.TrimSpace(biz), strings.TrimSpace(rec)
+	}
+	return "", threadID
 }
 
 // extractProviderMessageID best-effort pulls a provider message id out of the
@@ -315,6 +485,14 @@ func extractProviderMessageID(raw json.RawMessage) string {
 	if msg, ok := generic["message"].(map[string]any); ok {
 		for _, key := range []string{"ts", "id"} {
 			if v, ok := msg[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	// WhatsApp Cloud API: {"messages":[{"id":"wamid..."}]}.
+	if msgs, ok := generic["messages"].([]any); ok && len(msgs) > 0 {
+		if first, ok := msgs[0].(map[string]any); ok {
+			if v, ok := first["id"].(string); ok && strings.TrimSpace(v) != "" {
 				return strings.TrimSpace(v)
 			}
 		}
