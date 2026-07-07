@@ -115,7 +115,11 @@ func (h *DocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
 // "how many sources do I have" lives here, not in Quarry.
 func (h *DocumentHandler) Sources(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
-	sources, total, err := h.repo.SourcesFacet(r.Context(), orgID)
+	// Scope the facet to what this viewer may actually read (owned + org-visible
+	// + explicitly granted), mirroring Get/List. Without this the facet counted
+	// every org document regardless of ownership — a private-until-shared leak.
+	viewer := viewerID(r)
+	sources, total, err := h.repo.SourcesFacet(r.Context(), orgID, viewer, h.grantedDocs(r, orgID, viewer))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to facet sources")
 		return

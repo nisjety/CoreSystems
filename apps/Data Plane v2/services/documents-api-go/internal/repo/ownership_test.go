@@ -192,3 +192,71 @@ func TestOwnershipNoViewerSeesAllLegacy(t *testing.T) {
 		t.Fatal("legacy no-viewer path should see all org docs incl private")
 	}
 }
+
+// createDocWithSource is like createDoc but lets the caller set a distinct
+// `source` so the facet's per-source grouping can be exercised.
+func createDocWithSource(t *testing.T, r *repo.DocumentRepo, org, title, source, owner, visibility string) string {
+	t.Helper()
+	res, err := r.Create(context.Background(), model.CreateDocumentInput{
+		OrgID: org, Source: source, Type: "note", Title: title, Content: "x",
+		OwnerID: owner, Visibility: visibility,
+	})
+	if err != nil {
+		t.Fatalf("create %q: %v", title, err)
+	}
+	return res.Document.DocumentID
+}
+
+func facetSources(t *testing.T, r *repo.DocumentRepo, org, viewer string, granted []string) map[string]int {
+	t.Helper()
+	rows, _, err := r.SourcesFacet(context.Background(), org, viewer, granted)
+	if err != nil {
+		t.Fatalf("facet: %v", err)
+	}
+	out := make(map[string]int, len(rows))
+	for _, sc := range rows {
+		out[sc.Source] = sc.DocumentCount
+	}
+	return out
+}
+
+// The Sources facet must NOT count documents the viewer cannot read — it must
+// apply the identical owner/org/grant predicate as List/Get. Before the fix it
+// returned org-wide counts, leaking the existence + count of others' private docs.
+func TestSourcesFacetRespectsOwnership(t *testing.T) {
+	r, org, cleanup := setupOwnershipDB(t)
+	defer cleanup()
+
+	createDocWithSource(t, r, org, "a-private", "src-a", "user-a", "private")
+	createDocWithSource(t, r, org, "b-org", "src-b", "user-b", "org")
+	createDocWithSource(t, r, org, "c-private-b", "src-c", "user-b", "private")
+
+	// user-a: own private (src-a) + org-visible (src-b); NOT user-b's private src-c.
+	a := facetSources(t, r, org, "user-a", nil)
+	if _, ok := a["src-a"]; !ok {
+		t.Error("user-a must see own private source src-a")
+	}
+	if _, ok := a["src-b"]; !ok {
+		t.Error("user-a must see org-visible source src-b")
+	}
+	if _, ok := a["src-c"]; ok {
+		t.Error("LEAK: user-a must NOT see user-b's private source src-c")
+	}
+
+	// user-b: org-visible (src-b) + own private (src-c); NOT user-a's private src-a.
+	b := facetSources(t, r, org, "user-b", nil)
+	if _, ok := b["src-c"]; !ok {
+		t.Error("user-b must see own private source src-c")
+	}
+	if _, ok := b["src-a"]; ok {
+		t.Error("LEAK: user-b must NOT see user-a's private source src-a")
+	}
+
+	// Legacy no-viewer path still sees everything (back-compat).
+	legacy := facetSources(t, r, org, "", nil)
+	for _, want := range []string{"src-a", "src-b", "src-c"} {
+		if _, ok := legacy[want]; !ok {
+			t.Errorf("legacy no-viewer facet should include %s", want)
+		}
+	}
+}
