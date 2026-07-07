@@ -15,6 +15,14 @@ const LIVE_ACTIONS = new Set<ActionId>([
   'operating_map.review_proposal',
   'operating_map.create_agent_blueprint',
   'workflows.toggle_policy',
+  // Ticketing actions are backed by conversation-core-go via the gateway
+  // /api/v1/actions/execute dispatcher (domains/actions/handlers.rs).
+  'tickets.create',
+  'tickets.classify_conversation',
+  'tickets.update',
+  'tickets.assign',
+  'tickets.link_resource',
+  'tickets.resolve',
 ])
 
 const riskCost = {

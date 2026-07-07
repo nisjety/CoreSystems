@@ -51,6 +51,12 @@ var (
 	ErrForbidden      = errors.New("forbidden")
 	ErrAlreadyHandled = errors.New("event already handled")
 	ErrConflict       = errors.New("conversation resource conflict")
+	// ErrSendFailed is returned when a human agent's reply to a channel-backed
+	// conversation was attempted but could not be delivered to the customer (the
+	// integration-corev2 send errored). The HTTP layer surfaces it as 502 so the
+	// Inbox never shows a phantom "Reply sent" for a message the customer never
+	// received, and no outbound message row is persisted for it.
+	ErrSendFailed = errors.New("outbound reply delivery failed")
 )
 
 type EventPublisher interface {
@@ -63,6 +69,11 @@ type Repository interface {
 	GetConversation(ctx context.Context, orgID, conversationID string) (*ConversationDetail, error)
 	StoreInboundEvent(ctx context.Context, event InboundEvent) (*StoredEventResult, error)
 	AddMessage(ctx context.Context, input AddMessageInput) (*Message, error)
+	// GetChannelThreadRefByConversation resolves the outbound send target
+	// (provider/connection/thread) for a conversation, or ErrNotFound when the
+	// conversation is not bound to an external channel. The Service uses it to
+	// decide whether a human reply must be delivered through integration-corev2.
+	GetChannelThreadRefByConversation(ctx context.Context, orgID, conversationID string) (*ChannelThreadRef, error)
 	UpdateStatus(ctx context.Context, input StatusUpdate) (*ConversationDetail, error)
 	UpdateAssignment(ctx context.Context, input AssignmentUpdate) (*ConversationDetail, error)
 	AddTag(ctx context.Context, orgID, conversationID, tag string) (*ConversationDetail, error)
@@ -348,7 +359,13 @@ type AddMessageInput struct {
 	BodyHTML       string
 	Internal       bool
 	Direction      string
-	OccurredAt     time.Time
+	// Provider and ProviderMessageID record the channel a human reply was
+	// actually delivered through. They are set by the Service after a successful
+	// integration-corev2 send so the stored outbound row reflects the real
+	// delivery; they stay empty for internal notes and store-only conversations.
+	Provider          string
+	ProviderMessageID string
+	OccurredAt        time.Time
 }
 
 type ListFilter struct {

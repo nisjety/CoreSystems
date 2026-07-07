@@ -5,11 +5,6 @@ const sourceInput = z.object({
   sourceId: z.string().min(1),
 })
 
-const ticketInput = z.object({
-  ticketId: z.string().min(1),
-  responseTone: z.enum(['concise', 'warm', 'formal']),
-})
-
 const ticketCreateInput = z.object({
   conversationId: z.string().min(1),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).default('normal'),
@@ -375,17 +370,6 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: urlInvestigationInput,
     outputSchema: urlInvestigationOutput,
-  },
-  {
-    id: 'inbox.draft_reply',
-    label: 'Draft reply',
-    description: 'Ask Model Plane to draft a grounded customer support response.',
-    ownerPlane: 'model',
-    risk: 'medium',
-    requiresApproval: true,
-    reversible: true,
-    inputSchema: ticketInput,
-    outputSchema: runOutput,
   },
   {
     id: 'tickets.create',

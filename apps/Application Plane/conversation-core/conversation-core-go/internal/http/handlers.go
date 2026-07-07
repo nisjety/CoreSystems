@@ -1178,6 +1178,11 @@ func writeServiceError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, errorPayload("conflict", "Conversation resource already exists."))
 	case conversation.IsInvalidInput(err):
 		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", err.Error()))
+	case errors.Is(err, conversation.ErrSendFailed):
+		// The reply was attempted but the customer channel did not accept it.
+		// 502 (not 201) so the Inbox surfaces a real failure instead of a phantom
+		// "Reply sent" for a message that was never delivered or persisted.
+		c.JSON(http.StatusBadGateway, errorPayload("send_failed", "The reply could not be delivered to the customer channel and was not sent."))
 	default:
 		c.JSON(http.StatusInternalServerError, errorPayload("internal_error", "Internal error."))
 	}

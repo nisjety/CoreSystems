@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 )
 
 type fakeRepository struct {
@@ -13,6 +15,9 @@ type fakeRepository struct {
 	details         map[string]*ConversationDetail
 	stored          map[string]*StoredEventResult
 	lastMessage     AddMessageInput
+	addMessageCalls int
+	threadRefs      map[string]*ChannelThreadRef
+	threadRefErr    error
 	statusUpdate    StatusUpdate
 	tickets         map[string]*Ticket
 	macros          map[string]*TicketMacro
@@ -29,10 +34,32 @@ func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
 		details:    make(map[string]*ConversationDetail),
 		stored:     make(map[string]*StoredEventResult),
+		threadRefs: make(map[string]*ChannelThreadRef),
 		tickets:    make(map[string]*Ticket),
 		macros:     make(map[string]*TicketMacro),
 		checklists: make(map[string]*TicketChecklist),
 	}
+}
+
+// fakeSender records outbound send attempts so tests can assert whether a reply
+// was actually delivered and with what request shape.
+type fakeSender struct {
+	calls   int
+	lastReq integration.SendRequest
+	result  *integration.SendResult
+	err     error
+}
+
+func (f *fakeSender) Send(_ context.Context, req integration.SendRequest) (*integration.SendResult, error) {
+	f.calls++
+	f.lastReq = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &integration.SendResult{}, nil
 }
 
 func (f *fakeRepository) ListInboxes(_ context.Context, _ string) ([]Inbox, error) {
@@ -75,17 +102,31 @@ func (f *fakeRepository) StoreInboundEvent(_ context.Context, event InboundEvent
 }
 
 func (f *fakeRepository) AddMessage(_ context.Context, input AddMessageInput) (*Message, error) {
+	f.addMessageCalls++
 	f.lastMessage = input
 	return &Message{
-		ID:             "msg_reply",
-		OrgID:          input.OrgID,
-		ConversationID: input.ConversationID,
-		Direction:      input.Direction,
-		BodyText:       input.BodyText,
-		Internal:       input.Internal,
-		OccurredAt:     input.OccurredAt,
-		CreatedAt:      input.OccurredAt,
+		ID:                "msg_reply",
+		OrgID:             input.OrgID,
+		ConversationID:    input.ConversationID,
+		Direction:         input.Direction,
+		BodyText:          input.BodyText,
+		Internal:          input.Internal,
+		Provider:          input.Provider,
+		ProviderMessageID: input.ProviderMessageID,
+		OccurredAt:        input.OccurredAt,
+		CreatedAt:         input.OccurredAt,
 	}, nil
+}
+
+func (f *fakeRepository) GetChannelThreadRefByConversation(_ context.Context, _ string, conversationID string) (*ChannelThreadRef, error) {
+	if f.threadRefErr != nil {
+		return nil, f.threadRefErr
+	}
+	ref, ok := f.threadRefs[conversationID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return ref, nil
 }
 
 func (f *fakeRepository) UpdateStatus(_ context.Context, input StatusUpdate) (*ConversationDetail, error) {
@@ -469,6 +510,157 @@ func TestAddMessageDefaultsOutboundAndPublishes(t *testing.T) {
 	}
 	if len(publisher.subjects) != 1 || publisher.subjects[0] != SubjectMessageSent {
 		t.Fatalf("subjects = %#v, want message.sent", publisher.subjects)
+	}
+}
+
+func TestAddMessageDeliversReplyToChannelBackedConversation(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID:            "org_1",
+		ConversationID:   "conv_wa",
+		Provider:         "whatsapp",
+		ConnectionID:     "conn_9",
+		ProviderThreadID: "1067phone:4790012345",
+	}
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "wamid.HBgL123"}}
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher, WithSender(sender))
+
+	message, err := service.AddMessage(context.Background(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_wa",
+		ActorUserID:    "user_1",
+		BodyText:       "Hei!",
+	})
+	if err != nil {
+		t.Fatalf("AddMessage() error = %v", err)
+	}
+	// The reply must actually be sent through the integration client...
+	if sender.calls != 1 {
+		t.Fatalf("sender.calls = %d, want 1 (reply must reach the customer)", sender.calls)
+	}
+	if sender.lastReq.Provider != "whatsapp" || sender.lastReq.ConnectionID != "conn_9" || sender.lastReq.ProviderThreadID != "1067phone:4790012345" {
+		t.Fatalf("send request = %#v, want the resolved whatsapp channel ref", sender.lastReq)
+	}
+	if sender.lastReq.BodyText != "Hei!" {
+		t.Fatalf("send body_text = %q, want the reply text", sender.lastReq.BodyText)
+	}
+	// ...and the stored message must record the real delivery.
+	if repository.addMessageCalls != 1 {
+		t.Fatalf("repository.AddMessage calls = %d, want 1", repository.addMessageCalls)
+	}
+	if repository.lastMessage.Provider != "whatsapp" || repository.lastMessage.ProviderMessageID != "wamid.HBgL123" {
+		t.Fatalf("stored provider/message id = %q/%q, want whatsapp/wamid.HBgL123", repository.lastMessage.Provider, repository.lastMessage.ProviderMessageID)
+	}
+	if message.ProviderMessageID != "wamid.HBgL123" {
+		t.Fatalf("returned message provider_message_id = %q, want wamid.HBgL123", message.ProviderMessageID)
+	}
+	if len(publisher.subjects) != 1 || publisher.subjects[0] != SubjectMessageSent {
+		t.Fatalf("subjects = %#v, want message.sent", publisher.subjects)
+	}
+}
+
+func TestAddMessageSurfacesSendFailureWithoutStoring(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID:            "org_1",
+		ConversationID:   "conv_wa",
+		Provider:         "messenger",
+		ConnectionID:     "conn_9",
+		ProviderThreadID: "1094page:73940psid",
+	}
+	sender := &fakeSender{err: &integration.SendError{Terminal: true, Code: "invalid_body", Message: "bad"}}
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher, WithSender(sender))
+
+	_, err := service.AddMessage(context.Background(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_wa",
+		ActorUserID:    "user_1",
+		BodyText:       "Takk!",
+	})
+	if !errors.Is(err, ErrSendFailed) {
+		t.Fatalf("error = %v, want ErrSendFailed (a failed send must surface, not a false success)", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender.calls = %d, want 1", sender.calls)
+	}
+	// No phantom "sent" row may be persisted for a message the customer never got.
+	if repository.addMessageCalls != 0 {
+		t.Fatalf("repository.AddMessage calls = %d, want 0 (no stored reply on send failure)", repository.addMessageCalls)
+	}
+	if len(publisher.subjects) != 0 {
+		t.Fatalf("subjects = %#v, want none (nothing sent, nothing published)", publisher.subjects)
+	}
+}
+
+func TestAddMessageInternalNoteDoesNotSend(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_9", ProviderThreadID: "b:r",
+	}
+	sender := &fakeSender{}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+
+	if _, err := service.AddMessage(context.Background(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_wa",
+		ActorUserID:    "user_1",
+		BodyText:       "internal note",
+		Internal:       true,
+	}); err != nil {
+		t.Fatalf("AddMessage(note) error = %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 (internal notes are never sent to the customer)", sender.calls)
+	}
+	if repository.addMessageCalls != 1 {
+		t.Fatalf("repository.AddMessage calls = %d, want 1 (note is still stored)", repository.addMessageCalls)
+	}
+}
+
+func TestAddMessageWithoutChannelRefStoresWithoutSending(t *testing.T) {
+	repository := newFakeRepository() // no thread ref => store-only (e.g. unbound/email)
+	sender := &fakeSender{}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+
+	if _, err := service.AddMessage(context.Background(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_email",
+		ActorUserID:    "user_1",
+		BodyText:       "Reply",
+	}); err != nil {
+		t.Fatalf("AddMessage() error = %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 (no channel ref => store only)", sender.calls)
+	}
+	if repository.addMessageCalls != 1 {
+		t.Fatalf("repository.AddMessage calls = %d, want 1", repository.addMessageCalls)
+	}
+}
+
+func TestAddMessageUnsupportedProviderStoresWithoutSending(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_x"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_x", Provider: "discord", ConnectionID: "c", ProviderThreadID: "t",
+	}
+	sender := &fakeSender{}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+
+	if _, err := service.AddMessage(context.Background(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_x",
+		ActorUserID:    "user_1",
+		BodyText:       "Reply",
+	}); err != nil {
+		t.Fatalf("AddMessage() error = %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 (unsupported provider => store only, no false error)", sender.calls)
+	}
+	if repository.addMessageCalls != 1 {
+		t.Fatalf("repository.AddMessage calls = %d, want 1", repository.addMessageCalls)
 	}
 }
 
