@@ -24,7 +24,10 @@ fn session_validation_ttl_secs() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(SESSION_VALIDATION_TTL_DEFAULT_SECS)
-        .clamp(SESSION_VALIDATION_TTL_MIN_SECS, SESSION_VALIDATION_TTL_MAX_SECS)
+        .clamp(
+            SESSION_VALIDATION_TTL_MIN_SECS,
+            SESSION_VALIDATION_TTL_MAX_SECS,
+        )
 }
 
 const STRIPPED_HEADERS: &[&str] = &[
@@ -366,10 +369,18 @@ mod tests {
         );
 
         std::env::set_var(key, "3");
-        assert_eq!(super::session_validation_ttl_secs(), 5, "below floor → floor");
+        assert_eq!(
+            super::session_validation_ttl_secs(),
+            5,
+            "below floor → floor"
+        );
 
         std::env::set_var(key, "120");
-        assert_eq!(super::session_validation_ttl_secs(), 15, "above ceiling → ceiling");
+        assert_eq!(
+            super::session_validation_ttl_secs(),
+            15,
+            "above ceiling → ceiling"
+        );
 
         std::env::set_var(key, "8");
         assert_eq!(super::session_validation_ttl_secs(), 8, "in-band → as-is");

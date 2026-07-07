@@ -1,3 +1,3 @@
-export function VelionStepPill(props: { current: number; total: number }) {
-  return <span class="onboarding-step-pill">Steg {props.current} av {props.total}</span>
+export function VelionStepPill(props: { current: number; total: number; label?: string; ofLabel?: string }) {
+  return <span class="onboarding-step-pill">{props.label ?? 'Steg'} {props.current} {props.ofLabel ?? 'av'} {props.total}</span>
 }

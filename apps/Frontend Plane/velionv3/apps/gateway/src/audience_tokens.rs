@@ -86,3 +86,60 @@ pub(crate) async fn get_audience_token(
 
     Some(token)
 }
+
+/// Mint the pre-org onboarding preview token (quarry audience, sentinel org).
+/// The onboarding website step runs before an organization exists, so the
+/// normal org-scoped `get_audience_token(..., "quarry")` 400s. This hits
+/// auth-core's dedicated `/api/quarry/onboarding-token`, which requires only a
+/// session. Cached per user under a distinct key so it never collides with the
+/// real org-scoped quarry token the user gets after creating an org.
+pub(crate) async fn get_onboarding_preview_token(
+    state: &AppState,
+    user_id: &str,
+    cookie_header: &str,
+) -> Option<String> {
+    let cache_key = format!("{}:quarry-onboarding", user_id);
+
+    {
+        let cache = state.audience_token_cache.lock().await;
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.expires_at > Instant::now() {
+                return Some(entry.token.clone());
+            }
+        }
+    }
+
+    let resp = state
+        .client
+        .get(format!(
+            "{}/api/quarry/onboarding-token",
+            state.auth_core_url
+        ))
+        .header("cookie", cookie_header)
+        .header("x-internal-api-key", &state.internal_api_key)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let token_resp = resp.json::<TokenResponse>().await.ok()?;
+    let expires_in = token_resp.expires_in.unwrap_or(300).max(120);
+    let ttl = Duration::from_secs(expires_in.saturating_sub(60));
+    let token = token_resp.token.clone();
+
+    {
+        let mut cache = state.audience_token_cache.lock().await;
+        cache.insert(
+            cache_key,
+            CachedToken {
+                token: token.clone(),
+                expires_at: Instant::now() + ttl,
+            },
+        );
+    }
+
+    Some(token)
+}

@@ -1,128 +1,84 @@
-import Image from "next/image";
-import { ArrowButton } from "@/components/ui/ArrowButton";
+import { VelionMarkOutline } from "./VelionMark";
 
+/**
+ * HeroSectionV2 — calm, ambient, fast.
+ *
+ * One continuous video loop as ambient background (TYDE/Terminal pattern) —
+ * NO staged reveal choreography (video→image→copy stagger). All copy is
+ * server-rendered and visible at first paint, so the LCP element paints
+ * immediately instead of being gated by an animation timeline.
+ *
+ * Above the fold: one claim, one quiet line, and one small action. Let the
+ * media carry the atmosphere; keep explanatory copy for the sections below.
+ */
 export function HeroSection() {
 	return (
 		<section
-			className="velion-hero-load relative isolate min-h-svh overflow-hidden bg-background text-velion-c-white"
-			data-hero-parallax=""
+			className="relative isolate flex min-h-svh flex-col justify-end overflow-hidden bg-velion-h-ink-warm text-velion-c-white"
 			id="top"
 		>
-			<div aria-hidden="true" className="absolute inset-0 z-0 bg-background" />
-
 			<div
 				aria-hidden="true"
-				className="absolute inset-x-0 -top-[8%] -bottom-[18%] z-10 overflow-hidden will-change-transform"
-				data-hero-parallax-media=""
-				data-parallax-effect=""
-				data-parallax-options='{"from":{"y":"0%"},"to":{"y":"80%"},"start":"top top","end":"bottom top","disableOnMobile":false,"disableOnTablet":false}'
+				className="absolute inset-0 z-0 overflow-hidden"
 			>
-				<div
-					className="velion-hero-load__frame absolute inset-0 overflow-hidden bg-background"
-					data-hero-load-frame=""
+				<video
+					autoPlay
+					className="size-full object-cover object-center max-[760px]:object-left"
+					loop
+					muted
+					playsInline
+					poster="/velion-vibe/velion-signal-drone-short-poster.jpg"
+					preload="metadata"
 				>
-					<video
-						aria-hidden="true"
-						autoPlay
-						className="velion-hero-load__intro absolute inset-0 size-full object-cover object-center"
-						data-hero-load-intro-video=""
-						muted
-						playsInline
-						poster="/velion-vibe/hero-eye-source-poster.jpg"
-						preload="auto"
-						src="/velion-vibe/hero-eye-source.mp4"
+					<source
+						src="/velion-vibe/velion-hero-premiere-light.mp4"
+						type="video/mp4"
 					/>
-
-					<div
-						className="absolute inset-0 opacity-0"
-						data-hero-load-final-media=""
-					>
-						<Image
-							alt=""
-							className="absolute inset-0 size-full scale-[1.05] object-cover object-[48%_48%] brightness-[0.64] contrast-[1.1] saturate-[0.86]"
-							data-hero-load-final-image=""
-							fill
-							priority
-							sizes="100vw"
-							src="/velion-vibe/human-haze.png"
-						/>
-
-						<div
-							className="velion-hero-load__ambient absolute inset-0"
-							data-hero-load-final-overlay=""
-						/>
-						<div
-							className="velion-hero-load__organic-shadows absolute inset-0"
-							data-hero-load-final-overlay=""
-						/>
-						<div
-							className="velion-hero-load__fabric absolute inset-0"
-							data-hero-load-final-overlay=""
-						/>
-					</div>
-				</div>
+				</video>
 			</div>
 
-			<div
-				className="absolute bottom-0 left-[clamp(56px,5.55vw,208px)] top-0 z-20 flex w-[min(690px,calc(100%-clamp(56px,5.55vw,208px)*2))] max-w-[690px] flex-col items-start justify-center will-change-transform max-[760px]:left-[clamp(24px,4vw,56px)] max-[760px]:right-[clamp(24px,4vw,56px)] max-[760px]:w-auto max-[760px]:max-w-none"
-				data-hero-parallax-content=""
-				data-parallax-effect=""
-				data-parallax-options='{"from":{"y":"0%"},"to":{"y":"40%"},"start":"top top","end":"bottom top","disableOnMobile":false,"disableOnTablet":false}'
-			>
-				<p
-					className="mb-6 font-protokoll text-[0.82rem] font-medium uppercase leading-none tracking-[0.18em] text-[color-mix(in_srgb,var(--velion-c-white)_62%,transparent)] max-[760px]:mb-5 max-[760px]:text-[0.76rem]"
-					data-hero-load-copy-item=""
-				>
-					Den norske AI-arbeidsbenken
-				</p>
+			<div className="pointer-events-none absolute left-[70%] top-[50%] z-[1] w-[min(62vw,760px)] -translate-x-1/2 -translate-y-1/2 text-[color-mix(in_srgb,var(--velion-c-white)_13%,transparent)] mix-blend-screen max-[760px]:left-[66%] max-[760px]:top-[43%] max-[760px]:w-[128vw]">
+				<VelionMarkOutline className="h-auto w-full" strokeWidth={2} />
+			</div>
 
-				<h1
-					className="mb-9 max-w-[680px] font-arbeit text-[3.15rem] font-light leading-[0.98] tracking-normal text-velion-c-white sm:text-[4.7rem] lg:text-[6.7rem] 2xl:text-[7.8rem] max-[760px]:mb-6"
-					data-hero-load-copy-item=""
-				>
-					AI som handler — forankret og godkjent.
+			<div className="relative z-[1] mx-auto flex w-full max-w-[1680px] flex-col px-[var(--velion-edge)] pb-[clamp(112px,15vh,178px)] pt-[clamp(150px,18vh,220px)] max-[760px]:px-[var(--velion-page-pad)] max-[760px]:pb-[96px]">
+				<h1 className="max-w-[13ch] font-arbeit text-[clamp(2.85rem,5.6vw,6.9rem)] font-light leading-[0.96] tracking-[-0.045em] text-velion-c-white text-balance">
+					Fra signal til handling.
 				</h1>
 
-				<p
-					className="mb-[34px] max-w-[500px] font-protokoll text-[1.08rem] font-light leading-[1.5] text-[color-mix(in_srgb,var(--velion-c-white)_78%,transparent)] sm:text-[1.16rem] max-[760px]:max-w-[420px] max-[760px]:text-base"
-					data-hero-load-copy-item=""
-				>
-					Velion gjør forankret innsikt til godkjent handling. Hvert svar er
-					kildebelagt, hvert steg venter på et menneske — og dataene blir i EU
-					som standard.
+				<p className="mt-6 max-w-[34rem] font-protokoll text-[clamp(0.9rem,0.9vw,1.03rem)] font-light leading-[1.42] text-[color-mix(in_srgb,var(--velion-c-white)_72%,transparent)] text-pretty">
+					Kilder, svar og godkjenning i én arbeidsflyt.
 				</p>
 
-				<div
-					className="flex w-fit flex-wrap items-center gap-x-9 gap-y-4"
-					data-hero-load-copy-item=""
-				>
-					<ArrowButton href="#produkt" variant="light">
-						Se hvordan det virker
-					</ArrowButton>
-
+				<div className="mt-7">
 					<a
-						className="font-protokoll text-[0.98rem] font-light text-[color-mix(in_srgb,var(--velion-c-white)_70%,transparent)] underline-offset-[6px] transition-colors hover:text-velion-c-white hover:underline"
-						href="/trust"
+						className="group inline-flex w-fit items-center gap-3 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none text-[color-mix(in_srgb,var(--velion-c-white)_72%,transparent)] transition-colors duration-300 hover:text-velion-c-white"
+						href="#produkt"
 					>
-						Tillit &amp; datasuverenitet
+						<span className="whitespace-nowrap">
+							Se arbeidsflyten
+						</span>
+						<span
+							aria-hidden="true"
+							className="h-px w-7 origin-left bg-current opacity-70 transition-transform duration-300 group-hover:scale-x-125"
+						/>
 					</a>
 				</div>
 			</div>
 
 			<a
-				className="absolute bottom-[clamp(42px,6vh,76px)] left-[clamp(56px,5.55vw,208px)] z-20 inline-flex items-center gap-3 text-[1.06rem] text-[color-mix(in_srgb,var(--velion-c-white)_88%,transparent)] max-[760px]:bottom-[34px] max-[760px]:left-[clamp(24px,4vw,56px)]"
-				data-hero-load-copy-item=""
+				aria-label="Scroll til produktseksjonen"
+				className="velion-hero-scroll-cue absolute bottom-[clamp(28px,4vh,48px)] right-[var(--velion-edge)] z-[2] inline-flex items-end gap-3 font-protokoll text-[0.72rem] font-light leading-none text-[color-mix(in_srgb,var(--velion-c-white)_64%,transparent)] max-[760px]:right-[var(--velion-page-pad)]"
 				href="#produkt"
 			>
-				<svg
+				<span
 					aria-hidden="true"
-					className="size-[22px] fill-none stroke-current stroke-[1.8]"
-					viewBox="0 0 18 18"
-				>
-					<path d="m3 6 6 6 6-6" />
-				</svg>
-				<span>Bla ned</span>
+					className="velion-hero-scroll-cue__line h-[42px] w-px"
+				/>
+				<span className="pb-0.5">Scroll</span>
 			</a>
 		</section>
 	);
 }
+
+export default HeroSection;

@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useLayoutEffect, useRef } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { ArrowButton, ArrowButtonLabel } from "@/components/ui/ArrowButton";
 import { VelionComposerPreview } from "@/components/ui/VelionComposerPreview";
 
 gsap.registerPlugin(ScrollTrigger);
@@ -29,33 +30,33 @@ const mediaLayers: MediaLayer[] = [
 		kind: "video",
 		src: "/velion-product-shots/velion-dashboard-typing.mp4",
 		poster: "/velion-product-shots/dashboard-expanded-prompt.png",
-		alt: "Velion workspace dashboard in use.",
+		alt: "EU-residens som standard",
 	},
 	{
 		kind: "image",
 		src: "/velion-product-shots/chat-agent-steps.png",
-		alt: "Velion agent steps and approval trace.",
+		alt: "Godkjenning per handling",
 	},
 	{
 		kind: "image",
 		src: "/velion-vibe/human-haze.png",
-		alt: "Customer context signal silhouettes.",
+		alt: "Dataklassifisering",
 	},
 ];
 
 const copyPanels = [
 	{
-		body: "Velion turns company knowledge into governed action, with every source, answer, and approval kept inside one operating surface.",
+		body: "Velion kjører chat, søk og agentoppgaver i EU som standard, uten at promptene dine lagres hos modell-leverandøren.",
 		cta: undefined,
 		align: "left",
 	},
 	{
-		body: "Human approval gates, EU processing, and traceable memory work together so customer work can move faster without losing control.",
-		cta: "Trust center",
+		body: "Når Velion vil sende et svar, publisere noe eller bruke et risikofylt verktøy, stopper det for Godkjenn eller Avvis.",
+		cta: "Tillitssenter",
 		align: "left",
 	},
 	{
-		body: "Trusted automation scales when every workflow carries its evidence, ownership, and audit trail with it.",
+		body: "I Velion tillitssenter ser du hvilke kilder AI-en brukte, hvilke data som ble berørt, og at norske selskaper kobles mot Enhetsregisteret.",
 		cta: undefined,
 		align: "center",
 	},
@@ -167,56 +168,23 @@ function CopyPanel({
 				visibility: index === 0 ? "visible" : "hidden",
 			}}
 		>
-			<p className="m-0 font-protokoll text-[clamp(1rem,1.18vw,1.35rem)] font-light leading-[1.38] text-pretty">
+			<p className="m-0 font-protokoll text-[clamp(1.12rem,1.34vw,1.52rem)] font-light leading-[1.34] text-pretty">
 				{panel.body}
 			</p>
 
 			{panel.cta ? (
-				<a
-					className="mt-9 inline-flex h-11 items-center border border-velion-j-text/10 bg-velion-j-text/[0.035] px-5 font-protokoll text-[0.82rem] font-light leading-none text-velion-j-text/64 transition-colors hover:bg-velion-j-text/[0.075] hover:text-velion-j-text"
-					href="/trust"
-				>
+				<ArrowButton className="mt-9" href="/trust" variant="muted">
 					{panel.cta}
-				</a>
+				</ArrowButton>
 			) : null}
 		</div>
-	);
-}
-
-function ArrowGlyph({ className = "" }: { className?: string }) {
-	return (
-		<svg
-			aria-hidden="true"
-			className={["h-[10px] fill-current lg:h-[11px]", className]
-				.filter(Boolean)
-				.join(" ")}
-			viewBox="0 0 22.35 7.16"
-			xmlns="http://www.w3.org/2000/svg"
-		>
-			<path
-				d="m18.77 0 3.58 3.58c-.76 0-1.52-.29-2.1-.87l-2.1-2.1.62-.61zm-.61 6.54 2.1-2.1c.58-.58 1.34-.87 2.1-.87l-3.58 3.58-.62-.61zm.28-2.53v-.87H0V4h18.44z"
-				strokeWidth="0.5px"
-			/>
-		</svg>
-	);
-}
-
-function CardArrowLabel({ children }: { children: string }) {
-	return (
-		<span className="relative inline-flex w-fit items-center overflow-hidden px-px py-1 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none text-velion-j-text/62 opacity-80 transition-all duration-500 group-hover:opacity-100">
-			<span className="flex translate-x-[-43px] items-center gap-3 transition-transform duration-500 group-hover:translate-x-0 sm:translate-x-[-37px] sm:gap-1">
-				<ArrowGlyph />
-				<span className="whitespace-nowrap">{children}</span>
-				<ArrowGlyph className="absolute left-full translate-x-3 sm:translate-x-1" />
-			</span>
-		</span>
 	);
 }
 
 function FeaturePromptComposer() {
 	return (
 		<div
-			className="absolute bottom-[clamp(132px,17vh,182px)] left-1/2 z-40 w-[min(91vw,760px)] origin-bottom -translate-x-1/2 opacity-0 will-change-transform max-[899px]:hidden"
+			className="absolute bottom-[clamp(132px,17vh,182px)] left-1/2 z-40 w-[min(91vw,760px)] origin-bottom -translate-x-1/2 opacity-0 max-[899px]:hidden"
 			data-feature-prompt=""
 		>
 			<VelionComposerPreview animateCharacters prompt={promptText} />
@@ -234,7 +202,7 @@ function FeatureOutputCard({
 	return (
 		<a
 			aria-label={card.link}
-			className="group flex min-w-0 flex-col gap-3 will-change-[transform,opacity,filter]"
+			className="group flex min-w-0 flex-col gap-3"
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
@@ -243,7 +211,7 @@ function FeatureOutputCard({
 					<span className="size-[5px] rounded-full bg-velion-coral/70" />
 					{card.kicker}
 				</span>
-				<span>Velion output</span>
+				<span>Velion-resultat</span>
 			</div>
 
 			<div className="relative aspect-[3/4] overflow-hidden border border-velion-j-text/8 bg-white/55 shadow-[0_10px_28px_rgba(23,23,23,0.035)]">
@@ -267,7 +235,9 @@ function FeatureOutputCard({
 				{card.text}
 			</p>
 
-			<CardArrowLabel>{card.link}</CardArrowLabel>
+			<ArrowButtonLabel className="text-velion-j-text/62">
+				{card.link}
+			</ArrowButtonLabel>
 		</a>
 	);
 }
@@ -359,7 +329,7 @@ function FeatureHandoffIntro() {
 			</div>
 
 			<div
-				className="absolute left-1/2 top-[clamp(150px,16.5vh,172px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center will-change-[transform,opacity,filter]"
+				className="absolute left-1/2 top-[clamp(150px,16.5vh,172px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
 				data-trust-feature-copy=""
 			>
 				<p className="mb-4 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-velion-j-text/38">
@@ -401,7 +371,7 @@ function FeatureSourceChrome() {
 					<span className="size-[5px] rounded-full bg-velion-coral/70" />
 					signal
 				</span>
-				<span>customer context</span>
+				<span>kundekontekst</span>
 			</div>
 
 			{corners.map((position) => (
@@ -425,11 +395,11 @@ function FeatureMobileFallback() {
 					Forankret handling
 				</p>
 				<h2 className="m-0 font-arbeit text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-velion-j-text">
-					Tenking, satt i arbeid
+					Kundearbeid, klart til godkjenning
 				</h2>
 				<p className="mx-auto mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-velion-text-muted">
-					Ett kundesignal kan bli et svar, en rute, en policy-sjekk og
-					en revidert handling — alt med kildene synlige.
+					Velion samler kilder, lager forslag og viser hva som må godkjennes
+					før noe skjer ute hos kunden.
 				</p>
 			</div>
 
@@ -1037,7 +1007,7 @@ export function TrustScrollSection() {
 								<span className="mb-4 block font-arbeit text-[0.76rem] text-velion-coral">
 									{String(index + 1).padStart(2, "0")}
 								</span>
-								<p className="m-0 font-protokoll text-[1rem] font-light leading-[1.48] text-velion-j-text/68">
+								<p className="m-0 font-protokoll text-[1.08rem] font-light leading-[1.45] text-velion-j-text/68">
 									{panel.body}
 								</p>
 							</div>
@@ -1049,7 +1019,7 @@ export function TrustScrollSection() {
 			</div>
 
 			<h2 className="sr-only" id="trust-scroll-title">
-				Trusted AI operating layer
+				Styrt AI-arbeidsflate
 			</h2>
 		</section>
 	);

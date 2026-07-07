@@ -3,8 +3,8 @@ import { CpuArchitecture } from "@/components/ui/cpu-architecture";
 
 const stats = [
 	{ label: "Overvåk · brief · godkjenn · handle", unit: "steg", value: "4" },
-	{ label: "Residens som standard (Sweden Central)", unit: "EØS", value: "EU" },
-	{ label: "Risikofylte handlinger", unit: "godkjent", value: "HITL" },
+	{ label: "Data behandles i EU som standard", unit: "EØS", value: "EU" },
+	{ label: "Risikofylte handlinger stoppes", unit: "først", value: "Ja" },
 ];
 
 export function TechnologySection() {
@@ -45,7 +45,7 @@ export function TechnologySection() {
 							className="fade-out-top m-0 max-w-[500px] font-arbeit text-[clamp(3rem,3.9vw,4.7rem)] font-light leading-[1.02] tracking-[-0.055em] text-velion-j-text"
 							data-fade-out-top
 						>
-							Overvåk, brief,
+							Se, forstå,
 							<br />
 							godkjenn, handle.
 						</h1>
@@ -55,11 +55,10 @@ export function TechnologySection() {
 							data-fade-out-top
 						>
 							<p className="m-0 font-protokoll text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.55] text-velion-text-muted">
-								Den nyttige Velion-sløyfen starter med endring: en kundemelding,
-								en nettside som oppdateres, en konkurrent som beveger seg, et
-								hull i en kobling eller en kunnskaps­konflikt. Velion gjør
-								signalet til en brief, foreslår neste handling — og venter når
-								godkjenning kreves.
+								Velion starter med et signal: en kundemelding, en oppdatert
+								nettside eller en konflikt i kunnskapen. Derfra lager den et
+								kort grunnlag, foreslår neste steg og venter når godkjenning
+								kreves.
 							</p>
 						</div>
 					</div>

@@ -25,11 +25,15 @@ set -Eeuo pipefail
 #   WAIT_FOR_STACK_READY=true  After each plane starts, wait until every default
 #                              runtime service is running/healthy before moving
 #                              to the next plane.
-#   COMPOSE_PARALLEL_LIMIT=4   Max concurrent Docker Compose engine calls. Lower
+#   COMPOSE_PARALLEL_LIMIT=2   Max concurrent Docker Compose engine calls. Lower
 #                              this (1–2) on a memory-constrained Docker VM: the
 #                              heavy Rust planes (Quarry-v2, Model Plane) each
 #                              spawn rustc+LLVM per core, and several building in
 #                              parallel can OOM the VM (build dies with exit 101).
+#   COMPOSE_BAKE=false         Keep full-stack local builds predictable. Set true
+#                              to opt into buildx bake parallel builds.
+#   COMPOSE_PROGRESS=plain     Keep logs readable for long plane-by-plane builds.
+#   BUILDKIT_PROGRESS=plain    Keep BuildKit logs readable.
 #   PRUNE_BUILD_CACHE=true     When pruning, also clear the Docker build cache
 #                              (it balloons past 25 GB across full rebuilds and
 #                              slows/stalls later builds). Set false to keep it.
@@ -55,7 +59,9 @@ if [[ -z "${BRAVE_SEARCH_KEY:-}" && -n "${BRAVE_API_KEY:-}" ]]; then
   export BRAVE_SEARCH_KEY="$BRAVE_API_KEY"
 fi
 
-export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-4}"
+export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-2}"
+export COMPOSE_PROGRESS="${COMPOSE_PROGRESS:-plain}"
+export BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
 
 # ── Build-speed env (safe defaults; all caller-overridable) ─────────────────
 # BuildKit is required for the `RUN --mount=type=cache` steps in the per-plane
@@ -65,17 +71,13 @@ export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-4}"
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-1}"
 
-# COMPOSE_BAKE=true delegates multi-service builds to `docker buildx bake`,
-# which builds a stack's services in parallel and is more cache-aware than the
-# legacy sequential builder. It requires the `buildx` plugin, so gate it behind
-# a buildx-availability probe and let the caller force it off with
-# COMPOSE_BAKE=false (or pin any value of their own).
+# COMPOSE_BAKE=true delegates multi-service builds to `docker buildx bake`.
+# That can be faster on large machines, but it builds many services at once and
+# repeatedly sends large Rust contexts during a full local stack bring-up. Keep
+# local full-stack builds serial-friendly by default; callers can opt in with
+# COMPOSE_BAKE=true.
 if [[ -z "${COMPOSE_BAKE:-}" ]]; then
-  if docker buildx version >/dev/null 2>&1; then
-    export COMPOSE_BAKE=true
-  else
-    export COMPOSE_BAKE=false
-  fi
+  export COMPOSE_BAKE=false
 else
   export COMPOSE_BAKE
 fi
@@ -135,7 +137,7 @@ STACK_NAMES=(
 # One-shot services are removed after they exit successfully so `docker ps -a`
 # stays focused on long-running servers.
 BOOTSTRAP_SERVICES=(
-  "minio-init"
+  "minio-init migrate"
   "nango-seed"
   ""
   "lago-migrate"
@@ -200,6 +202,10 @@ run() {
   "$@"
 }
 
+compose() {
+  docker compose --parallel "$COMPOSE_PARALLEL_LIMIT" --progress "$COMPOSE_PROGRESS" "$@"
+}
+
 run_with_timeout() {
   local timeout_seconds="$1"
   shift
@@ -239,14 +245,14 @@ ensure_velion_network() {
 
 validate_compose() {
   local compose_file="$1"
-  docker compose -f "$compose_file" config --quiet
+  compose -f "$compose_file" config --quiet
 }
 
 validate_ingestion_plane_targets_quarry_v2() {
   local compose_file="$1"
   local services rendered_config settings_file
 
-  services="$(docker compose -f "$compose_file" config --services)"
+  services="$(compose -f "$compose_file" config --services)"
 
   for service in quarry-edge quarry-control quarry-orchestrator searxng; do
     if ! grep -qx "$service" <<<"$services"; then
@@ -260,7 +266,7 @@ validate_ingestion_plane_targets_quarry_v2() {
     return 1
   fi
 
-  rendered_config="$(docker compose -f "$compose_file" config)"
+  rendered_config="$(compose -f "$compose_file" config)"
   if ! grep -q 'QUARRY_EDGE__SEARXNG_URL: http://searxng:8080' <<<"$rendered_config"; then
     printf 'Ingestion Plane must wire Quarry-v2 to its local searxng service (http://searxng:8080)\n' >&2
     return 1
@@ -279,7 +285,7 @@ validate_ingestion_plane_targets_quarry_v2() {
 
 compose_services() {
   local compose_file="$1"
-  docker compose -f "$compose_file" config --services
+  compose -f "$compose_file" config --services
 }
 
 buildable_services() {
@@ -290,7 +296,7 @@ buildable_services() {
     return 1
   fi
 
-  docker compose -f "$compose_file" config --format json \
+  compose -f "$compose_file" config --format json \
     | jq -r '.services | to_entries[] | select(.value.build != null) | .key'
 }
 
@@ -320,7 +326,7 @@ service_ready() {
   local service="$2"
   local container_id status health
 
-  container_id="$(docker compose -f "$compose_file" ps -q "$service" 2>/dev/null || true)"
+  container_id="$(compose -f "$compose_file" ps -q "$service" 2>/dev/null || true)"
   [[ -n "$container_id" ]] || return 1
 
   status="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
@@ -421,10 +427,10 @@ wait_for_services_ready() {
   done
 
   printf 'Timed out waiting for runtime services to become ready: %s\n' "$services" >&2
-  docker compose -f "$compose_file" ps || true
+  compose -f "$compose_file" ps || true
   for service in $services; do
     if ! service_ready "$compose_file" "$service"; then
-      docker compose -f "$compose_file" logs --tail=80 "$service" || true
+      compose -f "$compose_file" logs --tail=80 "$service" || true
     fi
   done
   return 1
@@ -463,7 +469,7 @@ ensure_frontend_bus() {
 
   log "Ensuring Frontend Plane NATS bus is running"
   validate_compose "$compose_file"
-  run docker compose -f "$compose_file" up -d --build --remove-orphans nats
+  run compose -f "$compose_file" up -d --build --remove-orphans nats
 
   if [[ "$DRY_RUN" == "true" ]]; then
     return 0
@@ -476,7 +482,7 @@ ensure_frontend_bus() {
     sleep "$WAIT_INTERVAL_SECONDS"
   done
 
-  docker compose -f "$compose_file" logs --tail=120 nats || true
+  compose -f "$compose_file" logs --tail=120 nats || true
   printf 'Timed out waiting for frontend NATS bus\n' >&2
   return 1
 }
@@ -489,9 +495,9 @@ stop_old_project() {
     return 0
   fi
 
-  if docker compose ls --all --format json | grep -q "\"Name\":\"$old_project\""; then
+  if compose ls --all --format json | grep -q "\"Name\":\"$old_project\""; then
     log "Stopping old Compose project '$old_project' for $compose_file"
-    run docker compose -p "$old_project" -f "$compose_file" down --remove-orphans
+    run compose -p "$old_project" -f "$compose_file" down --remove-orphans
   fi
 }
 
@@ -502,7 +508,7 @@ wait_for_one_shot() {
 
   while (( SECONDS < deadline )); do
     local container_id
-    container_id="$(docker compose -f "$compose_file" ps -q "$service" 2>/dev/null || true)"
+    container_id="$(compose -f "$compose_file" ps -q "$service" 2>/dev/null || true)"
 
     if [[ -z "$container_id" ]]; then
       return 0
@@ -516,7 +522,7 @@ wait_for_one_shot() {
         return 0
         ;;
       exited\ *)
-        docker compose -f "$compose_file" logs --tail=120 "$service" || true
+        compose -f "$compose_file" logs --tail=120 "$service" || true
         printf 'One-shot service failed: %s (%s)\n' "$service" "$state" >&2
         return 1
         ;;
@@ -529,7 +535,7 @@ wait_for_one_shot() {
     esac
   done
 
-  docker compose -f "$compose_file" logs --tail=120 "$service" || true
+  compose -f "$compose_file" logs --tail=120 "$service" || true
   printf 'Timed out waiting for one-shot service: %s\n' "$service" >&2
   return 1
 }
@@ -559,11 +565,11 @@ remove_one_shot_containers() {
 
   log "Removing completed one-shot services: ${existing[*]}"
   if [[ "$DRY_RUN" == "true" ]]; then
-    run docker compose -f "$compose_file" rm -f -s -v "${existing[@]}"
+    run compose -f "$compose_file" rm -f -s -v "${existing[@]}"
   else
     for service in "${existing[@]}"; do
       local container_id
-      container_id="$(docker compose -f "$compose_file" ps -aq "$service" 2>/dev/null || true)"
+      container_id="$(compose -f "$compose_file" ps -aq "$service" 2>/dev/null || true)"
       [[ -z "$container_id" ]] && continue
 
       if ! run_with_timeout "$REMOVE_TIMEOUT_SECONDS" docker rm -f -v "$container_id" >/dev/null; then
@@ -596,28 +602,28 @@ build_stack() {
     no_cache_runtime_service_list="$(no_cache_runtime_start_services "$compose_file" "$bootstrap_services")"
     no_cache_runtime_ready_service_list="$(non_build_runtime_services "$compose_file" "$bootstrap_services" | xargs)"
     if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
-      run docker compose -f "$compose_file" build --no-cache gateway frontend
-      run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --remove-orphans nats gateway frontend
+      run compose -f "$compose_file" build --no-cache gateway frontend
+      VELION_SKIP_BOOTSTRAP=1 run compose -f "$compose_file" up -d --remove-orphans nats gateway frontend
     else
       if [[ -z "$no_cache_build_service_list" && -z "$no_cache_runtime_service_list" ]]; then
-        run docker compose -f "$compose_file" up -d --remove-orphans
+        run compose -f "$compose_file" up -d --remove-orphans
       fi
       if [[ -n "$no_cache_build_service_list" ]]; then
-        run docker compose -f "$compose_file" build --no-cache $no_cache_build_service_list
+        run compose -f "$compose_file" build --no-cache $no_cache_build_service_list
       fi
       if [[ -n "$no_cache_runtime_service_list" ]]; then
-        run docker compose -f "$compose_file" up -d --remove-orphans $no_cache_runtime_service_list
+        run compose -f "$compose_file" up -d --remove-orphans $no_cache_runtime_service_list
       fi
       wait_for_services_ready "$compose_file" "$no_cache_runtime_ready_service_list"
       if [[ -n "$no_cache_build_service_list" ]]; then
-        run docker compose -f "$compose_file" up -d --no-deps --remove-orphans $no_cache_build_service_list
+        run compose -f "$compose_file" up -d --no-deps --remove-orphans $no_cache_build_service_list
       fi
     fi
   else
     if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
-      run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --build --remove-orphans nats gateway frontend
+      VELION_SKIP_BOOTSTRAP=1 run compose -f "$compose_file" up -d --build --remove-orphans nats gateway frontend
     else
-      run docker compose -f "$compose_file" up -d --build --remove-orphans
+      run compose -f "$compose_file" up -d --build --remove-orphans
     fi
   fi
 
@@ -626,7 +632,7 @@ build_stack() {
     wait_for_stack_ready "$name" "$compose_file" "$bootstrap_services"
 
     log "$name status"
-    docker compose -f "$compose_file" ps
+    compose -f "$compose_file" ps
 
     if [[ -n "$post_hook" ]]; then
       IFS=',' read -r -a hooks <<<"$post_hook"
@@ -867,13 +873,13 @@ verify_controlplane_db_auth() {
     fi
 
     printf '[db-auth] WARN: %s /health=%s — DB unreachable/unauthenticated; force-recreating to pick up current config…\n' "$svc" "$code" >&2
-    run docker compose -f "$compose_file" up -d --force-recreate --no-deps "$svc"
+    run compose -f "$compose_file" up -d --force-recreate --no-deps "$svc"
     code="$(probe "$port")"
     if [[ "$code" == "200" ]]; then
       printf '[db-auth] %-12s recovered after recreate (/health 200)\n' "$svc"
     else
       printf '[db-auth] ERROR: %s still /health=%s after recreate — likely a DB password mismatch (compare ${DB_PASSWORD} in .env against the running Postgres).\n' "$svc" "$code" >&2
-      docker compose -f "$compose_file" logs --tail 8 "$svc" 2>&1 \
+      compose -f "$compose_file" logs --tail 8 "$svc" 2>&1 \
         | grep -iE "password authentication|database ping|connect database" | sed 's/^/[db-auth]   /' || true
       failed+=("$svc")
     fi
@@ -977,12 +983,12 @@ prune_all() {
     fi
 
     log "Stopping $stack_name ($compose_file)"
-    run docker compose -f "$compose_file" down --volumes --remove-orphans --rmi local || true
+    run compose -f "$compose_file" down --volumes --remove-orphans --rmi local || true
 
     if [[ -n "$old_project" ]]; then
-      if docker compose ls --all --format json 2>/dev/null | grep -q "\"Name\":\"$old_project\""; then
+      if compose ls --all --format json 2>/dev/null | grep -q "\"Name\":\"$old_project\""; then
         log "Stopping legacy Compose project '$old_project'"
-        run docker compose -p "$old_project" -f "$compose_file" down --volumes --remove-orphans || true
+        run compose -p "$old_project" -f "$compose_file" down --volumes --remove-orphans || true
       fi
     fi
   done

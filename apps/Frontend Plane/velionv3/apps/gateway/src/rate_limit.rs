@@ -176,8 +176,8 @@ impl RateLimiter {
         key: &str,
     ) -> Result<Result<(), u64>, redis::RedisError> {
         let refill_rate = self.rpm / 60.0; // tokens per second
-        // TTL: long enough that an idle bucket isn't reaped mid-burst, bounded
-        // so abandoned keys self-evict. One full refill window + a margin.
+                                           // TTL: long enough that an idle bucket isn't reaped mid-burst, bounded
+                                           // so abandoned keys self-evict. One full refill window + a margin.
         let ttl_secs = (self.rpm / refill_rate).ceil() as u64 + 60;
         let redis_key = distributed_key(key);
 

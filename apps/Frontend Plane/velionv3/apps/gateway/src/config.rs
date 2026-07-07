@@ -30,10 +30,10 @@ pub(crate) struct AppState {
     pub(crate) audit_core_url: String,
     pub(crate) insight_core_url: String,
     pub(crate) leads_core_url: String,
+    pub(crate) shipping_core_url: String,
     pub(crate) user_core_url: String,
     pub(crate) graph_index_url: String,
     pub(crate) quarry_edge_url: String,
-    pub(crate) quarry_control_url: String,
     pub(crate) model_recommend_url: String,
     pub(crate) model_gateway_url: String,
     pub(crate) cost_core_url: String,
@@ -122,10 +122,12 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // registry. Internal-key auth + x-org-id header, like the other cores.
         insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
         leads_core_url: env_url("LEADS_CORE_URL", "http://leads-core:3164"),
+        // shipping-core (Ingestion Plane) — freight aggregator; on the
+        // inter-plane bus, so the in-network name resolves from the gateway.
+        shipping_core_url: env_url("SHIPPING_CORE_URL", "http://shipping-core:8080"),
         user_core_url: env_url("USER_CORE_URL", "http://user-core:3012"),
         graph_index_url: env_url("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203"),
         quarry_edge_url: env_url("QUARRY_EDGE_URL", "http://quarry-edge:8082"),
-        quarry_control_url: env_url("QUARRY_CONTROL_URL", "http://quarry-control:8081"),
         model_recommend_url: env_url(
             "MODEL_PLANE_RECOMMEND_URL",
             "http://model-gateway:8080/v1/recommend/plan",
@@ -185,8 +187,8 @@ pub(crate) async fn build_state() -> Result<AppState> {
         cache,
         chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
         studio_store: crate::domains::studio::StudioStore::new(),
-        allow_dev_actor_headers: env_bool("ALLOW_DEV_ACTOR_HEADERS", false),
-        allow_dev_auth_bypass: env_bool("ALLOW_DEV_AUTH_BYPASS", false),
+        allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
+        allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         enhanced_scrape_provider: env::var("SCRAPE_ENHANCED_PROVIDER")
             .unwrap_or_default()
             .trim()
@@ -284,6 +286,23 @@ fn internal_api_key() -> Result<String> {
     }
 }
 
+/// Dev auth escape hatches must never activate in a production deploy, even if
+/// the env var leaks into the profile: `APP_ENV=production` (or `prod`) wins
+/// over the flag.
+fn dev_only_flag(key: &str) -> bool {
+    let enabled = env_bool(key, false);
+    let app_env = env::var("APP_ENV").unwrap_or_default();
+    if enabled && !dev_flags_allowed(&app_env) {
+        eprintln!("refusing {key}=true because APP_ENV={app_env}; dev bypass is disabled");
+        return false;
+    }
+    enabled
+}
+
+fn dev_flags_allowed(app_env: &str) -> bool {
+    !matches!(app_env.to_ascii_lowercase().as_str(), "production" | "prod")
+}
+
 fn env_bool(key: &str, fallback: bool) -> bool {
     env::var(key)
         .ok()
@@ -301,4 +320,23 @@ fn env_url(key: &str, fallback: &str) -> String {
         .unwrap_or_else(|_| fallback.into())
         .trim_end_matches('/')
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dev_flags_allowed;
+
+    #[test]
+    fn dev_flags_refused_in_production_profiles() {
+        assert!(!dev_flags_allowed("production"));
+        assert!(!dev_flags_allowed("Production"));
+        assert!(!dev_flags_allowed("prod"));
+    }
+
+    #[test]
+    fn dev_flags_allowed_outside_production() {
+        assert!(dev_flags_allowed(""));
+        assert!(dev_flags_allowed("development"));
+        assert!(dev_flags_allowed("staging"));
+    }
 }

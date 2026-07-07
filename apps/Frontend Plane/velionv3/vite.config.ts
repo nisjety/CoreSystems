@@ -48,6 +48,9 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
+    // Playwright specs live under tests/e2e and import @playwright/test — they
+    // must never be collected by vitest (they run via `pnpm test:e2e`).
+    exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**'],
     // Default per-test budget. The A8 fabrication-guard test spins up the real
     // ESLint flat config (cold-start ~8s), which exceeds vitest's 5s default when
     // that file runs in isolation; 30s keeps the suite stable on CI / slow hosts.

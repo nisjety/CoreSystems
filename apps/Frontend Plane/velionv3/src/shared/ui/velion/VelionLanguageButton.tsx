@@ -8,6 +8,7 @@ type VelionLanguageButtonProps = {
   ariaLabel?: string
   ariaControls?: string
   ariaExpanded?: boolean
+  hasMenu?: boolean
 }
 
 export function VelionLanguageButton(props: VelionLanguageButtonProps) {
@@ -17,9 +18,9 @@ export function VelionLanguageButton(props: VelionLanguageButtonProps) {
       class={cn('onboarding-language-pill', props.class)}
       onClick={() => props.onClick?.()}
       aria-label={props.ariaLabel ?? 'Language'}
-      aria-haspopup="menu"
-      aria-expanded={props.ariaExpanded}
-      aria-controls={props.ariaControls}
+      aria-haspopup={props.hasMenu === false ? undefined : 'menu'}
+      aria-expanded={props.hasMenu === false ? undefined : props.ariaExpanded}
+      aria-controls={props.hasMenu === false ? undefined : props.ariaControls}
     >
       <Globe size={16} />
       <span>{props.code}</span>

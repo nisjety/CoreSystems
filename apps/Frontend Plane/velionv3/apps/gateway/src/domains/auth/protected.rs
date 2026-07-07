@@ -375,3 +375,51 @@ fn has_any_role(value: &str, allowed: &[&str]) -> bool {
             .any(|allowed_role| role.eq_ignore_ascii_case(allowed_role))
     })
 }
+
+/// `GET /api/v1/admin/users` — cross-org user directory for platform super
+/// admins. Unlike `/api/v1/orgs/{id}/members` (scoped to one org), this lists
+/// EVERY user in the deployment by proxying Better Auth's admin `list-users`,
+/// which is not org-scoped. Gated here on the top-level Better Auth role
+/// (`admin`/`superadmin`); auth-core re-checks the same role via its admin
+/// plugin, so this is defense-in-depth, not the sole gate.
+pub(super) async fn admin_list_users(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    if !has_any_role(
+        user.auth_role.as_deref().unwrap_or_default(),
+        &["admin", "superadmin"],
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Cross-org user administration requires a platform admin role.",
+            )),
+        )
+            .into_response();
+    }
+
+    // Forward the client's paging/search query (limit, offset, searchValue,
+    // sortBy, …) verbatim to Better Auth's admin list-users.
+    let query = uri.query().filter(|q| !q.is_empty());
+    let url = match query {
+        Some(q) => format!("{}/api/auth/admin/list-users?{q}", state.auth_core_url),
+        None => format!(
+            "{}/api/auth/admin/list-users?limit=200",
+            state.auth_core_url
+        ),
+    };
+
+    proxy_auth(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&cookie_header(&headers)),
+        browser_origin(&headers).as_deref(),
+    )
+    .await
+}

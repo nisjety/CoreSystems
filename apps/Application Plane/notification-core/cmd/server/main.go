@@ -189,6 +189,23 @@ func main() {
 		}
 	}()
 
+	// Social publish-job failures (task #26, provider business modules
+	// program): social-core's own JetStream stream already covers this
+	// subject, so this reuses sharedNATSClient rather than needing a new
+	// stream. See consumers/social_publish_failed.go.
+	var socialPublishFailedSub *consumers.SocialPublishFailedSubscriber
+	if sharedNATSClient != nil {
+		socialPublishFailedSub = consumers.NewSocialPublishFailedSubscriber(sharedNATSClient.JS, notificationService)
+		if err := socialPublishFailedSub.Start(context.Background()); err != nil {
+			log.Printf("warning: start social-publish-failed subscriber: %v", err)
+		}
+	}
+	defer func() {
+		if socialPublishFailedSub != nil {
+			socialPublishFailedSub.Stop()
+		}
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.Start()

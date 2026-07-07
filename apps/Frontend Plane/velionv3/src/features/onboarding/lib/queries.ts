@@ -4,7 +4,7 @@ import type { OnboardingGatewayActions } from '@/features/onboarding/lib/actions
 
 export const onboardingQueryKeys = {
   graphPreview: (orgId?: string) => ['onboarding', 'graph-preview', orgId ?? 'none'] as const,
-  planRecommendation: (context: Record<string, unknown>) => ['onboarding', 'recommend-plan', context] as const,
+  planRecommendation: (contextHash: string) => ['onboarding', 'recommend-plan', contextHash] as const,
 }
 
 export function graphPreviewQueryConfig(
@@ -34,11 +34,12 @@ export function planRecommendationQueryConfig(
   actions: OnboardingGatewayActions,
   context: Accessor<Record<string, unknown>>,
   enabled: Accessor<boolean>,
+  contextHash: Accessor<string> = () => JSON.stringify(context()),
 ) {
   return {
     enabled: enabled(),
     queryFn: () => actions.recommendPlan(context()),
-    queryKey: onboardingQueryKeys.planRecommendation(context()),
+    queryKey: onboardingQueryKeys.planRecommendation(contextHash()),
     retry: false,
     staleTime: Infinity,
   }
@@ -48,6 +49,7 @@ export function createPlanRecommendationQuery(
   actions: OnboardingGatewayActions,
   context: Accessor<Record<string, unknown>>,
   enabled: Accessor<boolean>,
+  contextHash?: Accessor<string>,
 ) {
-  return createQuery(() => planRecommendationQueryConfig(actions, context, enabled))
+  return createQuery(() => planRecommendationQueryConfig(actions, context, enabled, contextHash))
 }

@@ -103,6 +103,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
         .merge(domains::shares::router(state.clone()))
+        .merge(domains::shipping::router(state.clone()))
         .merge(domains::social::router(state.clone()))
         .merge(domains::studio::router(state.clone()))
         .merge(domains::tickets::router(state.clone()))
@@ -172,10 +173,10 @@ mod tests {
             audit_core_url: "http://127.0.0.1:1".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
+            shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),
-            quarry_control_url: "http://127.0.0.1:1".into(),
             model_recommend_url: "http://127.0.0.1:1".into(),
             model_gateway_url: "http://127.0.0.1:1".into(),
             model_gateway_dev_bearer: String::new(),
@@ -313,13 +314,16 @@ mod tests {
 
     #[test]
     fn onboarding_payloads_accept_camel_and_snake_case_fields() {
+        // Tenant identity now comes from the verified session/JWT, not the body,
+        // so a legacy `orgId`/`org_id` field is accepted-and-ignored. Only `url`
+        // and `maxPages`/`max_pages` are read.
         let camel = serde_json::from_value::<WebsiteIngestRequest>(json!({
             "orgId": "org_1",
             "url": "https://example.com",
             "maxPages": 4
         }))
         .unwrap();
-        assert_eq!(camel.org_id, "org_1");
+        assert_eq!(camel.url, "https://example.com");
         assert_eq!(camel.max_pages, Some(4));
 
         let snake = serde_json::from_value::<WebsiteIngestRequest>(json!({
@@ -328,7 +332,7 @@ mod tests {
             "max_pages": 6
         }))
         .unwrap();
-        assert_eq!(snake.org_id, "org_2");
+        assert_eq!(snake.url, "https://example.com");
         assert_eq!(snake.max_pages, Some(6));
     }
 

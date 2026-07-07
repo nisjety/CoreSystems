@@ -133,7 +133,13 @@ export function WebsiteStepVisual(props: { website: OnboardingState['website'] }
         <div class="onboarding-folder-card__tab" />
         <p>Nettsidekunnskap</p>
         <h2>{props.website.snippets.length} utdrag samlet</h2>
-        <span>Quarry henter strukturert tekst, bilder og filer fra nettstedet ditt.</span>
+        <span>
+          <Switch fallback="Quarry henter strukturert tekst, bilder og filer fra nettstedet ditt.">
+            <Match when={props.website.status === 'completed'}>
+              Rask forhåndsvisning fra forsiden din. Hele nettstedet indekseres når arbeidsområdet er klart.
+            </Match>
+          </Switch>
+        </span>
         <div class="onboarding-folder-card__progress">
           <div>
             <span>Fremdrift</span>

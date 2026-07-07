@@ -21,25 +21,25 @@ type LayerDefinition = {
 const layers: LayerDefinition[] = [
 	{
 		id: "management",
-		title: "Styringslag",
+		title: "Oversikt",
 		description:
-			"Overvåking, evaluering og optimalisering på tvers av arbeid i produksjon.",
+			"Se hva agenten gjør, hvor godt det fungerer og hva som trenger oppfølging.",
 		framerLayer: 1,
 		image: "/velion-layers/management-layer.png",
 	},
 	{
 		id: "orchestration",
-		title: "Orkestrering",
+		title: "Arbeidsflyt",
 		description:
-			"Agent-ruting på tvers av innboks, chat, nettsøk og interne arbeidsflyter.",
+			"Velion flytter saker mellom chat, innboks, søk og interne oppgaver.",
 		framerLayer: 2,
 		image: "/velion-layers/orchestration-layer.png",
 	},
 	{
 		id: "business-context",
-		title: "Bedriftskontekst",
+		title: "Kontekst",
 		description:
-			"Gjenbrukbare instruksjoner, kunnskap og prosessminne forankret i systemene dere allerede bruker.",
+			"Kilder, regler og tidligere arbeid følger med, så teamet slipper å starte på nytt.",
 		framerLayer: 3,
 		image: "/velion-layers/business-context-layer.png",
 	},
@@ -47,7 +47,7 @@ const layers: LayerDefinition[] = [
 		id: "infrastructure",
 		title: "Infrastruktur",
 		description:
-			"Sikker fler-modell-kjøring, koblinger, godkjenninger og revisjonsspor — i EU.",
+			"Modeller, koblinger, godkjenninger og revisjonsspor kjøres med EU som standard.",
 		framerLayer: 4,
 		image: "/velion-layers/infrastructure-layer.png",
 	},
@@ -307,7 +307,7 @@ function LayerCallout({
 
 			<motion.p
 				animate={{ opacity: active ? 0.78 : 0.4 }}
-				className="mt-3 max-w-[290px] font-protokoll text-[clamp(0.82rem,0.68vw,0.94rem)] font-light leading-[1.42] tracking-[-0.02em] text-velion-text-muted"
+				className="mt-3 max-w-[310px] font-protokoll text-[clamp(0.9rem,0.78vw,1rem)] font-light leading-[1.42] tracking-[-0.02em] text-velion-text-muted"
 				initial={false}
 				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
 			>
@@ -349,17 +349,17 @@ export function LayerSection() {
 			<div className="relative z-[1] mx-auto w-full max-w-[1540px] px-[clamp(24px,4.2vw,112px)]">
 				<header className="grid grid-cols-1 gap-x-8 gap-y-6 md:grid-cols-3">
 					<p className="pt-1 font-protokoll text-[12px] font-light leading-none text-velion-text-muted">
-						Arkitektur
+						Slik henger det sammen
 					</p>
 
 					<div className="md:col-span-2">
-						<h2 className="font-arbeit text-[clamp(1.9rem,2.15vw,2.8rem)] font-light leading-[0.98] tracking-[-0.068em] text-velion-j-text">
-							AI-plattformen for virksomheter i stor skala.
+						<h2 className="font-arbeit text-[clamp(2.25rem,2.9vw,3.8rem)] font-light leading-[0.96] tracking-[-0.068em] text-velion-j-text">
+							Én flate for kunnskap, agentarbeid og kontroll.
 						</h2>
 
-						<p className="mt-4 max-w-[540px] font-protokoll text-[clamp(0.88rem,0.88vw,1rem)] font-light leading-[1.42] text-velion-text-muted">
-							Et samlet fundament som blir sterkere for hver
-							utrulling.
+						<p className="mt-4 max-w-[580px] font-protokoll text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-velion-text-muted">
+							Hver kobling gjør Velion mer nyttig: flere kilder, tydeligere
+							regler og bedre sporbarhet i samme arbeidsflate.
 						</p>
 					</div>
 				</header>
@@ -385,7 +385,7 @@ export function LayerSection() {
 						/>
 
 						<span className="relative z-[2] block max-w-[280px] font-protokoll text-[10px] font-light uppercase leading-[1.4] tracking-[0.25em] text-velion-text-muted/70">
-							Styring, orkestrering, kontekst, infrastruktur
+							Oversikt, flyt, kontekst, infrastruktur
 						</span>
 
 						<div className="absolute inset-x-[clamp(12px,3vw,44px)] bottom-[clamp(16px,3vw,48px)] top-[clamp(64px,8vw,112px)]">
@@ -401,11 +401,6 @@ export function LayerSection() {
 									<motion.div
 										aria-hidden="true"
 										animate={{
-											filter: `drop-shadow(0 ${
-												isActive ? 28 : 15
-											}px ${isActive ? 42 : 22}px rgba(31, 31, 29, ${
-												frame.shadowOpacity
-											}))`,
 											opacity: shouldPlayEntry ? 0 : 1,
 											scale: shouldPlayEntry
 												? frame.scale * 0.72
@@ -414,11 +409,16 @@ export function LayerSection() {
 												? frame.y * offsetScale + 44
 												: frame.y * offsetScale,
 										}}
-										className="pointer-events-none absolute inset-0 flex items-center justify-center will-change-transform"
+										className="pointer-events-none absolute inset-0 flex items-center justify-center"
 										data-framer-layer={layer.framerLayer}
 										initial={false}
 										key={layer.id}
 										style={{
+											filter: `drop-shadow(0 ${
+												isActive ? 28 : 15
+											}px ${isActive ? 42 : 22}px rgba(31, 31, 29, ${
+												frame.shadowOpacity
+											}))`,
 											zIndex: physicalLayerZIndex[
 												layer.id
 											],

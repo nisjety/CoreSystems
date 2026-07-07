@@ -18,6 +18,7 @@ import {
   startConnectSession,
   startIntegrationSync,
   startWebsiteIngest,
+  translatePlanRecommendation,
   warmSharePointDiscovery,
   type ActionActor,
 } from '@/features/onboarding/lib/api'
@@ -54,6 +55,7 @@ export function createOnboardingGatewayActions(actor: ActionActor = getBrowserAc
       startIntegrationSync({ actor, ...input }),
     startWebsiteIngest: (input: Omit<Parameters<typeof startWebsiteIngest>[0], 'actor'>) =>
       startWebsiteIngest({ actor, ...input }),
+    translatePlanRecommendation,
     warmSharePointDiscovery: (input: Omit<Parameters<typeof warmSharePointDiscovery>[0], 'actor'>) =>
       warmSharePointDiscovery({ actor, ...input }),
   }

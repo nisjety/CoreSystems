@@ -21,6 +21,8 @@ import { Dynamic } from 'solid-js/web'
 import { SidebarPanelTitle } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
+import { getSession } from '@/shared/session/session-store'
+import { hasPlatformAdminAccess } from '@/shared/session/access'
 
 type SettingsIcon = Component<LucideProps>
 type SettingsLinkSection = { id: string; label: string; icon: SettingsIcon; href: string }
@@ -37,6 +39,7 @@ const accountSidebarSections: SettingsLinkSection[] = [
 const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'workspace', label: 'Workspace', icon: Building2, href: '/settings/workspace' },
   { id: 'members', label: 'Members & roles', icon: UsersRound, href: '/settings/members' },
+  { id: 'platform-users', label: 'All users (platform)', icon: ShieldCheck, href: '/settings/platform-users' },
   { id: 'billing', label: 'Billing', icon: CreditCard, href: '/settings/billing' },
   { id: 'sso', label: 'SSO', icon: KeyRound, href: '/settings/sso' },
   { id: 'org-security', label: 'Org security', icon: ShieldCheck, href: '/settings/org-security' },
@@ -80,7 +83,9 @@ export function SettingsExpandedSidebarPanel(props: { onCollapse: () => void }) 
 
       <SettingsSectionLinks
         ariaLabel={i18n.tr('Innstillingsseksjoner', 'Settings sections')}
-        sections={localizedSettingsSections(i18n)}
+        sections={localizedSettingsSections(i18n).filter(
+          (section) => section.id !== 'platform-users' || hasPlatformAdminAccess(getSession()),
+        )}
         activeSectionId={activeSectionId()}
       />
     </div>
@@ -239,6 +244,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Arbeidsområde', 'Workspace')
     case 'members':
       return i18n.tr('Medlemmer og roller', 'Members & roles')
+    case 'platform-users':
+      return i18n.tr('Alle brukere (plattform)', 'All users (platform)')
     case 'billing':
       return i18n.tr('Fakturering', 'Billing')
     case 'sso':

@@ -1,6 +1,7 @@
 export const workspaceSettingsSectionIds = [
   'workspace',
   'members',
+  'platform-users',
   'billing',
   'sso',
   'org-security',
@@ -35,6 +36,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Members & roles',
     description: 'Control who has access, what they can do, and how seats are used.',
     saveLabel: 'Save members',
+  },
+  {
+    id: 'platform-users',
+    label: 'All users (platform)',
+    title: 'All users',
+    description: 'Every user across all organizations. Platform super-admin only.',
+    saveLabel: 'Save',
   },
   {
     id: 'billing',

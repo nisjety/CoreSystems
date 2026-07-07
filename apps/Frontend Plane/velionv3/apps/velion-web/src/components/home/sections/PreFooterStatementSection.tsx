@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import { ArrowButton } from "@/components/ui/ArrowButton";
-import { Button } from "@/components/ui/button";
 
 export function PreFooterStatementSection() {
 	const sectionRef = useRef<HTMLElement | null>(null);
@@ -262,36 +261,32 @@ export function PreFooterStatementSection() {
 
 				<div className="absolute inset-0 z-[3] grid place-items-center overflow-hidden px-[clamp(24px,4vw,72px)]">
 					<div
-						className="absolute left-1/2 top-1/2 grid w-[min(94vw,1280px)] -translate-x-1/2 -translate-y-1/2 justify-items-center text-center will-change-transform"
+						className="absolute left-1/2 top-1/2 grid w-[min(94vw,1280px)] -translate-x-1/2 -translate-y-1/2 justify-items-center text-center"
 						data-prefooter-first-phase
 					>
 						<h2 className="m-0 max-w-none whitespace-nowrap font-arbeit text-[clamp(1.5rem,4vw,5.5rem)] font-light leading-[0.88] tracking-[-0.08em] text-velion-j-text max-[760px]:whitespace-normal">
-							Hver kunde er forskjellig.
+							Hver kunde trenger riktig svar.
 						</h2>
 					</div>
 
 					<div
-						className="absolute left-1/2 top-1/2 grid w-[min(94vw,1280px)] -translate-x-1/2 -translate-y-1/2 justify-items-center text-center opacity-0 will-change-transform"
+						className="absolute left-1/2 top-1/2 grid w-[min(94vw,1280px)] -translate-x-1/2 -translate-y-1/2 justify-items-center text-center opacity-0"
 						data-prefooter-second-phase
 					>
 						<h2 className="m-0 max-w-none whitespace-nowrap font-arbeit text-[clamp(1.5rem,4vw,5.5rem)] font-light leading-[0.88] tracking-[-0.08em] text-velion-j-text max-[760px]:whitespace-normal">
-							Det bør AI-en din også være.
+							Vi gjør svaret klart.
 						</h2>
 
 						<div
-							className="mt-[clamp(32px,4vw,58px)] flex flex-wrap items-center justify-center gap-5 will-change-transform"
+							className="mt-[clamp(32px,4vw,58px)] flex flex-wrap items-center justify-center gap-5"
 							data-prefooter-second-buttons
 						>
-							<Button
-								asChild
-								className="h-auto min-h-[52px] rounded-full border-velion-j-text/15 bg-transparent px-7 font-protokoll text-base font-light text-velion-j-text/75 hover:border-velion-j-text/30 hover:bg-velion-j-text/5 hover:text-velion-j-text"
-								variant="outline"
-							>
-								<a href="#produkt">Prøv demo</a>
-							</Button>
+							<ArrowButton href="#produkt" variant="muted">
+								Se produktet
+							</ArrowButton>
 
 							<ArrowButton href="#kontakt" variant="dark">
-								Kontakt salg
+								Snakk med oss
 							</ArrowButton>
 						</div>
 					</div>

@@ -5,6 +5,8 @@ import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
+import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
+import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
 import {
   confirmBillingCheckout,
   loadBillingAccount,
@@ -20,6 +22,12 @@ import {
   type BillingPlanId,
 } from '@/features/billing/lib/plans'
 import { requestJson } from '@/shared/api/http'
+import {
+  ensureMetaLogin,
+  isMetaFacebookSdkEnabled,
+  loadMetaFacebookSdk,
+  type MetaFacebookSdkConfig,
+} from '@/shared/integrations/meta-facebook-sdk'
 import { getSession } from '@/shared/session/session-store'
 import {
   getWorkspaceSettingsSection,
@@ -50,6 +58,15 @@ export { getWorkspaceSettingsSection, isWorkspaceSettingsSection, workspaceSetti
 type LiveMember = { userId: string; name?: string; email: string; role: string; status: string }
 type MemberListResponse = { members?: unknown[]; count?: number }
 
+type IntegrationCapability = {
+  key: string
+  label?: string
+  description?: string
+  direction: 'read' | 'write'
+  scopes?: string[]
+  sensitive?: boolean
+}
+
 type IntegrationSettingsProvider = {
   key: string
   label: string
@@ -58,7 +75,12 @@ type IntegrationSettingsProvider = {
   status: string
   missingConfig: string[]
   directOAuthReady: boolean
-  capabilities: Array<{ key: string; sensitive?: boolean }>
+  capabilities: IntegrationCapability[]
+  metaSdk?: MetaFacebookSdkConfig
+  /** Provider replacing this one (e.g. facebook/instagram/whatsapp/meta-ads →
+   * "meta"). Superseded providers are hidden from new-connection lists but
+   * still render for existing connections. */
+  supersededBy?: string
 }
 
 type IntegrationSettingsConnection = {
@@ -144,6 +166,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   // live <Metric> grid in IntegrationsSection.
   workspace: [],
   members: [],
+  // Cross-org user directory renders its own live list; no shared status grid.
+  'platform-users': [],
   billing: [],
   // SSO + org-security status are not wired to a real source; show no
   // fabricated "Verified / Required / 365 days" cards.
@@ -360,6 +384,9 @@ function WorkspaceSettingsSection(props: {
       <Match when={props.section === 'members'}>
         <MembersSection orgId={props.orgId} />
       </Match>
+      <Match when={props.section === 'platform-users'}>
+        <PlatformUsersSection />
+      </Match>
       <Match when={props.section === 'billing'}>
         <BillingSection
           account={props.billingAccount}
@@ -532,6 +559,94 @@ function MembersSection(props: { orgId: string | null }) {
           </For>
         </div>
       </FeaturePanel>
+    </>
+  )
+}
+
+type PlatformUser = {
+  id: string
+  email: string
+  name: string
+  role: string
+  banned: boolean
+  emailVerified: boolean
+}
+
+type ListUsersResponse = { users?: unknown[]; total?: number }
+
+function normalizePlatformUsers(data: ListUsersResponse | unknown[]): PlatformUser[] {
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.users) ? data.users : []
+  return rows.map((raw) => {
+    const r = recordFrom(raw)
+    return {
+      id: stringValue(r, 'id'),
+      email: stringValue(r, 'email'),
+      name: stringValue(r, 'name'),
+      role: stringValue(r, 'role') || 'user',
+      banned: r.banned === true,
+      emailVerified: r.emailVerified === true || r.email_verified === true,
+    }
+  }).filter((u) => u.id !== '')
+}
+
+/**
+ * Cross-org user directory for platform super-admins. Calls the gateway's
+ * `/api/v1/admin/users` (which proxies Better Auth admin list-users — NOT
+ * org-scoped), so this lists every user in the deployment regardless of org.
+ * The gateway + auth-core both gate on the top-level admin/superadmin role;
+ * a non-admin who reaches this section sees the 403 message instead of data.
+ */
+function PlatformUsersSection() {
+  const [users, setUsers] = createSignal<PlatformUser[]>([])
+  const [loading, setLoading] = createSignal(true)
+  const [error, setError] = createSignal<string | null>(null)
+
+  createEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    requestJson<ListUsersResponse | PlatformUser[]>(
+      '/api/v1/admin/users?limit=500',
+      { signal: controller.signal },
+    )
+      .then((data) => {
+        setUsers(normalizePlatformUsers(data))
+        setLoading(false)
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof Error && reason.name === 'AbortError') return
+        setError('Could not load users. This view requires a platform super-admin.')
+        setLoading(false)
+      })
+    onCleanup(() => controller.abort())
+  })
+
+  return (
+    <>
+      <SectionHeader
+        title="All users"
+        description="Every user across all organizations. Platform super-admin only."
+      />
+      <div class="velion-settings-list-card">
+        <Show when={!loading()} fallback={<p class="velion-settings-empty-row">Loading users...</p>}>
+          <Show when={!error()} fallback={<p class="velion-settings-empty-row">{error()}</p>}>
+            <Show when={users().length > 0} fallback={<p class="velion-settings-empty-row">No users found.</p>}>
+              <For each={users()}>
+                {(user) => (
+                  <div class="velion-settings-member-row">
+                    <div>
+                      <p>{user.name || user.email}</p>
+                      <span>{user.email}</span>
+                    </div>
+                    <strong>{user.role}</strong>
+                    <span>{user.banned ? 'banned' : user.emailVerified ? 'verified' : 'unverified'}</span>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </Show>
+        </Show>
+      </div>
     </>
   )
 }
@@ -765,22 +880,43 @@ function BillingSection(props: {
           </For>
         </div>
       </section>
-      <Show
-        when={
-          checkoutSession()?.provider === 'hyperswitch' && checkoutSession()?.client_secret
-            ? checkoutSession()
-            : undefined
-        }
-      >
-        {(session) => (
-          <HyperswitchCheckout
-            session={session()}
-            confirming={confirmingCheckout()}
-            returnUrl={settingsCheckoutUrl('success', selectedPlan())}
-            onConfirmed={(payment) => finalizeCheckout({ ...payment, plan: selectedPlan() })}
-          />
-        )}
-      </Show>
+      <Switch>
+        <Match
+          when={
+            checkoutSession()?.provider === 'nexi' &&
+            (checkoutSession()?.payment_id || checkoutSession()?.id) &&
+            checkoutSession()?.publishable_key &&
+            checkoutSession()?.client_url
+              ? checkoutSession()
+              : undefined
+          }
+        >
+          {(session) => (
+            <NexiCheckout
+              session={session()}
+              confirming={confirmingCheckout()}
+              returnUrl={settingsCheckoutUrl('success', selectedPlan())}
+              onConfirmed={(payment) => finalizeCheckout({ ...payment, plan: selectedPlan() })}
+            />
+          )}
+        </Match>
+        <Match
+          when={
+            checkoutSession()?.provider === 'hyperswitch' && checkoutSession()?.client_secret
+              ? checkoutSession()
+              : undefined
+          }
+        >
+          {(session) => (
+            <HyperswitchCheckout
+              session={session()}
+              confirming={confirmingCheckout()}
+              returnUrl={settingsCheckoutUrl('success', selectedPlan())}
+              onConfirmed={(payment) => finalizeCheckout({ ...payment, plan: selectedPlan() })}
+            />
+          )}
+        </Match>
+      </Switch>
       <Show when={message()}>
         {(text) => <p class="velion-settings-status-message velion-settings-status-message--success" role="status">{text()}</p>}
       </Show>
@@ -965,6 +1101,14 @@ function IntegrationsSection() {
   const socialRows = createMemo(() => rows().filter(isSocialIntegrationRow))
   const socialStats = createMemo(() => buildSocialIntegrationStats(summary()))
 
+  createEffect(() => {
+    const config = socialRows()
+      .map((row) => row.provider.metaSdk)
+      .find(isMetaFacebookSdkEnabled)
+    if (!config) return
+    void loadMetaFacebookSdk(config).catch(() => undefined)
+  })
+
   const runAction = async (
     row: IntegrationSettingsRow,
     action: 'connect' | 'disconnect' | 'reconnect' | 'sync',
@@ -975,6 +1119,7 @@ function IntegrationsSection() {
 
     try {
       if (action === 'connect') {
+        await prepareMetaSdkLogin(row.provider)
         const session = await requestJson<ConnectSessionResult>(
           `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
           {
@@ -986,6 +1131,7 @@ function IntegrationsSection() {
         await runSettingsOAuth(session)
         setNotice(`${row.name} connected.`)
       } else if (action === 'reconnect' && row.connection) {
+        await prepareMetaSdkLogin(row.provider)
         const session = await requestJson<ConnectSessionResult>(
           `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}/reconnect-session`,
           { method: 'POST', body: JSON.stringify({}), headers: integrationHeaders(orgId()) },
@@ -1116,11 +1262,32 @@ function IntegrationsSection() {
               'connection' in integration && integration.connection
                 ? syncProgress()[integration.connection.id]
                 : undefined
+            const groups = createMemo(() => capabilityGroups(integration.provider))
+            const twoWay = () => groups().reads.length > 0 && groups().writes.length > 0
             return (
               <div class="velion-settings-integration-row">
-                <div>
-                  <p>{integration.name}</p>
+                <div class="velion-settings-integration-row__main">
+                  <div class="velion-settings-integration-row__head">
+                    <p>{integration.name}</p>
+                    <Show when={groups().reads.length || groups().writes.length}>
+                      <span class="velion-settings-integration-direction">
+                        {twoWay() ? 'Toveis' : groups().writes.length ? 'Skriver' : 'Leser'}
+                      </span>
+                    </Show>
+                  </div>
                   <span>{rowSyncProgress() ? `${integration.detail} · ${rowSyncProgress()}` : integration.detail}</span>
+                  <div class="velion-settings-integration-caps">
+                    <Show when={groups().reads.length}>
+                      <span class="velion-settings-integration-caps__group">
+                        <em>Leser</em> {groups().reads.join(' · ')}
+                      </span>
+                    </Show>
+                    <Show when={groups().writes.length}>
+                      <span class="velion-settings-integration-caps__group">
+                        <em>Skriver</em> {groups().writes.join(' · ')}
+                      </span>
+                    </Show>
+                  </div>
                 </div>
                 <div>
                   <span class="velion-settings-integration-status">{integration.status}</span>
@@ -1192,13 +1359,27 @@ function stringArrayValue(value: unknown): string[] {
 function normalizeIntegrationProvider(value: unknown): IntegrationSettingsProvider {
   const provider = recordFrom(value)
   const capabilities = arrayValue(provider.capabilities)
-    .map((capability) => {
+    .map((capability): IntegrationCapability | null => {
       const record = recordFrom(capability)
       const key = stringValue(record, 'key')
       if (!key) return null
-      return { key, sensitive: record.sensitive === true }
+      const rawDirection = stringValue(record, 'direction')
+      // Trust the backend direction; fall back to a key-suffix heuristic so
+      // older backends (no direction field) still render read/write correctly.
+      const direction: 'read' | 'write' =
+        rawDirection === 'write' || rawDirection === 'read'
+          ? rawDirection
+          : capabilityDirectionFromKey(key)
+      return {
+        key,
+        label: stringValue(record, 'label') || undefined,
+        description: stringValue(record, 'description') || undefined,
+        direction,
+        scopes: stringArrayValue(record.scopes),
+        sensitive: record.sensitive === true,
+      }
     })
-    .filter((capability): capability is { key: string; sensitive: boolean } => Boolean(capability))
+    .filter((capability): capability is IntegrationCapability => Boolean(capability))
 
   return {
     key: stringValue(provider, 'key'),
@@ -1209,6 +1390,20 @@ function normalizeIntegrationProvider(value: unknown): IntegrationSettingsProvid
     missingConfig: stringArrayValue(provider.missingConfig),
     directOAuthReady: provider.directOAuthReady === true,
     capabilities,
+    metaSdk: normalizeMetaSdk(provider.metaSdk),
+    supersededBy: stringValue(provider, 'supersededBy', 'superseded_by') || undefined,
+  }
+}
+
+function normalizeMetaSdk(value: unknown): MetaFacebookSdkConfig | undefined {
+  const meta = recordFrom(value)
+  if (Object.keys(meta).length === 0) return undefined
+  return {
+    enabled: meta.enabled === true,
+    appId: stringValue(meta, 'appId', 'app_id') || undefined,
+    apiVersion: stringValue(meta, 'apiVersion', 'api_version') || undefined,
+    locale: stringValue(meta, 'locale') || undefined,
+    loginConfigId: stringValue(meta, 'loginConfigId', 'login_config_id', 'configId', 'config_id') || undefined,
   }
 }
 
@@ -1256,9 +1451,21 @@ function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Integ
   if (!summary) return []
 
   const connectionsByProvider = new Map(summary.connections.map((connection) => [connection.providerKey, connection]))
-  return summary.providers.map((provider) => {
+  return summary.providers.flatMap((provider) => {
     const connection = connectionsByProvider.get(provider.key)
-    if (connection) {
+    // Superseded providers (facebook/instagram/whatsapp/meta-ads → the unified
+    // "meta" card) are hidden from the new-connection list; they only surface
+    // while an existing legacy connection is still attached.
+    if (provider.supersededBy && !connection) return []
+    return [buildIntegrationRow(provider, connection)]
+  })
+}
+
+function buildIntegrationRow(
+  provider: IntegrationSettingsProvider,
+  connection: IntegrationSettingsConnection | undefined,
+): IntegrationSettingsRow {
+  if (connection) {
       return {
         name: provider.label,
         detail: [
@@ -1274,36 +1481,35 @@ function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Integ
       }
     }
 
-    if (!provider.configured) {
-      return {
-        name: provider.label,
-        detail: provider.missingConfig.length > 0
-          ? `Missing ${provider.missingConfig.slice(0, 2).join(', ')}`
-          : 'Provider credentials are not configured',
-        status: 'Missing config',
-        action: 'missing',
-        provider,
-      }
-    }
-
-    if (!provider.directOAuthReady) {
-      return {
-        name: provider.label,
-        detail: `${provider.category} adapter is configured for admin setup`,
-        status: 'Admin setup',
-        action: 'admin',
-        provider,
-      }
-    }
-
+  if (!provider.configured) {
     return {
       name: provider.label,
-      detail: `${provider.category} source · ${provider.capabilities.length} capabilities`,
-      status: 'Ready',
-      action: 'connect',
+      detail: provider.missingConfig.length > 0
+        ? `Missing ${provider.missingConfig.slice(0, 2).join(', ')}`
+        : 'Provider credentials are not configured',
+      status: 'Missing config',
+      action: 'missing',
       provider,
     }
-  })
+  }
+
+  if (!provider.directOAuthReady) {
+    return {
+      name: provider.label,
+      detail: `${provider.category} adapter is configured for admin setup`,
+      status: 'Admin setup',
+      action: 'admin',
+      provider,
+    }
+  }
+
+  return {
+    name: provider.label,
+    detail: `${provider.category} source · ${provider.capabilities.length} capabilities`,
+    status: 'Ready',
+    action: 'connect',
+    provider,
+  }
 }
 
 function isSocialIntegrationRow(row: IntegrationSettingsRow): boolean {
@@ -1315,8 +1521,17 @@ function connectBundlesFor(provider: IntegrationSettingsProvider): string[] {
 }
 
 function buildSocialIntegrationStats(summary: IntegrationSettingsSummary | null) {
-  const socialProviders = summary?.providers.filter((provider) => provider.category === 'social') ?? []
-  const socialProviderKeys = new Set(socialProviders.map((provider) => provider.key))
+  // Superseded providers (the four legacy Meta entries) are excluded from the
+  // provider count so "Meta" is one platform, but their existing connections
+  // still count as connected.
+  const socialProviders = summary?.providers.filter(
+    (provider) => provider.category === 'social' && !provider.supersededBy,
+  ) ?? []
+  const socialProviderKeys = new Set(
+    (summary?.providers ?? [])
+      .filter((provider) => provider.category === 'social')
+      .map((provider) => provider.key),
+  )
   const socialConnections = summary?.connections.filter((connection) => socialProviderKeys.has(connection.providerKey)) ?? []
 
   return {
@@ -1329,10 +1544,16 @@ function buildSocialIntegrationStats(summary: IntegrationSettingsSummary | null)
 
 function socialProviderRole(provider: IntegrationSettingsProvider): string {
   switch (provider.key) {
+    case 'meta':
+      return 'Facebook Pages, Instagram, WhatsApp, and Meta Ads in one connection'
     case 'facebook':
       return 'Page publishing, comments, inbox, and analytics'
     case 'instagram':
       return 'Media publishing, messaging, and analytics'
+    case 'whatsapp':
+      return 'WhatsApp Business messaging and customer conversations'
+    case 'meta-ads':
+      return 'Meta Ads account, campaign, and reporting workflows'
     case 'linkedin':
       return 'Organization posts, comments, and reporting'
     case 'x':
@@ -1344,6 +1565,15 @@ function socialProviderRole(provider: IntegrationSettingsProvider): string {
     default:
       return 'Social workflow adapter'
   }
+}
+
+async function prepareMetaSdkLogin(provider: IntegrationSettingsProvider): Promise<void> {
+  if (!isMetaIntegrationProvider(provider.key) || !isMetaFacebookSdkEnabled(provider.metaSdk)) return
+  await ensureMetaLogin(provider.metaSdk)
+}
+
+function isMetaIntegrationProvider(providerKey: string): boolean {
+  return ['meta', 'facebook', 'instagram', 'whatsapp', 'meta-ads'].includes(providerKey.trim().toLowerCase())
 }
 
 function socialCapabilityLabels(row: IntegrationSettingsRow): string[] {
@@ -1376,6 +1606,40 @@ function formatSocialCapability(capability: string): string {
   }
 }
 
+// Fallback for backends that don't yet emit capability.direction: infer it from
+// the key so read/write rendering is correct either way (mirrors the Go
+// capabilityDirection heuristic in integration-corev2).
+function capabilityDirectionFromKey(key: string): 'read' | 'write' {
+  const k = key.toLowerCase()
+  const writeMarkers = ['.write', '.send', '.manage', '.post', '.publish', '.upload', '.create', '.delete', '.update']
+  if (writeMarkers.some((m) => k.includes(m))) return 'write'
+  if (['publishing', 'actions', 'write', 'send', 'manage'].includes(k)) return 'write'
+  return 'read'
+}
+
+// Human label for any capability: prefer the backend label, else the last
+// dotted segment of the key (e.g. "sharepoint.read" -> "sharepoint").
+function formatCapabilityLabel(capability: IntegrationCapability): string {
+  if (capability.label && capability.label.trim()) return capability.label.trim()
+  const parts = capability.key.split('.')
+  const tail = parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0]
+  return (tail || capability.key).replace(/[-_]/g, ' ')
+}
+
+// Consistent read/write grouping for EVERY provider (not just social). Returns
+// deduped, capped label lists so the UI can show "Reads … / Writes …" uniformly.
+function capabilityGroups(provider: IntegrationSettingsProvider): { reads: string[]; writes: string[] } {
+  const reads: string[] = []
+  const writes: string[] = []
+  for (const cap of provider.capabilities) {
+    const dir = cap.direction ?? capabilityDirectionFromKey(cap.key)
+    const label = formatCapabilityLabel(cap)
+    const bucket = dir === 'write' ? writes : reads
+    if (!bucket.includes(label)) bucket.push(label)
+  }
+  return { reads: reads.slice(0, 4), writes: writes.slice(0, 4) }
+}
+
 function IntegrationRowActions(props: {
   busyKey: string | null
   onAction: (row: IntegrationSettingsRow, action: 'connect' | 'disconnect' | 'reconnect' | 'sync') => void
@@ -1404,74 +1668,20 @@ function IntegrationRowActions(props: {
   )
 }
 
+// Delegates to the shared COOP-safe runner: completion is confirmed by
+// polling the connect-session status endpoint server-side (postMessage kept
+// as a fast path). Providers like X/LinkedIn/Microsoft set
+// Cross-Origin-Opener-Policy on their login pages, which severs the popup
+// handle — `popup.closed` then lies and postMessage from the callback page
+// never arrives, so any window-state heuristic misreports "closed".
 function runSettingsOAuth(session: ConnectSessionResult): Promise<void> {
   if (session.authMode !== 'direct-oauth' || !session.connectUrl || !session.sessionToken) {
     return Promise.reject(new Error('Integration service returned an incomplete connect session.'))
   }
-  const authWindow = openSettingsOAuthWindow()
-  if (!authWindow) {
-    return Promise.reject(new Error('The provider sign-in window was blocked by the browser.'))
-  }
-
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const settle = (callback: () => void) => {
-      if (settled) return
-      settled = true
-      window.clearTimeout(timeout)
-      window.clearInterval(closePoll)
-      window.removeEventListener('message', onMessage)
-      callback()
-    }
-    const onMessage = (event: MessageEvent) => {
-      const payload = event.data
-      if (!payload || typeof payload !== 'object') return
-      const record = payload as Record<string, unknown>
-      if (record.type !== 'velion.integration.connected') return
-      if (record.sessionToken !== session.sessionToken) return
-      if (record.status === 'success') {
-        settle(resolve)
-        return
-      }
-      settle(() => reject(new Error(typeof record.message === 'string' ? record.message : 'Provider authorization failed.')))
-    }
-    window.addEventListener('message', onMessage)
-    const timeout = window.setTimeout(() => {
-      settle(() => reject(new Error('Provider authorization timed out.')))
-    }, 120_000)
-    const closePoll = window.setInterval(() => {
-      if (!authWindow.closed) return
-      settle(() => reject(new Error('Provider authorization was closed before it finished.')))
-    }, 500)
-    try {
-      authWindow.location.href = session.connectUrl
-    } catch {
-      settle(() => reject(new Error('Could not open provider authorization.')))
-    }
+  return runDirectOauthWindow({
+    connectUrl: session.connectUrl,
+    sessionToken: session.sessionToken,
   })
-}
-
-function openSettingsOAuthWindow(): Window | null {
-  const width = Math.min(540, window.screen.width)
-  const height = Math.min(720, window.screen.height)
-  const left = Math.max(window.screen.width / 2 - width / 2, 0)
-  const top = Math.max(window.screen.height / 2 - height / 2, 0)
-  return window.open(
-    '',
-    '_blank',
-    [
-      `left=${left}`,
-      `top=${top}`,
-      `width=${width}`,
-      `height=${height}`,
-      'scrollbars=yes',
-      'resizable=yes',
-      'status=no',
-      'toolbar=no',
-      'location=no',
-      'menubar=no',
-    ].join(','),
-  )
 }
 
 function watchSyncProgress(

@@ -24,3 +24,15 @@ export function hasWorkspaceAdminAccess(session: SessionState): boolean {
 export function shouldShowWorkspaceAdminNavigation(session: SessionState): boolean {
   return session.status !== 'authenticated' || hasWorkspaceAdminAccess(session)
 }
+
+/**
+ * Platform super-admin: a top-level Better Auth `admin`/`superadmin` role,
+ * NOT merely an org owner/admin. Gates cross-org surfaces (e.g. the all-users
+ * directory) — an org owner can manage their own org's members but must not
+ * see other tenants' users. The gateway + auth-core enforce the same role;
+ * this only controls whether the navigation is offered.
+ */
+export function hasPlatformAdminAccess(session: SessionState): boolean {
+  if (session.status !== 'authenticated') return false
+  return roleMatches(session.user?.role, ['admin', 'superadmin'])
+}

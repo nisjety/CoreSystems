@@ -7,6 +7,6 @@ pub(crate) use onboarding::{
     CrawlPreviewRequest, CreateOrganizationRequest, GraphCounts, GraphPreviewQuery,
     GraphPreviewResponse, OnboardingStateResponse, OnboardingStateWriteRequest, OrgActionRequest,
     PlanRecommendation, PreviewEdge, PreviewNode, RecommendContext, RecommendPlanRequest,
-    SetPlanRequest, SourceCleanupRequest, SourceDiscoveryRequest, StartCheckoutRequest,
-    UpdateThemeRequest, WebsiteIngestRequest,
+    RecommendationText, SetPlanRequest, SourceCleanupRequest, SourceDiscoveryRequest,
+    StartCheckoutRequest, TranslateRecommendationRequest, UpdateThemeRequest, WebsiteIngestRequest,
 };

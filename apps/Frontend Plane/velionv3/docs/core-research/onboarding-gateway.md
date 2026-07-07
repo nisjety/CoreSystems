@@ -6,10 +6,10 @@ Onboarding is the strongest live integration in Velion v3.
 
 `src/features/onboarding/lib/api.ts` resolves the gateway URL from:
 
-1. `VITE_VELION_GATEWAY_URL`
-2. `http://127.0.0.1:3185`
+1. same-origin default through `src/shared/api/config.ts`
+2. optional `VITE_VELION_GATEWAY_URL`
 
-That default points at the Application Plane `velion-gateway-rs` service.
+In development, `vite.config.ts` proxies `/api` and `/health` to `GATEWAY_PROXY_TARGET`, `VITE_VELION_GATEWAY_URL`, or `http://127.0.0.1:3185`. That target is the Velion v3 Rust gateway under `apps/gateway`.
 
 ## Covered Gateway Calls
 
@@ -37,7 +37,7 @@ Velion v3 calls:
 
 ## Relationships
 
-- Control Plane, Ingestion Plane, Data Plane, and Model Plane are reached indirectly through `velion-gateway-rs`.
+- Control Plane, Ingestion Plane, Data Plane, Model Plane, and Application Plane are reached indirectly through the Velion v3 Rust gateway.
 - Onboarding state is persisted both locally and remotely.
 - Local persistence uses `localStorage` key `velionv3.onboarding.state.v1`.
 - Actor fallback uses `localStorage` key `velionv3.onboarding.actor`.
@@ -51,4 +51,4 @@ Velion v3 calls:
 
 ## Notes
 
-The dependency on `velion-gateway-rs` is important because Application Plane research found that gateway may overlap with `velionv2` onboarding BFF routes. For Velion v3, however, `velion-gateway-rs` is currently the main real backend bridge.
+The dependency on the Rust gateway is important because Application Plane research still contains older `velion-gateway-rs` notes. For Velion v3, the current source path and proxy setup make this a Frontend Plane gateway unless a deployment decision says otherwise.

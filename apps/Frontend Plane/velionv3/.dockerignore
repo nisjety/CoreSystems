@@ -1,5 +1,7 @@
 node_modules
+**/node_modules
 dist
+**/dist
 .git
 # Never ship the host's incremental tsc cache into the image — a stale
 # .tsbuildinfo makes `tsc -b` skip files or report phantom errors. Excluding it
@@ -10,6 +12,10 @@ dist
 *.jpg
 *.jpeg
 apps/gateway/target
+apps/**/target
+apps/**/.next
+**/.playwright-mcp
+**/.fallow
 docs/
 README.md
 *.snap

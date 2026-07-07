@@ -1,16 +1,236 @@
 "use client";
 
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import {
+	Activity,
+	Check,
+	Database,
+	FileText,
+	Inbox,
+	Search,
+	Shield,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 const promptLines = [
-	"Lag en rolig produktfilm for Velion.",
-	"Start med ett kundesignal, ikke en kampanje.",
-	"Bakgrunnen skal ha samme myke blå tone som seksjonen.",
-	"Vis hvordan et arbeidsområde vokser frem fra en enkel instruks.",
-	"La kilder, utkast og godkjenning føles som ett sammenhengende system.",
-	"Hold uttrykket stille, presist og menneskelig.",
-	"Ikke selg magi. Vis arbeidet som blir gjort.",
-	"Avslutt med at handlingen er klar, men fortsatt godkjennbar.",
+	"Finn dagens uløste kundesaker.",
+	"Sjekk virksomheten i Enhetsregisteret.",
+	"Hent relevante kilder før svaret skrives.",
+	"Se om noe viktig har endret seg.",
+	"Lag et kort svarforslag for teamet.",
+	"Marker hva som krever godkjenning.",
+	"Stopp før noe sendes til kunden.",
+	"Lagre kilder, region og godkjenning i sporet.",
+];
+
+type LoopSourceId =
+	| "signal"
+	| "brreg"
+	| "knowledge"
+	| "monitor"
+	| "brief"
+	| "approval"
+	| "audit";
+
+type LoopIcon = typeof Search;
+
+type LoopSource = {
+	detail: string;
+	icon: LoopIcon;
+	id: LoopSourceId;
+	label: string;
+	x: string;
+	y: string;
+};
+
+type LoopStep = {
+	accent: string;
+	action: string;
+	actionDetail: string;
+	label: string;
+	metric: string;
+	prompt: string;
+	result: string;
+	resultDetail: string;
+	sourceIds: LoopSourceId[];
+	status: string;
+	title: string;
+};
+
+const loopSources: LoopSource[] = [
+	{
+		id: "signal",
+		label: "Kundesignal",
+		detail: "Innboks",
+		icon: Inbox,
+		x: "8%",
+		y: "18%",
+	},
+	{
+		id: "brreg",
+		label: "Enhetsregisteret",
+		detail: "983 515 827",
+		icon: Database,
+		x: "6%",
+		y: "58%",
+	},
+	{
+		id: "knowledge",
+		label: "Kunnskap",
+		detail: "9 kilder",
+		icon: Search,
+		x: "71%",
+		y: "11%",
+	},
+	{
+		id: "monitor",
+		label: "Endring",
+		detail: "Endring funnet",
+		icon: Activity,
+		x: "78%",
+		y: "48%",
+	},
+	{
+		id: "brief",
+		label: "Svarutkast",
+		detail: "Teamklar",
+		icon: FileText,
+		x: "72%",
+		y: "76%",
+	},
+	{
+		id: "approval",
+		label: "Godkjenning",
+		detail: "Krever ja",
+		icon: Shield,
+		x: "63%",
+		y: "78%",
+	},
+	{
+		id: "audit",
+		label: "Spor",
+		detail: "EU/ZDR",
+		icon: FileText,
+		x: "22%",
+		y: "80%",
+	},
+];
+
+const loopSteps: LoopStep[] = [
+	{
+		label: "01 / Handling",
+		title: "Finn sakene",
+		prompt: promptLines[0],
+		action: "conversation.lookup",
+		actionDetail: "Velion leser dagens kø og filtrerer saker uten avklart neste steg.",
+		status: "kjører",
+		metric: "3 åpne saker",
+		result: "3 saker funnet",
+		resultDetail: "1 sak har tydelig kundeintensjon og mangler et svarutkast.",
+		accent: "#2f6f9f",
+		sourceIds: ["signal"],
+	},
+	{
+		label: "02 / Handling",
+		title: "Verifiser selskapet",
+		prompt: promptLines[1],
+		action: "company_lookup.enhetsregisteret",
+		actionDetail: "Organisasjonsnummer, navn og status kontrolleres før svaret bygges.",
+		status: "oppslag",
+		metric: "Org 983 515 827",
+		result: "Virksomhet bekreftet",
+		resultDetail: "AQUATIQ AS er aktiv, og saken kan knyttes til riktig kunde.",
+		accent: "#397f73",
+		sourceIds: ["brreg"],
+	},
+	{
+		label: "03 / Handling",
+		title: "Hent kildene",
+		prompt: promptLines[2],
+		action: "knowledge_search.graph",
+		actionDetail: "Velion søker i dokumenter, tidligere svar og policy før tekst skrives.",
+		status: "søker",
+		metric: "GraphRAG + søk",
+		result: "9 kilder rangert",
+		resultDetail: "Tre kilder blir brukt som belegg: avtale, policy og siste kundesvar.",
+		accent: "#6f74b7",
+		sourceIds: ["knowledge"],
+	},
+	{
+		label: "04 / Handling",
+		title: "Sjekk endringer",
+		prompt: promptLines[3],
+		action: "monitoring.diff",
+		actionDetail: "Ny ekstern tekst sammenlignes med sist lagrede versjon av grunnlaget.",
+		status: "sammenligner",
+		metric: "2 avsnitt endret",
+		result: "Ny frist oppdaget",
+		resultDetail: "Leveransefristen er flyttet, og svaret må bruke oppdatert dato.",
+		accent: "#497ea6",
+		sourceIds: ["monitor"],
+	},
+	{
+		label: "05 / Handling",
+		title: "Skriv forslag",
+		prompt: promptLines[4],
+		action: "draft_reply.create",
+		actionDetail: "Velion lager et kort svar med kildebelegg, usikkerhet og neste steg.",
+		status: "skriver",
+		metric: "Lav risiko",
+		result: "Svarutkast klart",
+		resultDetail: "Teamet får en kort, kildebelagt tekst som kan justeres manuelt.",
+		accent: "#c2764c",
+		sourceIds: ["brief"],
+	},
+	{
+		label: "06 / Handling",
+		title: "Finn grensen",
+		prompt: promptLines[5],
+		action: "risk_policy.classify",
+		actionDetail: "Velion vurderer om handlingen kan utføres, eller bare foreslås.",
+		status: "klassifiserer",
+		metric: "Krever ja",
+		result: "Publisering krever godkjenning",
+		resultDetail: "Utkastet kan ikke sendes til kunden uten et menneskelig ja.",
+		accent: "#a05c62",
+		sourceIds: ["approval"],
+	},
+	{
+		label: "07 / Handling",
+		title: "Stopp før utsending",
+		prompt: promptLines[6],
+		action: "approval.request",
+		actionDetail: "Godkjenning sendes til riktig team uten å utføre kundevendt handling.",
+		status: "venter",
+		metric: "Menneske i løkken",
+		result: "Ligger i inbox",
+		resultDetail: "Teamet kan godkjenne, avvise eller justere før kunden ser noe.",
+		accent: "#bf6d45",
+		sourceIds: ["approval"],
+	},
+	{
+		label: "08 / Handling",
+		title: "Lagre sporet",
+		prompt: promptLines[7],
+		action: "audit.tool_action",
+		actionDetail: "Kilder, region, ZDR-status og godkjenning skrives til saken.",
+		status: "logger",
+		metric: "Sweden Central",
+		result: "Revisjonsspor skrevet",
+		resultDetail: "Kilde, region og menneskelig godkjenning er etterprøvbart senere.",
+		accent: "#4b6f8f",
+		sourceIds: ["audit"],
+	},
+];
+
+const loopPaths: { d: string; id: LoopSourceId }[] = [
+	{ id: "signal", d: "M175 185 C280 250 328 262 382 302" },
+	{ id: "brreg", d: "M182 486 C270 446 320 424 382 389" },
+	{ id: "knowledge", d: "M586 165 C506 236 462 276 418 315" },
+	{ id: "monitor", d: "M620 428 C552 420 486 404 428 382" },
+	{ id: "brief", d: "M566 600 C514 518 462 468 424 414" },
+	{ id: "approval", d: "M526 612 C480 524 452 468 422 418" },
+	{ id: "audit", d: "M244 622 C302 524 342 474 388 426" },
 ];
 
 type PromptFeedState = {
@@ -27,10 +247,276 @@ const initialPromptFeed: PromptFeedState = {
 	isTyping: true,
 };
 
+function VelionPromptLoop({ activeIndex }: { activeIndex: number }) {
+	const shouldReduceMotion = useReducedMotion();
+	const stepIndex = Math.min(
+		Math.max(activeIndex, 0),
+		loopSteps.length - 1,
+	);
+	const step = loopSteps[stepIndex];
+	const activeSourceIds = new Set(step.sourceIds);
+
+	return (
+		<div
+			aria-hidden="true"
+			className="relative aspect-square w-full max-w-[760px] overflow-hidden bg-[#dfeaf4] text-velion-j-text"
+			data-promt-loop-surface
+		>
+			<motion.div
+				className="absolute inset-0 bg-[linear-gradient(90deg,rgba(39,86,126,0.08)_1px,transparent_1px),linear-gradient(180deg,rgba(39,86,126,0.07)_1px,transparent_1px),linear-gradient(145deg,rgba(248,252,254,0.94)_0%,rgba(223,234,244,0.7)_44%,rgba(179,205,226,0.76)_100%)] bg-[length:52px_52px,52px_52px,100%_100%]"
+				animate={
+					shouldReduceMotion
+						? undefined
+						: { backgroundPosition: ["0px 0px", "52px 52px"] }
+				}
+				transition={{
+					duration: 18,
+					ease: "linear",
+					repeat: Infinity,
+				}}
+			/>
+
+			<motion.div
+				className="absolute inset-[10%] border border-velion-j-text/8"
+				animate={
+					shouldReduceMotion
+						? undefined
+						: {
+								opacity: [0.18, 0.34, 0.18],
+								scale: [0.98, 1, 0.98],
+							}
+				}
+				transition={{
+					duration: 5.8,
+					ease: "easeInOut",
+					repeat: Infinity,
+				}}
+			/>
+
+			{loopSources.map((source) => {
+				const Icon = source.icon;
+				const isActive = activeSourceIds.has(source.id);
+
+				return (
+					<motion.div
+						animate={
+							shouldReduceMotion
+								? {
+										opacity: isActive ? 1 : 0.24,
+										scale: isActive ? 1.03 : 1,
+									}
+								: {
+										opacity: isActive ? 1 : 0.2,
+										scale: isActive ? [1, 1.045, 1] : 1,
+										y: isActive ? [0, -3, 0] : 0,
+									}
+						}
+						className="absolute z-[3] min-w-[132px] border border-velion-j-text/10 bg-white/52 px-3 py-2 shadow-[0_16px_40px_rgba(63,96,125,0.12)] backdrop-blur-md"
+						key={source.id}
+						style={{
+							left: source.x,
+							top: source.y,
+						}}
+						transition={
+							isActive && !shouldReduceMotion
+								? {
+										duration: 1.55,
+										ease: "easeInOut",
+										repeat: Infinity,
+									}
+								: { duration: 0.42, ease: "easeOut" }
+						}
+					>
+						<div className="flex items-center gap-2">
+							<span className="grid size-7 place-items-center rounded-[6px] bg-velion-j-text/7 text-velion-j-text/62">
+								<Icon aria-hidden="true" className="size-3.5" />
+							</span>
+							<span className="min-w-0">
+								<span className="block font-protokoll text-[0.68rem] font-medium uppercase leading-none tracking-[0.13em] text-velion-j-text/52">
+									{source.label}
+								</span>
+								<span className="mt-1 block truncate font-protokoll text-[0.76rem] font-light leading-none text-velion-j-text/76">
+									{source.detail}
+								</span>
+							</span>
+						</div>
+					</motion.div>
+				);
+			})}
+
+			<svg
+				className="absolute inset-0 z-[2] h-full w-full"
+				fill="none"
+				viewBox="0 0 760 760"
+			>
+				{loopPaths.map((path, index) => {
+					const isPathActive = activeSourceIds.has(path.id);
+
+					return (
+						<motion.path
+							animate={
+								shouldReduceMotion
+									? {
+											opacity: isPathActive ? 0.42 : 0.12,
+											pathLength: 1,
+										}
+									: {
+											opacity: isPathActive ? [0.2, 0.62, 0.2] : 0.11,
+											pathLength: isPathActive ? [0.08, 1, 1] : 0.32,
+										}
+							}
+							d={path.d}
+							key={path.id}
+							stroke="rgba(39,86,126,0.44)"
+							strokeDasharray="4 8"
+							strokeLinecap="round"
+							strokeWidth="1.2"
+							transition={{
+								delay: index * 0.08,
+								duration: 2.2,
+								ease: "easeInOut",
+								repeat: shouldReduceMotion ? 0 : Infinity,
+								repeatDelay: 1.2,
+							}}
+						/>
+					);
+				})}
+			</svg>
+
+			<div className="absolute inset-x-[13%] top-[15%] z-[4] border border-velion-j-text/10 bg-white/70 shadow-[0_24px_70px_rgba(66,92,118,0.18)] backdrop-blur-xl">
+				<div className="flex items-center justify-between border-b border-velion-j-text/8 px-4 py-3">
+					<div className="flex items-center gap-2">
+						<span className="size-2 rounded-full bg-[#c2764c]" />
+						<span className="size-2 rounded-full bg-[#d8bc65]" />
+						<span className="size-2 rounded-full bg-[#6f9f8d]" />
+					</div>
+					<span className="font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.18em] text-velion-j-text/42">
+						Egen handling
+					</span>
+				</div>
+
+				<div className="p-[clamp(16px,2.4vw,26px)]">
+					<AnimatePresence mode="wait">
+						<motion.div
+							animate={{ opacity: 1, y: 0 }}
+							exit={{ opacity: 0, y: -12 }}
+							initial={{ opacity: 0, y: 14 }}
+							key={step.label}
+							transition={{
+								duration: shouldReduceMotion ? 0 : 0.42,
+								ease: [0.16, 1, 0.3, 1],
+							}}
+						>
+							<div className="flex items-start justify-between gap-5">
+								<div>
+									<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase leading-none tracking-[0.18em] text-velion-j-text/42">
+										{step.label}
+									</p>
+									<h3 className="m-0 mt-3 max-w-[430px] font-arbeit text-[clamp(1.7rem,2.6vw,2.65rem)] font-light leading-[0.98] tracking-[-0.05em] text-velion-j-text">
+										{step.title}
+									</h3>
+								</div>
+								<span
+									className="mt-1 inline-flex shrink-0 items-center gap-2 border border-velion-j-text/10 bg-white/62 px-2.5 py-2 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.14em] text-velion-j-text/58"
+									style={{ color: step.accent }}
+								>
+									<span
+										className="size-1.5 rounded-full"
+										style={{ backgroundColor: step.accent }}
+									/>
+									{step.metric}
+								</span>
+							</div>
+
+							<div className="mt-5 border border-velion-j-text/8 bg-white/48 p-3.5">
+								<p className="m-0 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-velion-j-text/38">
+									Prompt
+								</p>
+								<p className="m-0 mt-2 font-protokoll text-[clamp(0.94rem,1vw,1.08rem)] font-light leading-[1.38] text-velion-j-text/74">
+									{step.prompt}
+								</p>
+							</div>
+
+							<div className="mt-3 grid grid-cols-[minmax(0,0.96fr)_minmax(0,1.04fr)] gap-3 max-[620px]:grid-cols-1">
+								<div className="relative overflow-hidden border border-velion-j-text/10 bg-white/52 p-3.5">
+									<motion.span
+										aria-hidden="true"
+										className="absolute inset-x-0 top-0 h-0.5 origin-left"
+										initial={{ scaleX: 0 }}
+										animate={{
+											scaleX: shouldReduceMotion ? 1 : [0, 1, 1],
+										}}
+										style={{ backgroundColor: step.accent }}
+										transition={{
+											duration: shouldReduceMotion ? 0 : 1.35,
+											ease: "easeInOut",
+											times: [0, 0.72, 1],
+										}}
+									/>
+									<div className="relative flex items-center justify-between gap-3">
+										<p className="m-0 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-velion-j-text/38">
+											Handling
+										</p>
+										<span
+											className="inline-flex items-center gap-1.5 font-protokoll text-[0.58rem] font-medium uppercase leading-none tracking-[0.14em]"
+											style={{ color: step.accent }}
+										>
+											<span
+												className="size-1.5 rounded-full"
+												style={{ backgroundColor: step.accent }}
+											/>
+											{step.status}
+										</span>
+									</div>
+									<p className="relative m-0 mt-3 truncate font-protokoll text-[0.86rem] font-medium leading-none text-velion-j-text/76">
+										{step.action}
+									</p>
+									<p className="relative m-0 mt-2 font-protokoll text-[0.78rem] font-light leading-[1.4] text-velion-j-text/54">
+										{step.actionDetail}
+									</p>
+								</div>
+
+								<motion.div
+									animate={{ opacity: 1, y: 0 }}
+									className="border border-velion-j-text/10 bg-[#f7fbfd]/72 p-3.5"
+									initial={{ opacity: 0, y: 8 }}
+									transition={{
+										delay: shouldReduceMotion ? 0 : 0.16,
+										duration: shouldReduceMotion ? 0 : 0.34,
+										ease: "easeOut",
+									}}
+								>
+									<div className="flex items-center justify-between gap-3">
+										<p className="m-0 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-velion-j-text/38">
+											Resultat
+										</p>
+										<span className="grid size-6 place-items-center rounded-[6px] bg-velion-j-text text-white">
+											<Check aria-hidden="true" className="size-3.5" />
+										</span>
+									</div>
+									<p className="m-0 mt-3 font-protokoll text-[0.94rem] font-medium leading-none text-velion-j-text/78">
+										{step.result}
+									</p>
+									<p className="m-0 mt-2 font-protokoll text-[0.78rem] font-light leading-[1.4] text-velion-j-text/54">
+										{step.resultDetail}
+									</p>
+								</motion.div>
+							</div>
+						</motion.div>
+					</AnimatePresence>
+				</div>
+			</div>
+
+			<div className="pointer-events-none absolute inset-0 z-[6] bg-[linear-gradient(90deg,#dfeaf4_0%,rgba(223,234,244,0)_12%,rgba(223,234,244,0)_88%,#dfeaf4_100%),linear-gradient(180deg,#dfeaf4_0%,rgba(223,234,244,0)_12%,rgba(223,234,244,0)_88%,#dfeaf4_100%)]" />
+		</div>
+	);
+}
+
 export function PromptSection() {
 	const completedCountRef = useRef(0);
 	const promptWindowRef = useRef<HTMLDivElement | null>(null);
 	const sectionRef = useRef<HTMLElement | null>(null);
+	const shouldReduceMotion = useReducedMotion();
 	const [promptFeed, setPromptFeed] =
 		useState<PromptFeedState>(initialPromptFeed);
 
@@ -42,11 +528,7 @@ export function PromptSection() {
 			return;
 		}
 
-		const reduceMotion = window.matchMedia(
-			"(prefers-reduced-motion: reduce)",
-		).matches;
-
-		if (reduceMotion) {
+		if (shouldReduceMotion) {
 			const frame = window.requestAnimationFrame(() => {
 				setPromptFeed({
 					activeIndex: promptLines.length,
@@ -154,7 +636,7 @@ export function PromptSection() {
 			observer.disconnect();
 			clearTimer();
 		};
-	}, []);
+	}, [shouldReduceMotion]);
 
 	useEffect(() => {
 		const promptWindow = promptWindowRef.current;
@@ -165,6 +647,7 @@ export function PromptSection() {
 
 		const frame = window.requestAnimationFrame(() => {
 			const behavior =
+				shouldReduceMotion ||
 				completedCountRef.current === promptFeed.completed.length
 					? "auto"
 					: "smooth";
@@ -178,17 +661,7 @@ export function PromptSection() {
 		});
 
 		return () => window.cancelAnimationFrame(frame);
-	}, [promptFeed.activeText, promptFeed.completed]);
-
-	const activeLine = promptLines[promptFeed.activeIndex] ?? "";
-	const activeLineProgress =
-		activeLine.length > 0
-			? promptFeed.activeText.length / activeLine.length
-			: 0;
-	const promptProgress = Math.min(
-		1,
-		(promptFeed.completed.length + activeLineProgress) / promptLines.length,
-	);
+	}, [promptFeed.activeText, promptFeed.completed, shouldReduceMotion]);
 
 	return (
 		<section
@@ -214,23 +687,22 @@ export function PromptSection() {
 						className="fade-out-top m-0 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.32em] text-velion-j-text/38"
 						data-fade-out-top
 					>
-						Prompt til Velion
+						Skriv målet
 					</p>
 
 					<h2
 						className="fade-out-top m-0 mt-5 max-w-[720px] font-arbeit text-[clamp(3rem,5vw,7.15rem)] font-light leading-[0.92] tracking-[-0.072em] text-velion-j-text"
 						data-fade-out-top
 					>
-						Den gjør det du ber om
+						Velion bygger arbeidet.
 					</h2>
 
 					<p
 						className="fade-out-top m-0 mt-[clamp(24px,2.6vw,38px)] max-w-[640px] font-protokoll text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.5] text-velion-text-muted"
 						data-fade-out-top
 					>
-						Et menneske skriver ikke en kommando til en maskin. Det
-						beskriver en ønsket retning, et uttrykk og grensene
-						arbeidet skal holde seg innenfor.
+						Skriv hva som skal løses. Velion finner kilder, lager forslag og
+						viser hva som må godkjennes før noe skjer ute hos kunden.
 					</p>
 
 					<div className="fade-out-top" data-fade-out-top>
@@ -292,9 +764,9 @@ export function PromptSection() {
 						className="fade-out-top m-0 mt-5 font-protokoll text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-none text-velion-j-text/52"
 						data-fade-out-top
 					>
-						<span>Open prompt.</span>{" "}
+						<span>Åpen instruks.</span>{" "}
 						<span className="text-velion-j-text/70">
-							Open output-_
+							Åpent resultat-_
 						</span>{" "}
 						<span
 							data-promt-glitch-noise
@@ -306,54 +778,12 @@ export function PromptSection() {
 				</div>
 
 				<div className="relative flex min-h-[min(760px,78svh)] min-w-0 items-center justify-center max-[1023px]:min-h-[min(620px,72svh)]">
-					<div
-						className="relative aspect-[1.28] w-full max-w-[900px] overflow-hidden bg-[#dfeaf4] will-change-[clip-path,opacity,transform]"
-						data-promt-video-surface
-					>
-						<video
-							aria-label="Velion bygger en arbeidsflate fra en norsk prompt."
-							autoPlay
-							className="h-full w-full object-cover object-center will-change-[filter,transform,opacity]"
-							data-promt-video
-							loop
-							muted
-							playsInline
-							poster="/velion-product-shots/dashboard-expanded-prompt.png"
-							preload="metadata"
-						>
-							<source
-								src="/velion-product-shots/velion-dashboard-typing.mp4"
-								type="video/mp4"
-							/>
-						</video>
-
-						<div
-							aria-hidden="true"
-							className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,#dfeaf4_0%,rgba(223,234,244,0)_18%,rgba(223,234,244,0)_82%,#dfeaf4_100%),linear-gradient(180deg,#dfeaf4_0%,rgba(223,234,244,0)_18%,rgba(223,234,244,0)_80%,#dfeaf4_100%)]"
-						/>
-						<div
-							aria-hidden="true"
-							className="pointer-events-none absolute inset-0 shadow-[inset_0_0_34px_32px_rgba(223,234,244,1)]"
-						/>
-
-						<div className="absolute inset-x-[clamp(28px,4vw,58px)] bottom-[clamp(28px,4vw,58px)]">
-							<div className="flex items-center justify-between gap-5 font-protokoll text-[0.72rem] uppercase leading-none tracking-[0.22em] text-velion-j-text/48">
-								<span>Velion lager</span>
-								<span>human approved</span>
-							</div>
-
-							<div className="mt-4 h-px overflow-hidden bg-velion-j-text/16">
-								<span
-									aria-hidden="true"
-									className="block h-full w-full origin-left bg-velion-coral/80"
-									data-promt-progress
-									style={{
-										transform: `scaleX(${promptProgress})`,
-									}}
-								/>
-							</div>
-						</div>
-					</div>
+					<VelionPromptLoop activeIndex={promptFeed.activeIndex} />
+					<p className="sr-only">
+						En animert Velion-loop viser hver prompt som en egen handling med
+						et eget resultat, fra kundesak og kildesøk til godkjenning og
+						revisjonsspor.
+					</p>
 				</div>
 			</div>
 		</section>

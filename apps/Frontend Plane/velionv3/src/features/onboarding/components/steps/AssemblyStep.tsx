@@ -1,4 +1,5 @@
-import { For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
+import type { PlanRecommendation } from "@/features/onboarding/lib/api";
 import { Button } from "@/shared/ui/Button";
 
 type AssemblyStepContentProps = {
@@ -12,10 +13,11 @@ export function AssemblyStepContent(props: AssemblyStepContentProps) {
 	return (
 		<section class="onboarding-copy">
 			<p class="onboarding-eyebrow">Final step · Assembly</p>
-			<h1>Setting up {props.organizationName || "s workspace"}.</h1>
+			<h1>Setting up {props.organizationName || "your workspace"}.</h1>
 			<p>
-				Your workspace is being built from the website, the knwledge we
-				have for {props.organizationName}, and the intergrations.
+				Your workspace is being built from the website, the knowledge we
+				have for {props.organizationName || "your organization"}, and the
+				integrations you connected.
 			</p>
 
 			<ul class="onboarding-assembly-list">
@@ -60,12 +62,27 @@ export function AssemblyStepContent(props: AssemblyStepContentProps) {
 
 type AssemblyStepVisualProps = {
 	activePlan: string;
-	connectorCount: number;
+	connectedSourceCount: number;
 	organizationName: string;
 	websitePages: number;
+	recommendation?: PlanRecommendation;
 };
 
 export function AssemblyStepVisual(props: AssemblyStepVisualProps) {
+	// Fuller recommendation detail, relocated here from the (non-scrolling)
+	// paywall so that step stays concise. The user isn't making a decision on
+	// this "workspace getting ready" screen, so there's room to show more.
+	const scopeSignals = createMemo(
+		() => props.recommendation?.scopeSignals?.filter(Boolean).slice(0, 5) ?? [],
+	);
+	const opportunities = createMemo(
+		() => props.recommendation?.opportunities?.filter(Boolean).slice(0, 3) ?? [],
+	);
+	// Proof points beyond the two already shown on the paywall.
+	const proofRest = createMemo(
+		() => props.recommendation?.proofPoints?.filter(Boolean).slice(2) ?? [],
+	);
+
 	return (
 		<div class="onboarding-right-surface onboarding-right-surface--summary">
 			<div class="onboarding-summary-card">
@@ -87,7 +104,7 @@ export function AssemblyStepVisual(props: AssemblyStepVisualProps) {
 						<span>pages grounded</span>
 					</article>
 					<article>
-						<strong>{props.connectorCount}</strong>
+						<strong>{props.connectedSourceCount}</strong>
 						<span>sources started</span>
 					</article>
 					<article>
@@ -95,6 +112,32 @@ export function AssemblyStepVisual(props: AssemblyStepVisualProps) {
 						<span>launch plan</span>
 					</article>
 				</div>
+
+				<Show when={opportunities().length || scopeSignals().length || proofRest().length}>
+					<div class="onboarding-summary-card__plan">
+						<Show when={opportunities().length}>
+							<div class="onboarding-summary-card__plan-block">
+								<span class="onboarding-summary-card__plan-label">Første forbedringer</span>
+								<ul>
+									<For each={opportunities()}>{(item) => <li>{item}</li>}</For>
+								</ul>
+							</div>
+						</Show>
+						<Show when={proofRest().length}>
+							<div class="onboarding-summary-card__plan-block">
+								<span class="onboarding-summary-card__plan-label">Hvorfor {props.activePlan}</span>
+								<ul>
+									<For each={proofRest()}>{(item) => <li>{item}</li>}</For>
+								</ul>
+							</div>
+						</Show>
+						<Show when={scopeSignals().length}>
+							<div class="onboarding-summary-card__plan-chips">
+								<For each={scopeSignals()}>{(item) => <span>{item}</span>}</For>
+							</div>
+						</Show>
+					</div>
+				</Show>
 			</div>
 		</div>
 	);

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/insights"
+	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/socialmetrics"
 )
 
 type fakeRecorder struct {
@@ -156,5 +157,111 @@ func TestProcess_RecorderErrorRetries(t *testing.T) {
 	sub := &MetricSubscriber{recorder: rec}
 	if got := sub.process(context.Background(), conversationSubject, evt("e", "ai_action.executed", "org-1")); got != outcomeRetry {
 		t.Fatalf("outcome = %v, want retry", got)
+	}
+}
+
+type fakeSocialFetcher struct {
+	mu             sync.Mutex
+	rows           []socialmetrics.Metric
+	err            error
+	lastOrgID      string
+	lastAccountID  string
+	lastSnapshotAt time.Time
+}
+
+func (f *fakeSocialFetcher) ListMetrics(_ context.Context, orgID, accountID string, snapshotDate time.Time) ([]socialmetrics.Metric, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastOrgID, f.lastAccountID, f.lastSnapshotAt = orgID, accountID, snapshotDate
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.rows, nil
+}
+
+func metricsSnapshottedEvent(orgID, accountID, snapshotDate string) applicationEvent {
+	return applicationEvent{
+		ID:    "evt-1",
+		Type:  metricsSnapshottedType,
+		OrgID: orgID,
+		Data: map[string]any{
+			"accountId":    accountID,
+			"snapshotDate": snapshotDate,
+		},
+		OccurredAt: time.Unix(1, 0).UTC(),
+	}
+}
+
+func TestProcess_MetricsSnapshotted_FetchesAndRecordsRealValues(t *testing.T) {
+	rec := &fakeRecorder{}
+	fetcher := &fakeSocialFetcher{rows: []socialmetrics.Metric{
+		{
+			OrgID: "org-1", AccountID: "acct-1", ProviderKey: "meta", MetricName: "ads.impressions",
+			MetricValue: 4200, Dimensions: map[string]any{"campaign_id": "camp-1"},
+			SnapshotDate: time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			OrgID: "org-1", AccountID: "acct-1", ProviderKey: "meta", MetricName: "ads.spend",
+			MetricValue: 15.5, Dimensions: map[string]any{"campaign_id": "camp-1"},
+			SnapshotDate: time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC),
+		},
+	}}
+	sub := &MetricSubscriber{recorder: rec, fetcher: fetcher}
+
+	ev := metricsSnapshottedEvent("org-1", "acct-1", "2026-07-04")
+	if got := sub.process(context.Background(), socialSubjectPrefix+metricsSnapshottedType, ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 2 {
+		t.Fatalf("recorded %d metrics, want 2", rec.count())
+	}
+	if fetcher.lastOrgID != "org-1" || fetcher.lastAccountID != "acct-1" {
+		t.Errorf("fetch args = (%q,%q), want (org-1,acct-1)", fetcher.lastOrgID, fetcher.lastAccountID)
+	}
+	for _, input := range rec.inputs {
+		if input.Surface != insights.SurfaceExternalAnalytics {
+			t.Errorf("surface = %q, want external_analytics", input.Surface)
+		}
+		if input.ConnectorType != "meta" {
+			t.Errorf("connector_type = %q, want meta", input.ConnectorType)
+		}
+	}
+}
+
+func TestProcess_MetricsSnapshotted_NoFetcherConfigured_Skips(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &MetricSubscriber{recorder: rec}
+
+	ev := metricsSnapshottedEvent("org-1", "acct-1", "2026-07-04")
+	if got := sub.process(context.Background(), socialSubjectPrefix+metricsSnapshottedType, ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 0 {
+		t.Errorf("recorded metrics despite no fetcher configured")
+	}
+}
+
+func TestProcess_MetricsSnapshotted_MissingAccountID_Skips(t *testing.T) {
+	rec := &fakeRecorder{}
+	fetcher := &fakeSocialFetcher{}
+	sub := &MetricSubscriber{recorder: rec, fetcher: fetcher}
+
+	ev := metricsSnapshottedEvent("org-1", "", "2026-07-04")
+	if got := sub.process(context.Background(), socialSubjectPrefix+metricsSnapshottedType, ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 0 {
+		t.Errorf("recorded metrics despite missing account id")
+	}
+}
+
+func TestProcess_MetricsSnapshotted_FetchError_Retries(t *testing.T) {
+	rec := &fakeRecorder{}
+	fetcher := &fakeSocialFetcher{err: errors.New("social-core unavailable")}
+	sub := &MetricSubscriber{recorder: rec, fetcher: fetcher}
+
+	ev := metricsSnapshottedEvent("org-1", "acct-1", "2026-07-04")
+	if got := sub.process(context.Background(), socialSubjectPrefix+metricsSnapshottedType, ev); got != outcomeRetry {
+		t.Fatalf("outcome = %v, want retry on a transient fetch failure", got)
 	}
 }

@@ -11,9 +11,9 @@ const footerColumns = [
 		{ href: "/#flyt", label: "Arbeidssløyfen" },
 	],
 	[
-		{ href: "/trust", label: "Trust Center ↗" },
+		{ href: "/trust", label: "Tillitssenter ↗" },
 		{ href: "/#trust", label: "Datasuverenitet" },
-		{ href: "/trust", label: "Underleverandører ↗" },
+		{ href: "/trust", label: "Sikkerhet ↗" },
 	],
 	[
 		{ href: "/#kontakt", label: "Kontakt" },
@@ -38,20 +38,19 @@ export function Footer() {
 			>
 				<div className="grid min-h-[520px] grid-cols-[minmax(180px,0.9fr)_minmax(0,3.1fr)] gap-[clamp(48px,6vw,112px)] max-[900px]:min-h-0 max-[900px]:grid-cols-1">
 					<div className="relative top-10 grid content-start gap-8">
-              <a
-                aria-label="Velion home"
-                className="font-arbeit text-[clamp(2rem,2.4vw,3rem)] font-light leading-none tracking-[-0.055em] text-velion-j-text"
-                href="#top"
-              >
-                VELION
-              </a>
+						<a
+							aria-label="Velion hjem"
+							className="font-arbeit text-[clamp(2rem,2.4vw,3rem)] font-light leading-none tracking-[-0.055em] text-velion-j-text"
+							href="#top"
+						>
+							VELION
+						</a>
 
-              <p className="m-0 max-w-[300px] font-protokoll text-[clamp(0.86rem,0.9vw,1rem)] font-light uppercase leading-[1.35] tracking-[0.02em] text-velion-j-text/45">
-                VELION ER BYGGET FOR VIRKSOMHETER SOM VIL AT AI SKAL GJØRE EKTE
-                KUNDEARBEID — MED KILDER, GODKJENNINGER, REVISJONSSPOR OG MENNESKET
-                FORTSATT I KONTROLL.
-              </p>
-            </div>
+						<p className="m-0 max-w-[320px] font-protokoll text-[clamp(0.9rem,0.95vw,1.08rem)] font-light uppercase leading-[1.32] tracking-[0.02em] text-velion-j-text/48">
+							Velion hjelper teamet å svare raskere, handle tryggere og vise
+							hvor AI-en fant grunnlaget.
+						</p>
+					</div>
 
 					<div className="grid grid-cols-4 gap-x-[clamp(24px,3vw,56px)] gap-y-20 max-[900px]:grid-cols-2 max-[560px]:grid-cols-1">
 						{footerColumns.map((column, columnIndex) => (
@@ -132,7 +131,7 @@ export function Footer() {
 								<span key={link}>
 									<a
 										className="transition-colors hover:text-velion-j-text"
-										href="#contact"
+										href="#kontakt"
 									>
 										{link}
 									</a>
@@ -145,7 +144,7 @@ export function Footer() {
 							className="justify-self-center transition-colors hover:text-velion-j-text max-[900px]:justify-self-start"
 							href="/trust"
 						>
-							Personvern & vilkår
+							Personvern og vilkår
 						</a>
 
 						<small className="justify-self-end font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light max-[900px]:justify-self-start">

@@ -38,6 +38,14 @@ type Config struct {
 	// Preview gate) to notification-core's existing Novu adapter. When empty the
 	// scheduler is not started.
 	NotificationCoreURL string
+
+	// SocialCoreURL is the metrics.snapshotted follow-up fetch target
+	// (GET /api/v1/social/metrics) — social-core's lifecycle event carries
+	// only a summary count, so the metric subscriber fetches the real values
+	// here. Reuses InternalAPIKey (the same shared cross-plane key every
+	// other core-to-core call in this repo uses). Empty disables the
+	// external_analytics surface without affecting the count-based metrics.
+	SocialCoreURL string
 }
 
 func Load() (*Config, error) {
@@ -57,6 +65,7 @@ func Load() (*Config, error) {
 		ModelPlaneNATSURL:             strings.TrimSpace(getEnv("MODEL_PLANE_NATS_URL", "")),
 		ModelPlaneNATSToken:           strings.TrimSpace(getEnv("MODEL_PLANE_NATS_TOKEN", "")),
 		NotificationCoreURL:           strings.TrimRight(strings.TrimSpace(getEnv("NOTIFICATION_CORE_URL", "")), "/"),
+		SocialCoreURL:                 strings.TrimRight(strings.TrimSpace(getEnv("SOCIAL_CORE_URL", "http://social-core:3162")), "/"),
 	}
 
 	if cfg.InternalAPIKey == "" {

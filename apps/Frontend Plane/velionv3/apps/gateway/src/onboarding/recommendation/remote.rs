@@ -9,7 +9,10 @@ use crate::{
     middleware::AuthenticatedUser,
 };
 
-use super::{normalize::string_list, plan_id};
+use super::{
+    normalize::{align_source_proof_points, string_list},
+    plan_id,
+};
 
 pub(crate) async fn fetch_remote_recommendation(
     state: &AppState,
@@ -60,11 +63,16 @@ pub(crate) async fn fetch_remote_recommendation(
     }
     let body = response.json::<Value>().await.ok()?;
     let raw = body.get("recommendation").unwrap_or(&body);
+    let locale = context.locale.as_deref().unwrap_or("en");
     Some(PlanRecommendation {
         plan_id: plan_id(raw.get("planId").and_then(Value::as_str).unwrap_or("trial")),
         reason: raw.get("reason").and_then(Value::as_str)?.to_owned(),
         summary: raw.get("summary").and_then(Value::as_str)?.to_owned(),
-        proof_points: string_list(raw.get("proofPoints")),
+        proof_points: align_source_proof_points(
+            string_list(raw.get("proofPoints")),
+            context,
+            locale,
+        ),
         scope_signals: string_list(raw.get("scopeSignals")),
         opportunities: string_list(raw.get("opportunities")),
         generated_at: raw

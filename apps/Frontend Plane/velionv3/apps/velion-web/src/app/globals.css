@@ -260,6 +260,85 @@ body {
 		sans-serif;
 }
 
+.velion-hima-fog {
+	position: absolute;
+	top: -60vh;
+	left: 0;
+	width: 100%;
+	height: 60vh;
+	opacity: 0;
+	visibility: hidden;
+	transform: translate3d(0, 20vh, 0);
+	transition:
+		opacity 0.62s ease,
+		transform 0.62s ease,
+		visibility 0.62s ease;
+	background: linear-gradient(
+		to top,
+		var(--background) 0%,
+		color-mix(in srgb, var(--background) 92%, transparent) 19%,
+		color-mix(in srgb, var(--background) 74%, transparent) 34%,
+		color-mix(in srgb, var(--background) 48%, transparent) 47%,
+		color-mix(in srgb, var(--background) 34%, transparent) 56.5%,
+		color-mix(in srgb, var(--background) 24%, transparent) 65%,
+		color-mix(in srgb, var(--background) 16%, transparent) 73%,
+		color-mix(in srgb, var(--background) 10%, transparent) 80.2%,
+		color-mix(in srgb, var(--background) 5%, transparent) 86.1%,
+		color-mix(in srgb, var(--background) 2%, transparent) 91%,
+		color-mix(in srgb, var(--background) 1%, transparent) 95.2%,
+		transparent 100%
+	);
+	will-change: opacity, transform;
+}
+
+.velion-hima-fog.scrolled {
+	opacity: 1;
+	visibility: visible;
+	transform: translate3d(0, 0, 0);
+}
+
+.velion-hero-scroll-cue {
+	opacity: 0.74;
+	transition: opacity 320ms var(--velion-ease-out);
+}
+
+.velion-hero-scroll-cue:hover {
+	opacity: 1;
+}
+
+.velion-hero-scroll-cue__line {
+	position: relative;
+	display: block;
+	width: 1px;
+	height: 42px;
+	overflow: hidden;
+	background: color-mix(in srgb, currentColor 24%, transparent);
+}
+
+.velion-hero-scroll-cue__line::after {
+	position: absolute;
+	inset-inline: 0;
+	top: 0;
+	height: 38%;
+	content: "";
+	background: currentColor;
+	animation: velion-hero-scroll-line 1.9s ease-in-out infinite;
+}
+
+@keyframes velion-hero-scroll-line {
+	0% {
+		opacity: 0;
+		transform: translateY(-120%);
+	}
+	34% {
+		opacity: 0.8;
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(290%);
+	}
+}
+
 body.velion-menu-open {
 	overflow: hidden;
 }
@@ -301,6 +380,13 @@ canvas {
 
 		-webkit-mask-image: linear-gradient(transparent 0, #000 80px);
 		-webkit-mask-position: 0 -80px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.fade-out-top {
+		mask-image: none;
+		-webkit-mask-image: none;
 	}
 }
 
@@ -530,5 +616,140 @@ canvas {
 	.velion-reveal {
 		opacity: 1;
 		transform: none;
+	}
+}
+
+/* ---------------------------------------------------------------------
+ * Preloader (V2) — branded wordmark + curtain reveal.
+ * Wordmark is painted immediately (keeps LCP low); the curtain slides up
+ * to reveal the hero. Reduced motion hides it entirely.
+ * ------------------------------------------------------------------- */
+
+.velion-preloader {
+	position: fixed;
+	inset: 0;
+	z-index: 120;
+	display: grid;
+	place-items: center;
+	background: linear-gradient(180deg, var(--velion-h-ink-warm) 0%, #080707 100%);
+	transition: transform 0.82s cubic-bezier(0.83, 0, 0.17, 1);
+}
+
+.velion-preloader.is-revealing {
+	transform: translateY(-101%);
+	will-change: transform;
+}
+
+.velion-preloader__inner {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: clamp(1.4rem, 2.4vw, 2.4rem);
+}
+
+.velion-preloader__word {
+	font-family: var(--font-arbeit), sans-serif;
+	font-weight: 300;
+	font-size: clamp(3rem, 12vw, 11rem);
+	line-height: 1;
+	color: var(--velion-c-white);
+	letter-spacing: 0.06em;
+	animation: velion-preloader-word 1.2s var(--velion-ease-out) forwards;
+}
+
+@keyframes velion-preloader-word {
+	to {
+		letter-spacing: -0.04em;
+	}
+}
+
+.velion-preloader__bar {
+	display: block;
+	height: 2px;
+	width: min(220px, 42vw);
+	overflow: hidden;
+	border-radius: 9999px;
+	background: color-mix(in srgb, var(--velion-c-white) 16%, transparent);
+}
+
+.velion-preloader__bar-fill {
+	display: block;
+	height: 100%;
+	width: 100%;
+	transform: scaleX(0);
+	transform-origin: left;
+	background: var(--velion-coral);
+	animation: velion-preloader-fill 1.2s var(--velion-ease-out) forwards;
+}
+
+@keyframes velion-preloader-fill {
+	to {
+		transform: scaleX(1);
+	}
+}
+
+.velion-preloader__label {
+	font-family: var(--font-protokoll), sans-serif;
+	font-size: 0.74rem;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: 0.22em;
+	color: color-mix(in srgb, var(--velion-c-white) 56%, transparent);
+	opacity: 0;
+	animation: velion-preloader-label 0.7s var(--velion-ease-out) 0.5s forwards;
+}
+
+.velion-preloader__label-no {
+	color: var(--velion-coral);
+}
+
+@keyframes velion-preloader-label {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-preloader {
+		display: none;
+	}
+}
+
+/* ---------------------------------------------------------------------
+ * Feature cards "fly into place" (trust-scroll-light) — cards converge from
+ * a horizontal spread + blur when the stage scrolls into view (one-shot,
+ * no pin/scrub). Per-card --fly-x (spread) and --fly-i (stagger).
+ * ------------------------------------------------------------------- */
+
+.velion-fly-card {
+	opacity: 0;
+	transform: translateX(var(--fly-x, 0)) translateY(-14px) scale(1.08);
+	filter: blur(14px);
+	transition:
+		opacity 0.6s var(--velion-ease-out),
+		transform 0.85s var(--velion-ease-out),
+		filter 0.7s var(--velion-ease-out);
+	transition-delay: calc(var(--fly-i, 0) * 90ms);
+	will-change: transform, opacity, filter;
+}
+
+.velion-fly-stage[data-in="true"] .velion-fly-card {
+	opacity: 1;
+	transform: none;
+	filter: blur(0);
+	will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-fly-card {
+		opacity: 1;
+		transform: none;
+		filter: none;
+		transition: none;
 	}
 }

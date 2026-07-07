@@ -41,6 +41,19 @@ pub(super) async fn quarry_token(
     get_audience_token(state, &user.user_id, cookie, "quarry").await
 }
 
+/// Mint the `data-plane` audience token for the current user. Attached as a
+/// Bearer on Data Plane legs (documents-api, retrieval-engine, graph-index) so
+/// documents-api can verify tenant identity once `AUTHCTX_ENFORCE=1`. Cached
+/// per user+audience; `None` when auth-core is unreachable, in which case the
+/// legs degrade to the internal-key + header path (works while enforce is off).
+pub(super) async fn data_plane_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    cookie: &str,
+) -> Option<String> {
+    get_audience_token(state, &user.user_id, cookie, "data-plane").await
+}
+
 /// Build an internal service-to-service request (internal API key + actor +
 /// optional org header), used by the knowledge aggregators to fan out across
 /// Data Plane v2 / integration-core / finspo with per-call timeouts.
@@ -51,6 +64,7 @@ fn internal_request(
     org_id: Option<&str>,
     actor: &ActionActor,
     timeout: Duration,
+    bearer: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut req = state
         .client
@@ -67,6 +81,12 @@ fn internal_request(
     if let Some(org) = org_id.filter(|v| !v.trim().is_empty()) {
         req = req.header("x-org-id", org.trim());
     }
+    // Data Plane legs additionally carry a verified `data-plane` audience
+    // token so documents-api can enforce tenant identity from the signed
+    // `org_id` claim (cross-checked against x-org-id) once enforce is on.
+    if let Some(token) = bearer.filter(|t| !t.is_empty()) {
+        req = req.bearer_auth(token);
+    }
     req
 }
 
@@ -82,7 +102,23 @@ pub(super) async fn fetch_json(
     actor: &ActionActor,
     timeout: Duration,
 ) -> Option<Value> {
-    let mut req = internal_request(state, method, url, org_id, actor, timeout);
+    fetch_json_bearer(state, method, url, body, org_id, actor, timeout, None).await
+}
+
+/// Like [`fetch_json`] but attaches a Bearer token (used for Data Plane legs
+/// that must present a verified `data-plane` audience token).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn fetch_json_bearer(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    actor: &ActionActor,
+    timeout: Duration,
+    bearer: Option<&str>,
+) -> Option<Value> {
+    let mut req = internal_request(state, method, url, org_id, actor, timeout, bearer);
     if let Some(body) = body {
         req = req.json(&body);
     }
@@ -104,7 +140,7 @@ pub(super) async fn request_ok(
     actor: &ActionActor,
     timeout: Duration,
 ) -> bool {
-    let mut req = internal_request(state, method, url, org_id, actor, timeout);
+    let mut req = internal_request(state, method, url, org_id, actor, timeout, None);
     if let Some(body) = body {
         req = req.json(&body);
     }
