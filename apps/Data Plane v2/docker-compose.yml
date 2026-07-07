@@ -462,6 +462,8 @@ services:
     build:
       context: .
       dockerfile: services/graph-index-rs/Dockerfile
+      additional_contexts:
+        model-plane-proto: "../Model Plane/proto"
     container_name: dpv2-graph-index
     restart: unless-stopped
     init: true
@@ -477,7 +479,7 @@ services:
       # azure_openai (and set the AZURE_* vars) to fall back to the direct path.
       GRAPH_EXTRACTION_PROVIDER: ${GRAPH_EXTRACTION_PROVIDER:-model_plane}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
-      MODEL_PLANE_EXTRACTION_MODEL: ${MODEL_PLANE_EXTRACTION_MODEL:-gpt-4o}
+      MODEL_PLANE_EXTRACTION_MODEL: ${MODEL_PLANE_EXTRACTION_MODEL:-gpt-4o-mini}
       MODEL_PLANE_EXTRACTION_PROVIDER: ${MODEL_PLANE_EXTRACTION_PROVIDER:-azure_openai}
       MODEL_PLANE_EXTRACTION_TIMEOUT_MS: ${MODEL_PLANE_EXTRACTION_TIMEOUT_MS:-60000}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}

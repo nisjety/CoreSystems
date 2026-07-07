@@ -5,6 +5,10 @@
 
 FROM rust:1-bookworm AS chef
 ARG DEBIAN_FRONTEND=noninteractive
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+    CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=120 \
+    CARGO_HTTP_MULTIPLEXING=false
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -e; \
@@ -19,7 +23,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /tmp/apt-install.log
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-chef --locked --version 0.1.77
+    set -e; \
+    for i in 1 2 3 4 5; do \
+        if cargo install cargo-chef --locked --version 0.1.77; then \
+            exit 0; \
+        fi; \
+        echo "cargo-chef install retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 WORKDIR /build
 
 FROM chef AS planner
@@ -44,6 +56,10 @@ FROM cooker AS builder
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY services/ services/
+# Shared cross-plane inference proto: build.rs resolves ../../../Model Plane/proto
+# from /build/services/graph-index-rs, i.e. "/Model Plane/proto" — vendored from
+# the model-plane-proto additional build context (same pattern as embedding-engine).
+COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
 # target/ IS cache-mounted here, so the compiled binary lives inside the cache
 # and is NOT in the image layer — copy it out within the same RUN to a non-cache
 # path that the runtime stage can COPY from.
