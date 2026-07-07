@@ -40,7 +40,7 @@ pub(crate) async fn translate_recommendation(
     Json(input): Json<TranslateRecommendationRequest>,
 ) -> impl IntoResponse {
     let target_language = normalize_locale(&input.target_language);
-    if !matches!(target_language.as_deref(), Some("en" | "nb")) {
+    if !matches!(target_language, Some("en" | "nb")) {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
