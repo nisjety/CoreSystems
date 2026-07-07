@@ -1,11 +1,12 @@
-const DEFAULT_INTERNAL_SERVICE_KEY = 'change-me-internal-service-secret';
-
 function getExpectedServiceKey() {
-  return (
-    process.env.CONVEX_INTERNAL_SERVICE_KEY ||
-    process.env.INTERNAL_API_KEY ||
-    DEFAULT_INTERNAL_SERVICE_KEY
-  );
+  // Fail closed: no hardcoded default (a leaked image with no env set must NOT
+  // authenticate against a public string). Control-Plane-owned shared key.
+  const key =
+    process.env.CONVEX_INTERNAL_SERVICE_KEY || process.env.INTERNAL_API_KEY;
+  if (!key) {
+    throw new Error('CONVEX_INTERNAL_SERVICE_KEY (or INTERNAL_API_KEY) must be set');
+  }
+  return key;
 }
 
 export function assertServiceKey(serviceKey: string) {

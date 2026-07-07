@@ -27,7 +27,10 @@ impl Interceptor for ApiKeyInterceptor {
                     .unwrap_or("");
                 provided == expected
             }
-            None => true, // No key configured → API-key path not enforced
+            // Fail closed: no key configured no longer auto-accepts (that was a
+            // fail-open hole). The Bearer-JWT path below is still tried, so a
+            // valid JWT is accepted even when no API key is set.
+            None => false,
         };
         if api_key_ok {
             record_trace_context(&req);

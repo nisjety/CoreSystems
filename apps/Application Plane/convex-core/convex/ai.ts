@@ -9,10 +9,12 @@ import { action } from "./_generated/server";
 import { v } from "convex/values";
 import { api } from "./_generated/api";
 
+// Control-Plane-owned shared key; no hardcoded fallback. Empty only if the env
+// is misconfigured, in which case the receiving validator rejects the call.
 const CONVEX_INTERNAL_SERVICE_KEY =
   process.env.CONVEX_INTERNAL_SERVICE_KEY ||
   process.env.INTERNAL_API_KEY ||
-  "change-me-internal-service-secret";
+  "";
 
 /**
  * Generate AI response for a user message

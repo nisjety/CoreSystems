@@ -94,7 +94,10 @@ async fn auth_middleware(
                 .unwrap_or("");
             provided == expected
         }
-        _ => true,
+        // Fail closed: a missing/empty configured key no longer auto-accepts
+        // (that was a fail-open hole). The Bearer-JWT branch below still runs,
+        // so a valid JWT is accepted even when no API key is configured.
+        _ => false,
     };
 
     let header_org_id = req

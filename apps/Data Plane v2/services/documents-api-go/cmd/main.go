@@ -38,7 +38,14 @@ func main() {
 		log.Fatal().Err(err).Msg("config load failed")
 	}
 	if cfg.InternalAPIKey == "" {
-		log.Warn().Msg("INTERNAL_API_KEY is empty — the documents API is UNAUTHENTICATED; set it in any non-local deployment")
+		// Fail closed: an empty key previously let the auth middleware wave every
+		// request through (fail-open). Refuse to start unless an operator has
+		// explicitly opted into the insecure local mode.
+		if os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" {
+			log.Warn().Msg("INTERNAL_API_KEY is empty and ALLOW_INSECURE_DEV_DEFAULTS=1 — documents API is UNAUTHENTICATED (local dev only)")
+		} else {
+			log.Fatal().Msg("INTERNAL_API_KEY is required (set ALLOW_INSECURE_DEV_DEFAULTS=1 to run unauthenticated locally)")
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

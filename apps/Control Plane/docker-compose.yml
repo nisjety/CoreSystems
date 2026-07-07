@@ -460,7 +460,7 @@ services:
       # is the single sink across planes. Comma-separate for more buses.
       EXTRA_NATS_URLS: ${AUDIT_EXTRA_NATS_URLS:-nats://model-plane-nats-1:4222}
       HTTP_PORT: "8187"
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-super-secret-internal-api-key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
     ports:
       # Native HTTP port 8187 (host and container). Kept clear of Model
       # Plane's browser-broker so the two never collide on the host.

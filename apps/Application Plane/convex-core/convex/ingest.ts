@@ -12,11 +12,18 @@ import { httpAction } from "./_generated/server";
 import { api } from "./_generated/api";
 
 function getServiceKey(): string {
-  return (
-    process.env.CONVEX_INTERNAL_SERVICE_KEY ||
-    process.env.INTERNAL_API_KEY ||
-    "change-me-internal-service-secret"
-  );
+  // Fail closed: never fall back to a hardcoded default (a leaked image with no
+  // env set must NOT authenticate against a public string). The shared key is
+  // Control-Plane-owned and propagated as CONVEX_INTERNAL_SERVICE_KEY /
+  // INTERNAL_API_KEY.
+  const key =
+    process.env.CONVEX_INTERNAL_SERVICE_KEY || process.env.INTERNAL_API_KEY;
+  if (!key) {
+    throw new Error(
+      "CONVEX_INTERNAL_SERVICE_KEY (or INTERNAL_API_KEY) must be set",
+    );
+  }
+  return key;
 }
 
 function assertIngestKey(request: Request): void {
