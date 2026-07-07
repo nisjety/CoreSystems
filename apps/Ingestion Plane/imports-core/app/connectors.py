@@ -2,41 +2,20 @@ from typing import Any
 
 import httpx
 from hubspot import HubSpot
-from notion_client import Client as NotionClient
 from odoorpc import ODOO
 from simple_salesforce import Salesforce
 
+from app.notion_import import import_from_notion
 from app.schemas import ImportDocument
 
-
-async def import_from_notion(connection: dict[str, Any], options: dict[str, Any]) -> list[ImportDocument]:
-    notion = NotionClient(auth=connection.get("token"))
-    query: dict[str, Any] = {}
-    if options.get("filter"):
-        query["filter"] = options["filter"]
-    if options.get("sort"):
-        query["sort"] = options["sort"]
-
-    result = notion.search(**query)
-    documents: list[ImportDocument] = []
-    for item in result.get("results", []):
-        title = None
-        properties = item.get("properties", {})
-        for value in properties.values():
-            if value.get("type") == "title":
-                parts = value.get("title", [])
-                title = "".join(part.get("plain_text", "") for part in parts)
-                break
-        documents.append(
-            ImportDocument(
-                source_id=item.get("id"),
-                source_name=title,
-                title=title,
-                text=str(item),
-                metadata={"source": "notion", "object": item.get("object")},
-            )
-        )
-    return documents
+__all__ = [
+    "import_from_notion",
+    "import_from_hubspot",
+    "import_from_salesforce",
+    "import_from_odoo",
+    "import_from_http_system",
+    "import_from_source",
+]
 
 
 async def import_from_hubspot(connection: dict[str, Any], options: dict[str, Any]) -> list[ImportDocument]:
