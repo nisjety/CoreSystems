@@ -3,6 +3,7 @@ package consumers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 
@@ -84,6 +85,19 @@ func (c *ModelActionProposedConsumer) process(ctx context.Context, ev conversati
 		return outcomeAck
 	}
 
+	// ZDR tripwire: conversation-core has NO Zero-Data-Retention propagation —
+	// nothing here classifies, gates, or erases persisted action payloads by ZDR
+	// policy. Until that exists, any producer that starts publishing on this
+	// (currently publisher-less) subject with a restrictive ZDR marker must fail
+	// closed HERE rather than have its content silently persisted as unclassified.
+	// Wiring a real publisher that carries ZDR content requires building ZDR
+	// propagation through CreateAIAction/persistence first, then removing this.
+	if key, val := restrictiveZDRMarker(ev.Data); key != "" {
+		log.Printf("[cc-go/model-action-proposed] ERROR: refusing ZDR-classified proposal (org=%s kind=%s %s=%q): conversation-core has no ZDR propagation; implement it before publishing ZDR content on %s",
+			orgID, kind, key, val, conversation.SubjectModelActionProposed)
+		return outcomeAck
+	}
+
 	_, err := c.service.CreateAIAction(ctx, conversation.CreateAIActionInput{
 		OrgID:          orgID,
 		ConversationID: conversationID,
@@ -102,4 +116,31 @@ func (c *ModelActionProposedConsumer) process(ctx context.Context, ev conversati
 		return outcomeRetry
 	}
 	return outcomeAck
+}
+
+// restrictiveZDRMarker reports the first ZDR marker in the event data (top level
+// or nested in "payload") whose value demands a retention posture this service
+// cannot honor. Non-restrictive values (internal/public/none/off) pass — they
+// match what persistence would default to anyway. Unknown values are treated as
+// restrictive on purpose: fail closed on anything we do not recognize.
+func restrictiveZDRMarker(data map[string]any) (key, value string) {
+	scopes := []map[string]any{data, mapFromData(data, "payload"), mapFromData(data, "ingest_policy")}
+	for _, m := range scopes {
+		if m == nil {
+			continue
+		}
+		for _, k := range []string{"zdr", "zdr_mode", "zdr_classification", "ephemeral_only"} {
+			v, ok := m[k]
+			if !ok {
+				continue
+			}
+			s := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
+			switch s {
+			case "", "false", "off", "disabled", "none", "internal", "public":
+				continue
+			}
+			return k, s
+		}
+	}
+	return "", ""
 }

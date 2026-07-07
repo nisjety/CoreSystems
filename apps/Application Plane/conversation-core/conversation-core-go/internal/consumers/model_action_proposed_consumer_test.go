@@ -126,3 +126,73 @@ func TestModelProposed_TransientStoreError_Retries(t *testing.T) {
 		t.Fatalf("outcome = %v, want outcomeRetry for a transient store error", got)
 	}
 }
+
+// --- ZDR tripwire -----------------------------------------------------------
+// conversation-core has no ZDR propagation; the consumer must fail closed on
+// restrictive ZDR markers instead of persisting the content unclassified.
+
+func TestModelProposed_ZDRMode_RefusedWithoutCreating(t *testing.T) {
+	proposer := &fakeProposer{}
+	c := &ModelActionProposedConsumer{service: proposer}
+	ev := proposedEvent("org-1", "conv-1", "draft.reply")
+	ev.Data["zdr_mode"] = "on"
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("want terminal ack, got %v", got)
+	}
+	if proposer.count() != 0 {
+		t.Fatalf("ZDR-classified proposal must not be persisted; got %d creates", proposer.count())
+	}
+}
+
+func TestModelProposed_ZDRClassificationInPayload_Refused(t *testing.T) {
+	proposer := &fakeProposer{}
+	c := &ModelActionProposedConsumer{service: proposer}
+	ev := proposedEvent("org-1", "conv-1", "draft.reply")
+	ev.Data["payload"] = map[string]any{"text": "hello", "zdr_classification": "restricted"}
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("want terminal ack, got %v", got)
+	}
+	if proposer.count() != 0 {
+		t.Fatalf("restricted payload must not be persisted; got %d creates", proposer.count())
+	}
+}
+
+func TestModelProposed_EphemeralOnly_Refused(t *testing.T) {
+	proposer := &fakeProposer{}
+	c := &ModelActionProposedConsumer{service: proposer}
+	ev := proposedEvent("org-1", "conv-1", "draft.reply")
+	ev.Data["ephemeral_only"] = true
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("want terminal ack, got %v", got)
+	}
+	if proposer.count() != 0 {
+		t.Fatalf("ephemeral_only content must not be persisted; got %d creates", proposer.count())
+	}
+}
+
+func TestModelProposed_NonRestrictiveZDRValues_StillCreate(t *testing.T) {
+	proposer := &fakeProposer{}
+	c := &ModelActionProposedConsumer{service: proposer}
+	ev := proposedEvent("org-1", "conv-1", "draft.reply")
+	ev.Data["zdr_classification"] = "internal" // persistence default — nothing to honor
+	ev.Data["zdr"] = false
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("want ack, got %v", got)
+	}
+	if proposer.count() != 1 {
+		t.Fatalf("non-restrictive markers must not trip the guard; got %d creates", proposer.count())
+	}
+}
+
+func TestModelProposed_UnknownZDRValue_FailsClosed(t *testing.T) {
+	proposer := &fakeProposer{}
+	c := &ModelActionProposedConsumer{service: proposer}
+	ev := proposedEvent("org-1", "conv-1", "draft.reply")
+	ev.Data["zdr_mode"] = "eu_strict_v2" // unrecognized → restrictive by default
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("want terminal ack, got %v", got)
+	}
+	if proposer.count() != 0 {
+		t.Fatalf("unknown ZDR value must fail closed; got %d creates", proposer.count())
+	}
+}
