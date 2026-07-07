@@ -252,14 +252,17 @@ services:
       # SEMANTIC_CACHE_ENABLED=true serves /v1/cache/semantic/* via this service's
       # embeddings + Qdrant. Off by default.
       SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-false}
-      # Query embedding: azure_openai (direct Azure HTTP — verified 200/3072)
-      # instead of model_plane (gRPC → inference-core). inference-core embedding
-      # works standalone (grpcurl OK), but the dpv2→inference-core gRPC hop
-      # returns a status error with no server-side log despite open TCP + shared
-      # proto — a deeper gRPC-layer issue tracked separately. Both paths embed
-      # via the SAME Azure text-embedding-3-large (3072), so vectors are
-      # index-compatible. Override to model_plane once that hop is fixed.
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-azure_openai}
+      # Query embedding routes through the Model Plane (gRPC → inference-core),
+      # NOT direct Azure: no-independent-embeddings-outside-Model-Plane, and the
+      # direct-Azure path fails closed on ZDR/restricted content (it is a
+      # retaining provider), so it cannot embed restricted docs at all.
+      # NOTE: a prior gRPC-hop error (dpv2→inference-core returning a status with
+      # no server log) drove an azure_openai fallback here; that hop MUST be
+      # re-smoke-tested live (one embedding round-trip returning a 3072-dim
+      # vector) after this flip. Operators can override EMBEDDING_PROVIDER=
+      # azure_openai if the hop regresses (same text-embedding-3-large@3072, so
+      # vectors stay index-compatible either way).
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
@@ -406,11 +409,14 @@ services:
       BATCH_SIZE: "32"
       QDRANT_COLLECTION: "dataplane_knowledge"
       EMBEDDING_DIMENSION: "3072"
-      # Index-time embedding: azure_openai (direct Azure HTTP) — same fix as
-      # retrieval-engine. model_plane (gRPC → inference-core) hangs the
-      # dpv2 embed client (DATAPLANE_KNOWLEDGE stream stuck, docs never index).
-      # Same text-embedding-3-large@3072 → query/index vectors stay compatible.
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-azure_openai}
+      # Index-time embedding routes through the Model Plane (gRPC → inference-core),
+      # matching retrieval-engine. Required so restricted (ZDR) documents have a
+      # compliant embedding path — the direct-Azure backend fails closed on ZDR.
+      # NOTE: a prior gRPC-hop stall (DATAPLANE_KNOWLEDGE stream stuck) drove the
+      # azure_openai fallback; re-smoke-test the hop live after this flip.
+      # Override EMBEDDING_PROVIDER=azure_openai if it regresses (same
+      # text-embedding-3-large@3072 → query/index vectors stay compatible).
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
@@ -465,6 +471,16 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:-dataplane}@postgres:5432/${POSTGRES_DB:-dataplane}
       NATS_URL: nats://nats:4222
       ADMIN_PORT: "9203"
+      # Graph entity/relationship extraction routes through the Model Plane
+      # (gRPC → inference-core Infer), NOT direct Azure — no independent LLM
+      # calls outside the Model Plane. Override GRAPH_EXTRACTION_PROVIDER=
+      # azure_openai (and set the AZURE_* vars) to fall back to the direct path.
+      GRAPH_EXTRACTION_PROVIDER: ${GRAPH_EXTRACTION_PROVIDER:-model_plane}
+      MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
+      MODEL_PLANE_EXTRACTION_MODEL: ${MODEL_PLANE_EXTRACTION_MODEL:-gpt-4o}
+      MODEL_PLANE_EXTRACTION_PROVIDER: ${MODEL_PLANE_EXTRACTION_PROVIDER:-azure_openai}
+      MODEL_PLANE_EXTRACTION_TIMEOUT_MS: ${MODEL_PLANE_EXTRACTION_TIMEOUT_MS:-60000}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EXTRACTION_DEPLOYMENT: ${AZURE_OPENAI_EXTRACTION_DEPLOYMENT:-gpt-4o}

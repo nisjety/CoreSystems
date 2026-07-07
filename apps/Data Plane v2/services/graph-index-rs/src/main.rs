@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     let store = Arc::new(store::GraphStore::new(pool.clone()));
-    let extractor = Arc::new(extractor::GraphExtractor::new(&cfg));
+    let extractor = Arc::new(extractor::GraphExtractor::new(&cfg)?);
 
     let nats_client = async_nats::connect(&cfg.nats_url).await?;
     let js = async_nats::jetstream::new(nats_client.clone());
