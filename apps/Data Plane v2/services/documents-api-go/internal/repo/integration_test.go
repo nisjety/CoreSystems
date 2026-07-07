@@ -138,6 +138,60 @@ func TestCreateAndGet(t *testing.T) {
 	}
 }
 
+// TestZDRClassificationRoundTrip proves the GDPR/ZDR wire fix end-to-end at the
+// persistence boundary: a non-default classification (as Quarry-v2's ingest
+// client now sends after mapping PrivacyClassification → zdr_classification) is
+// stored verbatim and read back — NOT silently coerced to the "internal"
+// default. This is the receiving half of the fix that makes retrieval-engine's
+// reject-mode filter (WHERE zdr_classification = 'restricted') operate on real
+// data. Requires docker (testcontainers); build with -tags integration.
+func TestZDRClassificationRoundTrip(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	// A restricted document must persist as "restricted" so retrieval filters it.
+	restricted, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID:             "org-zdr",
+		Source:            "quarry",
+		Type:              "web_page",
+		Title:             "Secret",
+		Content:           "confidential body",
+		ZDRClassification: "restricted",
+	})
+	if err != nil {
+		t.Fatalf("create restricted: %v", err)
+	}
+	gotRestricted, err := r.Get(ctx, "org-zdr", restricted.Document.DocumentID, "", nil)
+	if err != nil {
+		t.Fatalf("get restricted: %v", err)
+	}
+	if gotRestricted.ZDRClassification != "restricted" {
+		t.Fatalf("expected zdr_classification=restricted to round-trip, got %q", gotRestricted.ZDRClassification)
+	}
+
+	// An empty classification (no policy computed) still defaults to "internal".
+	internal, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID:   "org-zdr",
+		Source:  "quarry",
+		Type:    "web_page",
+		Title:   "Ordinary",
+		Content: "ordinary body",
+	})
+	if err != nil {
+		t.Fatalf("create default: %v", err)
+	}
+	gotInternal, err := r.Get(ctx, "org-zdr", internal.Document.DocumentID, "", nil)
+	if err != nil {
+		t.Fatalf("get default: %v", err)
+	}
+	if gotInternal.ZDRClassification != "internal" {
+		t.Fatalf("expected empty zdr_classification to default to internal, got %q", gotInternal.ZDRClassification)
+	}
+}
+
 func TestIdempotency(t *testing.T) {
 	pool, cleanup := setupPostgres(t)
 	defer cleanup()
