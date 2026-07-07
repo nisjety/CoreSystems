@@ -1,13 +1,26 @@
-import type { ReactNode } from "react";
+import type {
+	AnchorHTMLAttributes,
+	ButtonHTMLAttributes,
+	ReactNode,
+} from "react";
 
-type ArrowButtonProps = {
+type ArrowButtonBaseProps = {
 	children: ReactNode;
 	className?: string;
-	href?: string;
-	onClick?: () => void;
-	type?: "button" | "submit" | "reset";
 	variant?: "dark" | "light" | "muted" | "coral";
 };
+
+type ArrowLinkButtonProps = ArrowButtonBaseProps &
+	Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "children" | "className"> & {
+		href: string;
+	};
+
+type ArrowActionButtonProps = ArrowButtonBaseProps &
+	Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children" | "className"> & {
+		href?: undefined;
+	};
+
+type ArrowButtonProps = ArrowLinkButtonProps | ArrowActionButtonProps;
 
 const variantClasses = {
 	dark: "text-velion-j-text",
@@ -34,42 +47,87 @@ function ArrowIcon({ className = "" }: { className?: string }) {
 	);
 }
 
-export function ArrowButton({
+export function ArrowButtonLabel({
 	children,
 	className = "",
-	href,
-	onClick,
-	type = "button",
-	variant = "dark",
-}: ArrowButtonProps) {
-	const classes = [
-		"group relative inline-flex w-fit items-center overflow-hidden px-px py-1 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none opacity-80 transition-all duration-500 hover:opacity-100",
-		variantClasses[variant],
+}: {
+	children: ReactNode;
+	className?: string;
+}) {
+	return (
+		<span
+			className={[
+				"relative inline-flex w-fit items-center overflow-hidden px-px py-1 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none opacity-80 transition-all duration-500 group-hover:opacity-100",
+				className,
+			]
+				.filter(Boolean)
+				.join(" ")}
+		>
+			<span className="flex translate-x-[-43px] items-center gap-3 transition-transform duration-500 group-hover:translate-x-0 sm:translate-x-[-37px] sm:gap-1">
+				<ArrowIcon />
+
+				<span className="whitespace-nowrap">{children}</span>
+
+				<ArrowIcon className="absolute left-full translate-x-3 sm:translate-x-1" />
+			</span>
+		</span>
+	);
+}
+
+export function ArrowButton(props: ArrowButtonProps) {
+	const {
+		children,
+		className = "",
+		variant = "dark",
+	} = props;
+
+	const wrapperClasses = [
+		"group inline-flex w-fit items-center bg-transparent p-0 text-left no-underline",
 		className,
 	]
 		.filter(Boolean)
 		.join(" ");
 
 	const content = (
-		<span className="flex translate-x-[-43px] items-center gap-3 transition-transform duration-500 group-hover:translate-x-0 sm:translate-x-[-37px] sm:gap-1">
-			<ArrowIcon />
-
-			<span className="whitespace-nowrap">{children}</span>
-
-			<ArrowIcon className="absolute left-full translate-x-3 sm:translate-x-1" />
-		</span>
+		<ArrowButtonLabel className={variantClasses[variant]}>
+			{children}
+		</ArrowButtonLabel>
 	);
 
-	if (href) {
+	if ("href" in props && props.href) {
+		const {
+			children: ignoredChildren,
+			className: ignoredClassName,
+			href,
+			variant: ignoredVariant,
+			...linkProps
+		} = props as ArrowLinkButtonProps;
+
+		void ignoredChildren;
+		void ignoredClassName;
+		void ignoredVariant;
+
 		return (
-			<a className={classes} href={href}>
+			<a {...linkProps} className={wrapperClasses} href={href}>
 				{content}
 			</a>
 		);
 	}
 
+	const {
+		children: ignoredChildren,
+		className: ignoredClassName,
+		type = "button",
+		variant: ignoredVariant,
+		...buttonProps
+	} = props as ArrowActionButtonProps;
+
+	void ignoredChildren;
+	void ignoredClassName;
+	void ignoredVariant;
+
 	return (
-		<button className={classes} onClick={onClick} type={type}>
+		<button {...buttonProps} className={wrapperClasses} type={type}>
 			{content}
 		</button>
 	);

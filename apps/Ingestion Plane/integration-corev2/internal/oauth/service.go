@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,17 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	providerContext, err := NormalizeProviderContext(provider.Key, input.ProviderContext)
 	if err != nil {
 		return CreateSessionResult{}, err
+	}
+	// Meta bakes permissions into a Facebook Login for Business configuration
+	// rather than a per-request scope param (see MetaOAuthClient), so a
+	// bundle needing a different permission set than the default connection
+	// flow needs its own named configuration selected up front — callers
+	// selecting the "conversions" bundle shouldn't need to know that OAuth
+	// plumbing detail themselves.
+	if provider.Key == "meta" && slices.Contains(input.Bundles, "conversions") {
+		if _, ok := providerContext["business_login_config"]; !ok {
+			providerContext["business_login_config"] = "conversions"
+		}
 	}
 
 	sessionID := "cs_" + uuid.NewString()
@@ -396,6 +408,9 @@ func (s *Service) accessTokenForConnection(ctx context.Context, connection store
 }
 
 func (s *Service) callbackURL(providerKey string) string {
+	if providers.NormalizeKey(providerKey) == "snapchat" && strings.TrimSpace(s.cfg.SnapchatRedirectBaseURL) != "" {
+		return strings.TrimRight(s.cfg.SnapchatRedirectBaseURL, "/") + "/oauth/callback/snapchat"
+	}
 	return s.cfg.PublicBaseURL + "/oauth/callback/" + providerKey
 }
 

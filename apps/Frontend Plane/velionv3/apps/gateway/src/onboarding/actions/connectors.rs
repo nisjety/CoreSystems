@@ -1,16 +1,68 @@
-use axum::{extract::State, http::HeaderMap, response::IntoResponse, Json};
+use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
 use reqwest::Method;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     auth::actor_from_request,
     config::AppState,
     contracts::{
-        ConnectSessionRequest, OrgActionRequest, SourceCleanupRequest, SourceDiscoveryRequest,
+        ActionActor, ConnectSessionRequest, OrgActionRequest, SourceCleanupRequest,
+        SourceDiscoveryRequest,
     },
     upstream::proxy_json,
     utils::{empty_to_none, trim_opt},
 };
+
+/// Resolve the org's connection id for a provider via integration-core's
+/// connections list (newest active connection wins). The onboarding SPA only
+/// knows the provider key it just connected; integration-core v2's discovery
+/// and sync endpoints are per-connection.
+async fn resolve_connection_id(
+    state: &AppState,
+    actor: &ActionActor,
+    org_id: &str,
+    provider: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let (status, Json(body)) = proxy_json(
+        state,
+        Method::GET,
+        &format!(
+            "{}/api/v1/connections?organizationId={}&providerKey={}",
+            state.integration_core_url,
+            urlencoding::encode(org_id),
+            urlencoding::encode(provider)
+        ),
+        None,
+        Some(org_id),
+        Some(actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return Err((status, Json(body)));
+    }
+    let connections = body
+        .pointer("/data/connections")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pick = connections
+        .iter()
+        .find(|c| c.get("status").and_then(Value::as_str) == Some("active"))
+        .or_else(|| connections.first());
+    match pick.and_then(|c| c.get("id")).and_then(Value::as_str) {
+        Some(id) if !id.trim().is_empty() => Ok(id.to_string()),
+        _ => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "connection_not_found",
+                    "message": format!("No {provider} connection exists for this organization yet."),
+                }
+            })),
+        )),
+    }
+}
 
 pub(crate) async fn start_connect_session(
     State(state): State<AppState>,
@@ -49,6 +101,10 @@ pub(crate) async fn start_connect_session(
     .await
 }
 
+// integration-core v2 has no /api/v1/onboarding/discover-source (that was a
+// v1 path — proxying it produced the 404 the SPA surfaced as "synkronisering
+// kan ha feilet"). v2 discovery is GET /api/v1/connections/{id}/discovery, so
+// resolve the freshly-created connection first.
 pub(crate) async fn discover_source(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -59,28 +115,44 @@ pub(crate) async fn discover_source(
         Some(&headers),
         state.allow_dev_actor_headers,
     );
-    let body = json!({
-        "organizationId": input.org_id.trim(),
-        "workspaceId": input.org_id.trim(),
-        "connectorId": input.connector_id.trim(),
-        "label": input.label,
-        "provider": input.provider.trim(),
-        "sources": input.sources,
-    });
+    let org_id = input.org_id.trim().to_string();
+    let provider = input.provider.trim().to_string();
 
-    proxy_json(
+    let connection_id = match resolve_connection_id(&state, &actor, &org_id, &provider).await {
+        Ok(id) => id,
+        Err(err) => return err,
+    };
+
+    let (status, Json(body)) = proxy_json(
         &state,
-        Method::POST,
+        Method::GET,
         &format!(
-            "{}/api/v1/onboarding/discover-source",
-            state.integration_core_url
+            "{}/api/v1/connections/{}/discovery",
+            state.integration_core_url,
+            urlencoding::encode(&connection_id)
         ),
-        Some(body),
-        Some(input.org_id.trim()),
+        None,
+        Some(&org_id),
         Some(&actor),
-        Some("application/json"),
+        None,
     )
-    .await
+    .await;
+    if !status.is_success() {
+        return (status, Json(body));
+    }
+    // The SPA contract is `{ id?, discovered? }`; keep the discovery snapshot
+    // alongside for richer consumers.
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "data": {
+                "id": connection_id,
+                "discovered": true,
+                "discovery": body.pointer("/data").cloned().unwrap_or(Value::Null),
+            }
+        })),
+    )
 }
 
 pub(crate) async fn cleanup_source(
@@ -143,6 +215,9 @@ pub(crate) async fn warm_sharepoint_discovery(
     .await
 }
 
+// integration-core v2 has no /api/v1/providers/{provider}/sync (v1 path — the
+// second 404 behind "synkronisering kan ha feilet"). v2 queues sync jobs per
+// connection: POST /api/v1/connections/{id}/sync.
 pub(crate) async fn start_integration_sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -153,26 +228,45 @@ pub(crate) async fn start_integration_sync(
         Some(&headers),
         state.allow_dev_actor_headers,
     );
-    let body = json!({
-        "organizationId": input.org_id.trim(),
-        "workspaceId": input.org_id.trim(),
-        "connectorId": input.connector_id.trim(),
-        "provider": input.provider.trim(),
-        "sources": input.sources,
-    });
+    let org_id = input.org_id.trim().to_string();
+    let provider = input.provider.trim().to_string();
 
-    proxy_json(
+    let connection_id = match resolve_connection_id(&state, &actor, &org_id, &provider).await {
+        Ok(id) => id,
+        Err(err) => return err,
+    };
+
+    let (status, Json(body)) = proxy_json(
         &state,
         Method::POST,
         &format!(
-            "{}/api/v1/providers/{}/sync",
+            "{}/api/v1/connections/{}/sync",
             state.integration_core_url,
-            urlencoding::encode(input.provider.trim())
+            urlencoding::encode(&connection_id)
         ),
-        Some(body),
-        Some(input.org_id.trim()),
+        Some(json!({})),
+        Some(&org_id),
         Some(&actor),
         Some("application/json"),
     )
-    .await
+    .await;
+    if !status.is_success() {
+        return (status, Json(body));
+    }
+    let job_id = body
+        .pointer("/data/syncJob/id")
+        .and_then(Value::as_str)
+        .unwrap_or(&connection_id)
+        .to_string();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "data": {
+                "id": job_id,
+                "started": true,
+                "connectionId": connection_id,
+            }
+        })),
+    )
 }

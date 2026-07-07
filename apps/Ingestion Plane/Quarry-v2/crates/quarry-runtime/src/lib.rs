@@ -13,6 +13,7 @@ pub mod ai_formats;
 pub mod answer;
 pub mod artifact_store;
 pub mod browser_driver;
+pub mod cas_store;
 pub mod dns_guard;
 pub mod driver;
 pub mod driver_plan;
@@ -22,7 +23,6 @@ pub mod event_bus;
 pub mod events;
 pub mod host_scheduler;
 pub mod intent_classifier;
-pub mod cas_store;
 pub mod nats_event_bus;
 pub mod page_image;
 pub mod page_renderer;
@@ -80,6 +80,7 @@ pub mod tls_driver;
 pub mod transport_fallback_driver;
 pub mod usage;
 pub mod vector_index;
+pub mod vision;
 
 pub use action_runtime::{ActionResult, ActionRuntime};
 pub use agent_loop::{AgentLoop, AgentLoopResult, LoopTermination};
@@ -156,6 +157,11 @@ pub use tls_driver::TlsProfileDriver;
 pub use transport_fallback_driver::TransportFallbackDriver;
 pub use usage::{metrics as usage_metrics, NatsUsageMeter, NoopUsageMeter, UsageEvent, UsageMeter};
 pub use vector_index::{DataPlaneVectorIndex, NoopVectorIndex, VectorHit, VectorIndex};
+pub use vision::{
+    SidecarVisualProcessor, VisualChangeArtifact, VisualObservationArtifact,
+    VisualObservationInput, VisualObservationProcessor, VisualObservationResult,
+    VisualPreprocessInput, VisualPreprocessResult, VisualProcessorOptions, VisualRegion,
+};
 
 #[cfg(test)]
 pub(crate) mod tests {

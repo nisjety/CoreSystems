@@ -29,11 +29,41 @@ type FinspoSourceClient interface {
 	SyncSource(context.Context, string, string, string) (handoff.FinspoSyncResult, error)
 }
 
+// DataPlaneDocumentsClient is the subset of *handoff.DataPlaneDocumentsClient
+// the worker needs. It is optional: FinspoWorker.DataPlane may be nil, in
+// which case Data Plane forwarding is skipped silently (see
+// logSkippedDataPlaneForward).
+type DataPlaneDocumentsClient interface {
+	Configured() bool
+}
+
 type FinspoWorker struct {
 	Integration  IntegrationSyncClient
 	Finspo       FinspoSourceClient
 	PollInterval time.Duration
 	Logger       *zerolog.Logger
+
+	// DataPlane is an optional handoff.DataPlaneDocumentsClient used to
+	// forward synced Finspo/SharePoint items into Data Plane v2 as
+	// documents. It is nil-safe: when unset (or unconfigured), the worker
+	// skips Data Plane forwarding silently with a single log line.
+	//
+	// IMPORTANT — this is intentionally NOT wired to actually call
+	// CreateDocument today. finspo-core's Microsoft Graph sync captures
+	// file/folder METADATA ONLY (internal/store/items.go in finspo-core has
+	// no content/body column, and internal/sync/delta.go never calls Graph's
+	// /content download endpoint or extracts text from PDFs/DOCX/etc). Data
+	// Plane v2's POST /v1/documents requires a non-empty `content` field
+	// (documents-api-go internal/validate: "content is required") — sending
+	// an empty or fabricated Content string here would either be rejected
+	// outright or would silently poison Data Plane with fake document text.
+	// Closing this gap requires new work in finspo-core first (a Graph
+	// content-fetch client + text extraction); see the finspo-worker Phase 7
+	// knowledge-ingestion report for details. Until then this field exists
+	// so the wiring point is explicit and testable, and so a future
+	// content-capable caller has a nil-safe, already-tested integration
+	// point to extend instead of adding a second ad hoc client.
+	DataPlane DataPlaneDocumentsClient
 }
 
 func (w FinspoWorker) Run(ctx context.Context) error {
@@ -118,7 +148,27 @@ func (w FinspoWorker) process(ctx context.Context, job store.SyncJob) error {
 	if err != nil {
 		return fmt.Errorf("complete Finspo sync job: %w", err)
 	}
+	w.logSkippedDataPlaneForward(sourceID)
 	return nil
+}
+
+// logSkippedDataPlaneForward is the nil-safe, configuration-gated hook for
+// forwarding synced Finspo items into Data Plane v2. It never calls
+// CreateDocument: finspo-core does not capture document content today (see
+// the DataPlane field doc comment), so there is nothing honest to forward.
+// When a Data Plane client IS configured, this logs a single info line
+// naming the gap instead of silently doing nothing, so the missing
+// capability stays observable in worker logs rather than invisible.
+func (w FinspoWorker) logSkippedDataPlaneForward(sourceID string) {
+	if w.Logger == nil {
+		return
+	}
+	if w.DataPlane == nil || !w.DataPlane.Configured() {
+		return
+	}
+	w.Logger.Info().
+		Str("finspoSourceId", sourceID).
+		Msg("Data Plane documents client is configured but skipped: finspo-core captures metadata only (no document content), so no content-bearing document was forwarded")
 }
 
 func (w FinspoWorker) failJob(ctx context.Context, job store.SyncJob, failure error) error {

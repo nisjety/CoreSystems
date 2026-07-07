@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"strconv"
 	"strings"
@@ -52,7 +53,15 @@ const requestIDHeader = "X-Request-ID"
 type requestIDContextKey struct{}
 
 func NewServer(cfg ServerConfig) *fiber.App {
-	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app := fiber.New(fiber.Config{
+		DisableStartupMessage: true,
+		// OAuth callbacks arrive from a browser whose `localhost` cookie jar is
+		// shared across every dev port (SPA, gateway, auth) and easily exceeds
+		// fasthttp's 4 KiB default ReadBufferSize — which made Fiber reject the
+		// provider redirect with 431 "Request Header Fields Too Large" and broke
+		// every connect flow. 64 KiB matches common proxy header limits.
+		ReadBufferSize: 64 * 1024,
+	})
 	app.Use(requestIDMiddleware)
 	metrics := newRequestMetrics()
 	app.Use(metrics.middleware)
@@ -105,7 +114,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	rateLimited := rateLimitHandlers(cfg.Config)
 
 	app.Get("/api/v1/providers", func(c *fiber.Ctx) error {
-		return success(c, fiber.Map{"providers": providers.WithReadiness(providers.Catalog(), cfg.Config.ProviderReadiness())})
+		catalog := providers.WithReadiness(providers.Catalog(), cfg.Config.ProviderReadiness())
+		return success(c, fiber.Map{"providers": attachMetaSDKConfig(catalog, cfg.Config)})
 	})
 
 	connectSessionHandler := func(c *fiber.Ctx) error {
@@ -655,6 +665,38 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		}
 		return success(c, fiber.Map{"accepted": true, "webhookEventId": event.ID, "normalizedBy": normalized.NormalizedBy})
 	})...)
+
+	app.Get("/api/v1/webhooks/:provider", chainHandlers(rateLimited, func(c *fiber.Ctx) error {
+		providerKey := providers.NormalizeKey(c.Params("provider"))
+		if _, ok := providers.Find(providerKey); !ok {
+			return apiError(c, fiber.StatusNotFound, "provider_not_supported", "Provider is not supported.")
+		}
+		challenge, err := verifyProviderWebhookChallenge(c, cfg.Config, providerKey)
+		if err != nil {
+			return apiError(c, fiber.StatusUnauthorized, "invalid_webhook_challenge", err.Error())
+		}
+		c.Set("Content-Type", "text/plain; charset=utf-8")
+		return c.SendString(challenge)
+	})...)
+
+	// GET the full stored payload for a webhook_received event by id.
+	// velion.ingestion.integration.webhook_received (published above, and at
+	// the SCIM/legacy insert sites) carries only metadata (eventType,
+	// webhookEventId) so NATS messages stay small — downstream cores
+	// (conversation-core, leads-core, …) that need the actual content fetch
+	// it here. Internal-only: this is provider-origin data, not
+	// end-user-facing, and org-scoped via organizationId.
+	app.Get("/internal/webhooks/events/:id", internalAuth, func(c *fiber.Ctx) error {
+		organizationID := strings.TrimSpace(c.Query("organizationId"))
+		event, err := cfg.Repo.GetWebhookEvent(c.UserContext(), organizationID, c.Params("id"))
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return apiError(c, fiber.StatusNotFound, "webhook_event_not_found", "No webhook event exists for this id and organization.")
+			}
+			return apiError(c, fiber.StatusInternalServerError, "webhook_event_lookup_failed", err.Error())
+		}
+		return success(c, fiber.Map{"webhookEvent": event})
+	})
 
 	app.Get("/api/v1/scim/tokens", internalOrBearerAuth, func(c *fiber.Ctx) error {
 		organizationID, err := organizationIDForSCIMTokenRequest(c, c.Query("organizationId"))
@@ -1667,30 +1709,77 @@ func chainHandlers(prefix []fiber.Handler, handlers ...fiber.Handler) []fiber.Ha
 	return append(out, handlers...)
 }
 
+// verifyProviderWebhook fails closed: a provider webhook is accepted only when
+// its signature scheme is configured AND the signature verifies. An unset
+// secret used to mean "accept anything", which let unsigned payloads into the
+// normalize/store/event pipeline. ALLOW_UNVERIFIED_WEBHOOKS=true is a dev-only
+// escape hatch for local testing without provider secrets.
 func verifyProviderWebhook(c *fiber.Ctx, cfg config.Config, providerKey string) error {
 	switch providerKey {
 	case "github":
 		if strings.TrimSpace(cfg.GitHubWebhookSecret) == "" {
-			return nil
+			return unverifiedWebhookError(cfg, providerKey)
 		}
 		return verifyGitHubWebhookSignature(c, cfg.GitHubWebhookSecret)
 	case "shopify":
 		if strings.TrimSpace(cfg.ShopifyWebhookSecret) == "" {
-			return nil
+			return unverifiedWebhookError(cfg, providerKey)
 		}
 		return verifyShopifyWebhookSignature(c, cfg.ShopifyWebhookSecret)
 	case "slack":
 		if strings.TrimSpace(cfg.SlackSigningSecret) == "" {
-			return nil
+			return unverifiedWebhookError(cfg, providerKey)
 		}
 		return verifySlackWebhookSignature(c, cfg.SlackSigningSecret, time.Now)
 	case "stripe":
 		if strings.TrimSpace(cfg.StripeWebhookSecret) == "" {
-			return nil
+			return unverifiedWebhookError(cfg, providerKey)
 		}
 		return verifyStripeWebhookSignature(c, cfg.StripeWebhookSecret)
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		secret := firstNonEmpty(cfg.MetaWebhookSecret, cfg.FacebookClientSecret, cfg.InstagramClientSecret)
+		if strings.TrimSpace(secret) == "" {
+			return unverifiedWebhookError(cfg, providerKey)
+		}
+		return verifyGitHubWebhookSignature(c, secret)
 	default:
+		// No signature scheme implemented for this provider — reject rather
+		// than trust an unauthenticated payload.
+		return unverifiedWebhookError(cfg, providerKey)
+	}
+}
+
+func unverifiedWebhookError(cfg config.Config, providerKey string) error {
+	if cfg.AllowUnverifiedWebhooks {
 		return nil
+	}
+	return fmt.Errorf(
+		"webhook signature verification is not configured for provider %q; rejecting unverified webhook",
+		providerKey,
+	)
+}
+
+func verifyProviderWebhookChallenge(c *fiber.Ctx, cfg config.Config, providerKey string) (string, error) {
+	switch providerKey {
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		if strings.TrimSpace(cfg.MetaWebhookVerifyToken) == "" {
+			return "", fmt.Errorf("META_WEBHOOK_VERIFY_TOKEN is required for Meta webhook verification")
+		}
+		mode := strings.TrimSpace(c.Query("hub.mode"))
+		token := strings.TrimSpace(c.Query("hub.verify_token"))
+		challenge := strings.TrimSpace(c.Query("hub.challenge"))
+		if mode != "subscribe" {
+			return "", fmt.Errorf("hub.mode must be subscribe")
+		}
+		if token == "" || token != strings.TrimSpace(cfg.MetaWebhookVerifyToken) {
+			return "", fmt.Errorf("hub.verify_token is invalid")
+		}
+		if challenge == "" {
+			return "", fmt.Errorf("hub.challenge is required")
+		}
+		return challenge, nil
+	default:
+		return "", fmt.Errorf("webhook challenge verification is not configured for provider %q", providerKey)
 	}
 }
 
@@ -2340,12 +2429,22 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 		}
 	case "github":
 		switch normalized {
-		case "user", "github.user":
+		case "user", "github.user", "emails", "github.emails":
 			return "profile.read", false
 		case "orgs", "github.orgs", "teams", "github.teams":
 			return "org.read", false
 		case "repos", "github.repos", "repo", "github.repo":
 			return "repo.public.read", false
+		case "contents.get", "github.contents.get", "readme.get", "github.readme.get", "branches", "github.branches":
+			return "repo.contents.read", true
+		case "commits", "github.commits":
+			return "commits.read", true
+		case "pulls", "pulls.list", "github.pulls", "github.pulls.list":
+			return "pulls.read", true
+		case "issues", "issues.list", "github.issues", "github.issues.list":
+			return "issues.read", true
+		case "issues.create", "github.issues.create", "issues.update", "github.issues.update", "issues.comment.create", "github.issues.comment.create":
+			return "issues.write", true
 		}
 	case "notion":
 		switch normalized {
@@ -2372,6 +2471,73 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 		case "subscriptions", "stripe.subscriptions", "invoices", "stripe.invoices":
 			return "billing.read", true
 		}
+	case "linkedin":
+		switch normalized {
+		case "profile", "linkedin.profile":
+			return "social.profile.read", false
+		case "identity", "linkedin.identity":
+			return "social.profile.verify", true
+		case "verification.report", "linkedin.verification.report":
+			return "social.verification.read", true
+		case "organization.acls", "organizations", "linkedin.organization.acls":
+			return "social.organization.read", true
+		case "posts.list", "linkedin.posts.list":
+			return "social.post.read", true
+		case "posts.create", "linkedin.posts.create":
+			return "social.post.write", true
+		case "events.get", "linkedin.events.get":
+			return "social.organization.read", true
+		case "events.create", "linkedin.events.create", "events.update", "linkedin.events.update":
+			return "social.events.manage", true
+		case "ads.accounts", "linkedin.ads.accounts", "ads.account", "linkedin.ads.account":
+			return "social.ads.read", true
+		case "ads.campaigns", "linkedin.ads.campaigns", "ads.campaign", "linkedin.ads.campaign":
+			return "social.ads.read", true
+		case "ads.campaign.create", "linkedin.ads.campaign.create", "ads.campaign.update", "linkedin.ads.campaign.update":
+			return "social.ads.manage", true
+		case "conversions.list", "linkedin.conversions.list":
+			return "social.ads.read", true
+		case "conversions.create", "linkedin.conversions.create":
+			return "social.conversions.manage", true
+		case "lead.forms", "linkedin.lead.forms", "lead.responses", "linkedin.lead.responses":
+			return "social.leads.read", true
+		}
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		switch normalized {
+		case "profile", "meta.profile", "facebook.profile",
+			"pages.list", "facebook.pages", "meta.pages",
+			"ads.businesses", "meta.businesses":
+			return "social.profile.read", false
+		case "instagram.accounts", "meta.instagram.accounts",
+			"instagram.media.status", "instagram.insights":
+			return "social.instagram.read", true
+		case "pages.post", "facebook.page.post":
+			return "social.post.write", true
+		case "pages.photo", "facebook.page.photo",
+			"instagram.media.create", "instagram.media.publish":
+			return "social.media.upload", true
+		case "whatsapp.business_accounts", "whatsapp.accounts", "whatsapp.phone_numbers", "whatsapp.templates", "whatsapp.messages.send":
+			return "social.whatsapp.manage", true
+		case "messenger.messages.send", "messenger.subscribed_apps":
+			return "social.messenger.manage", true
+		case "ads.adaccounts", "meta.adaccounts", "ads.campaigns", "ads.campaign.create", "app_ads.campaign.create",
+			"ads.adsets", "ads.ads", "ads.creatives":
+			return "social.ads.manage", true
+		case "audience_network.apps", "meta.audience_network.apps":
+			return "social.audience_network.read", true
+		case "ads.insights":
+			return "social.analytics.read", true
+		case "catalogs.list", "catalog.list", "catalog.products", "catalog.product.upsert", "catalog.batch":
+			return "social.catalog.manage", true
+		case "threads.profile", "threads.container.create", "threads.publish":
+			return "social.threads.manage", true
+		case "threads.insights":
+			return "social.analytics.read", true
+		case "oembed", "meta.oembed":
+			return "social.oembed.read", false
+		case "live.create", "facebook.live.create", "live.list", "facebook.live.list", "live.get", "facebook.live.get":
+			return "social.live.manage", true
+		}
 	case "okta":
 		switch normalized {
 		case "org", "okta.org":
@@ -2394,10 +2560,46 @@ func actionRequiresApproval(providerKey, operation string) bool {
 		return normalized == "message.send" || normalized == "slack.message.send"
 	case "google":
 		return normalized == "gmail.send" || normalized == "google.gmail.send"
+	case "github":
+		switch normalized {
+		case "issues.create", "github.issues.create",
+			"issues.update", "github.issues.update",
+			"issues.comment.create", "github.issues.comment.create":
+			return true
+		default:
+			return false
+		}
 	case "notion":
 		return normalized == "content.write" || normalized == "notion.content.write"
 	case "shopify":
 		return normalized == "orders.write" || normalized == "shopify.orders.write"
+	case "linkedin":
+		switch normalized {
+		case "posts.create", "linkedin.posts.create",
+			"events.create", "linkedin.events.create",
+			"events.update", "linkedin.events.update",
+			"ads.campaign.create", "linkedin.ads.campaign.create",
+			"ads.campaign.update", "linkedin.ads.campaign.update",
+			"conversions.create", "linkedin.conversions.create":
+			return true
+		default:
+			return false
+		}
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		switch normalized {
+		case "pages.post", "facebook.page.post",
+			"pages.photo", "facebook.page.photo",
+			"live.create", "facebook.live.create",
+			"instagram.media.create", "instagram.media.publish",
+			"whatsapp.messages.send",
+			"messenger.messages.send", "messenger.subscribed_apps",
+			"ads.campaign.create", "app_ads.campaign.create",
+			"catalog.product.upsert", "catalog.batch",
+			"threads.container.create", "threads.publish":
+			return true
+		default:
+			return false
+		}
 	case "okta":
 		return normalized == "user.suspend" || normalized == "okta.user.suspend" ||
 			normalized == "user.activate" || normalized == "okta.user.activate"
@@ -2556,6 +2758,40 @@ func publishIntegrationEvent(ctx context.Context, cfg ServerConfig, eventType st
 	}
 }
 
+func attachMetaSDKConfig(catalog []providers.Provider, cfg config.Config) []providers.Provider {
+	meta := providers.MetaSDK{
+		Enabled:       strings.TrimSpace(cfg.MetaJSSDKAppID) != "",
+		AppID:         strings.TrimSpace(cfg.MetaJSSDKAppID),
+		APIVersion:    strings.TrimSpace(cfg.MetaJSSDKAPIVersion),
+		Locale:        strings.TrimSpace(cfg.MetaJSSDKLocale),
+		LoginConfigID: strings.TrimSpace(cfg.MetaBusinessLoginConfigID),
+	}
+	if meta.APIVersion == "" {
+		meta.APIVersion = "v25.0"
+	}
+	if meta.Locale == "" {
+		meta.Locale = "en_US"
+	}
+
+	out := make([]providers.Provider, 0, len(catalog))
+	for _, provider := range catalog {
+		if isMetaSDKProvider(provider.Key) {
+			provider.MetaSDK = &meta
+		}
+		out = append(out, provider)
+	}
+	return out
+}
+
+func isMetaSDKProvider(providerKey string) bool {
+	switch providers.NormalizeKey(providerKey) {
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		return true
+	default:
+		return false
+	}
+}
+
 func callbackHTML(result oauth.CallbackResult) string {
 	status := "error"
 	if result.Success {
@@ -2573,23 +2809,38 @@ func callbackHTML(result oauth.CallbackResult) string {
 	payloadScript := strings.ReplaceAll(string(payload), "<", "\\u003c")
 	message := html.EscapeString(result.Message)
 	returnURL := html.EscapeString(result.ReturnURL)
+	heading := "Tilkoblingen feilet"
+	if result.Success {
+		heading = "Tilkoblet"
+	}
+	// Auto-close ONLY on success. Providers with Cross-Origin-Opener-Policy
+	// (X, LinkedIn, Microsoft) sever window.opener, so the postMessage below is
+	// best-effort — the SPA's authoritative signal is the connect-session
+	// status endpoint. On error the window stays open so the user can actually
+	// read what went wrong (it used to close itself after 250ms).
+	autoClose := ""
+	if result.Success {
+		autoClose = `
+  window.setTimeout(function () {
+    try { window.close(); } catch (_) {}
+    if ("` + returnURL + `") window.location.href = "` + returnURL + `";
+  }, 900);`
+	}
 	return `<!doctype html>
 <html>
 <head><meta charset="utf-8"><title>Velion integration</title></head>
-<body style="font-family: system-ui, sans-serif; padding: 32px;">
+<body style="font-family: system-ui, sans-serif; padding: 32px; max-width: 32rem;">
 <script>
 (function () {
   var payload = ` + payloadScript + `;
   try {
     if (window.opener) window.opener.postMessage(payload, "*");
-  } catch (_) {}
-  window.setTimeout(function () {
-    try { window.close(); } catch (_) {}
-    if ("` + returnURL + `") window.location.href = "` + returnURL + `";
-  }, 250);
+  } catch (_) {}` + autoClose + `
 })();
 </script>
-<p>` + message + `</p>
+<h1 style="font-size: 1.1rem; margin: 0 0 8px;">` + heading + `</h1>
+<p style="margin: 0 0 20px; color: #444;">` + message + `</p>
+<button onclick="window.close()" style="padding: 8px 16px; font: inherit; cursor: pointer;">Lukk vinduet</button>
 </body>
 </html>`
 }

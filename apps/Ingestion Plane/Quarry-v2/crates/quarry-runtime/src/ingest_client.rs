@@ -96,20 +96,16 @@ impl IngestClient {
                 req_builder = req_builder.header("x-user-id", uid);
             }
         }
-        let resp = req_builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                let code = if e.is_timeout() {
-                    ErrorCode::Timeout
-                } else if e.is_connect() {
-                    ErrorCode::UpstreamBlocked
-                } else {
-                    ErrorCode::DriverFailed
-                };
-                QuarryError::new(code, format!("ingest request failed: {e}"))
-            })?;
+        let resp = req_builder.json(&body).send().await.map_err(|e| {
+            let code = if e.is_timeout() {
+                ErrorCode::Timeout
+            } else if e.is_connect() {
+                ErrorCode::UpstreamBlocked
+            } else {
+                ErrorCode::DriverFailed
+            };
+            QuarryError::new(code, format!("ingest request failed: {e}"))
+        })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -392,6 +388,8 @@ mod tests {
             retention_policy: None,
             privacy_policy: Some(quarry_core::privacy::PrivacyPolicy::default()),
             source_trace: None,
+            initiator_user_id: None,
+            visibility: None,
         }
     }
 

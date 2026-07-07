@@ -312,6 +312,31 @@ func (r *PostgresRepository) InsertWebhookEvent(ctx context.Context, event Webho
 	return nil
 }
 
+func (r *PostgresRepository) GetWebhookEvent(ctx context.Context, organizationID, id string) (WebhookEvent, error) {
+	var event WebhookEvent
+	var payload []byte
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, organization_id, provider_key, event_type, signature_hash, payload, received_at
+		FROM integration_webhook_events
+		WHERE id = $1 AND ($2 = '' OR organization_id = $2)
+	`, id, organizationID).Scan(
+		&event.ID, &event.OrganizationID, &event.ProviderKey, &event.EventType,
+		&event.SignatureHash, &payload, &event.ReceivedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return WebhookEvent{}, ErrNotFound
+		}
+		return WebhookEvent{}, fmt.Errorf("get webhook event: %w", err)
+	}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &event.Payload); err != nil {
+			return WebhookEvent{}, fmt.Errorf("unmarshal webhook payload: %w", err)
+		}
+	}
+	return event, nil
+}
+
 func (r *PostgresRepository) InsertTokenLease(ctx context.Context, lease TokenLease) error {
 	if lease.ID == "" {
 		lease.ID = "lease_" + uuid.NewString()

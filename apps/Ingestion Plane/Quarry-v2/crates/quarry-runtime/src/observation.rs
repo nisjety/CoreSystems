@@ -8,24 +8,28 @@ use quarry_browser::BrowserDriver;
 use quarry_core::contracts::{
     AgentAction, AgentActionRequest, BrowserObservation, DomSummary, InteractiveElement,
 };
-use quarry_core::error::QuarryResult;
+use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::EventType;
 use quarry_core::ids::kinds::ArtifactKind;
+use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use serde_json::json;
 
 use crate::artifact_store::ArtifactStore;
 use crate::events::EventSink;
+use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
 pub struct ObservationRunner {
     pub browser: Arc<dyn BrowserDriver>,
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
     pub events: Option<EventSink>,
+    pub visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
 }
 
 pub struct ObservationContext {
     pub step: u32,
     pub current_url: String,
     pub page_hash: String,
+    pub previous_screenshot: Option<Vec<u8>>,
 }
 
 impl ObservationRunner {
@@ -88,7 +92,9 @@ impl ObservationRunner {
         }
 
         let mut screenshot_artifact_id: Option<ArtifactKind> = None;
+        let mut visual_observation_artifact_id: Option<ArtifactKind> = None;
         let policy_denials: Vec<String> = Vec::new();
+        let mut current_screenshot: Option<Vec<u8>> = None;
 
         match &request.action {
             AgentAction::Navigate { url } => {
@@ -125,20 +131,29 @@ impl ObservationRunner {
             }
             AgentAction::Screenshot { full_page } => {
                 let bytes = self.browser.screenshot(session, *full_page).await?;
-                if let Some(store) = &self.artifacts {
-                    let handle = store
-                        .put(run_id, &ctx.page_hash, "screenshot", bytes.to_vec())
-                        .await?;
-                    screenshot_artifact_id = Some(handle.artifact_id);
-                }
+                let payload = bytes.to_vec();
+                screenshot_artifact_id = self
+                    .put_artifact_if_allowed(
+                        request.zdr,
+                        run_id,
+                        &ctx.page_hash,
+                        "screenshot",
+                        payload.clone(),
+                    )
+                    .await?;
+                current_screenshot = Some(payload);
             }
             AgentAction::Pdf => {
                 let bytes = self.browser.pdf(session).await?;
-                if let Some(store) = &self.artifacts {
-                    let _handle = store
-                        .put(run_id, &ctx.page_hash, "pdf", bytes.to_vec())
-                        .await?;
-                }
+                let _ = self
+                    .put_artifact_if_allowed(
+                        request.zdr,
+                        run_id,
+                        &ctx.page_hash,
+                        "pdf",
+                        bytes.to_vec(),
+                    )
+                    .await?;
             }
             AgentAction::Evaluate { script } => {
                 self.browser.evaluate(session, script).await?;
@@ -175,15 +190,199 @@ impl ObservationRunner {
 
         if screenshot_artifact_id.is_none() {
             if let Ok(bytes) = self.browser.screenshot(session, false).await {
-                if let Some(store) = &self.artifacts {
-                    if let Ok(handle) = store
-                        .put(run_id, &ctx.page_hash, "screenshot", bytes.to_vec())
+                let payload = bytes.to_vec();
+                if let Ok(id) = self
+                    .put_artifact_if_allowed(
+                        request.zdr,
+                        run_id,
+                        &ctx.page_hash,
+                        "screenshot",
+                        payload.clone(),
+                    )
+                    .await
+                {
+                    screenshot_artifact_id = id;
+                }
+                current_screenshot = Some(payload);
+            }
+        }
+
+        if let Some(current) = current_screenshot.clone() {
+            if matches!(request.zdr, ZdrMode::Off) {
+                if let Some(processor) = &self.visual_processor {
+                    match processor
+                        .observe(VisualObservationInput {
+                            run_id: run_id.to_string(),
+                            page_hash: ctx.page_hash.clone(),
+                            step: ctx.step,
+                            previous_png: ctx.previous_screenshot.clone(),
+                            current_png: current.clone(),
+                        })
                         .await
                     {
-                        screenshot_artifact_id = Some(handle.artifact_id);
+                        Ok(mut result) => {
+                            if let Some(annotated_png) = result.annotated_png {
+                                if let Ok(Some(id)) = self
+                                    .put_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "screenshot_annotated",
+                                        annotated_png,
+                                    )
+                                    .await
+                                {
+                                    result.artifact.annotated_artifact_id = Some(id.to_string());
+                                    attach_related(
+                                        &mut result.artifact,
+                                        "screenshot_annotated",
+                                        &id,
+                                    );
+                                }
+                            }
+                            if let Some(clean_png) = result.clean_png {
+                                if let Ok(Some(id)) = self
+                                    .put_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "page_image_clean",
+                                        clean_png,
+                                    )
+                                    .await
+                                {
+                                    attach_related(&mut result.artifact, "page_image_clean", &id);
+                                }
+                            }
+                            if let Some(thumbnail_png) = result.thumbnail_png {
+                                if let Ok(Some(id)) = self
+                                    .put_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "thumbnail",
+                                        thumbnail_png,
+                                    )
+                                    .await
+                                {
+                                    attach_related(&mut result.artifact, "thumbnail", &id);
+                                }
+                            }
+                            if let Some(tiles) = result.tiles {
+                                if let Ok(Some(id)) = self
+                                    .put_json_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "tiles",
+                                        &tiles,
+                                    )
+                                    .await
+                                {
+                                    attach_related(&mut result.artifact, "tiles", &id);
+                                }
+                            }
+                            if let Some(ocr_png) = result.ocr_preprocessed_png {
+                                if let Ok(Some(id)) = self
+                                    .put_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "ocr_preprocessed",
+                                        ocr_png,
+                                    )
+                                    .await
+                                {
+                                    attach_related(&mut result.artifact, "ocr_preprocessed", &id);
+                                }
+                            }
+                            if let Some(logo_png) = result.logo_candidate_png {
+                                if let Ok(Some(id)) = self
+                                    .put_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "logo_candidate",
+                                        logo_png,
+                                    )
+                                    .await
+                                {
+                                    attach_related(&mut result.artifact, "logo_candidate", &id);
+                                }
+                            }
+                            if let Some(palette) = result.rendered_palette {
+                                if let Ok(Some(id)) = self
+                                    .put_json_artifact_if_allowed(
+                                        request.zdr,
+                                        run_id,
+                                        &ctx.page_hash,
+                                        "rendered_palette",
+                                        &palette,
+                                    )
+                                    .await
+                                {
+                                    attach_related(&mut result.artifact, "rendered_palette", &id);
+                                }
+                            }
+
+                            let visual_change = VisualChangeArtifact {
+                                version: result.artifact.version,
+                                backend: result.artifact.backend.clone(),
+                                step: result.artifact.step,
+                                previous_available: result.artifact.previous_available,
+                                changed: result.artifact.changed,
+                                change_ratio: result.artifact.change_ratio,
+                                regions: result.artifact.regions.clone(),
+                                metrics: result.artifact.metrics.clone(),
+                                annotated_artifact_id: result
+                                    .artifact
+                                    .annotated_artifact_id
+                                    .clone(),
+                            };
+                            if let Ok(Some(id)) = self
+                                .put_json_artifact_if_allowed(
+                                    request.zdr,
+                                    run_id,
+                                    &ctx.page_hash,
+                                    "visual_change",
+                                    &visual_change,
+                                )
+                                .await
+                            {
+                                result.artifact.change_artifact_id = Some(id.to_string());
+                                attach_related(&mut result.artifact, "visual_change", &id);
+                            }
+
+                            match self
+                                .put_json_artifact_if_allowed(
+                                    request.zdr,
+                                    run_id,
+                                    &ctx.page_hash,
+                                    "visual_observation",
+                                    &result.artifact,
+                                )
+                                .await
+                            {
+                                Ok(id) => visual_observation_artifact_id = id,
+                                Err(e) => tracing::warn!(
+                                    error = %e,
+                                    "visual observation artifact write failed"
+                                ),
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "visual observation processor failed"
+                        ),
                     }
                 }
             }
+
+            ctx.previous_screenshot = if matches!(request.zdr, ZdrMode::Off) {
+                Some(current)
+            } else {
+                None
+            };
         }
 
         let observation = BrowserObservation {
@@ -193,6 +392,7 @@ impl ObservationRunner {
             title,
             dom_summary,
             screenshot_artifact_id,
+            visual_observation_artifact_id,
             console_summary: vec![],
             network_summary: vec![],
             policy_denials,
@@ -216,6 +416,42 @@ impl ObservationRunner {
 
         ctx.step += 1;
         Ok(observation)
+    }
+
+    async fn put_artifact_if_allowed(
+        &self,
+        zdr_mode: ZdrMode,
+        run_id: &quarry_core::ids::kinds::RunKind,
+        page_hash: &str,
+        kind: &str,
+        body: Vec<u8>,
+    ) -> QuarryResult<Option<ArtifactKind>> {
+        if zdr::guard(zdr_mode, WriteKind::Artifact).is_err() {
+            return Ok(None);
+        }
+        let Some(store) = &self.artifacts else {
+            return Ok(None);
+        };
+        let handle = store.put(run_id, page_hash, kind, body).await?;
+        Ok(Some(handle.artifact_id))
+    }
+
+    async fn put_json_artifact_if_allowed<T: serde::Serialize + ?Sized>(
+        &self,
+        zdr_mode: ZdrMode,
+        run_id: &quarry_core::ids::kinds::RunKind,
+        page_hash: &str,
+        kind: &str,
+        value: &T,
+    ) -> QuarryResult<Option<ArtifactKind>> {
+        let body = serde_json::to_vec(value).map_err(|e| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                format!("serialize visual artifact {kind}: {e}"),
+            )
+        })?;
+        self.put_artifact_if_allowed(zdr_mode, run_id, page_hash, kind, body)
+            .await
     }
 
     async fn page_state(&self, session: &quarry_browser::BrowserSession) -> PageState {
@@ -243,6 +479,16 @@ impl ObservationRunner {
             })
             .unwrap_or_default()
     }
+}
+
+fn attach_related(
+    artifact: &mut crate::vision::VisualObservationArtifact,
+    kind: &str,
+    id: &ArtifactKind,
+) {
+    artifact
+        .related_artifacts
+        .insert(kind.to_string(), id.to_string());
 }
 
 #[derive(Default)]
@@ -363,6 +609,17 @@ fn strip_tags(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_store::{ArtifactStore, InMemoryStore};
+    use crate::vision::{
+        VisualObservationArtifact, VisualObservationResult, VisualPreprocessInput,
+        VisualPreprocessResult, VisualRegion,
+    };
+    use quarry_browser::BrowserDriver;
+    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::ids::kinds::RunKind;
+    use quarry_core::ids::Id;
+    use quarry_core::lease::{BrowserLease, ProxyAffinity};
+    use std::sync::Arc;
 
     #[test]
     fn extract_title_basic() {
@@ -413,5 +670,196 @@ mod tests {
         let browser_action =
             ObservationRunner::agent_action_to_browser_action(&AgentAction::Forward);
         assert!(matches!(browser_action, Action::Forward));
+    }
+
+    #[tokio::test]
+    async fn put_artifact_if_allowed_skips_zdr_writes() {
+        let store = Arc::new(InMemoryStore::with_org("org_a"));
+        let runner = ObservationRunner {
+            browser: Arc::new(crate::tests::MockBrowserDriver),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: None,
+        };
+        let run_id: RunKind = Id::new();
+
+        let id = runner
+            .put_artifact_if_allowed(
+                ZdrMode::On,
+                &run_id,
+                "blake3:page",
+                "visual_observation",
+                b"{}".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert!(id.is_none());
+        assert_eq!(store.count("org_a").await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn put_artifact_if_allowed_stores_visual_observation_when_zdr_off() {
+        let store = Arc::new(InMemoryStore::with_org("org_a"));
+        let runner = ObservationRunner {
+            browser: Arc::new(crate::tests::MockBrowserDriver),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: None,
+        };
+        let run_id: RunKind = Id::new();
+
+        let id = runner
+            .put_artifact_if_allowed(
+                ZdrMode::Off,
+                &run_id,
+                "blake3:page",
+                "visual_observation",
+                b"{}".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert!(id.is_some());
+        let listed = store
+            .list("org_a", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.items[0].kind, "visual_observation");
+    }
+
+    struct MockVisualProcessor;
+
+    #[async_trait::async_trait]
+    impl VisualObservationProcessor for MockVisualProcessor {
+        async fn observe(
+            &self,
+            _input: VisualObservationInput,
+        ) -> QuarryResult<VisualObservationResult> {
+            Ok(VisualObservationResult {
+                artifact: VisualObservationArtifact {
+                    version: 1,
+                    backend: "mock-opencv5-sidecar".into(),
+                    step: 1,
+                    previous_available: true,
+                    changed: true,
+                    change_ratio: 0.42,
+                    regions: vec![VisualRegion {
+                        x: 1,
+                        y: 2,
+                        width: 3,
+                        height: 4,
+                        score: Some(0.5),
+                        label: Some("changed".into()),
+                    }],
+                    metrics: serde_json::json!({ "threshold": 18 }),
+                    annotated_artifact_id: None,
+                    change_artifact_id: None,
+                    related_artifacts: Default::default(),
+                },
+                annotated_png: Some(b"annotated".to_vec()),
+                clean_png: Some(b"clean".to_vec()),
+                thumbnail_png: Some(b"thumbnail".to_vec()),
+                tiles: Some(serde_json::json!({ "tiles": [{ "x": 0, "y": 0 }] })),
+                ocr_preprocessed_png: Some(b"ocr".to_vec()),
+                logo_candidate_png: Some(b"logo".to_vec()),
+                rendered_palette: Some(serde_json::json!({ "colors": [{ "hex": "#102030" }] })),
+            })
+        }
+
+        async fn preprocess_page_image(
+            &self,
+            input: VisualPreprocessInput,
+        ) -> QuarryResult<VisualPreprocessResult> {
+            Ok(VisualPreprocessResult {
+                clean_png: input.image_png,
+                metrics: serde_json::Value::Null,
+                thumbnail_png: None,
+                tiles: None,
+                ocr_preprocessed_png: None,
+                logo_candidate_png: None,
+                rendered_palette: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_stores_visual_artifact_fanout_when_zdr_off() {
+        let store = Arc::new(InMemoryStore::with_org("org_a"));
+        let browser = Arc::new(crate::tests::MockBrowserDriver);
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: Some(Arc::new(MockVisualProcessor)),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: "default".into(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org_a".into(),
+        };
+        let session = browser.acquire(&lease).await.unwrap();
+        let run_id: RunKind = Id::new();
+        let request = AgentActionRequest {
+            run_id: run_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Wait { ms: 0 },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+        };
+        let mut ctx = ObservationContext {
+            step: 1,
+            current_url: "https://example.com".into(),
+            page_hash: "blake3:page".into(),
+            previous_screenshot: Some(b"previous".to_vec()),
+        };
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+        assert!(observation.visual_observation_artifact_id.is_some());
+
+        let listed = store
+            .list("org_a", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        let kinds: std::collections::HashSet<_> =
+            listed.items.iter().map(|item| item.kind.as_str()).collect();
+        for kind in [
+            "screenshot",
+            "screenshot_annotated",
+            "page_image_clean",
+            "thumbnail",
+            "tiles",
+            "ocr_preprocessed",
+            "logo_candidate",
+            "rendered_palette",
+            "visual_change",
+            "visual_observation",
+        ] {
+            assert!(kinds.contains(kind), "missing visual artifact kind {kind}");
+        }
+
+        let obs_id = observation.visual_observation_artifact_id.unwrap();
+        let bytes = store.get(&obs_id).await.unwrap();
+        let artifact: VisualObservationArtifact = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(artifact.change_ratio, 0.42);
+        assert!(artifact.change_artifact_id.is_some());
+        assert!(artifact.related_artifacts.contains_key("visual_change"));
+        assert!(artifact.related_artifacts.contains_key("rendered_palette"));
     }
 }

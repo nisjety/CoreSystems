@@ -26,6 +26,8 @@ pub struct BrowserObservation {
     pub dom_summary: Option<DomSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot_artifact_id: Option<kinds::ArtifactKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_observation_artifact_id: Option<kinds::ArtifactKind>,
     #[serde(default)]
     pub console_summary: Vec<ConsoleLine>,
     #[serde(default)]

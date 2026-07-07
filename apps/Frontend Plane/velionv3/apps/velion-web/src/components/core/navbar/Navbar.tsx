@@ -1,4 +1,5 @@
 type NavbarProps = {
+	isHidden?: boolean;
 	isMenuOpen: boolean;
 	isOnDark: boolean;
 	isScrolled: boolean;
@@ -13,6 +14,7 @@ const navItems = [
 ];
 
 export function Navbar({
+	isHidden = false,
 	isMenuOpen,
 	isOnDark,
 	isScrolled,
@@ -27,6 +29,7 @@ export function Navbar({
 		<header
 			className={[
 				"pointer-events-none fixed inset-x-0 top-0 z-[60] grid h-28 grid-cols-[minmax(160px,1fr)_auto_minmax(160px,1fr)] items-center px-[clamp(24px,4vw,56px)] transition-[color,height,opacity] duration-300 max-[760px]:h-24 max-[760px]:grid-cols-[1fr_auto]",
+				isHidden ? "opacity-0 [&_*]:pointer-events-none" : "",
 				isScrolled ? "h-[92px]" : "",
 				isOnDark
 					? "text-[color-mix(in_srgb,var(--velion-c-white)_76%,transparent)]"
@@ -78,18 +81,17 @@ export function Navbar({
 					</svg>
 				</a>
 
-				<button
-					aria-expanded={isMenuOpen}
-					aria-label="Åpne meny"
-          
-					className="group grid w-[50px] cursor-pointer gap-1.5 border-0 bg-transparent py-2.5 text-[color-mix(in_srgb,currentColor_68%,transparent)] transition-colors hover:text-current max-[760px]:w-11"
-					onClick={onOpen}
-					type="button"
-				>
-					<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-[0.76]" />
-					<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-90" />
-				</button>
-			</div>
-		</header>
-	);
-}
+					<button
+						aria-expanded={isMenuOpen}
+						aria-label="Åpne meny"
+						className="group grid w-[50px] cursor-pointer gap-1.5 border-0 bg-transparent py-2.5 text-[color-mix(in_srgb,currentColor_68%,transparent)] transition-colors hover:text-current max-[760px]:w-11"
+						onClick={onOpen}
+						type="button"
+					>
+						<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-[0.76]" />
+						<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-90" />
+					</button>
+				</div>
+			</header>
+		);
+	}

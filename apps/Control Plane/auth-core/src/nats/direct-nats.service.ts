@@ -164,6 +164,25 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Fire-and-forget core publish for audit events (velion.audit.v1.control.*).
+   *
+   * This is the LOCAL control-plane bus connection (NATS_URL → controlplane-nats),
+   * where audit-core's primary core QueueSubscribe listens — NOT the shared
+   * velion-nats bus. Never throws: a missing/closed connection silently no-ops,
+   * matching SharedNatsService.publishPlain so callers stay fire-and-forget.
+   */
+  publishPlain(subject: string, payload: Record<string, unknown>): void {
+    if (!this.nc || this.nc.isClosed()) {
+      return;
+    }
+    try {
+      this.nc.publish(subject, this.sc.encode(JSON.stringify(payload)));
+    } catch (error) {
+      console.error(`❌ Failed to publish "${subject}" to local NATS:`, error);
+    }
+  }
+
+  /**
    * Request-reply pattern (for future use)
    */
   async request(subject: string, data: any, timeout = 5000): Promise<any> {

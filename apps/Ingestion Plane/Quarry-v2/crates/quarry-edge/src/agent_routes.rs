@@ -182,6 +182,7 @@ mod enabled {
                 step: 0,
                 current_url: String::new(),
                 page_hash: String::new(),
+                previous_screenshot: None,
             },
             lease,
             constraints: body.constraints,
@@ -318,6 +319,7 @@ mod enabled {
             browser: state.agent_driver.clone(),
             artifacts: Some(state.artifacts.clone()),
             events: Some(state.event_sink.clone()),
+            visual_processor: state.visual_processor.clone(),
         };
 
         // Disjoint borrows: &session (shared) + &mut ctx (exclusive).

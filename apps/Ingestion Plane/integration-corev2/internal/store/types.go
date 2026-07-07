@@ -190,6 +190,12 @@ type Repository interface {
 	InsertSyncEvent(ctx context.Context, event SyncEvent) error
 	ListSyncEvents(ctx context.Context, jobID string) ([]SyncEvent, error)
 	InsertWebhookEvent(ctx context.Context, event WebhookEvent) error
+	// GetWebhookEvent fetches a stored webhook by id, org-scoped. Downstream
+	// cores subscribe to the lightweight velion.ingestion.integration.
+	// webhook_received NATS event (metadata only: eventType, webhookEventId)
+	// and fetch the full payload on demand via this lookup rather than the
+	// event carrying a potentially-large body.
+	GetWebhookEvent(ctx context.Context, organizationID, id string) (WebhookEvent, error)
 	InsertTokenLease(ctx context.Context, lease TokenLease) error
 	CreateSCIMToken(ctx context.Context, token SCIMToken, tokenHash string) (SCIMToken, error)
 	ListSCIMTokens(ctx context.Context, organizationID string) ([]SCIMToken, error)

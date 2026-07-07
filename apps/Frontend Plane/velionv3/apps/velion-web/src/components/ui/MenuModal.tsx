@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { VelionMarkFilled } from "@/components/home/sections/VelionMark";
 
 type MenuModalProps = {
 	onClose: () => void;
@@ -8,7 +9,7 @@ type MenuModalProps = {
 const menuItems = [
 	{ href: "#produkt", label: "Produkt", number: "001" },
 	{ href: "#plattform", label: "Plattform", number: "002" },
-	{ href: "/trust", label: "Trust Center", number: "003" },
+	{ href: "/trust", label: "Tillit", number: "003" },
 	{ href: "#kontakt", label: "Kontakt", number: "004" },
 ];
 
@@ -29,11 +30,11 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 			<div className="flex items-start justify-between">
 				<a
 					aria-label="Velion hjem"
-					className="relative font-protokoll text-[3.4rem] font-medium leading-none before:absolute before:left-0 before:top-[0.56em] before:h-0.5 before:w-[1.1em] before:-translate-x-[0.38em] before:bg-current before:content-['']"
+					className="grid size-[76px] place-items-start text-current transition-opacity hover:opacity-75 max-[760px]:size-[60px]"
 					href="#top"
 					onClick={onClose}
 				>
-					V
+					<VelionMarkFilled className="size-full scale-170" />
 				</a>
 
 				<button
@@ -62,7 +63,9 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 						href={item.href}
 						key={item.href}
 						onClick={onClose}
-						style={{ "--delay": `${index * 80}ms` } as CSSProperties}
+						style={
+							{ "--delay": `${index * 80}ms` } as CSSProperties
+						}
 					>
 						<span className="font-arbeit text-[0.98rem] text-[color-mix(in_srgb,var(--velion-c-white)_72%,transparent)]">
 							{item.number}

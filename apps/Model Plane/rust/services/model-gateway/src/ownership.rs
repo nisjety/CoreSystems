@@ -283,8 +283,8 @@ mod tests {
         assert!(o.visible_to("bob", false)); // grantee
         assert!(o.visible_to("admin", true)); // any admin sees a SHARED resource
         assert!(!o.visible_to("carol", false)); // unrelated non-admin: no
-        // USE semantics are narrower: an admin's agent does NOT get to use a
-        // shared resource it wasn't granted; only owner + grantee can use it.
+                                                // USE semantics are narrower: an admin's agent does NOT get to use a
+                                                // shared resource it wasn't granted; only owner + grantee can use it.
         assert!(o.usable_by("alice"));
         assert!(o.usable_by("bob"));
         assert!(!o.usable_by("carol")); // admin role gives no extra USE access
@@ -332,7 +332,10 @@ mod tests {
                 ],
             )
             .expect("owner can share");
-        assert_eq!(updated.shared_with, vec!["bob".to_owned(), "carol".to_owned()]);
+        assert_eq!(
+            updated.shared_with,
+            vec!["bob".to_owned(), "carol".to_owned()]
+        );
         assert!(store.visible("o", "mcp", "s1", "bob", false));
         assert!(store.visible("o", "mcp", "s1", "admin", true));
         assert!(!store.visible("o", "mcp", "s1", "dave", false));

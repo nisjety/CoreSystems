@@ -1,18 +1,21 @@
 use async_stream::stream;
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    Json,
+    Extension, Json,
 };
 use serde_json::{json, Value};
 use tracing::error;
 
 use crate::{
+    audience_tokens::get_onboarding_preview_token,
     config::AppState,
     contracts::CrawlPreviewRequest,
+    middleware::AuthenticatedUser,
     onboarding::crawl_preview::{
         quarry::{create_crawl_job, forward_seed_scrape, poll_crawl_events},
         sse::sse_json,
@@ -22,6 +25,8 @@ use crate::{
 
 pub(crate) async fn crawl_preview(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(input): Json<CrawlPreviewRequest>,
 ) -> impl IntoResponse {
     let url = match normalize_public_http_url(&input.url) {
@@ -37,15 +42,26 @@ pub(crate) async fn crawl_preview(
         }
     };
 
-    let max_pages = input.max_pages.unwrap_or(3).clamp(1, 8);
+    let max_pages = input.max_pages.unwrap_or(6).clamp(1, 12);
+    // Mint the pre-org onboarding preview token up front (before the SSE stream
+    // starts): quarry-edge authenticates every crawl/scrape/event call with a
+    // Bearer JWT. The onboarding website step runs BEFORE an org exists, so the
+    // normal org-scoped quarry token can't be minted — this uses the dedicated
+    // onboarding-preview token (sentinel org, working-set only).
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let token = get_onboarding_preview_token(&state, &user.user_id, &cookie).await;
     let state_clone = state.clone();
     let output = stream! {
-        let crawl_job = create_crawl_job(&state_clone, input.org_id.as_deref(), &url, max_pages).await;
+        let crawl_job = create_crawl_job(&state_clone, token.as_deref(), &url, max_pages).await;
         match crawl_job {
             Ok(job_id) => {
                 yield Ok::<Event, std::convert::Infallible>(sse_json("started", json!({ "jobId": job_id, "url": url, "target": max_pages })));
                 yield Ok(sse_json("progress", json!({ "status": "starting", "pages": 0, "elements": 0, "target": max_pages, "jobId": job_id })));
-                match forward_seed_scrape(&state_clone, &url).await {
+                match forward_seed_scrape(&state_clone, token.as_deref(), &url).await {
                     Ok(events) => {
                         for event in events {
                             yield Ok::<Event, std::convert::Infallible>(event);
@@ -66,7 +82,8 @@ pub(crate) async fn crawl_preview(
                 let poll_handle = tokio::spawn({
                     let poll_state = state_clone.clone();
                     let poll_job = job_id.clone();
-                    async move { poll_crawl_events(&poll_state, &poll_job, tx).await }
+                    let poll_token = token.clone();
+                    async move { poll_crawl_events(&poll_state, poll_token.as_deref(), &poll_job, tx).await }
                 });
 
                 while let Some(payload) = rx.recv().await {

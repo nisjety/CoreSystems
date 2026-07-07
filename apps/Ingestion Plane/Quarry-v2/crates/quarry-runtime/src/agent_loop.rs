@@ -67,6 +67,7 @@ impl AgentLoop {
                 browser,
                 artifacts: None,
                 events: None,
+                visual_processor: None,
             },
             constraints,
             zdr,
@@ -186,6 +187,7 @@ impl AgentLoop {
             step: 0,
             current_url: String::new(),
             page_hash: format!("agent:{}", self.run_id),
+            previous_screenshot: None,
         };
 
         let mut observations = Vec::new();
@@ -649,6 +651,7 @@ mod tests {
             title: None,
             dom_summary: None,
             screenshot_artifact_id: None,
+            visual_observation_artifact_id: None,
             console_summary: vec![],
             network_summary: vec![],
             policy_denials: vec![],

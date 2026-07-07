@@ -11,6 +11,7 @@ use quarry_runtime::local_index::TantivyLocalIndex;
 use quarry_runtime::serp::SearchProvider;
 use quarry_runtime::usage::UsageMeter;
 use quarry_runtime::vector_index::VectorIndex;
+use quarry_runtime::vision::VisualObservationProcessor;
 use quarry_security::SecurityEngine;
 
 #[derive(Clone)]
@@ -77,6 +78,9 @@ pub struct AppState {
     /// injected into every `PageRunner` so ingested pages get rendered → CAS →
     /// `page_images.created`. `None` disables the producer.
     pub page_renderer: Option<Arc<quarry_runtime::page_renderer::PageRenderer>>,
+    /// Optional deterministic visual observation processor. Sidecar-backed for
+    /// the OpenCV spike; absent by default so observations behave as before.
+    pub visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
     /// C30.1 / cluster #7 — durable job-history store. When `Some`,
     /// the edge serves `/v1/runs/:id/events` locally from Postgres
     /// instead of forwarding to control plane. Gated behind the

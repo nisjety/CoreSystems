@@ -575,7 +575,10 @@ export const auth: any = betterAuth({
   },
 
   emailVerification: {
-    sendOnSignUp: false, // Automatically send verification email on signup
+    // Must stay true while REQUIRE_EMAIL_VERIFICATION=true: signin is blocked
+    // until verified, so the verification mail has to go out at signup or the
+    // account is permanently stuck at EMAIL_NOT_VERIFIED.
+    sendOnSignUp: true,
     autoSignInAfterVerification: false, // Auto sign in after email verification
     callbackURL:
       (process.env.FRONTEND_URL || 'http://localhost:3000') + '/dashboard', // Redirect to frontend after verification

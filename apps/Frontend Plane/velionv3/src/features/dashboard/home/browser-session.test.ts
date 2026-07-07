@@ -44,6 +44,10 @@ describe('browser session view model', () => {
         status: 'live',
         title: 'Live title',
         url: 'https://triodelab.no/',
+        visual: {
+          observationArtifactId: 'art_vision_1',
+          observationUrl: '/api/v1/browser/sessions/run-1/artifacts/art_vision_1',
+        },
         viewport: { width: 1280, height: 800 },
       },
       observation: {
@@ -65,6 +69,7 @@ describe('browser session view model', () => {
         step: 0,
         title: 'Rendered TriodeLab',
         url: 'https://triodelab.no/',
+        visual_observation_artifact_id: 'art_vision_1',
       },
     }
 
@@ -76,6 +81,8 @@ describe('browser session view model', () => {
     expect(model.frameUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/artifact-shot')
     expect(model.sourceLabel).toBe('Chromium frame')
     expect(model.screenshotArtifactId).toBe('artifact-shot')
+    expect(model.visualObservationArtifactId).toBe('art_vision_1')
+    expect(model.visualObservationUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/art_vision_1')
     expect(model.nodeCount).toBe(42)
     expect(model.consoleEntries).toEqual([
       { level: 'warning', text: 'Third-party script blocked' },
@@ -87,6 +94,37 @@ describe('browser session view model', () => {
     expect(model.domNodes).toEqual([
       { id: 'a-0', kind: 'a', selector: 'a[href="/kontakt"]', text: 'Kontakt oss' },
     ])
+  })
+
+  it('builds a visual observation URL from raw Quarry observation metadata', () => {
+    const response: BrowserSessionResponse = {
+      session: {
+        capabilities: ['navigate', 'visual_observation'],
+        frame: null,
+        id: 'run-1',
+        leaseId: null,
+        profile: { scope: 'run_scoped', storage: 'isolated' },
+        renderMode: 'chromium',
+        status: 'live',
+        title: 'Live title',
+        url: 'https://triodelab.no/',
+        viewport: { width: 1280, height: 800 },
+      },
+      observation: {
+        run_id: 'run-1',
+        step: 0,
+        title: 'Rendered TriodeLab',
+        url: 'https://triodelab.no/',
+        visual_observation_artifact_id: 'art_01JZ9XM7EXAMPLEVISION0001',
+      },
+    }
+
+    const model = browserSessionFromPreview(attachBrowserSession(preview(), response))
+
+    expect(model.visualObservationArtifactId).toBe('art_01JZ9XM7EXAMPLEVISION0001')
+    expect(model.visualObservationUrl).toBe(
+      '/api/v1/browser/sessions/run-1/artifacts/art_01JZ9XM7EXAMPLEVISION0001',
+    )
   })
 
   it('preserves browser profile metadata across action responses', () => {
@@ -101,6 +139,10 @@ describe('browser session view model', () => {
         status: 'live',
         title: 'Live title',
         url: 'https://triodelab.no/',
+        visual: {
+          observationArtifactId: 'art_vision_1',
+          observationUrl: '/api/v1/browser/sessions/run-1/artifacts/art_vision_1',
+        },
         viewport: { width: 1280, height: 800 },
       },
       observation: null,
@@ -125,6 +167,7 @@ describe('browser session view model', () => {
     const model = browserSessionFromPreview(next)
 
     expect(model.profileLabel).toBe('prof_01JZ9XM7EXAMPLEPROFILE0001 · persistent')
+    expect(model.visualObservationArtifactId).toBe('art_vision_1')
     expect(next.browserSession?.session.leaseId).toBe('lease-1')
   })
 })

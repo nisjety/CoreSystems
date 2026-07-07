@@ -33,6 +33,7 @@ pub mod router_policy;
 pub mod search;
 pub mod settings;
 pub mod shares;
+pub mod shipping;
 pub mod social;
 pub mod studio;
 pub mod tickets;

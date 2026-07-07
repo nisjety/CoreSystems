@@ -846,6 +846,62 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "browser-agent")]
     let agent_runs = agent_routes::new_runs();
 
+    let visual_processor: Option<Arc<dyn quarry_runtime::vision::VisualObservationProcessor>> = {
+        let visual_feature_requested = cfg.visual_diff_enabled
+            || cfg.screenshot_preprocessing_enabled
+            || cfg.page_image_cleanup_enabled
+            || cfg.visual_tiles_enabled
+            || cfg.ocr_preconditioning_enabled
+            || cfg.rendered_branding_visual_enabled;
+        if cfg.vision_enabled && visual_feature_requested {
+            let backend = cfg.vision_backend.as_deref().unwrap_or("sidecar");
+            let options = quarry_runtime::vision::VisualProcessorOptions {
+                max_regions: cfg.visual_max_regions.unwrap_or(32),
+                diff: cfg.visual_diff_enabled,
+                screenshot_preprocessing: cfg.screenshot_preprocessing_enabled
+                    || cfg.page_image_cleanup_enabled,
+                thumbnail: cfg.visual_tiles_enabled || cfg.page_image_cleanup_enabled,
+                tiles: cfg.visual_tiles_enabled || cfg.page_image_cleanup_enabled,
+                ocr_preconditioning: cfg.ocr_preconditioning_enabled,
+                rendered_branding: cfg.rendered_branding_visual_enabled,
+            };
+            match backend {
+                "sidecar" => match cfg.vision_sidecar_url.as_deref().filter(|s| !s.is_empty()) {
+                    Some(url) => match quarry_runtime::vision::SidecarVisualProcessor::new(url) {
+                        Ok(processor) => {
+                            tracing::info!(
+                                url,
+                                diff = options.diff,
+                                page_image_cleanup = cfg.page_image_cleanup_enabled,
+                                "visual sidecar enabled"
+                            );
+                            Some(Arc::new(processor.with_options(options))
+                                as Arc<
+                                    dyn quarry_runtime::vision::VisualObservationProcessor,
+                                >)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "visual sidecar config invalid; disabled");
+                            None
+                        }
+                    },
+                    None => {
+                        tracing::warn!(
+                            "vision enabled but QUARRY_EDGE__VISION_SIDECAR_URL is unset; disabled"
+                        );
+                        None
+                    }
+                },
+                other => {
+                    tracing::warn!(backend = other, "unsupported vision backend; disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     // Phase-2 visual RAG — page-image producer. Online only when CAS bucket,
     // Data Plane NATS, and edge base URL are all configured (browser-agent
     // feature provides the real BrowserDriver). Reuses agent_driver + AWS_* env.
@@ -864,6 +920,11 @@ async fn main() -> anyhow::Result<()> {
                 bucket.to_string(),
                 std::env::var("AWS_ENDPOINT_URL").ok(),
                 base.to_string(),
+                if cfg.page_image_cleanup_enabled {
+                    visual_processor.clone()
+                } else {
+                    None
+                },
             )
             .await
             {
@@ -935,6 +996,7 @@ async fn main() -> anyhow::Result<()> {
             quarry_runtime::HostScheduler::with_defaults(),
         )),
         page_renderer,
+        visual_processor,
         #[cfg(feature = "browser-agent")]
         agent_driver,
         #[cfg(feature = "browser-agent")]

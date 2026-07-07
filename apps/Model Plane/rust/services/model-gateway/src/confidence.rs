@@ -83,7 +83,10 @@ mod tests {
 
     #[test]
     fn clean_answer_is_base() {
-        assert_eq!(score("The capital of Norway is Oslo.", 8, 1024, false), Some(BASE));
+        assert_eq!(
+            score("The capital of Norway is Oslo.", 8, 1024, false),
+            Some(BASE)
+        );
     }
 
     #[test]
@@ -96,7 +99,13 @@ mod tests {
     #[test]
     fn truncated_and_hedging_lower_the_score() {
         // Hit the token ceiling AND hedged → both penalties applied.
-        let s = score("I'm not sure, but as an AI I cannot verify this", 1024, 1024, false).unwrap();
+        let s = score(
+            "I'm not sure, but as an AI I cannot verify this",
+            1024,
+            1024,
+            false,
+        )
+        .unwrap();
         assert!(s < BASE);
         assert!(s >= FLOOR);
     }

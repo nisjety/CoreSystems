@@ -48,9 +48,33 @@ pub fn evaluate(mode: PermissionMode, tool_name: &str) -> PermissionDecision {
 #[must_use]
 pub fn is_risky_tool(tool_name: &str) -> bool {
     const RISKY: &[&str] = &[
-        "delete", "remove", "drop", "write", "update", "patch", "create", "send", "email",
-        "deploy", "payment", "refund", "charge", "exec", "shell", "post", "purge", "revoke",
+        "delete",
+        "remove",
+        "drop",
+        "write",
+        "update",
+        "patch",
+        "create",
+        "send",
+        "email",
+        "deploy",
+        "payment",
+        "refund",
+        "charge",
+        "exec",
+        "shell",
+        "post",
+        "purge",
+        "revoke",
+        // book_shipment places a real freight order (money + a truck arriving)
+        // — explicitly gated since no generic keyword above catches it.
         "transfer",
+        "book_shipment",
+        // execute_provider_action runs an arbitrary provider write (publish a
+        // Page/Instagram post, send a WhatsApp/Messenger message, create an ad
+        // campaign …). The "exec" keyword above already matches it, but list
+        // it explicitly so the gate is intent-visible and survives a rename.
+        "execute_provider_action",
     ];
     if tool_name.starts_with("mcp__") {
         return true;
@@ -92,6 +116,22 @@ mod tests {
     fn auto_allows_everything() {
         assert_eq!(
             evaluate(PermissionMode::Auto, "delete_account"),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn provider_action_write_is_gated_discovery_is_not() {
+        // execute_provider_action runs arbitrary provider writes → gated.
+        assert!(is_risky_tool("execute_provider_action"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "execute_provider_action"),
+            PermissionDecision::AwaitApproval
+        );
+        // list_provider_actions is read-only discovery → not gated.
+        assert!(!is_risky_tool("list_provider_actions"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "list_provider_actions"),
             PermissionDecision::Allow
         );
     }

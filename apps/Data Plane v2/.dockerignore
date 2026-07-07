@@ -9,6 +9,13 @@ target/
 # Tests / CI / development
 tests/load/
 .github/
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/__pycache__/
+**/node_modules/
+*.pyc
+*.pyo
 
 # Tooling that doesn't belong in the Rust workspace build
 tools/
@@ -18,11 +25,14 @@ gen/*
 bin/
 backups/
 
-# Go service source — each Go service has its own build context, but we
-# don't want them pulled into Rust builds (project-root context).
+# Non-Rust services and labs that are not needed by root-context builds. Most
+# Go services have their own build context; wiki-store-go intentionally stays in
+# the root context because its Dockerfile also copies gen/go.
 services/documents-api-go/
 services/data-orchestrator-go/
 services/data-quality-go/
+services/*-py/
+services/colqwen-reranker/
 
 # IDE / OS noise
 .idea/

@@ -17,6 +17,7 @@ import (
 	apphttp "github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/http"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/insights"
 	appnats "github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/nats"
+	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/socialmetrics"
 )
 
 func main() {
@@ -61,7 +62,8 @@ func main() {
 			log.Printf("insight-core: NATS disabled: %v", err)
 		} else {
 			defer natsClient.Close()
-			subscriber := consumers.NewMetricSubscriber(natsClient.JS, service)
+			socialMetricsClient := socialmetrics.NewClient(cfg.SocialCoreURL, cfg.InternalAPIKey)
+			subscriber := consumers.NewMetricSubscriber(natsClient.JS, service, socialMetricsClient)
 			if err := subscriber.Start(context.Background()); err != nil {
 				log.Printf("insight-core: metric subscriber: %v", err)
 			} else {

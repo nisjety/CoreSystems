@@ -11,11 +11,16 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/brreg"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/leads"
+	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/providerleads"
 )
 
 type Handler struct {
 	cfg     *config.Config
 	service *leads.Service
+	// Optional provider-lead sync surface (see handlers_provider_leads.go).
+	// nil when INTEGRATION_CORE_URL is not configured; routes answer 503.
+	providerLeadSyncer *providerleads.Syncer
+	providerLeadRepo   providerleads.Repository
 }
 
 func NewHandler(cfg *config.Config, service *leads.Service) *Handler {

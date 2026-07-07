@@ -62,6 +62,7 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
         scheduler: None,
         internal_signer: None,
         page_renderer: None,
+        visual_processor: None,
         #[cfg(feature = "postgres-queue")]
         event_history: None,
         usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),

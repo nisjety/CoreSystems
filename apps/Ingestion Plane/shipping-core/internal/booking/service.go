@@ -1,0 +1,344 @@
+// Package booking owns the shipment execution lifecycle: the two-step
+// server-side confirmation gate, the carrier Book call, labels, pickups,
+// tracking persistence, end-of-day manifests, and the audit log that ships
+// WITH the feature (docs/ARCHITECTURE.md: the gate lives in the booking
+// module, not in any UI or agent prompt — no client can bypass it).
+package booking
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"shipping-core/internal/carrier"
+	"shipping-core/internal/docgen"
+)
+
+// ErrValidation marks caller mistakes (missing customs, unknown carrier…)
+// that map to HTTP 400.
+var ErrValidation = errors.New("validation")
+
+// Service coordinates the booking lifecycle across the store and the
+// carrier adapter fleet.
+type Service struct {
+	store    *Store
+	adapters map[string]carrier.Adapter
+	logger   *slog.Logger
+}
+
+func NewService(store *Store, adapters []carrier.Adapter, logger *slog.Logger) *Service {
+	byCode := make(map[string]carrier.Adapter, len(adapters))
+	for _, a := range adapters {
+		byCode[a.Info().Code] = a
+	}
+	return &Service{store: store, adapters: byCode, logger: logger}
+}
+
+// CreateInput is the normalized request to open a booking (step 1 of 2).
+type CreateInput struct {
+	QuoteRef    string
+	CarrierCode string
+	CarrierName string
+	ServiceName string
+	Price       carrier.Money
+	From        carrier.Address
+	To          carrier.Address
+	Package     carrier.Package
+	Customs     *carrier.CustomsInfo
+	BookedBy    string
+}
+
+// CreateResult returns the booking id plus the single-use confirmation
+// token. The token is shown ONCE; confirming requires presenting it back.
+type CreateResult struct {
+	BookingID         string `json:"booking_id"`
+	Status            string `json:"status"`
+	ConfirmationToken string `json:"confirmation_token"`
+	RequiresCustoms   bool   `json:"requires_customs"`
+}
+
+// Create validates and persists a pending booking. Nothing is sent to any
+// carrier here — that only happens in Confirm, after the gate.
+func (s *Service) Create(ctx context.Context, in CreateInput) (CreateResult, error) {
+	adapter, ok := s.adapters[in.CarrierCode]
+	if !ok {
+		return CreateResult{}, fmt.Errorf("%w: unknown carrier %q", ErrValidation, in.CarrierCode)
+	}
+	crossBorder := in.From.Country != in.To.Country
+	if crossBorder && (in.Customs == nil || len(in.Customs.Items) == 0) {
+		return CreateResult{}, fmt.Errorf("%w: cross-border shipment (%s→%s) requires a customs declaration with at least one item", ErrValidation, in.From.Country, in.To.Country)
+	}
+	if in.CarrierName == "" {
+		in.CarrierName = adapter.Info().Name
+	}
+
+	token, err := newToken()
+	if err != nil {
+		return CreateResult{}, err
+	}
+	id, err := s.store.CreateBooking(ctx, Record{
+		ConfirmationToken: token,
+		QuoteRef:          in.QuoteRef,
+		CarrierCode:       in.CarrierCode,
+		CarrierName:       in.CarrierName,
+		ServiceName:       in.ServiceName,
+		Price:             in.Price,
+		From:              in.From,
+		To:                in.To,
+		Package:           in.Package,
+		Customs:           in.Customs,
+		BookedBy:          in.BookedBy,
+	})
+	if err != nil {
+		return CreateResult{}, err
+	}
+	s.store.Audit(ctx, id, "created", in.BookedBy, map[string]any{
+		"carrier": in.CarrierCode, "service": in.ServiceName,
+		"price_cents": in.Price.AmountCents, "cross_border": crossBorder,
+	})
+	return CreateResult{
+		BookingID:         id,
+		Status:            "pending_confirmation",
+		ConfirmationToken: token,
+		RequiresCustoms:   crossBorder,
+	}, nil
+}
+
+// Confirm is step 2: the gate. The token must match AND the booking must
+// still be pending (atomic claim in the store); only then is the carrier
+// called. Every outcome is audited.
+func (s *Service) Confirm(ctx context.Context, id, token, actor string) (Record, error) {
+	if err := s.store.ClaimForConfirmation(ctx, id, token, actor); err != nil {
+		if errors.Is(err, ErrGate) {
+			s.store.Audit(ctx, id, "confirm_rejected", actor, map[string]any{"reason": "token mismatch or not pending"})
+		}
+		return Record{}, err
+	}
+	rec, err := s.store.GetBooking(ctx, id)
+	if err != nil {
+		return Record{}, err
+	}
+	adapter, ok := s.adapters[rec.CarrierCode]
+	if !ok {
+		_ = s.store.MarkFailed(ctx, id, "carrier adapter no longer registered")
+		return Record{}, fmt.Errorf("%w: carrier %q no longer registered", ErrValidation, rec.CarrierCode)
+	}
+
+	booked, err := adapter.Book(ctx, carrier.BookingRequest{
+		QuoteRef:    rec.QuoteRef,
+		ServiceName: rec.ServiceName,
+		Price:       rec.Price,
+		From:        rec.From,
+		To:          rec.To,
+		Package:     rec.Package,
+		Customs:     rec.Customs,
+		BookedBy:    rec.BookedBy,
+	})
+	if err != nil {
+		_ = s.store.MarkFailed(ctx, id, err.Error())
+		s.store.Audit(ctx, id, "book_failed", actor, map[string]any{"error": err.Error()})
+		return Record{}, fmt.Errorf("carrier booking failed: %w", err)
+	}
+
+	// Label + ZPL: best-effort at booking time so downloads never depend on
+	// the carrier being up later. A label failure does not undo the booking.
+	var label carrier.Label
+	if l, lerr := adapter.Label(ctx, booked.BookingRef); lerr == nil {
+		label = l
+	} else {
+		s.logger.Warn("label fetch failed after booking", "booking", id, "err", lerr)
+		s.store.Audit(ctx, id, "label_failed", actor, map[string]any{"error": lerr.Error()})
+	}
+	var zpl string
+	if z, ok := adapter.(interface{ ZPL(string) string }); ok {
+		zpl = z.ZPL(booked.BookingRef)
+	}
+
+	// Cross-border: render the CN22-style customs document alongside.
+	var customsDoc []byte
+	if rec.Customs != nil {
+		customsDoc = customsDocument(rec, booked)
+	}
+
+	if err := s.store.MarkBooked(ctx, id, booked, label, zpl, customsDoc); err != nil {
+		return Record{}, err
+	}
+	s.store.Audit(ctx, id, "booked", actor, map[string]any{
+		"booking_ref": booked.BookingRef, "tracking_no": booked.TrackingNo,
+	})
+	return s.store.GetBooking(ctx, id)
+}
+
+// Cancel cancels a booking (carrier-side when supported) and audits it.
+func (s *Service) Cancel(ctx context.Context, id, actor string) error {
+	rec, err := s.store.GetBooking(ctx, id)
+	if err != nil {
+		return err
+	}
+	if adapter, ok := s.adapters[rec.CarrierCode]; ok && rec.BookingRef != "" {
+		if canceller, ok := adapter.(carrier.BookingCanceller); ok {
+			if err := canceller.CancelBooking(ctx, rec.BookingRef); err != nil {
+				s.store.Audit(ctx, id, "cancel_failed", actor, map[string]any{"error": err.Error()})
+				return fmt.Errorf("carrier cancel failed: %w", err)
+			}
+		}
+	}
+	if err := s.store.MarkCancelled(ctx, id); err != nil {
+		return err
+	}
+	s.store.Audit(ctx, id, "cancelled", actor, nil)
+	return nil
+}
+
+// SchedulePickup orders carrier collection for a booked shipment.
+func (s *Service) SchedulePickup(ctx context.Context, id, actor string, req carrier.PickupRequest) (carrier.Pickup, error) {
+	rec, err := s.store.GetBooking(ctx, id)
+	if err != nil {
+		return carrier.Pickup{}, err
+	}
+	if rec.Status != "booked" {
+		return carrier.Pickup{}, fmt.Errorf("%w: pickup requires a booked shipment (status %s)", ErrValidation, rec.Status)
+	}
+	adapter := s.adapters[rec.CarrierCode]
+	scheduler, ok := adapter.(carrier.PickupScheduler)
+	if !ok {
+		return carrier.Pickup{}, fmt.Errorf("%w: %s does not support pickup ordering through this integration", ErrValidation, rec.CarrierName)
+	}
+	if len(req.BookingRefs) == 0 {
+		req.BookingRefs = []string{rec.BookingRef}
+	}
+	if req.Address.Name == "" {
+		req.Address = rec.From
+	}
+	pickup, err := scheduler.SchedulePickup(ctx, req)
+	if err != nil {
+		s.store.Audit(ctx, id, "pickup_failed", actor, map[string]any{"error": err.Error()})
+		return carrier.Pickup{}, fmt.Errorf("carrier pickup failed: %w", err)
+	}
+	if err := s.store.SetPickup(ctx, id, pickup); err != nil {
+		return carrier.Pickup{}, err
+	}
+	s.store.Audit(ctx, id, "pickup_scheduled", actor, map[string]any{
+		"pickup_ref": pickup.PickupRef, "date": pickup.Date.Format("2006-01-02"),
+	})
+	return pickup, nil
+}
+
+// Tracking refreshes (on read) and returns a booking's tracking history.
+type Tracking struct {
+	BookingID     string                  `json:"booking_id"`
+	TrackingNo    string                  `json:"tracking_no"`
+	CurrentStatus string                  `json:"current_status"`
+	Events        []carrier.TrackingEvent `json:"events"`
+}
+
+// Tracking polls the carrier for fresh events, persists them idempotently
+// (the base data for the future reliability module), and returns the
+// combined history. A carrier outage degrades to the persisted events.
+func (s *Service) Tracking(ctx context.Context, id string) (Tracking, error) {
+	rec, err := s.store.GetBooking(ctx, id)
+	if err != nil {
+		return Tracking{}, err
+	}
+	if rec.TrackingNo == "" {
+		return Tracking{}, fmt.Errorf("%w: booking has no tracking number yet (status %s)", ErrValidation, rec.Status)
+	}
+	current := ""
+	if adapter, ok := s.adapters[rec.CarrierCode]; ok {
+		if status, terr := adapter.Track(ctx, rec.TrackingNo); terr == nil {
+			current = status.CurrentStatus
+			if err := s.store.UpsertTrackingEvents(ctx, id, status.Events); err != nil {
+				s.logger.Warn("persist tracking events", "booking", id, "err", err)
+			}
+		} else {
+			s.logger.Warn("carrier tracking refresh failed; serving persisted events", "booking", id, "err", terr)
+		}
+	}
+	events, err := s.store.ListTrackingEvents(ctx, id)
+	if err != nil {
+		return Tracking{}, err
+	}
+	if current == "" && len(events) > 0 {
+		current = events[len(events)-1].Status
+	}
+	return Tracking{BookingID: id, TrackingNo: rec.TrackingNo, CurrentStatus: current, Events: events}, nil
+}
+
+// BuildManifest groups today's unmanifested booked shipments for a carrier
+// into an end-of-day manifest with a rendered summary document.
+func (s *Service) BuildManifest(ctx context.Context, carrierCode, actor string) (string, int, error) {
+	if _, ok := s.adapters[carrierCode]; !ok {
+		return "", 0, fmt.Errorf("%w: unknown carrier %q", ErrValidation, carrierCode)
+	}
+	id, included, err := s.store.CreateManifest(ctx, carrierCode, actor, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	doc := manifestDocument(carrierCode, included)
+	if err := s.store.SetManifestDocument(ctx, id, doc); err != nil {
+		return "", 0, err
+	}
+	for _, rec := range included {
+		s.store.Audit(ctx, rec.ID, "manifested", actor, map[string]any{"manifest_id": id})
+	}
+	return id, len(included), nil
+}
+
+func newToken() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate confirmation token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// customsDocument renders a CN22-style declaration for a booked shipment.
+// It is the shipper's copy of the declared data — carriers receive the same
+// data structurally through their booking APIs.
+func customsDocument(rec Record, booked carrier.Booking) []byte {
+	lines := []docgen.Line{
+		docgen.H1("CUSTOMS DECLARATION (CN22)"),
+		docgen.Txt(fmt.Sprintf("Booking: %s    Tracking: %s", booked.BookingRef, booked.TrackingNo)),
+		docgen.Txt(fmt.Sprintf("From: %s, %s %s, %s", rec.From.Name, rec.From.PostalCode, rec.From.City, rec.From.Country)),
+		docgen.Txt(fmt.Sprintf("To:   %s, %s %s, %s", rec.To.Name, rec.To.PostalCode, rec.To.City, rec.To.Country)),
+		docgen.Txt(""),
+		docgen.H2("Contents (" + rec.Customs.ContentsType + ")"),
+	}
+	for _, item := range rec.Customs.Items {
+		lines = append(lines, docgen.Txt(fmt.Sprintf(
+			"%dx %s — %d.%02d %s, %.2f kg, HS %s, origin %s",
+			item.Quantity, item.Description,
+			item.ValueCents/100, item.ValueCents%100, item.Currency,
+			item.WeightKg, item.HSCode, item.OriginCountry,
+		)))
+	}
+	total := rec.Customs.TotalValueCents()
+	lines = append(lines,
+		docgen.Txt(""),
+		docgen.H2(fmt.Sprintf("Total declared value: %d.%02d %s", total/100, total%100, rec.Price.Currency)),
+	)
+	if rec.Customs.Incoterms != "" {
+		lines = append(lines, docgen.Txt("Incoterms: "+rec.Customs.Incoterms))
+	}
+	lines = append(lines, docgen.Txt("Generated by Velion shipping-core "+time.Now().UTC().Format(time.RFC3339)))
+	return docgen.PDF(docgen.PageA4, lines)
+}
+
+// manifestDocument renders the end-of-day manifest summary.
+func manifestDocument(carrierCode string, included []Record) []byte {
+	lines := []docgen.Line{
+		docgen.H1("SHIPMENT MANIFEST — " + carrierCode),
+		docgen.Txt("Date: " + time.Now().Format("2006-01-02")),
+		docgen.Txt(fmt.Sprintf("Shipments: %d", len(included))),
+		docgen.Txt(""),
+	}
+	for _, rec := range included {
+		lines = append(lines, docgen.Txt(fmt.Sprintf("%s  %s  (%s)", rec.BookingRef, rec.TrackingNo, rec.ServiceName)))
+	}
+	lines = append(lines, docgen.Txt(""), docgen.Txt("Generated by Velion shipping-core."))
+	return docgen.PDF(docgen.PageA4, lines)
+}

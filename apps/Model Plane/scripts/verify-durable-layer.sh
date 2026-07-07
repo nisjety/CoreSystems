@@ -17,7 +17,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIG="$ROOT/rust/services/session-core/migrations"
 CTR="mp-verify-pg-$$"
-PORT="${PG_PORT:-55432}"
 
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -28,10 +27,23 @@ expect() { # expect <actual> <wanted> <label>
   echo "  ok: $3"
 }
 
-echo "==> starting throwaway Postgres ($CTR on :$PORT)"
+echo "==> starting throwaway Postgres ($CTR)"
 docker run -d --name "$CTR" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=session_core \
-  -p "${PORT}:5432" postgres:16-alpine >/dev/null
-for _ in $(seq 1 30); do docker exec "$CTR" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+  postgres:16-alpine >/dev/null
+
+ready=0
+for _ in $(seq 1 60); do
+  if docker exec "$CTR" psql -U postgres -d session_core -tAq -v ON_ERROR_STOP=1 -c "select 1" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$ready" != "1" ]; then
+  echo "FAIL: throwaway Postgres did not become SQL-ready"
+  docker logs "$CTR" | tail -50 || true
+  exit 1
+fi
 
 echo "==> applying migrations"
 for f in "$MIG"/[0-9]*.sql; do docker exec -i "$CTR" psql -U postgres -d session_core -v ON_ERROR_STOP=1 -q < "$f"; done

@@ -312,7 +312,8 @@ mod tests {
 
     #[test]
     fn parse_list_tools_response_rejects_error_and_id_mismatch() {
-        let err_line = r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"no such method"}}"#;
+        let err_line =
+            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"no such method"}}"#;
         assert!(parse_list_tools_response(3, err_line)
             .unwrap_err()
             .contains("no such method"));

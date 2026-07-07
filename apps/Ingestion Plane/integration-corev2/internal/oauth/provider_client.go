@@ -164,8 +164,14 @@ func (c *OAuth2Client) Profile(ctx context.Context, accessToken string, _ map[st
 		return c.instagramProfile(ctx, accessToken)
 	case "facebook":
 		return c.facebookProfile(ctx, accessToken)
+	case "whatsapp", "meta-ads", "meta":
+		return c.facebookProfile(ctx, accessToken)
 	case "snapchat":
 		return c.snapchatProfile(ctx, accessToken)
+	case "tiktok":
+		return c.tiktokProfile(ctx, accessToken)
+	case "discord":
+		return c.discordProfile(ctx, accessToken)
 	default:
 		return ProviderProfile{}, fmt.Errorf("profile discovery is not implemented for %s", c.cfg.ProviderKey)
 	}
@@ -256,6 +262,10 @@ func (c *OAuth2Client) notionProfile(ctx context.Context, accessToken string) (P
 }
 
 func (c *OAuth2Client) githubProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	headers := map[string]string{
+		"Accept":               "application/vnd.github+json",
+		"X-GitHub-Api-Version": "2022-11-28",
+	}
 	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/user", map[string]string{
 		"Accept":               "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
@@ -263,11 +273,63 @@ func (c *OAuth2Client) githubProfile(ctx context.Context, accessToken string) (P
 	if err != nil {
 		return ProviderProfile{}, err
 	}
+	email := stringValue(body["email"])
+	if email == "" {
+		if fallback, err := c.githubPrimaryEmail(ctx, accessToken, headers); err == nil {
+			email = fallback
+		}
+	}
 	return ProviderProfile{
 		ID:          fmt.Sprintf("%v", body["id"]),
 		DisplayName: firstNonEmpty(stringValue(body["name"]), stringValue(body["login"])),
-		Email:       stringValue(body["email"]),
+		Email:       email,
 	}, nil
+}
+
+func (c *OAuth2Client) githubPrimaryEmail(ctx context.Context, accessToken string, headers map[string]string) (string, error) {
+	endpoint := strings.TrimRight(c.cfg.APIBaseURL, "/") + "/user/emails?per_page=100"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build github email request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("call github email endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+	var emails []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
+		return "", fmt.Errorf("decode github email response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("github email endpoint returned status %d", resp.StatusCode)
+	}
+
+	firstVerified := ""
+	firstEmail := ""
+	for _, item := range emails {
+		email := stringValue(item["email"])
+		if email == "" {
+			continue
+		}
+		if firstEmail == "" {
+			firstEmail = email
+		}
+		verified, _ := item["verified"].(bool)
+		primary, _ := item["primary"].(bool)
+		if verified && firstVerified == "" {
+			firstVerified = email
+		}
+		if verified && primary {
+			return email, nil
+		}
+	}
+	return firstNonEmpty(firstVerified, firstEmail), nil
 }
 
 func (c *OAuth2Client) stripeProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
@@ -335,13 +397,20 @@ func (c *OAuth2Client) facebookProfile(ctx context.Context, accessToken string) 
 }
 
 func (c *OAuth2Client) snapchatProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
-	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/me/organizations", nil)
-	if err != nil {
-		return ProviderProfile{}, err
-	}
 	profile := ProviderProfile{
 		ID:          "snapchat",
 		DisplayName: "Snapchat Marketing",
+	}
+	// /me/organizations requires the snapchat-marketing-api scope. A
+	// connection made with only social.profile.read (scope
+	// snapchat-profile-api, e.g. the "onboarding" bundle) will always fail
+	// this call -- that's an expected consequence of the scope it was
+	// granted, not a real error, so degrade to the generic identity above
+	// instead of an empty ProviderProfile{} (which would otherwise surface
+	// as the "snapchat connection" placeholder name in persistConnection).
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/me/organizations", nil)
+	if err != nil {
+		return profile, err
 	}
 	if organizations, ok := body["organizations"].([]any); ok && len(organizations) > 0 {
 		if wrapper, ok := organizations[0].(map[string]any); ok {
@@ -355,6 +424,38 @@ func (c *OAuth2Client) snapchatProfile(ctx context.Context, accessToken string) 
 		}
 	}
 	return profile, nil
+}
+
+// tiktokProfile reads the Login Kit v2 user object. The response is enveloped:
+// {"data":{"user":{...}},"error":{...}} and field selection is mandatory via
+// the `fields` query parameter.
+func (c *OAuth2Client) tiktokProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/user/info/?fields=open_id,union_id,display_name,avatar_url", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	data, _ := body["data"].(map[string]any)
+	user, _ := data["user"].(map[string]any)
+	id := firstNonEmpty(stringValue(user["open_id"]), stringValue(user["union_id"]))
+	if id == "" {
+		return ProviderProfile{}, fmt.Errorf("tiktok profile response missing open_id: %s", tokenError(body))
+	}
+	return ProviderProfile{
+		ID:          id,
+		DisplayName: firstNonEmpty(stringValue(user["display_name"]), id),
+	}, nil
+}
+
+func (c *OAuth2Client) discordProfile(ctx context.Context, accessToken string) (ProviderProfile, error) {
+	body, err := c.getJSON(ctx, accessToken, strings.TrimRight(c.cfg.APIBaseURL, "/")+"/users/@me", nil)
+	if err != nil {
+		return ProviderProfile{}, err
+	}
+	return ProviderProfile{
+		ID:          stringValue(body["id"]),
+		DisplayName: firstNonEmpty(stringValue(body["global_name"]), stringValue(body["username"]), stringValue(body["id"])),
+		Email:       stringValue(body["email"]),
+	}, nil
 }
 
 func (c *OAuth2Client) getJSON(ctx context.Context, accessToken, endpoint string, headers map[string]string) (map[string]any, error) {
@@ -518,6 +619,195 @@ func (c *ShopifyOAuthClient) Profile(ctx context.Context, accessToken string, pr
 		WorkspaceName: firstNonEmpty(body.Shop.Name, body.Shop.MyshopifyName, shop),
 		TenantID:      firstNonEmpty(body.Shop.MyshopifyName, shop),
 	}, nil
+}
+
+// MetaOAuthClient implements the unified Meta provider (Facebook Pages +
+// Instagram + WhatsApp Business + Marketing API in one dialog).
+//
+// With a Facebook Login for Business configuration id it sends config_id
+// (which replaces `scope`) plus response_type=code and
+// override_default_response_type=true — required when the configuration issues
+// Business Integration System User tokens. Without one it falls back to
+// classic Facebook Login with comma-separated scopes (all scopes work in dev
+// mode for users holding a role on a Business-type app).
+//
+// Meta has no PKCE and never issues refresh tokens: short-lived user tokens
+// are upgraded via grant_type=fb_exchange_token to ~60-day tokens (Refresh).
+type MetaOAuthClient struct {
+	base      *OAuth2Client
+	configIDs map[string]string
+}
+
+// NewMetaOAuthClient takes a set of named Facebook Login for Business
+// configurations, keyed by purpose (e.g. "default", "conversions"). Meta
+// bakes permissions into the configuration itself rather than a per-request
+// scope param, so a Business-type app needing more than one permission set
+// needs one configuration per set — a single shared config_id can't express
+// "general Pages/Instagram access" and "narrower Conversions API partner
+// access" at once. Selected per connect session via
+// providerContext["business_login_config"]; "default" is used when unset.
+func NewMetaOAuthClient(cfg OAuth2ClientConfig, businessLoginConfigIDs map[string]string) *MetaOAuthClient {
+	ids := make(map[string]string, len(businessLoginConfigIDs))
+	for key, id := range businessLoginConfigIDs {
+		if id := strings.TrimSpace(id); id != "" {
+			ids[key] = id
+		}
+	}
+	return &MetaOAuthClient{base: NewOAuth2Client(cfg), configIDs: ids}
+}
+
+const defaultMetaBusinessLoginConfig = "default"
+
+func (c *MetaOAuthClient) businessLoginConfigID(providerContext map[string]string) string {
+	key := strings.TrimSpace(providerContext["business_login_config"])
+	if key == "" {
+		key = defaultMetaBusinessLoginConfig
+	}
+	return c.configIDs[key]
+}
+
+func (c *MetaOAuthClient) AuthorizationURL(state, redirectURI, _ string, scopes []string, providerContext map[string]string) (string, error) {
+	values := url.Values{}
+	values.Set("client_id", c.base.cfg.ClientID)
+	values.Set("redirect_uri", redirectURI)
+	values.Set("response_type", "code")
+	values.Set("state", state)
+	if configID := c.businessLoginConfigID(providerContext); configID != "" {
+		values.Set("config_id", configID)
+		// Configurations may default to a non-code response type (e.g. BISU
+		// token configs); force the authorization-code grant.
+		values.Set("override_default_response_type", "true")
+	} else if len(scopes) > 0 {
+		values.Set("scope", strings.Join(scopes, ","))
+	}
+	return c.base.cfg.AuthorizationURL + "?" + values.Encode(), nil
+}
+
+func (c *MetaOAuthClient) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string, scopes []string, providerContext map[string]string) (TokenResult, error) {
+	token, err := c.base.ExchangeCode(ctx, code, redirectURI, codeVerifier, scopes, providerContext)
+	if err != nil {
+		return TokenResult{}, err
+	}
+	if token.AccessToken == "" {
+		return token, nil
+	}
+	if c.businessLoginConfigID(providerContext) != "" {
+		// Business Login configurations can issue Business Integration System
+		// User tokens directly from the authorization-code exchange. Those are
+		// not classic short-lived user tokens, so do not force fb_exchange_token
+		// during callback.
+		if token.RefreshToken == "" {
+			token.RefreshToken = token.AccessToken
+		}
+		return token, nil
+	}
+	longLived, err := c.Refresh(ctx, token.AccessToken, scopes, providerContext)
+	if err != nil {
+		return TokenResult{}, err
+	}
+	return longLived, nil
+}
+
+// Refresh upgrades/renews a Meta user token via fb_exchange_token (Meta issues
+// no refresh tokens; the "refresh token" we persist is the access token
+// itself, re-exchanged for a fresh ~60-day long-lived token).
+func (c *MetaOAuthClient) Refresh(ctx context.Context, refreshToken string, _ []string, _ map[string]string) (TokenResult, error) {
+	values := url.Values{}
+	values.Set("grant_type", "fb_exchange_token")
+	values.Set("client_id", c.base.cfg.ClientID)
+	values.Set("client_secret", c.base.cfg.ClientSecret)
+	values.Set("fb_exchange_token", refreshToken)
+	token, err := c.base.tokenRequest(ctx, values)
+	if err != nil {
+		return TokenResult{}, err
+	}
+	if token.RefreshToken == "" {
+		token.RefreshToken = token.AccessToken
+	}
+	return token, nil
+}
+
+func (c *MetaOAuthClient) Profile(ctx context.Context, accessToken string, providerContext map[string]string) (ProviderProfile, error) {
+	return c.base.Profile(ctx, accessToken, providerContext)
+}
+
+func (c *MetaOAuthClient) Revoke(ctx context.Context, accessToken string, _ map[string]string) error {
+	// DELETE /me/permissions de-authorizes the app for this user.
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, strings.TrimRight(c.base.cfg.APIBaseURL, "/")+"/me/permissions", nil)
+	if err != nil {
+		return fmt.Errorf("build meta revoke request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	return c.base.doRevoke(req)
+}
+
+// TikTokOAuthClient implements TikTok Login Kit v2. TikTok's OAuth deviates
+// from RFC naming: the client identifier is `client_key` in BOTH the authorize
+// query and the token body (client_id is rejected), scopes are comma-separated,
+// credentials always go in the form body (no Basic auth), and PKCE challenges
+// are SHA-256 hex encoded.
+type TikTokOAuthClient struct {
+	base *OAuth2Client
+}
+
+func NewTikTokOAuthClient(cfg OAuth2ClientConfig) *TikTokOAuthClient {
+	return &TikTokOAuthClient{base: NewOAuth2Client(cfg)}
+}
+
+func (c *TikTokOAuthClient) AuthorizationURL(state, redirectURI, codeVerifier string, scopes []string, _ map[string]string) (string, error) {
+	if strings.TrimSpace(codeVerifier) == "" {
+		return "", fmt.Errorf("code verifier is required for TikTok OAuth")
+	}
+	values := url.Values{}
+	values.Set("client_key", c.base.cfg.ClientID)
+	values.Set("code_challenge", CodeChallengeS256Hex(codeVerifier))
+	values.Set("code_challenge_method", "S256")
+	values.Set("redirect_uri", redirectURI)
+	values.Set("response_type", "code")
+	values.Set("state", state)
+	if len(scopes) > 0 {
+		values.Set("scope", strings.Join(scopes, ","))
+	}
+	return c.base.cfg.AuthorizationURL + "?" + values.Encode(), nil
+}
+
+func (c *TikTokOAuthClient) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string, _ []string, _ map[string]string) (TokenResult, error) {
+	values := url.Values{}
+	values.Set("client_key", c.base.cfg.ClientID)
+	values.Set("client_secret", c.base.cfg.ClientSecret)
+	values.Set("grant_type", "authorization_code")
+	values.Set("code", code)
+	values.Set("redirect_uri", redirectURI)
+	if strings.TrimSpace(codeVerifier) != "" {
+		values.Set("code_verifier", codeVerifier)
+	}
+	return c.base.tokenRequest(ctx, values)
+}
+
+func (c *TikTokOAuthClient) Refresh(ctx context.Context, refreshToken string, _ []string, _ map[string]string) (TokenResult, error) {
+	values := url.Values{}
+	values.Set("client_key", c.base.cfg.ClientID)
+	values.Set("client_secret", c.base.cfg.ClientSecret)
+	values.Set("grant_type", "refresh_token")
+	values.Set("refresh_token", refreshToken)
+	return c.base.tokenRequest(ctx, values)
+}
+
+func (c *TikTokOAuthClient) Profile(ctx context.Context, accessToken string, providerContext map[string]string) (ProviderProfile, error) {
+	return c.base.Profile(ctx, accessToken, providerContext)
+}
+
+func (c *TikTokOAuthClient) Revoke(ctx context.Context, accessToken string, _ map[string]string) error {
+	values := url.Values{}
+	values.Set("client_key", c.base.cfg.ClientID)
+	values.Set("client_secret", c.base.cfg.ClientSecret)
+	values.Set("token", accessToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.base.cfg.APIBaseURL, "/")+"/oauth/revoke/", strings.NewReader(values.Encode()))
+	if err != nil {
+		return fmt.Errorf("build tiktok revoke request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return c.base.doRevoke(req)
 }
 
 func doTokenRequest(client *http.Client, req *http.Request, providerKey string) (TokenResult, error) {

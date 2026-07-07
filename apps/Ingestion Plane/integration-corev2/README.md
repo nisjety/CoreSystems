@@ -165,7 +165,7 @@ DATABASE_URL= \
 INTERNAL_API_KEY=dev \
 INTEGRATION_CREDENTIALS_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
 AZURE_CLIENT_ID=placeholder \
-AZURE_CLIENT_SECRET=placeholder \
+MICROSOFT_CLIENT_AUTH_MODE=public \
 go run ./cmd/api
 ```
 

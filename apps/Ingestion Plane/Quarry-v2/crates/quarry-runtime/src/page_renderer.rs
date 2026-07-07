@@ -23,6 +23,7 @@ use quarry_core::zdr::ZdrMode;
 
 use crate::cas_store::CasStore;
 use crate::page_image::{emit_page_image_created, PageImageCreated};
+use crate::vision::{VisualObservationProcessor, VisualPreprocessInput};
 
 /// Web-page → page-image producer.
 #[derive(Clone)]
@@ -34,6 +35,9 @@ pub struct PageRenderer {
     /// e.g. `http://quarry-edge:8082`. The emitted `image_url` is
     /// `{base}/v1/page-images/{document_id}/{page_no}`.
     edge_base_url: String,
+    /// Optional deterministic preprocessor for the Data Plane visual-RAG image.
+    /// The original screenshot is still used if the processor fails.
+    visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
 }
 
 impl PageRenderer {
@@ -42,12 +46,14 @@ impl PageRenderer {
         cas: Arc<CasStore>,
         js: async_nats::jetstream::Context,
         edge_base_url: impl Into<String>,
+        visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
     ) -> Self {
         Self {
             browser,
             cas,
             js,
             edge_base_url: edge_base_url.into(),
+            visual_processor,
         }
     }
 
@@ -67,6 +73,7 @@ impl PageRenderer {
         cas_bucket: impl Into<String>,
         cas_endpoint: Option<String>,
         edge_base_url: impl Into<String>,
+        visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
     ) -> QuarryResult<Self> {
         let client = async_nats::connect(dataplane_nats_url).await.map_err(|e| {
             QuarryError::new(
@@ -76,7 +83,7 @@ impl PageRenderer {
         })?;
         let js = async_nats::jetstream::new(client);
         let cas = std::sync::Arc::new(CasStore::new(cas_bucket, cas_endpoint).await);
-        Ok(Self::new(browser, cas, js, edge_base_url))
+        Ok(Self::new(browser, cas, js, edge_base_url, visual_processor))
     }
 
     /// Render `url` to a PNG, store it in the CAS, and publish
@@ -122,7 +129,32 @@ impl PageRenderer {
             Err(e) => Err(e),
         };
         let _ = self.browser.release(session).await;
-        let png = shot?.to_vec();
+        let mut png = shot?.to_vec();
+        if let Some(processor) = &self.visual_processor {
+            match processor
+                .preprocess_page_image(VisualPreprocessInput {
+                    document_id: document_id.to_string(),
+                    image_png: png.clone(),
+                })
+                .await
+            {
+                Ok(processed) => {
+                    tracing::debug!(
+                        document_id,
+                        metrics = ?processed.metrics,
+                        "page image cleaned before CAS"
+                    );
+                    png = processed.clean_png;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        document_id,
+                        "page image cleanup failed; storing original screenshot"
+                    );
+                }
+            }
+        }
 
         let content_hash = blake3::hash(&png).to_hex().to_string();
         let page_no = 0i64;

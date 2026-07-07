@@ -896,6 +896,11 @@ pub struct RunEventsQuery {
     /// Max events per page. Clamped server-side to [1, 1000].
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Only return events with `seq` strictly greater than this watermark
+    /// (control filters server-side). Lets incremental pollers such as the
+    /// onboarding crawl preview avoid re-downloading the whole event log.
+    #[serde(default)]
+    pub after_seq: Option<u64>,
 }
 
 pub async fn list_run_events(
@@ -996,6 +1001,7 @@ pub async fn list_job_events(
         .into_response();
     }
     let limit = q.limit.unwrap_or(500).clamp(1, 1000).to_string();
+    let after_seq = q.after_seq.unwrap_or(0).to_string();
 
     let events: Vec<serde_json::Value> = if state.control_base_url.is_empty() {
         tracing::debug!(%job_id, "control_base_url unset; emitting empty job-events stream");
@@ -1007,7 +1013,7 @@ pub async fn list_job_events(
             &request_id,
             &claims.org_id,
             &path,
-            &[("limit", limit)],
+            &[("limit", limit), ("after_seq", after_seq)],
         )
         .await
         {

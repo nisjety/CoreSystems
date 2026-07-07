@@ -19,7 +19,7 @@ export type BillingAccount = {
 export type CheckoutSession = {
   id?: string
   url?: string
-  provider?: 'hyperswitch' | 'stripe' | string
+  provider?: 'hyperswitch' | 'nexi' | 'stripe' | string
   payment_id?: string
   client_secret?: string
   publishable_key?: string
@@ -31,7 +31,7 @@ export type CheckoutSession = {
 }
 
 export type CheckoutStatus = {
-  provider?: 'hyperswitch' | 'stripe' | string
+  provider?: 'hyperswitch' | 'nexi' | 'stripe' | string
   payment_id?: string
   client_secret?: string
   status: string

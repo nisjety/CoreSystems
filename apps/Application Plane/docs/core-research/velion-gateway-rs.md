@@ -2,7 +2,9 @@
 
 ## Current State
 
-`velion-gateway-rs` is a real Rust onboarding BFF. It is not a stub.
+`velion-gateway-rs` is a real Rust onboarding/gateway BFF. It is not a stub.
+
+2026-07-02 note: this research file lives under Application Plane docs, but the current entry points listed below are under `apps/Frontend Plane/velionv3/apps/gateway`. Treat the gateway as a Frontend Plane ownership item unless the Application Plane service is re-established separately.
 
 It exposes a `/health` route plus a fairly broad onboarding router that fans out to lower-plane services for:
 
@@ -31,11 +33,11 @@ It exposes a `/health` route plus a fairly broad onboarding router that fans out
 
 ## Redundancy and Usage Audit
 
-- The current `velionv2` BFF already implements equivalent onboarding proxy logic in `apps/Frontend Plane/velionv2/src/app/api/onboarding/_lib/onboarding-proxy.ts`.
-- In-repo references to `velion-gateway-rs` are limited to its own compose wiring and source tree.
-- No current `velion` or `velionv2` caller reference points at `velion-gateway-rs` directly.
+- The historical `velionv2` BFF implements equivalent onboarding proxy logic in `apps/Frontend Plane/velionv2/src/app/api/onboarding/_lib/onboarding-proxy.ts`.
+- Velion v3 browser code calls same-origin `/api` paths; Vite/nginx proxying then targets the Rust gateway rather than naming `velion-gateway-rs` directly in browser code.
+- Application Plane docs still mention this gateway, while the current source path is Frontend Plane. That is an ownership/documentation drift item.
 
-That makes this service a likely transitional or redundant boundary. It may still be used operationally, but in-repo evidence for active callers is weak.
+That makes this service a boundary-ownership issue. It may still be used operationally through same-origin proxying, but Application Plane should not be treated as the owner without a fresh compose/deploy decision.
 
 ## Stub, Mock, Placeholder, and Partial Audit
 
@@ -44,4 +46,4 @@ That makes this service a likely transitional or redundant boundary. It may stil
 
 ## Notes
 
-If the system standardizes on `velionv2` BFF routes, this Rust gateway becomes a prime consolidation candidate.
+Decide whether this gateway is a Frontend Plane gateway, an Application Plane onboarding BFF, or a transitional compatibility layer. Do that before extending new onboarding behavior.

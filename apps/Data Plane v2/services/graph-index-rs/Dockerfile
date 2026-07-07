@@ -5,6 +5,10 @@
 
 FROM rust:1-bookworm AS chef
 ARG DEBIAN_FRONTEND=noninteractive
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+    CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=120 \
+    CARGO_HTTP_MULTIPLEXING=false
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -e; \
@@ -19,7 +23,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -f /tmp/apt-install.log
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-chef --locked --version 0.1.77
+    set -e; \
+    for i in 1 2 3 4 5; do \
+        if cargo install cargo-chef --locked --version 0.1.77; then \
+            exit 0; \
+        fi; \
+        echo "cargo-chef install retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 WORKDIR /build
 
 FROM chef AS planner

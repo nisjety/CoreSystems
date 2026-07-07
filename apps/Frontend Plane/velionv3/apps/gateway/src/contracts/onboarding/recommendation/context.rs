@@ -41,4 +41,8 @@ pub(crate) struct RecommendWebsite {
 pub(crate) struct RecommendConnector {
     pub(crate) id: String,
     pub(crate) label: String,
+    #[serde(default)]
+    pub(crate) sources: Vec<String>,
+    #[serde(alias = "source_count")]
+    pub(crate) source_count: Option<u32>,
 }

@@ -174,7 +174,10 @@ mod tests {
         assert!(v.get("title").is_none(), "None title must be omitted");
         let parsed: ConsumerMirror = serde_json::from_value(v).expect("minimal payload must parse");
         assert_eq!(parsed.page_no, 3);
-        assert_eq!(parsed.content_hash, "", "consumer defaults content_hash to empty");
+        assert_eq!(
+            parsed.content_hash, "",
+            "consumer defaults content_hash to empty"
+        );
         assert!(parsed.title.is_none());
         assert!(!parsed.zdr, "consumer defaults zdr to false");
     }

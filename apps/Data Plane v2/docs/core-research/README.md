@@ -1,8 +1,13 @@
 # Data Plane v2 Core Research
 
 Generated: 2026-06-07
+Updated: 2026-07-02
 
 This directory contains the current service-level research notes for Data Plane v2.
+
+Latest plane audit:
+
+- `plane-audit-2026-07-02.md`
 
 Runtime services:
 

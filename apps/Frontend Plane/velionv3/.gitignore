@@ -27,3 +27,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright E2E auth state (contains a live session — never commit)
+tests/e2e/.auth/
+test-results/
+playwright-report/

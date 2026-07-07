@@ -10,10 +10,12 @@ import {
   saveOnboardingState,
 } from '@/features/onboarding/lib/api'
 import { signOut } from '@/shared/api/auth-client'
+import { requestJson } from '@/shared/api/http'
 import { clearSession, getSession, loadSession, markSessionOnboardingComplete } from '@/shared/session/session-store'
 import { createCrawlPreviewStream } from '@/features/onboarding/lib/crawl-preview'
 import {
   type GraphDisplayNode,
+  type ConnectorOption,
   type OnboardingState,
   type PlanId,
   type Step,
@@ -42,6 +44,16 @@ import {
   sizeLabel,
   stepNumberFor,
 } from '@/features/onboarding/lib/view'
+import { summarizeOnboardingSources } from '@/features/onboarding/lib/source-summary'
+import {
+  hasRecommendationLocale,
+  localizeRecommendation,
+  planRecommendationContextHash,
+  recommendationLocale,
+  recommendationText,
+  withRecommendationTranslation,
+} from '@/features/onboarding/lib/plan-recommendation'
+import { useI18n } from '@/shared/i18n'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
 import { ConnectStepContent, ConnectStepVisual } from '@/features/onboarding/components/steps/ConnectStep'
 import { IntroStepContent, IntroStepVisual } from '@/features/onboarding/components/steps/IntroStep'
@@ -67,6 +79,7 @@ export default function OnboardingPage() {
     : getBrowserActor()
   const navigate = useNavigate()
   const actions = createOnboardingGatewayActions(actor)
+  const i18n = useI18n()
   const queryClient = useQueryClient()
   const [state, setState] = createOnboardingState(storageKey)
   const [searchResults, setSearchResults] = createSignal<BrregEnhet[]>([])
@@ -75,8 +88,13 @@ export default function OnboardingPage() {
   const [submittingOrg, setSubmittingOrg] = createSignal(false)
   const [connectingId, setConnectingId] = createSignal<string>()
   const [committingPlan, setCommittingPlan] = createSignal(false)
+  // Armed on connect-step hover (only when a source is connected) to start the
+  // plan recommendation early, so it's ready by the time the user reaches the
+  // paywall. No-integration users still trigger it on entering the paywall.
+  const [recommendationPrefetch, setRecommendationPrefetch] = createSignal(false)
   const [confirmingCheckout, setConfirmingCheckout] = createSignal(false)
   const [checkoutSession, setCheckoutSession] = createSignal<CheckoutSession>()
+  const [translatingRecommendationKey, setTranslatingRecommendationKey] = createSignal<string>()
   const [assemblyTicks, setAssemblyTicks] = createSignal(0)
   const [assemblyError, setAssemblyError] = createSignal<string>()
   const [error, setError] = createSignal<string>()
@@ -207,10 +225,14 @@ export default function OnboardingPage() {
       position: graphNodePosition(index, nodes.length),
     }))
   })
-  const recommendedPlan = createMemo(() => state.recommendation?.planId ?? 'trial')
-  const activePlan = createMemo(() => state.plan ?? recommendedPlan())
+  const sourceSummary = createMemo(() => summarizeOnboardingSources({
+    connectors: state.connectors,
+    websiteUrl: state.website.url,
+  }))
+  const currentRecommendationLocale = createMemo(() => recommendationLocale(i18n.locale()))
   const recommendationContext = createMemo<Record<string, unknown>>(() => {
     const graph = graphQuery.data
+    const sources = sourceSummary()
     return {
       organization: {
         name: state.organization.name,
@@ -225,9 +247,19 @@ export default function OnboardingPage() {
         agentBrief: state.website.brief,
       },
       websites: state.website.url ? [{ url: state.website.url, agentBrief: state.website.brief }] : [],
-      connectors: state.connectors.map((item) => ({ id: item.id, label: item.label })),
-      locale: 'nb',
-      sourceCount: state.connectors.length + (state.website.url ? 1 : 0),
+      connectors: sources.sourceDetails.map((item) => ({
+        id: item.connectorId,
+        label: item.connectorLabel,
+        sourceCount: item.sourceCount,
+        sources: item.sources,
+      })),
+      locale: currentRecommendationLocale(),
+      connectorCount: sources.connectorCount,
+      connectedSourceCount: sources.connectedSourceCount,
+      connectedSources: sources.sourceDetails,
+      sourceCount: sources.totalSourceCount,
+      sourceSummary: sources,
+      websiteSourceCount: sources.websiteSourceCount,
       // --- Rich personalization signals (top-level so the gateway's
       // flatten-passthrough carries them through to the Model Plane prompt,
       // which explicitly reads goal/industry/connected-systems and
@@ -241,6 +273,19 @@ export default function OnboardingPage() {
       goal: state.website.brief,
       branding: state.website.branding,
       websitePages: state.website.pages,
+      // Actual text the crawl pulled off the site (title + excerpt per page),
+      // capped and trimmed. This is the strongest personalization signal: it
+      // lets the AI describe what the company does in its own words instead of
+      // guessing from the domain. Flattened through the gateway to the Model
+      // Plane prompt (which is instructed to ground on it, not invent content).
+      websiteContent: state.website.snippets
+        .filter((s) => s.title || s.excerpt)
+        .slice(0, 8)
+        .map((s) => ({
+          title: s.title?.slice(0, 120),
+          excerpt: s.excerpt?.slice(0, 280),
+          url: s.url,
+        })),
       ...(graph
         ? {
             dataPlane: {
@@ -253,10 +298,21 @@ export default function OnboardingPage() {
         : {}),
     }
   })
+  const recommendationContextHash = createMemo(() => planRecommendationContextHash(recommendationContext()))
+  const activeRecommendation = createMemo(() => {
+    const recommendation = state.recommendation
+    if (!recommendation) return undefined
+    return recommendation.contextHash === recommendationContextHash() ? recommendation : undefined
+  })
+  const localizedRecommendation = createMemo(() =>
+    localizeRecommendation(activeRecommendation(), currentRecommendationLocale()))
+  const recommendedPlan = createMemo(() => activeRecommendation()?.planId ?? 'trial')
+  const activePlan = createMemo(() => state.plan ?? recommendedPlan())
   const recommendationQuery = createPlanRecommendationQuery(
     actions,
     () => recommendationContext(),
-    () => state.step === 'paywall' && !state.recommendation,
+    () => (state.step === 'paywall' || recommendationPrefetch()) && !activeRecommendation(),
+    () => recommendationContextHash(),
   )
   const checkoutReturnUrl = createMemo(() =>
     typeof window === 'undefined'
@@ -267,8 +323,50 @@ export default function OnboardingPage() {
   createEffect(() => {
     const recommendation = recommendationQuery.data
     if (!recommendation) return
-    setState('recommendation', recommendation)
+    const sources = sourceSummary()
+    const locale = untrack(currentRecommendationLocale)
+    setState('recommendation', {
+      ...recommendation,
+      connectedSourceCount: sources.connectedSourceCount,
+      contextHash: recommendationContextHash(),
+      locale,
+      sourceCount: sources.totalSourceCount,
+    })
     if (!untrack(() => state.plan)) setState('plan', recommendation.planId)
+  })
+
+  createEffect(() => {
+    const recommendation = activeRecommendation()
+    const targetLanguage = currentRecommendationLocale()
+    if (!recommendation || hasRecommendationLocale(recommendation, targetLanguage)) return
+
+    const key = `${recommendation.contextHash ?? 'current'}:${recommendation.generatedAt}:${targetLanguage}`
+    if (translatingRecommendationKey() === key) return
+    setTranslatingRecommendationKey(key)
+
+    void actions
+      .translatePlanRecommendation({
+        recommendation: recommendationText(recommendation),
+        sourceLanguage: recommendation.locale,
+        targetLanguage,
+      })
+      .then((translation) => {
+        setState('recommendation', (current) => {
+          if (!current || current.contextHash !== recommendation.contextHash) return current
+          return withRecommendationTranslation(current, targetLanguage, translation)
+        })
+      })
+      .catch(() => undefined)
+  })
+
+  createEffect(() => {
+    const recommendation = state.recommendation
+    if (!recommendation || recommendation.contextHash === recommendationContextHash()) return
+
+    batch(() => {
+      if (state.plan === recommendation.planId) setState('plan', undefined)
+      setState('recommendation', undefined)
+    })
   })
 
   createEffect(() => {
@@ -326,7 +424,7 @@ export default function OnboardingPage() {
       {
         url,
         brief,
-        maxPages: 3,
+        maxPages: 6,
         orgId,
       },
       {
@@ -440,12 +538,7 @@ export default function OnboardingPage() {
     }
   }
 
-  async function connectSource(option: {
-    id: string
-    label: string
-    provider: string
-    sources: string[]
-  }) {
+  async function connectSource(option: Pick<ConnectorOption, 'id' | 'label' | 'provider' | 'sources'>) {
     if (!state.organization.id) {
       setError('Create the organization before connecting sources.')
       return
@@ -456,6 +549,30 @@ export default function OnboardingPage() {
     setError(undefined)
 
     try {
+      // The shipping aggregator is Velion's own carrier fleet (shipping-core)
+      // — no per-user OAuth. "Connecting" it verifies the aggregator is live
+      // and shows which carriers it can compare.
+      if (option.provider === 'shipping') {
+        const fleet = await requestJson<{ carriers?: Array<{ name?: string; is_mock?: boolean }> }>(
+          '/api/v1/shipping/carriers',
+          { method: 'GET' },
+        )
+        const carriers = fleet.carriers ?? []
+        if (carriers.length === 0) {
+          throw new Error('Fraktaggregatoren svarte uten transportører. Sjekk shipping-core.')
+        }
+        setState('connectors', (current) => [
+          ...current.filter((item) => item.id !== option.id),
+          {
+            id: option.id,
+            label: `${option.label} (${carriers.length} transportører)`,
+            status: 'connected',
+            sources: option.sources,
+          },
+        ])
+        return
+      }
+
       const session = await actions.startConnectSession({
         orgId,
         provider: option.provider,
@@ -470,7 +587,13 @@ export default function OnboardingPage() {
       // Show connector in-flight while discover/sync settle
       setState('connectors', (current) => [
         ...current.filter((item) => item.id !== option.id),
-        { id: option.id, label: option.label, status: 'pending', connectUrl: session.connectUrl },
+        {
+          id: option.id,
+          label: option.label,
+          status: 'pending',
+          connectUrl: session.connectUrl,
+          sources: option.sources,
+        },
       ])
 
       const source = {
@@ -498,6 +621,7 @@ export default function OnboardingPage() {
           label: option.label,
           status: coresFailed ? 'partial' : 'connected',
           connectUrl: session.connectUrl,
+          sources: option.sources,
         },
       ])
 
@@ -532,8 +656,8 @@ export default function OnboardingPage() {
           orgId,
           plan: 'trial',
           onboarding: {
-            recommendation: state.recommendation,
-            sourceCount: state.connectors.length + 1,
+            recommendation: activeRecommendation(),
+            sourceCount: sourceSummary().totalSourceCount,
           },
         })
         setState('step', 'assembly')
@@ -599,8 +723,8 @@ export default function OnboardingPage() {
         orgId,
         plan: selectedPlan,
         onboarding: {
-          recommendation: state.recommendation,
-          sourceCount: state.connectors.length + 1,
+          recommendation: activeRecommendation(),
+          sourceCount: sourceSummary().totalSourceCount,
         },
       })
       setCheckoutSession(undefined)
@@ -621,6 +745,7 @@ export default function OnboardingPage() {
 
     setFinalizingOnboarding(true)
     const completionSnapshot = cloneOnboardingState(untrack(() => state))
+    const completionRecommendation = activeRecommendation()
     const selectedPlan = activePlan()
 
     setAssemblyTicks(0)
@@ -667,7 +792,11 @@ export default function OnboardingPage() {
             selected_theme: completionSnapshot.themeMode,
             websites: [{ url: completionSnapshot.website.url, brief: completionSnapshot.website.brief }],
             connectors: completionSnapshot.connectors,
-            recommendation: completionSnapshot.recommendation,
+            recommendation: completionRecommendation,
+            source_summary: summarizeOnboardingSources({
+              connectors: completionSnapshot.connectors,
+              websiteUrl: completionSnapshot.website.url,
+            }),
           },
         })
         if (!result.completed) {
@@ -778,6 +907,9 @@ export default function OnboardingPage() {
             onConnect={connectSource}
             onContinue={() => setState('step', 'social-proof')}
             onSkip={() => setState('step', 'social-proof')}
+            onPrefetch={() => {
+              if (state.connectors.length > 0) setRecommendationPrefetch(true)
+            }}
           />
         )
       case 'social-proof':
@@ -805,16 +937,24 @@ export default function OnboardingPage() {
       case 'organization':
         return <OrganizationStepVisual organization={state.organization} />
       case 'connect':
-        return <ConnectStepVisual graphNodes={graphDisplayNodes()} />
+        return (
+          <ConnectStepVisual
+            connectedSources={state.connectors}
+            graphNodes={graphDisplayNodes()}
+            organizationName={state.organization.name}
+            websiteUrl={state.website.url}
+          />
+        )
       case 'social-proof':
         return <SocialProofStepVisual />
       case 'assembly':
         return (
           <AssemblyStepVisual
             activePlan={activePlan()}
-            connectorCount={state.connectors.length}
+            connectedSourceCount={sourceSummary().connectedSourceCount}
             organizationName={state.organization.name}
             websitePages={state.website.pages}
+            recommendation={localizedRecommendation()}
           />
         )
       case 'paywall':
@@ -891,8 +1031,18 @@ export default function OnboardingPage() {
           committing={committingPlan()}
           confirmingCheckout={confirmingCheckout()}
           error={error()}
+          identity={{
+            orgName: state.organization.name,
+            industry: state.organization.industry,
+            orgNumber: state.organization.orgNumber,
+            websiteUrl: state.website.url,
+            websitePages: state.website.pages,
+            connectedSourceCount: sourceSummary().connectedSourceCount,
+            connectorCount: sourceSummary().connectorCount,
+            branding: state.website.branding,
+          }}
           loadingRecommendation={recommendationQuery.isFetching}
-          recommendation={state.recommendation}
+          recommendation={localizedRecommendation()}
           onRefreshRecommendation={() => {
             void recommendationQuery.refetch()
           }}

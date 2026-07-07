@@ -139,32 +139,66 @@ func (c *Config) resolveEnforce() bool {
 	}
 }
 
-// ErrNotImplemented signals that enforce-mode verification is not wired
-// up yet. The middleware returns 503 when it encounters this so a
-// premature flip to enforce mode fails loudly.
-var ErrNotImplemented = errors.New("authctx: signature verification not implemented yet")
-
 // Middleware returns a chi-compatible middleware. In observe mode it
 // decodes the JWT payload (no signature check) and stuffs Claims into
-// the request context. In enforce mode it currently returns 503 with
-// ErrNotImplemented — verification lands in the next commit.
+// the request context. In enforce mode it verifies the RS256 signature,
+// audience, issuer, and expiry against auth-core's public key (mirroring
+// the retrieval-engine Rust verifier) and 401s any request without a
+// valid token; a verified org that disagrees with X-Org-ID is 403'd.
 func Middleware(cfg Config) func(http.Handler) http.Handler {
 	enforce := cfg.resolveEnforce()
 	audience := strings.TrimSpace(cfg.Audience)
 	logger := log.With().Str("component", "authctx").Str("audience", audience).Logger()
+
+	// Build the verifier once at wiring time. If enforce is on but no
+	// verification key is available, keep the fail-closed kill switch:
+	// return a middleware that 503s every request rather than silently
+	// trusting headers.
+	var v *verifier
+	if enforce {
+		built, err := newVerifier(cfg)
+		if err != nil {
+			logger.Error().Err(err).Msg("AUTHCTX_ENFORCE=1 but no verification key is configured; returning 503")
+			return func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, `{"error":"authctx enforce misconfigured"}`, http.StatusServiceUnavailable)
+				})
+			}
+		}
+		v = built
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearer(r)
 
 			if enforce {
-				// Fail closed. Once Verify() is implemented this branch
-				// becomes the happy path; for now the kill switch must
-				// never silently let unauthenticated traffic through.
-				logger.Error().
-					Bool("has_token", token != "").
-					Msg("AUTHCTX_ENFORCE=1 but signature verification is not implemented; returning 503")
-				http.Error(w, `{"error":"authctx enforce not yet implemented"}`, http.StatusServiceUnavailable)
+				if token == "" {
+					http.Error(w, `{"error":"missing bearer token"}`, http.StatusUnauthorized)
+					return
+				}
+				claims, err := v.Verify(token)
+				if err != nil {
+					logger.Warn().Err(err).Msg("authctx enforce: token verification failed")
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				// Verified org is authoritative; reject a mismatched header
+				// so a leaked JWT can't be paired with another tenant's id.
+				if headerOrg := strings.TrimSpace(r.Header.Get("X-Org-ID")); headerOrg != "" && headerOrg != claims.OrgID {
+					logger.Warn().
+						Str("header_org_id", headerOrg).
+						Str("jwt_org_id", claims.OrgID).
+						Str("user_id", claims.UserID).
+						Msg("authctx enforce: X-Org-ID disagrees with verified JWT org_id; rejecting")
+					http.Error(w, `{"error":"org mismatch"}`, http.StatusForbidden)
+					return
+				}
+				// Re-stamp X-Org-ID from the verified claim so downstream
+				// OrgIDMiddleware + handlers scope to the trusted tenant.
+				r.Header.Set("X-Org-ID", claims.OrgID)
+				ctx := IntoContext(r.Context(), claims)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 

@@ -15,7 +15,10 @@ pub(crate) use graph::{
     GraphCounts, GraphPreviewQuery, GraphPreviewResponse, PreviewEdge, PreviewNode,
 };
 pub(crate) use organization::{BrregSearchQuery, CreateOrganizationRequest, WebsiteIngestRequest};
-pub(crate) use recommendation::{PlanRecommendation, RecommendContext, RecommendPlanRequest};
+pub(crate) use recommendation::{
+    PlanRecommendation, RecommendContext, RecommendPlanRequest, RecommendationText,
+    TranslateRecommendationRequest,
+};
 pub(crate) use session::{
     CompleteOnboardingRequest, OnboardingStateResponse, OnboardingStateWriteRequest,
     UpdateThemeRequest,

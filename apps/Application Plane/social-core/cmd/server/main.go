@@ -73,6 +73,8 @@ func main() {
 		social.WithAccountSource(integrationClient),
 		social.WithPublisher(publisher),
 		social.WithEventPublisher(eventPublisher),
+		social.WithActionExecutor(integrationClient),
+		social.WithMetricsStore(repository),
 	)
 	handler := apphttp.NewHandler(cfg, service)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
@@ -82,6 +84,10 @@ func main() {
 	if cfg.PublishWorkerEnabled {
 		worker := social.NewWorker(service, cfg.ServiceName, cfg.PublishWorkerPollInterval, cfg.PublishWorkerBatchSize)
 		go worker.Start(runtimeCtx)
+	}
+	if cfg.MetricsWorkerEnabled {
+		metricsWorker := social.NewMetricsWorker(service, cfg.ServiceName, cfg.MetricsWorkerPollInterval)
+		go metricsWorker.Start(runtimeCtx)
 	}
 
 	errCh := make(chan error, 1)

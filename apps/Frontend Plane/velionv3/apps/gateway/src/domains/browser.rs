@@ -17,6 +17,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,6 +26,7 @@ use url::Url;
 use crate::{
     audience_tokens::get_audience_token,
     config::AppState,
+    domains::chat::shared::{model_token, proxy_model_json},
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
@@ -50,6 +52,7 @@ pub(crate) struct BrowserRunMetadata {
     lease_id: Option<String>,
     profile_id: Option<String>,
     persistent_profile: bool,
+    last_observation: Option<Value>,
     viewport: Viewport,
 }
 
@@ -69,6 +72,15 @@ struct ActionBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuggestActionBody {
+    #[serde(default)]
+    goal: String,
+    #[serde(default = "default_include_screenshot")]
+    include_screenshot: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RestoreProbeBody {
     url: String,
 }
@@ -77,7 +89,12 @@ const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280,
     height: 800,
 };
-const MAX_SCREENSHOT_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
+
+fn default_include_screenshot() -> bool {
+    true
+}
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -85,6 +102,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/browser/sessions/:session_id/actions",
             post(run_action),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/suggestions",
+            post(suggest_action),
         )
         .route(
             "/api/v1/browser/sessions/:session_id/artifacts/:artifact_id",
@@ -209,6 +230,7 @@ async fn create_session(
         lease_id,
         profile_id: returned_profile_id,
         persistent_profile: requested_persistent_profile,
+        last_observation: Some(observation.clone()),
         viewport,
     };
     if let Ok(mut runs) = state.browser_run_store.lock() {
@@ -248,7 +270,7 @@ async fn run_action(
     }
 
     let observation = unwrap_data(&body);
-    let metadata = browser_run_metadata(&state, &session_id);
+    let metadata = update_browser_observation(&state, &session_id, observation.clone());
     let response = browser_response(&session_id, &metadata, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
 }
@@ -277,6 +299,87 @@ async fn close_session(
         runs.remove(&session_id);
     }
     (StatusCode::OK, Json(ok(json!({ "closed": true })))).into_response()
+}
+
+async fn suggest_action(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(body): Json<SuggestActionBody>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let metadata = browser_run_metadata(&state, &session_id);
+    let Some(observation) = metadata.last_observation.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_observation_missing",
+                "No browser observation is available for this session yet.",
+            )),
+        )
+            .into_response();
+    };
+
+    let cookie = cookie_header(&headers);
+    let quarry_bearer = quarry_token(&state, &user, &cookie).await;
+    let screenshot = if body.include_screenshot {
+        screenshot_artifact_id(&observation)
+    } else {
+        None
+    };
+    let screenshot_payload = match screenshot {
+        Some(artifact_id) => {
+            fetch_model_screenshot(&state, &user, quarry_bearer.as_deref(), &artifact_id).await
+        }
+        None => Ok(None),
+    };
+    let screenshot_payload = match screenshot_payload {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
+    let mut request_body = json!({
+        "goal": trimmed_goal(&body.goal),
+        "url": observation.get("url").and_then(Value::as_str).unwrap_or_default(),
+        "title": observation.get("title").and_then(Value::as_str).unwrap_or_default(),
+        "observation": observation,
+        "visual_observation_artifact_id": observation
+            .get("visual_observation_artifact_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    });
+    if let Some((mime_type, content_base64)) = screenshot_payload {
+        request_body["screenshot_mime_type"] = Value::String(mime_type);
+        request_body["screenshot_base64"] = Value::String(content_base64);
+    }
+
+    let token = model_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/browser/suggest-action", state.model_gateway_url);
+    let (status, Json(response_body)) = proxy_model_json(
+        &state,
+        Method::POST,
+        &url,
+        Some(request_body),
+        token.as_deref(),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, response_body);
+    }
+
+    (StatusCode::OK, Json(ok(response_body))).into_response()
 }
 
 async fn get_artifact(
@@ -321,24 +424,23 @@ async fn get_artifact(
 
             if upstream
                 .content_length()
-                .is_some_and(|length| length > MAX_SCREENSHOT_ARTIFACT_BYTES)
+                .is_some_and(|length| length > MAX_BROWSER_ARTIFACT_BYTES)
             {
                 return (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Json(error(
                         "browser_artifact_too_large",
-                        "The browser screenshot artifact is too large to preview.",
+                        "The browser artifact is too large to preview.",
                     )),
                 )
                     .into_response();
             }
 
-            let content_type = safe_image_content_type(
-                upstream
-                    .headers()
-                    .get(header::CONTENT_TYPE.as_str())
-                    .and_then(|v| v.to_str().ok()),
-            );
+            let upstream_content_type = upstream
+                .headers()
+                .get(header::CONTENT_TYPE.as_str())
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let bytes = match upstream.bytes().await {
                 Ok(bytes) => bytes,
                 Err(err) => {
@@ -349,17 +451,19 @@ async fn get_artifact(
                         .into_response()
                 }
             };
-            if bytes.len() as u64 > MAX_SCREENSHOT_ARTIFACT_BYTES {
+            if bytes.len() as u64 > MAX_BROWSER_ARTIFACT_BYTES {
                 return (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     Json(error(
                         "browser_artifact_too_large",
-                        "The browser screenshot artifact is too large to preview.",
+                        "The browser artifact is too large to preview.",
                     )),
                 )
                     .into_response();
             }
 
+            let content_type =
+                safe_browser_artifact_content_type(upstream_content_type.as_deref(), &bytes);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
@@ -371,7 +475,7 @@ async fn get_artifact(
                         StatusCode::BAD_GATEWAY,
                         Json(error(
                             "browser_artifact_failed",
-                            "The browser screenshot artifact could not be returned.",
+                            "The browser artifact could not be returned.",
                         )),
                     )
                         .into_response()
@@ -508,16 +612,17 @@ fn browser_response(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|artifact_id| is_valid_artifact_id(artifact_id))
+        .map(|artifact_id| artifact_frame(run_id, artifact_id, "screenshot", "image/png"));
+    let visual = observation
+        .as_ref()
+        .and_then(|v| v.get("visual_observation_artifact_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|artifact_id| is_valid_artifact_id(artifact_id))
         .map(|artifact_id| {
             json!({
-                "kind": "screenshot",
-                "artifactId": artifact_id,
-                "mediaType": "image/png",
-                "url": format!(
-                    "/api/v1/browser/sessions/{}/artifacts/{}",
-                    urlencoding::encode(run_id),
-                    urlencoding::encode(artifact_id)
-                )
+                "observationArtifactId": artifact_id,
+                "observationUrl": artifact_url(run_id, artifact_id)
             })
         });
 
@@ -539,10 +644,41 @@ fn browser_response(
                 "storage": if metadata.persistent_profile { "persistent" } else { "isolated" }
             },
             "frame": frame,
-            "capabilities": ["navigate", "back", "forward", "click", "type", "press", "scroll", "wait_for", "select", "inspect_dom", "screenshot_artifact", "annotate", "persistent_profile"]
+            "visual": visual,
+            "capabilities": ["navigate", "back", "forward", "click", "type", "press", "scroll", "wait_for", "select", "inspect_dom", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
         },
         "observation": observation
     })
+}
+
+fn artifact_frame(run_id: &str, artifact_id: &str, kind: &str, media_type: &str) -> Value {
+    json!({
+        "kind": kind,
+        "artifactId": artifact_id,
+        "mediaType": media_type,
+        "url": artifact_url(run_id, artifact_id)
+    })
+}
+
+fn artifact_url(run_id: &str, artifact_id: &str) -> String {
+    format!(
+        "/api/v1/browser/sessions/{}/artifacts/{}",
+        urlencoding::encode(run_id),
+        urlencoding::encode(artifact_id)
+    )
+}
+
+fn update_browser_observation(
+    state: &AppState,
+    session_id: &str,
+    observation: Value,
+) -> BrowserRunMetadata {
+    let mut metadata = browser_run_metadata(state, session_id);
+    metadata.last_observation = Some(observation);
+    if let Ok(mut runs) = state.browser_run_store.lock() {
+        runs.insert(session_id.to_owned(), metadata.clone());
+    }
+    metadata
 }
 
 fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadata {
@@ -555,8 +691,98 @@ fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadat
             lease_id: None,
             profile_id: None,
             persistent_profile: false,
+            last_observation: None,
             viewport: DEFAULT_VIEWPORT,
         })
+}
+
+fn screenshot_artifact_id(observation: &Value) -> Option<String> {
+    observation
+        .get("screenshot_artifact_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|artifact_id| is_valid_artifact_id(artifact_id))
+        .map(str::to_owned)
+}
+
+fn trimmed_goal(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "Decide the next safe browser action for evidence capture.".to_owned();
+    }
+    trimmed.chars().take(1200).collect()
+}
+
+async fn fetch_model_screenshot(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    artifact_id: &str,
+) -> Result<Option<(String, String)>, Response> {
+    let url = format!(
+        "{}/v1/artifacts/{}",
+        state.quarry_edge_url,
+        urlencoding::encode(artifact_id)
+    );
+    let mut req = state.client.get(&url).header("x-user-id", &user.user_id);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+
+    let upstream = req.send().await.map_err(|err| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error("upstream_unavailable", err.to_string())),
+        )
+            .into_response()
+    })?;
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !status.is_success() {
+        return Ok(None);
+    }
+    if upstream
+        .content_length()
+        .is_some_and(|length| length > MAX_MODEL_SCREENSHOT_BYTES)
+    {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(error(
+                "browser_screenshot_too_large",
+                "The browser screenshot is too large for model vision.",
+            )),
+        )
+            .into_response());
+    }
+
+    let content_type = safe_model_screenshot_content_type(
+        upstream
+            .headers()
+            .get(header::CONTENT_TYPE.as_str())
+            .and_then(|value| value.to_str().ok()),
+    );
+    let bytes = upstream.bytes().await.map_err(|err| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error("upstream_unavailable", err.to_string())),
+        )
+            .into_response()
+    })?;
+    if bytes.len() as u64 > MAX_MODEL_SCREENSHOT_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(error(
+                "browser_screenshot_too_large",
+                "The browser screenshot is too large for model vision.",
+            )),
+        )
+            .into_response());
+    }
+
+    Ok(Some((
+        content_type.to_owned(),
+        BASE64_STANDARD.encode(bytes.as_ref()),
+    )))
 }
 
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
@@ -691,7 +917,7 @@ fn is_valid_profile_id(value: &str) -> bool {
         .is_some_and(|suffix| !suffix.is_empty() && is_valid_path_segment(value))
 }
 
-fn safe_image_content_type(value: Option<&str>) -> HeaderValue {
+fn safe_browser_artifact_content_type(value: Option<&str>, bytes: &[u8]) -> HeaderValue {
     match value
         .unwrap_or_default()
         .split(';')
@@ -702,8 +928,33 @@ fn safe_image_content_type(value: Option<&str>) -> HeaderValue {
         "image/png" => HeaderValue::from_static("image/png"),
         "image/jpeg" => HeaderValue::from_static("image/jpeg"),
         "image/webp" => HeaderValue::from_static("image/webp"),
+        "application/json" => HeaderValue::from_static("application/json"),
+        "application/problem+json" => HeaderValue::from_static("application/json"),
+        _ if looks_like_json_payload(bytes) => HeaderValue::from_static("application/json"),
         _ => HeaderValue::from_static("image/png"),
     }
+}
+
+fn safe_model_screenshot_content_type(value: Option<&str>) -> &'static str {
+    match value
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+    {
+        "image/jpeg" => "image/jpeg",
+        "image/webp" => "image/webp",
+        _ => "image/png",
+    }
+}
+
+fn looks_like_json_payload(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .copied()
+        .find(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t'))
+        .is_some_and(|b| matches!(b, b'{' | b'['))
 }
 
 #[cfg(test)]
@@ -743,6 +994,7 @@ mod tests {
             lease_id: Some("lease-1".to_owned()),
             profile_id: None,
             persistent_profile: false,
+            last_observation: None,
             viewport: DEFAULT_VIEWPORT,
         };
         let response = browser_response(
@@ -760,6 +1012,40 @@ mod tests {
             "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLESHOT00001"
         );
         assert_eq!(response["session"]["frame"]["mediaType"], "image/png");
+    }
+
+    #[test]
+    fn browser_response_includes_visual_observation_artifact_url() {
+        let metadata = BrowserRunMetadata {
+            lease_id: None,
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: None,
+            viewport: DEFAULT_VIEWPORT,
+        };
+        let response = browser_response(
+            "run_browser_01",
+            &metadata,
+            Some(json!({
+                "run_id": "run_browser_01",
+                "url": "https://example.com",
+                "visual_observation_artifact_id": "art_01JZ9XM7EXAMPLEVISION0001"
+            })),
+        );
+
+        assert_eq!(
+            response["session"]["visual"]["observationArtifactId"],
+            "art_01JZ9XM7EXAMPLEVISION0001"
+        );
+        assert_eq!(
+            response["session"]["visual"]["observationUrl"],
+            "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLEVISION0001"
+        );
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "visual_observation"));
     }
 
     #[test]
@@ -785,11 +1071,57 @@ mod tests {
     }
 
     #[test]
-    fn only_safe_image_content_types_are_forwarded() {
+    fn only_safe_browser_artifact_content_types_are_forwarded() {
         assert_eq!(
-            safe_image_content_type(Some("image/webp; charset=binary")),
+            safe_browser_artifact_content_type(Some("image/webp; charset=binary"), b""),
             "image/webp"
         );
-        assert_eq!(safe_image_content_type(Some("text/html")), "image/png");
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/json"), b"{}"),
+            "application/json"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(
+                Some("application/octet-stream"),
+                b" {\"ok\": true}"
+            ),
+            "application/json"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("text/html"), b"<html></html>"),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn model_screenshot_content_types_are_image_only() {
+        assert_eq!(
+            safe_model_screenshot_content_type(Some("image/jpeg; charset=binary")),
+            "image/jpeg"
+        );
+        assert_eq!(
+            safe_model_screenshot_content_type(Some("image/webp")),
+            "image/webp"
+        );
+        assert_eq!(
+            safe_model_screenshot_content_type(Some("application/json")),
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn screenshot_artifact_id_uses_strict_artifact_ids() {
+        assert_eq!(
+            screenshot_artifact_id(&json!({
+                "screenshot_artifact_id": "art_01JZ9XM7EXAMPLESHOT00001"
+            })),
+            Some("art_01JZ9XM7EXAMPLESHOT00001".to_owned())
+        );
+        assert_eq!(
+            screenshot_artifact_id(&json!({
+                "screenshot_artifact_id": "../secret"
+            })),
+            None
+        );
     }
 }

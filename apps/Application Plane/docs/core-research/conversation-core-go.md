@@ -41,7 +41,8 @@ At startup it:
 ## Relationships
 
 - `conversation-ingest-rs` forwards normalized events into `/internal/conversation-events`.
-- `velionv2` talks to this service through `src/lib/integrations/conversation-core.ts`.
+- Known historical caller: `velionv2` talks to this service through `src/lib/integrations/conversation-core.ts`.
+- Current Velion v3 usage should be verified through the Frontend Plane gateway domains before treating it as live.
 - The service uses shared `application-postgres`.
 - It can publish events through NATS when JetStream wiring is available.
 
@@ -49,7 +50,7 @@ At startup it:
 
 - No runtime stub path stood out in the main boot path.
 - NATS publishing is optional and degrades when the client cannot connect.
-- The service appears live and used by `velionv2`.
+- The service appears live; its current Velion v3 caller path needs verification.
 
 ## Notes
 

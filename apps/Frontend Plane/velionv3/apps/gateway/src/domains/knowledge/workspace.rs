@@ -54,10 +54,16 @@ pub(super) async fn load_workspace(
     let actor = shared::actor_for(&user);
     let cookie = shared::cookie_header(&headers);
     let org_opt = (!org_id.trim().is_empty()).then(|| org_id.clone());
+    // Data Plane audience token — attached as Bearer on documents-api /
+    // retrieval-engine / graph-index legs so documents-api can enforce tenant
+    // identity from the signed claim. None when auth-core is unreachable; the
+    // legs still work via internal-key + header while enforce is off.
+    let dp_token = shared::data_plane_token(&state, &user, &cookie).await;
+    let dp = dp_token.as_deref();
 
     // Stage 1 — documents + integration summary load regardless of org scope.
     let (documents, integration) = tokio::join!(
-        load_documents(&state, org_opt.as_deref(), &actor),
+        load_documents(&state, org_opt.as_deref(), &actor, dp),
         load_integration_summary(&state, org_opt.as_deref(), &actor),
     );
     let indexed_count = count_indexed(&documents);
@@ -100,14 +106,14 @@ pub(super) async fn load_workspace(
 
     // Stage 2 — graph snapshot, finspo analytics, quarry web sources (org-scoped).
     let (graph_snapshot, finspo, quarry_sources) = tokio::join!(
-        load_graph_snapshot(&state, &org, &actor),
+        load_graph_snapshot(&state, &org, &actor, dp),
         load_finspo(&state, &org, &actor),
         load_quarry_sources(&state, &user, &cookie),
     );
 
     // Resolve graph entity source refs → documents so nodes can cite real sources.
     let graph_refs = collect_graph_source_refs(graph_snapshot.as_ref());
-    let chunk_lookup = load_graph_reference_chunks(&state, &org, &actor, &graph_refs).await;
+    let chunk_lookup = load_graph_reference_chunks(&state, &org, &actor, &graph_refs, dp).await;
     let graph = build_graph(graph_snapshot.as_ref(), &chunk_lookup);
 
     let selected = sort_by_recency(&documents)
@@ -119,8 +125,8 @@ pub(super) async fn load_workspace(
 
     // Stage 3 — per-document chunk previews, freshness rows, diagnostics.
     let (chunk_previews, freshness, diag) = tokio::join!(
-        load_document_chunk_previews(&state, &org, &actor, &selected),
-        load_freshness(&state, &org, &actor, &selected_ids),
+        load_document_chunk_previews(&state, &org, &actor, &selected, dp),
+        load_freshness(&state, &org, &actor, &selected_ids, dp),
         diagnostics::load_diagnostics(
             &state,
             &actor,
@@ -205,12 +211,13 @@ async fn load_documents(
     state: &AppState,
     org: Option<&str>,
     actor: &ActionActor,
+    dp_token: Option<&str>,
 ) -> Vec<DocSummary> {
     let url = format!(
         "{}/v1/documents?limit=100&offset=0",
         state.documents_api_url
     );
-    let payload = fetch_json(
+    let payload = shared::fetch_json_bearer(
         state,
         Method::GET,
         &url,
@@ -218,6 +225,7 @@ async fn load_documents(
         org,
         actor,
         Duration::from_millis(2_500),
+        dp_token,
     )
     .await;
     array_from(payload.as_ref(), "documents")
@@ -396,13 +404,18 @@ async fn load_integration_summary(
     }
 }
 
-async fn load_graph_snapshot(state: &AppState, org: &str, actor: &ActionActor) -> Option<Value> {
+async fn load_graph_snapshot(
+    state: &AppState,
+    org: &str,
+    actor: &ActionActor,
+    dp_token: Option<&str>,
+) -> Option<Value> {
     let url = format!(
         "{}/v1/graphs/{}?limit_nodes=120&limit_edges=240",
         state.graph_index_url,
         urlencoding::encode(org)
     );
-    fetch_json(
+    shared::fetch_json_bearer(
         state,
         Method::GET,
         &url,
@@ -410,6 +423,7 @@ async fn load_graph_snapshot(state: &AppState, org: &str, actor: &ActionActor) -
         Some(org),
         actor,
         Duration::from_millis(2_500),
+        dp_token,
     )
     .await
 }
@@ -420,6 +434,7 @@ async fn load_graph_reference_chunks(
     org: &str,
     actor: &ActionActor,
     knowledge_ids: &[String],
+    dp_token: Option<&str>,
 ) -> HashMap<String, String> {
     if knowledge_ids.is_empty() {
         return HashMap::new();
@@ -429,7 +444,7 @@ async fn load_graph_reference_chunks(
         "knowledge_ids": knowledge_ids.iter().take(GRAPH_SOURCE_REF_LIMIT).collect::<Vec<_>>(),
     });
     let url = format!("{}/v1/retrieve/chunks", state.retrieval_engine_url);
-    let payload = fetch_json(
+    let payload = shared::fetch_json_bearer(
         state,
         Method::POST,
         &url,
@@ -437,6 +452,7 @@ async fn load_graph_reference_chunks(
         Some(org),
         actor,
         Duration::from_millis(4_000),
+        dp_token,
     )
     .await;
     array_from(payload.as_ref(), "chunks")
@@ -463,6 +479,7 @@ async fn load_document_chunk_previews(
     org: &str,
     actor: &ActionActor,
     documents: &[DocSummary],
+    dp_token: Option<&str>,
 ) -> HashMap<String, ChunkPreview> {
     let futures = documents.iter().map(|doc| async move {
         let body = json!({
@@ -472,7 +489,7 @@ async fn load_document_chunk_previews(
             "offset": 0,
         });
         let url = format!("{}/v1/retrieve/chunks", state.retrieval_engine_url);
-        let payload = fetch_json(
+        let payload = shared::fetch_json_bearer(
             state,
             Method::POST,
             &url,
@@ -480,6 +497,7 @@ async fn load_document_chunk_previews(
             Some(org),
             actor,
             Duration::from_millis(4_000),
+            dp_token,
         )
         .await;
         (
@@ -495,13 +513,14 @@ async fn load_freshness(
     org: &str,
     actor: &ActionActor,
     document_ids: &[String],
+    dp_token: Option<&str>,
 ) -> HashMap<String, f64> {
     if document_ids.is_empty() {
         return HashMap::new();
     }
     let body = json!({ "org_id": org, "document_ids": document_ids });
     let url = format!("{}/v1/retrieve/freshness", state.retrieval_engine_url);
-    let payload = fetch_json(
+    let payload = shared::fetch_json_bearer(
         state,
         Method::POST,
         &url,
@@ -509,6 +528,7 @@ async fn load_freshness(
         Some(org),
         actor,
         Duration::from_millis(3_000),
+        dp_token,
     )
     .await;
     array_from(payload.as_ref(), "freshness")

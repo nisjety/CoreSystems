@@ -6,6 +6,7 @@ import {
   Check,
   Code2,
   ExternalLink,
+  Eye,
   Globe2,
   Keyboard,
   Loader2,
@@ -18,13 +19,14 @@ import {
   RefreshCw,
   Send,
   ShieldCheck,
+  Sparkles,
   Terminal,
   TextCursorInput,
   Timer,
   X,
 } from 'lucide-solid'
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX } from 'solid-js'
-import type { BrowserAction } from '@/shared/api/browser-client'
+import type { BrowserAction, BrowserActionSuggestionResponse } from '@/shared/api/browser-client'
 import { browserSessionFromPreview, type BrowserSessionViewModel } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
@@ -221,6 +223,11 @@ function compactBrowserUrl(value: string): string {
   }
 }
 
+function compactArtifactId(value: string): string {
+  if (value.length <= 22) return value
+  return `${value.slice(0, 9)}...${value.slice(-8)}`
+}
+
 function consoleTone(level: string): 'error' | 'warn' | 'info' {
   const normalized = level.toLowerCase()
   if (normalized.includes('error')) return 'error'
@@ -253,7 +260,34 @@ function BrowserObservationInspector(props: { session: BrowserSessionViewModel }
         <span class="knowledge-browser-inspector__tab">
           <Network class="size-3.5" /> Network
         </span>
+        <Show when={props.session.visualObservationArtifactId}>
+          <span class="knowledge-browser-inspector__tab">
+            <Eye class="size-3.5" /> Vision
+          </span>
+        </Show>
       </div>
+
+      <Show when={props.session.visualObservationArtifactId}>
+        {(artifactId) => (
+          <section class="knowledge-browser-inspector__section knowledge-browser-inspector__section--vision">
+            <header>
+              <span><Eye class="size-3.5" /> Visuelt</span>
+              <strong>OpenCV</strong>
+            </header>
+            <div class="knowledge-browser-vision-artifact">
+              <span>visual_observation.json</span>
+              <code>{compactArtifactId(artifactId())}</code>
+              <Show when={props.session.visualObservationUrl}>
+                {(url) => (
+                  <a href={url()} target="_blank" rel="noopener noreferrer" aria-label="Åpne visuell observasjon">
+                    <ExternalLink class="size-3.5" />
+                  </a>
+                )}
+              </Show>
+            </div>
+          </section>
+        )}
+      </Show>
 
       <section class="knowledge-browser-inspector__section">
         <header>
@@ -342,6 +376,7 @@ function BrowserSessionSurface(props: {
   browserBusy?: boolean
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
+  onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onEnter: (index: number) => void
   onLeave: (index: number) => void
   onSelectAll: () => void
@@ -360,6 +395,8 @@ function BrowserSessionSurface(props: {
   const [selectorInput, setSelectorInput] = createSignal('')
   const [textInput, setTextInput] = createSignal('')
   const [keyInput, setKeyInput] = createSignal('Enter')
+  const [goalInput, setGoalInput] = createSignal('Capture useful evidence from this page')
+  const [lastSuggestion, setLastSuggestion] = createSignal<BrowserActionSuggestionResponse | null>(null)
   const allSelected = () => props.total > 0 && props.selectedCount === props.total
   const isLive = () => session().renderMode === 'chromium'
   const controlsDisabled = () => !isLive() || props.browserBusy || !session().sessionId
@@ -377,10 +414,16 @@ function BrowserSessionSurface(props: {
   const keyValue = () => keyInput().trim() || 'Enter'
   const selectorActionDisabled = () => controlsDisabled() || selector().length === 0
   const typeActionDisabled = () => selectorActionDisabled() || textValue().length === 0
+  const modelActionDisabled = () => controlsDisabled() || !props.onBrowserSuggestAction
   const navigateFromAddress = () => {
     const target = address() || session().url
     if (!target) return
     runAction({ type: 'navigate', url: target })
+  }
+  const suggestAction = async () => {
+    if (modelActionDisabled()) return
+    const suggestion = await props.onBrowserSuggestAction?.(goalInput().trim())
+    setLastSuggestion(suggestion ?? null)
   }
 
   createEffect(() => {
@@ -541,6 +584,9 @@ function BrowserSessionSurface(props: {
               <Show when={session().frameArtifactId ?? session().screenshotArtifactId}>
                 {(artifactId) => <span>shot {artifactId()}</span>}
               </Show>
+              <Show when={session().visualObservationArtifactId}>
+                <span><Eye class="size-3.5" /> vision</span>
+              </Show>
               <button
                 type="button"
                 aria-label="Ta skjermbilde"
@@ -587,7 +633,31 @@ function BrowserSessionSurface(props: {
                   }}
                 />
               </label>
+              <label class="knowledge-browser-actionbar__field knowledge-browser-actionbar__field--goal">
+                <Sparkles class="size-3.5" aria-hidden="true" />
+                <input
+                  value={goalInput()}
+                  disabled={controlsDisabled()}
+                  placeholder="AI goal"
+                  onInput={(event) => setGoalInput(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      void suggestAction()
+                    }
+                  }}
+                />
+              </label>
               <div class="knowledge-browser-actionbar__buttons">
+                <button
+                  type="button"
+                  aria-label="Kjør ett AI-foreslått nettlesersteg"
+                  title="AI-steg"
+                  disabled={modelActionDisabled()}
+                  onClick={() => void suggestAction()}
+                >
+                  <Sparkles class="size-3.5" />
+                </button>
                 <button
                   type="button"
                   aria-label="Klikk valgt selector"
@@ -635,6 +705,15 @@ function BrowserSessionSurface(props: {
                 </button>
               </div>
             </div>
+            <Show when={lastSuggestion()?.suggestion.reason}>
+              {(reason) => (
+                <div class="knowledge-browser-model-suggestion">
+                  <Sparkles class="size-3.5" />
+                  <span>{lastSuggestion()?.suggestion.done ? 'done' : lastSuggestion()?.suggestion.action?.type ?? 'no-action'}</span>
+                  <p>{reason()}</p>
+                </div>
+              )}
+            </Show>
             <div class="knowledge-browser-live-surface__workspace">
               <div class="knowledge-browser-live-surface__page">
                 <header>
@@ -739,6 +818,7 @@ export function ScrapePreviewPanel(props: {
   adding: boolean
   browserBusy?: boolean
   onBrowserAction?: (action: BrowserAction) => void
+  onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
   preview: ScrapePreview
@@ -814,6 +894,7 @@ export function ScrapePreviewPanel(props: {
           browserBusy={props.browserBusy}
           hovered={hovered()}
           onBrowserAction={props.onBrowserAction}
+          onBrowserSuggestAction={props.onBrowserSuggestAction}
           onEnter={enter}
           onLeave={leave}
           onSelectAll={selectAll}

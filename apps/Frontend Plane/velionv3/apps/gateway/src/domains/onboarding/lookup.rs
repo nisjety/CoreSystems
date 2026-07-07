@@ -7,7 +7,7 @@ use crate::{
     config::AppState,
     onboarding::{
         crawl_preview::crawl_preview,
-        lookup::{brreg_search, graph_preview, recommend_plan},
+        lookup::{brreg_search, graph_preview, recommend_plan, translate_recommendation},
     },
 };
 
@@ -17,4 +17,8 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/v1/onboarding/graph-preview", get(graph_preview))
         .route("/api/v1/onboarding/crawl-preview", post(crawl_preview))
         .route("/api/v1/onboarding/recommend-plan", post(recommend_plan))
+        .route(
+            "/api/v1/onboarding/translate-recommendation",
+            post(translate_recommendation),
+        )
 }

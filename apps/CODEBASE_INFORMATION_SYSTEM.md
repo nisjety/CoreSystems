@@ -1,27 +1,47 @@
 # CoreSystem Codebase Information System
 
-Generated: 2026-06-07
+Updated: 2026-07-02
 
 Scope:
 - `apps/Application Plane`
 - `apps/Data Plane v2`
-- `apps/Channel Plane`
 - `apps/Control Plane`
 - `apps/Model Plane`
 - `apps/Ingestion Plane`
-- `apps/Frontend Plane/velionv2`
+- `apps/Frontend Plane/velionv3`
+
+Reference-only:
+- `apps/Channel Plane` remains future/docs-only.
+- `apps/Frontend Plane/velionv2` remains historical/reference unless explicitly targeted.
 
 Evidence used:
-- CodeGraph index: 3,246 indexed files, 58,130 symbols, Go/TypeScript/TSX/Python/Rust/JavaScript.
+- Consolidated cross-plane runtime map: `docs/CORESYSTEM_CROSS_PLANE_ARCHITECTURE_MAP.md`.
+- CodeGraph status on 2026-07-02: 11,635 indexed files, 216,888 nodes, 760,041 edges.
 - Canonical target ownership: `apps/master-ownership-matrix.md`.
 - Cross-plane privacy contract: `apps/GDPR_SUMMARY.md`.
-- As-built snapshot: `apps/Frontend Plane/velionv2/docs/coresystem-architecture-map.md`.
-- Plane docs and manifests indexed in context-mode as `CoreSystem plane docs snapshot 2026-06-07`.
-- Channel Plane is docs-only today: `apps/Channel Plane/docs/vision.md`.
+- Velion v3 source/docs: `apps/Frontend Plane/velionv3/README.md`, `package.json`, `vite.config.ts`, `apps/gateway/src/main.rs`, `apps/gateway/src/domains/*`, `src/shared/actions/action-registry.ts`.
+- Data Plane v2 docs/manifests: `apps/Data Plane v2/docs/gap-data.md`, `Makefile`, service manifests.
+- Ingestion docs/manifests: `apps/Ingestion Plane/Quarry-v2/docs/ARCHITECTURE.md`, `docs/CONTRACTS.md`, `docs/CROSS_PLANE_INTEGRATION.md`, service manifests.
+- Model Plane docs/manifests: `apps/Model Plane/README.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md`, `docs/VERIFICATION.md`.
+- Control/Application manifests and service READMEs.
+- Audit backlog: `apps/CORESYSTEM_AUDIT_BACKLOG.md`.
 
 ## Overview
 
-CoreSystem is a multi-plane AI customer experience platform. The architecture is a monorepo of independently runnable service stacks connected by explicit API, gRPC, NATS, and Docker network boundaries. Authority flows downward: Control owns identity and governance, Data owns durable knowledge, Ingestion captures evidence, Model reasons and executes agent loops, Application owns collaborative/realtime workspace state, Frontend exposes Velion v2 and its BFF, and Channel Plane is reserved for future external agent deployment.
+CoreSystem is a multi-plane AI customer experience platform. The architecture is a monorepo of independently runnable service stacks connected by explicit HTTP, gRPC, NATS/JetStream, Docker network, and gateway boundaries.
+
+The current active frontend target is Velion v3. Velion v3 is not the old Next.js BFF shape from Velion v2. It is a SolidJS/Vite TypeScript app at the plane root, a Rust Axum same-origin gateway under `apps/gateway`, and a separate nested Next.js web app under `apps/velion-web`.
+
+The authority model stays unchanged:
+
+```text
+Control owns authority.
+Data owns durable knowledge.
+Ingestion captures evidence.
+Model reasons and executes agent loops.
+Application projects collaborative/realtime workspace state.
+Frontend presents and normalizes access.
+```
 
 ## Plane Pyramid
 
@@ -31,21 +51,25 @@ CoreSystem is a multi-plane AI customer experience platform. The architecture is
 | L2 | Data Plane v2 | `apps/Data Plane v2` | Documents, chunks, embeddings, retrieval, GraphRAG, LLM wiki, quality gates |
 | L3 | Ingestion Plane | `apps/Ingestion Plane` | Quarry-v2 web/search evidence, imports, integrations, SharePoint/M365 sync |
 | L4 | Model Plane | `apps/Model Plane` | AI gateway, sessions, inference, execution loop, Temporal orchestration, capabilities |
-| L5 | Application Plane | `apps/Application Plane` | Convex workspace, realtime sync, notifications, conversation/information services |
-| L6 | Frontend Plane | `apps/Frontend Plane/velionv2` | Next.js 16 Velion workspace and BFF route handlers |
+| L5 | Application Plane | `apps/Application Plane` | Convex workspace, realtime sync, notifications, conversation/information/social services |
+| L6 | Frontend Plane | `apps/Frontend Plane/velionv3` | Solid/Vite Velion UI, Rust same-origin gateway, nested Velion web app |
 | Future | Channel Plane | `apps/Channel Plane` | Planned widgets, adapters, public visitor conversations, inbox/handoff runtime |
 
 ## Architecture Map
 
+The canonical live runtime map and integration-proof matrix is maintained in `docs/CORESYSTEM_CROSS_PLANE_ARCHITECTURE_MAP.md`. The diagram below is the compact orientation view.
+
 ```mermaid
 flowchart LR
-  User["User / operator"] --> Frontend["Frontend Plane: velionv2"]
-  Frontend --> BFF["Next.js route handlers: src/app/api"]
-  BFF --> Control["Control Plane: auth/user/org/billing/session/audit"]
-  BFF --> Ingestion["Ingestion Plane: Quarry-v2/imports/integrations"]
-  BFF --> Data["Data Plane v2: documents/retrieval/graph/wiki"]
-  BFF --> Model["Model Plane: gateway/session/inference/execution"]
-  BFF --> Application["Application Plane: Convex/notifications/conversation/info"]
+  User["User / operator"] --> Frontend["Frontend Plane: Velion v3 Solid/Vite"]
+  Frontend --> Gateway["Velion v3 Rust gateway: apps/gateway"]
+  Frontend --> Actions["Shared action registry and context packs"]
+  Gateway --> Control["Control Plane: auth/user/org/billing/session/audit"]
+  Gateway --> Ingestion["Ingestion Plane: Quarry-v2/imports/integrations"]
+  Gateway --> Data["Data Plane v2: documents/retrieval/graph/wiki"]
+  Gateway --> Model["Model Plane: gateway/session/inference/execution"]
+  Gateway --> Application["Application Plane: Convex/notifications/conversation/info/social"]
+  Actions --> Gateway
   Ingestion --> Data
   Model --> Data
   Model --> Ingestion
@@ -60,14 +84,15 @@ flowchart LR
 
 ## Non-Negotiable Cross-Plane Rules
 
-1. No direct database crossing. Model and Ingestion/Quarry consume Data Plane APIs only.
+1. No direct database crossing. Model, Frontend, Application, and Ingestion consume Data Plane APIs only.
 2. No independent embeddings or reranking outside isolated labs. Data Plane owns embedding and retrieval parity.
-3. No browser-agent bypass around Quarry policy. Model Plane proposes browser actions; Quarry executes or rejects them.
+3. No browser-agent bypass around Quarry policy. Model Plane proposes browser actions; Quarry-v2 executes or rejects them.
 4. Zero Data Retention must propagate across every boundary that could persist content.
 5. GDPR policy metadata must travel with data and processing jobs: purpose, lawful basis, retention, residency, privacy class, third-party processing allowance, and deletion scope.
 6. Durable knowledge assets live in Data Plane: documents, chunks, embeddings, graph, wiki, source logs, retrieval traces.
 7. Reasoning lives in Model Plane: planning, synthesis, agent loops, tool selection, memory/wiki maintenance proposals.
 8. Human-facing UX lives in Frontend/Application/Channel surfaces, not in core storage or reasoning services.
+9. Browser-facing and frontend calls must pass through the Velion gateway/BFF surface; upstream secrets, OAuth tokens, and forged org/user headers must not reach the browser.
 
 ## Plane Details
 
@@ -86,7 +111,7 @@ Primary services:
 Common entry points:
 - `apps/Control Plane/auth-core/src/main.ts`
 - `apps/Control Plane/{audit-core,billing-core,org-core,session-core,user-core}/cmd/server/main.go`
-- HTTP/gRPC servers under `internal/http` and `internal/grpc`.
+- HTTP/gRPC servers under service-local `internal/http` and `internal/grpc`.
 
 Primary docs:
 - `apps/Control Plane/README.md`
@@ -122,8 +147,8 @@ Primary docs:
 Purpose: evidence capture and acquisition. It authenticates through Control Plane, captures or imports source material, and persists durable knowledge only through Data Plane contracts.
 
 Current source of truth:
-- Use `Quarry-v2` for Velion v2 web/search ingestion.
-- `Quarry/` is deferred legacy and should not be the active target for new Velion v2 work.
+- Use `Quarry-v2` for Velion v3 web/search ingestion.
+- `Quarry/` is legacy/deferred and should not be the active target for new Velion v3 work.
 
 Primary services:
 - `Quarry-v2/crates/quarry-edge` - Rust public REST/SSE ingest edge.
@@ -135,6 +160,7 @@ Primary services:
 - `integration-corev2` - Go OAuth/connectors and workers.
 - `finspo-core` - Go SharePoint/M365 sync.
 - `autocomplete-core` - Rust quick lookup/autocomplete service.
+- `services/support-worker` - TypeScript worker package.
 
 Common entry points:
 - `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs`
@@ -182,49 +208,58 @@ Primary docs:
 Purpose: collaborative workspace and realtime synchronization layer. It may mirror or project state from lower planes, but it does not own identity, billing, durable knowledge, ingestion, or reasoning.
 
 Primary services:
-- `convex-backend`, `convex-dashboard`, `convex-gateway`, `convex-subscriber`.
-- `affine-core` and `affine-runtime`.
-- `conversation-core-go` and `conversation-ingest-rs`.
+- `convex-core` - Convex backend/dashboard/gateway/subscriber package.
+- `conversation-core/conversation-core-go` and `conversation-core/conversation-ingest-rs`.
 - `information-core`.
+- `insight-core`.
+- `leads-core`.
 - `notification-core`.
-- `application-postgres`, `application-redis`, app-local NATS.
+- `social-core`.
+- `zammad-foundation/bootstrap`.
 
 Common entry points:
 - `apps/Application Plane/convex-core/convex/*`
 - `apps/Application Plane/conversation-core/conversation-core-go/cmd/server/main.go`
 - `apps/Application Plane/conversation-core/conversation-ingest-rs/src/main.rs`
-- `apps/Application Plane/information-core/cmd/server/main.go`
-- `apps/Application Plane/notification-core/cmd/server/main.go`
+- `apps/Application Plane/{information-core,insight-core,leads-core,notification-core,social-core}/cmd/server/main.go`
 
 Primary docs:
-- `apps/Application Plane/APPLICATION_PLANE_ARCHITECTURE.md`
 - `apps/Application Plane/convex-core/README.md`
+- `apps/Application Plane/information-core/README.md`
+- `apps/Application Plane/insight-core/README.md`
 - `apps/Application Plane/notification-core/README.md`
 - `apps/Application Plane/zammad-foundation/README.md`
 
-### Frontend Plane: velionv2
+### Frontend Plane: Velion v3
 
-Purpose: clean Next.js 16 App Router rebuild of Velion. It is the human-facing workspace plus BFF that normalizes upstream plane responses.
+Purpose: the current human-facing Velion workspace and frontend gateway surface.
 
 Primary surfaces:
-- `src/app/(workspace)` - workspace pages for dashboard, onboarding, knowledge, search, agents, chat, inbox, settings, account, ingestions.
-- `src/features/*-v2` - feature-sliced frontend domains.
-- `src/app/api/**/route.ts` - BFF route handlers for chat, ingestions, onboarding, support, control-plane proxying, search, integrations, information, voice, Convex auth.
-- `src/lib/api` - typed REST envelope conventions.
-- `src/lib/control-plane`, `src/lib/knowledge`, `src/lib/integrations`, `src/lib/services` - plane clients and app services.
+- `src/app` - Solid app routing, providers, and shell.
+- `src/features/*` - feature-sliced product surfaces: dashboard, chat, inbox, agents, knowledge, onboarding, settings, social, studio, and related workspace areas.
+- `src/shared/actions` - AI-first command registry. The current registry exposes 25 action IDs across knowledge, operating map, security, inbox, tickets, social, agents, and workflow policy.
+- `src/shared/context-packs` - model context packaging from route, visible records, draft input, and available actions.
+- `src/shared/api`, `src/shared/rpc`, `src/shared/graphrest` - API-first transport clients.
+- `apps/gateway` - Rust Axum same-origin gateway/BFF. It owns route normalization, upstream selection, envelopes, auth/session context, rate limiting, security headers, CORS, metrics, and cross-plane domain modules.
+- `apps/velion-web` - separate Next.js app under the Velion v3 tree. Its README currently still contains the generated Next template and needs project-specific documentation.
+
+Gateway domain modules include actions, agent actions/runs, AG-UI, AI, audit, auth, billing, briefs, browser, chat, cost, eval, finetune, inbox, information, ingestions, insights, integrations, knowledge, leads, MCP, monitoring, navbar, notifications, onboarding, orchestration, orgs, ownership, privacy, router policy, search, settings, shares, social, studio, and tickets.
 
 Conventions:
-- Server Components by default; Client Components at interaction leaves.
-- TanStack Query for client cache and mutation state.
-- Cursor pagination for unbounded collections.
-- SSE stream IDs and `Last-Event-ID` resume shape for long-running work.
-- Route handlers normalize upstream responses and must not leak upstream secrets or OAuth tokens.
+- The root app is SolidJS/Vite/TypeScript.
+- Add the action contract before wiring a meaningful UI operation.
+- UI controls and model-driven calls should use the same action ID, input schema, approval rule, and audit path.
+- The browser talks to same-origin `/api` and `/health`; Vite dev proxy targets the Rust gateway.
+- The gateway must strip forged identity/org scoping headers before forwarding upstream.
+- Responses use typed envelopes: `{ data }`, cursor `meta`/`links`, or `{ error: { code, message, details } }`.
+- Honest empty/degraded data is preferred over fabricated demo data. Gateway helpers can annotate `meta.source` for degraded responses.
 
 Primary docs:
-- `apps/Frontend Plane/velionv2/README.md`
-- `apps/Frontend Plane/velionv2/docs/api-contracts.md`
-- `apps/Frontend Plane/velionv2/docs/adr/`
-- `apps/Frontend Plane/velionv2/docs/coresystem-architecture-map.md`
+- `apps/Frontend Plane/velionv3/README.md`
+- `apps/Frontend Plane/velionv3/package.json`
+- `apps/Frontend Plane/velionv3/vite.config.ts`
+- `apps/Frontend Plane/velionv3/apps/gateway/Cargo.toml`
+- `apps/Frontend Plane/velionv3/apps/velion-web/package.json`
 
 ### Channel Plane
 
@@ -232,67 +267,66 @@ Purpose: future runtime and deployment surface for external-facing Velion agents
 
 Current state:
 - Docs-only stub: `apps/Channel Plane/docs/vision.md`.
-- No source files are indexed by CodeGraph for this plane.
-
-Planned modules:
-- `adapter-core` - Shopify, WooCommerce, WordPress, generic embed deployment/install lifecycle.
-- `widget-core` - widget metadata, allowed domains, visitor bootstrap, browser tokens/cookies.
-- `conversation-core` - public visitor conversation runtime, agent calls, canonical messages, handoff.
-- Convex realtime layer - token streaming, typing, presence, operator handoff, live inbox.
-- Postgres canonical storage - compliance-sensitive conversation records and retention/deletion workflows.
+- Do not treat it as active runtime for this onboarding pass.
 
 ## Request Lifecycles
 
 ### Grounded Chat
 
-1. User sends a prompt in `velionv2`.
-2. `src/app/api/chat/stream/route.ts` accepts the request and normalizes the BFF contract.
-3. BFF calls Model Plane `model-gateway`.
-4. Model Plane validates auth/context, creates or resumes a run/session, and requests Data Plane retrieval/graph/wiki context through APIs.
-5. Data Plane performs hybrid retrieval, source joins, graph/wiki lookups, and returns auditable context/citations.
-6. Model Plane streams reasoning/output via SSE.
-7. Frontend renders chunks, grounding, citations, artifacts, and status.
+1. User sends a prompt in Velion v3.
+2. The Solid UI calls same-origin API helpers and/or action registry entries.
+3. Vite dev proxy or production routing sends `/api` traffic to the Rust gateway.
+4. Gateway validates session context, strips forged scoping headers, normalizes payloads, and calls Model Plane `model-gateway`.
+5. Model Plane creates or resumes a run/session and requests Data Plane retrieval/graph/wiki context through APIs.
+6. Data Plane performs hybrid retrieval, source joins, graph/wiki lookups, and returns auditable context/citations.
+7. Model Plane streams reasoning/output.
+8. Gateway and frontend render chunks, grounding, citations, artifacts, and status.
 
 ### Website Ingestion To Knowledge
 
-1. User starts website crawl/onboarding/import from `velionv2`.
-2. BFF route under `src/app/api/onboarding` or `src/app/api/ingestions` calls Quarry-v2 or integration/import services.
-3. Ingestion Plane validates org/user context, fetches/crawls/imports evidence, emits run events, and stores artifacts as allowed by policy.
-4. Ingestion submits durable content through Data Plane ingest/document contracts.
-5. Data Plane stores source records, chunks, embeds, indexes, graphifies, and makes the result retrievable.
-6. Frontend polls or streams status and later queries Data Plane/Model Plane through the BFF.
+1. User starts website crawl/onboarding/import from Velion v3.
+2. UI calls knowledge/onboarding/ingestion actions or gateway endpoints.
+3. Gateway calls Quarry-v2 edge, imports-core, integration-corev2, or finspo-core as the relevant Ingestion Plane boundary.
+4. Ingestion validates org/user context, fetches/crawls/imports evidence, emits run events, and stores artifacts as allowed by policy.
+5. Ingestion submits durable content through Data Plane ingest/document contracts.
+6. Data Plane stores source records, chunks, embeddings, graph/wiki projections, and retrieval traces.
+7. Frontend polls or streams status and later queries Data Plane/Model Plane through the gateway.
 
-### External Channel Agent (Future)
+### Studio/Social/Application Projection
 
-1. Admin configures an agent and widget/channel deployment in Velion.
-2. Channel Plane adapter installs the external channel integration and widget metadata.
-3. Public visitor bootstraps through widget runtime with allowed-domain and visitor-session validation.
-4. Channel conversation runtime calls Model Plane for agent behavior and uses Convex for realtime state.
-5. Canonical conversation records are stored in Postgres with retention/deletion workflows.
-6. Internal users monitor, hand off, and manage the conversation from Velion inbox surfaces.
+1. User opens Studio, Social, Inbox, Knowledge, or collaborative workspace surfaces.
+2. Velion v3 loads session/org context and calls the Rust gateway.
+3. Gateway selects Application Plane, Control Plane, Data Plane, or Ingestion Plane upstreams by domain.
+4. Application Plane may project realtime/collaborative workspace state, but lower-plane durable authorities remain the owners.
+5. Any fallback/degraded view must be labeled or represented as unavailable/planned/fallback, not fabricated as live state.
+
+### External Channel Agent
+
+This is future scope. Channel Plane should eventually own adapter install/runtime, visitor bootstrap, public conversation runtime, and handoff. Until runtime exists, do not wire active product flows against Channel Plane as if it is deployed.
 
 ## Directory Map
 
 | Path | Purpose |
 |---|---|
 | `apps/master-ownership-matrix.md` | Canonical target ownership and cross-plane decision rules |
-| `apps/Application Plane` | Collaborative workspace, Convex/AFFiNE, notifications, application-facing services |
+| `apps/CORESYSTEM_AUDIT_BACKLOG.md` | Current bug/gap/remediation backlog from onboarding audits |
+| `apps/Application Plane` | Collaborative workspace, Convex/AFFiNE-adjacent projections, notifications, application-facing services |
 | `apps/Data Plane v2` | Durable knowledge, retrieval, graph, wiki, indexing, embedding, data quality |
-| `apps/Channel Plane` | Future external channel runtime documentation |
 | `apps/Control Plane` | Identity, org, user, billing, session, audit authority |
 | `apps/Model Plane` | Reasoning, agent runtime, model gateway, sessions, inference, execution |
 | `apps/Ingestion Plane` | Evidence capture, web/search scraping, file imports, OAuth/connectors |
-| `apps/Frontend Plane/velionv2` | Velion v2 UI and BFF |
+| `apps/Frontend Plane/velionv3` | Current Velion UI and gateway |
+| `apps/Channel Plane` | Future external channel runtime documentation |
 
 ## Coding Conventions Detected
 
-- Monorepo, multi-stack microservices. There are 81 detected manifests across focused paths.
-- Language split: Rust for latency/parsing/retrieval/browser/protocol-heavy hot paths; Go for durable workflow, CRUD, registry, policy, scheduling; Python for labs, evals, provider glue, and imports; TypeScript/TSX for frontend/BFF/NestJS/Convex.
-- Entry points: Go services usually use `cmd/*/main.go`; Rust services use `src/main.rs`; Python FastAPI services use `app/main.py`; Next.js BFF uses `src/app/api/**/route.ts`.
-- Tests: Go uses `*_test.go`; Rust uses `tests/*.rs`; TypeScript uses `*.test.ts`, `*.test.tsx`, and Playwright `*.spec.ts`; Python SDK/labs use `test_*.py`.
-- API envelopes in Velion v2 use `{ data }`, cursor `meta`/`links`, and `{ error: { code, message, details } }`.
-- HTTP validation failures map to `422`, auth failures to `401`, upstream failures to `502` or `503`.
-- NATS/JetStream is the dominant event spine; Docker Compose stacks join the shared `inter-plane-bus`.
+- Monorepo, multi-stack microservices. Current manifest inventory spans Rust, Go, TypeScript/TSX, and Python across the active planes.
+- Language split: Rust for latency/parsing/retrieval/browser/protocol-heavy hot paths; Go for durable workflow, CRUD, registry, policy, scheduling; Python for labs, evals, provider glue, and imports; TypeScript/TSX for frontend/Auth/Convex/workers.
+- Entry points: Go services usually use `cmd/*/main.go`; Rust services use `src/main.rs`; Python FastAPI services use `app/main.py`; Velion v3 root uses Solid/Vite; Velion v3 gateway uses Rust Axum modules under `apps/gateway/src`.
+- Tests: Go uses `*_test.go`; Rust uses crate/workspace tests; TypeScript uses `*.test.ts`, `*.test.tsx`, and Playwright `*.spec.ts`; Python SDK/labs use `test_*.py`.
+- API envelopes use `{ data }`, cursor `meta`/`links`, and `{ error: { code, message, details } }`.
+- HTTP validation failures generally map to `422`, auth failures to `401`, upstream failures to `502` or `503`.
+- NATS/JetStream is the dominant event spine; Docker Compose stacks join the shared `inter-plane-bus` or equivalent local networks.
 - Commit history uses Conventional Commit style: `feat:`, `fix(scope):`, `docs:`.
 
 ## Common Commands
@@ -300,13 +334,13 @@ Planned modules:
 Frontend:
 
 ```bash
-cd "apps/Frontend Plane/velionv2"
+cd "apps/Frontend Plane/velionv3"
 pnpm dev
 pnpm lint
 pnpm typecheck
 pnpm test
-pnpm test:e2e
 pnpm build
+cargo test --manifest-path apps/gateway/Cargo.toml --all-targets
 ```
 
 Data Plane v2:
@@ -330,19 +364,7 @@ make up
 make down
 make build
 make test-endpoints
-make dev-quarry
-make test-quarry
-```
-
-Quarry-v2:
-
-```bash
-cd "apps/Ingestion Plane/Quarry-v2"
-make build
-make test
-make fmt
-make lint
-make dev
+cd "Quarry-v2" && cargo test --workspace
 ```
 
 Model Plane:
@@ -374,33 +396,46 @@ docker compose up -d --build
 | Task | Start here |
 |---|---|
 | Understand ownership boundaries | `apps/master-ownership-matrix.md` |
-| Inspect actual service stack wiring | `apps/Frontend Plane/velionv2/docs/coresystem-architecture-map.md` and each plane `docker-compose.yml` |
-| Add a Velion page | `apps/Frontend Plane/velionv2/src/app/(workspace)` |
-| Add frontend domain behavior | `apps/Frontend Plane/velionv2/src/features/*-v2` |
-| Add BFF/API route | `apps/Frontend Plane/velionv2/src/app/api/**/route.ts` |
-| Change REST envelope behavior | `apps/Frontend Plane/velionv2/src/lib/api` and `docs/api-contracts.md` |
+| Inspect current audit findings | `apps/CORESYSTEM_AUDIT_BACKLOG.md` |
+| Add a Velion v3 product surface | `apps/Frontend Plane/velionv3/src/features/*` and `src/app` |
+| Add a human/model action | `apps/Frontend Plane/velionv3/src/shared/actions/action-registry.ts` |
+| Add frontend API client behavior | `apps/Frontend Plane/velionv3/src/shared/api`, `src/shared/rpc`, `src/shared/graphrest` |
+| Add or change gateway/BFF behavior | `apps/Frontend Plane/velionv3/apps/gateway/src/domains/*` |
+| Change REST envelope behavior | `apps/Frontend Plane/velionv3/apps/gateway/src/envelope.rs` and frontend API clients |
 | Add auth/org/user/billing behavior | `apps/Control Plane/*-core` |
 | Add documents/retrieval/graph/wiki behavior | `apps/Data Plane v2/services/*` |
 | Add scrape/crawl/import/connectors | `apps/Ingestion Plane/Quarry-v2`, `imports-core`, `integration-corev2`, `finspo-core` |
 | Add model gateway/session/inference/execution behavior | `apps/Model Plane/rust/services/*` |
 | Add orchestration/capability/sandbox/browser/cost behavior | `apps/Model Plane/go/services/*` |
-| Add realtime workspace or notification behavior | `apps/Application Plane/convex-core`, `notification-core`, `conversation-core` |
+| Add realtime workspace or notification behavior | `apps/Application Plane/convex-core`, `notification-core`, `conversation-core`, `social-core` |
 | Plan external widget/channel runtime | `apps/Channel Plane/docs/vision.md` |
+
+## Current Audit Snapshot
+
+The current audit did not edit implementation code. Confirmed findings and remediation candidates live in `apps/CORESYSTEM_AUDIT_BACKLOG.md`.
+
+High-signal confirmed items from this refresh:
+- Root onboarding docs were stale to Velion v2 and have been updated to Velion v3.
+- `pnpm test` in Velion v3 fails because Vitest catches unhandled rejections from `loadStudioWorkspace` when session context lacks `orgs`.
+- Quarry-v2 workspace tests fail to compile where `DataPlaneIngestRequest` constructors have not been updated for `initiator_user_id` and `visibility`.
+- Data Plane Rust check passes with a cleanup warning for unused `RerankClient::new`.
+- Model Plane Rust workspace tests pass; Model Plane Go still has failing gates in `orchestrator-core/internal/orchestration` and `letta-bridge/internal/memstore`.
+- Control Plane checked Go services and `auth-core` Jest pass in this worktree.
+- Application Plane checked Go services pass; Convex direct TypeScript/ESLint checks pass, but pnpm script wrappers are blocked by ignored-build approval for `esbuild@0.27.0`.
+- Ingestion top-level Makefile still points some dev/test targets at legacy `Quarry`, while active architecture is `Quarry-v2`.
+- Nested `.claude/worktrees`, generated artifacts, build output, and package caches can pollute naive repository discovery and CodeGraph/static inventory.
 
 ## Known Drift And Watch Items
 
 - `apps/Channel Plane` is intentionally future/docs-only today.
-- Some older Ingestion documentation still describes legacy `Quarry/`; current Velion v2 work should target `Quarry-v2`.
-- `apps/Model Plane v2` exists in the repository, but the focused current map is `apps/Model Plane`.
-- The worktree observed during generation had many pre-existing deletions and local changes; do not reset or revert without explicit user direction.
-- Several Model Plane services have documented partial/stubbed backing stores in `docs/ARCHITECTURE.md` and `docs/CONTRACTS.md`.
+- `apps/Frontend Plane/velionv3/apps/velion-web/README.md` is still the generated Next.js template.
+- Some older Ingestion documentation and Makefile targets still describe legacy `Quarry/`; current Velion v3 work should target `Quarry-v2`.
+- `apps/Model Plane v2` may exist in the repository, but the focused current map is `apps/Model Plane`.
+- The worktree observed during generation had many pre-existing local changes. Never reset, clean, or revert without explicit user direction.
 - Data Plane v2 docs report Control Plane wiring as the remaining production blocker for multi-tenant deployment: `X-Org-ID` trust needs full auth-core/user-core/org-core/cost-core consultation.
+- Quarry-v2 docs identify a current exception where Velion v3 onboarding crawl handlers post to control `/v1/jobs/` directly; migrate that path to edge rather than extending it.
+- Large frontend/global styling files and fallback/preview surfaces should be audited before declaring Velion v3 feature completeness.
 
 ## Information-System Persistence
 
-This map is meant to exist in four places:
-
-1. Local source of truth: `apps/CODEBASE_INFORMATION_SYSTEM.md`.
-2. Agent instructions: root `CLAUDE.md` for concise workflow/convention reminders.
-3. Logseq page: `CoreSystem Codebase Information System`.
-4. Search/memory tools: context-mode source `CoreSystem codebase information system 2026-06-07` and mempalace KG facts for plane ownership.
+This map is meant to exist in source control as the local source of truth. If external memory/search tools are updated later, mirror the same facts rather than creating divergent onboarding maps.

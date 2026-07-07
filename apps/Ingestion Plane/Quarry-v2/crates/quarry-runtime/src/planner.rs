@@ -64,6 +64,7 @@ mod tests {
             title: Some("Example".into()),
             dom_summary: None,
             screenshot_artifact_id: None,
+            visual_observation_artifact_id: None,
             console_summary: vec![],
             network_summary: vec![],
             policy_denials: vec![],

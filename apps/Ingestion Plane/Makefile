@@ -12,14 +12,15 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make dev-imports        Start imports-core in dev mode"
-	@echo "  make dev-quarry         Start Quarry in dev mode"
+	@echo "  make dev-quarry         Start Quarry-v2 edge in dev mode"
 	@echo "  make logs               Tail all service logs"
 	@echo "  make shell-imports      Open shell in imports-api container"
 	@echo "  make shell-postgres     Open PostgreSQL shell"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-imports       Run imports-core tests"
-	@echo "  make test-quarry        Run Quarry tests"
+	@echo "  make test-quarry        Run Quarry-v2 workspace tests"
+	@echo "  make test-quarry-legacy Run legacy Go Quarry tests (deprecated)"
 	@echo "  make test-endpoints     Test all endpoints"
 	@echo "  make test-load          Run load test"
 	@echo "  make smoke-integration  Run integration-api smoke tests (12 checks)"
@@ -46,8 +47,8 @@ setup:
 	cd imports-core && python -m venv venv
 	@echo "2. Installing Python dependencies..."
 	cd imports-core && . venv/bin/activate && pip install -r requirements.txt
-	@echo "3. Installing Go dependencies..."
-	cd Quarry && go mod download
+	@echo "3. Fetching Quarry-v2 Rust dependencies..."
+	cd Quarry-v2 && cargo fetch
 	@echo "✓ Setup complete!"
 	@echo ""
 	@echo "Next steps:"
@@ -96,7 +97,12 @@ dev-imports:
 
 .PHONY: dev-quarry
 dev-quarry:
-	@echo "Starting Quarry in development mode..."
+	@echo "Starting Quarry-v2 edge in development mode..."
+	cd Quarry-v2 && cargo run -p quarry-edge
+
+.PHONY: dev-quarry-legacy
+dev-quarry-legacy:
+	@echo "Starting legacy Go Quarry (deprecated — use Quarry-v2)..."
 	cd Quarry && go run ./cmd/api/main.go
 
 .PHONY: logs
@@ -117,6 +123,11 @@ test-imports:
 
 .PHONY: test-quarry
 test-quarry:
+	cd Quarry-v2 && cargo test --workspace
+
+.PHONY: test-quarry-legacy
+test-quarry-legacy:
+	@echo "Legacy Go Quarry tests (deprecated — use 'make test-quarry' for Quarry-v2)"
 	cd Quarry && go test -v ./...
 
 .PHONY: test-endpoints
@@ -206,18 +217,20 @@ docs:
 	@echo "Ingestion Plane Documentation:"
 	@echo "  - Architecture:    INGESTION_PLANE_ARCHITECTURE.md"
 	@echo "  - Quick Start:     QUICKSTART.md"
-	@echo "  - Quarry API:      Quarry/docs/API.md"
+	@echo "  - Quarry-v2:       Quarry-v2/docs/ARCHITECTURE.md"
+	@echo "  - Onboarding crawl: Quarry-v2/docs/ONBOARDING_LIVE_CRAWL.md"
 	@echo "  - Imports README:  imports-core/README.md"
-	@echo "  - Deployment:      Quarry/docs/DEPLOYMENT.md"
+	@echo "  - Legacy Quarry (deprecated): Quarry/docs/API.md, Quarry/docs/DEPLOYMENT.md"
 	@echo ""
 	@echo "Open docs with: open INGESTION_PLANE_ARCHITECTURE.md"
 
 .PHONY: version
 version:
 	@echo "Ingestion Plane Version Information:"
-	@echo "  Quarry:         v0.1.0 (Production Ready)"
+	@echo "  Quarry-v2:      Rust workspace (active)"
+	@echo "  Quarry:         v0.1.0 (legacy Go service, deprecated)"
 	@echo "  Imports-Core:   v1.0.0 (Development)"
-	@echo "  Last Updated:   February 19, 2026"
+	@echo "  Last Updated:   July 2, 2026"
 
 # CI/CD targets
 .PHONY: ci-test

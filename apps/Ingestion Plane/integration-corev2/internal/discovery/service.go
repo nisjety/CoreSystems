@@ -70,13 +70,40 @@ func (s *Service) Discover(ctx context.Context, connection store.Connection, acc
 		return s.discoverNotion(ctx, snapshot, accessToken)
 	case "github":
 		return s.discoverGitHub(ctx, snapshot, accessToken)
+	case "linkedin":
+		return s.discoverLinkedIn(ctx, snapshot, accessToken)
 	case "shopify":
 		return s.discoverShopify(ctx, snapshot, accessToken, connection.ProviderContext)
 	case "stripe":
 		return s.discoverStripe(ctx, snapshot, accessToken)
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		return s.discoverMeta(ctx, snapshot, accessToken, connection.ProviderKey)
 	default:
-		return snapshot, fmt.Errorf("discovery is not implemented for %s", connection.ProviderKey)
+		// Identity-based providers (social: x, discord, meta family, linkedin,
+		// tiktok, snapchat, …) expose no browsable source tree to enumerate —
+		// the connected account IS the source. Returning an error here used to
+		// 502 the onboarding discover step for perfectly healthy connections;
+		// answer with an honest identity snapshot instead.
+		return identitySnapshot(snapshot, connection), nil
 	}
+}
+
+// identitySnapshot describes a connection whose provider has no
+// tree-of-sources to enumerate: the account identity is the single source.
+func identitySnapshot(snapshot Snapshot, connection store.Connection) Snapshot {
+	label := strings.TrimSpace(connection.DisplayName)
+	if label == "" {
+		label = connection.ProviderKey
+	}
+	snapshot.AccountName = safeSampleLabel(label)
+	snapshot.EntityCounts["accounts"] = 1
+	snapshot.SampleEntities = append(snapshot.SampleEntities, SampleEntity{
+		Kind:  "account",
+		Label: safeSampleLabel(label),
+	})
+	snapshot.ProviderWarnings = append(snapshot.ProviderWarnings,
+		fmt.Sprintf("%s has no browsable source tree; the connected account identity is the source.", connection.ProviderKey))
+	return snapshot
 }
 
 func (s *Service) discoverMicrosoft(ctx context.Context, snapshot Snapshot, accessToken string) (Snapshot, error) {
@@ -214,6 +241,45 @@ func (s *Service) discoverGitHub(ctx context.Context, snapshot Snapshot, accessT
 		}
 		snapshot.Availability["repositories"] = true
 	}
+	orgs, err := s.getJSON(ctx, accessToken, base+"/user/orgs?per_page=3", headers)
+	if err == nil {
+		values := objectList(orgs["items"])
+		snapshot.EntityCounts["organizations_sampled"] = len(values)
+		for _, org := range values {
+			if login := stringValue(org["login"]); login != "" {
+				appendSampleEntity(&snapshot, "organization", login)
+			}
+		}
+		snapshot.Availability["organizations"] = true
+	}
+	return snapshot, nil
+}
+
+func (s *Service) discoverLinkedIn(ctx context.Context, snapshot Snapshot, accessToken string) (Snapshot, error) {
+	base := strings.TrimRight(s.cfg.LinkedInAPIBaseURL, "/")
+	user, err := s.getJSON(ctx, accessToken, base+"/v2/userinfo", nil)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.AccountName = safeSampleLabel(firstNonEmpty(stringValue(user["name"]), strings.TrimSpace(stringValue(user["given_name"])+" "+stringValue(user["family_name"]))))
+	snapshot.WorkspaceID = stringValue(user["sub"])
+	snapshot.Availability["profile"] = true
+	if stringValue(user["email"]) != "" {
+		snapshot.Availability["email"] = true
+	}
+
+	headers := linkedInHeaders(s.cfg)
+	orgs, err := s.getJSON(ctx, accessToken, base+"/rest/organizationAcls?"+url.Values{"q": {"roleAssignee"}, "count": {"3"}}.Encode(), headers)
+	if err == nil {
+		values := objectList(orgs["elements"])
+		snapshot.EntityCounts["organizations_sampled"] = len(values)
+		for _, org := range values {
+			if organization := stringValue(org["organization"]); organization != "" {
+				appendSampleEntity(&snapshot, "organization", organization)
+			}
+		}
+		snapshot.Availability["organizations"] = true
+	}
 	return snapshot, nil
 }
 
@@ -251,6 +317,77 @@ func (s *Service) discoverStripe(ctx context.Context, snapshot Snapshot, accessT
 	snapshot.Availability["subscriptions"] = true
 	snapshot.Availability["invoices"] = true
 	snapshot.EntityCounts["billing_areas"] = 3
+	return snapshot, nil
+}
+
+func (s *Service) discoverMeta(ctx context.Context, snapshot Snapshot, accessToken, providerKey string) (Snapshot, error) {
+	base := strings.TrimRight(firstNonEmpty(s.cfg.FacebookAPIBaseURL, s.cfg.InstagramAPIBaseURL, "https://graph.facebook.com/v25.0"), "/")
+	if providerKey == "instagram" && strings.TrimSpace(s.cfg.InstagramAPIBaseURL) != "" {
+		base = strings.TrimRight(s.cfg.InstagramAPIBaseURL, "/")
+	}
+	me, err := s.getJSON(ctx, accessToken, base+"/me?fields=id,name", nil)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.AccountName = safeSampleLabel(stringValue(me["name"]))
+	snapshot.WorkspaceID = stringValue(me["id"])
+	snapshot.Availability["profile"] = true
+
+	pagesURL := base + "/me/accounts?" + url.Values{
+		"fields": {"id,name,category,instagram_business_account{id,username}"},
+		"limit":  {"3"},
+	}.Encode()
+	if pages, err := s.getJSON(ctx, accessToken, pagesURL, nil); err == nil {
+		values := objectList(pages["data"])
+		snapshot.EntityCounts["pages_sampled"] = len(values)
+		for _, page := range values {
+			if name := stringValue(page["name"]); name != "" {
+				appendSampleEntity(&snapshot, "facebook_page", safeSampleLabel(name))
+			}
+			if ig, ok := page["instagram_business_account"].(map[string]any); ok {
+				if username := stringValue(ig["username"]); username != "" {
+					appendSampleEntity(&snapshot, "instagram_account", safeSampleLabel("@"+username))
+				}
+			}
+		}
+		snapshot.Availability["pages"] = true
+	}
+
+	if adAccounts, err := s.getJSON(ctx, accessToken, base+"/me/adaccounts?fields=id,name,account_status&limit=3", nil); err == nil {
+		values := objectList(adAccounts["data"])
+		snapshot.EntityCounts["ad_accounts_sampled"] = len(values)
+		for _, account := range values {
+			if name := stringValue(account["name"]); name != "" {
+				appendSampleEntity(&snapshot, "ad_account", safeSampleLabel(name))
+			}
+		}
+		snapshot.Availability["ad_accounts"] = true
+	}
+
+	businessesURL := base + "/me/businesses?" + url.Values{
+		"fields": {"id,name,owned_whatsapp_business_accounts{id,name}"},
+		"limit":  {"3"},
+	}.Encode()
+	if businesses, err := s.getJSON(ctx, accessToken, businessesURL, nil); err == nil {
+		values := objectList(businesses["data"])
+		snapshot.EntityCounts["businesses_sampled"] = len(values)
+		for _, business := range values {
+			if name := stringValue(business["name"]); name != "" {
+				appendSampleEntity(&snapshot, "business", safeSampleLabel(name))
+			}
+			if wabas, ok := business["owned_whatsapp_business_accounts"].(map[string]any); ok {
+				accounts := objectList(wabas["data"])
+				snapshot.EntityCounts["whatsapp_business_accounts_sampled"] += len(accounts)
+				for _, account := range accounts {
+					if name := stringValue(account["name"]); name != "" {
+						appendSampleEntity(&snapshot, "whatsapp_business_account", safeSampleLabel(name))
+					}
+				}
+			}
+		}
+		snapshot.Availability["businesses"] = true
+	}
+
 	return snapshot, nil
 }
 
@@ -302,21 +439,90 @@ func (s *Service) doJSON(req *http.Request) (map[string]any, error) {
 func availabilityFromScopes(scopes []string) map[string]bool {
 	availability := map[string]bool{}
 	for _, scope := range scopes {
-		normalized := strings.ToLower(scope)
-		switch {
-		case strings.Contains(normalized, "mail") || strings.Contains(normalized, "gmail"):
+		normalized := strings.TrimSpace(strings.ToLower(scope))
+		if strings.Contains(normalized, "mail") || strings.Contains(normalized, "gmail") {
 			availability["mail"] = true
-		case strings.Contains(normalized, "drive") || strings.Contains(normalized, "files") || strings.Contains(normalized, "sites"):
+		}
+		if strings.Contains(normalized, "drive") || strings.Contains(normalized, "files") || strings.Contains(normalized, "sites") {
 			availability["documents"] = true
-		case strings.Contains(normalized, "team") || strings.Contains(normalized, "channel"):
+		}
+		if strings.Contains(normalized, "team") || strings.Contains(normalized, "channel") {
 			availability["collaboration"] = true
-		case strings.Contains(normalized, "products"):
+		}
+		if strings.Contains(normalized, "products") {
 			availability["products"] = true
-		case strings.Contains(normalized, "orders"):
+		}
+		if strings.Contains(normalized, "orders") {
 			availability["orders"] = true
+		}
+		if strings.Contains(normalized, "pages_messaging") {
+			availability["messenger"] = true
+		}
+		if strings.Contains(normalized, "pages_") {
+			availability["pages"] = true
+		}
+		if strings.Contains(normalized, "instagram_") {
+			availability["instagram"] = true
+		}
+		if strings.Contains(normalized, "whatsapp_") {
+			availability["whatsapp"] = true
+		}
+		if strings.Contains(normalized, "ads_") || strings.Contains(normalized, "business_management") {
+			availability["ads"] = true
+		}
+		if strings.Contains(normalized, "catalog_management") {
+			availability["catalogs"] = true
+		}
+		if strings.Contains(normalized, "threads_") {
+			availability["threads"] = true
+		}
+		if strings.Contains(normalized, "oembed") {
+			availability["embeds"] = true
+		}
+		switch normalized {
+		case "openid", "profile", "r_profile_basicinfo":
+			availability["profile"] = true
+		case "email":
+			availability["email"] = true
+		case "w_member_social":
+			availability["publishing"] = true
+		case "r_member_social":
+			availability["posts"] = true
+		case "r_organization_social", "w_organization_social", "rw_organization_admin", "r_organization_admin":
+			availability["organizations"] = true
+		case "r_verify", "r_verify_details":
+			availability["verification"] = true
+		case "r_ads", "rw_ads":
+			availability["ads"] = true
+		case "rw_conversions":
+			availability["conversions"] = true
+		case "r_marketing_leadgen_automation":
+			availability["leads"] = true
+		case "read:user":
+			availability["profile"] = true
+		case "user:email":
+			availability["email"] = true
+		case "read:org":
+			availability["organizations"] = true
+		case "public_repo":
+			availability["repositories"] = true
+		case "repo":
+			availability["repositories"] = true
+			availability["private_repositories"] = true
 		}
 	}
 	return availability
+}
+
+func linkedInHeaders(cfg config.Config) map[string]string {
+	version := strings.TrimSpace(cfg.LinkedInMarketingVersion)
+	if version == "" {
+		version = "202606"
+	}
+	return map[string]string{
+		"LinkedIn-Version":          version,
+		"X-Restli-Protocol-Version": "2.0.0",
+	}
 }
 
 func objectList(value any) []map[string]any {

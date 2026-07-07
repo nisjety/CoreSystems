@@ -93,7 +93,11 @@ fn normalize_rate(rate: &Value) -> Value {
     let num = |key: &str| rate.get(key).and_then(Value::as_f64).unwrap_or(0.0);
     let currency = {
         let c = str_field("currency");
-        if c.is_empty() { "USD".to_string() } else { c }
+        if c.is_empty() {
+            "USD".to_string()
+        } else {
+            c
+        }
     };
     json!({
         "model": str_field("model"),
@@ -166,8 +170,7 @@ async fn pricing(State(state): State<AppState>) -> impl IntoResponse {
     // The catalogue is global (not org-scoped); still session-gated by the
     // route_layer above.
     let url = format!("{}/api/v1/pricing", state.cost_core_url);
-    let (status, Json(body)) =
-        proxy_json(&state, Method::GET, &url, None, None, None, None).await;
+    let (status, Json(body)) = proxy_json(&state, Method::GET, &url, None, None, None, None).await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
@@ -225,7 +228,8 @@ mod tests {
 
     #[test]
     fn normalize_rate_defaults_currency_to_usd() {
-        let rate = json!({ "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 });
+        let rate =
+            json!({ "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 });
         let got = normalize_rate(&rate);
         assert_eq!(got["inputPerMillion"], json!(3.0));
         assert_eq!(got["currency"], json!("USD"));

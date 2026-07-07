@@ -28,7 +28,7 @@ fields so `Last-Event-ID` resume works.
 
 Status: **EXISTS** = registered today in `apps/gateway/src/` (20 routes: `/health` + current
 onboarding routes wired from `main.rs` and its supporting modules). **ADD** = must be implemented
-(133 route rows below). Target surface: **153 route rows**.
+(144 route rows below). Target surface: **164 route rows**.
 
 ### A.1 Health + session (existing + Phase 1)
 
@@ -91,6 +91,27 @@ verify `discover-source`/`cleanup-source` upstream paths against integration-api
 | `POST /api/v1/chat/feedback` | `POST /v1/feedback` |
 | `GET /api/v1/runs/:run_id/events` (SSE) | `GET /v1/runs/:run_id/events` — also the real backing for the action-client's promised `/api/v1/runs/{runId}/events` |
 | `POST /api/v1/ag-ui/stream` (SSE) | `POST /v1/invoke/stream` — accepts legacy chat bodies or TanStack/AG-UI `RunAgentInput`, normalizes to Model Plane invoke shape, propagates ZDR, and maps Model Plane SSE events into AG-UI `RUN_*`, `TEXT_MESSAGE_*`, `TOOL_CALL_*`, and `CUSTOM` payloads for Velion agentic UI clients |
+
+### A.4.1 Voice dictation and transcription domain — `domains/voice.rs` (Phase 2B, all ADD — 11 routes)
+
+Companion product/architecture plan: `voice-dictation-and-transcription-plan.md`.
+The gateway is the policy boundary. The SPA may request a mode, but the gateway
+derives the effective voice mode from org/user policy and propagates `x-zdr` to
+every content-carrying upstream call.
+
+| Gateway route | Upstream |
+|---|---|
+| `POST /api/v1/voice/transcribe` | model-gateway `POST /v1/ai/speech` with `operation:"stt"`; short audio/chunked upload; no raw audio/transcript persistence under ZDR |
+| `POST /api/v1/voice/transcribe/stream` | model-gateway streaming STT target (new `/v1/ai/speech/stream` or realtime session bridge); no replay buffer under ZDR |
+| `POST /api/v1/voice/format` | model-gateway `POST /v1/invoke` with profile `voice_format`; prompt cache/session writes disabled under ZDR |
+| `POST /api/v1/voice/commands/interpret` | model-gateway `POST /v1/invoke` with profile `voice_command`; returns command classification + preview payload |
+| `GET /api/v1/voice/policy` | user-core/org-core effective voice policy: allowed modes, default mode, retention, cloud allowed, Teams import allowed |
+| `GET /api/v1/voice/dictionary` | user-core settings; user/org-authored vocabulary only, not learned transcript content unless explicitly approved |
+| `PUT /api/v1/voice/dictionary` | user-core settings; replace/update vocabulary entries |
+| `GET /api/v1/voice/snippets` | user-core settings; user-authored snippets and custom voice prompts |
+| `PUT /api/v1/voice/snippets` | user-core settings; replace/update snippets and custom voice prompts |
+| `POST /api/v1/voice/teams/transcripts/import` | integration-corev2 Microsoft Graph transcript import + Model Plane ephemeral summarization; saves only approved summary/tasks by default |
+| `GET /api/v1/voice/teams/imports/:job_id/events` (SSE) | integration-corev2 sync-job events normalized to progress metadata; no raw transcript event payloads under ZDR |
 
 ### A.5 Knowledge domain — `domains/knowledge.rs` (Phase 3, all ADD — 24 routes)
 
@@ -339,9 +360,9 @@ Per repo rule ("BFF routes must not leak upstream secrets or raw OAuth tokens"):
 ### B.3 ZDR + headers
 
 - Accept `x-zdr: true` (or body flag) from the SPA on content-carrying routes (chat stream, chat
-  documents, crawls, imports) and propagate to upstreams that persist content (quarry-edge scrape
-  `zdr` flag, model-gateway invoke, imports). Default comes from org entitlements; the gateway
-  enforces, the SPA only requests.
+  documents, voice/audio/transcript routes, crawls, imports) and propagate to upstreams that persist
+  content (quarry-edge scrape `zdr` flag, model-gateway invoke/speech, imports). Default comes from
+  org entitlements; the gateway enforces, the SPA only requests.
 - Strip ALL inbound `x-user-*`/`x-org-id`/`x-internal-*` headers from browser requests before
   building upstream headers (today a spoofed `x-org-id` would be forwarded on most Data Plane
   services — cross-org read). This is the single most important security fix in the program.
@@ -485,6 +506,17 @@ disconnect/resume); Vitest — sse.ts parser (chunk splits, multi-line data, ids
 usage/confidence must come from real `usage` events (no placeholders, per parity constraints);
 persistence/resume gaps are Model Plane 🔴 items — chat history depends on `/v1/threads/:id/messages`
 being durable (verify against Model Plane v1, the canonical target).
+
+### Phase 2B — Voice dictation and transcription
+
+**Gateway:** `domains/voice.rs` (11 routes); enforce effective voice mode from org/user policy;
+propagate `x-zdr`; reject cloud providers when org policy requires `company_private`; emit
+metadata-only audit. **v3:** replace the current browser-only voice modal in `DashboardComposer.tsx`
+with `src/features/voice/*`; add mode badge, explicit discard/insert, command preview, and Teams
+transcript import panel. **Model Plane:** reuse `/v1/ai/speech` for MVP STT, then add streaming STT,
+`voice_format`, `voice_command`, and `company_private` provider routing. **Tests:** gateway policy
+matrix, ZDR propagation, no raw audio/transcript logs, local-provider egress-blocked smoke, browser
+dictate/cancel/insert E2E.
 
 ### Phase 3 — Knowledge / Data Plane
 

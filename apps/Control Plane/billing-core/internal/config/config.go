@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -26,6 +27,14 @@ type Config struct {
 	HyperswitchProfileID      string
 	HyperswitchClientURL      string
 	HyperswitchBackendURL     string
+	NexiEnvironment           string
+	NexiBaseURL               string
+	NexiSecretKey             string
+	NexiCheckoutKey           string
+	NexiCheckoutJSURL         string
+	NexiWebhookURL            string
+	NexiWebhookAuthorization  string
+	NexiTermsURL              string
 	LagoBaseURL               string
 	LagoAPIKey                string
 	AdapterTimeoutSeconds     int
@@ -45,6 +54,17 @@ type RedisConfig struct {
 
 func Load() (*Config, error) {
 	_ = godotenv.Load()
+
+	// Nexi: derive the API + Checkout JS base from NEXI_ENVIRONMENT (test|live),
+	// mirroring the proven nettbutikk client (client.ts). Explicit NEXI_BASE_URL /
+	// NEXI_CHECKOUT_JS_URL still override when set.
+	nexiEnv := strings.ToLower(strings.TrimSpace(getEnv("NEXI_ENVIRONMENT", "test")))
+	nexiAPIBase := "https://test.api.dibspayment.eu"
+	nexiCheckoutJS := "https://test.checkout.dibspayment.eu/v1/checkout.js?v=1"
+	if nexiEnv == "live" {
+		nexiAPIBase = "https://api.dibspayment.eu"
+		nexiCheckoutJS = "https://checkout.dibspayment.eu/v1/checkout.js?v=1"
+	}
 
 	cfg := &Config{
 		HTTPPort:        getEnvInt("HTTP_PORT", 3014),
@@ -71,13 +91,27 @@ func Load() (*Config, error) {
 		HyperswitchProfileID:      getEnv("HYPERSWITCH_PROFILE_ID", ""),
 		HyperswitchClientURL:      getEnv("HYPERSWITCH_CLIENT_URL", "https://beta.hyperswitch.io/v1/HyperLoader.js"),
 		HyperswitchBackendURL:     getEnv("HYPERSWITCH_BACKEND_URL", getEnv("HYPERSWITCH_BASE_URL", "https://sandbox.hyperswitch.io")),
-		LagoBaseURL:               getEnv("LAGO_BASE_URL", "http://lago:3000"),
-		LagoAPIKey:                getEnv("LAGO_API_KEY", ""),
-		AdapterTimeoutSeconds:     getEnvInt("ADAPTER_TIMEOUT_SECONDS", 10),
-		RetryPollSeconds:          getEnvInt("RETRY_POLL_SECONDS", 5),
-		RetryBatchSize:            getEnvInt("RETRY_BATCH_SIZE", 50),
-		RetryMaxAttempts:          getEnvInt("RETRY_MAX_ATTEMPTS", 8),
-		RetryBackoffSeconds:       getEnvInt("RETRY_BACKOFF_SECONDS", 5),
+		// Nexi Checkout (Nets/Nexi Group). Env var names match the proven
+		// nettbutikk integration: NEXI_SECRET_KEY (server Authorization value, no
+		// scheme), NEXI_CHECKOUT_KEY (public browser key for the Checkout JS SDK),
+		// NEXI_ENVIRONMENT (test|live) drives the base URLs, NEXI_WEBHOOK_SECRET is
+		// the shared secret Nexi echoes back in the webhook Authorization header.
+		// The *_API_KEY / *_AUTHORIZATION names are kept as fallbacks for back-compat.
+		NexiEnvironment:          nexiEnv,
+		NexiBaseURL:              getEnv("NEXI_BASE_URL", nexiAPIBase),
+		NexiSecretKey:            getEnv("NEXI_SECRET_KEY", getEnv("NEXI_SECRET_API_KEY", "")),
+		NexiCheckoutKey:          getEnv("NEXI_CHECKOUT_KEY", ""),
+		NexiCheckoutJSURL:        getEnv("NEXI_CHECKOUT_JS_URL", nexiCheckoutJS),
+		NexiWebhookURL:           getEnv("NEXI_WEBHOOK_URL", ""),
+		NexiWebhookAuthorization: getEnv("NEXI_WEBHOOK_SECRET", getEnv("NEXI_WEBHOOK_AUTHORIZATION", "")),
+		NexiTermsURL:             getEnv("NEXI_TERMS_URL", ""),
+		LagoBaseURL:              getEnv("LAGO_BASE_URL", "http://lago:3000"),
+		LagoAPIKey:               getEnv("LAGO_API_KEY", ""),
+		AdapterTimeoutSeconds:    getEnvInt("ADAPTER_TIMEOUT_SECONDS", 10),
+		RetryPollSeconds:         getEnvInt("RETRY_POLL_SECONDS", 5),
+		RetryBatchSize:           getEnvInt("RETRY_BATCH_SIZE", 50),
+		RetryMaxAttempts:         getEnvInt("RETRY_MAX_ATTEMPTS", 8),
+		RetryBackoffSeconds:      getEnvInt("RETRY_BACKOFF_SECONDS", 5),
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -11,6 +11,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/config"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
 	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/providers"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
 
@@ -28,43 +29,105 @@ func TestCreateSessionSupportsOAuthProviderCatalog(t *testing.T) {
 		TokenURL:         cfg.MicrosoftTokenURL,
 		GraphBaseURL:     cfg.MicrosoftGraphBaseURL,
 	}))
-	for _, provider := range []string{"microsoft", "slack", "google", "notion", "github", "shopify", "stripe"} {
-		service.clients[provider] = &callbackClient{authBaseURL: "https://" + provider + ".auth.test/oauth"}
+	for _, provider := range providers.OAuthCatalog() {
+		service.clients[provider.Key] = &callbackClient{authBaseURL: "https://" + provider.Key + ".auth.test/oauth"}
 	}
 
-	tests := []struct {
-		provider        string
-		providerContext map[string]string
-	}{
-		{provider: "microsoft"},
-		{provider: "slack"},
-		{provider: "google"},
-		{provider: "notion"},
-		{provider: "github"},
-		{provider: "shopify", providerContext: map[string]string{"shop": "velion.myshopify.com"}},
-		{provider: "stripe"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.provider, func(t *testing.T) {
+	for _, provider := range providers.OAuthCatalog() {
+		t.Run(provider.Key, func(t *testing.T) {
+			providerContext := map[string]string(nil)
+			if provider.Key == "shopify" {
+				providerContext = map[string]string{"shop": "velion.myshopify.com"}
+			}
 			result, err := service.CreateSession(context.Background(), CreateSessionInput{
-				ProviderKey:     tt.provider,
+				ProviderKey:     provider.Key,
 				OrganizationID:  "org-1",
 				WorkspaceID:     "workspace-1",
 				UserID:          "user-1",
 				Bundles:         []string{"onboarding"},
 				ReturnURL:       "https://app.test/onboarding",
-				ProviderContext: tt.providerContext,
+				ProviderContext: providerContext,
 			})
 			if err != nil {
 				t.Fatalf("CreateSession error: %v", err)
 			}
-			if result.AuthMode != "direct-oauth" || result.ConnectURL == "" || result.Provider.Key != tt.provider {
-				t.Fatalf("result = %#v, want direct OAuth session for %s", result, tt.provider)
+			if result.AuthMode != "direct-oauth" || result.ConnectURL == "" || result.Provider.Key != provider.Key {
+				t.Fatalf("result = %#v, want direct OAuth session for %s", result, provider.Key)
 			}
-			if tt.provider != "notion" && len(result.Scopes) == 0 {
-				t.Fatalf("Scopes = empty for %s", tt.provider)
+			if provider.Key != "notion" && len(result.Scopes) == 0 {
+				t.Fatalf("Scopes = empty for %s", provider.Key)
 			}
 		})
+	}
+}
+
+func TestCreateSessionSelectsConversionsBusinessLoginConfigForMeta(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	client := &callbackClient{}
+	service.clients["meta"] = client
+
+	if _, err := service.CreateSession(context.Background(), CreateSessionInput{
+		ProviderKey:    "meta",
+		OrganizationID: "org-1",
+		WorkspaceID:    "workspace-1",
+		UserID:         "user-1",
+		Bundles:        []string{"conversions"},
+		ReturnURL:      "https://app.test/onboarding",
+	}); err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+	if got := client.lastProviderContext["business_login_config"]; got != "conversions" {
+		t.Fatalf("business_login_config = %q, want conversions for the conversions bundle", got)
+	}
+
+	// A general bundle must NOT pick up the conversions-specific config --
+	// it should use the default (or no) Business Login configuration.
+	if _, err := service.CreateSession(context.Background(), CreateSessionInput{
+		ProviderKey:    "meta",
+		OrganizationID: "org-1",
+		WorkspaceID:    "workspace-1",
+		UserID:         "user-1",
+		Bundles:        []string{"onboarding"},
+		ReturnURL:      "https://app.test/onboarding",
+	}); err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+	if _, ok := client.lastProviderContext["business_login_config"]; ok {
+		t.Fatalf("business_login_config = %q, want unset for the onboarding bundle", client.lastProviderContext["business_login_config"])
+	}
+}
+
+func TestCreateSessionUsesSnapchatRedirectBaseURL(t *testing.T) {
+	cfg := testOAuthConfig()
+	cfg.PublicBaseURL = "http://localhost:3026"
+	cfg.SnapchatRedirectBaseURL = "https://connect.example.com"
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	client := &callbackClient{}
+	service.clients["snapchat"] = client
+
+	if _, err := service.CreateSession(context.Background(), CreateSessionInput{
+		ProviderKey:    "snapchat",
+		OrganizationID: "org-1",
+		WorkspaceID:    "workspace-1",
+		UserID:         "user-1",
+		Bundles:        []string{"onboarding"},
+		ReturnURL:      "https://app.test/onboarding",
+	}); err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+	if client.lastRedirectURI != "https://connect.example.com/oauth/callback/snapchat" {
+		t.Fatalf("Snapchat redirect URI = %q, want provider-specific HTTPS callback", client.lastRedirectURI)
 	}
 }
 
@@ -412,12 +475,16 @@ func (p *capturePublisher) Publish(_ context.Context, event events.Event) error 
 }
 
 type callbackClient struct {
-	authBaseURL string
-	token       TokenResult
-	profile     ProviderProfile
+	authBaseURL         string
+	token               TokenResult
+	profile             ProviderProfile
+	lastRedirectURI     string
+	lastProviderContext map[string]string
 }
 
-func (c *callbackClient) AuthorizationURL(state, _ string, _ string, _ []string, _ map[string]string) (string, error) {
+func (c *callbackClient) AuthorizationURL(state, redirectURI string, _ string, _ []string, providerContext map[string]string) (string, error) {
+	c.lastRedirectURI = redirectURI
+	c.lastProviderContext = providerContext
 	base := c.authBaseURL
 	if base == "" {
 		base = "https://auth.test/oauth"
@@ -478,6 +545,41 @@ func testOAuthConfig() config.Config {
 		StripeAuthorizationURL:    "https://stripe.test/oauth",
 		StripeTokenURL:            "https://stripe.test/token",
 		StripeAPIBaseURL:          "https://stripe.test",
+		LinkedInClientID:          "linkedin-client",
+		LinkedInClientSecret:      "linkedin-secret",
+		LinkedInAuthorizationURL:  "https://linkedin.test/oauth",
+		LinkedInTokenURL:          "https://linkedin.test/token",
+		LinkedInAPIBaseURL:        "https://linkedin-api.test",
+		XClientID:                 "x-client",
+		XClientSecret:             "x-secret",
+		XAuthorizationURL:         "https://x.test/oauth",
+		XTokenURL:                 "https://x.test/token",
+		XAPIBaseURL:               "https://x-api.test",
+		InstagramClientID:         "instagram-client",
+		InstagramClientSecret:     "instagram-secret",
+		InstagramAuthorizationURL: "https://instagram.test/oauth",
+		InstagramTokenURL:         "https://instagram.test/token",
+		InstagramAPIBaseURL:       "https://instagram-api.test",
+		FacebookClientID:          "facebook-client",
+		FacebookClientSecret:      "facebook-secret",
+		FacebookAuthorizationURL:  "https://facebook.test/oauth",
+		FacebookTokenURL:          "https://facebook.test/token",
+		FacebookAPIBaseURL:        "https://facebook-api.test",
+		SnapchatClientID:          "snapchat-client",
+		SnapchatClientSecret:      "snapchat-secret",
+		SnapchatAuthorizationURL:  "https://snapchat.test/oauth",
+		SnapchatTokenURL:          "https://snapchat.test/token",
+		SnapchatAPIBaseURL:        "https://snapchat-api.test",
+		TikTokClientKey:           "tiktok-client-key",
+		TikTokClientSecret:        "tiktok-secret",
+		TikTokAuthorizationURL:    "https://tiktok.test/oauth",
+		TikTokTokenURL:            "https://tiktok.test/token",
+		TikTokAPIBaseURL:          "https://tiktok-api.test",
+		DiscordClientID:           "discord-client",
+		DiscordClientSecret:       "discord-secret",
+		DiscordAuthorizationURL:   "https://discord.test/oauth",
+		DiscordTokenURL:           "https://discord.test/token",
+		DiscordAPIBaseURL:         "https://discord-api.test",
 		OktaDomain:                "https://okta.test",
 		OktaClientID:              "okta-client",
 		OktaClientSecret:          "okta-secret",

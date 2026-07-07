@@ -14,15 +14,15 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
 	title: {
-		default: "Velion — Suveren AI som handler, forankret og godkjent",
+		default: "Velion — Fra kundesignal til godkjent handling",
 		template: "%s — Velion",
 	},
 	description:
-		"Den norske AI-arbeidsbenken som gjør forankret innsikt til godkjent handling. EU-residens som standard, Brreg-forankring og menneskelig godkjenning på hvert steg.",
+		"Velion er en norsk AI-arbeidsbenk som finner kilder, skriver forslag og stopper for godkjenning før noe sendes, publiseres eller utføres.",
 	openGraph: {
-		title: "Velion — Suveren AI som handler, forankret og godkjent",
+		title: "Velion — Fra kundesignal til godkjent handling",
 		description:
-			"Den norske AI-arbeidsbenken: forankrede svar, observerbare agent-kjøringer og menneskelig godkjenning — med data i EU/Sverige som standard.",
+			"Norsk AI-arbeidsbenk for kundearbeid: kilder, svarforslag, godkjenning og revisjonsspor i én flate.",
 		locale: "nb_NO",
 		type: "website",
 	},

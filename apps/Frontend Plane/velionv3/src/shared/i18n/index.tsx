@@ -86,3 +86,4 @@ function readInitialLocale(): Locale {
 }
 
 export type { Locale }
+export { localeStorageKey }

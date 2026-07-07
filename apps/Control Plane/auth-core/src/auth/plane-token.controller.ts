@@ -64,6 +64,13 @@ function toWebHeaders(
   return headers;
 }
 
+/**
+ * Reserved, non-tenant `org_id` for pre-org onboarding preview tokens. It is
+ * never a real organization: preview crawls minted with it are working-set
+ * only (never persisted to Data Plane), so no data is ever written under it.
+ */
+const ONBOARDING_ORG_SENTINEL = 'onboarding';
+
 interface PlaneInternalTokenBody {
   userId?: string;
   orgId?: string;
@@ -102,6 +109,42 @@ export class PlaneTokenController {
    * org → 400 (fail-closed; a token with empty `org_id` would be rejected
    * downstream anyway, so surface it here as a clear error).
    */
+  /**
+   * Pre-org onboarding preview token. The onboarding website step runs BEFORE
+   * the user creates an organization (the crawl is used to infer the company),
+   * so `:audience/token` — which fails closed with no active org — cannot serve
+   * it. This mints a `quarry`-audience JWT carrying a reserved sentinel
+   * `org_id` (`onboarding`) and a single restricted scope (`onboarding:preview`)
+   * so quarry-edge, whose auth requires a non-empty `org_id`, accepts the
+   * transient preview crawl (working-set only, never persisted to a real
+   * tenant). A real org-scoped token is still required for any durable ingest.
+   * Requires only a valid session — no org.
+   */
+  @Get('quarry/onboarding-token')
+  @ApiOperation({
+    summary: 'Mint a pre-org quarry preview token for onboarding',
+  })
+  async getOnboardingToken(@Req() request: Request) {
+    const session = await auth.api.getSession({
+      headers: toWebHeaders(request.headers),
+    });
+    if (!session?.user?.id) {
+      throw new UnauthorizedException('Authentication required');
+    }
+    const bundle = this.convexTokenService.issuePlaneToken('quarry', {
+      userId: session.user.id,
+      orgId: ONBOARDING_ORG_SENTINEL,
+      email: session.user.email ?? undefined,
+      scopes: ['onboarding:preview'],
+    });
+    return {
+      ...bundle,
+      userId: session.user.id,
+      orgId: ONBOARDING_ORG_SENTINEL,
+      role: null,
+    };
+  }
+
   @Get(':audience/token')
   @ApiOperation({
     summary:

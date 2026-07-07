@@ -1,88 +1,90 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Control Plane Integration Test
-# Tests: Auth, User, Org, Billing, Quotas, Compliance
+AUTH_URL="${AUTH_URL:-http://localhost:3011}"
+USER_URL="${USER_URL:-http://localhost:3012}"
+ORG_URL="${ORG_URL:-http://localhost:18080}"
+BILLING_URL="${BILLING_URL:-http://localhost:3014}"
+SESSION_URL="${SESSION_URL:-http://localhost:3015}"
+AUDIT_URL="${AUDIT_URL:-http://localhost:8187}"
+PG_CONTAINER="${PG_CONTAINER:-controlplane-postgres}"
 
-set -e
+PASS_COUNT=0
+FAIL_COUNT=0
 
-echo "🧪 Control Plane Integration Test"
-echo "=================================="
-echo ""
+pass() {
+  printf 'PASS: %s\n' "$1"
+  PASS_COUNT=$((PASS_COUNT + 1))
+}
 
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+fail() {
+  printf 'FAIL: %s\n' "$1"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+}
 
-# Test credentials
-TEST_EMAIL="test-$(date +%s)@example.com"
-TEST_PASSWORD="TestPassword123!"
-TEST_ORG_NAME="Test Org $(date +%s)"
+curl_status() {
+  local url="$1"
+  local body_file
+  body_file="$(mktemp)"
+  HTTP_BODY_FILE="$body_file"
+  HTTP_STATUS="$(curl -sS --max-time 5 -o "$body_file" -w "%{http_code}" "$url" 2>/dev/null || true)"
+}
 
-echo -e "${BLUE}1. Testing Service Health${NC}"
-echo "   auth-core (3011)..."
-AUTH_HEALTH=$(curl -s http://localhost:3011/health || echo "DOWN")
-echo "   ✓ auth-core: $AUTH_HEALTH"
+assert_http() {
+  local name="$1"
+  local url="$2"
+  local expected="$3"
 
-echo "   user-core (3012)..."
-USER_HEALTH=$(curl -s http://localhost:3012/health || echo "DOWN")
-echo "   ✓ user-core: $USER_HEALTH"
+  curl_status "$url"
+  if [[ "$HTTP_STATUS" == "$expected" ]]; then
+    pass "$name returned HTTP $expected"
+  else
+    fail "$name returned HTTP ${HTTP_STATUS:-000}, expected $expected"
+    printf '      url: %s\n' "$url"
+    printf '      body: %s\n' "$(head -c 300 "$HTTP_BODY_FILE" | tr '\n' ' ')"
+  fi
+  rm -f "$HTTP_BODY_FILE"
+}
 
-echo "   org-core (8080)..."
-ORG_HEALTH=$(curl -s http://localhost:8080/health || echo "DOWN")
-echo "   ✓ org-core: $ORG_HEALTH"
-echo ""
+printf 'Control Plane smoke validation\n'
+printf '%s\n\n' '================================'
 
-echo -e "${BLUE}2. Testing Database Schema${NC}"
-echo "   Checking org-core tables..."
-ORG_TABLES=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c "SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public';")
-echo "   ✓ Found $ORG_TABLES tables in org_core"
+printf 'Service health checks\n'
+printf '%s\n' '---------------------'
+assert_http "auth-core session endpoint" "$AUTH_URL/api/auth/get-session" "200"
+assert_http "user-core health" "$USER_URL/health" "200"
+assert_http "org-core health" "$ORG_URL/health" "200"
+assert_http "billing-core health" "$BILLING_URL/health" "200"
+assert_http "session-core health" "$SESSION_URL/health" "200"
+assert_http "audit-core health" "$AUDIT_URL/healthz" "200"
 
-echo "   Checking GDPR functions..."
-GDPR_FUNCS=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = 'public' AND routine_name LIKE 'gdpr%';")
-echo "   ✓ Found $GDPR_FUNCS GDPR functions in org_core"
+printf '\nDatabase checks\n'
+printf '%s\n' '---------------'
+if ! docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+  fail "Postgres container '$PG_CONTAINER' exists"
+else
+  pass "Postgres container '$PG_CONTAINER' exists"
 
-AUTH_GDPR=$(docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -t -c "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = 'public' AND routine_name LIKE 'gdpr%';")
-echo "   ✓ Found $AUTH_GDPR GDPR functions in auth_service"
-echo ""
+  db_ping="$(docker exec "$PG_CONTAINER" sh -lc 'psql -U "$POSTGRES_USER" -d "${POSTGRES_DB:-controlplane}" -tAq -v ON_ERROR_STOP=1 -c "select 1"' 2>/dev/null || true)"
+  if [[ "$db_ping" == "1" ]]; then
+    pass "Postgres accepts SQL on configured control-plane database"
+  else
+    fail "Postgres SQL readiness check failed"
+  fi
 
-echo -e "${BLUE}3. Testing Data Integrity${NC}"
-echo "   Checking existing organizations..."
-ORG_COUNT=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c "SELECT COUNT(*) FROM organizations;")
-QUOTA_COUNT=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c "SELECT COUNT(*) FROM org_quotas;")
-BILLING_COUNT=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c "SELECT COUNT(*) FROM org_billing;")
-COMPLIANCE_COUNT=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c "SELECT COUNT(*) FROM org_compliance;")
+  table_count="$(docker exec "$PG_CONTAINER" sh -lc 'psql -U "$POSTGRES_USER" -d "${POSTGRES_DB:-controlplane}" -tAq -v ON_ERROR_STOP=1 -c "select count(*) from pg_tables"' 2>/dev/null || true)"
+  if [[ "$table_count" =~ ^[0-9]+$ ]]; then
+    pass "Postgres catalog is readable ($table_count tables visible)"
+  else
+    fail "Postgres catalog table count query failed"
+  fi
+fi
 
-echo "   ✓ Organizations: $ORG_COUNT"
-echo "   ✓ Quotas: $QUOTA_COUNT (3 per org expected)"
-echo "   ✓ Billing records: $BILLING_COUNT"
-echo "   ✓ Compliance records: $COMPLIANCE_COUNT"
-echo ""
+printf '\nSummary\n'
+printf '%s\n' '-------'
+printf 'Passed: %s\n' "$PASS_COUNT"
+printf 'Failed: %s\n' "$FAIL_COUNT"
 
-echo -e "${BLUE}4. Sample Organization Data${NC}"
-echo "   First organization with quotas:"
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c "SELECT o.name, o.plan, q.quota_key, q.quota_limit, q.quota_value FROM organizations o JOIN org_quotas q ON o.id = q.org_id ORDER BY o.id LIMIT 3;" | head -8
-echo ""
-
-echo -e "${BLUE}5. Sample Billing & Compliance Data${NC}"
-echo "   First organization billing/compliance:"
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c "SELECT o.name, o.plan, b.subscription_status, c.gdpr_compliant, c.data_residency FROM organizations o JOIN org_billing b ON o.id = b.org_id JOIN org_compliance c ON o.id = c.org_id LIMIT 3;"
-echo ""
-
-echo -e "${GREEN}✅ Control Plane Test Complete${NC}"
-echo ""
-echo "Summary:"
-echo "--------"
-echo "✓ All 3 services healthy (auth-core, user-core, org-core)"
-echo "✓ Database schema includes enterprise tables (quotas, billing, compliance)"
-echo "✓ GDPR hard delete functions available (org & user)"
-echo "✓ Existing orgs have default quotas, billing, compliance data"
-echo ""
-echo "Control Plane Components Verified:"
-echo "  - Auth (auth-core)"
-echo "  - User (user-core)"
-echo "  - Org (org-core)"
-echo "  - Billing (org-core)"
-echo "  - Feature Flags/Quotas (org-core)"
-echo "  - GDPR Compliance (auth-core + org-core)"
+if (( FAIL_COUNT > 0 )); then
+  exit 1
+fi

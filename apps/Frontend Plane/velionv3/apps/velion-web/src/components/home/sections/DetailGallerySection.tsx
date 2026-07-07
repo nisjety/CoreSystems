@@ -1,6 +1,13 @@
 import type { CSSProperties } from "react";
 
-const detailNotes = ["Monitor", "Brief", "Review", "Approve", "Execute", "Audit"];
+const detailNotes = [
+	"Overvåk",
+	"Grunnlag",
+	"Vurder",
+	"Godkjenn",
+	"Utfør",
+	"Revider",
+];
 
 export function DetailGallerySection() {
 	return (
@@ -20,7 +27,7 @@ export function DetailGallerySection() {
 					className="m-0 max-w-[820px] font-arbeit text-[clamp(3.35rem,6.4vw,8.6rem)] font-light leading-[0.9] tracking-[-0.078em] text-velion-j-text"
 					data-fade-out-top
 				>
-					The approval loop is the product.
+					Godkjenningen er en del av produktet.
 				</h1>
 
 				<div
@@ -28,15 +35,14 @@ export function DetailGallerySection() {
 					data-fade-out-top
 				>
 					<p className="m-0 font-protokoll text-[clamp(1.02rem,1.05vw,1.22rem)] font-light leading-[1.5] text-velion-text-muted">
-						Velion can propose work across support, sales, knowledge, and
-						operations, but the system is built around human control.
-						High-impact actions stop at review with context, rollback, and
-						audit attached.
+						Velion kan foreslå arbeid på tvers av kundeservice, kunnskap og drift.
+						Men handlinger med risiko stopper for vurdering, med kilder,
+						kontekst og sporbarhet ved siden av.
 					</p>
 				</div>
 
 				<div
-					aria-label="Detail sequence"
+					aria-label="Detaljert Velion-sekvens"
 					className="mt-[clamp(38px,5vw,78px)] grid max-w-[520px] grid-cols-2 border-t border-velion-j-text/10 sm:grid-cols-3"
 				>
 					{detailNotes.map((note, index) => (
@@ -51,7 +57,7 @@ export function DetailGallerySection() {
 			</div>
 
 			<div
-				aria-label="Animated detail panels"
+				aria-label="Animerte detaljpaneler"
 				className="relative min-h-[620px] overflow-hidden rounded-[2px] border border-velion-j-text/8 bg-[linear-gradient(90deg,rgba(23,23,23,0.045)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.045)_1px,transparent_1px),linear-gradient(145deg,#ffffff,#ecebea)] bg-[length:72px_72px,72px_72px,100%_100%] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.32)] max-[1100px]:min-h-[520px]"
 				role="img"
 			>

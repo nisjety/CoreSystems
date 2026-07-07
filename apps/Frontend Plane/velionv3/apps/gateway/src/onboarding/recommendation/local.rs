@@ -2,7 +2,10 @@ use chrono::Utc;
 
 use crate::contracts::{PlanRecommendation, RecommendContext};
 
-use super::{normalize::human_plan_name, plan_id};
+use super::{
+    normalize::{align_source_proof_points, human_plan_name, total_source_count},
+    plan_id,
+};
 
 pub(crate) fn build_local_recommendation(context: &RecommendContext) -> PlanRecommendation {
     let connector_count = context
@@ -10,14 +13,7 @@ pub(crate) fn build_local_recommendation(context: &RecommendContext) -> PlanReco
         .as_ref()
         .map(|items| items.len())
         .unwrap_or(0);
-    let source_count = context.source_count.unwrap_or(
-        connector_count as u32
-            + context
-                .websites
-                .as_ref()
-                .map(|items| items.len())
-                .unwrap_or(0) as u32,
-    );
+    let source_count = total_source_count(context);
     let employees = context
         .organization
         .as_ref()
@@ -99,13 +95,8 @@ pub(crate) fn build_local_recommendation(context: &RecommendContext) -> PlanReco
         plan_id: plan_id(plan),
         reason: reason.into(),
         summary,
-        proof_points: vec![
-            if locale == "nb" {
-                format!("{} kilder er valgt i onboarding.", source_count)
-            } else {
-                format!("{} sources are selected in onboarding.", source_count)
-            },
-            if employees > 0 {
+        proof_points: align_source_proof_points(
+            vec![if employees > 0 {
                 if locale == "nb" {
                     format!("Brreg eller brukeren oppga {} ansatte.", employees)
                 } else {
@@ -115,8 +106,10 @@ pub(crate) fn build_local_recommendation(context: &RecommendContext) -> PlanReco
                 "Teamstørrelse er fortsatt ukjent.".into()
             } else {
                 "Team size is still unknown.".into()
-            },
-        ],
+            }],
+            context,
+            locale,
+        ),
         scope_signals: vec![
             context
                 .website
@@ -152,5 +145,46 @@ pub(crate) fn build_local_recommendation(context: &RecommendContext) -> PlanReco
         },
         generated_at: Utc::now().to_rfc3339(),
         source: "local",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::contracts::RecommendPlanRequest;
+
+    use super::build_local_recommendation;
+
+    #[test]
+    fn counts_connector_source_streams_and_website_source() {
+        let request: RecommendPlanRequest = serde_json::from_value(json!({
+            "context": {
+                "organization": { "name": "AQUATIQ AS", "employeeCount": 93 },
+                "website": { "url": "https://aquatiq.com" },
+                "websites": [{ "url": "https://aquatiq.com" }],
+                "sourceCount": 4,
+                "connectors": [
+                    {
+                        "id": "microsoft365",
+                        "label": "Microsoft 365",
+                        "sources": ["teams", "outlook", "sharepoint", "onedrive"]
+                    },
+                    {
+                        "id": "meta",
+                        "label": "Meta",
+                        "sources": ["pages", "instagram_business", "whatsapp", "ads"]
+                    },
+                    { "id": "github", "label": "GitHub", "sources": ["issues"] }
+                ],
+                "locale": "nb"
+            }
+        }))
+        .expect("valid recommendation request");
+
+        let recommendation = build_local_recommendation(&request.context);
+
+        assert!(recommendation.summary.starts_with("10 kilder"));
+        assert_eq!(recommendation.proof_points[0], "9 tilkoblede kilder valgt.");
     }
 }

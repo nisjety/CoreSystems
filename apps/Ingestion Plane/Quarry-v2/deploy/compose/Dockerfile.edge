@@ -15,6 +15,10 @@
 # layer and cargo-chef install are computed once and reused.
 FROM rust:1-slim-bookworm AS chef-base
 WORKDIR /src
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+    CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=120 \
+    CARGO_HTTP_MULTIPLEXING=false
 
 # System dependencies for our crate graph:
 # - pkg-config, libssl-dev, ca-certificates: standard rustls + reqwest
@@ -48,7 +52,15 @@ RUN --mount=type=cache,id=quarry-edge-apt-cache,target=/var/cache/apt,sharing=lo
 # compile is cached independently of first-party source churn.
 RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-chef --locked
+    set -e; \
+    for i in 1 2 3 4 5; do \
+        if cargo install cargo-chef --locked --version 0.1.77; then \
+            exit 0; \
+        fi; \
+        echo "cargo-chef install retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 
 # ---- Planner stage -----------------------------------------------------------
 # Reads the full workspace and emits recipe.json (the dependency graph only).

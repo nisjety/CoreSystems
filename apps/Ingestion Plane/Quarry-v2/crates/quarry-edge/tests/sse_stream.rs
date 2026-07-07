@@ -55,6 +55,7 @@ async fn sse_streams_page_fetched_and_artifact_written() {
         scheduler: None,
         internal_signer: None,
         page_renderer: None,
+        visual_processor: None,
         #[cfg(feature = "postgres-queue")]
         event_history: None,
         usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),

@@ -9,9 +9,17 @@ export interface IntegrationProvider {
   requiresPlan?: string
   /** integration-core groups providers by category (e.g. "source", "social"). */
   category?: string
-  /** Declared capability labels, used as a permissions fallback when a connection
-   * exposes no granted scopes. integration-core returns objects keyed by `key`. */
-  capabilities?: Array<{ key: string; sensitive?: boolean }>
+  /** Declared capabilities, used as a permissions fallback when a connection
+   * exposes no granted scopes. integration-core returns objects keyed by `key`;
+   * `direction` marks read (into Velion) vs write (out to the provider). */
+  capabilities?: Array<{
+    key: string
+    label?: string
+    description?: string
+    direction?: 'read' | 'write'
+    scopes?: string[]
+    sensitive?: boolean
+  }>
 }
 
 export interface IntegrationConnection {

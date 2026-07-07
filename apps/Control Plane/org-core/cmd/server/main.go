@@ -118,6 +118,15 @@ func main() {
 
 	orgService := orgcore.NewService(repo, publisher, redisClient)
 
+	// Wire the local control-plane bus (controlplane-nats) as the audit
+	// publisher. velion.audit.v1.control.* events go here — NOT the shared
+	// velion-nats bus — because audit-core's primary QueueSubscribe listens on
+	// controlplane-nats. Core publish (no JetStream) matches audit-core's
+	// core subscription.
+	if natsClient != nil {
+		orgService.SetAuditPublisher(natsClient)
+	}
+
 	// Wire shared cross-plane publisher (velion-nats)
 	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, cfg.NATSSharedToken, cfg.ServiceName); spErr != nil {
 		log.Printf("warning: shared NATS unavailable: %v", spErr)

@@ -1,20 +1,25 @@
 # Velion v3 Core Research
 
 Generated: 2026-06-09
+Updated: 2026-07-02
 
 ## Scope
 
 This pass covers `apps/Frontend Plane/velionv3` only. It intentionally skips the broader `velionv2` Frontend Plane audit.
 
-Velion v3 is a standalone SolidJS + Vite + TypeScript SPA. It is smaller than `velionv2` and does not currently provide a Next.js-style server BFF.
+Velion v3 is the current Frontend Plane target. It is a SolidJS + Vite + TypeScript app with a Rust Axum same-origin gateway under `apps/gateway`. It does not use the old Velion v2 Next.js route-handler BFF shape.
+
+Latest plane audit: `plane-audit-2026-07-02.md`.
 
 ## Current Shape
 
 - Runtime: SolidJS 1.9, Vite 8, TypeScript strict mode.
+- Gateway/BFF: Rust Axum gateway under `apps/gateway`.
+- Adjacent web app: nested Next.js app under `apps/velion-web`.
 - Routes: dashboard, chat, inbox, agents, knowledge, auth/login, onboarding, settings.
-- Real cross-plane integration: onboarding calls the Application Plane `velion-gateway-rs`.
-- Demo/local surfaces: dashboard, chat, inbox, agents, knowledge, settings, auth, action execution, and GraphREST are mostly local or mock-backed today.
-- Directional architecture: shared action registry plus context packs are designed for Model Plane calls, but the transport is not wired yet.
+- Cross-plane integration: browser traffic should go through the Rust gateway; the older Application Plane `velion-gateway-rs` overlap needs an ownership decision.
+- Demo/fallback surfaces: several workspace views still use honest fallback or preview data and need live-wiring classification.
+- Directional architecture: shared action registry plus context packs are designed for human and Model Plane calls through the same action contracts.
 
 ## Entry Points
 
@@ -22,22 +27,23 @@ Velion v3 is a standalone SolidJS + Vite + TypeScript SPA. It is smaller than `v
 - Shell: `src/app/shell/AppShell.tsx`
 - Runtime mount: `src/index.tsx`
 - Vite config: `vite.config.ts`
+- Gateway entry: `apps/gateway/src/main.rs`
 - Onboarding API client: `src/features/onboarding/lib/api.ts`
 - Action registry: `src/shared/actions/action-registry.ts`
 - Action execution: `src/shared/actions/action-client.ts`
 
 ## Relationship Map
 
-- Velion v3 -> Application Plane `velion-gateway-rs` for onboarding bootstrap, state, Brreg search, graph preview, crawl preview, organization creation, connect sessions, source discovery, plan selection, checkout, and completion.
-- Velion v3 -> Model Plane only by contract intent today. `ActionDescriptor` entries name model-owned actions, but `executeAction()` does not call Model Plane.
-- Velion v3 -> Data/Ingestion/Control Plane indirectly through `velion-gateway-rs` during onboarding.
-- Velion v3 -> local mock data for main workspace surfaces outside onboarding.
+- Velion v3 browser -> Frontend Plane Rust gateway for same-origin `/api` and `/health` calls.
+- Frontend Plane Rust gateway -> Control, Data, Ingestion, Model, and Application services by domain.
+- Velion v3 -> Model Plane by action contract intent; action metadata should stay complete even when execution is proxied through the gateway.
+- Velion v3 -> fallback data for some workspace surfaces until each feature is classified as live, planned, or preview-only.
 
 ## Highest-Signal Findings
 
 1. Velion v3 is real as a Solid/Vite app and has a coherent feature-sliced structure.
-2. It is not equivalent to `velionv2` operationally because it has no server BFF and no auth/session enforcement.
-3. The onboarding flow is the only substantial live external integration and depends on `VITE_VELION_GATEWAY_URL` or `http://127.0.0.1:3185`.
+2. It is not equivalent to `velionv2` operationally because the server boundary is a Rust gateway, not Next.js route handlers.
+3. The current test gate failure is in Studio workspace loading when session context lacks `orgs`.
 4. Auth is presentation-only: email/password, social buttons, and passkey all navigate to `/onboarding`.
 5. The action registry is a useful contract surface, but action execution is local-only and returns synthetic run/audit IDs.
 6. `fetchKnowledgeGraphSnapshot()` is a static in-memory GraphREST example, not a Data Plane graph client.
@@ -59,3 +65,4 @@ Velion v3 is a standalone SolidJS + Vite + TypeScript SPA. It is smaller than `v
 - `auth-boundary.md`
 - `action-system.md`
 - `mock-backed-surfaces.md`
+- `plane-audit-2026-07-02.md`

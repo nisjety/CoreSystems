@@ -14,6 +14,8 @@ import (
 type MicrosoftClientConfig struct {
 	ClientID         string
 	ClientSecret     string
+	ClientAuthMode   string
+	TokenOrigin      string
 	AuthorizationURL string
 	TokenURL         string
 	GraphBaseURL     string
@@ -59,7 +61,7 @@ func NewMicrosoftClient(cfg MicrosoftClientConfig) *MicrosoftClient {
 func (c *MicrosoftClient) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string, scopes []string) (TokenResult, error) {
 	values := url.Values{}
 	values.Set("client_id", c.cfg.ClientID)
-	values.Set("client_secret", c.cfg.ClientSecret)
+	c.setClientSecret(values)
 	values.Set("grant_type", "authorization_code")
 	values.Set("code", code)
 	values.Set("redirect_uri", redirectURI)
@@ -73,13 +75,28 @@ func (c *MicrosoftClient) ExchangeCode(ctx context.Context, code, redirectURI, c
 func (c *MicrosoftClient) Refresh(ctx context.Context, refreshToken string, scopes []string) (TokenResult, error) {
 	values := url.Values{}
 	values.Set("client_id", c.cfg.ClientID)
-	values.Set("client_secret", c.cfg.ClientSecret)
+	c.setClientSecret(values)
 	values.Set("grant_type", "refresh_token")
 	values.Set("refresh_token", refreshToken)
 	if len(scopes) > 0 {
 		values.Set("scope", strings.Join(scopes, " "))
 	}
 	return c.tokenRequest(ctx, values)
+}
+
+func (c *MicrosoftClient) setClientSecret(values url.Values) {
+	if microsoftUsesClientSecret(c.cfg.ClientAuthMode) && strings.TrimSpace(c.cfg.ClientSecret) != "" {
+		values.Set("client_secret", c.cfg.ClientSecret)
+	}
+}
+
+func microsoftUsesClientSecret(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "confidential", "secret", "web":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *MicrosoftClient) Profile(ctx context.Context, accessToken string) (MicrosoftProfile, error) {
@@ -122,6 +139,7 @@ func (c *MicrosoftClient) tokenRequest(ctx context.Context, values url.Values) (
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	c.setTokenOrigin(req, values)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -154,6 +172,27 @@ func (c *MicrosoftClient) tokenRequest(ctx context.Context, values url.Values) (
 		ExpiresAt:    time.Now().UTC().Add(time.Duration(expiresIn) * time.Second),
 		Raw:          raw,
 	}, nil
+}
+
+func (c *MicrosoftClient) setTokenOrigin(req *http.Request, values url.Values) {
+	if microsoftUsesClientSecret(c.cfg.ClientAuthMode) {
+		return
+	}
+	origin := strings.TrimRight(strings.TrimSpace(c.cfg.TokenOrigin), "/")
+	if origin == "" {
+		origin = requestOrigin(values.Get("redirect_uri"))
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+}
+
+func requestOrigin(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 func tokenError(raw map[string]any) string {

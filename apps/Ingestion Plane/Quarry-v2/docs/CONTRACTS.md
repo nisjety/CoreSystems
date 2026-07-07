@@ -96,7 +96,7 @@ HMAC over raw body using org webhook secret. Retries: exp backoff, max 24h, DLQ 
 
 `s3://<bucket>/org=<org>/run=<run_id>/page=<page_hash>/<kind>.<ext>`
 
-Kinds: `html`, `md`, `raw`, `links.json`, `images.json`, `screenshot.png`, `pdf`, `trace.zip`, `extract.json`, `summary.txt`, `attributes.json`, `branding.json`, `audio.json`, `change.json`, `chunks.json`, `meta.json`.
+Kinds: `html`, `md`, `raw`, `links.json`, `images.json`, `screenshot.png`, `screenshot_annotated.png`, `pdf`, `trace.zip`, `extract.json`, `summary.txt`, `attributes.json`, `branding.json`, `audio.json`, `change.json`, `visual_change.json`, `visual_observation.json`, `thumbnail.png`, `tiles.json`, `page_image_clean.png`, `ocr_preprocessed.png`, `logo_candidate.png`, `rendered_palette.json`, `chunks.json`, `meta.json`.
 
 `page_hash = blake3(normalized_url + content_fingerprint)`.
 
@@ -216,6 +216,8 @@ Production snapshot storage uses real S3. Local development and tests use MinIO-
     "links": [ { "href": "...", "text": "...", "rel": "..." } ],
     "images": [ { "src": "...", "alt": "...", "title": "...", "width": 1200, "height": 630 } ],
     "screenshot": { "artifact_id": "art_..." },
+    "visual_observation": { "artifact_id": "art_..." },
+    "visual_change": { "artifact_id": "art_..." },
     "pdf": { "artifact_id": "art_..." },
     "extract": { "artifact_id": "art_...", "schema_id": "..." },
     "summary": { "artifact_id": "art_..." },
@@ -454,6 +456,112 @@ Denial reasons are emitted as `page.blocked` payloads or stored in crawl status 
   }
 }
 ```
+
+### Visual observation artifact
+
+Deterministic browser-action visual evidence. Quarry may use OpenCV in an
+isolated sidecar to compute this, but it must not perform VLM reasoning, OCR
+interpretation, anti-bot bypass, or model-provider replacement.
+
+```json
+{
+  "version": 1,
+  "backend": "opencv5-sidecar",
+  "step": 4,
+  "previous_available": true,
+  "changed": true,
+  "change_ratio": 0.18,
+  "regions": [
+    { "x": 120, "y": 300, "width": 480, "height": 220, "score": 0.92, "label": "changed_region" }
+  ],
+  "metrics": {
+    "threshold": 18,
+    "morphology": "close_3x3",
+    "source": "before_after_screenshot"
+  },
+  "annotated_artifact_id": "art_...",
+  "change_artifact_id": "art_...",
+  "related_artifacts": {
+    "visual_change": "art_...",
+    "screenshot_annotated": "art_...",
+    "page_image_clean": "art_...",
+    "thumbnail": "art_...",
+    "tiles": "art_...",
+    "ocr_preprocessed": "art_...",
+    "logo_candidate": "art_...",
+    "rendered_palette": "art_..."
+  }
+}
+```
+
+### Visual change artifact
+
+Pure deterministic before/after screenshot diff. This is intentionally smaller
+than `visual_observation.json` so change tracking can consume it without pulling
+thumbnail, OCR, or branding side outputs.
+
+```json
+{
+  "version": 1,
+  "backend": "opencv5-sidecar",
+  "step": 4,
+  "previous_available": true,
+  "changed": true,
+  "change_ratio": 0.18,
+  "regions": [
+    { "x": 120, "y": 300, "width": 480, "height": 220, "score": 0.92, "label": "changed" }
+  ],
+  "metrics": {
+    "threshold": 18,
+    "changed_pixels": 8120,
+    "total_pixels": 2073600,
+    "region_count": 1
+  },
+  "annotated_artifact_id": "art_..."
+}
+```
+
+### Vision sidecar wire contract
+
+Quarry edge calls the sidecar only after ZDR has been checked. The sidecar never
+persists inputs or outputs; it returns deterministic bytes and metadata for edge
+to persist or discard.
+
+`POST /v1/visual/observe` accepts `previous_png_b64`, `current_png_b64`, `step`,
+`max_regions`, and operation flags:
+
+```json
+{
+  "run_id": "run_...",
+  "page_hash": "blake3:...",
+  "step": 4,
+  "previous_png_b64": "...",
+  "current_png_b64": "...",
+  "max_regions": 32,
+  "operations": {
+    "diff": true,
+    "screenshot_preprocessing": true,
+    "thumbnail": true,
+    "tiles": true,
+    "ocr_preconditioning": true,
+    "rendered_branding": true
+  }
+}
+```
+
+`POST /v1/visual/preprocess` accepts one rendered page PNG and returns
+`clean_png_b64` for the Data Plane page-image CAS path. Optional derivative
+fields are `thumbnail_png_b64`, `tiles`, `ocr_preprocessed_png_b64`,
+`logo_candidate_png_b64`, and `rendered_palette`.
+
+Rules:
+
+- ZDR requests must not persist `visual_observation.json`, annotated screenshots,
+  thumbnails, tiles, cleaned page images, OCR preprocessed images, logo crops, or
+  rendered palette artifacts.
+- Visual artifacts are deterministic evidence only. Model Plane owns visual
+  reasoning and provider-backed VLM/OCR decisions.
+- OpenCV must not be used for anti-bot bypass or challenge solving.
 
 ## 10. Versioning
 

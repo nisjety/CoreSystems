@@ -11,6 +11,51 @@ type Capability struct {
 	Description string   `json:"description"`
 	Scopes      []string `json:"scopes"`
 	Sensitive   bool     `json:"sensitive"`
+	// Direction is the data-flow direction relative to Velion: "read" pulls
+	// data INTO Velion (grounding/signals), "write" pushes actions OUT to the
+	// provider (replies, publishing, provisioning). Derived from the capability
+	// key by capabilityDirection so every provider is modelled consistently and
+	// the UI can show read/write both-ways info uniformly.
+	Direction string `json:"direction"`
+}
+
+// capabilityDirection infers read vs write from a capability key. Write verbs
+// (send/write/manage/publish/upload/post/create/delete/provision) push actions
+// out to the provider; everything else reads data in. Centralised so the whole
+// catalog stays consistent without hand-annotating ~60 capabilities.
+func capabilityDirection(key string) string {
+	k := strings.ToLower(key)
+	writeMarkers := []string{
+		".write", ".send", ".manage", ".post", ".publish", ".upload",
+		".create", ".delete", ".update", "provisioning.write", "directory.write",
+	}
+	for _, m := range writeMarkers {
+		if strings.Contains(k, m) {
+			return "write"
+		}
+	}
+	// bare write-intent keys without a dotted suffix
+	switch k {
+	case "publishing", "actions", "write", "send", "manage":
+		return "write"
+	}
+	return "read"
+}
+
+// withCapabilityDirections stamps Direction on every capability of every
+// provider (idempotent: an explicitly-set direction is preserved). Applied at
+// the catalog boundary so all callers — /api/v1/providers, OAuth catalog,
+// readiness — emit consistent direction metadata.
+func withCapabilityDirections(catalog []Provider) []Provider {
+	for pi := range catalog {
+		caps := catalog[pi].Capabilities
+		for ci := range caps {
+			if strings.TrimSpace(caps[ci].Direction) == "" {
+				caps[ci].Direction = capabilityDirection(caps[ci].Key)
+			}
+		}
+	}
+	return catalog
 }
 
 type Bundle struct {
@@ -32,26 +77,45 @@ type Provider struct {
 	MissingConfig    []string     `json:"missingConfig,omitempty"`
 	Capabilities     []Capability `json:"capabilities"`
 	Bundles          []Bundle     `json:"bundles"`
+	MetaSDK          *MetaSDK     `json:"metaSdk,omitempty"`
+	// SupersededBy names the provider that replaces this one in the catalog UI
+	// (e.g. facebook/instagram/whatsapp/meta-ads → "meta"). Superseded
+	// providers stay in the catalog so existing connections keep resolving,
+	// but new-connection UIs should render only the superseding provider.
+	SupersededBy string `json:"supersededBy,omitempty"`
+}
+
+type MetaSDK struct {
+	Enabled       bool   `json:"enabled"`
+	AppID         string `json:"appId,omitempty"`
+	APIVersion    string `json:"apiVersion,omitempty"`
+	Locale        string `json:"locale,omitempty"`
+	LoginConfigID string `json:"loginConfigId,omitempty"`
 }
 
 func Catalog() []Provider {
-	return []Provider{
+	return withCapabilityDirections([]Provider{
 		Microsoft(),
 		GoogleWorkspace(),
 		Slack(),
+		Discord(),
 		GitHub(),
 		Notion(),
 		Shopify(),
 		Stripe(),
 		LinkedIn(),
 		X(),
+		Meta(),
 		Instagram(),
 		Facebook(),
+		WhatsApp(),
+		MetaAds(),
 		TikTok(),
 		Snapchat(),
+		Shipping(),
 		Okta(),
 		SCIM(),
-	}
+	})
 }
 
 func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider {
@@ -75,9 +139,10 @@ func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider
 }
 
 func OAuthCatalog() []Provider {
-	return []Provider{
+	return withCapabilityDirections([]Provider{
 		Microsoft(),
 		Slack(),
+		Discord(),
 		GoogleWorkspace(),
 		Notion(),
 		GitHub(),
@@ -85,10 +150,14 @@ func OAuthCatalog() []Provider {
 		Stripe(),
 		LinkedIn(),
 		X(),
+		Meta(),
 		Instagram(),
 		Facebook(),
+		WhatsApp(),
+		MetaAds(),
+		TikTok(),
 		Snapchat(),
-	}
+	})
 }
 
 func Find(key string) (Provider, bool) {
@@ -330,6 +399,17 @@ func GoogleWorkspace() Provider {
 				Scopes:      []string{"https://www.googleapis.com/auth/calendar.readonly"},
 				Sensitive:   true,
 			},
+			{
+				// The adwords scope has no readonly variant — consent wording is
+				// full-management. Google Ads API calls additionally require a
+				// developer token (GOOGLE_ADS_DEVELOPER_TOKEN header), which is
+				// provisioned separately from OAuth in a Google Ads manager account.
+				Key:         "ads.manage",
+				Label:       "Google Ads",
+				Description: "Manage and report on Google Ads campaigns for connected accounts.",
+				Scopes:      []string{"https://www.googleapis.com/auth/adwords"},
+				Sensitive:   true,
+			},
 		},
 		Bundles: []Bundle{
 			{
@@ -337,6 +417,12 @@ func GoogleWorkspace() Provider {
 				Label:        "Safe onboarding preview",
 				Description:  "Profile and Drive metadata only.",
 				Capabilities: []string{"profile.read", "drive.metadata"},
+			},
+			{
+				Key:          "ads",
+				Label:        "Google advertising",
+				Description:  "Google Ads campaign management and reporting.",
+				Capabilities: []string{"profile.read", "ads.manage"},
 			},
 			{
 				Key:          "knowledge",
@@ -438,6 +524,34 @@ func GitHub() Provider {
 				Scopes:      []string{"public_repo"},
 			},
 			{
+				Key:         "repo.contents.read",
+				Label:       "Repository contents",
+				Description: "Read repository contents and README files selected for knowledge ingestion.",
+				Scopes:      []string{"public_repo"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "commits.read",
+				Label:       "Commit history",
+				Description: "Read repository commit metadata for source traceability.",
+				Scopes:      []string{"public_repo"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "pulls.read",
+				Label:       "Pull requests",
+				Description: "Read pull request metadata and review status for engineering context.",
+				Scopes:      []string{"public_repo"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "issues.read",
+				Label:       "Issues read",
+				Description: "Read issue metadata and discussion context selected for support or planning workflows.",
+				Scopes:      []string{"public_repo"},
+				Sensitive:   true,
+			},
+			{
 				Key:         "repo.private.read",
 				Label:       "Private repository read",
 				Description: "Read private repositories selected for knowledge ingestion.",
@@ -463,13 +577,13 @@ func GitHub() Provider {
 				Key:          "knowledge",
 				Label:        "Knowledge sync",
 				Description:  "Read repository metadata and selected repository content.",
-				Capabilities: []string{"profile.read", "org.read", "repo.public.read", "repo.private.read"},
+				Capabilities: []string{"profile.read", "org.read", "repo.public.read", "repo.contents.read", "commits.read", "pulls.read", "issues.read", "repo.private.read"},
 			},
 			{
 				Key:          "full",
 				Label:        "Full GitHub workspace",
 				Description:  "Knowledge sync plus approved issue actions.",
-				Capabilities: []string{"profile.read", "org.read", "repo.public.read", "repo.private.read", "issues.write"},
+				Capabilities: []string{"profile.read", "org.read", "repo.public.read", "repo.contents.read", "commits.read", "pulls.read", "issues.read", "repo.private.read", "issues.write"},
 			},
 		},
 	}
@@ -604,9 +718,51 @@ func LinkedIn() Provider {
 		Capabilities: []Capability{
 			{
 				Key:         "social.profile.read",
-				Label:       "Profile and page metadata",
-				Description: "Read member identity and available organization/page publishing targets.",
+				Label:       "Member identity",
+				Description: "Read the connecting member identity through Sign in with LinkedIn using OpenID Connect.",
 				Scopes:      []string{"openid", "profile", "email"},
+			},
+			{
+				Key:         "social.profile.verify",
+				Label:       "Basic verified profile",
+				Description: "Read the member's basic profile information required by LinkedIn verification flows.",
+				Scopes:      []string{"r_profile_basicinfo"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.verification.read",
+				Label:       "Profile verification",
+				Description: "Read the member's profile verification status where Verified on LinkedIn access is approved.",
+				Scopes:      []string{"r_verify"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.verification.details.read",
+				Label:       "Profile verification details",
+				Description: "Read detailed verification report data for approved Verified on LinkedIn integrations.",
+				Scopes:      []string{"r_verify_details"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.organization.read",
+				Label:       "Organization pages",
+				Description: "Read organization/page ACLs and page publishing targets for the connected member.",
+				Scopes:      []string{"r_organization_social"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.organization.write",
+				Label:       "Organization page actions",
+				Description: "Create or update organization page content after workflow approval.",
+				Scopes:      []string{"w_organization_social"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.post.read",
+				Label:       "Posts read",
+				Description: "Read member or organization social posts where LinkedIn product access permits it.",
+				Scopes:      []string{"r_member_social", "r_organization_social"},
+				Sensitive:   true,
 			},
 			{
 				Key:         "social.post.write",
@@ -619,13 +775,49 @@ func LinkedIn() Provider {
 				Key:         "social.media.upload",
 				Label:       "Upload media",
 				Description: "Upload approved media assets used by scheduled LinkedIn posts.",
-				Scopes:      []string{"w_member_social"},
+				Scopes:      []string{"w_member_social", "w_organization_social"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.events.manage",
+				Label:       "Event management",
+				Description: "Create and manage LinkedIn events for approved organization/member workflows.",
+				Scopes:      []string{"r_organization_social", "w_organization_social"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.ads.read",
+				Label:       "Ads reporting",
+				Description: "Read LinkedIn Campaign Manager accounts and reporting metadata.",
+				Scopes:      []string{"r_ads"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.ads.manage",
+				Label:       "Ads management",
+				Description: "Create or modify LinkedIn ads assets and campaign entities after approval.",
+				Scopes:      []string{"rw_ads"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.conversions.manage",
+				Label:       "Conversions API",
+				Description: "Create and manage Conversions API rules and event sources for Campaign Manager accounts.",
+				Scopes:      []string{"r_ads", "rw_conversions"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.leads.read",
+				Label:       "Lead sync",
+				Description: "Read lead gen forms and lead form responses for approved advertisers.",
+				Scopes:      []string{"r_marketing_leadgen_automation"},
 				Sensitive:   true,
 			},
 			{
 				Key:         "social.analytics.read",
 				Label:       "Post analytics",
 				Description: "Read post status, reach, engagement, and error details.",
+				Scopes:      []string{"r_organization_social", "r_ads"},
 				Sensitive:   true,
 			},
 		},
@@ -637,16 +829,58 @@ func LinkedIn() Provider {
 				Capabilities: []string{"social.profile.read"},
 			},
 			{
+				Key:          "verification",
+				Label:        "Profile verification",
+				Description:  "Basic profile information plus profile verification status.",
+				Capabilities: []string{"social.profile.read", "social.profile.verify", "social.verification.read"},
+			},
+			{
+				Key:          "verification_details",
+				Label:        "Verification details",
+				Description:  "Detailed Verified on LinkedIn report data for approved integrations.",
+				Capabilities: []string{"social.profile.read", "social.profile.verify", "social.verification.read", "social.verification.details.read"},
+			},
+			{
 				Key:          "publishing",
 				Label:        "Approved publishing",
 				Description:  "Schedule and publish approved LinkedIn posts with media.",
 				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
 			},
 			{
+				Key:          "organization",
+				Label:        "Organization pages",
+				Description:  "Organization page targets plus approved organization content actions.",
+				Capabilities: []string{"social.profile.read", "social.organization.read", "social.organization.write"},
+			},
+			{
+				Key:          "ads",
+				Label:        "LinkedIn Ads",
+				Description:  "Campaign Manager account reporting and approved management operations.",
+				Capabilities: []string{"social.profile.read", "social.ads.read", "social.ads.manage", "social.analytics.read"},
+			},
+			{
+				Key:          "conversions",
+				Label:        "Conversions API",
+				Description:  "LinkedIn Ads conversion configuration and event-source management.",
+				Capabilities: []string{"social.profile.read", "social.ads.read", "social.conversions.manage"},
+			},
+			{
+				Key:          "lead_sync",
+				Label:        "Lead Sync",
+				Description:  "Lead gen form and response sync for approved advertisers.",
+				Capabilities: []string{"social.profile.read", "social.leads.read"},
+			},
+			{
+				Key:          "events",
+				Label:        "Event management",
+				Description:  "Create and manage LinkedIn events for approved organization/member workflows.",
+				Capabilities: []string{"social.profile.read", "social.organization.read", "social.events.manage"},
+			},
+			{
 				Key:          "full",
-				Label:        "Publishing and analytics",
-				Description:  "Publishing plus performance reporting.",
-				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read"},
+				Label:        "Full LinkedIn suite",
+				Description:  "Identity, verification, publishing, organizations, events, ads, conversions, lead sync, and analytics.",
+				Capabilities: []string{"social.profile.read", "social.profile.verify", "social.verification.read", "social.post.read", "social.post.write", "social.media.upload", "social.organization.read", "social.organization.write", "social.events.manage", "social.ads.read", "social.ads.manage", "social.conversions.manage", "social.leads.read", "social.analytics.read"},
 			},
 		},
 	}
@@ -711,6 +945,302 @@ func X() Provider {
 	}
 }
 
+// Meta is the unified Meta integration: ONE OAuth connect covering Facebook
+// Pages, Instagram (professional accounts linked to a Page), WhatsApp
+// Business, and Meta Ads (Marketing API). It supersedes the separate
+// facebook / instagram / whatsapp / meta-ads providers, which remain in the
+// catalog only so existing connections keep resolving.
+//
+// The instagram_* scopes are the "Instagram API with Facebook Login" flavor
+// (instagram_basic is NOT deprecated for that product — what died was the
+// standalone Basic Display API). With META_BUSINESS_LOGIN_CONFIG_ID set, the
+// dialog uses Facebook Login for Business and the configuration decides the
+// granted permissions; the scope lists below then serve as capability
+// documentation and the classic-login fallback.
+func Meta() Provider {
+	return Provider{
+		Key:              "meta",
+		Label:            "Meta",
+		Category:         "social",
+		ConnectorType:    "meta",
+		AuthType:         "meta_oauth_app_review",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Business & Page metadata",
+				Description: "Read the connected Meta business, Facebook Pages, and linked account identity.",
+				Scopes:      []string{"pages_show_list", "pages_read_engagement", "business_management"},
+			},
+			{
+				Key:         "social.instagram.read",
+				Label:       "Instagram account",
+				Description: "Read the linked Instagram professional account profile, media, and insights.",
+				Scopes:      []string{"instagram_basic", "instagram_manage_insights"},
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Publish to Facebook & Instagram",
+				Description: "Publish approved posts to connected Facebook Pages and Instagram professional accounts.",
+				Scopes:      []string{"pages_manage_posts", "instagram_content_publish"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Prepare and submit approved media for Page and Instagram publishing.",
+				Scopes:      []string{"pages_manage_posts", "instagram_content_publish"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.inbox.read",
+				Label:       "Page conversations",
+				Description: "Read Page comments and conversation metadata for unified inbox workflows.",
+				Scopes:      []string{"pages_read_user_content", "pages_manage_metadata"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.messenger.manage",
+				Label:       "Messenger",
+				Description: "Send approved Messenger replies and subscribe connected Pages to webhook fields.",
+				Scopes:      []string{"pages_messaging", "pages_manage_metadata"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.whatsapp.manage",
+				Label:       "WhatsApp Business",
+				Description: "Manage WhatsApp Business accounts and send approved template/session messages via the Cloud API.",
+				Scopes:      []string{"whatsapp_business_management", "whatsapp_business_messaging"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.ads.manage",
+				Label:       "Meta Ads management",
+				Description: "Manage Meta ad accounts, campaigns, ad sets, creatives, and delivery status.",
+				Scopes:      []string{"ads_management", "business_management"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.catalog.manage",
+				Label:       "Commerce catalogs",
+				Description: "Create, read, update, and batch-manage Meta commerce and Advantage+ catalog items.",
+				Scopes:      []string{"catalog_management", "business_management"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.threads.manage",
+				Label:       "Threads",
+				Description: "Read Threads profile metadata and publish approved Threads posts.",
+				Scopes:      []string{"threads_basic", "threads_content_publish"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.oembed.read",
+				Label:       "oEmbed",
+				Description: "Resolve Facebook, Instagram, and Threads oEmbed metadata for approved URLs.",
+			},
+			{
+				Key:         "social.live.manage",
+				Label:       "Live video",
+				Description: "Create and schedule approved Facebook Page live video broadcasts.",
+				Scopes:      []string{"pages_manage_posts", "pages_read_engagement"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.app_ads.manage",
+				Label:       "App install ads",
+				Description: "Create and manage app-install campaigns through the Meta Marketing API.",
+				Scopes:      []string{"ads_management", "business_management"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.audience_network.read",
+				Label:       "Audience Network",
+				Description: "Read Audience Network business and placement metadata where provider access permits it.",
+				Scopes:      []string{"business_management", "ads_read"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Pages, Instagram & ads analytics",
+				Description: "Read Page, Instagram, and ad campaign performance metadata.",
+				Scopes:      []string{"read_insights", "ads_read", "instagram_manage_insights", "threads_manage_insights"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.conversions.manage",
+				Label:       "Conversions API",
+				Description: "Submit server-side conversion events for a Meta ad account or dataset.",
+				// Meta's Conversions API has no scopes of its own — it's
+				// authorized via the same Marketing API permissions as
+				// social.ads.manage. Kept as a distinct capability (matching
+				// this catalog's LinkedIn Conversions API entry) so a
+				// narrower, partner-scoped Business Login configuration can
+				// be selected for it instead of the general connection flow's
+				// configuration — see the "conversions" bundle below.
+				Scopes:    []string{"ads_management", "business_management"},
+				Sensitive: true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Business preview",
+				Description:  "Business, Page, and account metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "publishing",
+				Label:        "Approved publishing",
+				Description:  "Publish approved posts to Facebook Pages and Instagram.",
+				Capabilities: []string{"social.profile.read", "social.instagram.read", "social.post.write", "social.media.upload"},
+			},
+			{
+				Key:          "inbox",
+				Label:        "Unified inbox",
+				Description:  "Page conversations plus WhatsApp Business messaging.",
+				Capabilities: []string{"social.profile.read", "social.inbox.read", "social.messenger.manage", "social.whatsapp.manage"},
+			},
+			{
+				Key:          "ads",
+				Label:        "Meta advertising",
+				Description:  "Campaign, app-install, catalog, Audience Network, and ads reporting workflows.",
+				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.app_ads.manage", "social.catalog.manage", "social.audience_network.read", "social.analytics.read"},
+			},
+			{
+				Key:          "conversions",
+				Label:        "Conversions API partner integration",
+				Description:  "Server-side conversion event submission for a partner Conversions API integration — uses its own Business Login configuration, separate from the general connection flow.",
+				Capabilities: []string{"social.profile.read", "social.conversions.manage"},
+			},
+			{
+				Key:          "commerce",
+				Label:        "Catalog commerce",
+				Description:  "Commerce catalog management for shops and Advantage+ catalog ads.",
+				Capabilities: []string{"social.profile.read", "social.catalog.manage"},
+			},
+			{
+				Key:          "threads",
+				Label:        "Threads publishing",
+				Description:  "Threads profile access and approved publishing.",
+				Capabilities: []string{"social.profile.read", "social.threads.manage", "social.analytics.read"},
+			},
+			{
+				Key:          "embed",
+				Label:        "Embeds",
+				Description:  "Resolve Facebook, Instagram, and Threads oEmbed metadata.",
+				Capabilities: []string{"social.oembed.read"},
+			},
+			{
+				Key:          "live",
+				Label:        "Live video",
+				Description:  "Create and schedule approved Page live broadcasts.",
+				Capabilities: []string{"social.profile.read", "social.live.manage"},
+			},
+			{
+				Key:          "full",
+				Label:        "Full Meta suite",
+				Description:  "Pages, Instagram, WhatsApp, Messenger, ads, catalogs, Threads, embeds, live video, and analytics in one connection.",
+				Capabilities: []string{"social.profile.read", "social.instagram.read", "social.post.write", "social.media.upload", "social.inbox.read", "social.messenger.manage", "social.whatsapp.manage", "social.ads.manage", "social.catalog.manage", "social.threads.manage", "social.oembed.read", "social.live.manage", "social.app_ads.manage", "social.audience_network.read", "social.analytics.read"},
+			},
+		},
+	}
+}
+
+// Shipping is Velion's OWN freight aggregator (shipping-core in the Ingestion
+// Plane): one integration covers the whole carrier fleet — Bring, PostNord,
+// DHL, DSV, Helthjem, Porterbuddy, m.fl. — the nShift/Logistra Cargonizer
+// model, in-house. There is no per-user OAuth: carrier credentials are
+// org/admin-level (Mybring API key, UPS/FedEx OAuth apps) configured on
+// shipping-core itself, so this provider is catalog-visible with an
+// admin-setup status rather than a connect popup. Quote comparison works out
+// of the box on the demo fleet; carriers flip to live agreement prices as
+// their credentials are configured.
+func Shipping() Provider {
+	return Provider{
+		Key:              "shipping",
+		Label:            "Frakt & sporing",
+		Category:         "shipping",
+		ConnectorType:    "shipping",
+		AuthType:         "aggregator_admin_config",
+		DirectOAuthReady: false,
+		Capabilities: []Capability{
+			{
+				Key:         "shipping.quotes.read",
+				Label:       "Fraktpriser",
+				Description: "Sammenlign priser og leveringstid fra hele transportørflåten i sanntid.",
+			},
+			{
+				Key:         "shipping.carriers.read",
+				Label:       "Transportører",
+				Description: "Se hvilke transportører som er tilgjengelige og om de kjører avtalepriser.",
+			},
+			{
+				Key:         "shipping.tracking.read",
+				Label:       "Sporing",
+				Description: "Følg sendinger med sporingsnummer (Bring i dag, flere transportører senere).",
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Fraktsammenligning",
+				Description:  "Priser, transportører og sporing.",
+				Capabilities: []string{"shipping.quotes.read", "shipping.carriers.read", "shipping.tracking.read"},
+			},
+			{
+				Key:          "full",
+				Label:        "Full frakt",
+				Description:  "Alle frakt-kapabiliteter (booking kommer).",
+				Capabilities: []string{"shipping.quotes.read", "shipping.carriers.read", "shipping.tracking.read"},
+			},
+		},
+	}
+}
+
+// Discord covers workspace (guild) identity intake via plain OAuth2. Reading
+// or sending channel messages requires a bot with privileged intents — NOT
+// offered here; the OAuth `messages.read` scope is an RPC-client scope and
+// does not grant REST access to server messages.
+func Discord() Provider {
+	return Provider{
+		Key:              "discord",
+		Label:            "Discord",
+		Category:         "chat",
+		ConnectorType:    "discord",
+		AuthType:         "oauth2_authorization_code",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{
+			{
+				Key:         "profile.read",
+				Label:       "User identity",
+				Description: "Identify the connecting Discord user (username and email).",
+				Scopes:      []string{"identify", "email"},
+			},
+			{
+				Key:         "workspace.read",
+				Label:       "Server list",
+				Description: "Read the servers (guilds) the connecting user belongs to.",
+				Scopes:      []string{"guilds"},
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Identity preview",
+				Description:  "User identity only.",
+				Capabilities: []string{"profile.read"},
+			},
+			{
+				Key:          "full",
+				Label:        "Identity and servers",
+				Description:  "User identity plus server membership.",
+				Capabilities: []string{"profile.read", "workspace.read"},
+			},
+		},
+	}
+}
+
 func Instagram() Provider {
 	return Provider{
 		Key:              "instagram",
@@ -719,6 +1249,7 @@ func Instagram() Provider {
 		ConnectorType:    "instagram",
 		AuthType:         "meta_oauth_app_review",
 		DirectOAuthReady: true,
+		SupersededBy:     "meta",
 		Capabilities: []Capability{
 			{
 				Key:         "social.profile.read",
@@ -778,6 +1309,7 @@ func Facebook() Provider {
 		ConnectorType:    "facebook",
 		AuthType:         "meta_oauth_app_review",
 		DirectOAuthReady: true,
+		SupersededBy:     "meta",
 		Capabilities: []Capability{
 			{
 				Key:         "social.profile.read",
@@ -843,36 +1375,151 @@ func Facebook() Provider {
 	}
 }
 
+func WhatsApp() Provider {
+	return Provider{
+		Key:              "whatsapp",
+		Label:            "WhatsApp Business",
+		Category:         "social",
+		ConnectorType:    "whatsapp",
+		AuthType:         "meta_oauth_app_review",
+		DirectOAuthReady: true,
+		SupersededBy:     "meta",
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Business account metadata",
+				Description: "Read connected WhatsApp Business account identity and phone number readiness.",
+				Scopes:      []string{"whatsapp_business_management", "business_management"},
+			},
+			{
+				Key:         "social.inbox.read",
+				Label:       "Customer conversations",
+				Description: "Read webhook-backed WhatsApp conversation metadata for unified inbox workflows.",
+				Scopes:      []string{"whatsapp_business_messaging"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.post.write",
+				Label:       "Approved messaging",
+				Description: "Send approved WhatsApp Business template and session messages.",
+				Scopes:      []string{"whatsapp_business_messaging"},
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Business account preview",
+				Description:  "Business account metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "inbox",
+				Label:        "WhatsApp inbox",
+				Description:  "Business account metadata plus approved inbox messaging workflows.",
+				Capabilities: []string{"social.profile.read", "social.inbox.read", "social.post.write"},
+			},
+			{
+				Key:          "full",
+				Label:        "WhatsApp Business messaging",
+				Description:  "Business account, inbox, and approved messaging workflows.",
+				Capabilities: []string{"social.profile.read", "social.inbox.read", "social.post.write"},
+			},
+		},
+	}
+}
+
+func MetaAds() Provider {
+	return Provider{
+		Key:              "meta-ads",
+		Label:            "Meta Ads",
+		Category:         "social",
+		ConnectorType:    "meta-ads",
+		AuthType:         "meta_oauth_app_review",
+		DirectOAuthReady: true,
+		SupersededBy:     "meta",
+		Capabilities: []Capability{
+			{
+				Key:         "social.profile.read",
+				Label:       "Business metadata",
+				Description: "Read connected Meta business and ad account identity.",
+				Scopes:      []string{"business_management"},
+			},
+			{
+				Key:         "social.ads.manage",
+				Label:       "Campaign management",
+				Description: "Manage Meta ad accounts, campaigns, ad sets, creatives, and delivery status.",
+				Scopes:      []string{"ads_management", "business_management"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.analytics.read",
+				Label:       "Ads analytics",
+				Description: "Read campaign, ad set, creative, and account reporting metadata.",
+				Scopes:      []string{"ads_read", "read_insights"},
+				Sensitive:   true,
+			},
+		},
+		Bundles: []Bundle{
+			{
+				Key:          "onboarding",
+				Label:        "Ad account preview",
+				Description:  "Business and ad account metadata only.",
+				Capabilities: []string{"social.profile.read"},
+			},
+			{
+				Key:          "ads",
+				Label:        "Meta advertising",
+				Description:  "Campaign management and reporting workflows.",
+				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.analytics.read"},
+			},
+			{
+				Key:          "full",
+				Label:        "Campaign management and analytics",
+				Description:  "Meta Ads management plus reporting.",
+				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.analytics.read"},
+			},
+		},
+	}
+}
+
 func TikTok() Provider {
 	return Provider{
-		Key:              "tiktok",
-		Label:            "TikTok",
-		Category:         "social",
-		ConnectorType:    "tiktok",
-		AuthType:         "oauth2_authorization_code_app_review",
-		DirectOAuthReady: false,
+		Key:           "tiktok",
+		Label:         "TikTok",
+		Category:      "social",
+		ConnectorType: "tiktok",
+		AuthType:      "oauth2_authorization_code_app_review",
+		// Login Kit v2 flow is implemented (client_key naming); readiness still
+		// gates on TIKTOK_CLIENT_KEY/SECRET. Web apps require a public https
+		// redirect URI — localhost only works for Desktop-type TikTok apps.
+		DirectOAuthReady: true,
 		Capabilities: []Capability{
 			{
 				Key:         "social.profile.read",
 				Label:       "Creator profile metadata",
 				Description: "Read connected TikTok creator identity and content posting readiness.",
+				Scopes:      []string{"user.info.basic"},
 			},
 			{
 				Key:         "social.post.write",
 				Label:       "Create posts",
 				Description: "Publish approved direct posts through TikTok's content posting workflow.",
+				Scopes:      []string{"video.publish"},
 				Sensitive:   true,
 			},
 			{
 				Key:         "social.media.upload",
 				Label:       "Upload media",
 				Description: "Prepare approved video or image media for scheduled posts.",
+				Scopes:      []string{"video.upload"},
 				Sensitive:   true,
 			},
 			{
 				Key:         "social.analytics.read",
 				Label:       "Post analytics",
 				Description: "Read post status and performance metadata where provider access permits it.",
+				Scopes:      []string{"video.list", "user.info.stats"},
 				Sensitive:   true,
 			},
 		},
@@ -1048,6 +1695,12 @@ func NormalizeKey(key string) string {
 		return "instagram"
 	case "facebook-page", "facebook-pages", "meta-facebook":
 		return "facebook"
+	case "whatsapp-business", "whatsapp-cloud", "whatsapp-business-platform", "meta-whatsapp":
+		return "whatsapp"
+	case "meta-business", "meta-suite", "facebook-business", "meta-unified":
+		return "meta"
+	case "facebook-ads", "facebook-marketing", "metaads", "meta_ads", "meta-marketing", "meta-marketing-api", "ads-manager":
+		return "meta-ads"
 	case "tik-tok", "tiktok-business":
 		return "tiktok"
 	case "snap", "snapchat-ads", "snapchat-marketing":

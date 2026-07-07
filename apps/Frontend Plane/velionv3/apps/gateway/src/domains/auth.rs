@@ -81,6 +81,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/auth/2fa/generate-backup-codes",
             post(protected::two_factor_generate_backup_codes),
         )
+        // Platform super-admin: cross-org user directory (all users, every org).
+        // Role-gated inside the handler; auth-core re-checks via its admin plugin.
+        .route("/api/v1/admin/users", get(protected::admin_list_users))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session));
 
     Router::new().merge(public_routes).merge(protected_routes)

@@ -47,7 +47,11 @@ func NewNATSPublisher(cfg config.Config) (*NATSPublisher, error) {
 		nats.Name(cfg.ServiceName),
 		nats.Timeout(5 * time.Second),
 	}
-	if cfg.NATSUsername != "" || cfg.NATSPassword != "" {
+	if cfg.NATSToken != "" {
+		// The shared cross-plane velion-nats broker enforces single-token
+		// authorization (see nats-shared.conf), not username/password.
+		options = append(options, nats.Token(cfg.NATSToken))
+	} else if cfg.NATSUsername != "" || cfg.NATSPassword != "" {
 		options = append(options, nats.UserInfo(cfg.NATSUsername, cfg.NATSPassword))
 	}
 	conn, err := nats.Connect(cfg.NATSURL, options...)

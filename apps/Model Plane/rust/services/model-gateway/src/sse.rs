@@ -371,9 +371,13 @@ pub async fn invoke_stream_sse(
         // `dispatch_tool` routes the call back through the registry. Existing
         // client/builtin names win on collision (MCP names are namespaced, so a
         // real collision is unlikely — this is purely defensive).
-        for mcp_def in
-            crate::runtime_registries::mcp_tool_defs(&state.mcp, &state.ownership, &org_id, &user_id)
-                .await
+        for mcp_def in crate::runtime_registries::mcp_tool_defs(
+            &state.mcp,
+            &state.ownership,
+            &org_id,
+            &user_id,
+        )
+        .await
         {
             if !defs.iter().any(|d| d.name == mcp_def.name) {
                 defs.push(mcp_def);
@@ -719,11 +723,13 @@ pub async fn invoke_stream_sse(
                     // faked. Phase 7 B6 — confidence is a heuristic answer-quality
                     // score over the real completion (grounded = carried citations).
                     let cost_usd = pricing
-                        .cost_usd(&model_used, i64::from(input_tokens), i64::from(output_tokens))
+                        .cost_usd(
+                            &model_used,
+                            i64::from(input_tokens),
+                            i64::from(output_tokens),
+                        )
                         .await;
-                    let grounded = grounding
-                        .as_ref()
-                        .is_some_and(|g| !g.citations.is_empty());
+                    let grounded = grounding.as_ref().is_some_and(|g| !g.citations.is_empty());
                     let confidence =
                         crate::confidence::score(&assistant_output, output_tokens, 1024, grounded);
                     let usage_event = crate::sse_events::ChatEvent::Usage {
@@ -1451,11 +1457,13 @@ fn infer_fallback_stream(
                 // Phase 7 B6 — confidence is the heuristic answer-quality score.
                 let cost_usd = state
                     .pricing
-                    .cost_usd(&model_used, i64::from(input_tokens), i64::from(output_tokens))
+                    .cost_usd(
+                        &model_used,
+                        i64::from(input_tokens),
+                        i64::from(output_tokens),
+                    )
                     .await;
-                let grounded = grounding
-                    .as_ref()
-                    .is_some_and(|g| !g.citations.is_empty());
+                let grounded = grounding.as_ref().is_some_and(|g| !g.citations.is_empty());
                 let confidence =
                     crate::confidence::score(&resp.content, output_tokens, 1024, grounded);
                 let usage_event = crate::sse_events::ChatEvent::Usage {

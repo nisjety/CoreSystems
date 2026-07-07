@@ -54,6 +54,8 @@ func main() {
 	service := oauth.NewService(cfg, repo, vault, oauth.NewMicrosoftClient(oauth.MicrosoftClientConfig{
 		ClientID:         cfg.MicrosoftClientID,
 		ClientSecret:     cfg.MicrosoftClientSecret,
+		ClientAuthMode:   cfg.MicrosoftClientAuthMode,
+		TokenOrigin:      cfg.MicrosoftTokenOrigin,
 		AuthorizationURL: cfg.MicrosoftAuthorizationURL,
 		TokenURL:         cfg.MicrosoftTokenURL,
 		GraphBaseURL:     cfg.MicrosoftGraphBaseURL,

@@ -296,8 +296,14 @@ type Message struct {
 }
 
 type ParticipantInput struct {
-	Name  string `json:"name"`
+	Name string `json:"name"`
+	// Email and Phone identify the participant across channels — email-based
+	// channels (email/microsoft/google) populate Email; WhatsApp populates
+	// Phone. Contact resolution in StoreInboundEvent prefers Email, falls
+	// back to Phone, and last to a provider-scoped reference (e.g. a
+	// Messenger PSID) so no two channels' contacts collide.
 	Email string `json:"email"`
+	Phone string `json:"phone,omitempty"`
 }
 
 type AttachmentInput struct {

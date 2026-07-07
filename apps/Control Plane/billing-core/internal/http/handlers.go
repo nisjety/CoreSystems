@@ -2,8 +2,10 @@ package http
 
 import (
 	"context"
+	"crypto/subtle"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -281,4 +283,62 @@ func (s *Server) confirmCheckoutSession(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, status)
+}
+
+// nexiWebhook receives Nexi Checkout payment webhooks. Nexi authenticates the
+// callback by echoing the per-webhook `authorization` string we registered when
+// creating the payment; we verify it (constant-time) against
+// NEXI_WEBHOOK_AUTHORIZATION and FAIL CLOSED when the secret is unset — an
+// unverifiable webhook must never activate a paid plan. On a paid event we
+// activate the plan from the payment itself (org/plan derived server-side, not
+// trusted from the request body).
+func (s *Server) nexiWebhook(c *gin.Context) {
+	// The shared secret Nexi echoes back. Primary env name matches nettbutikk
+	// (NEXI_WEBHOOK_SECRET); NEXI_WEBHOOK_AUTHORIZATION kept as a fallback.
+	expected := strings.TrimSpace(os.Getenv("NEXI_WEBHOOK_SECRET"))
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv("NEXI_WEBHOOK_AUTHORIZATION"))
+	}
+	if expected == "" {
+		log.Println("nexi webhook rejected: NEXI_WEBHOOK_SECRET not configured")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "webhook not configured"})
+		return
+	}
+	provided := strings.TrimSpace(c.GetHeader("Authorization"))
+	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook authorization"})
+		return
+	}
+
+	var event struct {
+		ID    string `json:"id"`
+		Event string `json:"event"`
+		Data  struct {
+			PaymentID string `json:"paymentId"`
+		} `json:"data"`
+	}
+	if err := c.ShouldBindJSON(&event); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook payload"})
+		return
+	}
+	if strings.TrimSpace(event.Data.PaymentID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing paymentId"})
+		return
+	}
+
+	// Only payment-confirming events activate a plan; acknowledge others so Nexi
+	// does not retry them.
+	switch event.Event {
+	case "payment.checkout.completed", "payment.charge.created", "payment.charge.created.v2":
+		if _, err := s.billingCore.ConfirmCheckoutByPaymentID(c.Request.Context(), event.Data.PaymentID); err != nil {
+			log.Printf("nexi webhook %s payment=%s activation failed: %v", event.Event, event.Data.PaymentID, err)
+			// 502 so Nexi retries a transient failure; the operation is idempotent.
+			c.JSON(http.StatusBadGateway, gin.H{"error": "activation failed"})
+			return
+		}
+	default:
+		// Acknowledge unhandled events (e.g. refund, cancel) without acting.
+	}
+
+	c.JSON(http.StatusOK, gin.H{"received": true})
 }

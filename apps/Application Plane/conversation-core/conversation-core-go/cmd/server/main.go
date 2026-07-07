@@ -58,6 +58,12 @@ func main() {
 		if err := eventPublisher.EnsureModelStream(); err != nil {
 			log.Printf("conversation-core-go: ensure model stream: %v", err)
 		}
+		// integration-corev2 (Ingestion Plane) publishes webhook_received via
+		// plain core-NATS Publish, not js.Publish — this stream is what makes
+		// those events durably consumable by our JetStream QueueSubscribe.
+		if err := eventPublisher.EnsureIngestionStream(); err != nil {
+			log.Printf("conversation-core-go: ensure ingestion stream: %v", err)
+		}
 		publisher = eventPublisher
 	}
 
@@ -68,8 +74,10 @@ func main() {
 	// Constructed only when configured, so the executor never claims a send it
 	// cannot perform (a nil sender disables draft.reply execution honestly).
 	var sender consumers.OutboundSender
+	var integrationClient *integration.Client
 	if cfg.DraftReplySendEnabled() {
-		sender = integration.NewClient(cfg.IntegrationBaseURL, cfg.IntegrationInternalKey)
+		integrationClient = integration.NewClient(cfg.IntegrationBaseURL, cfg.IntegrationInternalKey)
+		sender = integrationClient
 		log.Printf("conversation-core-go: draft.reply outbound-send enabled via %s", cfg.IntegrationBaseURL)
 	} else {
 		log.Printf("conversation-core-go: draft.reply outbound-send disabled (INTEGRATION_BASE_URL / key unset)")
@@ -93,6 +101,21 @@ func main() {
 			log.Printf("conversation-core-go: model-action-proposed consumer: %v", err)
 		} else {
 			defer proposedConsumer.Stop()
+		}
+
+		// Inbound leg: integration-corev2 webhook_received events (WhatsApp,
+		// Messenger) fetched and normalized into stored conversation messages.
+		// Reuses the same integration client as draft.reply sends, since both
+		// need INTEGRATION_BASE_URL / INTEGRATION_INTERNAL_API_KEY configured.
+		if integrationClient != nil {
+			webhookConsumer := consumers.NewWebhookReceivedConsumer(natsClient.JS, integrationClient, service)
+			if err := webhookConsumer.Start(ctx); err != nil {
+				log.Printf("conversation-core-go: webhook-received consumer: %v", err)
+			} else {
+				defer webhookConsumer.Stop()
+			}
+		} else {
+			log.Printf("conversation-core-go: webhook-received consumer disabled (no integration client)")
 		}
 	}
 

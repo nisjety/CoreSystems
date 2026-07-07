@@ -110,6 +110,34 @@ fn artifact_object_key_deterministic() {
 }
 
 #[test]
+fn visual_artifact_object_keys_are_contract_named() {
+    let visual = artifact::object_key(
+        "org_a",
+        "run_01H000",
+        "blake3:abc",
+        ArtifactKind::VisualObservation,
+    );
+    let annotated = artifact::object_key(
+        "org_a",
+        "run_01H000",
+        "blake3:abc",
+        ArtifactKind::ScreenshotAnnotated,
+    );
+    let tiles = artifact::object_key("org_a", "run_01H000", "blake3:abc", ArtifactKind::Tiles);
+    let change = artifact::object_key(
+        "org_a",
+        "run_01H000",
+        "blake3:abc",
+        ArtifactKind::VisualChange,
+    );
+
+    assert!(visual.ends_with("visual_observation.json"));
+    assert!(change.ends_with("visual_change.json"));
+    assert!(annotated.ends_with("screenshot_annotated.png"));
+    assert!(tiles.ends_with("tiles.json"));
+}
+
+#[test]
 fn page_hash_differs_on_url_or_fingerprint() {
     let a = artifact::page_hash("https://a.com", "blake3:xxx");
     let b = artifact::page_hash("https://b.com", "blake3:xxx");
@@ -141,6 +169,7 @@ fn browser_observation_serde_roundtrip() {
             text_snippet: Some("Hello world".into()),
         }),
         screenshot_artifact_id: None,
+        visual_observation_artifact_id: None,
         console_summary: vec![],
         network_summary: vec![],
         policy_denials: vec!["blocked: private IP".into()],
@@ -256,12 +285,46 @@ fn data_plane_ingest_request_serde_roundtrip() {
             fingerprint: "blake3:abc123".into(),
             field_traces: vec![],
         }),
+        initiator_user_id: Some("user_test".into()),
+        visibility: Some("private".into()),
     };
     let json = serde_json::to_string(&req).unwrap();
     let back: DataPlaneIngestRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(back.org_id, "org_test");
     assert_eq!(back.chunks.len(), 1);
     assert!(back.source_trace.is_some());
+    assert_eq!(back.initiator_user_id.as_deref(), Some("user_test"));
+    assert_eq!(back.visibility.as_deref(), Some("private"));
+}
+
+#[test]
+fn data_plane_ingest_request_omits_absent_ownership_fields() {
+    // System/connector ingest: no initiator, no visibility override. The wire
+    // shape must omit both keys so older documents-api deployments keep parsing.
+    let req = DataPlaneIngestRequest {
+        run_id: quarry_core::ids::Id::new(),
+        org_id: "org_test".into(),
+        source_url: "https://example.com/page".into(),
+        title: None,
+        markdown: None,
+        html_ref: None,
+        raw_ref: None,
+        chunks: vec![],
+        metadata: json!({}),
+        fingerprint: "blake3:abc123".into(),
+        zdr: ZdrMode::Off,
+        retention_policy: None,
+        privacy_policy: None,
+        source_trace: None,
+        initiator_user_id: None,
+        visibility: None,
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(!json.contains("initiator_user_id"));
+    assert!(!json.contains("visibility"));
+    let back: DataPlaneIngestRequest = serde_json::from_str(&json).unwrap();
+    assert!(back.initiator_user_id.is_none());
+    assert!(back.visibility.is_none());
 }
 
 #[test]

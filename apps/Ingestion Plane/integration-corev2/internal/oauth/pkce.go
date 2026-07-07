@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 )
@@ -19,6 +20,11 @@ func RandomURLToken(bytes int) (string, error) {
 func CodeChallengeS256(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func CodeChallengeS256Hex(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return hex.EncodeToString(sum[:])
 }
 
 func HashState(state string) string {

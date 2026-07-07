@@ -379,6 +379,17 @@ func (r *MemoryRepository) InsertWebhookEvent(_ context.Context, event WebhookEv
 	return nil
 }
 
+func (r *MemoryRepository) GetWebhookEvent(_ context.Context, organizationID, id string) (WebhookEvent, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	event, ok := r.webhooks[id]
+	if !ok || (organizationID != "" && event.OrganizationID != organizationID) {
+		return WebhookEvent{}, ErrNotFound
+	}
+	event.Payload = cloneAnyMap(event.Payload)
+	return event, nil
+}
+
 func (r *MemoryRepository) InsertTokenLease(_ context.Context, lease TokenLease) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

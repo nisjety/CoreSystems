@@ -2,7 +2,10 @@ package consumers
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -10,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/insights"
+	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/socialmetrics"
 )
 
 const (
@@ -36,15 +40,29 @@ type MetricRecorder interface {
 	RecordMetricEvent(ctx context.Context, input insights.IngestMetricEventInput) (*insights.MetricEvent, error)
 }
 
+// SocialMetricsFetcher fetches the real provider-metric rows behind a
+// metrics.snapshotted event (which carries only a summary count).
+// *socialmetrics.Client satisfies it.
+type SocialMetricsFetcher interface {
+	ListMetrics(ctx context.Context, orgID, accountID string, snapshotDate time.Time) ([]socialmetrics.Metric, error)
+}
+
 // applicationEvent is the shared application LifecycleEvent wire shape
 // (snake_case) that conversation-core and social-core both publish. Unknown
 // fields are ignored. The `Type` is the subject minus its domain prefix.
 type applicationEvent struct {
-	ID         string    `json:"id"`
-	Type       string    `json:"type"`
-	OrgID      string    `json:"org_id"`
-	OccurredAt time.Time `json:"occurred_at"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	OrgID      string         `json:"org_id"`
+	Data       map[string]any `json:"data"`
+	OccurredAt time.Time      `json:"occurred_at"`
 }
+
+// metricsSnapshottedType is social-core's event type (subject minus the
+// `velion.application.social.` prefix) for SubjectMetricsSnapshotted. Handled
+// separately from socialMapping because it carries real per-metric values
+// fetched from social-core, not a fixed count of 1.
+const metricsSnapshottedType = "metrics.snapshotted"
 
 type metricTarget struct {
 	surface string
@@ -94,12 +112,17 @@ var socialMapping = map[string]metricTarget{
 type MetricSubscriber struct {
 	consumer *DurableConsumer
 	recorder MetricRecorder
+	fetcher  SocialMetricsFetcher
 }
 
-func NewMetricSubscriber(js nats.JetStreamContext, recorder MetricRecorder) *MetricSubscriber {
+// NewMetricSubscriber wires the subscriber. fetcher may be nil — a
+// metrics.snapshotted event is then skipped rather than crashing (matches
+// this package's fail-open convention for optional integrations).
+func NewMetricSubscriber(js nats.JetStreamContext, recorder MetricRecorder, fetcher SocialMetricsFetcher) *MetricSubscriber {
 	return &MetricSubscriber{
 		consumer: NewDurableConsumer(js, "metric-subscriber"),
 		recorder: recorder,
+		fetcher:  fetcher,
 	}
 }
 
@@ -168,6 +191,10 @@ func resolveTarget(subject string, eventType string) (metricTarget, bool) {
 // process maps one application event to a metric and records it. Returns whether
 // the message should be acked. Testable without NATS.
 func (s *MetricSubscriber) process(ctx context.Context, subject string, ev applicationEvent) outcome {
+	if strings.HasPrefix(subject, socialSubjectPrefix) && ev.Type == metricsSnapshottedType {
+		return s.processProviderMetricsSnapshotted(ctx, ev)
+	}
+
 	target, ok := resolveTarget(subject, ev.Type)
 	if !ok {
 		return outcomeAck // not a metric-bearing event/domain — skip
@@ -189,4 +216,69 @@ func (s *MetricSubscriber) process(ctx context.Context, subject string, ev appli
 		return outcomeRetry
 	}
 	return outcomeAck
+}
+
+// processProviderMetricsSnapshotted fetches the real metric rows behind a
+// metrics.snapshotted summary event and records each as an external_analytics
+// metric event. Unlike the count-based mappings above, this carries the
+// actual provider value (impressions, spend, ...) via social-core's
+// GET /api/v1/social/metrics.
+func (s *MetricSubscriber) processProviderMetricsSnapshotted(ctx context.Context, ev applicationEvent) outcome {
+	if s.fetcher == nil {
+		return outcomeAck // no social-core client configured — skip, not an error
+	}
+	orgID := strings.TrimSpace(ev.OrgID)
+	accountID := stringFromEventData(ev.Data, "accountId")
+	if orgID == "" || accountID == "" {
+		log.Printf("[insight-core/metric-subscriber] metrics.snapshotted missing org/account; skipping")
+		return outcomeAck
+	}
+	snapshotDate, _ := time.Parse("2006-01-02", stringFromEventData(ev.Data, "snapshotDate"))
+
+	rows, err := s.fetcher.ListMetrics(ctx, orgID, accountID, snapshotDate)
+	if err != nil {
+		log.Printf("[insight-core/metric-subscriber] fetch social metrics (org=%s account=%s): %v", orgID, accountID, err)
+		return outcomeRetry
+	}
+
+	anyFailure := false
+	for _, row := range rows {
+		campaignID, _ := row.Dimensions["campaign_id"].(string)
+		dedupKey := fmt.Sprintf("%s|%s|%s|%s|%s", accountID, row.ProviderKey, row.MetricName, campaignID, row.SnapshotDate.Format("2006-01-02"))
+		if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
+			ID:            "ins_evt_socialmetric_" + stableHex(dedupKey),
+			OrgID:         orgID,
+			Surface:       insights.SurfaceExternalAnalytics,
+			Metric:        row.MetricName,
+			Value:         row.MetricValue,
+			Unit:          "count",
+			Source:        metricSourceSocial,
+			ConnectorType: row.ProviderKey,
+			Dimensions:    row.Dimensions,
+			OccurredAt:    row.SnapshotDate,
+		}); err != nil {
+			log.Printf("[insight-core/metric-subscriber] record provider metric %s for org %s: %v", row.MetricName, orgID, err)
+			anyFailure = true
+		}
+	}
+	if anyFailure {
+		return outcomeRetry
+	}
+	return outcomeAck
+}
+
+func stringFromEventData(data map[string]any, key string) string {
+	if data == nil {
+		return ""
+	}
+	value, _ := data[key].(string)
+	return value
+}
+
+// stableHex derives a short deterministic hex id from an arbitrary dedup key
+// so re-fetching the same (account, provider, metric, campaign, day) tuple
+// resolves to the same row (RecordMetricEvent is ON CONFLICT DO NOTHING).
+func stableHex(key string) string {
+	sum := sha1.Sum([]byte(key))
+	return hex.EncodeToString(sum[:10])
 }

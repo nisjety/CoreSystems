@@ -30,9 +30,14 @@ func main() {
 	}
 
 	httpClient := &http.Client{Timeout: 20 * time.Second}
+	// DataPlane is optional: NewDataPlaneDocumentsClientFromConfig always
+	// returns a non-nil client, but its Configured() reports false when
+	// DATA_PLANE_DOCUMENTS_URL / DATA_PLANE_INTERNAL_API_KEY are unset, in
+	// which case the worker skips Data Plane forwarding silently.
 	worker := workers.FinspoWorker{
 		Integration:  handoff.NewIntegrationClientFromConfig(cfg, httpClient),
 		Finspo:       handoff.NewFinspoClientFromConfig(cfg, httpClient),
+		DataPlane:    handoff.NewDataPlaneDocumentsClientFromConfig(cfg, httpClient),
 		PollInterval: 5 * time.Second,
 		Logger:       &logger,
 	}

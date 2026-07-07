@@ -337,10 +337,18 @@ services:
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      META_JS_SDK_APP_ID: ${META_JS_SDK_APP_ID:-${FACEBOOK_CLIENT_ID:-${INSTAGRAM_CLIENT_ID:-}}}
+      META_JS_SDK_API_VERSION: ${META_JS_SDK_API_VERSION:-v23.0}
+      META_JS_SDK_LOCALE: ${META_JS_SDK_LOCALE:-en_US}
+      META_BUSINESS_LOGIN_CONFIG_ID: ${META_BUSINESS_LOGIN_CONFIG_ID:-}
+      META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID: ${META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID:-}
       NATS_ENABLED: ${NATS_ENABLED:-false}
       NATS_URL: ${NATS_URL:-nats://velion-nats:4222}
       NATS_USERNAME: ${NATS_USERNAME:-}
       NATS_PASSWORD: ${NATS_PASSWORD:-}
+      # velion-nats enforces single-token auth (see nats-shared.conf); reuse
+      # the same shared token every other plane authenticates with.
+      NATS_TOKEN: ${NATS_TOKEN:-${VELION_NATS_TOKEN:-}}
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
       # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
       INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
@@ -386,6 +394,82 @@ services:
         max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3026/health || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ============================================================
+  # SHIPPING-CORE — freight aggregator (quotes today; booking/tracking later).
+  # Migrated from Suplayer-System: carrier-adapter fleet (mock carriers by
+  # default; real Bring/UPS/FedEx activate individually when their credentials
+  # are present — missing creds are logged and skipped, never fatal).
+  # Joins inter-plane-bus so Model Plane tools and the Velion gateway can
+  # reach it; host port 3156 is what execution-core's host.docker.internal
+  # pattern dials.
+  # ============================================================
+  shipping-core:
+    build:
+      context: ./shipping-core
+      dockerfile: Dockerfile
+    container_name: shipping-core
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/shipping_core?sslmode=disable
+      # Carrier credentials (vendor-supplied; Phase-0 tasks in the shipping
+      # docs). Empty ⇒ that carrier stays on its mock adapter / is skipped.
+      BRING_API_UID: ${BRING_API_UID:-}
+      BRING_API_KEY: ${BRING_API_KEY:-}
+      BRING_CUSTOMER_NUMBER: ${BRING_CUSTOMER_NUMBER:-}
+      # X-Bring-Client-URL header value (developer.bring.com/api: identifies
+      # the calling service, required on every Mybring API request alongside
+      # the UID/key above). Defaults to velion.no in code if left empty.
+      BRING_CLIENT_URL: ${BRING_CLIENT_URL:-}
+      # Set to "true" only once bookings are meant to place REAL freight
+      # orders; otherwise every Booking API call carries testIndicator=true.
+      BRING_LIVE_BOOKING: ${BRING_LIVE_BOOKING:-}
+      # MyDHL API (developer.dhl.com): Basic Auth, API Key as username / API
+      # Secret as password — no OAuth2 flow. DHL_API_BASE_URL defaults to
+      # production; set it to https://express.api.dhl.com/mydhlapi/test for
+      # a sandbox-scoped app (e.g. an approved "...-sandbox-..." app name).
+      DHL_API_KEY: ${DHL_API_KEY:-}
+      DHL_API_SECRET: ${DHL_API_SECRET:-}
+      DHL_ACCOUNT_NUMBER: ${DHL_ACCOUNT_NUMBER:-}
+      DHL_API_BASE_URL: ${DHL_API_BASE_URL:-}
+      UPS_CLIENT_ID: ${UPS_CLIENT_ID:-}
+      UPS_CLIENT_SECRET: ${UPS_CLIENT_SECRET:-}
+      UPS_ACCOUNT_NUMBER: ${UPS_ACCOUNT_NUMBER:-}
+      # Test/CIE base has NO /rest/ suffix — the adapter string-concatenates
+      # BaseURL + path (e.g. "/api/rating/v2409/Shop"); a trailing /rest/
+      # would produce a malformed double-slash URL.
+      UPS_API_BASE_URL: ${UPS_API_BASE_URL:-}
+      FEDEX_CLIENT_ID: ${FEDEX_CLIENT_ID:-}
+      FEDEX_CLIENT_SECRET: ${FEDEX_CLIENT_SECRET:-}
+      FEDEX_ACCOUNT_NUMBER: ${FEDEX_ACCOUNT_NUMBER:-}
+      FEDEX_API_BASE_URL: ${FEDEX_API_BASE_URL:-https://apis-sandbox.fedex.com}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+        reservations:
+          memory: 32M
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3156:8080"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
       interval: 60s
       timeout: 10s
       retries: 3

@@ -605,6 +605,39 @@ func (s *Service) ConfirmCheckoutSession(
 	return status, nil
 }
 
+// ConfirmCheckoutByPaymentID activates a plan from a provider webhook, where the
+// caller only knows the provider paymentId (org + plan are derived from the
+// payment itself, not trusted from the request). It retrieves the payment via
+// the adapter, and only activates when the payment status indicates the
+// customer actually paid. Idempotent: re-applying the same plan is a no-op, so
+// duplicate webhook deliveries are safe.
+func (s *Service) ConfirmCheckoutByPaymentID(ctx context.Context, paymentID string) (CheckoutStatus, error) {
+	if strings.TrimSpace(paymentID) == "" {
+		return CheckoutStatus{}, fmt.Errorf("payment_id is required")
+	}
+	if s.paymentAdapter == nil {
+		return CheckoutStatus{}, fmt.Errorf("payment adapter is not configured")
+	}
+
+	status, err := s.paymentAdapter.RetrieveCheckoutSession(ctx, CheckoutLookupParams{PaymentID: paymentID})
+	if err != nil {
+		return CheckoutStatus{}, err
+	}
+	if !checkoutStatusActivatesPlan(status.Status) {
+		return status, nil
+	}
+
+	orgID := strings.TrimSpace(status.OrgID)
+	plan := billablePlan(status.Plan)
+	if orgID == "" || plan == "free" {
+		return CheckoutStatus{}, fmt.Errorf("payment %s missing org/plan reference", paymentID)
+	}
+	if err := s.ApplyPlanChange(ctx, orgID, "", plan); err != nil {
+		return CheckoutStatus{}, err
+	}
+	return status, nil
+}
+
 func (s *Service) RecordUsage(ctx context.Context, usage UsageEvent) error {
 	if usage.OrgID == "" || usage.Metric == "" {
 		return fmt.Errorf("org_id and metric are required")

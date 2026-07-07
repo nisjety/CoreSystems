@@ -1,10 +1,14 @@
 package workers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 
 	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/store"
@@ -50,6 +54,108 @@ func TestFinspoWorkerProcessesClaimedMicrosoftJob(t *testing.T) {
 	}
 	if integration.progressRequest.Checkpoint["finspoSyncJobId"] != "finspo-job-1" {
 		t.Fatalf("checkpoint = %#v, want finspo job id", integration.progressRequest.Checkpoint)
+	}
+}
+
+func TestFinspoWorkerProcessSkipsDataPlaneForwardWhenClientNil(t *testing.T) {
+	// FinspoWorker.DataPlane is nil by default (not set). RunOnce must still
+	// succeed and must not panic on a nil DataPlane client.
+	integration := &fakeIntegrationClient{
+		claim: store.SyncJob{
+			ID:             "sync-1",
+			OrganizationID: "org-1",
+			UserID:         "user-1",
+			ProviderKey:    "microsoft",
+			Checkpoint: map[string]any{
+				"site_id":  "site-1",
+				"drive_id": "drive-1",
+			},
+		},
+	}
+	finspo := &fakeFinspoClient{
+		source: handoff.FinspoSource{ID: "finspo-source-1", Status: "ready"},
+		sync:   handoff.FinspoSyncResult{SourceID: "finspo-source-1", Status: "queued", JobID: "finspo-job-1"},
+	}
+	processed, err := FinspoWorker{Integration: integration, Finspo: finspo}.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce error = %v, want nil with DataPlane unset", err)
+	}
+	if !processed {
+		t.Fatal("RunOnce processed = false, want true")
+	}
+}
+
+func TestFinspoWorkerProcessSkipsDataPlaneForwardWhenNotConfigured(t *testing.T) {
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	integration := &fakeIntegrationClient{
+		claim: store.SyncJob{
+			ID:             "sync-1",
+			OrganizationID: "org-1",
+			UserID:         "user-1",
+			ProviderKey:    "microsoft",
+			Checkpoint: map[string]any{
+				"site_id":  "site-1",
+				"drive_id": "drive-1",
+			},
+		},
+	}
+	finspo := &fakeFinspoClient{
+		source: handoff.FinspoSource{ID: "finspo-source-1", Status: "ready"},
+		sync:   handoff.FinspoSyncResult{SourceID: "finspo-source-1", Status: "queued", JobID: "finspo-job-1"},
+	}
+	dataPlane := &fakeDataPlaneClient{configured: false}
+	processed, err := FinspoWorker{Integration: integration, Finspo: finspo, DataPlane: dataPlane, Logger: &logger}.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce error = %v", err)
+	}
+	if !processed {
+		t.Fatal("RunOnce processed = false, want true")
+	}
+	if !dataPlane.configuredCalled {
+		t.Fatal("Configured() was not called, want the worker to check before forwarding")
+	}
+	if strings.Contains(buf.String(), "Data Plane documents client is configured") {
+		t.Fatalf("log output = %q, want no Data Plane forward log when unconfigured", buf.String())
+	}
+}
+
+func TestFinspoWorkerProcessLogsSkippedDataPlaneForwardWhenConfigured(t *testing.T) {
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	integration := &fakeIntegrationClient{
+		claim: store.SyncJob{
+			ID:             "sync-1",
+			OrganizationID: "org-1",
+			UserID:         "user-1",
+			ProviderKey:    "microsoft",
+			Checkpoint: map[string]any{
+				"site_id":  "site-1",
+				"drive_id": "drive-1",
+			},
+		},
+	}
+	finspo := &fakeFinspoClient{
+		source: handoff.FinspoSource{ID: "finspo-source-1", Status: "ready"},
+		sync:   handoff.FinspoSyncResult{SourceID: "finspo-source-1", Status: "queued", JobID: "finspo-job-1"},
+	}
+	dataPlane := &fakeDataPlaneClient{configured: true}
+	processed, err := FinspoWorker{Integration: integration, Finspo: finspo, DataPlane: dataPlane, Logger: &logger}.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce error = %v", err)
+	}
+	if !processed {
+		t.Fatal("RunOnce processed = false, want true")
+	}
+	if !dataPlane.configuredCalled {
+		t.Fatal("Configured() was not called")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "Data Plane documents client is configured but skipped") {
+		t.Fatalf("log output = %q, want an explicit skipped-forward log line", logged)
+	}
+	if !strings.Contains(logged, "finspo-source-1") {
+		t.Fatalf("log output = %q, want the source id included", logged)
 	}
 }
 
@@ -142,4 +248,14 @@ func (c *fakeFinspoClient) SyncSource(_ context.Context, _ string, _ string, sou
 		return handoff.FinspoSyncResult{}, c.syncErr
 	}
 	return c.sync, nil
+}
+
+type fakeDataPlaneClient struct {
+	configured       bool
+	configuredCalled bool
+}
+
+func (c *fakeDataPlaneClient) Configured() bool {
+	c.configuredCalled = true
+	return c.configured
 }

@@ -20,14 +20,12 @@ use mp_contracts::model_plane::v1::{
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest,
     ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
     GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
-    ListApprovalsRequest, ListModelsRequest, ListPlansRequest, ListRunsRequest,
-    ListMcpServersRequest, ListSpeechVoicesRequest, ListTodosRequest,
-    ListTranslationLanguagesRequest, McpServer, Plan, PlanState,
-    PlanStep, PlanStepState, RegisterMcpServerRequest, ResumeRunRequest, RunDetail,
-    StreamVideoGenerationContentRequest,
-    SubagentLineage, SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState,
-    TranscribeSpeechRequest, TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest,
-    TranslationInput,
+    ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest, ListPlansRequest,
+    ListRunsRequest, ListSpeechVoicesRequest, ListTodosRequest, ListTranslationLanguagesRequest,
+    McpServer, Plan, PlanState, PlanStep, PlanStepState, RegisterMcpServerRequest,
+    ResumeRunRequest, RunDetail, StreamVideoGenerationContentRequest, SubagentLineage,
+    SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState, TranscribeSpeechRequest,
+    TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -101,6 +99,9 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         .route("/v1/runs/:run_id", get(get_run))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
+        // Browser reasoning: Model Plane proposes one safe browser action from
+        // Quarry evidence; Quarry remains the only executor/capture layer.
+        .route("/v1/browser/suggest-action", post(browser_suggest_action))
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)
@@ -913,6 +914,30 @@ struct AiImagesRequest {
     max_tokens: Option<i32>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct BrowserSuggestActionRequest {
+    #[serde(default)]
+    goal: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    observation: Value,
+    #[serde(default)]
+    visual_observation: Value,
+    #[serde(default)]
+    visual_observation_artifact_id: Option<String>,
+    #[serde(default)]
+    screenshot_base64: Option<String>,
+    #[serde(default)]
+    screenshot_mime_type: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AiSpeechRequest {
     operation: Option<String>,
@@ -1008,6 +1033,324 @@ struct AiVideoJobQuery {
     model: Option<String>,
 }
 
+const BROWSER_SCREENSHOT_MAX_BYTES: usize = 6 * 1024 * 1024;
+const BROWSER_OBSERVATION_PROMPT_CHARS: usize = 16_000;
+const BROWSER_VISUAL_PROMPT_CHARS: usize = 8_000;
+
+const BROWSER_ACTION_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["navigate", "click", "type", "press", "scroll", "select", "wait", "wait_for", "screenshot", "done"]
+    },
+    "url": { "type": "string" },
+    "selector": { "type": "string" },
+    "text": { "type": "string" },
+    "value": { "type": "string" },
+    "key": { "type": "string" },
+    "target": { "type": "string" },
+    "ms": { "type": "integer" },
+    "timeout_ms": { "type": "integer" },
+    "full_page": { "type": "boolean" },
+    "reason": { "type": "string" },
+    "confidence": { "type": "number" }
+  },
+  "required": ["action", "reason", "confidence"]
+}"#;
+
+const BROWSER_SUGGEST_SYSTEM_PROMPT: &str = concat!(
+    "You are the Model Plane browser planner for Velion. Quarry-v2 captures browser evidence; ",
+    "you only decide the next browser action. Return exactly one JSON object matching the schema. ",
+    "Do not request raw JavaScript evaluation, anti-bot bypass, credential entry, CAPTCHA solving, ",
+    "or actions outside the current user goal. Prefer low-risk actions that reveal useful page evidence. ",
+    "Use action=\"done\" when the page is already ready for evidence capture or no safe action is needed. ",
+    "Allowed action meanings: navigate uses url; click/type/select/wait_for use selector; type uses text; ",
+    "press uses key; scroll uses target; wait uses ms; screenshot uses full_page."
+);
+
+async fn browser_suggest_action(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<BrowserSuggestActionRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+
+    let request_id = new_ulid();
+    let visual_summary = browser_visual_summary(&state, &claims, &req, &request_id).await?;
+    let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+
+    let resp = state
+        .inference_client
+        .clone()
+        .infer(InferRequest {
+            request_id: request_id.clone(),
+            org_id: claims.org_id.clone(),
+            model: req.model.clone().unwrap_or_default(),
+            provider_hint: req.provider.clone().unwrap_or_default(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: BROWSER_SUGGEST_SYSTEM_PROMPT.to_owned(),
+                    name: String::new(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: evidence,
+                    name: String::new(),
+                },
+            ],
+            temperature: 0.2,
+            max_tokens: 700,
+            structured_output_schema: BROWSER_ACTION_SCHEMA.to_owned(),
+            zdr: true,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    let parsed: Value = serde_json::from_str(resp.content.trim()).map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("browser planner returned invalid JSON: {e}")
+            })),
+        )
+    })?;
+    let suggestion = browser_suggestion_value(&parsed);
+
+    Ok(Json(json!({
+        "id": request_id,
+        "object": "browser.action_suggestion",
+        "suggestion": suggestion,
+        "visual_summary": visual_summary,
+        "model_used": resp.model_used,
+        "usage": {
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens
+        }
+    })))
+}
+
+async fn browser_visual_summary(
+    state: &AppState,
+    claims: &Claims,
+    req: &BrowserSuggestActionRequest,
+    request_id: &str,
+) -> Result<Option<String>, HttpJsonError> {
+    let Some(raw_base64) = req
+        .screenshot_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let encoded = raw_base64
+        .split_once(',')
+        .map_or(raw_base64, |(_, payload)| payload)
+        .trim();
+    let image_data = STANDARD.decode(encoded).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "screenshot_base64 must be valid base64" })),
+        )
+    })?;
+    if image_data.len() > BROWSER_SCREENSHOT_MAX_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "screenshot_base64 is too large" })),
+        ));
+    }
+
+    let prompt = concat!(
+        "Describe the visible browser page for action planning. Focus on clickable controls, forms, ",
+        "visible blockers, selected/active state, and whether the page is ready for evidence capture. ",
+        "Do not infer hidden data or solve CAPTCHAs."
+    );
+    match state
+        .inference_client
+        .clone()
+        .analyze_image(AnalyzeImageRequest {
+            request_id: format!("{request_id}-vision"),
+            org_id: claims.org_id.clone(),
+            image_url: String::new(),
+            image_data,
+            mime_type: req
+                .screenshot_mime_type
+                .clone()
+                .unwrap_or_else(|| "image/png".to_owned()),
+            prompt: prompt.to_owned(),
+            model: req.model.clone().unwrap_or_default(),
+            provider_hint: req.provider.clone().unwrap_or_default(),
+            max_tokens: 700,
+        })
+        .await
+    {
+        Ok(resp) => Ok(Some(resp.into_inner().description)),
+        Err(error) => {
+            warn!(error = %error, "browser screenshot vision analysis failed; planning from structured evidence only");
+            Ok(None)
+        }
+    }
+}
+
+fn browser_suggestion_prompt(
+    req: &BrowserSuggestActionRequest,
+    visual_summary: Option<&str>,
+) -> String {
+    let goal = truncate_for_prompt(
+        if req.goal.trim().is_empty() {
+            "Decide whether one more browser action is needed before evidence capture."
+        } else {
+            req.goal.trim()
+        },
+        1_200,
+    );
+    let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
+    let visual_observation =
+        compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
+    let visual_summary = visual_summary
+        .map(|summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS))
+        .unwrap_or_else(|| "not provided".to_owned());
+    let visual_artifact = req
+        .visual_observation_artifact_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("not provided");
+
+    format!(
+        "Goal:\n{goal}\n\nCurrent URL: {}\nCurrent title: {}\n\nQuarry observation JSON:\n{observation}\n\nOpenCV visual observation artifact id: {visual_artifact}\nOpenCV visual observation JSON:\n{visual_observation}\n\nVLM screenshot summary:\n{visual_summary}\n\nReturn the single next browser action JSON only.",
+        truncate_for_prompt(&req.url, 1_000),
+        truncate_for_prompt(&req.title, 500),
+    )
+}
+
+fn browser_suggestion_value(parsed: &Value) -> Value {
+    let action_kind = parsed
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("done");
+    let action = browser_action_value(action_kind, parsed);
+    json!({
+        "done": action_kind == "done",
+        "action": action,
+        "reason": string_value(parsed, "reason", 500),
+        "confidence": confidence_value(parsed),
+    })
+}
+
+fn browser_action_value(action_kind: &str, parsed: &Value) -> Value {
+    match action_kind {
+        "navigate" => string_value(parsed, "url", 2_000)
+            .is_empty()
+            .then_some(Value::Null)
+            .unwrap_or_else(
+                || json!({ "type": "navigate", "url": string_value(parsed, "url", 2_000) }),
+            ),
+        "click" => selector_action(parsed, "click"),
+        "type" => {
+            let selector = string_value(parsed, "selector", 1_000);
+            let text = string_value(parsed, "text", 4_000);
+            if selector.is_empty() || text.is_empty() {
+                Value::Null
+            } else {
+                json!({ "type": "type", "selector": selector, "text": text })
+            }
+        }
+        "press" => {
+            let key = string_value(parsed, "key", 64);
+            json!({ "type": "press", "key": if key.is_empty() { "Enter".to_owned() } else { key } })
+        }
+        "scroll" => {
+            let target = string_value(parsed, "target", 1_000);
+            json!({ "type": "scroll", "target": if target.is_empty() { "viewport".to_owned() } else { target } })
+        }
+        "select" => {
+            let selector = string_value(parsed, "selector", 1_000);
+            let value = string_value(parsed, "value", 1_000);
+            if selector.is_empty() || value.is_empty() {
+                Value::Null
+            } else {
+                json!({ "type": "select", "selector": selector, "value": value })
+            }
+        }
+        "wait" => json!({ "type": "wait", "ms": integer_value(parsed, "ms", 250, 10_000, 1_000) }),
+        "wait_for" => {
+            let selector = string_value(parsed, "selector", 1_000);
+            if selector.is_empty() {
+                Value::Null
+            } else {
+                json!({
+                    "type": "wait_for",
+                    "selector": selector,
+                    "timeout_ms": integer_value(parsed, "timeout_ms", 250, 15_000, 5_000)
+                })
+            }
+        }
+        "screenshot" => json!({
+            "type": "screenshot",
+            "full_page": parsed.get("full_page").and_then(Value::as_bool).unwrap_or(false)
+        }),
+        _ => Value::Null,
+    }
+}
+
+fn selector_action(parsed: &Value, action_type: &str) -> Value {
+    let selector = string_value(parsed, "selector", 1_000);
+    if selector.is_empty() {
+        Value::Null
+    } else {
+        json!({ "type": action_type, "selector": selector })
+    }
+}
+
+fn string_value(parsed: &Value, key: &str, max_chars: usize) -> String {
+    parsed
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_for_prompt(value, max_chars))
+        .unwrap_or_default()
+}
+
+fn integer_value(parsed: &Value, key: &str, min: i64, max: i64, fallback: i64) -> i64 {
+    parsed
+        .get(key)
+        .and_then(Value::as_i64)
+        .unwrap_or(fallback)
+        .clamp(min, max)
+}
+
+fn confidence_value(parsed: &Value) -> f64 {
+    parsed
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0)
+}
+
+fn compact_json_for_prompt(value: &Value, max_chars: usize) -> String {
+    let serialized = serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned());
+    truncate_for_prompt(&serialized, max_chars)
+}
+
+fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    out.push_str("\n...[truncated]");
+    out
+}
+
 async fn ai_chat(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1052,7 +1395,7 @@ async fn ai_chat(
 
 /// Versioned system prompt for the onboarding plan recommender. Bumping the
 /// version string changes the inference-core prompt-cache key.
-const RECOMMEND_PLAN_MODEL_VERSION: &str = "recommend-plan-v6";
+const RECOMMEND_PLAN_MODEL_VERSION: &str = "recommend-plan-v9";
 
 const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
     "Velion product context: Velion is both the product name and the AI worker at the center of the product. ",
@@ -1075,26 +1418,35 @@ const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
     "launch estimates. ",
     "Recommendation task: you are Velion's senior onboarding consultant writing a live AI recommendation ",
     "for a customer who just connected their website and tools. Recommend exactly one Velion plan. ",
-    "Plans (id -> name): ",
-    "trial -> Free (14-day Pro trial, no card); ",
-    "hobby -> Essential (small team, single chatbot); ",
-    "standard -> Advanced (automation, routing, multiple sources/inboxes); ",
-    "pro -> Expert (SSO, SLA, reporting, multibrand, larger teams); ",
-    "enterprise -> Custom (governance, volume, dedicated onboarding). ",
+    "Plans (id -> name and terms): ",
+    "trial -> Free, 0 NOK/month, 14-day trial, no card, upgrade later; ",
+    "hobby -> Essential, 299 NOK/month, 4 NOK per AI-resolved inquiry, chatbot + shared inbox, website and knowledge sources, small-team/simple chatbot validation; ",
+    "standard -> Advanced, 999 NOK/month, 3.50 NOK per AI-resolved inquiry, automation and routing, multiple team inboxes, 20 Lite seats, multiple sources/inboxes; ",
+    "pro -> Expert, 1499 NOK/month, 2.90 NOK per AI-resolved inquiry, SSO and identity controls, SLA/reporting/multibrand, 50 Lite seats, larger support teams; ",
+    "enterprise -> Custom, volume pricing per AI answer, custom terms, extended onboarding, dedicated success team, governance/volume. ",
     "Heuristics: more employees, more connected sources, and intent signals like ",
     "automation/SLA/SSO/governance push toward higher tiers; little or no signal -> trial. ",
     "Write like a thoughtful product specialist, not a pricing template. ",
     "Use the actual organization name, employee count if provided, website host, and connected systems. ",
+    "Counts are authoritative: context.connectedSourceCount/context.sourceSummary.connectedSourceCount is the number of ",
+    "connected source streams to call 'tilkoblede kilder'; context.sourceCount includes those connected streams plus ",
+    "the website as one source. Never invent a smaller source count or reuse an older count. ",
+    "If context.websiteContent is present, it holds real title+excerpt snippets Velion just crawled from the ",
+    "customer's site; read them to state concretely what the company does, sells, or serves, and reference that ",
+    "in the reason/summary so the recommendation is visibly grounded in their own site — never invent facts not ",
+    "present in those snippets. If context.industry is present, use it to frame the company's sector. ",
     "If context.dataPlane is present, use its graph counts, groups, sample nodes and sample edges as evidence; ",
     "do not invent document contents that are not in the JSON. ",
     "Paraphrase the user's goal and correct obvious spelling/grammar mistakes; never quote raw user input. ",
     "Explain why this plan fits now, what Velion already appears to understand, and what the customer can expect ",
     "in the first launch window. Expected outcomes must be rough directional estimates, not guarantees. ",
     "Avoid generic phrases such as 'select this plan', 'static FAQ', or 'you can change later'. ",
+    "Be terse: prefer the fewest words that stay grounded and specific; no filler. ",
     "Reply with ONLY a JSON object: {\"planId\": one of trial|hobby|standard|pro|enterprise, ",
-    "\"reason\": a short natural sentence addressed to the user, \"summary\": two concise sentences, ",
-    "\"proofPoints\": 2-4 concrete evidence bullets, \"scopeSignals\": 2-4 scope bullets, ",
-    "\"opportunities\": 2-4 likely first improvements, ",
+    "\"reason\": ONE short sentence addressed to the user, \"summary\": exactly ONE tight sentence, ",
+    "\"proofPoints\": at most 3 short bullets (max ~8 words each, not full sentences), ",
+    "\"scopeSignals\": at most 3 short bullets (max ~8 words each), ",
+    "\"opportunities\": at most 2 short bullets (max ~8 words each), ",
     "\"expectedOutcomes\": 2-3 objects with {label,value,detail}, ",
     "\"confidence\": number 0..1}. Write all user-facing text in the requested locale ",
     "(nb = natural Norwegian Bokmål, en = English)."
@@ -1185,9 +1537,9 @@ async fn recommend_plan(
         .get("summary")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let proof_points = string_array_field(&parsed, "proofPoints", 4);
-    let scope_signals = string_array_field(&parsed, "scopeSignals", 4);
-    let opportunities = string_array_field(&parsed, "opportunities", 4);
+    let proof_points = string_array_field(&parsed, "proofPoints", 3);
+    let scope_signals = string_array_field(&parsed, "scopeSignals", 3);
+    let opportunities = string_array_field(&parsed, "opportunities", 2);
     let expected_outcomes = expected_outcomes_field(&parsed, 3);
     let confidence = parsed.get("confidence").and_then(Value::as_f64);
 
@@ -1351,7 +1703,13 @@ fn req_is_admin(claims: &Claims, headers: &HeaderMap) -> bool {
 fn mcp_server_json(s: &McpServer, ownership: Option<&crate::ownership::Ownership>) -> Value {
     let (scope, owner, shared) = ownership.map_or_else(
         || ("org", String::new(), Vec::new()),
-        |o| (o.scope.as_wire(), o.owner_user_id.clone(), o.shared_with.clone()),
+        |o| {
+            (
+                o.scope.as_wire(),
+                o.owner_user_id.clone(),
+                o.shared_with.clone(),
+            )
+        },
     );
     json!({
         "server_id": s.server_id,
@@ -1392,9 +1750,7 @@ async fn mcp_register(
     }
     let ownership = match scope {
         crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
-        crate::ownership::Scope::User => {
-            crate::ownership::Ownership::user(claims.user_id.clone())
-        }
+        crate::ownership::Scope::User => crate::ownership::Ownership::user(claims.user_id.clone()),
     };
     let server = McpServer {
         server_id: body.server_id,
@@ -1431,9 +1787,8 @@ async fn mcp_register(
     if !state.capability_core_base_url.is_empty() {
         if let Some(server) = resp.server.as_ref() {
             if !org_id.is_empty() && !server.name.is_empty() {
-                let payload = crate::runtime_registries::mcp_capability_payload(
-                    &org_id, server, &ownership,
-                );
+                let payload =
+                    crate::runtime_registries::mcp_capability_payload(&org_id, server, &ownership);
                 let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
                 let client = state.http_client.clone();
                 tokio::spawn(async move {
@@ -1488,11 +1843,9 @@ async fn mcp_list(
             )
         })
         .map(|s| {
-            let own = state.ownership.get(
-                &claims.org_id,
-                crate::ownership::KIND_MCP,
-                &s.server_id,
-            );
+            let own = state
+                .ownership
+                .get(&claims.org_id, crate::ownership::KIND_MCP, &s.server_id);
             mcp_server_json(s, own.as_ref())
         })
         .collect();
@@ -3759,4 +4112,89 @@ async fn toon_encode(
         chars,
         estimated_tokens,
     }))
+}
+
+#[cfg(test)]
+mod browser_suggestion_tests {
+    use super::*;
+
+    #[test]
+    fn browser_suggestion_maps_click_to_client_action_shape() {
+        let suggestion = browser_suggestion_value(&json!({
+            "action": "click",
+            "selector": "button.submit",
+            "reason": "Submit button is visible.",
+            "confidence": 0.82
+        }));
+
+        assert_eq!(suggestion["done"], false);
+        assert_eq!(
+            suggestion["action"],
+            json!({
+                "type": "click",
+                "selector": "button.submit"
+            })
+        );
+        assert_eq!(suggestion["reason"], "Submit button is visible.");
+        assert_eq!(suggestion["confidence"], 0.82);
+    }
+
+    #[test]
+    fn browser_suggestion_maps_done_without_action() {
+        let suggestion = browser_suggestion_value(&json!({
+            "action": "done",
+            "reason": "Evidence is already visible.",
+            "confidence": 0.91
+        }));
+
+        assert_eq!(suggestion["done"], true);
+        assert_eq!(suggestion["action"], Value::Null);
+    }
+
+    #[test]
+    fn browser_suggestion_drops_incomplete_selector_actions() {
+        let suggestion = browser_suggestion_value(&json!({
+            "action": "click",
+            "reason": "No selector.",
+            "confidence": 0.4
+        }));
+
+        assert_eq!(suggestion["done"], false);
+        assert_eq!(suggestion["action"], Value::Null);
+    }
+
+    #[test]
+    fn browser_suggestion_clamps_wait_time_and_confidence() {
+        let suggestion = browser_suggestion_value(&json!({
+            "action": "wait_for",
+            "selector": "#ready",
+            "timeout_ms": 120000,
+            "reason": "Wait for dynamic content.",
+            "confidence": 2.0
+        }));
+
+        assert_eq!(
+            suggestion["action"],
+            json!({
+                "type": "wait_for",
+                "selector": "#ready",
+                "timeout_ms": 15000
+            })
+        );
+        assert_eq!(suggestion["confidence"], 1.0);
+    }
+
+    #[test]
+    fn browser_prompt_truncates_large_observations() {
+        let req = BrowserSuggestActionRequest {
+            goal: "Inspect page".to_owned(),
+            observation: json!({ "text": "x".repeat(BROWSER_OBSERVATION_PROMPT_CHARS + 100) }),
+            ..Default::default()
+        };
+
+        let prompt = browser_suggestion_prompt(&req, None);
+
+        assert!(prompt.contains("...[truncated]"));
+        assert!(prompt.contains("Inspect page"));
+    }
 }

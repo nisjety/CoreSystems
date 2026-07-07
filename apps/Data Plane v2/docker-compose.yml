@@ -548,6 +548,19 @@ services:
       # from user-core's resource_grants facade. HTTP/facade port is 3012, NOT 8080.
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       HTTP_PORT: "8010"
+      # authctx (pkg/authctx): verify auth-core's RS256 data-plane JWT and bind
+      # tenant identity from the signed org_id claim. Mirrors the retrieval-engine
+      # verifier that already runs strict. AUTHCTX_ENFORCE stays OFF by default —
+      # observe mode logs drift without changing behavior; flip to 1 only once the
+      # gateway mints data-plane Bearer tokens on every leg (it now does) and the
+      # cross-tenant isolation tests pass. AUDIENCE/ISSUER match auth-core's mint.
+      AUTHCTX_ENFORCE: ${AUTHCTX_ENFORCE:-0}
+      JWT_PUBLIC_KEY_FILE: ${JWT_PUBLIC_KEY_FILE:-/app/keys/convex-auth.pub}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+    volumes:
+      # auth-core's PUBLIC JWT key (read-only), shared with retrieval-engine.
+      - ./services/retrieval-engine-rs/keys:/app/keys:ro
     networks:
       - dpv2-net
       - inter-plane-bus

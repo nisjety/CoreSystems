@@ -1,6 +1,9 @@
 # Application Plane Core Research
 
 Generated: 2026-06-09
+Updated: 2026-07-02
+
+Latest plane audit: `plane-audit-2026-07-02.md`.
 
 ## Scope
 
@@ -15,6 +18,8 @@ This pass covers the live and adjacent cores under `apps/Application Plane`:
 - `zammad-foundation`
 
 It also tracks the missing `affine-core` build context because it is still declared in compose.
+
+2026-07-02 audit note: the Application Plane `velion-gateway-rs` notes now overlap with the current Frontend Plane Velion v3 Rust gateway under `apps/Frontend Plane/velionv3/apps/gateway`. Treat that as an ownership clarification item before extending either gateway.
 
 ## Current Plane Shape
 
@@ -59,8 +64,8 @@ Adjacent or partial surfaces:
 - `conversation-ingest-rs` normalizes inbound email-style events and forwards them into `conversation-core-go`.
 - `conversation-core-go` persists support workflows in shared `application-postgres` and can publish events on NATS.
 - `notification-core` persists request, feed, subscriber, and preference state in shared `application-postgres`, uses Redis, and consumes shared-bus identity and control-session events.
-- `information-core` is called by `velionv2` through its BFF routes for weather, traffic, and news cards.
-- `velion-gateway-rs` fans out to Control, Data, Ingestion, and Model Plane endpoints for onboarding flows.
+- `information-core` has known historical `velionv2` BFF callers for weather, traffic, and news cards; current Velion v3 routing should be verified through the Frontend Plane gateway.
+- `velion-gateway-rs` research now overlaps with the Frontend Plane Velion v3 Rust gateway; treat this as an ownership clarification item before extending either gateway.
 - `zammad-foundation` provides a separate support stack and bootstrap path; it is adjacent to the main plane rather than embedded in the default runtime.
 
 ## Highest-Signal Findings
@@ -69,7 +74,7 @@ Adjacent or partial surfaces:
 2. `conversation-core-go` is a real first-party support API with inbox, queue, message, note, assignment, tag, and AI-action review surfaces.
 3. `conversation-ingest-rs` is small but live. It validates and canonicalizes inbound mail events before forwarding them to `conversation-core-go`.
 4. `convex-core` is live and important, but some webhook and integration surfaces are stale or placeholder-grade.
-5. `velion-gateway-rs` is a real onboarding gateway, but current `velionv2` code already proxies the same lower-plane capabilities directly. In-repo callers for the Rust gateway are not evident outside its compose wiring, which makes it a likely transitional or redundant boundary.
+5. `velion-gateway-rs` research points at a real Rust onboarding gateway, but the current path is under the Frontend Plane Velion v3 tree. This makes the Application-vs-Frontend ownership boundary the issue, not whether the gateway code exists.
 6. `affine-core` is a concrete stale runtime surface because the build context is missing.
 7. The stale-doc register already points at `apps/Application Plane/APPLICATION_PLANE_ARCHITECTURE.md`, but that file is not present in the current workspace. The register itself needs a truth pass before deletion work starts.
 
@@ -80,7 +85,7 @@ Adjacent or partial surfaces:
 - `notification-core` intentionally falls back to stub delivery mode when `NOVU_SECRET_KEY` is unset.
 - `zammad-foundation` contains future webhook placeholder guidance and dry-run placeholder IDs, but those are confined to the bootstrap/foundation package.
 - `docker-compose.ui.yml` looks redundant with the main compose.
-- `velion-gateway-rs` overlaps substantially with `apps/Frontend Plane/velionv2/src/app/api/onboarding/_lib/onboarding-proxy.ts`.
+- `velion-gateway-rs` overlaps historically with `apps/Frontend Plane/velionv2/src/app/api/onboarding/_lib/onboarding-proxy.ts` and currently with `apps/Frontend Plane/velionv3/apps/gateway`.
 
 ## Files In This Set
 
@@ -91,3 +96,4 @@ Adjacent or partial surfaces:
 - `notification-core.md`
 - `velion-gateway-rs.md`
 - `zammad-foundation.md`
+- `plane-audit-2026-07-02.md`

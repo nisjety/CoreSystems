@@ -35,11 +35,21 @@ type SharedPublisher interface {
 	PublishPlain(subject string, payload map[string]any)
 }
 
+// AuditPublisher emits raw audit events over CORE NATS on the control-plane
+// bus (controlplane-nats), where audit-core's primary QueueSubscribe listens.
+// Satisfied by *nats.Client. Defined here (not importing nats) to avoid an
+// import cycle. Kept separate from the cross-plane SharedPublisher (velion-nats)
+// so audit stays CP-local and never depends on the shared bus being up.
+type AuditPublisher interface {
+	PublishCore(subject string, payload map[string]any) error
+}
+
 // Service handles organization business logic and event publishing
 type Service struct {
 	repo            *Repository
 	publisher       Publisher
 	sharedPublisher SharedPublisher    // cross-plane events on velion-nats
+	auditPublisher  AuditPublisher     // velion.audit.v1.* on the local controlplane-nats bus
 	cache           *rediscache.Client // optional, nil if Redis disabled
 }
 
@@ -57,6 +67,12 @@ func NewService(repo *Repository, publisher Publisher, cache ...*rediscache.Clie
 // SetSharedPublisher wires the cross-plane NATS publisher for controlplane.org.* subjects.
 func (s *Service) SetSharedPublisher(sp SharedPublisher) {
 	s.sharedPublisher = sp
+}
+
+// SetAuditPublisher wires the local control-plane bus publisher used to emit
+// velion.audit.v1.* events to audit-core. nil disables audit emission.
+func (s *Service) SetAuditPublisher(ap AuditPublisher) {
+	s.auditPublisher = ap
 }
 
 // Ping checks database connectivity + authentication for the /health probe.
@@ -518,9 +534,16 @@ func (s *Service) IsActiveMember(ctx context.Context, orgID, userID string) (boo
 }
 
 // SharedPub exposes the cross-plane publisher so the GDPR handlers can emit
-// erasure audit + fan-out events. Returns nil when shared NATS is disabled.
+// the cross-plane erasure fan-out. Returns nil when shared NATS is disabled.
 func (s *Service) SharedPub() SharedPublisher {
 	return s.sharedPublisher
+}
+
+// AuditPub exposes the local control-plane bus publisher so the GDPR handlers
+// can emit durable velion.audit.v1.* events to audit-core. Returns nil when the
+// local NATS connection is disabled.
+func (s *Service) AuditPub() AuditPublisher {
+	return s.auditPublisher
 }
 
 // Event publishing methods

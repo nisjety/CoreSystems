@@ -106,6 +106,7 @@ Internal-key gated; trusts identity forwarded by the gateway (Better Auth sessio
 | GET/PUT | `/api/v1/settings/accessibility` | Accessibility settings | internal key | HTTP | core |
 | GET/PUT | `/api/v1/settings/ai` | AI/Copilot settings | internal key | HTTP | core |
 | GET/PUT | `/api/v1/settings/storage` | Storage & sync settings | internal key | HTTP | core |
+| GET/PUT | `/api/v1/settings/voice` | Voice mode, dictionary, snippets, local/private retention policy | internal key | HTTP | core |
 | GET/POST | `/api/v1/calendar/events` | Navbar calendar state / lightweight events | internal key | HTTP | core |
 | POST | `/api/v1/calendar/notes` | Calendar note | internal key | HTTP | core |
 | POST | `/api/v1/support/requests` | Support request from navbar | internal key | HTTP | core |
@@ -310,7 +311,7 @@ The only Ingestion service designed for end-user JWTs: verifies `Authorization: 
 | POST | `/v1/batch` | Batch scrape job | Bearer JWT | HTTP | **later** |
 | POST | `/v1/internal/run_page` | Orchestrator-internal page execution | internal | HTTP | none |
 | GET/POST/DELETE | `/v1/profiles[...:id]`, `POST /v1/profiles/:id/restore_probe` | Browser profile CRUD/probe | Bearer JWT | HTTP | **later** |
-| POST | `/v1/audio` | Audio ingestion | Bearer JWT | HTTP | **later** |
+| POST | `/v1/audio` | Audio evidence ingestion; not the primary Velion dictation path | Bearer JWT | HTTP | **later** |
 | POST | `/v1/search`, `/v1/search/images` | Web/image search | Bearer JWT | HTTP | **later** |
 | POST | `/v1/map`, `/v1/extract` | Site URL discovery / structured extraction | Bearer JWT | HTTP | **later** |
 | POST | `/v1/answer`, `/v1/answer/stream` | Answer with web evidence (downstream model-gateway stream noted stubbed) | Bearer JWT | HTTP / SSE | **later** |
@@ -527,7 +528,8 @@ JWT Bearer via JWKS from auth-core on all non-health routes; rate-limited; dev b
 | GET/POST | `/v1/skills`; GET/PATCH/DELETE `/v1/skills/:id` | Agent skills (proxy) | JWT | HTTP | core |
 | POST | `/v1/recommend/plan` | Plan recommendation (onboarding dependency; already proxied by gateway) | JWT | HTTP | onboarding |
 | POST | `/v1/ai/chat`, `/v1/ai/embeddings`; GET `/v1/ai/models` | Direct chat (use `/v1/invoke` instead) / embeddings / model list | JWT | HTTP | **later** |
-| POST/GET | `/v1/ai/images*`, `/v1/ai/speech*`, `/v1/ai/translate*`, `/v1/ai/documents*`, `/v1/ai/language*`, `/v1/ai/video*` | Multimodal suites | JWT | HTTP | **later** |
+| POST/GET | `/v1/ai/speech*` | Speech STT/TTS; v3 voice routes proxy here for MVP and must propagate ZDR | JWT | HTTP | core |
+| POST/GET | `/v1/ai/images*`, `/v1/ai/translate*`, `/v1/ai/documents*`, `/v1/ai/language*`, `/v1/ai/video*` | Multimodal suites other than speech | JWT | HTTP | **later** |
 | POST/GET | `/v1/ai/realtime*` | Realtime session — **placeholder per openapi.yaml** | JWT | HTTP | **later** |
 | GET/POST | `/v1/documents`; `/v1/documents/bulk`; GET/DELETE `/v1/documents/:id`; GET `/v1/documents/:id/index-status` | Data Plane document relays | JWT | HTTP | core (bulk **later**) |
 | POST | `/v1/retrieval`; GET `/v1/retrieval/traces/:trace_id`; POST `/v1/retrieval/{sources,chunks,pack}` | Data Plane retrieval relays | JWT | HTTP | core / later (traces, chunks, pack) |

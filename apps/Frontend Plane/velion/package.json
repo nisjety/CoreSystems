@@ -15,6 +15,9 @@
     "render:onboarding:product-reveal": "remotion render remotion/index.ts ProductReveal public/videos/onboarding/product-reveal.webm --codec=vp9 --crf=18 --timeout=60000 --concurrency=2",
     "render:onboarding:product-reveal:poster": "remotion still remotion/index.ts ProductReveal public/imagens/onboarding/product-reveal-poster.png --frame=228 --timeout=60000",
     "render:onboarding:assets": "pnpm render:onboarding:product-reveal && pnpm render:onboarding:product-reveal:poster",
+    "render:velion:signal-drone-short": "remotion render remotion/index.ts VelionSignalDroneShort public/videos/velion-signal-drone-short.mp4 --codec=h264 --crf=18 --timeout=60000 --concurrency=2",
+    "render:velion:signal-drone-short:poster": "remotion still remotion/index.ts VelionSignalDroneShort public/imagens/velion-signal-drone-short-poster.png --frame=315 --timeout=60000",
+    "render:velion:signal-drone-short:assets": "pnpm render:velion:signal-drone-short && pnpm render:velion:signal-drone-short:poster",
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "typecheck": "bash scripts/typecheck.sh"

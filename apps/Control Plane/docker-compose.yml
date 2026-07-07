@@ -447,8 +447,14 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
-      NATS_URL: nats://velion-nats:4222
-      NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      # Control-plane local bus. The other CP services reach this same broker
+      # via VELION_NATS_URL/VELION_NATS_TOKEN, but those point at the SHARED
+      # cross-plane `velion-nats` bus (long token) and only survive because they
+      # treat NATS as lazy/non-fatal. audit-core fatals on a bad primary connect,
+      # so it must address the CP broker directly: controlplane-nats with the
+      # literal `nats` token that nats.conf actually requires (NATS_TOKEN=nats).
+      NATS_URL: nats://controlplane-nats:4222
+      NATS_TOKEN: ${NATS_TOKEN:-nats}
       # Aggregate the model-plane bus (reachable via inter-plane-bus) where
       # session-core publishes velion.audit.v1.model.tool_action — audit-core
       # is the single sink across planes. Comma-separate for more buses.
@@ -687,7 +693,7 @@ services:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "9095:9090" # host 9095 avoids collision with Model Plane (host 9090)
+      - "19095:9090" # host 19095 avoids Model Plane browser-broker on host 9095
     networks:
       - controlplane-net  # reach the cores by container name
       - inter-plane-bus   # reach the Frontend-Plane gateway

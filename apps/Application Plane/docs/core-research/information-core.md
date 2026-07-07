@@ -28,8 +28,8 @@ At startup it:
 
 ## Relationships
 
-- `velionv2` references `information-core` through `src/app/api/v1/information/_lib/upstream.ts`.
-- `velionv2` dashboard cards consume that BFF path for weather, traffic, and news.
+- Known historical caller: `velionv2` references `information-core` through `src/app/api/v1/information/_lib/upstream.ts`.
+- Current Velion v3 usage should be verified through the Frontend Plane gateway before treating it as active product traffic.
 - The service is internal-key-gated and uses no dedicated plane database in the boot path.
 
 ## Stub, Mock, Placeholder, and Unused Audit

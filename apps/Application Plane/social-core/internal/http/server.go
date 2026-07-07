@@ -65,6 +65,10 @@ func newRouter(handler *Handler, internalKey string) *gin.Engine {
 		api.POST("/posts/:id/publish-jobs", handler.EnqueuePublishJob)
 		api.GET("/publish-jobs/:id", handler.GetPublishJob)
 		api.POST("/publish-jobs/drain", handler.DrainPublishJobs)
+		api.POST("/metrics/snapshot", handler.SnapshotMetrics)
+		api.GET("/metrics", handler.ListMetrics)
+		api.GET("/catalogs", handler.ListCatalogs)
+		api.GET("/catalogs/:id/products", handler.ListCatalogProducts)
 	}
 
 	return router

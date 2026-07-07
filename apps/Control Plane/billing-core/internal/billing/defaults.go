@@ -121,7 +121,12 @@ func billablePlan(plan string) string {
 
 func checkoutStatusActivatesPlan(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
+	// Stripe/Hyperswitch vocabulary.
 	case "succeeded", "processing":
+		return true
+	// Nexi Checkout vocabulary: a completed checkout yields a reservation
+	// (and, with charge-on-reservation, a charge) — both mean the customer paid.
+	case "reserved", "charged":
 		return true
 	default:
 		return false

@@ -23,7 +23,6 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			TokenURL:         cfg.SlackTokenURL,
 			APIBaseURL:       cfg.SlackAPIBaseURL,
 			ScopeSeparator:   ",",
-			UseBasicAuth:     true,
 			HTTPClient:       httpClient,
 		}),
 		"google": NewOAuth2Client(OAuth2ClientConfig{
@@ -94,7 +93,7 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			UseBasicAuth:     true,
 			HTTPClient:       httpClient,
 		}),
-		"instagram": NewOAuth2Client(OAuth2ClientConfig{
+		"instagram": NewMetaOAuthClient(OAuth2ClientConfig{
 			ProviderKey:      "instagram",
 			ClientID:         cfg.InstagramClientID,
 			ClientSecret:     cfg.InstagramClientSecret,
@@ -103,8 +102,8 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			APIBaseURL:       cfg.InstagramAPIBaseURL,
 			ScopeSeparator:   ",",
 			HTTPClient:       httpClient,
-		}),
-		"facebook": NewOAuth2Client(OAuth2ClientConfig{
+		}, nil),
+		"facebook": NewMetaOAuthClient(OAuth2ClientConfig{
 			ProviderKey:      "facebook",
 			ClientID:         cfg.FacebookClientID,
 			ClientSecret:     cfg.FacebookClientSecret,
@@ -113,7 +112,27 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			APIBaseURL:       cfg.FacebookAPIBaseURL,
 			ScopeSeparator:   ",",
 			HTTPClient:       httpClient,
-		}),
+		}, nil),
+		"whatsapp": NewMetaOAuthClient(OAuth2ClientConfig{
+			ProviderKey:      "whatsapp",
+			ClientID:         cfg.FacebookClientID,
+			ClientSecret:     cfg.FacebookClientSecret,
+			AuthorizationURL: cfg.FacebookAuthorizationURL,
+			TokenURL:         cfg.FacebookTokenURL,
+			APIBaseURL:       cfg.FacebookAPIBaseURL,
+			ScopeSeparator:   ",",
+			HTTPClient:       httpClient,
+		}, nil),
+		"meta-ads": NewMetaOAuthClient(OAuth2ClientConfig{
+			ProviderKey:      "meta-ads",
+			ClientID:         cfg.FacebookClientID,
+			ClientSecret:     cfg.FacebookClientSecret,
+			AuthorizationURL: cfg.FacebookAuthorizationURL,
+			TokenURL:         cfg.FacebookTokenURL,
+			APIBaseURL:       cfg.FacebookAPIBaseURL,
+			ScopeSeparator:   ",",
+			HTTPClient:       httpClient,
+		}, nil),
 		"snapchat": NewOAuth2Client(OAuth2ClientConfig{
 			ProviderKey:      "snapchat",
 			ClientID:         cfg.SnapchatClientID,
@@ -121,6 +140,49 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			AuthorizationURL: cfg.SnapchatAuthorizationURL,
 			TokenURL:         cfg.SnapchatTokenURL,
 			APIBaseURL:       cfg.SnapchatAPIBaseURL,
+			ScopeSeparator:   " ",
+			UsePKCE:          true,
+			HTTPClient:       httpClient,
+		}),
+		// Unified Meta provider: ONE OAuth dialog covering Facebook Pages,
+		// Instagram (Facebook-Login flavor), WhatsApp Business, and Marketing
+		// API. Uses Facebook Login for Business (config_id) when a named
+		// META_BUSINESS_LOGIN_*_CONFIG_ID is set for the requested purpose
+		// (providerContext["business_login_config"], "default" otherwise);
+		// falls back to classic comma-separated scopes if none are configured
+		// at all (works in dev mode for app-role users on a Business-type app).
+		"meta": NewMetaOAuthClient(OAuth2ClientConfig{
+			ProviderKey:      "meta",
+			ClientID:         cfg.FacebookClientID,
+			ClientSecret:     cfg.FacebookClientSecret,
+			AuthorizationURL: cfg.FacebookAuthorizationURL,
+			TokenURL:         cfg.FacebookTokenURL,
+			APIBaseURL:       cfg.FacebookAPIBaseURL,
+			ScopeSeparator:   ",",
+			HTTPClient:       httpClient,
+		}, cfg.MetaBusinessLoginConfigIDs),
+		// TikTok Login Kit v2: TikTok uses `client_key` (NOT client_id) in both
+		// the authorize query and the token body — the generic client cannot
+		// express that, hence the dedicated client type.
+		"tiktok": NewTikTokOAuthClient(OAuth2ClientConfig{
+			ProviderKey:      "tiktok",
+			ClientID:         cfg.TikTokClientKey,
+			ClientSecret:     cfg.TikTokClientSecret,
+			AuthorizationURL: cfg.TikTokAuthorizationURL,
+			TokenURL:         cfg.TikTokTokenURL,
+			APIBaseURL:       cfg.TikTokAPIBaseURL,
+			ScopeSeparator:   ",",
+			HTTPClient:       httpClient,
+		}),
+		// Discord: standard authorization-code flow; token endpoint accepts the
+		// secret in the form body (JSON bodies are rejected by Discord).
+		"discord": NewOAuth2Client(OAuth2ClientConfig{
+			ProviderKey:      "discord",
+			ClientID:         cfg.DiscordClientID,
+			ClientSecret:     cfg.DiscordClientSecret,
+			AuthorizationURL: cfg.DiscordAuthorizationURL,
+			TokenURL:         cfg.DiscordTokenURL,
+			APIBaseURL:       cfg.DiscordAPIBaseURL,
 			ScopeSeparator:   " ",
 			HTTPClient:       httpClient,
 		}),

@@ -1,6 +1,6 @@
 "use client";
 
-import { animate, motion, useMotionValue } from "motion/react";
+import { animate, motion, useMotionValue, useReducedMotion } from "motion/react";
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import useMeasure from "react-use-measure";
@@ -29,11 +29,13 @@ function InfiniteSlider({
 	const translation = useMotionValue(0);
 	const [isTransitioning, setIsTransitioning] = useState(false);
 	const [key, setKey] = useState(0);
+	const shouldReduceMotion = useReducedMotion();
 
 	useEffect(() => {
 		const size = direction === "horizontal" ? width : height;
 
-		if (size === 0) {
+		if (size === 0 || shouldReduceMotion) {
+			translation.set(0);
 			return undefined;
 		}
 
@@ -74,17 +76,18 @@ function InfiniteSlider({
 		isTransitioning,
 		direction,
 		reverse,
+		shouldReduceMotion,
 	]);
 
 	const handleHoverStart = () => {
-		if (!speedOnHover) return;
+		if (!speedOnHover || shouldReduceMotion) return;
 
 		setIsTransitioning(true);
 		setCurrentSpeed(speedOnHover);
 	};
 
 	const handleHoverEnd = () => {
-		if (!speedOnHover) return;
+		if (!speedOnHover || shouldReduceMotion) return;
 
 		setIsTransitioning(true);
 		setCurrentSpeed(speed);
@@ -93,7 +96,12 @@ function InfiniteSlider({
 	return (
 		<div className={className}>
 			<motion.div
-				className="flex w-max items-center will-change-transform"
+				className={[
+					"flex w-max items-center",
+					shouldReduceMotion ? "" : "will-change-transform",
+				]
+					.filter(Boolean)
+					.join(" ")}
 				onHoverEnd={handleHoverEnd}
 				onHoverStart={handleHoverStart}
 				ref={ref}
@@ -167,12 +175,12 @@ function getLogoClassName(index: number) {
 export function BrandLogosSection() {
 	return (
 		<section
-      aria-label="Systemer Velion kobler til"
-      className="grid h-[clamp(112px,12vw,154px)] grid-cols-[minmax(138px,220px)_minmax(0,1fr)] items-center gap-[clamp(34px,4.8vw,92px)] overflow-hidden border-y border-[color-mix(in_srgb,var(--velion-j-text)_7%,transparent)] bg-background px-[clamp(56px,5.55vw,208px)] max-[760px]:h-auto max-[760px]:grid-cols-1 max-[760px]:gap-4 max-[760px]:px-[clamp(24px,4vw,56px)] max-[760px]:py-7"
-    >
+			aria-label="Systemer Velion kobler til"
+			className="grid h-[clamp(112px,12vw,154px)] grid-cols-[minmax(138px,220px)_minmax(0,1fr)] items-center gap-[clamp(34px,4.8vw,92px)] overflow-hidden border-b border-[color-mix(in_srgb,var(--velion-j-text)_7%,transparent)] bg-background px-[clamp(56px,5.55vw,208px)] max-[760px]:h-auto max-[760px]:grid-cols-1 max-[760px]:gap-4 max-[760px]:px-[clamp(24px,4vw,56px)] max-[760px]:py-7"
+		>
 			<p className="m-0 grid justify-self-start border-r border-[color-mix(in_srgb,var(--velion-j-text)_10%,transparent)] pr-[clamp(18px,2vw,34px)] text-left font-protokoll text-[clamp(0.78rem,0.72vw,0.92rem)] font-medium uppercase leading-[1.12] tracking-[0.025em] text-[color-mix(in_srgb,var(--velion-j-text)_58%,transparent)] max-[760px]:flex max-[760px]:gap-1.5 max-[760px]:border-r-0 max-[760px]:pr-0">
-				<span>Forankret i</span>
-				<span>systemene dere bruker</span>
+				<span>Koblet til</span>
+				<span>systemene deres</span>
 			</p>
 
 			<BlurredInfiniteSlider

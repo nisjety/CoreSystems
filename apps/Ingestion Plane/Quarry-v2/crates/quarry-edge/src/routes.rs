@@ -438,6 +438,11 @@ pub struct CrawlRequest {
     pub url: String,
     #[serde(default)]
     pub max_pages: Option<u32>,
+    /// BFS depth cap forwarded to the orchestrator's `CrawlJobInput`
+    /// (`params.max_depth`). Absent = orchestrator default. Onboarding's
+    /// crawl preview pins this to 1 so previews stay shallow.
+    #[serde(default)]
+    pub max_depth: Option<u32>,
     /// Selective ingest (Phase 2): true = successful crawled pages are durably
     /// persisted+embedded into the Data Plane (owner=initiator/private via
     /// Phase 1). Absent/false = working-set only (default NEVER). The gateway
@@ -488,6 +493,7 @@ async fn crawl_handoff(
             "kind": "crawl",
             "url": req.url,
             "max_pages": req.max_pages,
+            "max_depth": req.max_depth,
             "org_id": org_id,
             "user_id": claims.user_id,
             "ingest": req.ingest,
@@ -1117,6 +1123,7 @@ mod tests {
             scheduler: None,
             internal_signer: None,
             page_renderer: None,
+            visual_processor: None,
             #[cfg(feature = "postgres-queue")]
             event_history: None,
             #[cfg(feature = "postgres-queue")]

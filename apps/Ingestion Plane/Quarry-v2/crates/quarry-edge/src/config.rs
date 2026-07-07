@@ -178,6 +178,30 @@ pub struct EdgeConfig {
     pub dataplane_nats_url: Option<String>,
     #[serde(default)]
     pub edge_internal_base_url: Option<String>,
+    /// Deterministic visual evidence processing. This is intentionally separate
+    /// from page-image rendering: page images feed Data Plane embeddings, while
+    /// visual observation processing produces debug/change artifacts for browser
+    /// actions. Defaults off; the first backend is an isolated OpenCV sidecar.
+    #[serde(default)]
+    pub vision_enabled: bool,
+    #[serde(default)]
+    pub vision_backend: Option<String>,
+    #[serde(default)]
+    pub vision_sidecar_url: Option<String>,
+    #[serde(default)]
+    pub visual_diff_enabled: bool,
+    #[serde(default)]
+    pub screenshot_preprocessing_enabled: bool,
+    #[serde(default)]
+    pub page_image_cleanup_enabled: bool,
+    #[serde(default)]
+    pub visual_tiles_enabled: bool,
+    #[serde(default)]
+    pub ocr_preconditioning_enabled: bool,
+    #[serde(default)]
+    pub rendered_branding_visual_enabled: bool,
+    #[serde(default)]
+    pub visual_max_regions: Option<usize>,
 }
 
 fn default_port() -> u16 {
@@ -262,6 +286,16 @@ impl EdgeConfig {
             cas_bucket: None,
             dataplane_nats_url: None,
             edge_internal_base_url: None,
+            vision_enabled: false,
+            vision_backend: None,
+            vision_sidecar_url: None,
+            visual_diff_enabled: false,
+            screenshot_preprocessing_enabled: false,
+            page_image_cleanup_enabled: false,
+            visual_tiles_enabled: false,
+            ocr_preconditioning_enabled: false,
+            rendered_branding_visual_enabled: false,
+            visual_max_regions: None,
         }
     }
 }

@@ -102,6 +102,21 @@ func (p *HTTPPublisher) Publish(ctx context.Context, job PublishJob, post Post, 
 		return p.publishInstagram(ctx, attempt, post, account, token.AccessToken)
 	case "facebook":
 		return p.publishFacebook(ctx, attempt, post, account, token.AccessToken)
+	case "meta":
+		// Unified Meta connection (Facebook Pages + Instagram + WhatsApp + Ads
+		// behind one grant): organic posts publish via the Facebook Pages
+		// surface. When the account metadata carries an Instagram user id,
+		// route to the Instagram publisher instead.
+		if metadataString(account.Metadata, "instagram_user_id", "instagramUserId", "ig_user_id") != "" {
+			return p.publishInstagram(ctx, attempt, post, account, token.AccessToken)
+		}
+		return p.publishFacebook(ctx, attempt, post, account, token.AccessToken)
+	case "whatsapp":
+		attempt.Message = "WhatsApp is a messaging surface — send template/session messages via inbox workflows, not organic publishing."
+		return attempt
+	case "meta-ads":
+		attempt.Message = "Meta Ads connections manage campaigns, not organic posts; use ads workflows."
+		return attempt
 	case "tiktok":
 		return p.publishTikTok(ctx, attempt, post, account, token.AccessToken)
 	case "snapchat":
@@ -200,6 +215,19 @@ func (p *HTTPPublisher) publishInstagram(ctx context.Context, attempt PublishAtt
 		return attempt
 	}
 
+	// Video/REELS containers process asynchronously; calling media_publish
+	// while status_code is still IN_PROGRESS returns an HTTP 400. Image
+	// containers process near-instantly and Meta does not document this
+	// wait as required for them, matching the video-only check below.
+	if mediaKind(post) == "video" {
+		if err := p.waitForInstagramMediaReady(ctx, accessToken, creationID); err != nil {
+			attempt.Status = AttemptStatusFailed
+			attempt.Message = "Instagram media container did not finish processing."
+			attempt.Response = map[string]any{"error": err.Error()}
+			return attempt
+		}
+	}
+
 	publishForm := url.Values{}
 	publishForm.Set("creation_id", creationID)
 	publishURL := p.cfg.InstagramGraphAPIBaseURL + "/" + url.PathEscape(igUserID) + "/media_publish"
@@ -222,11 +250,61 @@ func (p *HTTPPublisher) publishInstagram(ctx context.Context, attempt PublishAtt
 	return attempt
 }
 
+const (
+	instagramContainerPollInterval = 3 * time.Second
+	// ~2 minutes total, inside Meta's documented "30s to a few minutes"
+	// typical processing window for video/Reels containers.
+	instagramContainerPollAttempts = 40
+)
+
+// waitForInstagramMediaReady polls a media container's processing status
+// until it reports FINISHED, per Meta's Content Publishing docs.
+func (p *HTTPPublisher) waitForInstagramMediaReady(ctx context.Context, accessToken, creationID string) error {
+	statusURL := p.cfg.InstagramGraphAPIBaseURL + "/" + url.PathEscape(creationID) + "?fields=status_code"
+	for range instagramContainerPollAttempts {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+		if err != nil {
+			return fmt.Errorf("build media status request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/json")
+		resp, err := p.doRaw(req)
+		if err != nil {
+			return fmt.Errorf("call media status: %w", err)
+		}
+		if resp.status < 200 || resp.status >= 300 {
+			return fmt.Errorf("media status lookup returned status %d", resp.status)
+		}
+		switch status, _ := resp.body["status_code"].(string); status {
+		case "FINISHED":
+			return nil
+		case "ERROR", "EXPIRED":
+			return fmt.Errorf("media container processing failed with status %s", status)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(instagramContainerPollInterval):
+		}
+	}
+	return fmt.Errorf("media container did not finish processing within %s", instagramContainerPollInterval*instagramContainerPollAttempts)
+}
+
 func (p *HTTPPublisher) publishFacebook(ctx context.Context, attempt PublishAttempt, post Post, account Account, accessToken string) PublishAttempt {
 	pageID := firstNonEmpty(metadataString(account.Metadata, "page_id", "pageId", "facebook_page_id"), account.Handle)
 	if pageID == "" {
 		attempt.Message = "Facebook publishing requires a Page id in integration provider context."
 		return attempt
+	}
+	// Page Feed/Photos are Page-scoped edges: Meta's Graph API reference for
+	// them ("A Page access token, pages_manage_posts, pages_read_engagement,
+	// pages_show_list" under Requirements) rejects the connecting user's own
+	// User access token even when that user administers the Page. Exchange
+	// for the Page token first — this was a "connects clean, every post
+	// fails" bug before this fix.
+	pageToken, err := p.facebookPageAccessToken(ctx, accessToken, pageID)
+	if err != nil {
+		return failedAttempt(attempt, "Could not obtain a Facebook Page access token.", err)
 	}
 	if mediaURL := publicMediaURL(post); mediaURL != "" && mediaKind(post) != "video" {
 		attempt.Endpoint = "POST /{page-id}/photos"
@@ -237,7 +315,7 @@ func (p *HTTPPublisher) publishFacebook(ctx context.Context, attempt PublishAtte
 		if err != nil {
 			return failedAttempt(attempt, "Could not build Facebook photo request.", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Authorization", "Bearer "+pageToken)
 		return p.doJSON(attempt, req, http.StatusOK, "Facebook Page photo published.")
 	}
 	attempt.Endpoint = "POST /{page-id}/feed"
@@ -247,8 +325,36 @@ func (p *HTTPPublisher) publishFacebook(ctx context.Context, attempt PublishAtte
 	if err != nil {
 		return failedAttempt(attempt, "Could not build Facebook Page post request.", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Authorization", "Bearer "+pageToken)
 	return p.doJSON(attempt, req, http.StatusOK, "Facebook Page post published.")
+}
+
+// facebookPageAccessToken exchanges the connecting user's OAuth access token
+// for a Page-scoped token, per Meta's documented Page publishing
+// requirements. Instagram Content Publishing deliberately does NOT use this
+// — Meta's own Graph API accepts the linked user token directly for
+// /{ig-user-id}/media and /media_publish (confirmed against real production
+// integrations); do not apply this exchange to publishInstagram.
+func (p *HTTPPublisher) facebookPageAccessToken(ctx context.Context, userToken, pageID string) (string, error) {
+	endpoint := p.cfg.FacebookGraphAPIBaseURL + "/" + url.PathEscape(pageID) + "?fields=access_token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build Page access token request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	req.Header.Set("Accept", "application/json")
+	resp, err := p.doRaw(req)
+	if err != nil {
+		return "", fmt.Errorf("call Page access token lookup: %w", err)
+	}
+	if resp.status < 200 || resp.status >= 300 {
+		return "", fmt.Errorf("Page access token lookup for %s returned status %d", pageID, resp.status)
+	}
+	pageToken, _ := resp.body["access_token"].(string)
+	if strings.TrimSpace(pageToken) == "" {
+		return "", fmt.Errorf("Page %s did not return an access_token — the connected user may not administer this Page", pageID)
+	}
+	return pageToken, nil
 }
 
 func (p *HTTPPublisher) publishTikTok(ctx context.Context, attempt PublishAttempt, post Post, account Account, accessToken string) PublishAttempt {

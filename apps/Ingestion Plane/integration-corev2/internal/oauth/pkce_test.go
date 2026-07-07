@@ -10,6 +10,14 @@ func TestCodeChallengeS256(t *testing.T) {
 	}
 }
 
+func TestCodeChallengeS256Hex(t *testing.T) {
+	got := CodeChallengeS256Hex("abc")
+	want := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	if got != want {
+		t.Fatalf("challenge = %q, want %q", got, want)
+	}
+}
+
 func TestHashStateIsStable(t *testing.T) {
 	a := HashState("state")
 	b := HashState("state")

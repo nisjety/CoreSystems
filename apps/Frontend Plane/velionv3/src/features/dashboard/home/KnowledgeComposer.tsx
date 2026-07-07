@@ -23,7 +23,9 @@ import {
   listBrowserProfiles,
   probeBrowserProfile,
   runBrowserAction,
+  suggestBrowserAction,
   type BrowserAction,
+  type BrowserActionSuggestionResponse,
   type BrowserProfileRestoreProbe,
   type BrowserSessionResponse,
 } from '@/shared/api/browser-client'
@@ -578,6 +580,32 @@ export function KnowledgeComposer(props: {
     }
   }
 
+  const performBrowserSuggestedAction = async (goal: string): Promise<BrowserActionSuggestionResponse | null> => {
+    const current = preview()
+    const sessionId = current?.browserSession?.session.id
+    const id = orgId()
+    if (!current || !sessionId || !id || browserBusy()) return null
+    setBrowserBusy(true)
+    setFormError(null)
+    try {
+      const suggestion = await suggestBrowserAction(id, sessionId, {
+        goal,
+        includeScreenshot: Boolean(current.browserSession?.session.frame?.artifactId),
+      })
+      const action = suggestion.suggestion.action
+      if (action && !suggestion.suggestion.done) {
+        const nextSession = await runBrowserAction(id, sessionId, action)
+        setPreview(attachBrowserSession(current, nextSession))
+      }
+      return suggestion
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : i18n.tr('AI-steget kunne ikke fullføres.', 'The AI browser step could not be completed.'))
+      return null
+    } finally {
+      setBrowserBusy(false)
+    }
+  }
+
   // Link mode scrapes first (preview, no ingest yet); crawl mode kicks off an
   // async site crawl. "Add to knowledge base" below the preview does the ingest.
   const submitUrl = async (event: SubmitEvent) => {
@@ -845,6 +873,7 @@ export function KnowledgeComposer(props: {
             adding={adding()}
             browserBusy={browserBusy()}
             onBrowserAction={(action) => void performBrowserAction(action)}
+            onBrowserSuggestAction={performBrowserSuggestedAction}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
             onDiscard={clearPreview}
             preview={current}

@@ -72,7 +72,12 @@ impl PricingCache {
     /// Compute the USD cost for an inference. Returns `None` when no catalogue
     /// is available (pricing disabled, or cost-core unreachable with a cold
     /// cache) so the caller can emit a null `cost_usd` instead of faking one.
-    pub async fn cost_usd(&self, model: &str, input_tokens: i64, output_tokens: i64) -> Option<f64> {
+    pub async fn cost_usd(
+        &self,
+        model: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+    ) -> Option<f64> {
         self.ensure_fresh().await;
         let inner = self.inner.read().await;
         if inner.rates.is_empty() {
@@ -83,7 +88,10 @@ impl PricingCache {
         // lossless (avoids clippy::cast_precision_loss on a raw i64 cast).
         let input = f64::from(u32::try_from(input_tokens.max(0)).unwrap_or(u32::MAX));
         let output = f64::from(u32::try_from(output_tokens.max(0)).unwrap_or(u32::MAX));
-        Some(input / 1_000_000.0 * rate.input_per_million + output / 1_000_000.0 * rate.output_per_million)
+        Some(
+            input / 1_000_000.0 * rate.input_per_million
+                + output / 1_000_000.0 * rate.output_per_million,
+        )
     }
 
     /// Refresh the catalogue from cost-core when it is empty or past the TTL. A
@@ -157,9 +165,21 @@ mod tests {
 
     fn rates() -> Vec<Rate> {
         vec![
-            Rate { model: "default".into(), input_per_million: 3.0, output_per_million: 15.0 },
-            Rate { model: "gpt-4o-mini".into(), input_per_million: 0.15, output_per_million: 0.60 },
-            Rate { model: "claude-sonnet".into(), input_per_million: 3.0, output_per_million: 15.0 },
+            Rate {
+                model: "default".into(),
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+            },
+            Rate {
+                model: "gpt-4o-mini".into(),
+                input_per_million: 0.15,
+                output_per_million: 0.60,
+            },
+            Rate {
+                model: "claude-sonnet".into(),
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+            },
         ]
     }
 
@@ -167,7 +187,10 @@ mod tests {
     fn exact_and_prefix_and_default() {
         let r = rates();
         assert_eq!(lookup(&r, "gpt-4o-mini").unwrap().model, "gpt-4o-mini");
-        assert_eq!(lookup(&r, "claude-sonnet-4-6").unwrap().model, "claude-sonnet");
+        assert_eq!(
+            lookup(&r, "claude-sonnet-4-6").unwrap().model,
+            "claude-sonnet"
+        );
         assert_eq!(lookup(&r, "totally-unknown").unwrap().model, "default");
     }
 

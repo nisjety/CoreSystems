@@ -26,6 +26,13 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	t.Setenv("DATA_PLANE_INTERNAL_API_KEY", "data-plane-key")
 	t.Setenv("DATA_PLANE_INTERNAL_API_KEY_HEADER", "X-Data-Plane-Key")
 	t.Setenv("INTEGRATION_CORE_URL", "http://integration-corev2:3026/")
+	t.Setenv("FACEBOOK_CLIENT_ID", "facebook-app-id")
+	t.Setenv("META_JS_SDK_API_VERSION", "23.0")
+	t.Setenv("META_JS_SDK_LOCALE", "nb_NO")
+	t.Setenv("META_BUSINESS_LOGIN_CONFIG_ID", "business-login-config")
+	t.Setenv("META_WEBHOOK_VERIFY_TOKEN", "meta-verify-token")
+	t.Setenv("META_WEBHOOK_SECRET", "meta-webhook-secret")
+	t.Setenv("THREADS_API_BASE_URL", "https://threads.test/v1/")
 
 	cfg, err := Load()
 	if err != nil {
@@ -54,6 +61,99 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	}
 	if cfg.IntegrationCoreURL != "http://integration-corev2:3026" {
 		t.Fatalf("IntegrationCoreURL = %q, want trimmed internal URL", cfg.IntegrationCoreURL)
+	}
+	if cfg.MicrosoftTokenOrigin != "http://localhost:3026" {
+		t.Fatalf("MicrosoftTokenOrigin = %q, want public base origin", cfg.MicrosoftTokenOrigin)
+	}
+	if cfg.LinkedInMarketingVersion != "202606" {
+		t.Fatalf("LinkedInMarketingVersion = %q, want default 202606", cfg.LinkedInMarketingVersion)
+	}
+	if cfg.MetaJSSDKAppID != "facebook-app-id" || cfg.MetaJSSDKAPIVersion != "v23.0" || cfg.MetaJSSDKLocale != "nb_NO" {
+		t.Fatalf("Meta JS SDK config = %q/%q/%q, want facebook-app-id/v23.0/nb_NO", cfg.MetaJSSDKAppID, cfg.MetaJSSDKAPIVersion, cfg.MetaJSSDKLocale)
+	}
+	if cfg.MetaBusinessLoginConfigID != "business-login-config" {
+		t.Fatalf("MetaBusinessLoginConfigID = %q, want configured id", cfg.MetaBusinessLoginConfigID)
+	}
+	if cfg.MetaWebhookVerifyToken != "meta-verify-token" || cfg.MetaWebhookSecret != "meta-webhook-secret" || cfg.MetaThreadsAPIBaseURL != "https://threads.test/v1" {
+		t.Fatalf("Meta webhook/Threads config = %q/%q/%q, want configured values", cfg.MetaWebhookVerifyToken, cfg.MetaWebhookSecret, cfg.MetaThreadsAPIBaseURL)
+	}
+	if cfg.InstagramClientID != "facebook-app-id" {
+		t.Fatalf("InstagramClientID = %q, want shared Meta/Facebook app fallback", cfg.InstagramClientID)
+	}
+}
+
+func TestNormalizeGraphAPIVersionDefaultsToCurrentVersion(t *testing.T) {
+	if got := normalizeGraphAPIVersion(""); got != "v25.0" {
+		t.Fatalf("normalizeGraphAPIVersion(\"\") = %q, want v25.0", got)
+	}
+	if got := normalizeGraphAPIVersion("25.0"); got != "v25.0" {
+		t.Fatalf("normalizeGraphAPIVersion(\"25.0\") = %q, want v25.0", got)
+	}
+}
+
+func TestNormalizeGitHubAPIBaseURLAvoidsPublicWebOrigin404(t *testing.T) {
+	if got := normalizeGitHubAPIBaseURL("https://github.com"); got != "https://api.github.com" {
+		t.Fatalf("normalizeGitHubAPIBaseURL(public web) = %q, want https://api.github.com", got)
+	}
+	if got := normalizeGitHubAPIBaseURL("https://github.example.com"); got != "https://github.example.com/api/v3" {
+		t.Fatalf("normalizeGitHubAPIBaseURL(enterprise web) = %q, want enterprise API path", got)
+	}
+	if got := normalizeGitHubAPIBaseURL("https://github.example.com/api/v3/"); got != "https://github.example.com/api/v3" {
+		t.Fatalf("normalizeGitHubAPIBaseURL(enterprise API) = %q, want trimmed enterprise API path", got)
+	}
+	if got := normalizeGitHubAPIBaseURL("http://localhost:9090"); got != "http://localhost:9090" {
+		t.Fatalf("normalizeGitHubAPIBaseURL(local mock) = %q, want unchanged local mock URL", got)
+	}
+}
+
+func TestLoadAcceptsTikTokClientIDAlias(t *testing.T) {
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("TIKTOK_CLIENT_KEY", "")
+	t.Setenv("TIKTOK_CLIENT_ID", "legacy-tiktok-client-id")
+	t.Setenv("TIKTOK_CLIENT_SECRET", "tiktok-secret")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.TikTokClientKey != "legacy-tiktok-client-id" {
+		t.Fatalf("TikTokClientKey = %q, want client_id alias", cfg.TikTokClientKey)
+	}
+	if missing := cfg.ProviderReadiness()["tiktok"]; len(missing) != 0 {
+		t.Fatalf("TikTok readiness missing = %v, want ready", missing)
+	}
+}
+
+func TestSnapchatReadinessRequiresHTTPSRedirectBaseURL(t *testing.T) {
+	cfg := Config{
+		PublicBaseURL:        "http://localhost:3026",
+		SnapchatClientID:     "snapchat-client",
+		SnapchatClientSecret: "snapchat-secret",
+	}
+	missing := strings.Join(cfg.ProviderReadiness()["snapchat"], ",")
+	if !strings.Contains(missing, "SNAPCHAT_REDIRECT_BASE_URL or HTTPS INTEGRATION_PUBLIC_BASE_URL") {
+		t.Fatalf("Snapchat readiness missing = %q, want HTTPS redirect requirement", missing)
+	}
+
+	cfg.SnapchatRedirectBaseURL = "https://connect.example.com/"
+	if missing := cfg.ProviderReadiness()["snapchat"]; len(missing) != 0 {
+		t.Fatalf("Snapchat readiness missing = %v, want ready with HTTPS redirect override", missing)
+	}
+	if err := cfg.ValidateProvider("snapchat"); err != nil {
+		t.Fatalf("ValidateProvider returned error with HTTPS redirect override: %v", err)
+	}
+}
+
+func TestLoadTrimsSnapchatRedirectBaseURL(t *testing.T) {
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("SNAPCHAT_REDIRECT_BASE_URL", "https://connect.example.com/")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.SnapchatRedirectBaseURL != "https://connect.example.com" {
+		t.Fatalf("SnapchatRedirectBaseURL = %q, want trimmed override", cfg.SnapchatRedirectBaseURL)
 	}
 }
 
@@ -92,6 +192,9 @@ func TestLoadAcceptsLegacyMicrosoftCredentialEnv(t *testing.T) {
 	if cfg.MicrosoftClientSecret != "legacy-client-secret" {
 		t.Fatalf("MicrosoftClientSecret = %q, want legacy-client-secret", cfg.MicrosoftClientSecret)
 	}
+	if cfg.MicrosoftClientAuthMode != "public" {
+		t.Fatalf("MicrosoftClientAuthMode = %q, want public", cfg.MicrosoftClientAuthMode)
+	}
 }
 
 func TestControlPlaneInternalAPIKeyFallsBackToInternalAPIKey(t *testing.T) {
@@ -114,6 +217,27 @@ func TestValidateProviderRequiresMicrosoftCredentials(t *testing.T) {
 	}
 }
 
+func TestValidateProviderAllowsMicrosoftPublicClientWithoutSecret(t *testing.T) {
+	cfg := Config{
+		MicrosoftClientID:       "microsoft-client",
+		MicrosoftClientAuthMode: "public",
+	}
+	if err := cfg.ValidateProvider("microsoft"); err != nil {
+		t.Fatalf("ValidateProvider returned error: %v", err)
+	}
+}
+
+func TestValidateProviderRequiresMicrosoftSecretForConfidentialClient(t *testing.T) {
+	cfg := Config{
+		MicrosoftClientID:       "microsoft-client",
+		MicrosoftClientAuthMode: "confidential",
+	}
+	err := cfg.ValidateProvider("microsoft")
+	if err == nil || !strings.Contains(err.Error(), "AZURE_CLIENT_SECRET") {
+		t.Fatalf("ValidateProvider error = %v, want client secret error", err)
+	}
+}
+
 func TestValidateProviderRequiresProviderSpecificCredentials(t *testing.T) {
 	tests := []struct {
 		provider string
@@ -127,8 +251,13 @@ func TestValidateProviderRequiresProviderSpecificCredentials(t *testing.T) {
 		{provider: "linkedin", want: "LINKEDIN_CLIENT_ID"},
 		{provider: "x", want: "X_CLIENT_ID"},
 		{provider: "instagram", want: "INSTAGRAM_CLIENT_ID"},
+		{provider: "meta", want: "FACEBOOK_CLIENT_ID"},
 		{provider: "facebook", want: "FACEBOOK_CLIENT_ID"},
+		{provider: "whatsapp", want: "FACEBOOK_CLIENT_ID"},
+		{provider: "meta-ads", want: "FACEBOOK_CLIENT_ID"},
 		{provider: "snapchat", want: "SNAPCHAT_CLIENT_ID"},
+		{provider: "tiktok", want: "TIKTOK_CLIENT_KEY or TIKTOK_CLIENT_ID"},
+		{provider: "discord", want: "DISCORD_CLIENT_ID"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {

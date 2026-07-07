@@ -420,6 +420,12 @@ services:
       NATS_URL: nats://nats:4222
       VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      # Ingestion Plane outbound client: draft.reply sends (task #22) and the
+      # webhook_received inbound consumer (task #24) both need this to reach
+      # integration-corev2 across the shared inter-plane-bus network. The
+      # internal key falls back to INTERNAL_API_KEY above (same shared value
+      # every plane already uses for cross-plane calls).
+      INTEGRATION_BASE_URL: ${INTEGRATION_BASE_URL:-http://integration-api:3026}
     depends_on:
       application-postgres:
         condition: service_healthy
@@ -582,6 +588,10 @@ services:
       # surface stays empty even when agent runs are executing.
       MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-plane-nats-1:4222}
       MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:-}
+      # Task #28: metrics.snapshotted carries only a summary count; the metric
+      # subscriber fetches the real per-metric values from social-core's
+      # GET /api/v1/social/metrics using this URL + the shared internal key.
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
     ports:
       - "${INSIGHT_CORE_HOST_PORT:-3163}:3163"
     depends_on:
@@ -618,6 +628,11 @@ services:
     # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
     # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
     # event on the inter-plane bus (audit-core subscribes velion.audit.v1.>).
+    #
+    # Provider lead sync: LinkedIn Lead Gen form responses via integration-corev2's
+    # actions gateway (integration-api on the inter-plane bus, same route as
+    # social-core/insight-core). PERSON DATA is confined to the provider_leads
+    # table — see leads-core/README.md "PII posture" before extending.
     environment:
       PORT: "3164"
       SERVICE_NAME: leads-core
@@ -625,6 +640,9 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
       NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      PROVIDER_LEAD_SYNC_ENABLED: ${PROVIDER_LEAD_SYNC_ENABLED:-true}
+      PROVIDER_LEAD_SYNC_INTERVAL: ${PROVIDER_LEAD_SYNC_INTERVAL:-1h}
     ports:
       - "${LEADS_CORE_HOST_PORT:-3164}:3164"
     depends_on:
@@ -782,7 +800,7 @@ services:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - application-prometheus-data:/prometheus
     ports:
-      - "9096:9090" # host 9096 avoids collision with the Control-Plane Prometheus (9095)
+      - "19096:9090" # host 19096 avoids Model Plane letta-bridge on host 9096
     networks:
       - app-net
       - inter-plane-bus

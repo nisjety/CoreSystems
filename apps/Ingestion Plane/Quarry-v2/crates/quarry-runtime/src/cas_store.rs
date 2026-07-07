@@ -97,11 +97,10 @@ impl CasStore {
             .send()
             .await
             .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("cas get {key}: {e}")))?;
-        let body = out
-            .body
-            .collect()
-            .await
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("cas read {key}: {e}")))?;
+        let body =
+            out.body.collect().await.map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("cas read {key}: {e}"))
+            })?;
         Ok(body.into_bytes().to_vec())
     }
 
@@ -132,10 +131,9 @@ impl CasStore {
 
         let mut objects = Vec::with_capacity(keys.len());
         for k in &keys {
-            let oi = ObjectIdentifier::builder()
-                .key(k)
-                .build()
-                .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("object id {k}: {e}")))?;
+            let oi = ObjectIdentifier::builder().key(k).build().map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("object id {k}: {e}"))
+            })?;
             objects.push(oi);
         }
         let delete = Delete::builder()

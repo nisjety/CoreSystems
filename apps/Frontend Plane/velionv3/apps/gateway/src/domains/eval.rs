@@ -69,13 +69,21 @@ struct RunRow {
 }
 
 fn classify(run: &Value) -> Option<RunRow> {
-    let status = run.get("status").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+    let status = run
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
     if status.is_empty() {
         return None;
     }
     let terminal = matches!(status.as_str(), "completed" | "failed" | "cancelled");
     Some(RunRow {
-        created_at: run.get("created_at").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        created_at: run
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         completed: status == "completed",
         terminal,
     })
@@ -97,9 +105,19 @@ async fn quality(
     let token = model_token(&state, &user, &headers).await;
 
     // 1) List the caller's recent threads (model-gateway derives scope from the token).
-    let threads_url = format!("{}/v1/threads?limit={}", state.model_gateway_url, MAX_THREADS);
-    let (status, Json(threads_body)) =
-        proxy_model_json(&state, Method::GET, &threads_url, None, token.as_deref(), &user).await;
+    let threads_url = format!(
+        "{}/v1/threads?limit={}",
+        state.model_gateway_url, MAX_THREADS
+    );
+    let (status, Json(threads_body)) = proxy_model_json(
+        &state,
+        Method::GET,
+        &threads_url,
+        None,
+        token.as_deref(),
+        &user,
+    )
+    .await;
     if !status.is_success() {
         return (status, Json(threads_body)).into_response();
     }
@@ -134,7 +152,10 @@ async fn quality(
             let (st, Json(body)) =
                 proxy_model_json(state, Method::GET, &url, None, token.as_deref(), user).await;
             if st.is_success() {
-                body.get("runs").and_then(Value::as_array).cloned().unwrap_or_default()
+                body.get("runs")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -154,7 +175,11 @@ async fn quality(
     let mut rows: Vec<RunRow> = Vec::with_capacity(runs.len());
 
     for run in &runs {
-        let status = run.get("status").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
         match status.as_str() {
             "completed" => completed += 1,
             "failed" => failed += 1,
@@ -163,7 +188,10 @@ async fn quality(
             _ => other += 1,
         }
         input_sum += run.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-        output_sum += run.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        output_sum += run
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         if let Some(row) = classify(run) {
             rows.push(row);
         }

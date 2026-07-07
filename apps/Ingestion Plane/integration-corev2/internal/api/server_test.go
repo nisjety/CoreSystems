@@ -37,6 +37,58 @@ func TestProvidersCatalogIsPublic(t *testing.T) {
 	}
 }
 
+func TestProvidersCatalogIncludesMetaSDKConfig(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MetaJSSDKAppID = "meta-app-id"
+	cfg.MetaJSSDKAPIVersion = "v23.0"
+	cfg.MetaJSSDKLocale = "en_US"
+	cfg.MetaBusinessLoginConfigID = "business-config-id"
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	req := httptest.NewRequest("GET", "/api/v1/providers", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var decoded struct {
+		Data struct {
+			Providers []struct {
+				Key     string `json:"key"`
+				MetaSDK *struct {
+					Enabled       bool   `json:"enabled"`
+					AppID         string `json:"appId"`
+					APIVersion    string `json:"apiVersion"`
+					Locale        string `json:"locale"`
+					LoginConfigID string `json:"loginConfigId"`
+				} `json:"metaSdk"`
+			} `json:"providers"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, provider := range decoded.Data.Providers {
+		if provider.Key != "facebook" && provider.Key != "instagram" && provider.Key != "whatsapp" && provider.Key != "meta-ads" {
+			continue
+		}
+		if provider.MetaSDK == nil {
+			t.Fatalf("%s provider missing metaSdk config", provider.Key)
+		}
+		if !provider.MetaSDK.Enabled || provider.MetaSDK.AppID != "meta-app-id" || provider.MetaSDK.APIVersion != "v23.0" || provider.MetaSDK.Locale != "en_US" || provider.MetaSDK.LoginConfigID != "business-config-id" {
+			t.Fatalf("%s metaSdk = %#v, want configured sdk metadata", provider.Key, provider.MetaSDK)
+		}
+		seen[provider.Key] = true
+	}
+	if !seen["facebook"] || !seen["instagram"] || !seen["whatsapp"] || !seen["meta-ads"] {
+		t.Fatalf("providers with metaSdk = %#v, want facebook, instagram, whatsapp, and meta-ads", seen)
+	}
+}
+
 func TestHealthIsPublic(t *testing.T) {
 	app := testServer(t)
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -1109,6 +1161,49 @@ func TestGitHubWebhookRejectsInvalidSignature(t *testing.T) {
 	}
 }
 
+func TestMetaWebhookChallengeIsVerified(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MetaWebhookVerifyToken = "verify-token"
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	req := httptest.NewRequest("GET", "/api/v1/webhooks/meta?hub.mode=subscribe&hub.verify_token=verify-token&hub.challenge=challenge-123", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(body) != "challenge-123" {
+		t.Fatalf("body = %q, want challenge-123", string(body))
+	}
+}
+
+func TestMetaWebhookSignatureIsVerified(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MetaWebhookSecret = "meta-webhook-secret"
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+	body := `{"object":"page","organizationId":"org-1","entry":[{"id":"page-1"}]}`
+	mac := hmac.New(sha256.New, []byte(cfg.MetaWebhookSecret))
+	_, _ = mac.Write([]byte(body))
+	signature := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	req := httptest.NewRequest("POST", "/api/v1/webhooks/meta", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", signature)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestShopifyWebhookSignatureIsVerified(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.ShopifyWebhookSecret = "shopify-webhook-secret"
@@ -1131,11 +1226,129 @@ func TestShopifyWebhookSignatureIsVerified(t *testing.T) {
 	}
 }
 
+func TestWebhookRejectsWhenSecretUnconfigured(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	// github has a signature scheme but no secret configured; notion has no
+	// implemented scheme at all. Both must fail closed with 401.
+	for _, provider := range []string{"github", "notion"} {
+		req := httptest.NewRequest("POST", "/api/v1/webhooks/"+provider, strings.NewReader(`{"event":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test error: %v", err)
+		}
+		if resp.StatusCode != 401 {
+			t.Fatalf("provider %s: status = %d, want 401", provider, resp.StatusCode)
+		}
+	}
+}
+
+func TestInternalWebhookEventFetchRoundTrips(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.AllowUnverifiedWebhooks = true
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	postReq := httptest.NewRequest("POST", "/api/v1/webhooks/github", strings.NewReader(`{"organizationId":"org-1","deliveryId":"delivery-42","zen":"hello"}`))
+	postReq.Header.Set("Content-Type", "application/json")
+	postResp, err := app.Test(postReq)
+	if err != nil {
+		t.Fatalf("app.Test (post webhook) error: %v", err)
+	}
+	if postResp.StatusCode != 200 {
+		t.Fatalf("post status = %d, want 200", postResp.StatusCode)
+	}
+	var posted struct {
+		Data struct {
+			WebhookEventID string `json:"webhookEventId"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(postResp.Body).Decode(&posted); err != nil {
+		t.Fatalf("decode post response: %v", err)
+	}
+	if posted.Data.WebhookEventID == "" {
+		t.Fatal("post response missing webhookEventId")
+	}
+
+	getReq := httptest.NewRequest("GET", "/internal/webhooks/events/"+posted.Data.WebhookEventID+"?organizationId=org-1", nil)
+	getReq.Header.Set("X-Internal-API-Key", "dev-key")
+	getResp, err := app.Test(getReq)
+	if err != nil {
+		t.Fatalf("app.Test (get webhook event) error: %v", err)
+	}
+	if getResp.StatusCode != 200 {
+		t.Fatalf("get status = %d, want 200", getResp.StatusCode)
+	}
+	var fetched struct {
+		Data struct {
+			WebhookEvent struct {
+				ID      string         `json:"id"`
+				Payload map[string]any `json:"payload"`
+			} `json:"webhookEvent"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(getResp.Body).Decode(&fetched); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if fetched.Data.WebhookEvent.ID != posted.Data.WebhookEventID {
+		t.Fatalf("fetched id = %q, want %q", fetched.Data.WebhookEvent.ID, posted.Data.WebhookEventID)
+	}
+	if fetched.Data.WebhookEvent.Payload["zen"] != "hello" {
+		t.Fatalf("fetched payload = %#v, want the original body echoed back", fetched.Data.WebhookEvent.Payload)
+	}
+}
+
+func TestInternalWebhookEventFetchRequiresInternalAuth(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+	req := httptest.NewRequest("GET", "/internal/webhooks/events/wh_nonexistent", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != 401 {
+		t.Fatalf("status = %d, want 401 without an internal key", resp.StatusCode)
+	}
+}
+
+func TestInternalWebhookEventFetchScopesByOrganization(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.AllowUnverifiedWebhooks = true
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	postReq := httptest.NewRequest("POST", "/api/v1/webhooks/github", strings.NewReader(`{"organizationId":"org-1","deliveryId":"delivery-99"}`))
+	postReq.Header.Set("Content-Type", "application/json")
+	postResp, err := app.Test(postReq)
+	if err != nil {
+		t.Fatalf("app.Test (post webhook) error: %v", err)
+	}
+	var posted struct {
+		Data struct {
+			WebhookEventID string `json:"webhookEventId"`
+		} `json:"data"`
+	}
+	_ = json.NewDecoder(postResp.Body).Decode(&posted)
+
+	getReq := httptest.NewRequest("GET", "/internal/webhooks/events/"+posted.Data.WebhookEventID+"?organizationId=org-2", nil)
+	getReq.Header.Set("X-Internal-API-Key", "dev-key")
+	getResp, err := app.Test(getReq)
+	if err != nil {
+		t.Fatalf("app.Test (get webhook event) error: %v", err)
+	}
+	if getResp.StatusCode != 404 {
+		t.Fatalf("status = %d, want 404 for a mismatched organizationId", getResp.StatusCode)
+	}
+}
+
 func TestWebhookRouteIsRateLimited(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.RateLimitEnabled = true
 	cfg.RateLimitMax = 1
 	cfg.RateLimitWindow = time.Minute
+	// This test exercises the limiter, not signatures: opt into the dev-only
+	// unverified-webhook escape hatch (webhooks otherwise fail closed).
+	cfg.AllowUnverifiedWebhooks = true
 	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
 
 	for i := 0; i < 2; i++ {
@@ -1532,6 +1745,92 @@ func TestLegacySlackChannelsRouteUsesOrgConnection(t *testing.T) {
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestMetaActionCapabilityAndApprovalGates(t *testing.T) {
+	tests := []struct {
+		operation string
+		wantCap   string
+	}{
+		{operation: "pages.post", wantCap: "social.post.write"},
+		{operation: "whatsapp.messages.send", wantCap: "social.whatsapp.manage"},
+		{operation: "messenger.messages.send", wantCap: "social.messenger.manage"},
+		{operation: "ads.campaign.create", wantCap: "social.ads.manage"},
+		{operation: "catalog.product.upsert", wantCap: "social.catalog.manage"},
+		{operation: "threads.publish", wantCap: "social.threads.manage"},
+		{operation: "live.create", wantCap: "social.live.manage"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.operation, func(t *testing.T) {
+			gotCap, sensitive := requiredCapabilityForOperation("meta", tt.operation)
+			if gotCap != tt.wantCap || !sensitive {
+				t.Fatalf("requiredCapabilityForOperation = %q/%v, want %q/true", gotCap, sensitive, tt.wantCap)
+			}
+			if !actionRequiresApproval("meta", tt.operation) {
+				t.Fatalf("actionRequiresApproval(%q) = false, want true", tt.operation)
+			}
+		})
+	}
+}
+
+func TestGitHubActionCapabilityAndApprovalGates(t *testing.T) {
+	tests := []struct {
+		operation     string
+		wantCap       string
+		wantSensitive bool
+		wantApproval  bool
+	}{
+		{operation: "contents.get", wantCap: "repo.contents.read", wantSensitive: true},
+		{operation: "commits", wantCap: "commits.read", wantSensitive: true},
+		{operation: "pulls.list", wantCap: "pulls.read", wantSensitive: true},
+		{operation: "issues.list", wantCap: "issues.read", wantSensitive: true},
+		{operation: "issues.create", wantCap: "issues.write", wantSensitive: true, wantApproval: true},
+		{operation: "issues.update", wantCap: "issues.write", wantSensitive: true, wantApproval: true},
+		{operation: "issues.comment.create", wantCap: "issues.write", wantSensitive: true, wantApproval: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.operation, func(t *testing.T) {
+			gotCap, sensitive := requiredCapabilityForOperation("github", tt.operation)
+			if gotCap != tt.wantCap || sensitive != tt.wantSensitive {
+				t.Fatalf("requiredCapabilityForOperation = %q/%v, want %q/%v", gotCap, sensitive, tt.wantCap, tt.wantSensitive)
+			}
+			if got := actionRequiresApproval("github", tt.operation); got != tt.wantApproval {
+				t.Fatalf("actionRequiresApproval(%q) = %v, want %v", tt.operation, got, tt.wantApproval)
+			}
+		})
+	}
+}
+
+func TestLinkedInActionCapabilityAndApprovalGates(t *testing.T) {
+	tests := []struct {
+		operation     string
+		wantCap       string
+		wantSensitive bool
+		wantApproval  bool
+	}{
+		{operation: "profile", wantCap: "social.profile.read"},
+		{operation: "identity", wantCap: "social.profile.verify", wantSensitive: true},
+		{operation: "verification.report", wantCap: "social.verification.read", wantSensitive: true},
+		{operation: "organization.acls", wantCap: "social.organization.read", wantSensitive: true},
+		{operation: "posts.create", wantCap: "social.post.write", wantSensitive: true, wantApproval: true},
+		{operation: "events.create", wantCap: "social.events.manage", wantSensitive: true, wantApproval: true},
+		{operation: "ads.accounts", wantCap: "social.ads.read", wantSensitive: true},
+		{operation: "ads.campaigns", wantCap: "social.ads.read", wantSensitive: true},
+		{operation: "ads.campaign.create", wantCap: "social.ads.manage", wantSensitive: true, wantApproval: true},
+		{operation: "conversions.create", wantCap: "social.conversions.manage", wantSensitive: true, wantApproval: true},
+		{operation: "lead.forms", wantCap: "social.leads.read", wantSensitive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.operation, func(t *testing.T) {
+			gotCap, sensitive := requiredCapabilityForOperation("linkedin", tt.operation)
+			if gotCap != tt.wantCap || sensitive != tt.wantSensitive {
+				t.Fatalf("requiredCapabilityForOperation = %q/%v, want %q/%v", gotCap, sensitive, tt.wantCap, tt.wantSensitive)
+			}
+			if got := actionRequiresApproval("linkedin", tt.operation); got != tt.wantApproval {
+				t.Fatalf("actionRequiresApproval(%q) = %v, want %v", tt.operation, got, tt.wantApproval)
+			}
+		})
 	}
 }
 

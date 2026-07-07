@@ -3,6 +3,8 @@ import {
   createEmptyPreviewResponse,
   type BrregEnhet,
   type PlanRecommendation,
+  type PlanRecommendationLocale,
+  type PlanRecommendationText,
   type PreviewResponse,
 } from '@/features/onboarding/lib/api/contracts'
 
@@ -40,4 +42,19 @@ export async function recommendPlan(context: Record<string, unknown>): Promise<P
     body: JSON.stringify({ context }),
   })
   return response.recommendation
+}
+
+export async function translatePlanRecommendation(input: {
+  recommendation: PlanRecommendationText
+  sourceLanguage?: PlanRecommendationLocale
+  targetLanguage: PlanRecommendationLocale
+}): Promise<PlanRecommendationText> {
+  const response = await requestJson<{ translation: PlanRecommendationText }>(
+    '/api/v1/onboarding/translate-recommendation',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  )
+  return response.translation
 }

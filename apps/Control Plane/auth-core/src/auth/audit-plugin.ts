@@ -1,6 +1,16 @@
 import { createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
-import type { SharedNatsService } from '../nats/shared-nats.service';
+
+/**
+ * Minimal core-publish surface the audit plugin needs. Satisfied by
+ * DirectNatsService (the LOCAL control-plane bus → controlplane-nats, where
+ * audit-core's primary subscription listens). Audit deliberately uses the local
+ * bus, not the shared velion-nats bus (which carries cross-plane domain/ACL
+ * events), so it never depends on the shared bus being up.
+ */
+interface AuditNatsPublisher {
+  publishPlain(subject: string, payload: Record<string, unknown>): void;
+}
 
 // Audit event types for Sprint 4
 export interface AuditEvent {
@@ -38,27 +48,28 @@ interface VelionAuditEvent {
 }
 
 // Module-level singleton — set by setAuditNatsPublisher() called from auth-service.initializer
-let sharedNats: SharedNatsService | null = null;
+let auditNats: AuditNatsPublisher | null = null;
 
-export function setAuditNatsPublisher(svc: SharedNatsService): void {
-  sharedNats = svc;
+export function setAuditNatsPublisher(svc: AuditNatsPublisher): void {
+  auditNats = svc;
 }
 
 /**
- * Publish to velion.audit.v1.control.<event> via the existing SharedNatsService
- * connection only when org_id is known (audit-core rejects events without it).
+ * Publish to velion.audit.v1.control.<event> over the LOCAL control-plane bus
+ * (controlplane-nats), only when org_id is known (audit-core rejects events
+ * without it). Core publish matches audit-core's core QueueSubscribe.
  */
 function publishVelionAudit(evt: VelionAuditEvent): void {
-  if (!sharedNats) return;
+  if (!auditNats) return;
   const subject = `velion.audit.v1.control.${evt.event}`;
-  sharedNats.publishPlain(subject, evt as unknown as Record<string, unknown>);
+  auditNats.publishPlain(subject, evt as unknown as Record<string, unknown>);
 }
 
 // Dev-only fallback: when NATS is unconfigured the event can't reach
 // audit-core, so we at least surface it on stdout. When NATS IS configured
 // this is a no-op — the durable record goes to velion.audit.v1.control.<event>.
 function logAuditEvent(event: AuditEvent): void {
-  if (sharedNats) return;
+  if (auditNats) return;
   console.log('[AUDIT:dev-fallback]', JSON.stringify(event, null, 2));
 }
 

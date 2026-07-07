@@ -1,31 +1,31 @@
 # Project Instructions
 
 ## Scope
-CoreSystem is a multi-plane monorepo. For cross-plane orientation, start with `apps/CODEBASE_INFORMATION_SYSTEM.md`, then `apps/master-ownership-matrix.md`, then plane-specific docs.
+CoreSystem is a multi-plane monorepo. For cross-plane orientation, start with `apps/CODEBASE_INFORMATION_SYSTEM.md`, then `apps/master-ownership-matrix.md`, then plane-specific docs. The current onboarding/audit focus is the six active planes below; Channel Plane remains future/docs-only unless explicitly requested.
 
 Focused planes:
 - `apps/Application Plane`
 - `apps/Data Plane v2`
-- `apps/Channel Plane`
 - `apps/Control Plane`
 - `apps/Model Plane`
 - `apps/Ingestion Plane`
-- `apps/Frontend Plane/velionv2`
+- `apps/Frontend Plane/velionv3`
 
 ## Tech Stack
-- Rust: latency-sensitive runtime, retrieval, browser, protocol, and hot-path services.
+- Rust: latency-sensitive runtime, retrieval, browser, protocol, gateway, and hot-path services.
 - Go: durable workflow, CRUD, registry, policy, orchestration, billing, and control services.
-- TypeScript/TSX: Velion v2 frontend/BFF, NestJS auth-core, Convex functions, support workers.
+- TypeScript/TSX: Velion v3 Solid/Vite frontend, Velion web app, NestJS auth-core, Convex functions, support workers.
 - Python: imports, labs, evals, provider glue, and generated SDK tests.
-- Infra: Docker Compose stacks, Postgres, Redis, NATS/JetStream, Qdrant, MinIO, Temporal, Quickwit, Convex.
+- Infra: Docker Compose stacks, Postgres, Redis/Dragonfly, NATS/JetStream, Qdrant, MinIO, Temporal, Quickwit, Convex.
 
 ## Architecture Rules
 - Control Plane owns identity, users, orgs, billing, sessions, audit, quotas, and entitlements.
 - Data Plane v2 owns documents, chunks, embeddings, retrieval, graph, wiki, and source traces.
 - Ingestion Plane captures evidence and persists durable knowledge through Data Plane contracts only.
+- Provider actions go through integration-corev2's actions surface; the frozen operation/capability contract is `docs/actions-surface-operations.md`.
 - Model Plane owns reasoning, sessions/runs, inference, execution loops, capabilities, sandboxes, browser grants, and cost.
 - Application Plane owns collaborative/realtime workspace projections and notifications.
-- Frontend Plane owns Velion v2 UI plus BFF route normalization.
+- Frontend Plane owns Velion v3 UI plus same-origin gateway/BFF normalization.
 - Channel Plane is future/docs-only today; do not build against it as if runtime exists.
 - No direct database crossing between planes.
 - No independent embeddings/reranking outside isolated labs.
@@ -37,13 +37,14 @@ Focused planes:
 - Keep authority boundaries explicit in names, clients, and tests.
 - Go services usually enter through `cmd/*/main.go` and keep HTTP/gRPC under `internal/http` and `internal/grpc`.
 - Rust services usually enter through `src/main.rs` and keep cross-plane contracts in crate/service-specific modules.
-- Velion v2 uses feature-sliced folders under `src/features/*-v2`.
-- Velion v2 uses Server Components by default and Client Components at interaction leaves.
-- Velion v2 BFF routes live under `src/app/api/**/route.ts` and must not leak upstream secrets or raw OAuth tokens.
+- Velion v3 root uses SolidJS/Vite with feature-sliced folders under `src/features/*`.
+- Velion v3 action contracts live in `src/shared/actions`; add or update the action contract before wiring a meaningful UI operation.
+- Velion v3 context packs live in `src/shared/context-packs`; API clients live under `src/shared/api`, `src/shared/rpc`, and `src/shared/graphrest`.
+- Velion v3 gateway domains live under `apps/gateway/src/domains/*` and must not leak upstream secrets, raw OAuth tokens, or forged scoping headers.
 - API responses use typed envelopes: `{ data }`, cursor `meta`/`links`, or `{ error: { code, message, details } }`.
 
 ## Testing
-- Go tests: `*_test.go`, usually `go test ./...`.
+- Go tests: `*_test.go`, usually `go test ./...` per module/service.
 - Rust tests: `cargo test --workspace` or per-crate `tests/*.rs`.
 - TypeScript tests: `*.test.ts` / `*.test.tsx` with Vitest or Jest, depending on package.
 - Playwright tests: `tests/e2e/*.spec.ts`.
@@ -53,13 +54,13 @@ Focused planes:
 ## Build And Run
 Frontend:
 ```bash
-cd "apps/Frontend Plane/velionv2"
+cd "apps/Frontend Plane/velionv3"
 pnpm dev
 pnpm lint
 pnpm typecheck
 pnpm test
-pnpm test:e2e
 pnpm build
+cargo test --manifest-path apps/gateway/Cargo.toml --all-targets
 ```
 
 Data Plane v2:
@@ -77,6 +78,7 @@ Ingestion Plane:
 cd "apps/Ingestion Plane"
 make up
 make test-endpoints
+cd "Quarry-v2" && cargo test --workspace
 ```
 
 Model Plane:

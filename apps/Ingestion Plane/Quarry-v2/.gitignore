@@ -21,6 +21,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+**/.venv/
+**/.pytest_cache/
+**/__pycache__/
 
 # Docker
 docker-compose.override.yml

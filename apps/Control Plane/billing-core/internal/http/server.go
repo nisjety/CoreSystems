@@ -62,7 +62,16 @@ func (s *Server) setupRoutes() {
 	v1.POST("/orgs/:orgId/invoices", s.createInvoice)
 	v1.POST("/orgs/:orgId/checkout-session", s.createCheckoutSession)
 	v1.POST("/orgs/:orgId/checkout-session/confirm", s.confirmCheckoutSession)
+	// Nexi Checkout payment webhook. Authenticated by the per-webhook shared
+	// secret Nexi echoes in the Authorization header (verified in the handler),
+	// NOT by the internal API key — so its path is exempted from
+	// internalAuthMiddleware below.
+	v1.POST("/webhooks/nexi", s.nexiWebhook)
 }
+
+// nexiWebhookPath is the internal-auth-exempt route for the external Nexi
+// payment webhook (it carries its own Authorization shared-secret instead).
+const nexiWebhookPath = "/api/v1/billing/webhooks/nexi"
 
 func internalAuthMiddleware() gin.HandlerFunc {
 	configuredKeys := []string{
@@ -71,7 +80,7 @@ func internalAuthMiddleware() gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		if c.Request.URL.Path == "/health" || c.Request.Method == http.MethodOptions {
+		if c.Request.URL.Path == "/health" || c.Request.URL.Path == nexiWebhookPath || c.Request.Method == http.MethodOptions {
 			c.Next()
 			return
 		}

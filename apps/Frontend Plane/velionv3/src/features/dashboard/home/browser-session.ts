@@ -1,5 +1,4 @@
 import type {
-  BrowserFrame,
   BrowserObservation,
   BrowserSession,
   BrowserSessionResponse,
@@ -55,6 +54,8 @@ export type BrowserSessionViewModel = {
   status: BrowserSession['status']
   title: string
   url: string
+  visualObservationArtifactId?: string | null
+  visualObservationUrl?: string | null
   viewport: {
     height: number
     width: number
@@ -67,7 +68,12 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
   const mode = preview.browserSession?.session.renderMode ?? 'readability_fallback'
   const observation = preview.browserSession?.observation ?? null
   const session = preview.browserSession?.session
-  const frameUrl = resolveFrameUrl(session?.frame)
+  const frameUrl = resolveBrowserArtifactUrl(session?.frame?.url)
+  const visualObservationArtifactId =
+    session?.visual?.observationArtifactId ?? observation?.visual_observation_artifact_id ?? null
+  const visualObservationUrl =
+    resolveBrowserArtifactUrl(session?.visual?.observationUrl)
+    ?? resolveVisualObservationUrl(session?.id, visualObservationArtifactId)
 
   return {
     capabilities: session?.capabilities ?? ['annotate', 'dom_select', 'knowledge_ingest'],
@@ -100,6 +106,8 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     status: session?.status ?? 'degraded',
     title: observation?.title || session?.title || preview.title,
     url: observation?.url || session?.url || preview.url,
+    visualObservationArtifactId,
+    visualObservationUrl,
     viewport: session?.viewport ?? fallbackViewport,
   }
 }
@@ -122,6 +130,7 @@ export function attachBrowserSession(
       scope: session.profile.id ? session.profile.scope : previous?.profile.scope ?? session.profile.scope,
       storage: session.profile.id ? session.profile.storage : previous?.profile.storage ?? session.profile.storage,
     },
+    visual: session.visual ?? previous?.visual ?? null,
     viewport: session.viewport ?? previous?.viewport,
   }
   const mergedBrowserSession: BrowserSessionResponse = {
@@ -171,10 +180,19 @@ function sourceLabel(mode: BrowserSurfaceMode): string {
   return 'Readability fallback'
 }
 
-function resolveFrameUrl(frame?: BrowserFrame | null): string | null {
-  const value = frame?.url?.trim()
+function resolveBrowserArtifactUrl(url?: string | null): string | null {
+  const value = url?.trim()
   if (!value) return null
   if (value.startsWith('/')) return `${gatewayBaseUrl()}${value}`
   if (/^https?:\/\//i.test(value)) return value
   return null
+}
+
+function resolveVisualObservationUrl(sessionId?: string, artifactId?: string | null): string | null {
+  const normalizedSessionId = sessionId?.trim()
+  const normalizedArtifactId = artifactId?.trim()
+  if (!normalizedSessionId || !normalizedArtifactId) return null
+  return resolveBrowserArtifactUrl(
+    `/api/v1/browser/sessions/${encodeURIComponent(normalizedSessionId)}/artifacts/${encodeURIComponent(normalizedArtifactId)}`,
+  )
 }

@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen } from '@solidjs/testing-library'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PaywallStep } from '@/features/onboarding/components/steps/PaywallStep'
+import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 
 describe('PaywallStep', () => {
+  beforeEach(() => {
+    installMemoryStorage()
+  })
+
   it('uses shared button and switch primitives for plan selection and billing', () => {
     render(() => (
       <PaywallStep
@@ -17,7 +22,7 @@ describe('PaywallStep', () => {
       />
     ))
 
-    expect(screen.getByLabelText('Billing period')).toBeTruthy()
+    expect(screen.getByLabelText('Faktureringsperiode')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Valgt' }).className).toContain('button--primary')
     expect(screen.getAllByRole('button', { name: 'Velg plan' })[0]?.className).toContain('button--secondary')
     expect(screen.getByRole('button', { name: 'Fortsett til oppsett' }).className).toContain('button--primary')
@@ -100,7 +105,9 @@ describe('PaywallStep', () => {
     expect(screen.getByText('Expert anbefales')).toBeTruthy()
     expect(screen.getByText('3 kilder og 48 ansatte gjør Expert til beste startpunkt.')).toBeTruthy()
     expect(screen.getByText('3 kilder er valgt i onboarding.')).toBeTruthy()
-    expect(screen.getByText('Microsoft 365, Slack, GitHub')).toBeTruthy()
+    // Scope signals + opportunities now render on the assembly step (to keep the
+    // non-scrolling paywall concise), so they must NOT appear here.
+    expect(screen.queryByText('Microsoft 365, Slack, GitHub')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Bruk anbefalingen' }))
     expect(onSelectPlan).toHaveBeenCalledWith('pro')
@@ -108,4 +115,76 @@ describe('PaywallStep', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Oppdater forslag' }))
     expect(onRefreshRecommendation).toHaveBeenCalled()
   })
+
+  it('renders the canonical connected source count from onboarding identity', () => {
+    render(() => (
+      <PaywallStep
+        activePlanId="standard"
+        checkoutReturnUrl="https://velion.test/onboarding"
+        identity={{
+          orgName: 'AQUATIQ AS',
+          websiteUrl: 'https://aquatiq.com',
+          websitePages: 6,
+          connectedSourceCount: 10,
+        }}
+        loadingRecommendation={false}
+        onConfirmCheckout={vi.fn()}
+        onCommitPlan={vi.fn()}
+        onSelectPlan={vi.fn()}
+      />
+    ))
+
+    expect(screen.getByText('6 sider fra aquatiq.com')).toBeTruthy()
+    expect(screen.getByText('10 tilkoblede kilder')).toBeTruthy()
+  })
+
+  it('renders paywall chrome and plan cards in English when the shared locale is English', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+
+    render(() => (
+      <I18nProvider>
+        <PaywallStep
+          activePlanId="trial"
+          checkoutReturnUrl="https://velion.test/onboarding"
+          identity={{
+            orgName: 'AQUATIQ AS',
+            websiteUrl: 'https://aquatiq.com',
+            websitePages: 6,
+            connectedSourceCount: 10,
+          }}
+          loadingRecommendation={false}
+          onConfirmCheckout={vi.fn()}
+          onCommitPlan={vi.fn()}
+          onSelectPlan={vi.fn()}
+        />
+      </I18nProvider>
+    ))
+
+    expect(screen.getByText('Best match for AQUATIQ AS')).toBeTruthy()
+    expect(screen.getByText('6 pages from aquatiq.com')).toBeTruthy()
+    expect(screen.getByText('10 connected sources')).toBeTruthy()
+    expect(screen.getByText('For larger support teams with reporting and controls.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Continue to setup' })).toBeTruthy()
+  })
 })
+
+function installMemoryStorage() {
+  const values = new Map<string, string>()
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value)
+      },
+      removeItem: (key: string) => {
+        values.delete(key)
+      },
+      clear: () => values.clear(),
+      key: (index: number) => Array.from(values.keys())[index] ?? null,
+      get length() {
+        return values.size
+      },
+    } satisfies Storage,
+  })
+}

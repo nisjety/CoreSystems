@@ -1,4 +1,4 @@
-.PHONY: bootstrap build build-rust build-go test test-rust test-go fmt lint dev down clean tidy
+.PHONY: bootstrap build build-rust build-go test test-rust test-go test-vision fmt lint dev down clean tidy
 
 bootstrap:
 	@command -v cargo >/dev/null || { echo "install rust toolchain: https://rustup.rs"; exit 1; }
@@ -27,6 +27,9 @@ test-rust:
 test-go:
 	cd services/quarry-control && go test ./...
 	cd services/quarry-orchestrator && go test ./...
+
+test-vision:
+	cd services/quarry-vision-sidecar && python -m pytest
 
 fmt:
 	cargo fmt

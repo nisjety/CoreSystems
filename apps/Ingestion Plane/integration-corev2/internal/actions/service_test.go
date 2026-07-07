@@ -41,6 +41,125 @@ func TestExecuteSlackChannelsList(t *testing.T) {
 	}
 }
 
+func TestExecuteLinkedInPostCreateAddsRestliHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/posts" {
+			t.Fatalf("path = %s, want /rest/posts", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want Bearer token", got)
+		}
+		if got := r.Header.Get("X-Restli-Protocol-Version"); got != "2.0.0" {
+			t.Fatalf("X-Restli-Protocol-Version = %q, want 2.0.0", got)
+		}
+		if got := r.Header.Get("LinkedIn-Version"); got != "202606" {
+			t.Fatalf("LinkedIn-Version = %q, want 202606", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if body["author"] != "urn:li:person:abc" {
+			t.Fatalf("body = %#v, want author", body)
+		}
+		w.Header().Set("x-restli-id", "urn:li:share:1")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{LinkedInAPIBaseURL: server.URL, LinkedInMarketingVersion: "202606"}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "linkedin"},
+		AccessToken: "token",
+		Operation:   "posts.create",
+		Body:        map[string]any{"author": "urn:li:person:abc", "commentary": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteLinkedInVerificationReport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/verificationReport" {
+			t.Fatalf("path = %s, want /rest/verificationReport", r.URL.Path)
+		}
+		if got := r.URL.Query()["verificationCriteria"]; len(got) != 2 || got[0] != "IDENTITY" || got[1] != "WORKPLACE" {
+			t.Fatalf("verificationCriteria = %#v, want IDENTITY and WORKPLACE", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"verifications": []string{"IDENTITY"}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{LinkedInAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "linkedin"},
+		AccessToken: "token",
+		Operation:   "verification.report",
+		Params:      map[string]any{"verificationCriteria": []string{"IDENTITY", "WORKPLACE"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteLinkedInAdAccountsList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/adAccounts" {
+			t.Fatalf("path = %s, want /rest/adAccounts", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("pageSize"); got != "25" {
+			t.Fatalf("pageSize = %q, want 25", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"elements": []map[string]any{{"id": 123}}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{LinkedInAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "linkedin"},
+		AccessToken: "token",
+		Operation:   "ads.accounts",
+		Params:      map[string]any{"pageSize": 25},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteLinkedInAdCampaignCreate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/adAccounts/123/adCampaigns" {
+			t.Fatalf("path = %s, want /rest/adAccounts/123/adCampaigns", r.URL.Path)
+		}
+		if got := r.Header.Get("X-Restli-Protocol-Version"); got != "2.0.0" {
+			t.Fatalf("X-Restli-Protocol-Version = %q, want 2.0.0", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if body["name"] != "Awareness" {
+			t.Fatalf("body = %#v, want campaign name", body)
+		}
+		w.Header().Set("x-restli-id", "456")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{LinkedInAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "linkedin"},
+		AccessToken: "token",
+		Operation:   "ads.campaign.create",
+		Params:      map[string]any{"accountId": "123"},
+		Body:        map[string]any{"name": "Awareness"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
 func TestExecuteGitHubRepoEscapesPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/triodelab/velion" {
@@ -110,6 +229,89 @@ func TestExecuteGitHubTeams(t *testing.T) {
 	}
 }
 
+func TestExecuteGitHubContentsGetEscapesPathSegments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/triodelab/velion/contents/docs/README.md" {
+			t.Fatalf("path = %s, want /repos/triodelab/velion/contents/docs/README.md", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("ref"); got != "main" {
+			t.Fatalf("ref = %q, want main", got)
+		}
+		if got := r.Header.Get("X-GitHub-Api-Version"); got == "" {
+			t.Fatalf("missing GitHub API version header")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"path": "docs/README.md"})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GitHubAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "github"},
+		AccessToken: "token",
+		Operation:   "contents.get",
+		Params:      map[string]any{"owner": "triodelab", "repo": "velion", "path": "docs/README.md", "ref": "main"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteGitHubIssueCreatePostsJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/triodelab/velion/issues" {
+			t.Fatalf("path = %s, want /repos/triodelab/velion/issues", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want Bearer token", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if body["title"] != "Fix checkout" {
+			t.Fatalf("body = %#v, want issue title", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GitHubAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "github"},
+		AccessToken: "token",
+		Operation:   "issues.create",
+		Params:      map[string]any{"owner": "triodelab", "repo": "velion"},
+		Body:        map[string]any{"title": "Fix checkout"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteGitHubPullsList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/triodelab/velion/pulls" {
+			t.Fatalf("path = %s, want /repos/triodelab/velion/pulls", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("state"); got != "open" {
+			t.Fatalf("state = %q, want open", got)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 7}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GitHubAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "github"},
+		AccessToken: "token",
+		Operation:   "pulls.list",
+		Params:      map[string]any{"owner": "triodelab", "repo": "velion", "state": "open"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
 func TestExecuteOktaUsersUsesAPIToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/users" {
@@ -133,6 +335,218 @@ func TestExecuteOktaUsersUsesAPIToken(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteMetaPagesPostUsesPageAccessToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/page-1":
+			if got := r.Header.Get("Authorization"); got != "Bearer user-token" {
+				t.Fatalf("page token lookup Authorization = %q, want Bearer user-token", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "page-token"})
+		case "/page-1/feed":
+			if got := r.Header.Get("Authorization"); got != "Bearer page-token" {
+				t.Fatalf("post Authorization = %q, want Bearer page-token", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm error: %v", err)
+			}
+			if got := r.Form.Get("message"); got != "hello page" {
+				t.Fatalf("message = %q, want hello page", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "page-1_post-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{FacebookAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "user-token",
+		Operation:   "pages.post",
+		Params:      map[string]any{"pageId": "page-1"},
+		Body:        map[string]any{"message": "hello page"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if result.ProviderKey != "meta" || result.Operation != "pages.post" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestExecuteMetaWhatsAppSendUsesCloudAPIJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/phone-1/messages" {
+			t.Fatalf("path = %s, want /phone-1/messages", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want Bearer token", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if body["messaging_product"] != "whatsapp" {
+			t.Fatalf("body = %#v, want WhatsApp payload", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]any{{"id": "wamid.1"}}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{FacebookAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "token",
+		Operation:   "whatsapp.messages.send",
+		Params:      map[string]any{"phoneNumberId": "phone-1"},
+		Body:        map[string]any{"messaging_product": "whatsapp", "to": "+15551234567", "type": "text", "text": map[string]any{"body": "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteMetaWhatsAppSendDefaultsMessagingProduct(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		// Meta requires messaging_product on every send and does not
+		// default it -- a caller that omits it would otherwise get a
+		// silent Graph API 400 with no clear cause.
+		if body["messaging_product"] != "whatsapp" {
+			t.Fatalf("body = %#v, want messaging_product defaulted to whatsapp", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]any{{"id": "wamid.1"}}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{FacebookAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "token",
+		Operation:   "whatsapp.messages.send",
+		Params:      map[string]any{"phoneNumberId": "phone-1"},
+		Body:        map[string]any{"to": "+15551234567", "type": "text", "text": map[string]any{"body": "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteMetaWhatsAppSendRequiresToAndType(t *testing.T) {
+	service := NewService(config.Config{FacebookAPIBaseURL: "https://graph.facebook.test"}, http.DefaultClient)
+	for _, body := range []map[string]any{
+		{"type": "text", "text": map[string]any{"body": "hi"}},
+		{"to": "+15551234567"},
+	} {
+		_, err := service.Execute(context.Background(), ExecuteInput{
+			Connection:  store.Connection{ProviderKey: "meta"},
+			AccessToken: "token",
+			Operation:   "whatsapp.messages.send",
+			Params:      map[string]any{"phoneNumberId": "phone-1"},
+			Body:        body,
+		})
+		if err == nil {
+			t.Fatalf("expected an error for incomplete body %#v", body)
+		}
+	}
+}
+
+func TestExecuteMetaAdsCampaignsNormalizesAdAccountPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/act_123/campaigns" {
+			t.Fatalf("path = %s, want /act_123/campaigns", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("fields"); got == "" {
+			t.Fatalf("missing fields query")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "cmp-1"}}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{FacebookAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "token",
+		Operation:   "ads.campaigns",
+		Params:      map[string]any{"adAccountId": "act_123"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteMetaThreadsPublishUsesThreadsBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me/threads_publish" {
+			t.Fatalf("path = %s, want /me/threads_publish", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm error: %v", err)
+		}
+		if got := r.Form.Get("creation_id"); got != "container-1" {
+			t.Fatalf("creation_id = %q, want container-1", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "thread-1"})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MetaThreadsAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "token",
+		Operation:   "threads.publish",
+		Body:        map[string]any{"creation_id": "container-1"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteMetaThreadsContainerStatusUsesThreadsBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/container-1" {
+			t.Fatalf("path = %s, want /container-1", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("fields"); got != "id,status,error_message" {
+			t.Fatalf("fields = %q, want id,status,error_message", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "container-1", "status": "FINISHED"})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MetaThreadsAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "token",
+		Operation:   "threads.container.status",
+		Params:      map[string]any{"creationId": "container-1"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	body, ok := result.Result.(map[string]any)
+	if !ok || body["status"] != "FINISHED" {
+		t.Fatalf("result = %#v, want status FINISHED", result.Result)
+	}
+}
+
+func TestExecuteMetaThreadsContainerStatusRequiresCreationID(t *testing.T) {
+	service := NewService(config.Config{MetaThreadsAPIBaseURL: "https://graph.threads.test"}, http.DefaultClient)
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "meta"},
+		AccessToken: "token",
+		Operation:   "threads.container.status",
+	})
+	if err == nil {
+		t.Fatal("expected an error when creationId is missing")
 	}
 }
 

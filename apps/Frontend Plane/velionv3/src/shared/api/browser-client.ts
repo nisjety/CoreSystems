@@ -38,6 +38,7 @@ export type BrowserObservation = {
   step: number
   title?: string | null
   url: string
+  visual_observation_artifact_id?: string | null
 }
 
 export type BrowserProfileScope = 'ephemeral' | 'user_private' | 'org_shared' | 'run_scoped'
@@ -69,6 +70,11 @@ export type BrowserFrame = {
   url?: string | null
 }
 
+export type BrowserVisualEvidence = {
+  observationArtifactId?: string | null
+  observationUrl?: string | null
+}
+
 export type BrowserSession = {
   capabilities: string[]
   frame?: BrowserFrame | null
@@ -83,6 +89,7 @@ export type BrowserSession = {
   status: BrowserSessionStatus
   title: string
   url: string
+  visual?: BrowserVisualEvidence | null
   viewport: {
     height: number
     width: number
@@ -92,6 +99,25 @@ export type BrowserSession = {
 export type BrowserSessionResponse = {
   observation?: BrowserObservation | null
   session: BrowserSession
+}
+
+export type BrowserSuggestedAction = {
+  action?: BrowserAction | null
+  confidence?: number | null
+  done?: boolean
+  reason?: string | null
+}
+
+export type BrowserActionSuggestionResponse = {
+  id?: string
+  model_used?: string
+  object?: string
+  suggestion: BrowserSuggestedAction
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+  }
+  visual_summary?: string | null
 }
 
 export type CreateBrowserSessionRequest = {
@@ -133,6 +159,23 @@ export async function runBrowserAction(
     headers: orgHeaders(orgId),
     signal,
   })
+}
+
+export async function suggestBrowserAction(
+  orgId: string,
+  sessionId: string,
+  body: { goal?: string; includeScreenshot?: boolean },
+  signal?: AbortSignal,
+): Promise<BrowserActionSuggestionResponse> {
+  return requestJson<BrowserActionSuggestionResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/suggestions`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
 }
 
 export async function closeBrowserSession(

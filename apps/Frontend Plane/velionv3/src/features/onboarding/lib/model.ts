@@ -35,6 +35,8 @@ type ConnectedSource = {
   label: string
   status: 'pending' | 'connected' | 'partial'
   connectUrl?: string
+  sources?: string[]
+  sourceCount?: number
 }
 
 export type OnboardingState = {
@@ -126,6 +128,14 @@ export const onboardingConnectorOptions: readonly ConnectorOption[] = [
     category: 'work',
   },
   {
+    id: 'discord',
+    label: 'Discord',
+    hint: 'Server-identitet og medlemskap',
+    provider: 'discord',
+    sources: ['guilds'],
+    category: 'work',
+  },
+  {
     id: 'linkedin',
     label: 'LinkedIn',
     hint: 'Sider, innlegg og kampanjesignaler',
@@ -134,19 +144,14 @@ export const onboardingConnectorOptions: readonly ConnectorOption[] = [
     category: 'social',
   },
   {
-    id: 'instagram',
-    label: 'Instagram',
-    hint: 'Business-profiler, medier og kommentarer',
-    provider: 'instagram',
-    sources: ['business_profile', 'media', 'comments'],
-    category: 'social',
-  },
-  {
-    id: 'facebook',
-    label: 'Facebook',
-    hint: 'Pages, innlegg, meldinger og kommentarer',
-    provider: 'facebook',
-    sources: ['pages', 'posts', 'comments', 'messages'],
+    // Unified Meta connection: Facebook Pages + Instagram + WhatsApp Business
+    // + Meta Ads authorize through ONE dialog (supersedes the separate
+    // facebook/instagram/whatsapp/meta-ads providers).
+    id: 'meta',
+    label: 'Meta',
+    hint: 'Facebook Pages, Instagram, WhatsApp og Meta Ads',
+    provider: 'meta',
+    sources: ['pages', 'instagram_business', 'whatsapp', 'ads'],
     category: 'social',
   },
   {
@@ -187,6 +192,17 @@ export const onboardingConnectorOptions: readonly ConnectorOption[] = [
     hint: 'Kunder, abonnement og fakturaer',
     provider: 'stripe',
     sources: ['customers', 'subscriptions', 'invoices'],
+    category: 'other',
+  },
+  {
+    // Velion's own freight aggregator (shipping-core, Ingestion Plane) — one
+    // integration covers hele transportørflåten. No per-user OAuth: connecting
+    // verifies the aggregator and lists the carriers it can compare.
+    id: 'shipping',
+    label: 'Frakt & sporing',
+    hint: 'Bring, PostNord, DHL, Helthjem, Porterbuddy m.fl. — priser og sporing',
+    provider: 'shipping',
+    sources: ['quotes', 'carriers', 'tracking'],
     category: 'other',
   },
 ]

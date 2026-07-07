@@ -12,11 +12,11 @@ describe('onboarding query helpers', () => {
       recommendPlan: vi.fn(),
     } as unknown as OnboardingGatewayActions
 
-    const config = planRecommendationQueryConfig(actions, () => ({ sourceCount: 1 }), () => true)
+    const config = planRecommendationQueryConfig(actions, () => ({ sourceCount: 1 }), () => true, () => 'ctx-1')
 
     expect(config.retry).toBe(false)
     expect(config.staleTime).toBe(Infinity)
-    expect(config.queryKey).toEqual(onboardingQueryKeys.planRecommendation({ sourceCount: 1 }))
+    expect(config.queryKey).toEqual(onboardingQueryKeys.planRecommendation('ctx-1'))
   })
 
   it('polls graph preview only while enabled', () => {

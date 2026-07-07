@@ -18,6 +18,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/hyperswitch"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/lago"
+	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/nexi"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/adapters/stripe"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/billing"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/config"
@@ -233,7 +234,9 @@ func main() {
 func buildPaymentAdapter(cfg *config.Config, timeout time.Duration) billing.PaymentAdapter {
 	provider := strings.ToLower(strings.TrimSpace(cfg.PaymentProvider))
 	if provider == "" || provider == "auto" {
-		if strings.TrimSpace(cfg.HyperswitchAPIKey) != "" || strings.TrimSpace(cfg.HyperswitchPublishableKey) != "" {
+		if strings.TrimSpace(cfg.NexiSecretKey) != "" {
+			provider = "nexi"
+		} else if strings.TrimSpace(cfg.HyperswitchAPIKey) != "" || strings.TrimSpace(cfg.HyperswitchPublishableKey) != "" {
 			provider = "hyperswitch"
 		} else {
 			provider = "stripe"
@@ -241,6 +244,18 @@ func buildPaymentAdapter(cfg *config.Config, timeout time.Duration) billing.Paym
 	}
 
 	switch provider {
+	case "nexi":
+		log.Println("billing-core payment provider: nexi")
+		return nexi.NewAdapter(nexi.Config{
+			BaseURL:              cfg.NexiBaseURL,
+			SecretKey:            cfg.NexiSecretKey,
+			CheckoutKey:          cfg.NexiCheckoutKey,
+			CheckoutJSURL:        cfg.NexiCheckoutJSURL,
+			WebhookURL:           cfg.NexiWebhookURL,
+			WebhookAuthorization: cfg.NexiWebhookAuthorization,
+			TermsURL:             cfg.NexiTermsURL,
+			Timeout:              timeout,
+		})
 	case "hyperswitch":
 		log.Println("billing-core payment provider: hyperswitch")
 		return hyperswitch.NewAdapter(hyperswitch.Config{

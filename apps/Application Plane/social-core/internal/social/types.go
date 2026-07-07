@@ -2,6 +2,7 @@ package social
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -53,6 +54,7 @@ const (
 	SubjectPublishJobCompleted = "velion.application.social.publish_job.completed"
 	SubjectPublishJobFailed    = "velion.application.social.publish_job.failed"
 	SubjectPublishJobBlocked   = "velion.application.social.publish_job.blocked"
+	SubjectMetricsSnapshotted  = "velion.application.social.metrics.snapshotted"
 )
 
 var (
@@ -82,6 +84,25 @@ type AccountSource interface {
 
 type TokenBroker interface {
 	AccessToken(ctx context.Context, request TokenRequest) (*TokenLease, error)
+}
+
+type ActionExecutor interface {
+	ExecuteAction(ctx context.Context, request ActionRequest) (*ActionResult, error)
+}
+
+type MetricsStore interface {
+	ListAccountOrgIDs(ctx context.Context) ([]string, error)
+	UpsertProviderMetrics(ctx context.Context, metrics []ProviderMetric) (int, error)
+	ListProviderMetrics(ctx context.Context, filter ProviderMetricsFilter) ([]ProviderMetric, error)
+}
+
+// ProviderMetricsFilter scopes a metrics read. OrgID is required; AccountID
+// and SnapshotDate are optional narrowing filters (insight-core passes both,
+// resolved from the metrics.snapshotted event that triggered the read).
+type ProviderMetricsFilter struct {
+	OrgID        string
+	AccountID    string
+	SnapshotDate time.Time
 }
 
 type EventPublisher interface {
@@ -246,6 +267,41 @@ type TokenLease struct {
 	ExpiresAt    time.Time
 	Scopes       []string
 	Capabilities []string
+}
+
+type ActionRequest struct {
+	ConnectionID string
+	Operation    string
+	Params       map[string]any
+	Body         map[string]any
+}
+
+// ActionResult mirrors integration-corev2's ExecuteResult envelope. Result is
+// kept as raw JSON on purpose: provider payload schemas (Graph API, LinkedIn
+// Rest.li, ...) are never assumed here — callers decode defensively.
+type ActionResult struct {
+	ProviderKey string          `json:"providerKey"`
+	Operation   string          `json:"operation"`
+	Result      json.RawMessage `json:"result"`
+}
+
+type ProviderMetric struct {
+	OrgID        string         `json:"org_id"`
+	AccountID    string         `json:"account_id"`
+	ConnectionID string         `json:"connection_id,omitempty"`
+	ProviderKey  string         `json:"provider_key"`
+	MetricName   string         `json:"metric_name"`
+	MetricValue  float64        `json:"metric_value"`
+	Dimensions   map[string]any `json:"dimensions"`
+	SnapshotDate time.Time      `json:"snapshot_date"`
+}
+
+type MetricsSnapshotSummary struct {
+	Orgs     int      `json:"orgs"`
+	Accounts int      `json:"accounts"`
+	Metrics  int      `json:"metrics"`
+	Skipped  int      `json:"skipped"`
+	Failures []string `json:"failures"`
 }
 
 type ListPostsFilter struct {

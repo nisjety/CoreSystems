@@ -14,6 +14,8 @@ type Service struct {
 	accountSource  AccountSource
 	publisher      Publisher
 	eventPublisher EventPublisher
+	actionExecutor ActionExecutor
+	metricsStore   MetricsStore
 	now            func() time.Time
 }
 
@@ -42,6 +44,18 @@ func WithPublisher(publisher Publisher) Option {
 func WithEventPublisher(publisher EventPublisher) Option {
 	return func(s *Service) {
 		s.eventPublisher = publisher
+	}
+}
+
+func WithActionExecutor(executor ActionExecutor) Option {
+	return func(s *Service) {
+		s.actionExecutor = executor
+	}
+}
+
+func WithMetricsStore(store MetricsStore) Option {
+	return func(s *Service) {
+		s.metricsStore = store
 	}
 }
 

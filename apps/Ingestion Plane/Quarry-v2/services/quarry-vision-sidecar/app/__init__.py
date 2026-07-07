@@ -1,0 +1,2 @@
+"""Quarry visual evidence sidecar."""
+
