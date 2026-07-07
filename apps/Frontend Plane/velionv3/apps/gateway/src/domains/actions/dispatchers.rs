@@ -635,6 +635,304 @@ pub(super) async fn dispatch_operating_map_blueprint(
         .into_response()
 }
 
+// --- Ticketing actions (conversation-core-go) ------------------------------
+//
+// The tickets.* registry actions have real backends in conversation-core-go —
+// the same endpoints the dedicated /api/v1/tickets/* routes proxy to. These
+// dispatchers make them executable through the generic action surface too, so
+// the shared action contract + Model-Plane tool exposure are honest instead of
+// a registered-but-501 promise. Each remaps the registry's camelCase input to
+// conversation-core's snake_case body and forwards with the caller's org scope;
+// conversation-core owns tickets, the gateway only scopes and forwards.
+
+// ticket_remap copies present, non-null fields from a camelCase action input
+// into a snake_case upstream body under the mapped keys.
+fn ticket_remap(input: &Value, pairs: &[(&str, &str)]) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for (from, to) in pairs {
+        if let Some(v) = input.get(*from) {
+            if !v.is_null() {
+                out.insert((*to).to_string(), v.clone());
+            }
+        }
+    }
+    out
+}
+
+fn ticket_bad_request(message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error("invalid_input", message)),
+    )
+        .into_response()
+}
+
+// forward_ticket_action proxies a ticket action to conversation-core-go with the
+// caller's authorized org scope + actor and wraps the upstream ticket in the
+// standard action-execution envelope.
+async fn forward_ticket_action(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    action_id: &str,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Response {
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "org_scope_required",
+                "An authorized organization scope is required.",
+            )),
+        )
+            .into_response();
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let url = format!("{}{}", state.conversation_core_url, path);
+    let (status, Json(resp)) =
+        proxy_json(state, method, &url, body, Some(&org_id), Some(&actor), None).await;
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+    let ticket_id = resp
+        .get("data")
+        .and_then(|d| d.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    (
+        StatusCode::OK,
+        Json(ok(json!({
+            "actionId": action_id,
+            "runId": format!("{}_{}", action_id, user.user_id),
+            "status": "completed",
+            "auditId": format!("audit_{}_{}", action_id, user.user_id),
+            "ticketId": ticket_id,
+            "result": resp,
+        }))),
+    )
+        .into_response()
+}
+
+pub(super) async fn dispatch_ticket_create(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let conversation_id = input
+        .get("conversationId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if conversation_id.is_empty() {
+        return ticket_bad_request("tickets.create requires a non-empty 'conversationId'");
+    }
+    let body = ticket_remap(
+        input,
+        &[
+            ("conversationId", "conversation_id"),
+            ("priority", "priority"),
+            ("severity", "severity"),
+            ("category", "category"),
+            ("intent", "intent"),
+        ],
+    );
+    forward_ticket_action(
+        state,
+        user,
+        "tickets.create",
+        Method::POST,
+        "/api/v1/tickets",
+        Some(Value::Object(body)),
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ticket_classify(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let conversation_id = input
+        .get("conversationId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if conversation_id.is_empty() {
+        return ticket_bad_request(
+            "tickets.classify_conversation requires a non-empty 'conversationId'",
+        );
+    }
+    let body = ticket_remap(
+        input,
+        &[
+            ("confidence", "confidence"),
+            ("reason", "reason"),
+            ("suggestedFields", "suggested_fields"),
+            ("evidenceMessageIds", "evidence_message_ids"),
+        ],
+    );
+    let path = format!(
+        "/api/v1/tickets/conversations/{}/classifications",
+        urlencoding::encode(conversation_id)
+    );
+    forward_ticket_action(
+        state,
+        user,
+        "tickets.classify_conversation",
+        Method::POST,
+        &path,
+        Some(Value::Object(body)),
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ticket_update(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let ticket_id = input
+        .get("ticketId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if ticket_id.is_empty() {
+        return ticket_bad_request("tickets.update requires a non-empty 'ticketId'");
+    }
+    let body = ticket_remap(
+        input,
+        &[
+            ("status", "status"),
+            ("priority", "priority"),
+            ("severity", "severity"),
+            ("category", "category"),
+            ("intent", "intent"),
+        ],
+    );
+    let path = format!("/api/v1/tickets/{}", urlencoding::encode(ticket_id));
+    forward_ticket_action(
+        state,
+        user,
+        "tickets.update",
+        Method::PATCH,
+        &path,
+        Some(Value::Object(body)),
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ticket_assign(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let ticket_id = input
+        .get("ticketId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if ticket_id.is_empty() {
+        return ticket_bad_request("tickets.assign requires a non-empty 'ticketId'");
+    }
+    let body = ticket_remap(
+        input,
+        &[
+            ("assigneeUserId", "assignee_user_id"),
+            ("assigneeName", "assignee_name"),
+            ("teamId", "team_id"),
+            ("teamName", "team_name"),
+        ],
+    );
+    let path = format!("/api/v1/tickets/{}", urlencoding::encode(ticket_id));
+    forward_ticket_action(
+        state,
+        user,
+        "tickets.assign",
+        Method::PATCH,
+        &path,
+        Some(Value::Object(body)),
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ticket_link_resource(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let ticket_id = input
+        .get("ticketId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if ticket_id.is_empty() {
+        return ticket_bad_request("tickets.link_resource requires a non-empty 'ticketId'");
+    }
+    let resource_kind = input
+        .get("resourceKind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if resource_kind.is_empty() {
+        return ticket_bad_request("tickets.link_resource requires a non-empty 'resourceKind'");
+    }
+    let body = ticket_remap(
+        input,
+        &[
+            ("resourceKind", "resource_kind"),
+            ("resourceId", "resource_id"),
+            ("resourceUrl", "resource_url"),
+            ("label", "label"),
+        ],
+    );
+    let path = format!("/api/v1/tickets/{}/links", urlencoding::encode(ticket_id));
+    forward_ticket_action(
+        state,
+        user,
+        "tickets.link_resource",
+        Method::POST,
+        &path,
+        Some(Value::Object(body)),
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ticket_resolve(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let ticket_id = input
+        .get("ticketId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    if ticket_id.is_empty() {
+        return ticket_bad_request("tickets.resolve requires a non-empty 'ticketId'");
+    }
+    // conversation-core has no free-text resolution field; resolving is a status
+    // transition. The optional 'resolution' note has no backend home and is
+    // intentionally not forwarded rather than dropped into a wrong field.
+    let path = format!("/api/v1/tickets/{}", urlencoding::encode(ticket_id));
+    forward_ticket_action(
+        state,
+        user,
+        "tickets.resolve",
+        Method::PATCH,
+        &path,
+        Some(json!({ "status": "resolved" })),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +943,32 @@ mod tests {
         // return a typed 422 pointing at the multipart route, never a fake success.
         let response = dispatch_upload_files().await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn ticket_remap_maps_camel_to_snake_and_omits_absent_or_null() {
+        let input = json!({
+            "conversationId": "conv_1",
+            "priority": "high",
+            "category": null,
+        });
+        let out = ticket_remap(
+            &input,
+            &[
+                ("conversationId", "conversation_id"),
+                ("priority", "priority"),
+                ("severity", "severity"),
+                ("category", "category"),
+            ],
+        );
+        assert_eq!(
+            out.get("conversation_id").and_then(|v| v.as_str()),
+            Some("conv_1")
+        );
+        assert_eq!(out.get("priority").and_then(|v| v.as_str()), Some("high"));
+        // absent field is omitted (not sent as null)...
+        assert!(!out.contains_key("severity"));
+        // ...and an explicit null is omitted too, so it never clobbers upstream state.
+        assert!(!out.contains_key("category"));
     }
 }
