@@ -18,7 +18,7 @@ use axum::{
     },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -42,6 +42,30 @@ use crate::{
     upstream::{proxy_bearer_json, proxy_sse_stream},
 };
 
+/// Mirrors the SPA's `BrowserProfileScope` union (`browser-client.ts`).
+/// Phase 3 continuation: promotes profile scope from an inferred
+/// `persistent_profile` boolean into a real, explicit value the caller
+/// can request and the ZDR guard can check directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserProfileScope {
+    Ephemeral,
+    UserPrivate,
+    OrgShared,
+    RunScoped,
+}
+
+impl BrowserProfileScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ephemeral => "ephemeral",
+            Self::UserPrivate => "user_private",
+            Self::OrgShared => "org_shared",
+            Self::RunScoped => "run_scoped",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateSessionBody {
@@ -59,19 +83,67 @@ struct CreateSessionBody {
     /// that one check plus the metadata recorded for this session.
     #[serde(default)]
     zdr: bool,
+    /// Phase 3 continuation: explicit scope for the profile this session
+    /// attaches (new or existing). Optional for back-compat — when
+    /// omitted, the effective scope is inferred from `profile_id`/
+    /// `persistent_profile` exactly as before (see
+    /// `effective_profile_scope`).
+    #[serde(default)]
+    scope: Option<BrowserProfileScope>,
+}
+
+/// Resolves the real scope a session's profile attachment implies, so the
+/// ZDR guard can check the actual four-value scope instead of a coarse
+/// boolean. A caller-supplied `scope` generally wins (it is the explicit,
+/// current-generation signal); when absent, back-compat callers that only
+/// ever sent `profileId`/`persistentProfile` still resolve to a
+/// non-ephemeral scope so the guard's behavior is unchanged for them.
+///
+/// One exception, load-bearing for the ZDR guard: when the *raw* facts
+/// (`profile_id`/`persistent_profile`) already imply real persistence, an
+/// explicit `scope: "ephemeral"` claim can never downgrade that back to
+/// ephemeral. Without this, a client could send
+/// `{zdr: true, profileId: "<real>", scope: "ephemeral"}` and pass
+/// `reject_zdr_persistent_profile` (which only inspects the *resolved*
+/// scope) while `create_session` still forwards the real `profile_id` to
+/// Quarry — a ZDR-labeled session would end up attached to a real
+/// persisted profile's cookies. The effective scope is therefore the more
+/// restrictive of "what the raw facts imply" and "what the caller claims";
+/// a caller can still *widen* an implied `user_private` up to
+/// `org_shared`/`run_scoped` (unchanged from before), just never launder
+/// real persistence signals down to `ephemeral`.
+fn effective_profile_scope(
+    profile_id: Option<&str>,
+    persistent_profile: bool,
+    requested_scope: Option<BrowserProfileScope>,
+) -> BrowserProfileScope {
+    let implied_by_facts = if profile_id.is_some() || persistent_profile {
+        BrowserProfileScope::UserPrivate
+    } else {
+        BrowserProfileScope::Ephemeral
+    };
+    match requested_scope {
+        Some(BrowserProfileScope::Ephemeral)
+            if implied_by_facts != BrowserProfileScope::Ephemeral =>
+        {
+            implied_by_facts
+        }
+        Some(scope) => scope,
+        None => implied_by_facts,
+    }
 }
 
 /// Phase 3 ZDR enforcement: a ZDR session must never be able to select or
-/// attach a persistent browser profile — persisted cookies/storage would
-/// defeat the point of "no data retained for this session". This is checked
-/// server-side, before any upstream Quarry call, so a client can't bypass it
-/// by racing the request body against stale UI state.
+/// attach a persisted browser profile of ANY scope — persisted cookies/
+/// storage would defeat the point of "no data retained for this session".
+/// This is checked server-side, before any upstream Quarry call, so a
+/// client can't bypass it by racing the request body against stale UI
+/// state or by claiming a scope the guard doesn't recognize as persistent.
 fn reject_zdr_persistent_profile(
     zdr: bool,
-    profile_id: Option<&str>,
-    persistent_profile: bool,
+    scope: BrowserProfileScope,
 ) -> Option<(&'static str, &'static str)> {
-    if zdr && (profile_id.is_some() || persistent_profile) {
+    if zdr && scope != BrowserProfileScope::Ephemeral {
         Some((
             "zdr_persistent_profile_forbidden",
             "A Zero Data Retention session cannot use a persistent browser profile.",
@@ -87,7 +159,11 @@ pub(crate) type BrowserRunStore = Arc<StdMutex<HashMap<String, BrowserRunMetadat
 pub(crate) struct BrowserRunMetadata {
     lease_id: Option<String>,
     profile_id: Option<String>,
-    persistent_profile: bool,
+    /// Phase 3 continuation: the real requested/inferred scope (see
+    /// `effective_profile_scope`) — replaces the old two-value
+    /// `persistent_profile ? user_private : run_scoped` guess the session
+    /// response used to render.
+    profile_scope: BrowserProfileScope,
     last_observation: Option<Value>,
     observation_history: Vec<Value>,
     devtools_events: Vec<Value>,
@@ -282,14 +358,17 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/browser/sessions/:session_id",
             delete(close_session),
         )
-        .route("/api/v1/browser/profiles", get(list_profiles))
+        .route(
+            "/api/v1/browser/profiles",
+            get(list_profiles).post(create_browser_profile),
+        )
         .route(
             "/api/v1/browser/profiles/:profile_id/restore-probe",
             post(restore_profile_probe),
         )
         .route(
             "/api/v1/browser/profiles/:profile_id",
-            delete(delete_profile),
+            patch(rename_browser_profile).delete(delete_profile),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -313,9 +392,9 @@ async fn create_session(
         .map(str::trim)
         .filter(|v| !v.is_empty());
     let requested_persistent_profile = body.persistent_profile || profile_id.is_some();
-    if let Some((code, message)) =
-        reject_zdr_persistent_profile(body.zdr, profile_id, requested_persistent_profile)
-    {
+    let profile_scope =
+        effective_profile_scope(profile_id, requested_persistent_profile, body.scope);
+    if let Some((code, message)) = reject_zdr_persistent_profile(body.zdr, profile_scope) {
         return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response();
     }
     let cookie = cookie_header(&headers);
@@ -410,7 +489,7 @@ async fn create_session(
     let metadata = BrowserRunMetadata {
         lease_id,
         profile_id: returned_profile_id,
-        persistent_profile: requested_persistent_profile,
+        profile_scope,
         last_observation: Some(observation.clone()),
         observation_history: vec![observation.clone()],
         devtools_events: Vec::new(),
@@ -1890,6 +1969,125 @@ async fn list_profiles(
     (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
 }
 
+/// Phase 3 continuation — `POST /api/v1/browser/profiles`. Explicitly
+/// create a named, scoped profile (as opposed to attaching one implicitly
+/// via `persistentProfile`/`profileId` at session-create time). `scope:
+/// ephemeral` is rejected here too (defense in depth — quarry-edge
+/// enforces the same rule) since a *stored* profile with "no persistence"
+/// scope is a contradiction; ephemeral browsing simply attaches no
+/// profile at all.
+#[derive(Debug, Deserialize)]
+struct CreateProfileBody {
+    #[serde(default)]
+    name: Option<String>,
+    scope: BrowserProfileScope,
+}
+
+async fn create_browser_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<CreateProfileBody>,
+) -> Response {
+    if body.scope == BrowserProfileScope::Ephemeral {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_profile_scope",
+                "A created browser profile cannot use the ephemeral scope.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::POST,
+        "/v1/profiles/create",
+        Some(json!({
+            "name": body.name,
+            "scope": body.scope.as_str(),
+        })),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
+}
+
+/// Phase 3 continuation — `PATCH /api/v1/browser/profiles/:profile_id`.
+/// Rename and/or rescope an existing profile. At least one field must be
+/// present; rescoping to `ephemeral` is rejected the same way creation
+/// is (delete the profile instead of "rescoping it away").
+#[derive(Debug, Deserialize)]
+struct RenameProfileBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    scope: Option<BrowserProfileScope>,
+}
+
+async fn rename_browser_profile(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    Json(body): Json<RenameProfileBody>,
+) -> Response {
+    if !is_valid_profile_id(&profile_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_profile",
+                "The requested browser profile id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    if body.name.is_none() && body.scope.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_profile_update",
+                "Provide a name and/or scope to update.",
+            )),
+        )
+            .into_response();
+    }
+    if body.scope == Some(BrowserProfileScope::Ephemeral) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_profile_scope",
+                "A stored browser profile cannot be rescoped to ephemeral.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, resp_body) = quarry_call(
+        &state,
+        Method::PATCH,
+        &format!("/v1/profiles/{}", urlencoding::encode(&profile_id)),
+        Some(json!({
+            "name": body.name,
+            "scope": body.scope.map(BrowserProfileScope::as_str),
+        })),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, resp_body);
+    }
+    (StatusCode::OK, Json(ok(unwrap_data(&resp_body)))).into_response()
+}
+
 async fn restore_profile_probe(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2019,8 +2217,11 @@ fn browser_response(
             },
             "profile": {
                 "id": metadata.profile_id,
-                "scope": if metadata.persistent_profile { "user_private" } else { "run_scoped" },
-                "storage": if metadata.persistent_profile { "persistent" } else { "isolated" }
+                // Phase 3 continuation: real requested/inferred scope
+                // (was previously derived from a single boolean, so it
+                // could only ever report 2 of the 4 possible values).
+                "scope": metadata.profile_scope.as_str(),
+                "storage": if metadata.profile_scope != BrowserProfileScope::Ephemeral { "persistent" } else { "isolated" }
             },
             "control": {
                 "mode": metadata.control_mode.as_str()
@@ -2503,7 +2704,7 @@ fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadat
         .unwrap_or(BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: None,
             observation_history: Vec::new(),
             devtools_events: Vec::new(),
@@ -3054,26 +3255,147 @@ mod tests {
 
     #[test]
     fn zdr_session_is_rejected_when_requesting_a_persistent_profile_by_id() {
-        let err = reject_zdr_persistent_profile(true, Some("prof_123"), false)
+        let scope = effective_profile_scope(Some("prof_123"), false, None);
+        let err = reject_zdr_persistent_profile(true, scope)
             .expect("a ZDR session selecting a persistent profile id must be rejected");
         assert_eq!(err.0, "zdr_persistent_profile_forbidden");
     }
 
     #[test]
     fn zdr_session_is_rejected_when_requesting_persistence_by_flag() {
-        let err = reject_zdr_persistent_profile(true, None, true)
+        let scope = effective_profile_scope(None, true, None);
+        let err = reject_zdr_persistent_profile(true, scope)
             .expect("a ZDR session requesting persistent_profile must be rejected");
         assert_eq!(err.0, "zdr_persistent_profile_forbidden");
     }
 
     #[test]
     fn zdr_session_without_a_persistent_profile_request_is_allowed() {
-        assert!(reject_zdr_persistent_profile(true, None, false).is_none());
+        let scope = effective_profile_scope(None, false, None);
+        assert!(reject_zdr_persistent_profile(true, scope).is_none());
     }
 
     #[test]
     fn non_zdr_session_may_use_a_persistent_profile() {
-        assert!(reject_zdr_persistent_profile(false, Some("prof_123"), true).is_none());
+        let scope = effective_profile_scope(Some("prof_123"), true, None);
+        assert!(reject_zdr_persistent_profile(false, scope).is_none());
+    }
+
+    // Phase 3 continuation — the guard now checks a real 4-value scope
+    // instead of a coarse boolean, so it must reject every non-ephemeral
+    // scope explicitly, not just the two the boolean used to infer.
+    #[test]
+    fn zdr_session_is_rejected_for_explicit_org_shared_scope() {
+        let err = reject_zdr_persistent_profile(true, BrowserProfileScope::OrgShared)
+            .expect("org_shared must be rejected under ZDR");
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn zdr_session_is_rejected_for_explicit_run_scoped_scope() {
+        let err = reject_zdr_persistent_profile(true, BrowserProfileScope::RunScoped)
+            .expect("run_scoped must be rejected under ZDR");
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn zdr_session_is_rejected_for_explicit_user_private_scope() {
+        let err = reject_zdr_persistent_profile(true, BrowserProfileScope::UserPrivate)
+            .expect("user_private must be rejected under ZDR");
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn zdr_session_is_allowed_for_explicit_ephemeral_scope() {
+        assert!(reject_zdr_persistent_profile(true, BrowserProfileScope::Ephemeral).is_none());
+    }
+
+    #[test]
+    fn non_zdr_session_may_use_any_scope() {
+        for scope in [
+            BrowserProfileScope::Ephemeral,
+            BrowserProfileScope::UserPrivate,
+            BrowserProfileScope::OrgShared,
+            BrowserProfileScope::RunScoped,
+        ] {
+            assert!(reject_zdr_persistent_profile(false, scope).is_none());
+        }
+    }
+
+    #[test]
+    fn effective_profile_scope_prefers_explicit_scope_over_inference() {
+        // Even though profile_id + persistent_profile would infer
+        // user_private, an explicit caller-supplied scope must win.
+        let scope =
+            effective_profile_scope(Some("prof_1"), true, Some(BrowserProfileScope::OrgShared));
+        assert_eq!(scope, BrowserProfileScope::OrgShared);
+    }
+
+    #[test]
+    fn effective_profile_scope_infers_ephemeral_with_no_profile_signal() {
+        assert_eq!(
+            effective_profile_scope(None, false, None),
+            BrowserProfileScope::Ephemeral
+        );
+    }
+
+    #[test]
+    fn effective_profile_scope_infers_user_private_from_legacy_boolean() {
+        // Back-compat: an older client that only ever sent
+        // `persistentProfile: true` (no `scope` field) must still resolve
+        // to a non-ephemeral scope so the ZDR guard's behavior is
+        // unchanged for it.
+        assert_eq!(
+            effective_profile_scope(None, true, None),
+            BrowserProfileScope::UserPrivate
+        );
+    }
+
+    // Regression: a client cannot launder a real persistent-profile
+    // attachment past the ZDR guard by explicitly claiming
+    // `scope: "ephemeral"` alongside a real `profileId`/`persistentProfile`
+    // signal. Fixed alongside this test — previously `effective_profile_scope`
+    // let any explicit `requested_scope` (including `ephemeral`)
+    // unconditionally override the raw facts.
+    #[test]
+    fn effective_profile_scope_cannot_be_downgraded_to_ephemeral_by_explicit_claim_over_profile_id()
+    {
+        let scope = effective_profile_scope(
+            Some("prof_real"),
+            false,
+            Some(BrowserProfileScope::Ephemeral),
+        );
+        assert_eq!(scope, BrowserProfileScope::UserPrivate);
+    }
+
+    #[test]
+    fn effective_profile_scope_cannot_be_downgraded_to_ephemeral_by_explicit_claim_over_persistent_flag(
+    ) {
+        let scope = effective_profile_scope(None, true, Some(BrowserProfileScope::Ephemeral));
+        assert_eq!(scope, BrowserProfileScope::UserPrivate);
+    }
+
+    #[test]
+    fn zdr_session_is_rejected_despite_explicit_ephemeral_scope_claim_over_real_profile_id() {
+        // The exact bypass payload the audit flagged:
+        // {zdr: true, profileId: "<real>", scope: "ephemeral"}.
+        let scope = effective_profile_scope(
+            Some("prof_real"),
+            false,
+            Some(BrowserProfileScope::Ephemeral),
+        );
+        let err = reject_zdr_persistent_profile(true, scope)
+            .expect("an explicit ephemeral scope claim must not bypass a real profile_id");
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn zdr_session_is_rejected_despite_explicit_ephemeral_scope_claim_over_persistent_flag() {
+        let scope = effective_profile_scope(None, true, Some(BrowserProfileScope::Ephemeral));
+        let err = reject_zdr_persistent_profile(true, scope).expect(
+            "an explicit ephemeral scope claim must not bypass a real persistent_profile flag",
+        );
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
     }
 
     #[test]
@@ -3081,7 +3403,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-1".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: None,
             observation_history: vec![json!({
                 "step": 0,
@@ -3180,7 +3502,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: None,
             observation_history: vec![json!({
                 "step": 0,
@@ -3253,7 +3575,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(observation.clone()),
             observation_history: vec![observation.clone()],
             devtools_events: Vec::new(),
@@ -3298,7 +3620,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3356,7 +3678,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3409,7 +3731,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-release".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 3,
                 "url": "https://example.com"
@@ -3495,7 +3817,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-1".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3562,7 +3884,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-devtools".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3637,7 +3959,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-frame".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3700,7 +4022,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-frame-stress".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3772,7 +4094,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-devtools-stress".to_owned()),
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: Some(json!({
                 "step": 0,
                 "url": "https://example.com"
@@ -3885,7 +4207,7 @@ mod tests {
         let metadata = BrowserRunMetadata {
             lease_id: None,
             profile_id: None,
-            persistent_profile: false,
+            profile_scope: BrowserProfileScope::Ephemeral,
             last_observation: None,
             observation_history: vec![json!({
                 "step": 3,
