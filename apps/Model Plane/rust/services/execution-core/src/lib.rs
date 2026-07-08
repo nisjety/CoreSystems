@@ -20,6 +20,7 @@ pub mod runtime_loop;
 pub mod sandbox;
 pub mod scrub;
 pub mod shipping_tools;
+pub mod social_tools;
 pub mod state;
 pub mod subagent;
 pub mod tool_bridge;
