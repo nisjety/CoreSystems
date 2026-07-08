@@ -9,9 +9,12 @@ import {
   Link2,
   ListChecks,
   Loader2,
+  Pencil,
+  Plus,
   RefreshCw,
   ShieldCheck,
   ShoppingBag,
+  Trash2,
 } from 'lucide-solid'
 import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
 import { executeAction } from '@/shared/actions/action-client'
@@ -20,8 +23,11 @@ import {
   closeBrowserSession,
   createBrowserTab,
   createBrowserSession,
+  createBrowserProfile,
+  deleteBrowserProfile,
   listBrowserProfiles,
   probeBrowserProfile,
+  renameBrowserProfile,
   runBrowserAction,
   selectBrowserTab,
   setBrowserControlMode,
@@ -31,8 +37,10 @@ import {
   type BrowserControlMode,
   type BrowserObservation,
   type BrowserProfileRestoreProbe,
+  type BrowserProfileSummary,
   type BrowserSession,
   type BrowserSessionResponse,
+  type CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
 import { startBrowserAiRun } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
@@ -61,6 +69,7 @@ import { CrawlPagePicker } from './CrawlPagePicker'
 import { DashboardPlanBadge } from './DashboardPlanBadge'
 import { ProductPicker } from './ProductPicker'
 import { ScrapePreviewPanel } from './KnowledgeScrapePreview'
+import { PROFILE_SCOPE_LABELS, type BrowserProfileManagerProps } from './BrowserChrome'
 import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
 import {
   attachBrowserObservation,
@@ -162,12 +171,26 @@ export function KnowledgeComposer(props: {
   const [submitting, setSubmitting] = createSignal(false)
   const [adding, setAdding] = createSignal(false)
   const [browserBusy, setBrowserBusy] = createSignal(false)
-  const [browserProfiles, setBrowserProfiles] = createSignal<string[]>([])
+  const [browserProfiles, setBrowserProfiles] = createSignal<BrowserProfileSummary[]>([])
   const [browserProfilesLoading, setBrowserProfilesLoading] = createSignal(false)
   const [browserProfileChoice, setBrowserProfileChoice] = createSignal(isolatedProfileChoice)
   const [browserProfileProbe, setBrowserProfileProbe] = createSignal<BrowserProfileRestoreProbe | null>(null)
   const [browserProfileProbing, setBrowserProfileProbing] = createSignal(false)
   const [browserProfileError, setBrowserProfileError] = createSignal<string | null>(null)
+  // Phase 3 continuation — explicit profile create/rename/delete state.
+  const [newProfileName, setNewProfileName] = createSignal('')
+  const [newProfileScope, setNewProfileScope] = createSignal<CreatableBrowserProfileScope>('user_private')
+  const [browserProfileCreating, setBrowserProfileCreating] = createSignal(false)
+  const [browserProfileMutating, setBrowserProfileMutating] = createSignal(false)
+  const [browserProfileDeleteArmed, setBrowserProfileDeleteArmed] = createSignal(false)
+  const [renamingProfile, setRenamingProfile] = createSignal(false)
+  const [renameProfileName, setRenameProfileName] = createSignal('')
+  // Client-side mirror of the gateway's `reject_zdr_persistent_profile`
+  // guard: when checked, the profile picker is forced back to isolated and
+  // disabled — this NEVER replaces the server-side check (`createBrowserSession`
+  // below still omits every profile field whenever this is true), it only
+  // stops the UI from ever building a request the server would reject anyway.
+  const [zdrRequested, setZdrRequested] = createSignal(false)
   const [browserLoopState, setBrowserLoopState] = createSignal<BrowserLoopState>({
     error: null,
     goal: '',
@@ -206,7 +229,27 @@ export function KnowledgeComposer(props: {
     const choice = browserProfileChoice()
     return isProfileId(choice) ? choice : null
   })
-  const shouldPersistBrowserProfile = createMemo(() => browserProfileChoice() === newProfileChoice || Boolean(selectedBrowserProfileId()))
+  // Phase 3 continuation: the selected profile's real stored summary
+  // (name + scope) so session-create can pass the genuine scope instead
+  // of inferring it from a boolean.
+  const selectedBrowserProfileSummary = createMemo<BrowserProfileSummary | null>(() => {
+    const id = selectedBrowserProfileId()
+    if (!id) return null
+    return browserProfiles().find((profile) => profile.profile_id === id) ?? null
+  })
+
+  // ZDR client-side guard (mirrors, never replaces, the gateway's
+  // `reject_zdr_persistent_profile`): as soon as ZDR is requested, force the
+  // picker back to isolated so no persistent-profile UI state can leak into
+  // the next `createBrowserSession` call.
+  createEffect(() => {
+    if (!zdrRequested()) return
+    if (browserProfileChoice() === isolatedProfileChoice) return
+    setBrowserProfileChoice(isolatedProfileChoice)
+    setBrowserProfileProbe(null)
+    setBrowserProfileDeleteArmed(false)
+    setRenamingProfile(false)
+  })
 
   const updateJob = (key: string, patch: Partial<IngestJob>) => {
     setJobs((current) => current.map((job) => (job.key === key ? { ...job, ...patch } : job)))
@@ -522,7 +565,8 @@ export function KnowledgeComposer(props: {
     try {
       const result = await listBrowserProfiles(id)
       setBrowserProfiles(result.profiles)
-      if (selectedBrowserProfileId() && !result.profiles.includes(selectedBrowserProfileId() ?? '')) {
+      const selectedId = selectedBrowserProfileId()
+      if (selectedId && !result.profiles.some((profile) => profile.profile_id === selectedId)) {
         setBrowserProfileChoice(isolatedProfileChoice)
         setBrowserProfileProbe(null)
       }
@@ -547,6 +591,93 @@ export function KnowledgeComposer(props: {
       setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke sjekkes.', 'The profile could not be checked.'))
     } finally {
       setBrowserProfileProbing(false)
+    }
+  }
+
+  const selectBrowserProfile = (profileId: string) => {
+    setBrowserProfileChoice(profileId)
+    setBrowserProfileProbe(null)
+    setBrowserProfileError(null)
+    setRenamingProfile(false)
+    setBrowserProfileDeleteArmed(false)
+  }
+
+  const createNamedBrowserProfile = async () => {
+    const id = orgId()
+    if (!id || browserProfileCreating() || zdrRequested()) return
+    setBrowserProfileCreating(true)
+    setBrowserProfileError(null)
+    try {
+      const name = newProfileName().trim()
+      const created = await createBrowserProfile(id, {
+        ...(name ? { name } : {}),
+        scope: newProfileScope(),
+      })
+      setBrowserProfiles((current) => [created, ...current.filter((profile) => profile.profile_id !== created.profile_id)])
+      selectBrowserProfile(created.profile_id)
+      setNewProfileName('')
+    } catch (reason) {
+      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke opprettes.', 'The profile could not be created.'))
+    } finally {
+      setBrowserProfileCreating(false)
+    }
+  }
+
+  const startRenamingSelectedBrowserProfile = () => {
+    const summary = selectedBrowserProfileSummary()
+    if (!summary) return
+    setRenameProfileName(summary.name ?? '')
+    setBrowserProfileDeleteArmed(false)
+    setRenamingProfile(true)
+  }
+
+  const cancelRenamingBrowserProfile = () => {
+    setRenamingProfile(false)
+    setRenameProfileName('')
+  }
+
+  const confirmRenameSelectedBrowserProfile = async () => {
+    const id = orgId()
+    const profileId = selectedBrowserProfileId()
+    const name = renameProfileName().trim()
+    if (!id || !profileId || !name || browserProfileMutating()) return
+    setBrowserProfileMutating(true)
+    setBrowserProfileError(null)
+    try {
+      const updated = await renameBrowserProfile(id, profileId, { name })
+      setBrowserProfiles((current) => current.map((profile) => (profile.profile_id === updated.profile_id ? updated : profile)))
+      cancelRenamingBrowserProfile()
+    } catch (reason) {
+      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke gi profilen nytt navn.', 'Could not rename the profile.'))
+    } finally {
+      setBrowserProfileMutating(false)
+    }
+  }
+
+  const armDeleteSelectedBrowserProfile = () => {
+    setRenamingProfile(false)
+    setBrowserProfileDeleteArmed(true)
+  }
+
+  const cancelDeleteSelectedBrowserProfile = () => setBrowserProfileDeleteArmed(false)
+
+  const confirmDeleteSelectedBrowserProfile = async () => {
+    const id = orgId()
+    const profileId = selectedBrowserProfileId()
+    if (!id || !profileId || browserProfileMutating()) return
+    setBrowserProfileMutating(true)
+    setBrowserProfileError(null)
+    try {
+      await deleteBrowserProfile(id, profileId)
+      setBrowserProfiles((current) => current.filter((profile) => profile.profile_id !== profileId))
+      setBrowserProfileChoice(isolatedProfileChoice)
+      setBrowserProfileProbe(null)
+      cancelRenamingBrowserProfile()
+    } catch (reason) {
+      setBrowserProfileError(reason instanceof Error ? reason.message : i18n.tr('Profilen kunne ikke slettes.', 'The profile could not be deleted.'))
+    } finally {
+      setBrowserProfileDeleteArmed(false)
+      setBrowserProfileMutating(false)
     }
   }
 
@@ -607,18 +738,28 @@ export function KnowledgeComposer(props: {
     if (!id) return { error: i18n.tr('Arbeidsområde mangler for nettleserøkt.', 'Workspace is missing for the browser session.'), session: null }
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), BROWSER_SESSION_TIMEOUT_MS)
-    const profileId = selectedBrowserProfileId()
+    // A ZDR session never carries a profile field, regardless of whatever the
+    // picker happened to show — this mirrors (never replaces) the gateway's
+    // `reject_zdr_persistent_profile` guard, which rejects the request
+    // independently if this client ever got it wrong.
+    const zdr = zdrRequested()
+    const selectedProfile = zdr ? null : selectedBrowserProfileSummary()
     try {
       const session = await createBrowserSession(id, {
-        ...(shouldPersistBrowserProfile() ? { persistentProfile: true } : {}),
-        ...(profileId ? { profileId } : {}),
+        ...(zdr ? { zdr: true } : {}),
+        ...(selectedProfile ? { profileId: selectedProfile.profile_id, scope: selectedProfile.scope } : {}),
         url: target,
         viewport: { width: 1280, height: 800 },
       }, controller.signal)
-      const returnedProfileId = session.session.profile.id
-      if (session.session.profile.storage === 'persistent' && returnedProfileId) {
-        setBrowserProfiles((current) => current.includes(returnedProfileId) ? current : [returnedProfileId, ...current])
-        setBrowserProfileChoice(returnedProfileId)
+      const returnedProfile = session.session.profile
+      if (returnedProfile.storage === 'persistent' && returnedProfile.id) {
+        const returnedId = returnedProfile.id
+        setBrowserProfiles((current) =>
+          current.some((profile) => profile.profile_id === returnedId)
+            ? current
+            : [{ profile_id: returnedId, name: selectedProfile?.name ?? null, scope: returnedProfile.scope }, ...current],
+        )
+        setBrowserProfileChoice(returnedId)
       }
       return { error: null, session }
     } catch (reason) {
@@ -957,6 +1098,39 @@ export function KnowledgeComposer(props: {
     }
   }
 
+  // Phase 3 continuation: everything the live browser chrome's profile
+  // popover needs for full CRUD, keyed off the same state the pre-session
+  // picker above already uses — `current.browserSession?.session.zdr` is the
+  // one thing that differs per-preview (the *live session's* ZDR flag, not
+  // the pre-session checkbox, which is meaningless once a session exists).
+  const browserProfileManagerProps = (current: ScrapePreview): BrowserProfileManagerProps => ({
+    creating: browserProfileCreating(),
+    deleteArmed: browserProfileDeleteArmed(),
+    error: browserProfileError(),
+    loading: browserProfilesLoading(),
+    mutating: browserProfileMutating(),
+    newProfileName: newProfileName(),
+    newProfileScope: newProfileScope(),
+    onArmDelete: armDeleteSelectedBrowserProfile,
+    onCancelDelete: cancelDeleteSelectedBrowserProfile,
+    onCancelRename: cancelRenamingBrowserProfile,
+    onConfirmDelete: () => void confirmDeleteSelectedBrowserProfile(),
+    onConfirmRename: () => void confirmRenameSelectedBrowserProfile(),
+    onCreateProfile: () => void createNamedBrowserProfile(),
+    onNewProfileNameChange: setNewProfileName,
+    onNewProfileScopeChange: setNewProfileScope,
+    onProbeProfile: () => void probeSelectedBrowserProfile(),
+    onRefreshProfiles: () => void refreshBrowserProfiles(),
+    onRenameProfileNameChange: setRenameProfileName,
+    onSelectProfile: selectBrowserProfile,
+    onStartRename: startRenamingSelectedBrowserProfile,
+    profiles: browserProfiles(),
+    renameProfileName: renameProfileName(),
+    renaming: renamingProfile(),
+    selectedProfileId: selectedBrowserProfileId(),
+    zdrActive: Boolean(current.browserSession?.session.zdr),
+  })
+
   onCleanup(() => {
     if (pollTimer !== undefined) window.clearInterval(pollTimer)
     for (const controller of crawlStreams.values()) controller.abort()
@@ -1042,14 +1216,16 @@ export function KnowledgeComposer(props: {
                     setBrowserProfileChoice(event.currentTarget.value)
                     setBrowserProfileProbe(null)
                     setBrowserProfileError(null)
+                    cancelRenamingBrowserProfile()
+                    setBrowserProfileDeleteArmed(false)
                   }}
-                  disabled={!ready()}
+                  disabled={!ready() || zdrRequested()}
                   aria-label={i18n.tr('Nettleserprofil', 'Browser profile')}
                 >
                   <option value={isolatedProfileChoice}>{i18n.tr('Isolert', 'Isolated')}</option>
                   <option value={newProfileChoice}>{i18n.tr('Ny profil', 'New profile')}</option>
                   <For each={browserProfiles()}>
-                    {(profileId) => <option value={profileId}>{shortProfileLabel(profileId)}</option>}
+                    {(profile) => <option value={profile.profile_id}>{profileOptionLabel(profile)}</option>}
                   </For>
                 </select>
               </label>
@@ -1077,6 +1253,15 @@ export function KnowledgeComposer(props: {
                   <ShieldCheck class="size-3.5" />
                 </Show>
               </button>
+              <label class="dashboard-knowledge-composer__browser-zdr">
+                <input
+                  type="checkbox"
+                  checked={zdrRequested()}
+                  onChange={(event) => setZdrRequested(event.currentTarget.checked)}
+                  disabled={!ready()}
+                />
+                <span>{i18n.tr('ZDR — ingen lagring', 'ZDR — no persistence')}</span>
+              </label>
               <Show when={browserProfileProbe()}>
                 {(probe) => (
                   <span class="dashboard-knowledge-composer__browser-profile-status">
@@ -1092,6 +1277,102 @@ export function KnowledgeComposer(props: {
                     {message()}
                   </span>
                 )}
+              </Show>
+
+              <Show when={browserProfileChoice() === newProfileChoice && !zdrRequested()}>
+                <div class="dashboard-knowledge-composer__browser-profile-create">
+                  <input
+                    value={newProfileName()}
+                    onInput={(event) => setNewProfileName(event.currentTarget.value)}
+                    placeholder={i18n.tr('Profilnavn (valgfritt)', 'Profile name (optional)')}
+                    aria-label={i18n.tr('Navn på ny profil', 'New profile name')}
+                    disabled={!ready() || browserProfileCreating()}
+                  />
+                  <select
+                    value={newProfileScope()}
+                    onChange={(event) => setNewProfileScope(event.currentTarget.value as CreatableBrowserProfileScope)}
+                    aria-label={i18n.tr('Omfang for ny profil', 'New profile scope')}
+                    disabled={!ready() || browserProfileCreating()}
+                  >
+                    <option value="user_private">{PROFILE_SCOPE_LABELS.user_private}</option>
+                    <option value="org_shared">{PROFILE_SCOPE_LABELS.org_shared}</option>
+                    <option value="run_scoped">{PROFILE_SCOPE_LABELS.run_scoped}</option>
+                  </select>
+                  <button
+                    type="button"
+                    class="dashboard-knowledge-composer__browser-tool"
+                    onClick={() => void createNamedBrowserProfile()}
+                    disabled={!ready() || browserProfileCreating()}
+                    aria-label={i18n.tr('Opprett profil', 'Create profile')}
+                    title={i18n.tr('Opprett', 'Create')}
+                  >
+                    <Show when={!browserProfileCreating()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
+                      <Plus class="size-3.5" />
+                    </Show>
+                  </button>
+                </div>
+              </Show>
+
+              <Show when={selectedBrowserProfileId()}>
+                <div class="dashboard-knowledge-composer__browser-profile-manage">
+                  <Show
+                    when={renamingProfile()}
+                    fallback={
+                      <button
+                        type="button"
+                        class="dashboard-knowledge-composer__browser-tool"
+                        onClick={startRenamingSelectedBrowserProfile}
+                        disabled={browserProfileMutating()}
+                        aria-label={i18n.tr('Gi profilen nytt navn', 'Rename the profile')}
+                        title={i18n.tr('Nytt navn', 'Rename')}
+                      >
+                        <Pencil class="size-3.5" />
+                      </button>
+                    }
+                  >
+                    <input
+                      value={renameProfileName()}
+                      onInput={(event) => setRenameProfileName(event.currentTarget.value)}
+                      placeholder={i18n.tr('Profilnavn', 'Profile name')}
+                      aria-label={i18n.tr('Nytt profilnavn', 'New profile name')}
+                    />
+                    <button
+                      type="button"
+                      class="dashboard-knowledge-composer__browser-tool"
+                      onClick={() => void confirmRenameSelectedBrowserProfile()}
+                      disabled={browserProfileMutating() || renameProfileName().trim().length === 0}
+                    >
+                      {i18n.tr('Lagre', 'Save')}
+                    </button>
+                    <button type="button" onClick={cancelRenamingBrowserProfile}>{i18n.tr('Avbryt', 'Cancel')}</button>
+                  </Show>
+                  <Show
+                    when={browserProfileDeleteArmed()}
+                    fallback={
+                      <button
+                        type="button"
+                        class="dashboard-knowledge-composer__browser-profile-delete"
+                        onClick={armDeleteSelectedBrowserProfile}
+                        disabled={browserProfileMutating()}
+                        aria-label={i18n.tr('Slett profilen', 'Delete the profile')}
+                        title={i18n.tr('Slett', 'Delete')}
+                      >
+                        <Trash2 class="size-3.5" />
+                      </button>
+                    }
+                  >
+                    <span>{i18n.tr('Slette permanent?', 'Delete permanently?')}</span>
+                    <button
+                      type="button"
+                      class="dashboard-knowledge-composer__browser-profile-delete"
+                      onClick={() => void confirmDeleteSelectedBrowserProfile()}
+                      disabled={browserProfileMutating()}
+                    >
+                      {i18n.tr('Bekreft', 'Confirm')}
+                    </button>
+                    <button type="button" onClick={cancelDeleteSelectedBrowserProfile}>{i18n.tr('Avbryt', 'Cancel')}</button>
+                  </Show>
+                </div>
               </Show>
             </div>
           </Show>
@@ -1154,6 +1435,7 @@ export function KnowledgeComposer(props: {
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
             onDiscard={clearPreview}
             preview={current}
+            profileManager={browserProfileManagerProps(current)}
             profileProbe={browserProfileProbe()}
           />
         )}
@@ -1323,6 +1605,14 @@ function isProfileId(value: string): boolean {
 
 function shortProfileLabel(profileId: string): string {
   return profileId.length <= 18 ? profileId : `${profileId.slice(0, 10)}...${profileId.slice(-5)}`
+}
+
+/** Dropdown option text for a real stored profile: its name when it has one
+ * (set via `createBrowserProfile`/`renameBrowserProfile`), else a truncated
+ * id — plus its scope, so the picker never hides what a selection implies. */
+function profileOptionLabel(profile: BrowserProfileSummary): string {
+  const label = profile.name?.trim() || shortProfileLabel(profile.profile_id)
+  return `${label} · ${PROFILE_SCOPE_LABELS[profile.scope]}`
 }
 
 function profileProbeSummary(probe: BrowserProfileRestoreProbe, i18n: ReturnType<typeof useI18n>): string {

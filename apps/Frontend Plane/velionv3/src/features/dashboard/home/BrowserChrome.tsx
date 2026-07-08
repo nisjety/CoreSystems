@@ -11,6 +11,7 @@ import {
   Eye,
   History,
   Keyboard,
+  Loader2,
   LockKeyhole,
   MoreVertical,
   MousePointer2,
@@ -18,6 +19,7 @@ import {
   Network,
   PanelRight,
   Pause,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -29,6 +31,7 @@ import {
   Terminal,
   TextCursorInput,
   Timer,
+  Trash2,
   X,
 } from 'lucide-solid'
 import {
@@ -49,8 +52,10 @@ import type {
   BrowserDevtoolsEvent,
   BrowserObservation,
   BrowserProfileRestoreProbe,
+  BrowserProfileSummary,
   BrowserSession,
   BrowserTab,
+  CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import {
@@ -84,12 +89,54 @@ export const RENDER_MODE_LABELS: Record<BrowserSessionViewModel['renderMode'], s
   readability_fallback: 'Readability',
 }
 
-const PROFILE_SCOPE_LABELS: Record<BrowserSessionViewModel['profileScope'], string> = {
+export const PROFILE_SCOPE_LABELS: Record<BrowserSessionViewModel['profileScope'], string> = {
   ephemeral: 'Efemer',
   org_shared: 'Org-delt',
   run_scoped: 'Kjøringsscopet',
   user_private: 'Privat',
 }
+
+/**
+ * Phase 3 continuation — everything the profile popover needs to run full
+ * CRUD (create/rename/delete/list) against the org's real, named+scoped
+ * `ProfileStore` rows, independent of whichever profile the *current*
+ * session happens to be attached to. Data is plain values (not signals) —
+ * the caller (`KnowledgeComposer`) owns the state and re-renders this
+ * component reactively the same way every other prop here already works.
+ */
+export type BrowserProfileManagerProps = {
+  creating?: boolean
+  deleteArmed?: boolean
+  error?: string | null
+  loading?: boolean
+  mutating?: boolean
+  newProfileName: string
+  newProfileScope: CreatableBrowserProfileScope
+  onArmDelete: () => void
+  onCancelDelete: () => void
+  onCancelRename: () => void
+  onConfirmDelete: () => void
+  onConfirmRename: () => void
+  onCreateProfile: () => void
+  onNewProfileNameChange: (value: string) => void
+  onNewProfileScopeChange: (value: CreatableBrowserProfileScope) => void
+  onProbeProfile: () => void
+  onRefreshProfiles: () => void
+  onRenameProfileNameChange: (value: string) => void
+  onSelectProfile: (profileId: string) => void
+  onStartRename: () => void
+  profiles: BrowserProfileSummary[]
+  renameProfileName: string
+  renaming?: boolean
+  selectedProfileId: string | null
+  /** True while the visible session itself is ZDR — creating/attaching a
+   * persistent profile is disabled in that case (client-side mirror of the
+   * server's `reject_zdr_persistent_profile` guard, never a substitute for
+   * it: the gateway still rejects the request independently). */
+  zdrActive?: boolean
+}
+
+const CREATABLE_PROFILE_SCOPES: CreatableBrowserProfileScope[] = ['user_private', 'org_shared', 'run_scoped']
 
 const LOOP_STATUS_LABELS: Record<BrowserLoopState['status'], string> = {
   acting: 'Utfører',
@@ -235,6 +282,10 @@ export function BrowserChrome(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
+  /** Phase 3 continuation: full profile CRUD surfaced in the popover. Omit
+   * to fall back to the read-only current-session info the popover always
+   * showed before this. */
+  profileManager?: BrowserProfileManagerProps
   profileProbe?: BrowserProfileRestoreProbe | null
   session: BrowserSessionViewModel
 }) {
@@ -1225,6 +1276,153 @@ export function BrowserChrome(props: {
                     <ShieldCheck class="size-3" aria-hidden="true" /> Flyktig evidens — ingen lagring
                   </span>
                 </div>
+              </Show>
+
+              <Show when={props.profileManager}>
+                {(manager) => (
+                  <div class="knowledge-browser-popover__profiles">
+                    <header class="knowledge-browser-popover__subhead">
+                      <span>Alle profiler</span>
+                      <button
+                        type="button"
+                        aria-label="Oppdater profillisten"
+                        title="Oppdater"
+                        disabled={manager().loading}
+                        onClick={() => manager().onRefreshProfiles()}
+                      >
+                        <Show when={!manager().loading} fallback={<Loader2 class="size-3 dashboard-xsearch-spin" />}>
+                          <RefreshCw class="size-3" />
+                        </Show>
+                      </button>
+                    </header>
+                    <ul class="knowledge-browser-profile-list">
+                      <For each={manager().profiles} fallback={<li class="knowledge-browser-empty">Ingen lagrede profiler ennå.</li>}>
+                        {(item) => (
+                          <li classList={{ 'knowledge-browser-profile-list__item--active': item.profile_id === manager().selectedProfileId }}>
+                            <button
+                              type="button"
+                              class="knowledge-browser-profile-list__select"
+                              title={`Velg ${item.name || item.profile_id} for neste økt`}
+                              onClick={() => manager().onSelectProfile(item.profile_id)}
+                            >
+                              <strong>{item.name?.trim() || compactArtifactId(item.profile_id)}</strong>
+                              <span class="knowledge-browser-profile-list__scope">{PROFILE_SCOPE_LABELS[item.scope]}</span>
+                            </button>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
+
+                    <Show when={manager().selectedProfileId}>
+                      <div class="knowledge-browser-popover__profile-actions">
+                        <button
+                          type="button"
+                          aria-label="Sjekk gjenopprettbarhet for valgt profil"
+                          title="Sjekk profil"
+                          disabled={manager().mutating}
+                          onClick={() => manager().onProbeProfile()}
+                        >
+                          <ShieldCheck class="size-3" /> Sjekk
+                        </button>
+                        <Show
+                          when={manager().renaming}
+                          fallback={
+                            <button
+                              type="button"
+                              aria-label="Gi valgt profil nytt navn"
+                              disabled={manager().mutating}
+                              onClick={() => manager().onStartRename()}
+                            >
+                              <Pencil class="size-3" /> Nytt navn
+                            </button>
+                          }
+                        >
+                          <div class="knowledge-browser-profile-rename">
+                            <input
+                              value={manager().renameProfileName}
+                              placeholder="Profilnavn"
+                              aria-label="Nytt profilnavn"
+                              onInput={(event) => manager().onRenameProfileNameChange(event.currentTarget.value)}
+                            />
+                            <button
+                              type="button"
+                              disabled={manager().mutating || manager().renameProfileName.trim().length === 0}
+                              onClick={() => manager().onConfirmRename()}
+                            >
+                              Lagre
+                            </button>
+                            <button type="button" onClick={() => manager().onCancelRename()}>Avbryt</button>
+                          </div>
+                        </Show>
+                        <Show
+                          when={manager().deleteArmed}
+                          fallback={
+                            <button
+                              type="button"
+                              class="knowledge-browser-popover__delete"
+                              aria-label="Slett valgt profil"
+                              disabled={manager().mutating}
+                              onClick={() => manager().onArmDelete()}
+                            >
+                              <Trash2 class="size-3" /> Slett
+                            </button>
+                          }
+                        >
+                          <div class="knowledge-browser-profile-delete-confirm">
+                            <span>Slette permanent?</span>
+                            <button
+                              type="button"
+                              class="knowledge-browser-popover__delete"
+                              disabled={manager().mutating}
+                              onClick={() => manager().onConfirmDelete()}
+                            >
+                              Bekreft
+                            </button>
+                            <button type="button" onClick={() => manager().onCancelDelete()}>Avbryt</button>
+                          </div>
+                        </Show>
+                      </div>
+                    </Show>
+
+                    <div class="knowledge-browser-profile-create">
+                      <input
+                        value={manager().newProfileName}
+                        placeholder="Navn på ny profil"
+                        aria-label="Navn på ny profil"
+                        disabled={manager().zdrActive || manager().creating}
+                        onInput={(event) => manager().onNewProfileNameChange(event.currentTarget.value)}
+                      />
+                      <select
+                        value={manager().newProfileScope}
+                        aria-label="Omfang for ny profil"
+                        disabled={manager().zdrActive || manager().creating}
+                        onChange={(event) => manager().onNewProfileScopeChange(event.currentTarget.value as CreatableBrowserProfileScope)}
+                      >
+                        <For each={CREATABLE_PROFILE_SCOPES}>
+                          {(scope) => <option value={scope}>{PROFILE_SCOPE_LABELS[scope]}</option>}
+                        </For>
+                      </select>
+                      <button
+                        type="button"
+                        disabled={manager().zdrActive || manager().creating}
+                        onClick={() => manager().onCreateProfile()}
+                      >
+                        <Show when={!manager().creating} fallback={<Loader2 class="size-3 dashboard-xsearch-spin" />}>
+                          <Plus class="size-3" />
+                        </Show>
+                        Opprett
+                      </button>
+                    </div>
+                    <Show when={manager().zdrActive}>
+                      <p class="knowledge-browser-popover__profile-hint">
+                        ZDR-økter kan ikke bruke en lagret profil — kun efemert.
+                      </p>
+                    </Show>
+                    <Show when={manager().error}>
+                      {(message) => <p class="knowledge-browser-popover__profile-error">{message()}</p>}
+                    </Show>
+                  </div>
+                )}
               </Show>
             </div>
           </>

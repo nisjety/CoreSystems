@@ -8606,6 +8606,112 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.dashboard-knowledge-composer__browser-zdr {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border-radius: 12px;
+  background: var(--velion-surface-soft);
+  padding: 5px 10px;
+  color: var(--velion-text-soft);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.dashboard-knowledge-composer__browser-zdr input {
+  accent-color: var(--velion-brand, #171717);
+}
+
+/* Phase 3 continuation: inline "create a new profile" mini-form, shown when
+ * the picker's "Ny profil" option is selected. */
+.dashboard-knowledge-composer__browser-profile-create {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.dashboard-knowledge-composer__browser-profile-create input {
+  min-width: 0;
+  flex: 1 1 160px;
+  border: 1px solid rgb(23 23 23 / 10%);
+  border-radius: 10px;
+  background: var(--velion-surface-soft);
+  padding: 6px 10px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 12px;
+}
+
+.dashboard-knowledge-composer__browser-profile-create select {
+  flex: 0 0 auto;
+  border: 1px solid rgb(23 23 23 / 10%);
+  border-radius: 10px;
+  background: var(--velion-surface-soft);
+  padding: 6px 8px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 12px;
+}
+
+/* Rename/delete affordances for whichever profile is currently selected in
+ * the picker above (same selection the live session inherits). */
+.dashboard-knowledge-composer__browser-profile-manage {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.dashboard-knowledge-composer__browser-profile-manage input {
+  min-width: 0;
+  flex: 1 1 120px;
+  border: 1px solid rgb(23 23 23 / 10%);
+  border-radius: 10px;
+  background: var(--velion-surface-soft);
+  padding: 5px 9px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 11.5px;
+}
+
+.dashboard-knowledge-composer__browser-profile-manage > button {
+  border-radius: 10px;
+  padding: 5px 9px;
+  color: var(--velion-text-soft);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.dashboard-knowledge-composer__browser-profile-manage > button:hover:not(:disabled) {
+  background: rgb(23 23 23 / 6%);
+}
+
+.dashboard-knowledge-composer__browser-profile-manage span {
+  color: #a45b22;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.dashboard-knowledge-composer__browser-profile-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  border: 1px solid rgb(178 58 58 / 25%);
+  background: rgb(178 58 58 / 8%);
+  color: #b23a3a;
+}
+
+.dashboard-knowledge-composer__browser-profile-delete:hover:not(:disabled) {
+  background: rgb(178 58 58 / 16%);
+}
+
+.dashboard-knowledge-composer__browser-profile-delete:disabled {
+  opacity: 0.48;
+}
+
 .dashboard-knowledge-composer__discover {
   display: inline-flex;
   min-height: 34px;
@@ -10114,6 +10220,222 @@ textarea:focus-visible {
 
 .knowledge-browser-popover__menu a:hover {
   background: rgb(23 23 23 / 5%);
+}
+
+/* Phase 3 continuation: full profile CRUD inside the padlock popover. */
+.knowledge-browser-popover__profiles {
+  margin-top: 6px;
+  border-top: 1px solid rgb(23 23 23 / 8%);
+  padding-top: 8px;
+}
+
+.knowledge-browser-popover__subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: rgb(110 116 123);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.knowledge-browser-popover__subhead button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: rgb(96 104 112);
+}
+
+.knowledge-browser-popover__subhead button:hover:not(:disabled) {
+  background: rgb(23 23 23 / 7%);
+  color: rgb(31 35 38);
+}
+
+.knowledge-browser-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 148px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+
+.knowledge-browser-profile-list__select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border-radius: 8px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.knowledge-browser-profile-list__select:hover {
+  background: rgb(23 23 23 / 5%);
+}
+
+.knowledge-browser-profile-list__select strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 11.5px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-browser-profile-list__item--active .knowledge-browser-profile-list__select {
+  background: rgb(20 115 230 / 8%);
+}
+
+.knowledge-browser-profile-list__scope {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgb(23 23 23 / 6%);
+  padding: 2px 7px;
+  color: rgb(96 104 112);
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.knowledge-browser-popover__profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.knowledge-browser-popover__profile-actions > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 8px;
+  background: rgb(23 23 23 / 5%);
+  padding: 5px 9px;
+  color: rgb(52 60 68);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.knowledge-browser-popover__profile-actions > button:hover:not(:disabled) {
+  background: rgb(23 23 23 / 9%);
+}
+
+.knowledge-browser-popover__profile-actions > button:disabled {
+  opacity: 0.5;
+}
+
+.knowledge-browser-popover__delete {
+  color: #b23a3a !important;
+}
+
+.knowledge-browser-popover__delete:hover:not(:disabled) {
+  background: rgb(178 58 58 / 12%) !important;
+}
+
+.knowledge-browser-profile-rename,
+.knowledge-browser-profile-delete-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.knowledge-browser-profile-rename input {
+  min-width: 0;
+  flex: 1 1 120px;
+  border: 0;
+  border-radius: 8px;
+  background: rgb(23 23 23 / 5%);
+  box-shadow: inset 0 0 0 1px rgb(23 23 23 / 8%);
+  padding: 5px 8px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 11.5px;
+}
+
+.knowledge-browser-profile-rename button,
+.knowledge-browser-profile-delete-confirm button {
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: rgb(23 23 23 / 6%);
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.knowledge-browser-profile-delete-confirm span {
+  color: #a45b22;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.knowledge-browser-profile-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.knowledge-browser-profile-create input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  border-radius: 8px;
+  background: rgb(23 23 23 / 5%);
+  box-shadow: inset 0 0 0 1px rgb(23 23 23 / 8%);
+  padding: 5px 8px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 11.5px;
+}
+
+.knowledge-browser-profile-create select {
+  flex: 0 0 auto;
+  max-width: 108px;
+  border: 0;
+  border-radius: 8px;
+  background: rgb(23 23 23 / 5%);
+  padding: 5px 6px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 11px;
+}
+
+.knowledge-browser-profile-create button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--velion-brand, #171717);
+  color: #fff;
+}
+
+.knowledge-browser-profile-create button:disabled {
+  opacity: 0.5;
+}
+
+.knowledge-browser-popover__profile-hint {
+  margin: 6px 0 0;
+  color: rgb(110 116 123);
+  font-size: 10.5px;
+  font-style: italic;
+}
+
+.knowledge-browser-popover__profile-error {
+  margin: 6px 0 0;
+  color: #a45b22;
+  font-size: 11px;
+  font-weight: 650;
 }
 
 .knowledge-browser-canvas {

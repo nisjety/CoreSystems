@@ -15,7 +15,7 @@ import type {
   BrowserProfileRestoreProbe,
 } from '@/shared/api/browser-client'
 import type { BrowserLoopState } from './browser-loop'
-import { BrowserChrome } from './BrowserChrome'
+import { BrowserChrome, type BrowserProfileManagerProps } from './BrowserChrome'
 import { browserSessionFromPreview, type BrowserStepRationale } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
@@ -226,6 +226,7 @@ function BrowserSessionSurface(props: {
   onToggle: (index: number) => void
   onToggleExpanded: () => void
   preview: ScrapePreview
+  profileManager?: BrowserProfileManagerProps
   profileProbe?: BrowserProfileRestoreProbe | null
   selected: Set<number>
   selectedChars: number
@@ -283,6 +284,7 @@ function BrowserSessionSurface(props: {
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        profileManager={props.profileManager}
         profileProbe={props.profileProbe}
         session={session()}
       >
@@ -412,6 +414,7 @@ export function ScrapePreviewPanel(props: {
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
   preview: ScrapePreview
+  profileManager?: BrowserProfileManagerProps
   profileProbe?: BrowserProfileRestoreProbe | null
 }) {
   // Mounted fresh per scrape (parent <Show keyed>), so default-select every block.
@@ -471,6 +474,7 @@ export function ScrapePreviewPanel(props: {
         onToggle={toggle}
         onToggleExpanded={() => setBrowserExpanded((current) => !current)}
         preview={props.preview}
+        profileManager={props.profileManager}
         profileProbe={props.profileProbe}
         selected={selected()}
         selectedChars={selectedChars()}

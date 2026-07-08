@@ -69,9 +69,29 @@ export type BrowserSessionStatus = 'live' | 'degraded' | 'closed'
 export type BrowserControlMode = 'agent_control' | 'human_takeover'
 export type BrowserActionActor = 'agent' | 'human'
 
-export type BrowserProfileListResponse = {
-  profiles: string[]
+/**
+ * Phase 3 continuation: one row of `GET /api/v1/browser/profiles` — a
+ * real name + scope, not just a bare id string. Field names stay
+ * snake_case (unlike most gateway responses in this file) because this
+ * is a raw Quarry-edge pass-through, matching
+ * `BrowserProfileRestoreProbe` below.
+ */
+export type BrowserProfileSummary = {
+  profile_id: string
+  name?: string | null
+  scope: BrowserProfileScope
 }
+
+export type BrowserProfileListResponse = {
+  profiles: BrowserProfileSummary[]
+}
+
+/**
+ * A scope a caller may explicitly create/rescope a profile to. Creating
+ * or rescoping to `ephemeral` is rejected server-side — ephemeral
+ * browsing simply attaches no profile at all.
+ */
+export type CreatableBrowserProfileScope = Exclude<BrowserProfileScope, 'ephemeral'>
 
 export type BrowserProfileRestoreProbe = {
   cookies_count: number
@@ -80,8 +100,10 @@ export type BrowserProfileRestoreProbe = {
   indexed_db_count: number
   local_storage_count: number
   locale?: string | null
+  name?: string | null
   profile_id: string
   restorable: boolean
+  scope?: BrowserProfileScope
   session_storage_count: number
   timezone?: string | null
   url: string
@@ -236,6 +258,12 @@ export type BrowserActionSuggestionResponse = {
 export type CreateBrowserSessionRequest = {
   persistentProfile?: boolean
   profileId?: string
+  /**
+   * Phase 3 continuation: explicit scope for the profile this session
+   * attaches. Optional — when omitted the gateway infers scope from
+   * `profileId`/`persistentProfile` exactly as before.
+   */
+  scope?: BrowserProfileScope
   url: string
   viewport?: {
     height: number
@@ -410,6 +438,46 @@ export async function listBrowserProfiles(
     headers: orgHeaders(orgId),
     signal,
   })
+}
+
+/**
+ * Phase 3 continuation: explicitly create a named, scoped profile (as
+ * opposed to attaching one implicitly via `persistentProfile`/`profileId`
+ * at session-create time). Returns the created profile's summary so the
+ * caller can select it immediately.
+ */
+export async function createBrowserProfile(
+  orgId: string,
+  body: { name?: string; scope: CreatableBrowserProfileScope },
+  signal?: AbortSignal,
+): Promise<BrowserProfileSummary> {
+  return requestJson<BrowserProfileSummary>('/api/v1/browser/profiles', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: orgHeaders(orgId),
+    signal,
+  })
+}
+
+/**
+ * Phase 3 continuation: rename and/or rescope an existing profile. At
+ * least one of `name`/`scope` must be provided.
+ */
+export async function renameBrowserProfile(
+  orgId: string,
+  profileId: string,
+  body: { name?: string; scope?: CreatableBrowserProfileScope },
+  signal?: AbortSignal,
+): Promise<BrowserProfileSummary> {
+  return requestJson<BrowserProfileSummary>(
+    `/api/v1/browser/profiles/${encodeURIComponent(profileId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
 }
 
 export async function probeBrowserProfile(
