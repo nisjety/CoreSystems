@@ -31,6 +31,23 @@ def test_baseline_suite_loads_and_validates() -> None:
     assert len({case.id for case in cases}) == 12
 
 
+def test_deployed_agent_cases_request_the_agentic_feature() -> None:
+    # model-gateway only drives execution-core's tool catalog when the
+    # request opts into the "agentic" feature (sse.rs: `features.iter().any(
+    # |f| f == "agentic")`); profile=deployed_agent alone only affects
+    # approval POSTURE once a run is already agentic. Missing this made
+    # every deployed_agent case silently fall back to a plain completion
+    # with zero tool calls (discovered 2026-07-08 calibrating case 07 — the
+    # "multitool-loop-health" case had been passing vacuously on 0 tool
+    # calls). This test makes that class of bug impossible to reintroduce.
+    for case in load_cases(CASES_DIR):
+        if case.profile == "deployed_agent":
+            assert "agentic" in case.features, (
+                f"{case.id}: profile=deployed_agent but features={case.features} "
+                "is missing 'agentic' — the tool loop will never run"
+            )
+
+
 def test_vendor_dependent_cases_declare_requirements() -> None:
     # Cases that need seeded fixtures must say so — that is what turns a
     # missing fixture into an honest SKIP instead of a fake pass.
