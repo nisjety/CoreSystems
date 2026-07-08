@@ -67,8 +67,13 @@ struct BrowserRunStartRequest {
     plan_id: Option<String>,
     #[serde(default)]
     profile_id: Option<String>,
+    // `Option`, not a bare `Vec`, because callers (the Velion gateway) may
+    // send an explicit JSON `null` for "no restriction yet" rather than
+    // omitting the key — `Vec<String>` rejects `null` even with
+    // `#[serde(default)]` (default only covers a *missing* key), which
+    // otherwise 422s a well-formed request.
     #[serde(default)]
-    allowed_domains: Vec<String>,
+    allowed_domains: Option<Vec<String>>,
     #[serde(default)]
     max_steps: Option<i32>,
     #[serde(default)]
@@ -330,8 +335,20 @@ mod tests {
         assert!(req.thread_id.is_none());
         assert!(req.plan_id.is_none());
         assert!(req.profile_id.is_none());
-        assert!(req.allowed_domains.is_empty());
+        assert!(req.allowed_domains.is_none());
         assert!(!req.zdr);
+    }
+
+    #[test]
+    fn start_request_accepts_explicit_null_allowed_domains() {
+        // Regression: the Velion gateway sends an explicit JSON `null` (not a
+        // missing key) when it has no restriction to forward — `Vec<String>`
+        // rejects that even with `#[serde(default)]` (a 422 seen live before
+        // this field became `Option<Vec<String>>`).
+        let req: BrowserRunStartRequest =
+            serde_json::from_str(r#"{"goal":"g","grant_id":"session:s1","allowed_domains":null}"#)
+                .expect("explicit null allowed_domains must deserialize");
+        assert!(req.allowed_domains.is_none());
     }
 
     #[test]
