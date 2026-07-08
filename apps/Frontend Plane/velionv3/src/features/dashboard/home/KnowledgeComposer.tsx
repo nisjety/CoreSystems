@@ -1300,15 +1300,14 @@ export function KnowledgeComposer(props: {
                   </select>
                   <button
                     type="button"
-                    class="dashboard-knowledge-composer__browser-tool"
+                    class="dashboard-knowledge-composer__browser-profile-create-submit"
                     onClick={() => void createNamedBrowserProfile()}
                     disabled={!ready() || browserProfileCreating()}
-                    aria-label={i18n.tr('Opprett profil', 'Create profile')}
-                    title={i18n.tr('Opprett', 'Create')}
                   >
                     <Show when={!browserProfileCreating()} fallback={<Loader2 class="size-3.5 dashboard-xsearch-spin" />}>
                       <Plus class="size-3.5" />
                     </Show>
+                    {i18n.tr('Opprett', 'Create')}
                   </button>
                 </div>
               </Show>
@@ -1338,7 +1337,6 @@ export function KnowledgeComposer(props: {
                     />
                     <button
                       type="button"
-                      class="dashboard-knowledge-composer__browser-tool"
                       onClick={() => void confirmRenameSelectedBrowserProfile()}
                       disabled={browserProfileMutating() || renameProfileName().trim().length === 0}
                     >
@@ -1364,7 +1362,7 @@ export function KnowledgeComposer(props: {
                     <span>{i18n.tr('Slette permanent?', 'Delete permanently?')}</span>
                     <button
                       type="button"
-                      class="dashboard-knowledge-composer__browser-profile-delete"
+                      class="dashboard-knowledge-composer__browser-profile-delete-confirm"
                       onClick={() => void confirmDeleteSelectedBrowserProfile()}
                       disabled={browserProfileMutating()}
                     >

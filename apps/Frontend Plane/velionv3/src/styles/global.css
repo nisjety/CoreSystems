@@ -8654,6 +8654,30 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
+.dashboard-knowledge-composer__browser-profile-create-submit {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  border-radius: 10px;
+  background: var(--velion-brand, #171717);
+  padding: 6px 12px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  transition: opacity 140ms ease;
+}
+
+.dashboard-knowledge-composer__browser-profile-create-submit:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
+.dashboard-knowledge-composer__browser-profile-create-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Rename/delete affordances for whichever profile is currently selected in
  * the picker above (same selection the live session inherits). */
 .dashboard-knowledge-composer__browser-profile-manage {
@@ -8710,6 +8734,24 @@ textarea:focus-visible {
 
 .dashboard-knowledge-composer__browser-profile-delete:disabled {
   opacity: 0.48;
+}
+
+.dashboard-knowledge-composer__browser-profile-delete-confirm {
+  border-radius: 10px;
+  background: rgb(178 58 58 / 10%);
+  padding: 5px 9px;
+  color: #b23a3a;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.dashboard-knowledge-composer__browser-profile-delete-confirm:hover:not(:disabled) {
+  background: rgb(178 58 58 / 18%);
+}
+
+.dashboard-knowledge-composer__browser-profile-delete-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .dashboard-knowledge-composer__discover {
