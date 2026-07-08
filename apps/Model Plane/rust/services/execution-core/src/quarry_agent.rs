@@ -301,8 +301,15 @@ impl QuarryAgentClient {
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Always send a bearer, matching `web_tools.rs`'s `WebToolsClient::post`
+        // (same edge, same env vars): quarry-edge's `AUTH_DEV_BYPASS` accepts
+        // any token but still requires the header to be present at all, so an
+        // empty `QUARRY_EDGE_TOKEN` (never populated with a real signed JWT
+        // anywhere in this stack today) must still fall back to a literal
+        // placeholder rather than omitting the header — otherwise every
+        // `/v1/agent/runs` call 401s before dev bypass is ever consulted.
         if self.token.is_empty() {
-            req
+            req.bearer_auth("dev")
         } else {
             req.bearer_auth(&self.token)
         }
