@@ -58,6 +58,86 @@ pub struct Viewport {
     pub is_mobile: bool,
 }
 
+/// Profile scope — mirrors the SPA's `BrowserProfileScope` union
+/// (`ephemeral | user_private | org_shared | run_scoped`). Phase 3
+/// continuation: promotes scope from an inferred gateway-side boolean
+/// into first-class, queryable profile metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileScope {
+    /// No persistence intended. A *session* can be ephemeral without any
+    /// profile at all. This is the in-language default for "no scope was
+    /// specified" (e.g. `ProfileMetadata::default()` when a store has no
+    /// metadata row at all) — but a persisted `ProfileMetadata` row must
+    /// never actually carry this value: `quarry-edge`'s create/update
+    /// handlers reject `scope: ephemeral` outright, and the Postgres
+    /// migration backfills/defaults un-metadata'd rows to `UserPrivate`,
+    /// not this variant, precisely because a row that exists in storage
+    /// was, by construction, deliberately persisted.
+    #[default]
+    Ephemeral,
+    /// Persists for one signed-in user only.
+    UserPrivate,
+    /// Persists and is usable by any member of the org.
+    OrgShared,
+    /// Persists only for the lifetime of a single agent run/grant.
+    RunScoped,
+}
+
+impl ProfileScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ephemeral => "ephemeral",
+            Self::UserPrivate => "user_private",
+            Self::OrgShared => "org_shared",
+            Self::RunScoped => "run_scoped",
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ProfileScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ephemeral" => Ok(Self::Ephemeral),
+            "user_private" => Ok(Self::UserPrivate),
+            "org_shared" => Ok(Self::OrgShared),
+            "run_scoped" => Ok(Self::RunScoped),
+            other => Err(format!("unknown profile scope: {other}")),
+        }
+    }
+}
+
+/// First-class profile metadata, additive alongside `SessionSnapshot`.
+/// `name` is a caller-chosen display label; `scope` mirrors the SPA's
+/// `BrowserProfileScope`. Stored/loaded independently of the snapshot so
+/// naming/rescoping a profile never touches its captured cookies/storage.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub scope: ProfileScope,
+}
+
+/// One row of `ProfileStore::list` — enough to render a profile picker
+/// (name + scope) without a follow-up load per entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileSummary {
+    pub profile_id: ProfileKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub scope: ProfileScope,
+}
+
 /// Tenant-scoped profile storage. Every method takes the verified
 /// `org_id` so the store can never return another tenant's session state
 /// (cookies, storage, viewport). The trait is intentionally a leaky
@@ -77,7 +157,29 @@ pub trait ProfileStore: Send + Sync {
         profile_id: &ProfileKind,
     ) -> QuarryResult<Option<SessionSnapshot>>;
     async fn delete(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<()>;
-    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileKind>>;
+    /// Enumerate this org's profiles with name/scope metadata attached.
+    /// Phase 3 continuation: previously returned bare `Vec<ProfileKind>`.
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>>;
+
+    /// Persist/overwrite a profile's name/scope. Additive: never touches
+    /// the `SessionSnapshot` written by `save`. Implementations must not
+    /// require a prior `save` call — metadata can be written for a
+    /// freshly "created" named profile that has no browsing history yet.
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()>;
+    /// Load a profile's metadata. `Ok(None)` means no metadata (and, per
+    /// `list`'s contract, no snapshot either) exists at all — callers
+    /// that already know the profile exists should treat `None` here as
+    /// `ProfileMetadata::default()` (scope `Ephemeral`, no name).
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>>;
 }
 
 pub struct InMemoryProfileStore {
@@ -86,12 +188,16 @@ pub struct InMemoryProfileStore {
     /// accidental key collision between an org named "alpha" with profile
     /// "foo" and an org named "alphafoo" with no profile suffix.
     store: tokio::sync::RwLock<std::collections::HashMap<String, SessionSnapshot>>,
+    /// Same composite-key scheme, kept as an independent map so naming
+    /// or rescoping a profile never touches its captured snapshot.
+    metadata: tokio::sync::RwLock<std::collections::HashMap<String, ProfileMetadata>>,
 }
 
 impl InMemoryProfileStore {
     pub fn new() -> Self {
         Self {
             store: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            metadata: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -135,22 +241,66 @@ impl ProfileStore for InMemoryProfileStore {
     }
 
     async fn delete(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<()> {
-        self.store
-            .write()
-            .await
-            .remove(&Self::key(org_id, profile_id));
+        let key = Self::key(org_id, profile_id);
+        self.store.write().await.remove(&key);
+        self.metadata.write().await.remove(&key);
         Ok(())
     }
 
-    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileKind>> {
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
         let prefix = format!("{org_id}\0");
+        let metadata = self.metadata.read().await;
         Ok(self
             .store
             .read()
             .await
             .keys()
-            .filter_map(|k| k.strip_prefix(&prefix).and_then(|s| s.parse().ok()))
+            .filter_map(|k| {
+                let suffix = k.strip_prefix(&prefix)?;
+                let profile_id: ProfileKind = suffix.parse().ok()?;
+                let found = metadata.get(k).cloned().unwrap_or_default();
+                Some(ProfileSummary {
+                    profile_id,
+                    name: found.name,
+                    scope: found.scope,
+                })
+            })
             .collect())
+    }
+
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()> {
+        let key = Self::key(org_id, profile_id);
+        // Mirror Postgres/S3: a profile "created" via metadata alone (no
+        // browsing history yet) must still surface from `list()`, whose
+        // InMemory implementation enumerates `store`'s keys. Seed a
+        // placeholder snapshot only if one doesn't already exist so a
+        // rename/rescope of a profile with real captured cookies never
+        // clobbers them.
+        self.store
+            .write()
+            .await
+            .entry(key.clone())
+            .or_insert_with(SessionSnapshot::default);
+        self.metadata.write().await.insert(key, metadata.clone());
+        Ok(())
+    }
+
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>> {
+        Ok(self
+            .metadata
+            .read()
+            .await
+            .get(&Self::key(org_id, profile_id))
+            .cloned())
     }
 }
 
@@ -251,7 +401,7 @@ mod tests {
         // Own-tenant list: must contain it.
         let mine = store.list("org_a").await.unwrap();
         assert_eq!(mine.len(), 1);
-        assert_eq!(mine[0].to_string(), pid.to_string());
+        assert_eq!(mine[0].profile_id.to_string(), pid.to_string());
 
         // Cross-tenant delete: must NOT remove org_a's profile.
         store.delete("org_b", &pid).await.unwrap();
@@ -288,6 +438,148 @@ mod tests {
 
         let list = store.list("org_a").await.unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn metadata_save_load_roundtrip() {
+        let store = InMemoryProfileStore::new();
+        let profile_id: ProfileKind = Id::new();
+        store
+            .save("org_a", &profile_id, &SessionSnapshot::default())
+            .await
+            .unwrap();
+
+        assert!(store
+            .load_metadata("org_a", &profile_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let metadata = ProfileMetadata {
+            name: Some("Work Gmail".into()),
+            scope: ProfileScope::UserPrivate,
+        };
+        store
+            .save_metadata("org_a", &profile_id, &metadata)
+            .await
+            .unwrap();
+
+        let loaded = store
+            .load_metadata("org_a", &profile_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("Work Gmail"));
+        assert_eq!(loaded.scope, ProfileScope::UserPrivate);
+    }
+
+    #[tokio::test]
+    async fn list_carries_name_and_scope_from_metadata() {
+        let store = InMemoryProfileStore::new();
+        let named: ProfileKind = Id::new();
+        let unnamed: ProfileKind = Id::new();
+        store
+            .save("org_a", &named, &SessionSnapshot::default())
+            .await
+            .unwrap();
+        store
+            .save("org_a", &unnamed, &SessionSnapshot::default())
+            .await
+            .unwrap();
+        store
+            .save_metadata(
+                "org_a",
+                &named,
+                &ProfileMetadata {
+                    name: Some("Norwegian bank".into()),
+                    scope: ProfileScope::OrgShared,
+                },
+            )
+            .await
+            .unwrap();
+
+        let list = store.list("org_a").await.unwrap();
+        let named_summary = list
+            .iter()
+            .find(|s| s.profile_id == named)
+            .expect("named profile missing from list");
+        assert_eq!(named_summary.name.as_deref(), Some("Norwegian bank"));
+        assert_eq!(named_summary.scope, ProfileScope::OrgShared);
+
+        // No metadata ever saved for `unnamed` — must default, not error.
+        let unnamed_summary = list
+            .iter()
+            .find(|s| s.profile_id == unnamed)
+            .expect("unnamed profile missing from list");
+        assert!(unnamed_summary.name.is_none());
+        assert_eq!(unnamed_summary.scope, ProfileScope::Ephemeral);
+    }
+
+    #[tokio::test]
+    async fn metadata_isolates_orgs() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        store
+            .save("org_a", &pid, &SessionSnapshot::default())
+            .await
+            .unwrap();
+        store
+            .save_metadata(
+                "org_a",
+                &pid,
+                &ProfileMetadata {
+                    name: Some("secret".into()),
+                    scope: ProfileScope::UserPrivate,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(store.load_metadata("org_b", &pid).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_metadata_too() {
+        let store = InMemoryProfileStore::new();
+        let pid: ProfileKind = Id::new();
+        store
+            .save("org_a", &pid, &SessionSnapshot::default())
+            .await
+            .unwrap();
+        store
+            .save_metadata(
+                "org_a",
+                &pid,
+                &ProfileMetadata {
+                    name: Some("temp".into()),
+                    scope: ProfileScope::RunScoped,
+                },
+            )
+            .await
+            .unwrap();
+
+        store.delete("org_a", &pid).await.unwrap();
+        assert!(store.load("org_a", &pid).await.unwrap().is_none());
+        assert!(store.load_metadata("org_a", &pid).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn profile_scope_string_roundtrip() {
+        for scope in [
+            ProfileScope::Ephemeral,
+            ProfileScope::UserPrivate,
+            ProfileScope::OrgShared,
+            ProfileScope::RunScoped,
+        ] {
+            let s = scope.to_string();
+            let parsed: ProfileScope = s.parse().unwrap();
+            assert_eq!(parsed, scope);
+        }
+    }
+
+    #[test]
+    fn profile_scope_default_is_ephemeral() {
+        assert_eq!(ProfileScope::default(), ProfileScope::Ephemeral);
     }
 
     #[test]

@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 
-use quarry_browser::session::{ProfileStore, SessionSnapshot};
+use quarry_browser::session::{ProfileMetadata, ProfileStore, ProfileSummary, SessionSnapshot};
 use quarry_core::error::QuarryResult;
 use quarry_core::ids::kinds::ProfileKind;
 
@@ -142,12 +142,33 @@ impl ProfileStore for CachedProfileStore {
         Ok(())
     }
 
-    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileKind>> {
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
         // List bypasses the cache — see the module-level doc. The
         // inner store's `list` is already cheap because the schema
         // has an org_id-prefixed index.
         let _ = org_id;
         self.inner.list(org_id).await
+    }
+
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()> {
+        // Pass-through, same rationale as `list`: name/scope changes are
+        // low-frequency admin actions, not the hot restore path this
+        // cache exists for. Caching them would also risk a stale name/
+        // scope surviving past a rename until TTL expiry.
+        self.inner.save_metadata(org_id, profile_id, metadata).await
+    }
+
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>> {
+        self.inner.load_metadata(org_id, profile_id).await
     }
 }
 
@@ -226,8 +247,23 @@ mod tests {
         async fn delete(&self, org_id: &str, profile_id: &ProfileKind) -> QuarryResult<()> {
             self.inner.delete(org_id, profile_id).await
         }
-        async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileKind>> {
+        async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
             self.inner.list(org_id).await
+        }
+        async fn save_metadata(
+            &self,
+            org_id: &str,
+            profile_id: &ProfileKind,
+            metadata: &ProfileMetadata,
+        ) -> QuarryResult<()> {
+            self.inner.save_metadata(org_id, profile_id, metadata).await
+        }
+        async fn load_metadata(
+            &self,
+            org_id: &str,
+            profile_id: &ProfileKind,
+        ) -> QuarryResult<Option<ProfileMetadata>> {
+            self.inner.load_metadata(org_id, profile_id).await
         }
     }
 
@@ -266,7 +302,13 @@ mod tests {
         let id: ProfileKind = quarry_core::ids::Id::new();
         let snap = SessionSnapshot::default();
 
-        store.save("org_a", &id, &snap).await.unwrap();
+        // Seed via the raw inner store, NOT `store.save()` — the cache is
+        // write-through on save (see module docs), so going through the
+        // wrapper would pre-warm Redis and make every `load()` below a
+        // guaranteed hit regardless of the read-through path under test.
+        // Seeding `inner` directly leaves the cache genuinely cold so the
+        // first `store.load()` below exercises a real cache miss.
+        inner.save("org_a", &id, &snap).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
         let _ = store.load("org_a", &id).await.unwrap();
@@ -283,7 +325,10 @@ mod tests {
         let inner = Arc::new(CountingStore::new());
         let store = CachedProfileStore::new(inner.clone(), redis);
         let id: ProfileKind = quarry_core::ids::Id::new();
-        store
+        // Seed via `inner` directly for the same reason as above — a
+        // cold cache makes the first `store.load()` a real, countable
+        // inner hit instead of an immediate write-through cache hit.
+        inner
             .save("org_a", &id, &SessionSnapshot::default())
             .await
             .unwrap();
@@ -294,5 +339,41 @@ mod tests {
         let got = store.load("org_a", &id).await.unwrap();
         assert!(got.is_none());
         assert!(inner.load_count() >= 2, "delete should bust cache");
+    }
+
+    #[tokio::test]
+    async fn metadata_methods_pass_through_to_inner_uncached() {
+        let Some(redis) = redis_manager().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+        let inner = Arc::new(CountingStore::new());
+        let store = CachedProfileStore::new(inner.clone(), redis);
+        let id: ProfileKind = quarry_core::ids::Id::new();
+        store
+            .save("org_a", &id, &SessionSnapshot::default())
+            .await
+            .unwrap();
+
+        assert!(store.load_metadata("org_a", &id).await.unwrap().is_none());
+
+        let metadata = ProfileMetadata {
+            name: Some("Shared support inbox".into()),
+            scope: quarry_browser::session::ProfileScope::OrgShared,
+        };
+        store.save_metadata("org_a", &id, &metadata).await.unwrap();
+
+        let loaded = store.load_metadata("org_a", &id).await.unwrap().unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("Shared support inbox"));
+        assert_eq!(
+            loaded.scope,
+            quarry_browser::session::ProfileScope::OrgShared
+        );
+
+        // list() is already documented pass-through; confirm it carries
+        // the metadata through the wrapper too.
+        let list = store.list("org_a").await.unwrap();
+        let summary = list.iter().find(|s| s.profile_id == id).unwrap();
+        assert_eq!(summary.name.as_deref(), Some("Shared support inbox"));
     }
 }

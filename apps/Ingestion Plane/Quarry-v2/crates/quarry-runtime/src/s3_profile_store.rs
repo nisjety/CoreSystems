@@ -11,13 +11,18 @@
 
 use async_trait::async_trait;
 
-use quarry_browser::session::{ProfileStore, SessionSnapshot};
+use quarry_browser::session::{ProfileMetadata, ProfileStore, ProfileSummary, SessionSnapshot};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::ProfileKind;
 use quarry_core::QuarryResult;
 
 const PROFILES_PREFIX: &str = "profiles";
 const INDEX_PREFIX: &str = ".profile-index";
+/// Dedicated metadata key space, separate from `INDEX_PREFIX`. Keeping
+/// metadata out of the index marker means `save()` (snapshot writes)
+/// never has to read-before-write to avoid clobbering a name/scope a
+/// caller previously set via `save_metadata`.
+const META_PREFIX: &str = ".profile-meta";
 
 pub struct S3ProfileStore {
     client: aws_sdk_s3::Client,
@@ -51,6 +56,10 @@ impl S3ProfileStore {
 
     fn index_prefix(org_id: &str) -> String {
         format!("{INDEX_PREFIX}/{org_id}/")
+    }
+
+    fn meta_key(org_id: &str, id: &ProfileKind) -> String {
+        format!("{META_PREFIX}/{org_id}/{id}.json")
     }
 }
 
@@ -150,12 +159,24 @@ impl ProfileStore for S3ProfileStore {
             .map_err(|e| {
                 QuarryError::new(ErrorCode::Internal, format!("s3 delete profile idx: {e}"))
             })?;
+        // S3 DELETE is idempotent even when the key never existed, so a
+        // profile that was never named/rescoped deletes cleanly too.
+        let meta_key = Self::meta_key(org_id, profile_id);
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(&meta_key)
+            .send()
+            .await
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("s3 delete profile meta: {e}"))
+            })?;
         Ok(())
     }
 
-    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileKind>> {
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
         let mut continuation: Option<String> = None;
-        let mut out = Vec::new();
+        let mut ids = Vec::new();
         let prefix = Self::index_prefix(org_id);
         loop {
             let mut req = self
@@ -173,7 +194,7 @@ impl ProfileStore for S3ProfileStore {
                 if let Some(key) = obj.key() {
                     if let Some(id_str) = key.strip_prefix(&prefix) {
                         if let Ok(id) = id_str.parse::<ProfileKind>() {
-                            out.push(id);
+                            ids.push(id);
                         }
                     }
                 }
@@ -187,7 +208,110 @@ impl ProfileStore for S3ProfileStore {
                 break;
             }
         }
+
+        // N+1 metadata fetch: correctness/isolation over micro-perf here —
+        // per-org profile counts are small and this mirrors how the index
+        // marker itself was already a separate object per profile.
+        let mut out = Vec::with_capacity(ids.len());
+        for profile_id in ids {
+            let metadata = self
+                .load_metadata(org_id, &profile_id)
+                .await?
+                .unwrap_or_default();
+            out.push(ProfileSummary {
+                profile_id,
+                name: metadata.name,
+                scope: metadata.scope,
+            });
+        }
         Ok(out)
+    }
+
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()> {
+        let body = serde_json::to_vec(metadata).map_err(|e| {
+            QuarryError::new(ErrorCode::Internal, format!("metadata encode failed: {e}"))
+        })?;
+        let meta_key = Self::meta_key(org_id, profile_id);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&meta_key)
+            .body(aws_sdk_s3::primitives::ByteStream::from(body))
+            .send()
+            .await
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("s3 put profile meta: {e}"))
+            })?;
+
+        // A profile can be "created" (named) before it has ever been
+        // browsed. Ensure it still shows up in `list()` by writing the
+        // index marker if this is the first time we've seen this id.
+        let idx_key = Self::index_key(org_id, profile_id);
+        let exists = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&idx_key)
+            .send()
+            .await
+            .is_ok();
+        if !exists {
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&idx_key)
+                .body(aws_sdk_s3::primitives::ByteStream::from(Vec::new()))
+                .send()
+                .await
+                .map_err(|e| {
+                    QuarryError::new(ErrorCode::Internal, format!("s3 put profile index: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>> {
+        let key = Self::meta_key(org_id, profile_id);
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await;
+
+        match resp {
+            Ok(out) => {
+                let body = out.body.collect().await.map_err(|e| {
+                    QuarryError::new(ErrorCode::Internal, format!("s3 read meta body: {e}"))
+                })?;
+                let bytes = body.into_bytes();
+                let metadata: ProfileMetadata = serde_json::from_slice(&bytes).map_err(|e| {
+                    QuarryError::new(ErrorCode::Internal, format!("metadata decode: {e}"))
+                })?;
+                Ok(Some(metadata))
+            }
+            Err(err) => {
+                let s = err.to_string();
+                if s.contains("NoSuchKey") || s.contains("NotFound") || s.contains("404") {
+                    Ok(None)
+                } else {
+                    Err(QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("s3 get profile meta: {err}"),
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -219,5 +343,17 @@ mod tests {
         assert_ne!(a, b);
         assert!(!a.starts_with(&b));
         assert!(!b.starts_with(&a));
+    }
+
+    #[test]
+    fn meta_key_includes_org_prefix_and_is_distinct_from_index_and_snapshot() {
+        let id: ProfileKind = quarry_core::ids::Id::new();
+        let meta = S3ProfileStore::meta_key("org_alpha", &id);
+        let idx = S3ProfileStore::index_key("org_alpha", &id);
+        let snap = S3ProfileStore::snapshot_key("org_alpha", &id);
+        assert!(meta.starts_with(".profile-meta/org_alpha/"));
+        assert!(meta.ends_with(".json"));
+        assert_ne!(meta, idx);
+        assert_ne!(meta, snap);
     }
 }

@@ -25,12 +25,25 @@ use async_trait::async_trait;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 
-use quarry_browser::session::{ProfileStore, SessionSnapshot};
+use quarry_browser::session::{
+    ProfileMetadata, ProfileScope, ProfileStore, ProfileSummary, SessionSnapshot,
+};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds::ProfileKind;
 
 fn db_err(label: &str, e: sqlx::Error) -> QuarryError {
     QuarryError::new(ErrorCode::Internal, format!("postgres {label}: {e}"))
+}
+
+/// Placeholder snapshot for a freshly `save_metadata`'d profile that has
+/// no browsing history yet (e.g. an explicitly "created" named profile).
+/// Serializes cleanly and deserializes back into `SessionSnapshot`
+/// unlike a bare `{}` — `cookies`/`local_storage`/`session_storage` have
+/// no per-field `#[serde(default)]`, so an empty JSON object would fail
+/// to deserialize.
+fn empty_snapshot_json() -> serde_json::Value {
+    serde_json::to_value(SessionSnapshot::default())
+        .expect("SessionSnapshot::default always serializes")
 }
 
 /// Durable, multi-instance-safe `ProfileStore`.
@@ -117,12 +130,12 @@ impl ProfileStore for PostgresProfileStore {
         Ok(())
     }
 
-    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileKind>> {
+    async fn list(&self, org_id: &str) -> QuarryResult<Vec<ProfileSummary>> {
         // ORDER BY updated_at DESC uses the partial index defined in
         // 0002_profiles.sql — single index seek + range scan, no full
         // table walk even on a multi-tenant DB.
         let rows = sqlx::query(
-            "SELECT profile_id FROM quarry_profiles \
+            "SELECT profile_id, name, scope FROM quarry_profiles \
              WHERE org_id = $1 \
              ORDER BY updated_at DESC",
         )
@@ -133,12 +146,69 @@ impl ProfileStore for PostgresProfileStore {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let s: String = row.try_get(0).map_err(|e| db_err("list:row", e))?;
-            if let Ok(id) = s.parse::<ProfileKind>() {
-                out.push(id);
+            let id_str: String = row.try_get(0).map_err(|e| db_err("list:row", e))?;
+            let name: Option<String> = row.try_get(1).map_err(|e| db_err("list:row", e))?;
+            let scope_str: String = row.try_get(2).map_err(|e| db_err("list:row", e))?;
+            if let Ok(profile_id) = id_str.parse::<ProfileKind>() {
+                out.push(ProfileSummary {
+                    profile_id,
+                    name,
+                    scope: scope_str.parse::<ProfileScope>().unwrap_or_default(),
+                });
             }
         }
         Ok(out)
+    }
+
+    async fn save_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+        metadata: &ProfileMetadata,
+    ) -> QuarryResult<()> {
+        // ON CONFLICT only touches name/scope/updated_at — an existing
+        // row's snapshot (real captured cookies/storage) is never
+        // clobbered by a rename/rescope. The INSERT branch only fires
+        // for a brand-new, snapshot-less "created" profile, so its
+        // placeholder snapshot is safe.
+        sqlx::query(
+            "INSERT INTO quarry_profiles (org_id, profile_id, snapshot, name, scope, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) \
+             ON CONFLICT (org_id, profile_id) DO UPDATE SET \
+                 name       = EXCLUDED.name, \
+                 scope      = EXCLUDED.scope, \
+                 updated_at = NOW()",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .bind(empty_snapshot_json())
+        .bind(&metadata.name)
+        .bind(metadata.scope.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| db_err("save_metadata", e))?;
+        Ok(())
+    }
+
+    async fn load_metadata(
+        &self,
+        org_id: &str,
+        profile_id: &ProfileKind,
+    ) -> QuarryResult<Option<ProfileMetadata>> {
+        let row: Option<(Option<String>, String)> = sqlx::query_as(
+            "SELECT name, scope FROM quarry_profiles \
+             WHERE org_id = $1 AND profile_id = $2",
+        )
+        .bind(org_id)
+        .bind(profile_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| db_err("load_metadata", e))?;
+
+        Ok(row.map(|(name, scope)| ProfileMetadata {
+            name,
+            scope: scope.parse::<ProfileScope>().unwrap_or_default(),
+        }))
     }
 }
 
@@ -263,7 +333,7 @@ mod tests {
         let ids = store.list("org_a").await.unwrap();
         assert_eq!(ids.len(), 2);
         // Most-recent first → b before a.
-        assert_eq!(ids[0].to_string(), b.to_string());
-        assert_eq!(ids[1].to_string(), a.to_string());
+        assert_eq!(ids[0].profile_id.to_string(), b.to_string());
+        assert_eq!(ids[1].profile_id.to_string(), a.to_string());
     }
 }
