@@ -205,6 +205,7 @@ function ScrapeRegion(props: {
 function BrowserSessionSurface(props: {
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
+  browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
@@ -248,6 +249,7 @@ function BrowserSessionSurface(props: {
       <BrowserChrome
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
+        browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
         frameControls={
           <div class="knowledge-browser-frame__controls">
@@ -395,6 +397,7 @@ export function ScrapePreviewPanel(props: {
   adding: boolean
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
+  browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -446,6 +449,7 @@ export function ScrapePreviewPanel(props: {
       <BrowserSessionSurface
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
+        browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
         expanded={browserExpanded()}
         hovered={hovered()}

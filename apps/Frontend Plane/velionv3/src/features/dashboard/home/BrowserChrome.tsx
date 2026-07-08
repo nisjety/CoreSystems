@@ -217,6 +217,10 @@ function DomNodeList(props: { nodes: BrowserSessionViewModel['domNodes'] }) {
 export function BrowserChrome(props: {
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
+  /** Latest streamed rationale from a durable server-side AI run (Phase 2):
+   * shown live in the AI bubble as `browser_action_dispatched` events arrive,
+   * kept separate from the per-tab-step `browserRationales` map. */
+  browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
   /** Fallback body (non-live render modes); shown instead of the live page. */
   children?: JSX.Element
@@ -1372,13 +1376,15 @@ export function BrowserChrome(props: {
       >
         <Show when={isLive()} fallback={props.children}>
           <div class="knowledge-browser-chrome__page" aria-label="Gjengitt nettleserside">
-            <Show when={!suggestionDismissed() && lastSuggestion()?.suggestion.reason}>
+            <Show when={!suggestionDismissed() && (props.browserLoopRationale?.reason ?? lastSuggestion()?.suggestion.reason)}>
               {(reason) => (
                 <div class="knowledge-browser-ai-bubble" role="status" aria-label="Siste AI-forslag">
                   <Sparkles class="size-3.5" aria-hidden="true" />
                   <div class="knowledge-browser-ai-bubble__body">
                     <span class="knowledge-browser-ai-bubble__kind">
-                      {lastSuggestion()?.suggestion.done ? 'done' : lastSuggestion()?.suggestion.action?.type ?? 'no-action'}
+                      {props.browserLoopRationale
+                        ? `${props.browserLoopRationale.actionType ?? 'observe'} · steg ${props.browserLoopRationale.step}`
+                        : lastSuggestion()?.suggestion.done ? 'done' : lastSuggestion()?.suggestion.action?.type ?? 'no-action'}
                     </span>
                     <p>{reason()}</p>
                   </div>

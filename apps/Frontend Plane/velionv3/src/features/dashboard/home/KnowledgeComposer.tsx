@@ -34,6 +34,8 @@ import {
   type BrowserSession,
   type BrowserSessionResponse,
 } from '@/shared/api/browser-client'
+import { startBrowserAiRun } from '@/shared/api/browser-run-client'
+import { streamRunEvents } from '@/shared/api/run-console-client'
 import {
   crawlSelectedPages,
   createDocument,
@@ -174,6 +176,13 @@ export function KnowledgeComposer(props: {
   })
   const browserLoop = createBrowserLoopController(setBrowserLoopState)
   const [browserRationales, setBrowserRationales] = createSignal<BrowserStepRationale[]>([])
+  // Latest streamed rationale from the durable server-side AI run (Phase 2).
+  // Kept out of `browserRationales` on purpose: that map is keyed by the
+  // visible tab session's observation steps, while an AI run executes in its
+  // own Quarry session with its own step numbering.
+  const [aiRunRationale, setAiRunRationale] = createSignal<BrowserStepRationale | null>(null)
+  let aiRunAbort: AbortController | null = null
+  onCleanup(() => aiRunAbort?.abort())
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
   const [discovery, setDiscovery] = createSignal<CrawlDiscovery | null>(null)
   const [discovering, setDiscovering] = createSignal(false)
@@ -559,6 +568,8 @@ export function KnowledgeComposer(props: {
     // A new link replaces any current preview: stop a running AI loop, close
     // the old browser session, and drop rationales so nothing dangles.
     browserLoop.requestStop()
+    aiRunAbort?.abort()
+    setAiRunRationale(null)
     closePreviewBrowserSession(preview())
     setBrowserRationales([])
     let browserSessionPromise: Promise<BrowserSessionAttempt> | null = null
@@ -638,6 +649,8 @@ export function KnowledgeComposer(props: {
   const clearPreview = () => {
     const current = preview()
     browserLoop.requestStop()
+    aiRunAbort?.abort()
+    setAiRunRationale(null)
     closePreviewBrowserSession(current)
     clearStoredBrowserPreview()
     setBrowserRationales([])
@@ -770,48 +783,83 @@ export function KnowledgeComposer(props: {
     }
   }
 
-  const performBrowserAutoRun = async (goal: string): Promise<BrowserActionSuggestionResponse | null> => {
-    let current = preview()
-    const id = orgId()
+  // Phase 2 (durable browser-agent run): the AI loop is a server-side run on
+  // the Model Plane backbone. This replaces the old client-side suggest/act
+  // `for` loop (`performBrowserAutoRun`): progress arrives as SSE run events
+  // (`browser_action_dispatched` with the model's rationale,
+  // `browser_observation_received`, `browser_run_paused`/`_resumed`), and
+  // pause/resume/stop go through `controlBrowserAiRun` via
+  // `browserLoop.attachRun`. The visible tab stays interactive: the run
+  // executes in its own Quarry session, sharing cookies only through the
+  // session's profile (server-derived, see gateway `start_ai_run`).
+  const beginBrowserAiRun = async (goal: string): Promise<BrowserActionSuggestionResponse | null> => {
+    const current = preview()
     const sessionId = current?.browserSession?.session.id
-    if (!current || !sessionId || !id || browserBusy()) return null
+    const id = orgId()
+    if (!current || !sessionId || !id) return null
     if (!browserLoop.begin(goal)) return null
-    setBrowserBusy(true)
     setFormError(null)
-    let lastSuggestion: BrowserActionSuggestionResponse | null = null
+    setAiRunRationale(null)
+    aiRunAbort?.abort()
+    const controller = new AbortController()
+    aiRunAbort = controller
+    let dispatchCount = 0
     try {
-      for (let step = 0; step < BROWSER_AI_LOOP_MAX_STEPS; step += 1) {
-        // User interrupts (pause/stop) take effect here — between steps, never
-        // mid-action, so the session state always matches the last observation.
-        if ((await browserLoop.gate()) === 'stopped') return lastSuggestion
-        browserLoop.markSuggesting()
-        const suggestion = await suggestBrowserAction(id, sessionId, {
-          goal,
-          includeScreenshot: Boolean(current.browserSession?.session.frame?.artifactId),
-        })
-        lastSuggestion = suggestion
-        const action = suggestion.suggestion.action
-        if (!action || suggestion.suggestion.done) {
+      const run = await startBrowserAiRun(
+        id,
+        sessionId,
+        { goal, maxSteps: BROWSER_AI_LOOP_MAX_STEPS },
+        controller.signal,
+      )
+      browserLoop.attachRun({ orgId: id, runId: run.runId })
+      await streamRunEvents(run.runId, {
+        onBrowserAction: (event) => {
+          dispatchCount += 1
+          browserLoop.onActionDispatched()
+          setAiRunRationale({
+            actionType: event.actionType ?? null,
+            confidence: null,
+            done: false,
+            goal,
+            modelUsed: null,
+            reason: event.reason?.trim() ? event.reason : null,
+            step: dispatchCount,
+          })
+        },
+        onBrowserObservation: () => {
+          browserLoop.onObservationReceived()
+        },
+        onBrowserRunPaused: () => browserLoop.onRunPaused(),
+        onBrowserRunResumed: () => browserLoop.onRunResumed(),
+        onError: (streamError) => {
+          // A deliberate abort (new link, preview cleared, unmount) is not an
+          // error the user should see.
+          if (controller.signal.aborted) {
+            browserLoop.finish('stopped')
+            return
+          }
+          const message = streamError instanceof Error
+            ? streamError.message
+            : i18n.tr('AI-loopen mistet forbindelsen til kjøringen.', 'The AI browser loop lost its run connection.')
+          browserLoop.finish('stopped', message)
+          setFormError(message)
+        },
+        onDone: () => {
           browserLoop.finish('done')
-          return lastSuggestion
-        }
-        if ((await browserLoop.gate()) === 'stopped') return lastSuggestion
-        browserLoop.markActing()
-        const nextSession = await runBrowserAction(id, sessionId, action, { actor: 'agent' })
-        recordBrowserRationale(goal, suggestion, nextSession)
-        current = attachBrowserSession(current, nextSession)
-        setPreview(current)
-        browserLoop.markStepDone()
-      }
-      browserLoop.finish('done')
-      return lastSuggestion
+        },
+      }, controller.signal)
+      return null
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : i18n.tr('AI-loopen kunne ikke fullføres.', 'The AI browser loop could not be completed.')
+      if (controller.signal.aborted) {
+        browserLoop.finish('stopped')
+        return null
+      }
+      const message = reason instanceof Error ? reason.message : i18n.tr('AI-loopen kunne ikke startes.', 'The AI browser loop could not be started.')
       browserLoop.finish('stopped', message)
       setFormError(message)
-      return lastSuggestion
+      return null
     } finally {
-      setBrowserBusy(false)
+      if (aiRunAbort === controller) aiRunAbort = null
     }
   }
 
@@ -1091,9 +1139,10 @@ export function KnowledgeComposer(props: {
             adding={adding()}
             browserBusy={browserBusy()}
             browserLoop={browserLoopState()}
+            browserLoopRationale={aiRunRationale()}
             browserRationales={browserRationales()}
             onBrowserAction={(action) => void performBrowserAction(action)}
-            onBrowserAutoRun={performBrowserAutoRun}
+            onBrowserAutoRun={beginBrowserAiRun}
             onBrowserControlMode={(mode) => void updateBrowserControlMode(mode)}
             onBrowserLoopPause={() => browserLoop.requestPause()}
             onBrowserLoopResume={() => browserLoop.requestResume()}
