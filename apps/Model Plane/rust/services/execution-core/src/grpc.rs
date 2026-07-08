@@ -66,8 +66,10 @@ impl ExecutionCore for ExecutionService {
         // publishes BrowserActionDispatched/BrowserObservationReceived events to
         // session-core's orchestration broadcast (shared channel). Best-effort:
         // failures never fail the step.
-        let browser_sink =
-            crate::browser_events::OrchestrationEventSink::new(self.session_channel.clone());
+        let browser_sink = crate::browser_events::OrchestrationEventSink::new(
+            self.session_channel.clone(),
+            Some(self.state.clone()),
+        );
 
         let outcome = runtime_loop::execute_step(
             &req.tool_name,

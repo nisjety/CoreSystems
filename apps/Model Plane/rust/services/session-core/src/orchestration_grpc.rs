@@ -1001,6 +1001,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                         r.plan_id.as_deref() == Some(req.step_id.as_str())
                     }
                 })
+                // Cross-org IDOR fix (Phase 6): a non-empty org_id scopes the
+                // list to that tenant's own approvals, even when the run_id
+                // itself is known/guessed by a caller from a different org.
+                // Empty org_id is unscoped (internal-only callers).
+                .filter(|r| req.org_id.is_empty() || r.org_id == req.org_id)
                 .map(approval_from_row)
                 .collect();
             Ok(Response::new(proto::ListApprovalsResponse { approvals }))
@@ -1047,6 +1052,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let row = store::get_approval(&self.pool, &req.approval_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
+            // Cross-org IDOR fix (Phase 6): a non-empty org_id scopes the
+            // lookup to that tenant. A cross-org row is treated exactly like
+            // a missing one (mirrors model-gateway's
+            // `ApprovalStore::resolve`) so existence is never leaked across
+            // tenants. Empty org_id is unscoped (internal-only callers).
+            let row = row.filter(|r| req.org_id.is_empty() || r.org_id == req.org_id);
             Ok(Response::new(proto::GetApprovalResponse {
                 approval: row.as_ref().map(approval_from_row),
             }))
@@ -1199,6 +1210,25 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 return Err(Status::invalid_argument(
                     "decision must be granted, denied, or timed_out",
                 ));
+            }
+
+            // Cross-org IDOR fix (Phase 6): resolve the row first and verify
+            // tenant ownership BEFORE mutating it. A non-empty org_id that
+            // doesn't match the approval's own org is treated exactly like a
+            // missing approval (mirrors model-gateway's own
+            // `ApprovalStore::resolve` pattern) — never a distinguishable
+            // "forbidden" that would leak existence across tenants. Empty
+            // org_id stays unscoped for internal-only callers (e.g.
+            // execution-core's in-loop timeout/cancel fail-closed paths,
+            // which already resolved the row themselves via `GetApproval`).
+            if !req.org_id.is_empty() {
+                let existing = store::get_approval(&self.pool, &req.approval_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                match existing {
+                    Some(row) if row.org_id == req.org_id => {}
+                    _ => return Err(Status::not_found("approval not found")),
+                }
             }
 
             store::decide_approval(

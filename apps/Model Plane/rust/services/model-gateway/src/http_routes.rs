@@ -478,6 +478,7 @@ async fn get_todo(
 
 async fn list_approvals(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(run_id): Path<String>,
     Query(query): Query<ApprovalsQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -487,6 +488,9 @@ async fn list_approvals(
         .list_approvals(ListApprovalsRequest {
             run_id,
             step_id: query.step_id.unwrap_or_default(),
+            // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+            // JWT org, never a client-suppliable value.
+            org_id: claims.org_id.clone(),
         })
         .await
         .map_err(|e| grpc_status_to_http(&e))?
@@ -499,12 +503,18 @@ async fn list_approvals(
 
 async fn get_approval(
     State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
     Path(approval_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .get_approval(GetApprovalRequest { approval_id })
+        .get_approval(GetApprovalRequest {
+            approval_id,
+            // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+            // JWT org, never a client-suppliable value.
+            org_id: claims.org_id.clone(),
+        })
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -707,6 +717,9 @@ async fn decide_approval(
             decision: target_state as i32,
             decided_by: claims.user_id.clone(),
             decision_reason: body.reason,
+            // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+            // JWT org, never a client-suppliable value.
+            org_id: claims.org_id.clone(),
         })
         .await
         .map_err(|e| grpc_status_to_http(&e))?

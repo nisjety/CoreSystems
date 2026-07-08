@@ -854,6 +854,10 @@ async fn resolve_write_approval(
                     decided_by,
                     decision_reason: "auto (chat) posture: interactive user is the live approver"
                         .to_owned(),
+                    // Cross-org IDOR fix (Phase 6): this approval was just
+                    // created with this same org_id above, so asserting it
+                    // here is a real ownership check, not a no-op.
+                    org_id: org_id.to_owned(),
                 })
                 .await
                 .map_err(|e| {

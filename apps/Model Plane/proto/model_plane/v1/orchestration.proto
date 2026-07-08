@@ -508,6 +508,11 @@ message ListApprovalsRequest {
 
   // Optional step filter. Empty means run-level and all steps.
   string step_id = 2;
+
+  // Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+  // callers). Non-empty → only approvals owned by this org are returned,
+  // regardless of what org the run itself belongs to.
+  string org_id = 3;
 }
 
 message ListApprovalsResponse {
@@ -534,6 +539,13 @@ message OrgPendingApprovalsResponse {
 message GetApprovalRequest {
   // Approval identifier.
   string approval_id = 1;
+
+  // Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+  // callers, e.g. session-core's own boot paths). Non-empty → the approval is
+  // only returned when it belongs to this org; a mismatch is treated as
+  // not-found (never a distinguishable "forbidden") so existence is not
+  // leaked across tenants.
+  string org_id = 2;
 }
 
 message GetApprovalResponse {
@@ -555,6 +567,13 @@ message DecideApprovalRequest {
 
   // Optional free-form reason for the decision.
   string decision_reason = 4;
+
+  // Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+  // callers, e.g. the in-loop browser-agent timeout/cancel fail-closed
+  // paths that already resolved the row themselves). Non-empty → the
+  // decision is only applied when the approval belongs to this org; a
+  // mismatch is treated as not-found, never a distinguishable "forbidden".
+  string org_id = 5;
 }
 
 message DecideApprovalResponse {

@@ -7,14 +7,15 @@ use model_gateway::{http_routes::build_router, state::AppState};
 use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
-    orchestration_event, Approval, ApprovalState, CreateApprovalRequest, CreateApprovalResponse,
-    DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse,
-    GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse,
-    GetTodoRequest, GetTodoResponse, LineageEdge, ListApprovalsRequest, ListApprovalsResponse,
-    ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
-    OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
-    StreamRunEventsRequest, SubagentLineage, Todo, TodoState, TransitionPlanRequest,
-    TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
+    orchestration_event, Approval, ApprovalState, AttachSubagentRequest, AttachSubagentResponse,
+    CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
+    GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse,
+    GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse,
+    LineageEdge, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse,
+    ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest,
+    OrgPendingApprovalsResponse, Plan, PlanState, RecordOrchestrationEventRequest,
+    RecordOrchestrationEventResponse, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
+    TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
 };
 use std::{
     pin::Pin,
@@ -530,5 +531,320 @@ async fn orchestration_run_events_route_relays_sse() {
     assert_eq!(
         *capture.stream_run_id.lock().unwrap(),
         Some("run-33".into())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — cross-org approval IDOR fix.
+//
+// A dedicated, org-aware mock (distinct from `MockOrchestration` above, whose
+// approvals always report a fixed `org_id: "org-1"` regardless of the
+// request) that behaves like the REAL session-core fix: `get_approval`/
+// `decide_approval`/`list_approvals` only honor a request whose `org_id`
+// matches the approval's home org, otherwise responding exactly as if the
+// approval didn't exist. This proves model-gateway's HTTP handlers actually
+// thread `Extension<Claims>.org_id` into the outgoing gRPC request — not just
+// that they compile.
+// ---------------------------------------------------------------------------
+
+/// The one org that owns the single seeded approval (`appr-owned`).
+const OWNER_ORG: &str = "org-owner";
+const OTHER_ORG: &str = "org-intruder";
+
+#[derive(Clone, Default)]
+struct OrgScopedMock {
+    /// `(org_id, decision)` from the last accepted (same-org) decide call.
+    last_decision: Arc<Mutex<Option<(String, i32)>>>,
+}
+
+#[tonic::async_trait]
+impl OrchestrationCoreService for OrgScopedMock {
+    async fn list_plans(
+        &self,
+        _: TonicRequest<ListPlansRequest>,
+    ) -> Result<Response<ListPlansResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn get_plan(
+        &self,
+        _: TonicRequest<GetPlanRequest>,
+    ) -> Result<Response<GetPlanResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn transition_plan(
+        &self,
+        _: TonicRequest<TransitionPlanRequest>,
+    ) -> Result<Response<TransitionPlanResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn list_todos(
+        &self,
+        _: TonicRequest<ListTodosRequest>,
+    ) -> Result<Response<ListTodosResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn get_todo(
+        &self,
+        _: TonicRequest<GetTodoRequest>,
+    ) -> Result<Response<GetTodoResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn transition_todo(
+        &self,
+        _: TonicRequest<TransitionTodoRequest>,
+    ) -> Result<Response<TransitionTodoResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn create_approval(
+        &self,
+        _: TonicRequest<CreateApprovalRequest>,
+    ) -> Result<Response<CreateApprovalResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn list_approvals(
+        &self,
+        request: TonicRequest<ListApprovalsRequest>,
+    ) -> Result<Response<ListApprovalsResponse>, Status> {
+        let request = request.into_inner();
+        let approvals = if request.org_id.is_empty() || request.org_id == OWNER_ORG {
+            vec![owned_approval(ApprovalState::Requested)]
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(ListApprovalsResponse { approvals }))
+    }
+    async fn list_pending_approvals(
+        &self,
+        _: TonicRequest<OrgPendingApprovalsRequest>,
+    ) -> Result<Response<OrgPendingApprovalsResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn get_approval(
+        &self,
+        request: TonicRequest<GetApprovalRequest>,
+    ) -> Result<Response<GetApprovalResponse>, Status> {
+        let request = request.into_inner();
+        let approval = if request.approval_id == "appr-owned"
+            && (request.org_id.is_empty() || request.org_id == OWNER_ORG)
+        {
+            Some(owned_approval(ApprovalState::Requested))
+        } else {
+            None
+        };
+        Ok(Response::new(GetApprovalResponse { approval }))
+    }
+    async fn decide_approval(
+        &self,
+        request: TonicRequest<DecideApprovalRequest>,
+    ) -> Result<Response<DecideApprovalResponse>, Status> {
+        let request = request.into_inner();
+        if request.approval_id != "appr-owned"
+            || (!request.org_id.is_empty() && request.org_id != OWNER_ORG)
+        {
+            // Mirrors the real session-core fix: a cross-org decide is
+            // rejected as not-found, never applied.
+            return Err(Status::not_found("approval not found"));
+        }
+        *self.last_decision.lock().unwrap() = Some((request.org_id.clone(), request.decision));
+        Ok(Response::new(DecideApprovalResponse {
+            approval: Some(Approval {
+                state: request.decision,
+                decided_by: request.decided_by,
+                decision_reason: request.decision_reason,
+                ..owned_approval(ApprovalState::Requested)
+            }),
+        }))
+    }
+    async fn get_subagent_lineage(
+        &self,
+        _: TonicRequest<GetSubagentLineageRequest>,
+    ) -> Result<Response<GetSubagentLineageResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn attach_subagent(
+        &self,
+        _: TonicRequest<AttachSubagentRequest>,
+    ) -> Result<Response<AttachSubagentResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    type StreamRunEventsStream = MockEventStream;
+    async fn stream_run_events(
+        &self,
+        _: TonicRequest<StreamRunEventsRequest>,
+    ) -> Result<Response<Self::StreamRunEventsStream>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn record_orchestration_event(
+        &self,
+        _: TonicRequest<RecordOrchestrationEventRequest>,
+    ) -> Result<Response<RecordOrchestrationEventResponse>, Status> {
+        Ok(Response::new(RecordOrchestrationEventResponse {
+            event_id: "evt-mock".into(),
+        }))
+    }
+}
+
+fn owned_approval(state: ApprovalState) -> Approval {
+    Approval {
+        id: "appr-owned".into(),
+        run_id: "run-owned".into(),
+        step_id: String::new(),
+        kind: 1,
+        state: state as i32,
+        requested_of: "reviewer-1".into(),
+        decided_by: String::new(),
+        decision_reason: String::new(),
+        context: None,
+        requested_at: None,
+        decided_at: None,
+        expires_at: None,
+        org_id: OWNER_ORG.into(),
+    }
+}
+
+async fn spawn_org_scoped_mock(
+    svc: OrgScopedMock,
+) -> OrchestrationCoreServiceClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(OrchestrationCoreServiceServer::new(svc))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    OrchestrationCoreServiceClient::new(channel)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn get_approval_is_scoped_to_the_callers_org() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let mock = OrgScopedMock::default();
+    let app = build_router(make_state(spawn_org_scoped_mock(mock).await), None);
+
+    // The owning org can read its own approval.
+    let owner_req = Request::builder()
+        .method("GET")
+        .uri("/v1/orchestration/approvals/appr-owned")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header("x-org-id", OWNER_ORG)
+        .body(Body::empty())
+        .unwrap();
+    let owner_resp = app.clone().oneshot(owner_req).await.unwrap();
+    assert_eq!(
+        owner_resp.status(),
+        StatusCode::OK,
+        "owner org must succeed"
+    );
+
+    // A different, authenticated org gets 404 — not a distinguishable
+    // "forbidden" that would confirm the approval's existence.
+    let intruder_req = Request::builder()
+        .method("GET")
+        .uri("/v1/orchestration/approvals/appr-owned")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header("x-org-id", OTHER_ORG)
+        .body(Body::empty())
+        .unwrap();
+    let intruder_resp = app.oneshot(intruder_req).await.unwrap();
+    assert_eq!(
+        intruder_resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-org read must be rejected as not-found"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decide_approval_is_scoped_to_the_callers_org() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let mock = OrgScopedMock::default();
+    let (mock, last_decision) = (mock.clone(), mock.last_decision.clone());
+    let app = build_router(make_state(spawn_org_scoped_mock(mock).await), None);
+
+    // A different org cannot decide (approve) another org's approval.
+    let intruder_req = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/approvals/appr-owned/decide")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header("x-org-id", OTHER_ORG)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"decision":"approve"}"#))
+        .unwrap();
+    let intruder_resp = app.clone().oneshot(intruder_req).await.unwrap();
+    assert_eq!(
+        intruder_resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-org decide must be rejected as not-found"
+    );
+    assert!(
+        last_decision.lock().unwrap().is_none(),
+        "the cross-org decide must never have reached the durable store"
+    );
+
+    // The owning org can still decide its own approval.
+    let owner_req = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/approvals/appr-owned/decide")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header("x-org-id", OWNER_ORG)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"decision":"approve"}"#))
+        .unwrap();
+    let owner_resp = app.oneshot(owner_req).await.unwrap();
+    assert_eq!(
+        owner_resp.status(),
+        StatusCode::OK,
+        "owner org must succeed"
+    );
+    let (decided_org, decision) = last_decision.lock().unwrap().clone().unwrap();
+    assert_eq!(decided_org, OWNER_ORG);
+    assert_eq!(decision, ApprovalState::Granted as i32);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn list_approvals_is_scoped_to_the_callers_org() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let mock = OrgScopedMock::default();
+    let app = build_router(make_state(spawn_org_scoped_mock(mock).await), None);
+
+    let owner_req = Request::builder()
+        .method("GET")
+        .uri("/v1/orchestration/runs/run-owned/approvals")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header("x-org-id", OWNER_ORG)
+        .body(Body::empty())
+        .unwrap();
+    let owner_resp = app.clone().oneshot(owner_req).await.unwrap();
+    assert_eq!(owner_resp.status(), StatusCode::OK);
+    let owner_body = to_bytes(owner_resp.into_body(), usize::MAX).await.unwrap();
+    let owner_json: serde_json::Value = serde_json::from_slice(&owner_body).unwrap();
+    assert_eq!(owner_json["approvals"].as_array().unwrap().len(), 1);
+
+    let intruder_req = Request::builder()
+        .method("GET")
+        .uri("/v1/orchestration/runs/run-owned/approvals")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header("x-org-id", OTHER_ORG)
+        .body(Body::empty())
+        .unwrap();
+    let intruder_resp = app.oneshot(intruder_req).await.unwrap();
+    assert_eq!(intruder_resp.status(), StatusCode::OK);
+    let intruder_body = to_bytes(intruder_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let intruder_json: serde_json::Value = serde_json::from_slice(&intruder_body).unwrap();
+    assert_eq!(
+        intruder_json["approvals"].as_array().unwrap().len(),
+        0,
+        "a different org must see no approvals for someone else's run"
     );
 }

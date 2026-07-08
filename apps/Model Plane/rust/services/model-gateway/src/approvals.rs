@@ -133,6 +133,11 @@ pub fn to_decide_approval_request(a: &GatewayApproval) -> DecideApprovalRequest 
         decision: decision as i32,
         decided_by: a.decided_by.clone(),
         decision_reason: a.comment.clone(),
+        // Cross-org IDOR fix (Phase 6): this gateway-side `GatewayApproval`
+        // was itself org-scoped by `ApprovalStore::resolve` before this
+        // function is ever reached, so asserting it here is a real,
+        // already-verified ownership check, not a no-op.
+        org_id: a.org_id.clone(),
     }
 }
 
