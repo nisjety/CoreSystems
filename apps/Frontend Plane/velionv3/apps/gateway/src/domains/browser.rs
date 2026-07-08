@@ -5,32 +5,41 @@
 //! one browser action at a time. The SPA never sees raw CDP or Quarry tokens.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex as StdMutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     body::Body,
-    extract::{Extension, Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    extract::{
+        ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
+        Extension, Path, Query, State,
+    },
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message as TungsteniteMessage},
+};
 use url::Url;
 
 use crate::{
-    audience_tokens::get_audience_token,
+    audience_tokens::{get_audience_token, get_onboarding_preview_token},
     config::AppState,
     domains::chat::shared::{model_token, proxy_model_json},
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
-    upstream::proxy_bearer_json,
+    upstream::{proxy_bearer_json, proxy_sse_stream},
 };
 
 #[derive(Debug, Deserialize)]
@@ -54,7 +63,11 @@ pub(crate) struct BrowserRunMetadata {
     persistent_profile: bool,
     last_observation: Option<Value>,
     observation_history: Vec<Value>,
+    devtools_events: Vec<Value>,
+    replay_events: Vec<Value>,
+    tabs: Vec<Value>,
     viewport: Viewport,
+    control_mode: BrowserControlMode,
     zdr: bool,
 }
 
@@ -71,6 +84,53 @@ struct Viewport {
 #[derive(Debug, Deserialize)]
 struct ActionBody {
     action: Value,
+    #[serde(default)]
+    actor: BrowserActionActor,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BrowserActionActor {
+    Agent,
+    #[default]
+    Human,
+}
+
+impl BrowserActionActor {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Human => "human",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserControlMode {
+    AgentControl,
+    HumanTakeover,
+}
+
+impl BrowserControlMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentControl => "agent_control",
+            Self::HumanTakeover => "human_takeover",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlBody {
+    mode: BrowserControlMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewTabBody {
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +165,19 @@ struct StartAiRunBody {
     max_cost_usd: Option<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameQuery {
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    quality: Option<u8>,
+    #[serde(default)]
+    max_width: Option<u32>,
+    #[serde(default)]
+    max_height: Option<u32>,
+}
+
 const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280,
     height: 800,
@@ -113,6 +186,8 @@ const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
 const MAX_MODEL_VISUAL_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_BROWSER_TIMELINE_ENTRIES: usize = 32;
+const MAX_BROWSER_REPLAY_EVENTS: usize = 96;
+const MAX_BROWSER_DEVTOOLS_EVENTS: usize = 512;
 const MAX_TIMELINE_CONSOLE_ENTRIES: usize = 20;
 const MAX_TIMELINE_NETWORK_ENTRIES: usize = 30;
 const MAX_TIMELINE_POLICY_DENIALS: usize = 10;
@@ -129,6 +204,22 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(run_action),
         )
         .route(
+            "/api/v1/browser/sessions/:session_id/control",
+            post(set_control_mode),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/tabs",
+            get(get_tabs).post(new_tab),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/tabs/:tab_id/select",
+            post(select_tab),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/tabs/:tab_id",
+            delete(close_tab),
+        )
+        .route(
             "/api/v1/browser/sessions/:session_id/suggestions",
             post(suggest_action),
         )
@@ -143,6 +234,22 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/browser/sessions/:session_id/artifacts/:artifact_id",
             get(get_artifact),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/frame",
+            get(get_live_frame),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/frames/stream",
+            get(stream_live_frames),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/frames/ws",
+            get(proxy_live_frames_ws),
+        )
+        .route(
+            "/api/v1/browser/sessions/:session_id/devtools",
+            get(get_devtools_events),
         )
         .route(
             "/api/v1/browser/sessions/:session_id",
@@ -232,11 +339,12 @@ async fn create_session(
     let lease_id = str_field(&start_data, "lease_id");
     let returned_profile_id =
         str_field(&start_data, "profile_id").or_else(|| profile_id.map(str::to_owned));
+    let initial_action = json!({
+        "type": "navigate",
+        "url": target
+    });
     let step_body = json!({
-        "action": {
-            "type": "navigate",
-            "url": target
-        },
+        "action": initial_action.clone(),
         "instruction": "Open the page for the Velion in-app browser surface."
     });
     let (step_status, step_body) = quarry_call(
@@ -262,13 +370,28 @@ async fn create_session(
     }
 
     let observation = unwrap_data(&step_body);
+    let tabs = match fetch_browser_tabs(&state, &user, token.as_deref(), &run_id).await {
+        Ok(tabs) => tabs,
+        Err(response) => return response,
+    };
     let metadata = BrowserRunMetadata {
         lease_id,
         profile_id: returned_profile_id,
         persistent_profile: requested_persistent_profile,
         last_observation: Some(observation.clone()),
         observation_history: vec![observation.clone()],
+        devtools_events: Vec::new(),
+        replay_events: vec![observation_replay_event(
+            &run_id,
+            &observation,
+            "system",
+            Some(&initial_action),
+            BrowserControlMode::AgentControl,
+            zdr,
+        )],
+        tabs,
         viewport,
+        control_mode: BrowserControlMode::AgentControl,
         zdr,
     };
     if let Ok(mut runs) = state.browser_run_store.lock() {
@@ -292,6 +415,39 @@ async fn run_action(
             return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response()
         }
     };
+    let actor = body.actor;
+    let current_metadata = browser_run_metadata(&state, &session_id);
+    if actor == BrowserActionActor::Agent
+        && current_metadata.control_mode == BrowserControlMode::HumanTakeover
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_human_takeover_active",
+                "Human takeover is active for this browser session.",
+            )),
+        )
+            .into_response();
+    }
+    if actor == BrowserActionActor::Human
+        && current_metadata.control_mode != BrowserControlMode::HumanTakeover
+    {
+        if let Some(metadata) =
+            update_browser_control_mode(&state, &session_id, BrowserControlMode::HumanTakeover)
+        {
+            let _ = append_replay_event(
+                &state,
+                &session_id,
+                control_replay_event(
+                    &session_id,
+                    BrowserControlMode::HumanTakeover,
+                    actor.as_str(),
+                    metadata.zdr,
+                ),
+            );
+        }
+    }
+    let action_for_replay = action.clone();
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
@@ -308,9 +464,312 @@ async fn run_action(
     }
 
     let observation = unwrap_data(&body);
-    let metadata = update_browser_observation(&state, &session_id, observation.clone());
+    let mut metadata = update_browser_observation(&state, &session_id, observation.clone());
+    if let Some(next_metadata) = append_replay_event(
+        &state,
+        &session_id,
+        observation_replay_event(
+            &session_id,
+            &observation,
+            actor.as_str(),
+            Some(&action_for_replay),
+            metadata.control_mode,
+            metadata.zdr,
+        ),
+    ) {
+        metadata = next_metadata;
+    }
+    if let Ok(tabs) = fetch_browser_tabs(&state, &user, token.as_deref(), &session_id).await {
+        if let Some(next_metadata) = update_browser_tabs(&state, &session_id, tabs) {
+            metadata = next_metadata;
+        }
+    }
     let response = browser_response(&session_id, &metadata, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
+}
+
+async fn set_control_mode(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<ControlBody>,
+) -> Response {
+    let Some(metadata) = update_browser_control_mode(&state, &session_id, body.mode) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "Browser session is not active.",
+            )),
+        )
+            .into_response();
+    };
+    let metadata = append_replay_event(
+        &state,
+        &session_id,
+        control_replay_event(&session_id, body.mode, "human", metadata.zdr),
+    )
+    .unwrap_or(metadata);
+    let observation = metadata.last_observation.clone();
+    let response = browser_response(&session_id, &metadata, observation);
+    (StatusCode::OK, Json(ok(response))).into_response()
+}
+
+async fn get_tabs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not active.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let tabs = match fetch_browser_tabs(&state, &user, token.as_deref(), &session_id).await {
+        Ok(tabs) => tabs,
+        Err(response) => return response,
+    };
+    let metadata = update_browser_tabs(&state, &session_id, tabs.clone()).unwrap_or(metadata);
+    let response = browser_response(&session_id, &metadata, metadata.last_observation.clone());
+    (
+        StatusCode::OK,
+        Json(ok(json!({ "tabs": tabs, "session": response["session"] }))),
+    )
+        .into_response()
+}
+
+async fn new_tab(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(body): Json<NewTabBody>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not active.",
+            )),
+        )
+            .into_response();
+    }
+    let url = match normalize_optional_public_url(body.url.as_deref()) {
+        Ok(url) => url,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(error("invalid_url", message))).into_response()
+        }
+    };
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::POST,
+        &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(&session_id)),
+        Some(json!({ "url": url })),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    let data = unwrap_data(&body);
+    let tabs = tabs_from_data(&data);
+    let metadata = update_browser_tabs(&state, &session_id, tabs.clone()).unwrap_or(metadata);
+    let tab_id = data
+        .get("tab")
+        .and_then(|tab| tab.get("tabId"))
+        .and_then(Value::as_str)
+        .or_else(|| active_tab_id(&tabs))
+        .unwrap_or("tab");
+    let metadata = append_replay_event(
+        &state,
+        &session_id,
+        tab_replay_event(
+            &session_id,
+            "new",
+            tab_id,
+            active_tab(&tabs),
+            metadata.control_mode,
+            metadata.zdr,
+        ),
+    )
+    .unwrap_or(metadata);
+    let response = browser_response(&session_id, &metadata, metadata.last_observation.clone());
+    (
+        StatusCode::OK,
+        Json(ok(json!({
+            "tab": data.get("tab").cloned().unwrap_or(Value::Null),
+            "tabs": tabs,
+            "session": response["session"]
+        }))),
+    )
+        .into_response()
+}
+
+async fn select_tab(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((session_id, tab_id)): Path<(String, String)>,
+) -> Response {
+    tab_mutation(
+        state,
+        user,
+        headers,
+        session_id,
+        Some(tab_id),
+        Method::POST,
+        "select",
+        None,
+    )
+    .await
+}
+
+async fn close_tab(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((session_id, tab_id)): Path<(String, String)>,
+) -> Response {
+    tab_mutation(
+        state,
+        user,
+        headers,
+        session_id,
+        Some(tab_id),
+        Method::DELETE,
+        "close",
+        None,
+    )
+    .await
+}
+
+// reason: shared select/close tab route glue — every argument is a distinct
+// request-scoped concern (auth, headers, path segments, upstream verb); a
+// one-off params struct would only relocate the same list.
+#[allow(clippy::too_many_arguments)]
+async fn tab_mutation(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    session_id: String,
+    tab_id: Option<String>,
+    method: Method,
+    operation: &str,
+    body: Option<Value>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let Some(tab_id) = tab_id else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_tab",
+                "The requested browser tab id is invalid.",
+            )),
+        )
+            .into_response();
+    };
+    if !is_valid_path_segment(&tab_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_tab",
+                "The requested browser tab id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not active.",
+            )),
+        )
+            .into_response();
+    }
+
+    let suffix = if operation == "select" { "/select" } else { "" };
+    let path = format!(
+        "/v1/agent/runs/{}/tabs/{}{}",
+        urlencoding::encode(&session_id),
+        urlencoding::encode(&tab_id),
+        suffix
+    );
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) =
+        quarry_call(&state, method, &path, body, token.as_deref(), &user.user_id).await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    let data = unwrap_data(&body);
+    let tabs = tabs_from_data(&data);
+    let metadata = update_browser_tabs(&state, &session_id, tabs.clone()).unwrap_or(metadata);
+    let metadata = append_replay_event(
+        &state,
+        &session_id,
+        tab_replay_event(
+            &session_id,
+            operation,
+            &tab_id,
+            active_tab(&tabs),
+            metadata.control_mode,
+            metadata.zdr,
+        ),
+    )
+    .unwrap_or(metadata);
+    let response = browser_response(&session_id, &metadata, metadata.last_observation.clone());
+    (
+        StatusCode::OK,
+        Json(ok(json!({ "tabs": tabs, "session": response["session"] }))),
+    )
+        .into_response()
 }
 
 async fn close_session(
@@ -478,10 +937,22 @@ async fn start_ai_run(
             .into_response();
     }
 
+    // Server-derived only, from the session's own last observation: a freshly
+    // `start_run`'d Quarry lease the AI run acquires has no page loaded, so
+    // the loop's first action needs an explicit destination — the URL of the
+    // tab the user is already looking at (never a client-supplied value).
+    let start_url = metadata
+        .last_observation
+        .as_ref()
+        .and_then(|observation| observation.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
     let request_body = json!({
         "goal": goal,
         "grant_id": format!("session:{session_id}"),
         "profile_id": metadata.profile_id,
+        "start_url": start_url,
         "allowed_domains": body.allowed_domains,
         "max_steps": body.max_steps,
         "max_runtime_s": body.max_runtime_s,
@@ -663,6 +1134,707 @@ async fn get_artifact(
     }
 }
 
+async fn get_live_frame(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Query(query): Query<FrameQuery>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not available.",
+            )),
+        )
+            .into_response();
+    }
+
+    let format = match query
+        .format
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("jpeg")
+    {
+        "jpg" | "jpeg" => "jpeg",
+        "png" => "png",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "invalid_browser_frame",
+                    "Frame format must be jpeg or png.",
+                )),
+            )
+                .into_response()
+        }
+    };
+    let quality = query.quality.unwrap_or(65).clamp(1, 100);
+    let max_width = query
+        .max_width
+        .unwrap_or(metadata.viewport.width)
+        .clamp(320, metadata.viewport.width.max(320));
+    let max_height = query
+        .max_height
+        .unwrap_or(metadata.viewport.height)
+        .clamp(240, metadata.viewport.height.max(240));
+    let path = format!(
+        "/v1/agent/runs/{}/frame?format={}&quality={}&maxWidth={}&maxHeight={}",
+        urlencoding::encode(&session_id),
+        format,
+        quality,
+        max_width,
+        max_height
+    );
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::GET,
+        &path,
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    let data = unwrap_data(&body);
+    let Some(data_base64) = str_field(&data, "dataBase64") else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "browser_frame_invalid",
+                "Quarry did not return a live browser frame.",
+            )),
+        )
+            .into_response();
+    };
+    let mime_type = match str_field(&data, "mimeType").as_deref() {
+        Some("image/png") => HeaderValue::from_static("image/png"),
+        _ => HeaderValue::from_static("image/jpeg"),
+    };
+    let bytes = match BASE64_STANDARD.decode(data_base64.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "browser_frame_invalid",
+                    "Quarry returned an invalid live browser frame.",
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime_type)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "browser_frame_failed",
+                    "The live browser frame could not be returned.",
+                )),
+            )
+                .into_response()
+        })
+}
+
+async fn stream_live_frames(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not available.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let url = format!(
+        "{}/v1/agent/runs/{}/frames/stream{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&session_id),
+        query_suffix(&uri)
+    );
+
+    proxy_sse_stream(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+        None,
+        metadata.zdr,
+    )
+    .await
+}
+
+async fn get_devtools_events(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not available.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::GET,
+        &format!(
+            "/v1/agent/runs/{}/devtools{}",
+            urlencoding::encode(&session_id),
+            query_suffix(&uri)
+        ),
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+
+    let data = unwrap_data(&body);
+    let events = data
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let metadata = update_browser_devtools_events(&state, &session_id, events.clone())
+        .unwrap_or_else(|| browser_run_metadata(&state, &session_id));
+    let observation = metadata.last_observation.clone();
+    let response = browser_response(&session_id, &metadata, observation);
+
+    (
+        StatusCode::OK,
+        Json(ok(json!({
+            "events": events,
+            "session": response["session"],
+            "zdr": data
+                .get("zdr")
+                .and_then(Value::as_bool)
+                .unwrap_or(metadata.zdr)
+        }))),
+    )
+        .into_response()
+}
+
+async fn proxy_live_frames_ws(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not available.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let upstream_url = match upstream_ws_url(
+        &state.quarry_edge_url,
+        &format!(
+            "/v1/agent/runs/{}/frames/ws{}",
+            urlencoding::encode(&session_id),
+            query_suffix(&uri)
+        ),
+    ) {
+        Ok(url) => url,
+        Err(message) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error("browser_ws_invalid_upstream", message)),
+            )
+                .into_response()
+        }
+    };
+
+    ws.on_upgrade(move |socket| {
+        browser_ws_proxy_loop(socket, state, session_id, upstream_url, token)
+    })
+    .into_response()
+}
+
+async fn browser_ws_proxy_loop(
+    mut client_socket: WebSocket,
+    state: AppState,
+    session_id: String,
+    upstream_url: String,
+    bearer_token: Option<String>,
+) {
+    let mut request = match upstream_url.as_str().into_client_request() {
+        Ok(request) => request,
+        Err(err) => {
+            let _ = send_client_ws_error(
+                &mut client_socket,
+                format!("Invalid browser websocket upstream: {err}"),
+            )
+            .await;
+            return;
+        }
+    };
+    if let Some(token) = bearer_token.filter(|value| !value.trim().is_empty()) {
+        match format!("Bearer {}", token.trim()).parse() {
+            Ok(value) => {
+                request.headers_mut().insert("authorization", value);
+            }
+            Err(err) => {
+                let _ = send_client_ws_error(
+                    &mut client_socket,
+                    format!("Invalid browser websocket token: {err}"),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
+    let upstream = match connect_async(request).await {
+        Ok((socket, _response)) => socket,
+        Err(err) => {
+            let _ = send_client_ws_error(
+                &mut client_socket,
+                format!("Browser websocket upstream unavailable: {err}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let (mut client_tx, mut client_rx) = client_socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+    let mut pending_action: Option<Value> = None;
+    let mut pending_actor = "human".to_owned();
+
+    loop {
+        tokio::select! {
+            client_msg = client_rx.next() => {
+                match client_msg {
+                    Some(Ok(message)) => {
+                        let close = matches!(message, AxumWsMessage::Close(_));
+                        let prepared_message = match prepare_client_ws_message(
+                            message,
+                            &state,
+                            &session_id,
+                            &mut pending_action,
+                            &mut pending_actor,
+                        ) {
+                            Ok(message) => message,
+                            Err(err) => {
+                                let _ = client_tx
+                                    .send(AxumWsMessage::Text(json!({
+                                        "type": "error",
+                                        "code": err.code,
+                                        "message": err.message
+                                    }).to_string()))
+                                    .await;
+                                continue;
+                            }
+                        };
+                        match prepared_message {
+                            PreparedClientWsMessage::Client(message) => {
+                                if client_tx.send(message).await.is_err() {
+                                    break;
+                                }
+                            }
+                            PreparedClientWsMessage::Upstream(message) => {
+                                if let Some(upstream_message) = axum_to_tungstenite_message(message) {
+                                    if upstream_tx.send(upstream_message).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if close {
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        tracing::debug!(error = %err, "browser websocket client receive failed");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            upstream_msg = upstream_rx.next() => {
+                match upstream_msg {
+                    Some(Ok(message)) => {
+                        let close = matches!(message, TungsteniteMessage::Close(_));
+                        let client_message = process_upstream_ws_message(
+                            message,
+                            &state,
+                            &session_id,
+                            &mut pending_action,
+                            &mut pending_actor,
+                        );
+                        if let Some(client_message) = client_message {
+                            if client_tx.send(client_message).await.is_err() {
+                                break;
+                            }
+                        }
+                        if close {
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        let _ = client_tx
+                            .send(AxumWsMessage::Text(json!({
+                                "type": "error",
+                                "message": format!("Browser websocket upstream failed: {err}")
+                            }).to_string()))
+                            .await;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+async fn send_client_ws_error(socket: &mut WebSocket, message: String) -> Result<(), axum::Error> {
+    socket
+        .send(AxumWsMessage::Text(
+            json!({ "type": "error", "message": message }).to_string(),
+        ))
+        .await
+}
+
+#[derive(Debug)]
+enum PreparedClientWsMessage {
+    Client(AxumWsMessage),
+    Upstream(AxumWsMessage),
+}
+
+#[derive(Debug)]
+struct ClientWsPrepareError {
+    code: &'static str,
+    message: String,
+}
+
+fn prepare_client_ws_message(
+    message: AxumWsMessage,
+    state: &AppState,
+    session_id: &str,
+    pending_action: &mut Option<Value>,
+    pending_actor: &mut String,
+) -> Result<PreparedClientWsMessage, ClientWsPrepareError> {
+    let AxumWsMessage::Text(text) = message else {
+        return Ok(PreparedClientWsMessage::Upstream(message));
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+        return Ok(PreparedClientWsMessage::Upstream(AxumWsMessage::Text(text)));
+    };
+    let Some(message_type) = value.get("type").and_then(Value::as_str) else {
+        return Ok(PreparedClientWsMessage::Upstream(AxumWsMessage::Text(
+            value.to_string(),
+        )));
+    };
+    if message_type == "control" {
+        return prepare_client_control_ws_message(value, state, session_id)
+            .map(PreparedClientWsMessage::Client);
+    }
+    if message_type != "action" {
+        return Ok(PreparedClientWsMessage::Upstream(AxumWsMessage::Text(
+            value.to_string(),
+        )));
+    }
+
+    let actor = value
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| "human".to_owned());
+    let current_metadata = browser_run_metadata(state, session_id);
+    if actor == "agent" && current_metadata.control_mode == BrowserControlMode::HumanTakeover {
+        return Err(ClientWsPrepareError {
+            code: "browser_human_takeover_active",
+            message: "Human takeover is active for this browser session.".to_owned(),
+        });
+    }
+    *pending_actor = actor.clone();
+    *pending_action = value.get("action").cloned();
+
+    if actor == "human" && current_metadata.control_mode != BrowserControlMode::HumanTakeover {
+        if let Some(metadata) =
+            update_browser_control_mode(state, session_id, BrowserControlMode::HumanTakeover)
+        {
+            let _ = append_replay_event(
+                state,
+                session_id,
+                control_replay_event(
+                    session_id,
+                    BrowserControlMode::HumanTakeover,
+                    "human",
+                    metadata.zdr,
+                ),
+            );
+        }
+    }
+    if value.get("instruction").is_none() {
+        value["instruction"] =
+            Value::String("Human browser takeover action from Velion.".to_owned());
+    }
+    Ok(PreparedClientWsMessage::Upstream(AxumWsMessage::Text(
+        value.to_string(),
+    )))
+}
+
+fn prepare_client_control_ws_message(
+    value: Value,
+    state: &AppState,
+    session_id: &str,
+) -> Result<AxumWsMessage, ClientWsPrepareError> {
+    let mode = match value.get("mode").and_then(Value::as_str) {
+        Some("agent_control") => BrowserControlMode::AgentControl,
+        Some("human_takeover") => BrowserControlMode::HumanTakeover,
+        _ => {
+            return Err(ClientWsPrepareError {
+                code: "invalid_browser_control_mode",
+                message: "Browser control mode must be agent_control or human_takeover.".to_owned(),
+            })
+        }
+    };
+    let actor = value
+        .get("actor")
+        .and_then(Value::as_str)
+        .unwrap_or("human");
+    let Some(metadata) = update_browser_control_mode(state, session_id, mode) else {
+        return Err(ClientWsPrepareError {
+            code: "browser_session_not_found",
+            message: "Browser session is not active.".to_owned(),
+        });
+    };
+    let metadata = append_replay_event(
+        state,
+        session_id,
+        control_replay_event(session_id, mode, actor, metadata.zdr),
+    )
+    .unwrap_or(metadata);
+    let observation = metadata.last_observation.clone();
+    let response = browser_response(session_id, &metadata, observation.clone());
+
+    Ok(AxumWsMessage::Text(
+        json!({
+            "type": "control",
+            "actor": actor,
+            "control": { "mode": mode.as_str() },
+            "observation": observation,
+            "session": response["session"].clone()
+        })
+        .to_string(),
+    ))
+}
+
+fn process_upstream_ws_message(
+    message: TungsteniteMessage,
+    state: &AppState,
+    session_id: &str,
+    pending_action: &mut Option<Value>,
+    pending_actor: &mut String,
+) -> Option<AxumWsMessage> {
+    let TungsteniteMessage::Text(text) = message else {
+        return tungstenite_to_axum_message(message);
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+        return Some(AxumWsMessage::Text(text));
+    };
+    if value.get("type").and_then(Value::as_str) == Some("frame") {
+        return process_upstream_frame_ws_message(value, state, session_id);
+    }
+    if value.get("type").and_then(Value::as_str) == Some("devtools") {
+        return process_upstream_devtools_ws_message(value, state, session_id);
+    }
+    if value.get("type").and_then(Value::as_str) != Some("observation") {
+        return Some(AxumWsMessage::Text(value.to_string()));
+    }
+    let Some(observation) = value.get("observation").cloned() else {
+        return Some(AxumWsMessage::Text(value.to_string()));
+    };
+
+    let mut metadata = update_browser_observation(state, session_id, observation.clone());
+    if let Some(next_metadata) = append_replay_event(
+        state,
+        session_id,
+        observation_replay_event(
+            session_id,
+            &observation,
+            pending_actor.as_str(),
+            pending_action.as_ref(),
+            metadata.control_mode,
+            metadata.zdr,
+        ),
+    ) {
+        metadata = next_metadata;
+    }
+    value["session"] =
+        browser_response(session_id, &metadata, Some(observation))["session"].clone();
+    *pending_action = None;
+    *pending_actor = "human".to_owned();
+    Some(AxumWsMessage::Text(value.to_string()))
+}
+
+fn process_upstream_frame_ws_message(
+    mut value: Value,
+    state: &AppState,
+    session_id: &str,
+) -> Option<AxumWsMessage> {
+    let Some(sequence) = value.get("sequence").and_then(Value::as_u64) else {
+        return Some(AxumWsMessage::Text(value.to_string()));
+    };
+    let metadata = browser_run_metadata(state, session_id);
+    if !should_record_frame_replay(&metadata.replay_events, sequence) {
+        return Some(AxumWsMessage::Text(value.to_string()));
+    }
+
+    let frame_event =
+        live_frame_replay_event(session_id, &value, metadata.control_mode, metadata.zdr);
+    let metadata = append_replay_event(state, session_id, frame_event).unwrap_or(metadata);
+    let observation = metadata.last_observation.clone();
+    value["session"] = browser_response(session_id, &metadata, observation)["session"].clone();
+    Some(AxumWsMessage::Text(value.to_string()))
+}
+
+fn process_upstream_devtools_ws_message(
+    mut value: Value,
+    state: &AppState,
+    session_id: &str,
+) -> Option<AxumWsMessage> {
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if events.is_empty() {
+        return Some(AxumWsMessage::Text(value.to_string()));
+    }
+
+    let mut metadata = update_browser_devtools_events(state, session_id, events.clone())
+        .unwrap_or_else(|| browser_run_metadata(state, session_id));
+    if let Some(next_metadata) = append_replay_event(
+        state,
+        session_id,
+        devtools_replay_event(session_id, &events, metadata.control_mode, metadata.zdr),
+    ) {
+        metadata = next_metadata;
+    }
+    let observation = metadata.last_observation.clone();
+    value["session"] = browser_response(session_id, &metadata, observation)["session"].clone();
+    Some(AxumWsMessage::Text(value.to_string()))
+}
+
+fn axum_to_tungstenite_message(message: AxumWsMessage) -> Option<TungsteniteMessage> {
+    match message {
+        AxumWsMessage::Text(value) => Some(TungsteniteMessage::Text(value)),
+        AxumWsMessage::Binary(value) => Some(TungsteniteMessage::Binary(value)),
+        AxumWsMessage::Ping(value) => Some(TungsteniteMessage::Ping(value)),
+        AxumWsMessage::Pong(value) => Some(TungsteniteMessage::Pong(value)),
+        AxumWsMessage::Close(_) => Some(TungsteniteMessage::Close(None)),
+    }
+}
+
+fn tungstenite_to_axum_message(message: TungsteniteMessage) -> Option<AxumWsMessage> {
+    match message {
+        TungsteniteMessage::Text(value) => Some(AxumWsMessage::Text(value)),
+        TungsteniteMessage::Binary(value) => Some(AxumWsMessage::Binary(value)),
+        TungsteniteMessage::Ping(value) => Some(AxumWsMessage::Ping(value)),
+        TungsteniteMessage::Pong(value) => Some(AxumWsMessage::Pong(value)),
+        TungsteniteMessage::Close(_) => Some(AxumWsMessage::Close(None)),
+        TungsteniteMessage::Frame(_) => None,
+    }
+}
+
 async fn list_profiles(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -817,13 +1989,234 @@ fn browser_response(
                 "scope": if metadata.persistent_profile { "user_private" } else { "run_scoped" },
                 "storage": if metadata.persistent_profile { "persistent" } else { "isolated" }
             },
+            "control": {
+                "mode": metadata.control_mode.as_str()
+            },
             "frame": frame,
+            "liveFrameUrl": live_frame_url(run_id),
+            "liveFrameStreamUrl": live_frame_stream_url(run_id),
+            "liveFrameWsUrl": live_frame_ws_url(run_id),
+            "tabsUrl": browser_tabs_url(run_id),
+            "tabs": metadata.tabs.clone(),
+            "devtoolsUrl": browser_devtools_url(run_id),
+            "devtools": {
+                "events": metadata.devtools_events.clone(),
+                "eventCount": metadata.devtools_events.len(),
+                "lastSequence": last_devtools_sequence(&metadata.devtools_events)
+            },
             "visual": visual,
             "timeline": browser_timeline(run_id, &metadata.observation_history),
+            "replay": {
+                "events": metadata.replay_events.clone(),
+                "eventCount": metadata.replay_events.len()
+            },
             "zdr": metadata.zdr,
-            "capabilities": ["navigate", "back", "forward", "click", "type", "press", "scroll", "wait_for", "select", "inspect_dom", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
+            "capabilities": ["navigate", "back", "forward", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "live_frame_ws", "devtools_events", "devtools_stream", "replay_timeline", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
         },
         "observation": observation
+    })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn action_type(action: Option<&Value>) -> Option<String> {
+    action
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn observation_replay_event(
+    run_id: &str,
+    observation: &Value,
+    actor: &str,
+    action: Option<&Value>,
+    control_mode: BrowserControlMode,
+    zdr: bool,
+) -> Value {
+    let timestamp_ms = now_ms();
+    let step = observation.get("step").and_then(Value::as_u64).unwrap_or(0);
+    let screenshot_artifact_id = screenshot_artifact_id(observation);
+    let visual_observation_artifact_id = visual_observation_artifact_id(observation);
+    let screenshot_url = screenshot_artifact_id
+        .as_deref()
+        .map(|artifact_id| artifact_url(run_id, artifact_id));
+    let visual_observation_url = visual_observation_artifact_id
+        .as_deref()
+        .map(|artifact_id| artifact_url(run_id, artifact_id));
+
+    json!({
+        "id": format!("{}:observation:{}:{}", run_id, step, timestamp_ms),
+        "kind": "observation",
+        "timestampMs": timestamp_ms,
+        "step": step,
+        "actor": actor,
+        "actionType": action_type(action),
+        "action": action.cloned().unwrap_or(Value::Null),
+        "controlMode": control_mode.as_str(),
+        "url": observation.get("url").and_then(Value::as_str).unwrap_or_default(),
+        "title": observation.get("title").and_then(Value::as_str).unwrap_or_default(),
+        "observedAt": observation.get("observed_at").and_then(Value::as_str).unwrap_or_default(),
+        "screenshotArtifactId": screenshot_artifact_id,
+        "screenshotUrl": screenshot_url,
+        "visualObservationArtifactId": visual_observation_artifact_id,
+        "visualObservationUrl": visual_observation_url,
+        "consoleCount": observation
+            .get("console_summary")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or_default(),
+        "networkCount": observation
+            .get("network_summary")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or_default(),
+        "policyDenialCount": observation
+            .get("policy_denials")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or_default(),
+        "domNodeCount": observation
+            .get("dom_summary")
+            .and_then(|summary| summary.get("node_count"))
+            .and_then(Value::as_u64),
+        "domInteractiveCount": observation
+            .get("dom_summary")
+            .and_then(|summary| summary.get("interactive_elements"))
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        "zdr": zdr
+    })
+}
+
+fn control_replay_event(
+    session_id: &str,
+    mode: BrowserControlMode,
+    actor: &str,
+    zdr: bool,
+) -> Value {
+    let timestamp_ms = now_ms();
+    json!({
+        "id": format!("{}:control:{}:{}", session_id, mode.as_str(), timestamp_ms),
+        "kind": "control",
+        "timestampMs": timestamp_ms,
+        "actor": actor,
+        "controlMode": mode.as_str(),
+        "zdr": zdr
+    })
+}
+
+fn devtools_replay_event(
+    session_id: &str,
+    events: &[Value],
+    control_mode: BrowserControlMode,
+    zdr: bool,
+) -> Value {
+    let timestamp_ms = now_ms();
+    let categories = devtools_categories(events);
+    json!({
+        "id": format!("{}:devtools:{}:{}", session_id, last_devtools_sequence(events).unwrap_or_default(), timestamp_ms),
+        "kind": "devtools",
+        "timestampMs": timestamp_ms,
+        "actor": "browser",
+        "controlMode": control_mode.as_str(),
+        "eventCount": events.len(),
+        "categories": categories,
+        "firstSequence": events
+            .iter()
+            .filter_map(devtools_sequence)
+            .min(),
+        "lastSequence": last_devtools_sequence(events),
+        "zdr": zdr
+    })
+}
+
+fn live_frame_replay_event(
+    session_id: &str,
+    frame: &Value,
+    control_mode: BrowserControlMode,
+    zdr: bool,
+) -> Value {
+    let timestamp_ms = now_ms();
+    let sequence = frame
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let data_base64_len = frame
+        .get("dataBase64")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or_default();
+    json!({
+        "id": format!("{}:frame:{}:{}", session_id, sequence, timestamp_ms),
+        "kind": "frame",
+        "timestampMs": timestamp_ms,
+        "actor": "browser",
+        "controlMode": control_mode.as_str(),
+        "sequence": sequence,
+        "mimeType": frame
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or("image/jpeg"),
+        "transport": "websocket",
+        "transient": true,
+        "persisted": false,
+        "imagePayloadPersisted": false,
+        "dataBase64Length": data_base64_len,
+        "zdr": frame
+            .get("zdr")
+            .and_then(Value::as_bool)
+            .unwrap_or(zdr)
+    })
+}
+
+fn should_record_frame_replay(replay_events: &[Value], sequence: u64) -> bool {
+    sequence == 1
+        || sequence % 10 == 1
+        || replay_events
+            .iter()
+            .rev()
+            .filter(|event| event.get("kind").and_then(Value::as_str) == Some("frame"))
+            .filter_map(|event| event.get("sequence").and_then(Value::as_u64))
+            .next()
+            .is_none()
+}
+
+fn devtools_categories(events: &[Value]) -> Vec<String> {
+    let mut categories = events
+        .iter()
+        .filter_map(|event| event.get("category").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    categories.sort();
+    categories.dedup();
+    categories
+}
+
+fn tab_replay_event(
+    session_id: &str,
+    operation: &str,
+    tab_id: &str,
+    active_tab: Option<&Value>,
+    control_mode: BrowserControlMode,
+    zdr: bool,
+) -> Value {
+    let timestamp_ms = now_ms();
+    json!({
+        "id": format!("{}:tab:{}:{}:{}", session_id, operation, tab_id, timestamp_ms),
+        "kind": "tab",
+        "timestampMs": timestamp_ms,
+        "operation": operation,
+        "tabId": tab_id,
+        "activeTab": active_tab.cloned().unwrap_or(Value::Null),
+        "actor": "human",
+        "controlMode": control_mode.as_str(),
+        "zdr": zdr
     })
 }
 
@@ -901,6 +2294,74 @@ fn artifact_url(run_id: &str, artifact_id: &str) -> String {
     )
 }
 
+fn live_frame_url(run_id: &str) -> String {
+    format!(
+        "/api/v1/browser/sessions/{}/frame?format=jpeg&quality=65",
+        urlencoding::encode(run_id)
+    )
+}
+
+fn live_frame_stream_url(run_id: &str) -> String {
+    format!(
+        "/api/v1/browser/sessions/{}/frames/stream?format=jpeg&quality=65&intervalMs=250",
+        urlencoding::encode(run_id)
+    )
+}
+
+fn live_frame_ws_url(run_id: &str) -> String {
+    format!(
+        "/api/v1/browser/sessions/{}/frames/ws?format=jpeg&quality=65&intervalMs=250",
+        urlencoding::encode(run_id)
+    )
+}
+
+fn browser_tabs_url(run_id: &str) -> String {
+    format!(
+        "/api/v1/browser/sessions/{}/tabs",
+        urlencoding::encode(run_id)
+    )
+}
+
+fn browser_devtools_url(run_id: &str) -> String {
+    format!(
+        "/api/v1/browser/sessions/{}/devtools",
+        urlencoding::encode(run_id)
+    )
+}
+
+fn devtools_sequence(event: &Value) -> Option<u64> {
+    event.get("sequence").and_then(Value::as_u64)
+}
+
+fn last_devtools_sequence(events: &[Value]) -> Option<u64> {
+    events.iter().filter_map(devtools_sequence).max()
+}
+
+fn query_suffix(uri: &Uri) -> String {
+    uri.query()
+        .filter(|query| !query.is_empty())
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default()
+}
+
+fn upstream_ws_url(base_url: &str, path_and_query: &str) -> Result<String, String> {
+    let base =
+        Url::parse(base_url).map_err(|err| format!("invalid Quarry Edge URL {base_url}: {err}"))?;
+    let mut url = base
+        .join(path_and_query.trim_start_matches('/'))
+        .map_err(|err| format!("invalid browser websocket path: {err}"))?;
+    let scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        "ws" | "wss" => url.scheme(),
+        other => return Err(format!("unsupported Quarry Edge scheme {other}")),
+    }
+    .to_owned();
+    url.set_scheme(&scheme)
+        .map_err(|_| format!("could not convert Quarry Edge URL to {scheme}"))?;
+    Ok(url.to_string())
+}
+
 fn update_browser_observation(
     state: &AppState,
     session_id: &str,
@@ -919,6 +2380,87 @@ fn update_browser_observation(
     metadata
 }
 
+fn update_browser_tabs(
+    state: &AppState,
+    session_id: &str,
+    tabs: Vec<Value>,
+) -> Option<BrowserRunMetadata> {
+    let mut runs = state.browser_run_store.lock().ok()?;
+    let metadata = runs.get(session_id)?;
+    let next_metadata = BrowserRunMetadata {
+        tabs,
+        ..metadata.clone()
+    };
+    runs.insert(session_id.to_owned(), next_metadata.clone());
+    Some(next_metadata)
+}
+
+fn update_browser_devtools_events(
+    state: &AppState,
+    session_id: &str,
+    events: Vec<Value>,
+) -> Option<BrowserRunMetadata> {
+    let mut runs = state.browser_run_store.lock().ok()?;
+    let metadata = runs.get(session_id)?;
+    let mut by_sequence = metadata
+        .devtools_events
+        .iter()
+        .filter_map(|event| devtools_sequence(event).map(|sequence| (sequence, event.clone())))
+        .collect::<BTreeMap<_, _>>();
+    for event in events {
+        if let Some(sequence) = devtools_sequence(&event) {
+            by_sequence.insert(sequence, event);
+        }
+    }
+    let mut devtools_events = by_sequence.into_values().collect::<Vec<_>>();
+    if devtools_events.len() > MAX_BROWSER_DEVTOOLS_EVENTS {
+        let remove_count = devtools_events.len() - MAX_BROWSER_DEVTOOLS_EVENTS;
+        devtools_events.drain(0..remove_count);
+    }
+    let next_metadata = BrowserRunMetadata {
+        devtools_events,
+        ..metadata.clone()
+    };
+    runs.insert(session_id.to_owned(), next_metadata.clone());
+    Some(next_metadata)
+}
+
+fn append_replay_event(
+    state: &AppState,
+    session_id: &str,
+    event: Value,
+) -> Option<BrowserRunMetadata> {
+    let mut runs = state.browser_run_store.lock().ok()?;
+    let metadata = runs.get(session_id)?;
+    let mut replay_events = metadata.replay_events.clone();
+    replay_events.push(event);
+    if replay_events.len() > MAX_BROWSER_REPLAY_EVENTS {
+        let remove_count = replay_events.len() - MAX_BROWSER_REPLAY_EVENTS;
+        replay_events.drain(0..remove_count);
+    }
+    let next_metadata = BrowserRunMetadata {
+        replay_events,
+        ..metadata.clone()
+    };
+    runs.insert(session_id.to_owned(), next_metadata.clone());
+    Some(next_metadata)
+}
+
+fn update_browser_control_mode(
+    state: &AppState,
+    session_id: &str,
+    control_mode: BrowserControlMode,
+) -> Option<BrowserRunMetadata> {
+    let mut runs = state.browser_run_store.lock().ok()?;
+    let metadata = runs.get(session_id)?;
+    let next_metadata = BrowserRunMetadata {
+        control_mode,
+        ..metadata.clone()
+    };
+    runs.insert(session_id.to_owned(), next_metadata.clone());
+    Some(next_metadata)
+}
+
 fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadata {
     state
         .browser_run_store
@@ -931,7 +2473,11 @@ fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadat
             persistent_profile: false,
             last_observation: None,
             observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
             viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
             zdr: false,
         })
 }
@@ -1005,6 +2551,48 @@ async fn fetch_model_screenshot(
     )))
 }
 
+async fn fetch_browser_tabs(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    session_id: &str,
+) -> Result<Vec<Value>, Response> {
+    let (status, body) = quarry_call(
+        state,
+        Method::GET,
+        &format!("/v1/agent/runs/{}/tabs", urlencoding::encode(session_id)),
+        None,
+        token,
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(forward_quarry_failure(status, body));
+    }
+    Ok(tabs_from_data(&unwrap_data(&body)))
+}
+
+fn tabs_from_data(data: &Value) -> Vec<Value> {
+    data.get("tabs")
+        .and_then(Value::as_array)
+        .map(|tabs| tabs.to_vec())
+        .unwrap_or_default()
+}
+
+fn active_tab(tabs: &[Value]) -> Option<&Value> {
+    tabs.iter().find(|tab| {
+        tab.get("active")
+            .and_then(Value::as_bool)
+            .unwrap_or_default()
+    })
+}
+
+fn active_tab_id(tabs: &[Value]) -> Option<&str> {
+    active_tab(tabs)
+        .and_then(|tab| tab.get("tabId"))
+        .and_then(Value::as_str)
+}
+
 async fn fetch_quarry_artifact_bytes(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -1074,6 +2662,16 @@ async fn fetch_quarry_artifact_bytes(
     Ok(Some((bytes, content_type)))
 }
 
+fn normalize_optional_public_url(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.eq_ignore_ascii_case("about:blank") {
+        return Ok(None);
+    }
+    normalize_public_http_url(raw).map(Some)
+}
+
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
     let action_type = action
         .get("type")
@@ -1096,6 +2694,18 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
         }
         "click" | "press" | "scroll" | "select" | "wait" | "wait_for" | "screenshot" | "back"
         | "forward" | "get_content" => Ok(action),
+        "click_point" => {
+            validate_viewport_coordinate(&action, "x")?;
+            validate_viewport_coordinate(&action, "y")?;
+            Ok(action)
+        }
+        "mouse_wheel" => {
+            validate_viewport_coordinate(&action, "x")?;
+            validate_viewport_coordinate(&action, "y")?;
+            validate_wheel_delta(&action, "delta_x")?;
+            validate_wheel_delta(&action, "delta_y")?;
+            Ok(action)
+        }
         "type" => {
             if action
                 .get("text")
@@ -1122,6 +2732,43 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
     }
 }
 
+fn validate_viewport_coordinate(
+    action: &Value,
+    field: &'static str,
+) -> Result<(), (&'static str, String)> {
+    let value = action.get(field).and_then(Value::as_f64).ok_or_else(|| {
+        (
+            "invalid_browser_action",
+            format!("{field} must be a finite viewport coordinate."),
+        )
+    })?;
+    if value.is_finite() && (0.0..=10_000.0).contains(&value) {
+        Ok(())
+    } else {
+        Err((
+            "invalid_browser_action",
+            format!("{field} must be between 0 and 10000 CSS pixels."),
+        ))
+    }
+}
+
+fn validate_wheel_delta(action: &Value, field: &'static str) -> Result<(), (&'static str, String)> {
+    let value = action.get(field).and_then(Value::as_f64).ok_or_else(|| {
+        (
+            "invalid_browser_action",
+            format!("{field} must be a finite wheel delta."),
+        )
+    })?;
+    if value.is_finite() && (-5000.0..=5000.0).contains(&value) {
+        Ok(())
+    } else {
+        Err((
+            "invalid_browser_action",
+            format!("{field} must be between -5000 and 5000 CSS pixels."),
+        ))
+    }
+}
+
 async fn quarry_call(
     state: &AppState,
     method: Method,
@@ -1136,9 +2783,13 @@ async fn quarry_call(
 }
 
 async fn quarry_token(state: &AppState, user: &AuthenticatedUser, cookie: &str) -> Option<String> {
-    get_audience_token(state, &user.user_id, cookie, "quarry")
-        .await
-        .or_else(|| dev_quarry_token(state))
+    if let Some(token) = get_audience_token(state, &user.user_id, cookie, "quarry").await {
+        return Some(token);
+    }
+    if let Some(token) = get_onboarding_preview_token(state, &user.user_id, cookie).await {
+        return Some(token);
+    }
+    dev_quarry_token(state)
 }
 
 fn dev_quarry_token(state: &AppState) -> Option<String> {
@@ -1250,6 +2901,63 @@ fn looks_like_json_payload(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    fn test_app_state() -> AppState {
+        let cache = crate::cache::ResultCache::disabled();
+        AppState {
+            client: reqwest::Client::new(),
+            streaming_client: reqwest::Client::new(),
+            internal_api_key: "test-key".into(),
+            enforcement_mode: "off".to_string(),
+            auth_core_url: "http://127.0.0.1:1".into(),
+            session_core_url: "http://127.0.0.1:1".into(),
+            billing_core_url: "http://127.0.0.1:1".into(),
+            cost_core_url: "http://127.0.0.1:1".into(),
+            org_core_url: "http://127.0.0.1:1".into(),
+            integration_core_url: "http://127.0.0.1:1".into(),
+            audit_core_url: "http://127.0.0.1:1".into(),
+            insight_core_url: "http://127.0.0.1:1".into(),
+            leads_core_url: "http://127.0.0.1:1".into(),
+            shipping_core_url: "http://127.0.0.1:1".into(),
+            user_core_url: "http://127.0.0.1:1".into(),
+            graph_index_url: "http://127.0.0.1:1".into(),
+            quarry_edge_url: "http://127.0.0.1:1".into(),
+            model_recommend_url: "http://127.0.0.1:1".into(),
+            model_gateway_url: "http://127.0.0.1:1".into(),
+            model_gateway_dev_bearer: String::new(),
+            inference_core_url: "http://127.0.0.1:1".into(),
+            documents_api_url: "http://127.0.0.1:1".into(),
+            retrieval_engine_url: "http://127.0.0.1:1".into(),
+            wiki_store_url: "http://127.0.0.1:1".into(),
+            embedding_engine_url: "http://127.0.0.1:1".into(),
+            quickwit_adapter_url: "http://127.0.0.1:1".into(),
+            qdrant_url: "http://127.0.0.1:1".into(),
+            quickwit_url: "http://127.0.0.1:1".into(),
+            finspo_core_url: "http://127.0.0.1:1".into(),
+            imports_api_url: "http://127.0.0.1:1".into(),
+            notification_core_url: "http://127.0.0.1:1".into(),
+            information_core_url: "http://127.0.0.1:1".into(),
+            conversation_core_url: "http://127.0.0.1:1".into(),
+            social_core_url: "http://127.0.0.1:1".into(),
+            searxng_url: "http://127.0.0.1:1".into(),
+            autocomplete_core_url: "http://127.0.0.1:1".into(),
+            autocomplete_token: String::new(),
+            zammad_api_url: "http://127.0.0.1:1".into(),
+            zammad_api_token: String::new(),
+            audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
+            browser_run_store: new_browser_run_store(),
+            cache: cache.clone(),
+            rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
+            chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
+            studio_store: crate::domains::studio::StudioStore::new(),
+            allow_dev_actor_headers: true,
+            allow_dev_auth_bypass: true,
+            enhanced_scrape_provider: String::new(),
+            enhanced_scrape_api_key: String::new(),
+            enhanced_scrape_zone: String::new(),
+            enhanced_scrape_country: String::new(),
+        }
+    }
+
     #[test]
     fn sanitize_action_normalizes_navigation_urls() {
         let action = sanitize_action(json!({ "type": "navigate", "url": "https://example.com/a" }))
@@ -1278,6 +2986,40 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_action_allows_coordinate_takeover_actions() {
+        let click = sanitize_action(json!({ "type": "click_point", "x": 120.5, "y": 300.0 }))
+            .expect("valid click point");
+        assert_eq!(click["type"], "click_point");
+
+        let wheel = sanitize_action(json!({
+            "type": "mouse_wheel",
+            "x": 120.5,
+            "y": 300.0,
+            "delta_x": 0.0,
+            "delta_y": 480.0
+        }))
+        .expect("valid wheel action");
+        assert_eq!(wheel["type"], "mouse_wheel");
+    }
+
+    #[test]
+    fn sanitize_action_rejects_unbounded_coordinate_takeover_actions() {
+        let err = sanitize_action(json!({ "type": "click_point", "x": -1.0, "y": 300.0 }))
+            .expect_err("negative coordinate should be rejected");
+        assert_eq!(err.0, "invalid_browser_action");
+
+        let err = sanitize_action(json!({
+            "type": "mouse_wheel",
+            "x": 120.5,
+            "y": 300.0,
+            "delta_x": 0.0,
+            "delta_y": 50_000.0
+        }))
+        .expect_err("oversized wheel delta should be rejected");
+        assert_eq!(err.0, "invalid_browser_action");
+    }
+
+    #[test]
     fn browser_response_includes_scoped_screenshot_frame_url() {
         let metadata = BrowserRunMetadata {
             lease_id: Some("lease-1".to_owned()),
@@ -1290,7 +3032,16 @@ mod tests {
                 "title": "Example",
                 "screenshot_artifact_id": "art_01JZ9XM7EXAMPLESHOT00001"
             })],
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: vec![json!({
+                "tabId": "tab-1",
+                "title": "Example",
+                "url": "https://example.com",
+                "active": true
+            })],
             viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
             zdr: false,
         };
         let response = browser_response(
@@ -1312,6 +3063,59 @@ mod tests {
             response["session"]["timeline"][0]["screenshotUrl"],
             "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLESHOT00001"
         );
+        assert_eq!(
+            response["session"]["liveFrameUrl"],
+            "/api/v1/browser/sessions/run_browser_01/frame?format=jpeg&quality=65"
+        );
+        assert_eq!(
+            response["session"]["liveFrameStreamUrl"],
+            "/api/v1/browser/sessions/run_browser_01/frames/stream?format=jpeg&quality=65&intervalMs=250"
+        );
+        assert_eq!(
+            response["session"]["liveFrameWsUrl"],
+            "/api/v1/browser/sessions/run_browser_01/frames/ws?format=jpeg&quality=65&intervalMs=250"
+        );
+        assert_eq!(
+            response["session"]["tabsUrl"],
+            "/api/v1/browser/sessions/run_browser_01/tabs"
+        );
+        assert_eq!(
+            response["session"]["devtoolsUrl"],
+            "/api/v1/browser/sessions/run_browser_01/devtools"
+        );
+        assert_eq!(response["session"]["devtools"]["eventCount"], 0);
+        assert_eq!(response["session"]["tabs"][0]["tabId"], "tab-1");
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "live_frame"));
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "live_frame_stream"));
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "live_frame_ws"));
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "devtools_events"));
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "tabs"));
+        assert_eq!(response["session"]["control"]["mode"], "agent_control");
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "control_state"));
     }
 
     #[test]
@@ -1326,7 +3130,11 @@ mod tests {
                 "url": "https://example.com",
                 "visual_observation_artifact_id": "art_01JZ9XM7EXAMPLEVISION0001"
             })],
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
             viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
             zdr: false,
         };
         let response = browser_response(
@@ -1359,6 +3167,660 @@ mod tests {
     }
 
     #[test]
+    fn browser_response_includes_replay_events() {
+        let observation = json!({
+            "step": 7,
+            "url": "https://example.com/pricing",
+            "title": "Pricing",
+            "screenshot_artifact_id": "art_01JZ9XM7EXAMPLESHOT00001",
+            "visual_observation_artifact_id": "art_01JZ9XM7EXAMPLEVISION0001",
+            "console_summary": [{ "level": "info", "text": "ready" }],
+            "network_summary": [{ "method": "GET", "status": 200, "url": "https://example.com/pricing" }],
+            "policy_denials": [],
+            "dom_summary": {
+                "node_count": 88,
+                "interactive_elements": [
+                    { "tag": "button", "selector": "button.cta" },
+                    { "tag": "a", "selector": "a[href=\"/demo\"]" }
+                ]
+            }
+        });
+        let replay_event = observation_replay_event(
+            "run_browser_01",
+            &observation,
+            "agent",
+            Some(&json!({ "type": "click_point", "x": 10.0, "y": 20.0 })),
+            BrowserControlMode::AgentControl,
+            false,
+        );
+        let metadata = BrowserRunMetadata {
+            lease_id: None,
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(observation.clone()),
+            observation_history: vec![observation.clone()],
+            devtools_events: Vec::new(),
+            replay_events: vec![replay_event],
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: false,
+        };
+        let response = browser_response("run_browser_01", &metadata, Some(observation));
+        let replay = &response["session"]["replay"];
+        let event = &replay["events"][0];
+
+        assert_eq!(replay["eventCount"], 1);
+        assert_eq!(event["kind"], "observation");
+        assert_eq!(event["actor"], "agent");
+        assert_eq!(event["actionType"], "click_point");
+        assert_eq!(event["controlMode"], "agent_control");
+        assert_eq!(event["consoleCount"], 1);
+        assert_eq!(event["networkCount"], 1);
+        assert_eq!(event["domNodeCount"], 88);
+        assert_eq!(event["domInteractiveCount"], 2);
+        assert_eq!(
+            event["screenshotUrl"],
+            "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLESHOT00001"
+        );
+        assert_eq!(
+            event["visualObservationUrl"],
+            "/api/v1/browser/sessions/run_browser_01/artifacts/art_01JZ9XM7EXAMPLEVISION0001"
+        );
+        assert!(response["session"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| capability == "replay_timeline"));
+    }
+
+    #[test]
+    fn websocket_human_action_updates_control_replay() {
+        let state = test_app_state();
+        let session_id = "run_ws_01";
+        let metadata = BrowserRunMetadata {
+            lease_id: None,
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let prepared = prepare_client_ws_message(
+            AxumWsMessage::Text(
+                json!({
+                    "type": "action",
+                    "action": { "type": "click_point", "x": 1, "y": 2 }
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("ws action accepted");
+
+        assert!(matches!(
+            prepared,
+            PreparedClientWsMessage::Upstream(AxumWsMessage::Text(_))
+        ));
+        let metadata = browser_run_metadata(&state, session_id);
+        assert_eq!(metadata.control_mode, BrowserControlMode::HumanTakeover);
+        assert_eq!(pending_actor, "human");
+        assert_eq!(
+            pending_action.expect("pending action")["type"],
+            "click_point"
+        );
+        assert_eq!(metadata.replay_events[0]["kind"], "control");
+        assert_eq!(metadata.replay_events[0]["controlMode"], "human_takeover");
+    }
+
+    #[test]
+    fn websocket_agent_action_is_rejected_during_human_takeover() {
+        let state = test_app_state();
+        let session_id = "run_ws_agent_blocked";
+        let metadata = BrowserRunMetadata {
+            lease_id: None,
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::HumanTakeover,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let err = prepare_client_ws_message(
+            AxumWsMessage::Text(
+                json!({
+                    "type": "action",
+                    "actor": "agent",
+                    "action": { "type": "click_point", "x": 1, "y": 2 }
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect_err("agent action should be rejected");
+
+        assert_eq!(err.code, "browser_human_takeover_active");
+        assert_eq!(
+            err.message,
+            "Human takeover is active for this browser session."
+        );
+        assert!(pending_action.is_none());
+        assert!(pending_actor.is_empty());
+    }
+
+    #[test]
+    fn websocket_control_release_updates_state_and_returns_session() {
+        let state = test_app_state();
+        let session_id = "run_ws_release";
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-release".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 3,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::HumanTakeover,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let prepared = prepare_client_ws_message(
+            AxumWsMessage::Text(
+                json!({
+                    "type": "control",
+                    "mode": "agent_control",
+                    "actor": "human"
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("control release accepted");
+        let PreparedClientWsMessage::Client(AxumWsMessage::Text(text)) = prepared else {
+            panic!("expected local client control message");
+        };
+        let payload: Value = serde_json::from_str(&text).expect("valid control payload");
+        let metadata = browser_run_metadata(&state, session_id);
+
+        assert_eq!(payload["type"], "control");
+        assert_eq!(payload["control"]["mode"], "agent_control");
+        assert_eq!(payload["session"]["control"]["mode"], "agent_control");
+        assert_eq!(payload["session"]["replay"]["eventCount"], 1);
+        assert_eq!(payload["session"]["replay"]["events"][0]["kind"], "control");
+        assert_eq!(
+            payload["session"]["replay"]["events"][0]["controlMode"],
+            "agent_control"
+        );
+        assert_eq!(metadata.control_mode, BrowserControlMode::AgentControl);
+        assert!(pending_action.is_none());
+        assert!(pending_actor.is_empty());
+
+        let prepared = prepare_client_ws_message(
+            AxumWsMessage::Text(
+                json!({
+                    "type": "action",
+                    "actor": "agent",
+                    "action": { "type": "wait", "ms": 10 }
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("agent action accepted after release");
+
+        assert!(matches!(
+            prepared,
+            PreparedClientWsMessage::Upstream(AxumWsMessage::Text(_))
+        ));
+        assert_eq!(pending_actor, "agent");
+        assert_eq!(pending_action.expect("pending action")["type"], "wait");
+    }
+
+    #[test]
+    fn websocket_observation_updates_replay_and_injects_session() {
+        let state = test_app_state();
+        let session_id = "run_ws_02";
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-1".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::HumanTakeover,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action =
+            Some(json!({ "type": "mouse_wheel", "x": 4, "y": 8, "delta_y": 120 }));
+        let mut pending_actor = "human".to_owned();
+        let message = process_upstream_ws_message(
+            TungsteniteMessage::Text(
+                json!({
+                    "type": "observation",
+                    "observation": {
+                        "run_id": session_id,
+                        "step": 1,
+                        "url": "https://example.com/news",
+                        "title": "News",
+                        "screenshot_artifact_id": "art_01JZ9XM7EXAMPLESHOT00001"
+                    }
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("client message");
+        let AxumWsMessage::Text(text) = message else {
+            panic!("expected text message");
+        };
+        let payload: Value = serde_json::from_str(&text).expect("valid json");
+        let metadata = browser_run_metadata(&state, session_id);
+
+        assert_eq!(payload["session"]["control"]["mode"], "human_takeover");
+        assert_eq!(payload["session"]["replay"]["eventCount"], 1);
+        assert_eq!(
+            payload["session"]["replay"]["events"][0]["screenshotUrl"],
+            "/api/v1/browser/sessions/run_ws_02/artifacts/art_01JZ9XM7EXAMPLESHOT00001"
+        );
+        assert_eq!(metadata.last_observation.as_ref().unwrap()["step"], 1);
+        assert_eq!(metadata.replay_events[0]["actionType"], "mouse_wheel");
+        assert!(pending_action.is_none());
+        assert_eq!(pending_actor, "human");
+    }
+
+    #[test]
+    fn websocket_devtools_updates_session_and_replay() {
+        let state = test_app_state();
+        let session_id = "run_ws_devtools";
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-devtools".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let message = process_upstream_ws_message(
+            TungsteniteMessage::Text(
+                json!({
+                    "type": "devtools",
+                    "events": [
+                        {
+                            "sequence": 4,
+                            "tabId": "tab-1",
+                            "category": "network",
+                            "name": "Network.responseReceived",
+                            "method": "GET",
+                            "url": "https://example.com/",
+                            "status": 200,
+                            "timestampMs": 1234,
+                            "payload": {}
+                        }
+                    ],
+                    "zdr": false
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("client message");
+        let AxumWsMessage::Text(text) = message else {
+            panic!("expected text message");
+        };
+        let payload: Value = serde_json::from_str(&text).expect("valid json");
+        let metadata = browser_run_metadata(&state, session_id);
+
+        assert_eq!(payload["session"]["devtools"]["eventCount"], 1);
+        assert_eq!(payload["session"]["devtools"]["lastSequence"], 4);
+        assert_eq!(payload["session"]["replay"]["eventCount"], 1);
+        assert_eq!(
+            payload["session"]["replay"]["events"][0]["kind"],
+            "devtools"
+        );
+        assert_eq!(payload["session"]["replay"]["events"][0]["lastSequence"], 4);
+        assert_eq!(metadata.devtools_events.len(), 1);
+        assert_eq!(metadata.replay_events[0]["categories"][0], "network");
+        assert!(pending_action.is_none());
+        assert!(pending_actor.is_empty());
+    }
+
+    #[test]
+    fn websocket_frame_adds_transient_replay_without_image_payload() {
+        let state = test_app_state();
+        let session_id = "run_ws_frame";
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-frame".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let message = process_upstream_ws_message(
+            TungsteniteMessage::Text(
+                json!({
+                    "type": "frame",
+                    "sequence": 1,
+                    "mimeType": "image/jpeg",
+                    "dataBase64": "abcdef",
+                    "zdr": false
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("client message");
+        let AxumWsMessage::Text(text) = message else {
+            panic!("expected text message");
+        };
+        let payload: Value = serde_json::from_str(&text).expect("valid json");
+        let metadata = browser_run_metadata(&state, session_id);
+        let replay = &payload["session"]["replay"]["events"][0];
+
+        assert_eq!(payload["dataBase64"], "abcdef");
+        assert_eq!(replay["kind"], "frame");
+        assert_eq!(replay["sequence"], 1);
+        assert_eq!(replay["persisted"], false);
+        assert_eq!(replay["imagePayloadPersisted"], false);
+        assert!(replay.get("dataBase64").is_none());
+        assert_eq!(metadata.replay_events[0]["dataBase64Length"], 6);
+        assert!(pending_action.is_none());
+        assert!(pending_actor.is_empty());
+    }
+
+    #[test]
+    fn websocket_frame_replay_is_sampled_bounded_and_payload_free() {
+        let state = test_app_state();
+        let session_id = "run_ws_frame_stress";
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-frame-stress".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: true,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let final_sequence = (MAX_BROWSER_REPLAY_EVENTS as u64 + 4) * 10 + 1;
+        for sequence in 1..=final_sequence {
+            let message = process_upstream_ws_message(
+                TungsteniteMessage::Text(
+                    json!({
+                        "type": "frame",
+                        "sequence": sequence,
+                        "mimeType": "image/jpeg",
+                        "dataBase64": format!("payload-{sequence}"),
+                        "zdr": true
+                    })
+                    .to_string(),
+                ),
+                &state,
+                session_id,
+                &mut pending_action,
+                &mut pending_actor,
+            )
+            .expect("frame message");
+            assert!(matches!(message, AxumWsMessage::Text(_)));
+        }
+
+        let metadata = browser_run_metadata(&state, session_id);
+        assert_eq!(metadata.replay_events.len(), MAX_BROWSER_REPLAY_EVENTS);
+        assert_eq!(metadata.replay_events[0]["sequence"], 51);
+        assert_eq!(
+            metadata.replay_events.last().expect("last replay event")["sequence"],
+            final_sequence
+        );
+        assert!(metadata.replay_events.iter().all(|event| {
+            event.get("kind").and_then(Value::as_str) == Some("frame")
+                && event.get("persisted").and_then(Value::as_bool) == Some(false)
+                && event.get("imagePayloadPersisted").and_then(Value::as_bool) == Some(false)
+                && event.get("dataBase64").is_none()
+                && event
+                    .get("dataBase64Length")
+                    .and_then(Value::as_u64)
+                    .is_some()
+                && event.get("zdr").and_then(Value::as_bool) == Some(true)
+        }));
+        assert!(pending_action.is_none());
+        assert!(pending_actor.is_empty());
+    }
+
+    #[test]
+    fn websocket_devtools_events_are_deduped_sorted_and_bounded() {
+        let state = test_app_state();
+        let session_id = "run_ws_devtools_stress";
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-devtools-stress".to_owned()),
+            profile_id: None,
+            persistent_profile: false,
+            last_observation: Some(json!({
+                "step": 0,
+                "url": "https://example.com"
+            })),
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::HumanTakeover,
+            zdr: false,
+        };
+        state
+            .browser_run_store
+            .lock()
+            .expect("browser store")
+            .insert(session_id.to_owned(), metadata);
+
+        let last_sequence = MAX_BROWSER_DEVTOOLS_EVENTS as u64 + 7;
+        let mut events = (0..=last_sequence)
+            .map(|sequence| {
+                json!({
+                    "sequence": sequence,
+                    "tabId": "tab-1",
+                    "category": if sequence % 2 == 0 { "network" } else { "console" },
+                    "name": "Network.responseReceived",
+                    "timestampMs": sequence * 10,
+                    "payload": { "sequence": sequence }
+                })
+            })
+            .collect::<Vec<_>>();
+        events.push(json!({
+            "sequence": last_sequence,
+            "tabId": "tab-1",
+            "category": "console",
+            "name": "Runtime.consoleAPICalled",
+            "timestampMs": 99_999,
+            "payload": { "deduped": true }
+        }));
+
+        let mut pending_action = None;
+        let mut pending_actor = String::new();
+        let message = process_upstream_ws_message(
+            TungsteniteMessage::Text(
+                json!({
+                    "type": "devtools",
+                    "events": events,
+                    "zdr": false
+                })
+                .to_string(),
+            ),
+            &state,
+            session_id,
+            &mut pending_action,
+            &mut pending_actor,
+        )
+        .expect("devtools message");
+        let AxumWsMessage::Text(text) = message else {
+            panic!("expected text message");
+        };
+        let payload: Value = serde_json::from_str(&text).expect("valid json");
+        let metadata = browser_run_metadata(&state, session_id);
+
+        assert_eq!(payload["session"]["devtools"]["eventCount"], 512);
+        assert_eq!(
+            payload["session"]["devtools"]["lastSequence"],
+            last_sequence
+        );
+        assert_eq!(metadata.devtools_events.len(), MAX_BROWSER_DEVTOOLS_EVENTS);
+        assert_eq!(metadata.devtools_events[0]["sequence"], 8);
+        assert_eq!(
+            metadata
+                .devtools_events
+                .last()
+                .expect("last devtools event")["name"],
+            "Runtime.consoleAPICalled"
+        );
+        assert_eq!(metadata.replay_events.len(), 1);
+        assert_eq!(metadata.replay_events[0]["kind"], "devtools");
+        assert_eq!(metadata.replay_events[0]["eventCount"], 521);
+        assert_eq!(metadata.replay_events[0]["controlMode"], "human_takeover");
+        assert_eq!(
+            metadata.replay_events[0]["categories"]
+                .as_array()
+                .expect("categories"),
+            &vec![json!("console"), json!("network")]
+        );
+        assert!(pending_action.is_none());
+        assert!(pending_actor.is_empty());
+    }
+
+    #[test]
+    fn upstream_ws_url_converts_http_origin_to_ws() {
+        let url = upstream_ws_url(
+            "http://quarry-edge:8082",
+            "/v1/agent/runs/run_1/frames/ws?format=jpeg",
+        )
+        .expect("ws url");
+        assert_eq!(
+            url,
+            "ws://quarry-edge:8082/v1/agent/runs/run_1/frames/ws?format=jpeg"
+        );
+    }
+
+    #[test]
     fn browser_timeline_entries_carry_bounded_step_evidence() {
         let console: Vec<Value> = (0..30)
             .map(|index| json!({ "level": "info", "text": format!("line {index}") }))
@@ -1384,7 +3846,11 @@ mod tests {
                     ]
                 }
             })],
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
             viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::HumanTakeover,
             zdr: false,
         };
         let response = browser_response("run_browser_01", &metadata, None);
@@ -1402,6 +3868,7 @@ mod tests {
         assert_eq!(entry["domNodeCount"], 42);
         assert_eq!(entry["domInteractiveCount"], 1);
         assert_eq!(response["session"]["zdr"], false);
+        assert_eq!(response["session"]["control"]["mode"], "human_takeover");
     }
 
     #[test]
