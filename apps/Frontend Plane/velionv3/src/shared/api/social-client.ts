@@ -42,7 +42,7 @@ export type SocialPost = {
 export type SocialPlatformAdapter = {
   providerKey: SocialProviderKey
   label: string
-  mode: 'direct_api' | 'media_container' | 'graph_pages_api' | 'content_posting_api' | 'marketing_api'
+  mode: 'direct_api' | 'media_container' | 'graph_pages_api' | 'content_posting_api' | 'marketing_api' | 'public_profile_api'
   endpoint: string
   maxCharacters: number
   mediaRequired: boolean
