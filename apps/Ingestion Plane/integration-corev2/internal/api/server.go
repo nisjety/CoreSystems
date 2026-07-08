@@ -2579,6 +2579,29 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 		case "live.create", "facebook.live.create", "live.list", "facebook.live.list", "live.get", "facebook.live.get":
 			return "social.live.manage", true
 		}
+	case "snapchat":
+		switch normalized {
+		case "organizations", "snapchat.organizations",
+			"profile.stories", "snapchat.profile.stories",
+			"profile.spotlights", "snapchat.profile.spotlights",
+			"profile.saved_stories", "snapchat.profile.saved_stories",
+			"spotlight.get", "snapchat.spotlight.get":
+			return "social.profile.read", false
+		case "adaccounts", "snapchat.adaccounts",
+			"media.list", "snapchat.media.list",
+			"creatives.list", "snapchat.creatives.list",
+			"ads.media.create", "snapchat.ads.media.create",
+			"ads.creative.create", "snapchat.ads.creative.create":
+			return "social.ads.manage", true
+		case "ads.stats", "snapchat.ads.stats":
+			return "social.analytics.read", true
+		case "profile.media.create", "snapchat.profile.media.create":
+			return "social.media.upload", true
+		case "story.post", "snapchat.story.post",
+			"spotlight.post", "snapchat.spotlight.post",
+			"saved_story.create", "snapchat.saved_story.create":
+			return "social.post.write", true
+		}
 	case "okta":
 		switch normalized {
 		case "org", "okta.org":
@@ -2638,6 +2661,18 @@ func actionRequiresApproval(providerKey, operation string) bool {
 			"ads.campaign.create", "app_ads.campaign.create",
 			"catalog.product.upsert", "catalog.batch",
 			"threads.container.create", "threads.publish":
+			return true
+		default:
+			return false
+		}
+	case "snapchat":
+		switch normalized {
+		case "ads.media.create", "snapchat.ads.media.create",
+			"ads.creative.create", "snapchat.ads.creative.create",
+			"profile.media.create", "snapchat.profile.media.create",
+			"story.post", "snapchat.story.post",
+			"spotlight.post", "snapchat.spotlight.post",
+			"saved_story.create", "snapchat.saved_story.create":
 			return true
 		default:
 			return false

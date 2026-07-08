@@ -129,6 +129,12 @@ type Config struct {
 	SnapchatAuthorizationURL  string
 	SnapchatTokenURL          string
 	SnapchatAPIBaseURL        string
+	// SnapchatBusinessAPIBaseURL is the Public Profile API host
+	// (businessapi.snapchat.com) used for organic Story/Spotlight/Saved Story
+	// content management. It is a DIFFERENT host from SnapchatAPIBaseURL
+	// (adsapi.snapchat.com, the Ads/Marketing API), though both authenticate
+	// with the same Snapchat Marketing API OAuth (scope snapchat-marketing-api).
+	SnapchatBusinessAPIBaseURL string
 	// TikTok Login Kit v2. TikTok calls the client id "client_key" — it is NOT
 	// a client_id and must be sent as client_key in both the authorize query
 	// and the token body.
@@ -282,20 +288,21 @@ func Load() (Config, error) {
 		// Graph API v25.0 is current (Graph + Marketing API version in lockstep);
 		// instagram_* scopes here are the "Instagram API with Facebook Login"
 		// flavor — instagram_basic is NOT deprecated for that product.
-		InstagramAuthorizationURL: envOr("INSTAGRAM_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
-		InstagramTokenURL:         envOr("INSTAGRAM_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token"),
-		InstagramAPIBaseURL:       envOr("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0"),
-		FacebookClientID:          facebookClientID,
-		FacebookClientSecret:      facebookClientSecret,
-		FacebookAuthorizationURL:  envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
-		FacebookTokenURL:          envOr("FACEBOOK_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token"),
-		FacebookAPIBaseURL:        envOr("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0"),
-		SnapchatClientID:          strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_ID")),
-		SnapchatClientSecret:      strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_SECRET")),
-		SnapchatRedirectBaseURL:   strings.TrimRight(envOr("SNAPCHAT_REDIRECT_BASE_URL", publicBaseURL), "/"),
-		SnapchatAuthorizationURL:  envOr("SNAPCHAT_AUTHORIZATION_URL", "https://accounts.snapchat.com/login/oauth2/authorize"),
-		SnapchatTokenURL:          envOr("SNAPCHAT_TOKEN_URL", "https://accounts.snapchat.com/login/oauth2/access_token"),
-		SnapchatAPIBaseURL:        envOr("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1"),
+		InstagramAuthorizationURL:  envOr("INSTAGRAM_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
+		InstagramTokenURL:          envOr("INSTAGRAM_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token"),
+		InstagramAPIBaseURL:        envOr("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0"),
+		FacebookClientID:           facebookClientID,
+		FacebookClientSecret:       facebookClientSecret,
+		FacebookAuthorizationURL:   envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
+		FacebookTokenURL:           envOr("FACEBOOK_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token"),
+		FacebookAPIBaseURL:         envOr("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0"),
+		SnapchatClientID:           strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_ID")),
+		SnapchatClientSecret:       strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_SECRET")),
+		SnapchatRedirectBaseURL:    strings.TrimRight(envOr("SNAPCHAT_REDIRECT_BASE_URL", publicBaseURL), "/"),
+		SnapchatAuthorizationURL:   envOr("SNAPCHAT_AUTHORIZATION_URL", "https://accounts.snapchat.com/login/oauth2/authorize"),
+		SnapchatTokenURL:           envOr("SNAPCHAT_TOKEN_URL", "https://accounts.snapchat.com/login/oauth2/access_token"),
+		SnapchatAPIBaseURL:         envOr("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1"),
+		SnapchatBusinessAPIBaseURL: envOr("SNAPCHAT_BUSINESS_API_BASE_URL", "https://businessapi.snapchat.com/v1"),
 		// TikTok Login Kit v2 (client_key naming; v1 open-api.tiktok.com endpoints
 		// died Feb 2024). Web-app redirect URIs must be public https — localhost
 		// only works for Desktop-type TikTok apps.

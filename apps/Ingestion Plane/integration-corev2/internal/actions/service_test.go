@@ -160,6 +160,115 @@ func TestExecuteLinkedInAdCampaignCreate(t *testing.T) {
 	}
 }
 
+func TestExecuteSnapchatOrganizationsUsesAdsBase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me/organizations" {
+			t.Fatalf("path = %s, want /me/organizations", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q, want Bearer token", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"organizations": []map[string]any{{"organization": map[string]any{"id": "org1"}}}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{SnapchatAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "snapchat"},
+		AccessToken: "token",
+		Operation:   "organizations",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if result.ProviderKey != "snapchat" || result.Operation != "organizations" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestExecuteSnapchatAdsCreativeCreatePostsJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/adaccounts/acc-1/creatives" {
+			t.Fatalf("path = %s, want /adaccounts/acc-1/creatives", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if body["top_snap_media_id"] != "media-1" || body["type"] != "SNAP_AD" {
+			t.Fatalf("body = %#v, want creative fields", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"request_status": "success"})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{SnapchatAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "snapchat"},
+		AccessToken: "token",
+		Operation:   "snapchat.ads.creative.create",
+		Params:      map[string]any{"adAccountId": "acc-1"},
+		Body:        map[string]any{"name": "Health", "type": "SNAP_AD", "top_snap_media_id": "media-1"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteSnapchatSpotlightPostUsesBusinessBase(t *testing.T) {
+	adsHit := false
+	adsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adsHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer adsServer.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/public_profiles/prof-1/spotlights" {
+			t.Fatalf("path = %s, want /public_profiles/prof-1/spotlights", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		if body["media_id"] != "m-1" || body["locale"] != "en_US" {
+			t.Fatalf("body = %#v, want spotlight fields", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"request_status": "SUCCESS"})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{SnapchatAPIBaseURL: adsServer.URL, SnapchatBusinessAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "snapchat"},
+		AccessToken: "token",
+		Operation:   "spotlight.post",
+		Params:      map[string]any{"profileId": "prof-1"},
+		Body:        map[string]any{"media_id": "m-1", "description": "hi", "locale": "en_US"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if adsHit {
+		t.Fatalf("Public Profile posting must not hit the Ads API host")
+	}
+}
+
+func TestExecuteSnapchatMissingProfileIDErrors(t *testing.T) {
+	service := NewService(config.Config{SnapchatBusinessAPIBaseURL: "https://businessapi.example"}, http.DefaultClient)
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection:  store.Connection{ProviderKey: "snapchat"},
+		AccessToken: "token",
+		Operation:   "story.post",
+		Body:        map[string]any{"media_id": "m-1"},
+	})
+	if err == nil {
+		t.Fatalf("expected error when profileId is missing")
+	}
+}
+
 func TestExecuteGitHubRepoEscapesPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/triodelab/velion" {

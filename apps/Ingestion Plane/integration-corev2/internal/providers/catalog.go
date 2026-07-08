@@ -1558,8 +1558,26 @@ func Snapchat() Provider {
 			{
 				Key:         "social.profile.read",
 				Label:       "Public profile metadata",
-				Description: "Read allowlisted Snapchat Public Profile metadata where available.",
+				Description: "Read allowlisted Snapchat Public Profile metadata and content (stories, spotlights, saved stories) where available.",
 				Scopes:      []string{"snapchat-profile-api"},
+			},
+			{
+				Key:   "social.post.write",
+				Label: "Organic content publishing",
+				// Public Profile API (businessapi.snapchat.com) Content Management.
+				// ALLOWLIST-ONLY: Snap must allowlist the OAuth app's client id and
+				// the connecting user needs a Partnership Role on the target
+				// profile. social-core keeps live posting behind SNAPCHAT_LIVE_PUBLISHING.
+				Description: "Post Stories, Spotlights, and Saved Stories to a Snapchat Public Profile (allowlist-gated).",
+				Scopes:      []string{"snapchat-marketing-api"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.media.upload",
+				Label:       "Upload media",
+				Description: "Prepare video/image media containers for Snapchat Story, Spotlight, and ad-creative posting.",
+				Scopes:      []string{"snapchat-marketing-api"},
+				Sensitive:   true,
 			},
 			{
 				Key:         "social.ads.manage",
@@ -1584,16 +1602,22 @@ func Snapchat() Provider {
 				Capabilities: []string{"social.profile.read"},
 			},
 			{
+				Key:          "publishing",
+				Label:        "Approved publishing",
+				Description:  "Post approved organic Stories/Spotlights to a Public Profile (allowlist-gated).",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
+			},
+			{
 				Key:          "ads",
 				Label:        "Snapchat marketing",
-				Description:  "Ad account, campaign, creative, and reporting workflows.",
-				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.analytics.read"},
+				Description:  "Ad account, creative, media, and reporting workflows.",
+				Capabilities: []string{"social.profile.read", "social.media.upload", "social.ads.manage", "social.analytics.read"},
 			},
 			{
 				Key:          "full",
-				Label:        "Marketing and analytics",
-				Description:  "Snapchat marketing workflows and reporting.",
-				Capabilities: []string{"social.profile.read", "social.ads.manage", "social.analytics.read"},
+				Label:        "Publishing, marketing, and analytics",
+				Description:  "Organic publishing plus Snapchat marketing workflows and reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.ads.manage", "social.analytics.read"},
 			},
 		},
 	}
