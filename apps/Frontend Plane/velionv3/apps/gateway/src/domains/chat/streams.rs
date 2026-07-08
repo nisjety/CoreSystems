@@ -77,6 +77,13 @@ pub(super) async fn run_events_stream(
     // `after_event_id` on the upstream replay buffer, not silently restart
     // from the live tail. Pre-existing gap on a route Phase 2 newly depends
     // on for browser-agent runs; not new scope.
+    //
+    // Phase 5: this is a raw byte-level SSE proxy (see `proxy_sse_stream`
+    // below) with no event-name allowlist, so model-gateway's two new
+    // browser-approval event kinds (`browser_action_approval_required`,
+    // `browser_action_decided` — carrying action type/url/selector/risk
+    // category/decision) already flow through unchanged; nothing here needed
+    // to change for them to reach the SPA.
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())

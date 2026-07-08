@@ -7,9 +7,33 @@
 //! the SPA lists pending approvals and POSTs a decision here, which flows
 //! through model-gateway → session-core → execution-core's `resume_run`.
 //!
+//! **Dual-purpose since Phase 5 ("Approvals & policy"):** the `approvals`
+//! routes below (`list_approvals`, `get_approval`, `decide_approval`) are
+//! generic over `run_id`/`approval_id` and were never chat-specific to begin
+//! with — execution-core's browser-agent loop (`browser.rs`'s `start_ai_run`)
+//! now creates durable approvals for risky browser actions (login, checkout,
+//! posting forms, destructive actions, cross-domain navigation, persistent
+//! cookie use) through the exact same `CreateApproval`/`GetApproval`/
+//! `DecideApproval` RPCs a chat run's tool-call approval uses, scoped under
+//! the browser AI run's own `run_id`. **Do not add a browser-specific
+//! decide/list route elsewhere** — extend these handlers if a browser-only
+//! need arises; `browser.rs` deliberately has none of its own. The
+//! browser-specific detail (action type, URL, selector, risk category) is
+//! *not* on the generic `Approval` object returned here — it rides
+//! separately on the run's SSE stream (`GET /api/v1/runs/:run_id/events`,
+//! `browser_action_approval_required` / `browser_action_decided` events);
+//! these HTTP routes are the decide/list/reconcile surface, not the
+//! rich-detail surface.
+//!
 //! Every route carries the model-plane audience token (or dev-bypass) and the
 //! verified user id via [`proxy_model_json`]; nothing trusts client input beyond
 //! the path id and the decision body, which model-gateway re-validates.
+//! Known gap (pre-existing, not introduced or fixed here): model-gateway's
+//! `GetApprovalRequest`/`DecideApprovalRequest` carry no `org_id`, so this
+//! proxy cannot enforce org-ownership beyond what the upstream itself checks
+//! (today, nothing) — any authenticated caller who knows/guesses an
+//! `approval_id` can read or decide it regardless of org. Flagged for a
+//! dedicated fix in session-core/model-gateway, not in scope for this proxy.
 
 use axum::{
     extract::{Path, State},
@@ -183,6 +207,9 @@ async fn list_todos(
     .await
 }
 
+/// Lists pending/decided approvals for a run. Also the Phase 5 browser-run
+/// listing surface: pass the AI run's own `run_id` (from `start_ai_run`'s
+/// response), not the browser `session_id`.
 async fn list_approvals(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -230,6 +257,11 @@ async fn get_lineage(
 
 // ── decision / run-control handlers ───────────────────────────────────────────
 
+/// Approves or rejects a pending approval by id. Also the Phase 5
+/// browser-action decision surface (a granted decision lets execution-core's
+/// in-loop poller in `browser_agent.rs` proceed with the exact action that
+/// was gated; a denial/timeout aborts the run without dispatching it).
+/// Body: `{"decision": "approve" | "reject", "reason"?: string}`.
 async fn decide_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,

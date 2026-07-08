@@ -3,6 +3,24 @@
 //! This is a narrow facade over Quarry-v2's existing Rust browser-agent lane:
 //! `/v1/agent/runs` acquires a chromiumoxide-backed run, and `/step` executes
 //! one browser action at a time. The SPA never sees raw CDP or Quarry tokens.
+//!
+//! Phase 5 ("Approvals & policy"): a durable AI run started via `start_ai_run`
+//! below now gets real per-action HITL gating for risky browser actions
+//! (login, checkout, posting forms, destructive actions, cross-domain
+//! navigation, persistent cookie use) — classified and enforced inside
+//! execution-core's browser loop, not here. This module intentionally adds
+//! **no** new approval routes: pending approvals and decisions for a browser
+//! run are listed/decided through the exact same generic, already-existing
+//! surface `orchestration.rs` proxies (`GET
+//! /api/v1/orchestration/runs/:run_id/approvals`, `POST
+//! /api/v1/orchestration/approvals/:approval_id/decide`), keyed by the AI
+//! run's own `run_id` (the value `start_ai_run` returns, not the browser
+//! `session_id` this whole file otherwise keys on). The browser-specific
+//! rationale (action type, URL, selector, risk category) rides on the
+//! existing `GET /api/v1/runs/:run_id/events` SSE stream (`chat/streams.rs`,
+//! reused byte-for-byte, unchanged) as two new event kinds emitted by
+//! model-gateway: `browser_action_approval_required` /
+//! `browser_action_decided`.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -262,6 +280,10 @@ struct StartAiRunBody {
     max_runtime_s: Option<i32>,
     #[serde(default)]
     stop_criteria: Option<String>,
+    /// Accepted for API back-compat only — deliberately never read. See
+    /// `build_ai_run_request`'s doc comment: this controls a confirmed-broken
+    /// legacy gate in execution-core, and the gateway must never arm it.
+    #[allow(dead_code)]
     #[serde(default)]
     require_approval: Option<bool>,
     #[serde(default)]
@@ -1001,13 +1023,74 @@ async fn suggest_action(
     (StatusCode::OK, Json(ok(response_body))).into_response()
 }
 
+/// Builds the JSON body forwarded to model-gateway's `POST /v1/browser/runs`.
+///
+/// `require_approval` is deliberately **never** taken from the caller. That
+/// field controls a different, older, still-broken mechanism —
+/// execution-core's blanket per-run gate (`PlanConfig.require_approval` in
+/// `browser_agent.rs`'s `decide_next_action`): when set, it fires before the
+/// very first action, sets `PlanStatus::WaitingApproval`, and the outer loop
+/// just `break`s with no poll/resume path, so `close_run` releases the
+/// Quarry lease with zero actions ever taken and the run never comes back.
+/// It predates Phase 5 and Phase 5 does not touch it. Real per-action HITL
+/// gating — Phase 5's actual deliverable — fires automatically inside the
+/// loop based on risk classification (login/checkout/destructive/
+/// cross-domain-nav/persistent-cookie-use), independent of this flag, and
+/// its approvals flow through the same generic, already-proxied surface
+/// (`orchestration.rs`'s `/api/v1/orchestration/runs/:run_id/approvals` +
+/// `.../approvals/:id/decide`) — nothing here needs to opt in, and nothing
+/// here should ever arm the broken legacy switch on a caller's behalf.
+fn build_ai_run_request(
+    goal: &str,
+    session_id: &str,
+    metadata: &BrowserRunMetadata,
+    body: &StartAiRunBody,
+    start_url: Option<&str>,
+) -> Value {
+    // Quarry assigns a `profile_id` to *every* session lease, including
+    // purely ephemeral ones (confirmed live: a session created with no
+    // `profileId`/`persistentProfile` still comes back with
+    // `profile.scope: "ephemeral"` and a real `prof_...` id) — it is a
+    // working-set identifier, not evidence of persistence. Forwarding it
+    // unconditionally would make execution-core's Phase 5
+    // `persistent_cookie_use` HITL gate (`PlanConfig.profile_id.is_some() &&
+    // !zdr`) fire on every single AI run, not just ones actually reusing a
+    // saved profile's cookies. Only forward it when this session's own
+    // resolved scope (`effective_profile_scope`, computed once at
+    // `create_session` time) says the attachment is genuinely persistent.
+    let persistent_profile_id = (metadata.profile_scope != BrowserProfileScope::Ephemeral)
+        .then(|| metadata.profile_id.clone())
+        .flatten();
+    json!({
+        "goal": goal,
+        "grant_id": format!("session:{session_id}"),
+        "profile_id": persistent_profile_id,
+        "start_url": start_url,
+        "allowed_domains": body.allowed_domains,
+        "max_steps": body.max_steps,
+        "max_runtime_s": body.max_runtime_s,
+        "stop_criteria": body.stop_criteria,
+        "require_approval": false,
+        "max_cost_usd": body.max_cost_usd,
+        // Server-derived only — mirrors `create_session`'s own zdr handling;
+        // never sourced from the request body.
+        "zdr": metadata.zdr,
+    })
+}
+
 /// `POST /api/v1/browser/sessions/:session_id/ai-runs` — start a durable,
 /// server-side, multi-step browser-agent run (Phase 2). The Quarry browser
-/// session's own `profile_id`/`zdr` (never a client-supplied value) are
-/// forwarded so cookie continuity and Zero-Data-Retention carry over from
-/// the tab the run was launched from. `grant_id` is an interim,
-/// session-scoped string — real Model-Plane browser-grant issuance is
-/// Phase 5's job (see docs/BROWSER_WORKSPACE_PLAN.md).
+/// session's own `zdr` (never a client-supplied value) is forwarded so
+/// Zero-Data-Retention carries over from the tab the run was launched from;
+/// `profile_id` is forwarded *only* when the session's resolved scope is
+/// genuinely persistent (see `build_ai_run_request`'s doc comment — Quarry
+/// assigns a working-set `profile_id` to every lease, ephemeral ones
+/// included, so the raw value alone is not evidence of persistence).
+/// `grant_id` is an interim, session-scoped string — real Model-Plane
+/// browser-grant *issuance* (a durable `BrowserGrant` record) is still
+/// unbuilt; risk-based HITL *gating* of individual risky actions is live as
+/// of Phase 5 (see `build_ai_run_request` above and
+/// `docs/BROWSER_WORKSPACE_PLAN.md`).
 async fn start_ai_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1060,21 +1143,8 @@ async fn start_ai_run(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    let request_body = json!({
-        "goal": goal,
-        "grant_id": format!("session:{session_id}"),
-        "profile_id": metadata.profile_id,
-        "start_url": start_url,
-        "allowed_domains": body.allowed_domains,
-        "max_steps": body.max_steps,
-        "max_runtime_s": body.max_runtime_s,
-        "stop_criteria": body.stop_criteria,
-        "require_approval": body.require_approval.unwrap_or(false),
-        "max_cost_usd": body.max_cost_usd,
-        // Server-derived only — mirrors `create_session`'s own zdr handling;
-        // never sourced from the request body.
-        "zdr": metadata.zdr,
-    });
+    let request_body =
+        build_ai_run_request(goal, &session_id, &metadata, &body, start_url.as_deref());
 
     let token = model_token(&state, &user, &headers).await;
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
@@ -3396,6 +3466,163 @@ mod tests {
             "an explicit ephemeral scope claim must not bypass a real persistent_profile flag",
         );
         assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn build_ai_run_request_never_forwards_client_requested_require_approval() {
+        // Phase 5 regression guard: the legacy blanket `require_approval`
+        // gate in execution-core is confirmed broken (ends the run with no
+        // resume path, releases the Quarry lease, zero actions taken) — the
+        // gateway must never arm it on a caller's behalf, no matter what a
+        // client requests. Real risk-based per-action gating is automatic
+        // and does not depend on this flag at all.
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-1".to_owned()),
+            profile_id: Some("prof_1".to_owned()),
+            profile_scope: BrowserProfileScope::UserPrivate,
+            last_observation: None,
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: false,
+        };
+        let body = StartAiRunBody {
+            goal: "check out the cart".to_owned(),
+            allowed_domains: None,
+            max_steps: Some(5),
+            max_runtime_s: None,
+            stop_criteria: None,
+            require_approval: Some(true),
+            max_cost_usd: None,
+        };
+
+        let request = build_ai_run_request("check out the cart", "sess_1", &metadata, &body, None);
+
+        assert_eq!(request["require_approval"], json!(false));
+        // Sanity: everything else still forwards as expected.
+        assert_eq!(request["goal"], json!("check out the cart"));
+        assert_eq!(request["grant_id"], json!("session:sess_1"));
+        assert_eq!(request["profile_id"], json!("prof_1"));
+        assert_eq!(request["max_steps"], json!(5));
+        assert_eq!(request["zdr"], json!(false));
+    }
+
+    #[test]
+    fn build_ai_run_request_forwards_zdr_and_start_url_from_server_state() {
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-1".to_owned()),
+            profile_id: None,
+            profile_scope: BrowserProfileScope::Ephemeral,
+            last_observation: None,
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: true,
+        };
+        let body = StartAiRunBody {
+            goal: "find the price".to_owned(),
+            allowed_domains: None,
+            max_steps: None,
+            max_runtime_s: None,
+            stop_criteria: None,
+            require_approval: None,
+            max_cost_usd: None,
+        };
+
+        let request = build_ai_run_request(
+            "find the price",
+            "sess_2",
+            &metadata,
+            &body,
+            Some("https://example.com"),
+        );
+
+        assert_eq!(request["zdr"], json!(true));
+        assert_eq!(request["start_url"], json!("https://example.com"));
+        assert_eq!(request["profile_id"], json!(null));
+    }
+
+    #[test]
+    fn build_ai_run_request_never_forwards_an_ephemeral_scope_profile_id() {
+        // Live-confirmed bug fix: Quarry assigns a `profile_id` to every
+        // session lease, including ephemeral ones (the create-session
+        // response reports `profile.scope: "ephemeral"` alongside a real
+        // `prof_...` id even when the caller never requested persistence).
+        // Forwarding that id unconditionally would make execution-core's
+        // Phase 5 `persistent_cookie_use` gate fire on every AI run, not
+        // just genuine persistent-profile reuse.
+        let metadata = BrowserRunMetadata {
+            lease_id: Some("lease-1".to_owned()),
+            profile_id: Some("prof_ephemeral_lease".to_owned()),
+            profile_scope: BrowserProfileScope::Ephemeral,
+            last_observation: None,
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr: false,
+        };
+        let body = StartAiRunBody {
+            goal: "browse around".to_owned(),
+            allowed_domains: None,
+            max_steps: None,
+            max_runtime_s: None,
+            stop_criteria: None,
+            require_approval: None,
+            max_cost_usd: None,
+        };
+
+        let request = build_ai_run_request("browse around", "sess_3", &metadata, &body, None);
+
+        assert_eq!(request["profile_id"], json!(null));
+    }
+
+    #[test]
+    fn build_ai_run_request_forwards_a_genuinely_persistent_profile_id() {
+        for scope in [
+            BrowserProfileScope::UserPrivate,
+            BrowserProfileScope::OrgShared,
+            BrowserProfileScope::RunScoped,
+        ] {
+            let metadata = BrowserRunMetadata {
+                lease_id: Some("lease-1".to_owned()),
+                profile_id: Some("prof_real".to_owned()),
+                profile_scope: scope,
+                last_observation: None,
+                observation_history: Vec::new(),
+                devtools_events: Vec::new(),
+                replay_events: Vec::new(),
+                tabs: Vec::new(),
+                viewport: DEFAULT_VIEWPORT,
+                control_mode: BrowserControlMode::AgentControl,
+                zdr: false,
+            };
+            let body = StartAiRunBody {
+                goal: "resume shopping".to_owned(),
+                allowed_domains: None,
+                max_steps: None,
+                max_runtime_s: None,
+                stop_criteria: None,
+                require_approval: None,
+                max_cost_usd: None,
+            };
+
+            let request = build_ai_run_request("resume shopping", "sess_4", &metadata, &body, None);
+
+            assert_eq!(
+                request["profile_id"],
+                json!("prof_real"),
+                "scope {scope:?} should forward a genuinely persistent profile id"
+            );
+        }
     }
 
     #[test]
