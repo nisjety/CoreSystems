@@ -67,6 +67,12 @@ struct BrowserRunStartRequest {
     plan_id: Option<String>,
     #[serde(default)]
     profile_id: Option<String>,
+    /// Where to navigate first — see `PlanConfig::start_url` (execution-core).
+    /// A freshly acquired Quarry lease has no page loaded; without this the
+    /// loop's first action fails with "no current page". Typically the URL
+    /// of the tab the run was launched from.
+    #[serde(default)]
+    start_url: Option<String>,
     // `Option`, not a bare `Vec`, because callers (the Velion gateway) may
     // send an explicit JSON `null` for "no restriction yet" rather than
     // omitting the key — `Vec<String>` rejects `null` even with
@@ -104,6 +110,9 @@ struct BrowserRunStartRequest {
 ///    plan doc's "Permission mode" section for the full rationale.
 /// 4. Returns immediately; the caller streams progress from the existing
 ///    `GET /v1/runs/:run_id/events`.
+// Cohesive single-flow handler (validate → thread → run → dispatch); splitting
+// it would obscure the linear session-core/execution-core sequencing.
+#[allow(clippy::too_many_lines)]
 async fn browser_run_start(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -175,6 +184,7 @@ async fn browser_run_start(
         "max_cost_usd": req.max_cost_usd,
         "zdr": req.zdr,
         "profile_id": req.profile_id,
+        "start_url": req.start_url,
     })
     .to_string();
 
@@ -197,11 +207,20 @@ async fn browser_run_start(
         {
             Ok(resp) => {
                 let resp = resp.into_inner();
-                info!(
-                    run_id = %dispatch_run_id,
-                    status = %resp.status,
-                    "browser-agent run finished"
-                );
+                if resp.status == "failed" || resp.status == "permission_denied" {
+                    warn!(
+                        run_id = %dispatch_run_id,
+                        status = %resp.status,
+                        error = %resp.error,
+                        "browser-agent run finished with an error"
+                    );
+                } else {
+                    info!(
+                        run_id = %dispatch_run_id,
+                        status = %resp.status,
+                        "browser-agent run finished"
+                    );
+                }
             }
             Err(error) => {
                 warn!(

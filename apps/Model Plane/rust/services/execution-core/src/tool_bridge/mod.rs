@@ -110,6 +110,7 @@ pub(crate) async fn execute_browser_agent(
                 max_cost_usd: input.max_cost_usd,
                 zdr: input.zdr.unwrap_or(false),
                 profile_id: input.profile_id,
+                start_url: input.start_url,
             };
             // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
             // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
@@ -156,4 +157,6 @@ struct BrowserAgentInput {
     /// Persistent Quarry browser profile to reuse cookie/session state from
     /// (Phase 2). `None` acquires a fresh, isolated Quarry session.
     profile_id: Option<String>,
+    /// Where to navigate first (Phase 2) — see `PlanConfig::start_url`.
+    start_url: Option<String>,
 }

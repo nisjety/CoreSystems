@@ -456,6 +456,11 @@ services:
       # host-published port (same convention model-gateway uses).
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://host.docker.internal:8082}
       QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-}
+      # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
+      # env var this block's QUARRY_EDGE_URL comment already promises but that
+      # was never actually wired here (Phase 2, found live: run_browser_agent_loop
+      # failed fast with "browser agent unavailable" until this was added).
+      QUARRY_BROWSER_AGENT_ENABLED: ${QUARRY_BROWSER_AGENT_ENABLED:-1}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). execution-core is not on the
       # inter-plane bus, so it reaches the engine via the host-published gRPC

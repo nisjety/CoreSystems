@@ -50,6 +50,9 @@ async fn browser_agent_drives_real_quarry_loop() {
         max_cost_usd: Some(0.50),
         zdr: false,
         profile_id: None,
+        // Phase 2, found live: a freshly `start_run`'d Quarry lease has no
+        // page loaded, so the first action needs an explicit destination.
+        start_url: Some("https://example.com".to_owned()),
     };
 
     let (status, observations, summary) =

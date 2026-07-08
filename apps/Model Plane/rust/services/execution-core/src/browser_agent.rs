@@ -162,6 +162,17 @@ pub struct PlanConfig {
     /// (Phase 2). `None` acquires a fresh, isolated Quarry session — the same
     /// default a manual `create_session` gets without an explicit profile.
     pub profile_id: Option<String>,
+    /// Where to navigate first (Phase 2). A freshly `start_run`'d Quarry
+    /// lease has no page loaded — chromiumoxide fails any observe/click/etc.
+    /// with "no current page; call `goto()` first" until something navigates.
+    /// The manual `create_session` flow already issues an explicit navigate
+    /// right after `start_run`; the AI loop needs the same first step, since
+    /// it has no other source of an initial URL (`system_prompt` is free
+    /// text, not a target). Typically the URL of the tab the user launched
+    /// the run from. `None` keeps the pre-Phase-2 deterministic-`Observe`
+    /// first step (e.g. existing unit tests, or a caller that genuinely has
+    /// no starting point).
+    pub start_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -320,15 +331,38 @@ pub fn plan_next_action(
     let action_id = format!("act_{:04}", plan.current_step);
 
     if plan.current_step == 1 && plan.observations.is_empty() {
-        return PlanStepResult::Action(BrowserAction {
-            action_id,
-            grant_id: plan.config.grant_id.clone(),
-            action_type: ActionType::Observe,
-            selector: String::new(),
-            value: String::new(),
-            url: String::new(),
-            max_wait_ms: 5000,
-            reason: String::new(),
+        // A fresh Quarry lease has no page loaded yet — navigate to the
+        // configured starting point (typically the tab the run was launched
+        // from) before anything else, or chromiumoxide fails every action
+        // with "no current page". Falls back to the pre-Phase-2 deterministic
+        // `Observe` when no `start_url` is configured.
+        let start_url = plan
+            .config
+            .start_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        return PlanStepResult::Action(match start_url {
+            Some(url) => BrowserAction {
+                action_id,
+                grant_id: plan.config.grant_id.clone(),
+                action_type: ActionType::Goto,
+                selector: String::new(),
+                value: String::new(),
+                url: url.to_owned(),
+                max_wait_ms: 15_000,
+                reason: "navigate to the run's starting page".to_owned(),
+            },
+            None => BrowserAction {
+                action_id,
+                grant_id: plan.config.grant_id.clone(),
+                action_type: ActionType::Observe,
+                selector: String::new(),
+                value: String::new(),
+                url: String::new(),
+                max_wait_ms: 5000,
+                reason: String::new(),
+            },
         });
     }
 
@@ -655,6 +689,7 @@ mod tests {
             max_cost_usd: None,
             zdr: false,
             profile_id: None,
+            start_url: None,
         }
     }
 
@@ -674,6 +709,37 @@ mod tests {
                 assert_eq!(action.action_type, ActionType::Observe);
                 assert_eq!(plan.current_step, 1);
             }
+            _ => panic!("expected Action"),
+        }
+    }
+
+    #[test]
+    fn first_action_navigates_when_a_start_url_is_configured() {
+        // Phase 2, found live: a freshly `start_run`'d Quarry lease has no
+        // page loaded, so an unconditional first `Observe` fails with
+        // "no current page; call goto() first". `start_url` fixes this.
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/landing".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let result = plan_next_action(&mut plan, None);
+        match result {
+            PlanStepResult::Action(action) => {
+                assert_eq!(action.action_type, ActionType::Goto);
+                assert_eq!(action.url, "https://example.com/landing");
+                assert_eq!(plan.current_step, 1);
+            }
+            _ => panic!("expected Action"),
+        }
+    }
+
+    #[test]
+    fn first_action_ignores_a_blank_start_url() {
+        let mut config = test_config();
+        config.start_url = Some("   ".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let result = plan_next_action(&mut plan, None);
+        match result {
+            PlanStepResult::Action(action) => assert_eq!(action.action_type, ActionType::Observe),
             _ => panic!("expected Action"),
         }
     }
