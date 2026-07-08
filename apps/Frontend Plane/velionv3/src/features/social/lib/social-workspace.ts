@@ -470,14 +470,15 @@ export function fallbackSocialAdapters(): SocialPlatformAdapter[] {
     {
       providerKey: 'snapchat',
       label: 'Snapchat',
-      mode: 'marketing_api',
-      endpoint: 'Ads/creative workflows, not organic post publishing',
+      mode: 'public_profile_api',
+      endpoint: 'POST /public_profiles/{id}/media + /stories|/spotlights',
       maxCharacters: 250,
-      mediaRequired: false,
-      requiredCapabilities: ['social.profile.read', 'social.ads.manage'],
+      mediaRequired: true,
+      requiredCapabilities: ['social.profile.read', 'social.post.write', 'social.media.upload'],
       notes: [
-        'Snapchat is available for marketing, creative, campaign, and reporting workflows.',
-        'Organic Story/Spotlight publishing is intentionally blocked until an approved API path exists.',
+        'Organic posting uploads media to a Snapchat Public Profile as a Story (default) or Spotlight (video).',
+        'Live posting is allowlist-gated: it requires Snap to allowlist the OAuth app plus SNAPCHAT_LIVE_PUBLISHING enabled server-side.',
+        'Marketing/creative/reporting workflows also run through the Snapchat Marketing API.',
       ],
     },
   ]

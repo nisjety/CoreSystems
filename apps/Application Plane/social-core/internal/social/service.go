@@ -632,7 +632,7 @@ func characterLimit(platform string) int {
 }
 
 func mediaRequired(platform string) bool {
-	return platform == "instagram" || platform == "tiktok"
+	return platform == "instagram" || platform == "tiktok" || platform == "snapchat"
 }
 
 func previewWarnings(platform, body string, media []MediaRef) []string {
@@ -644,7 +644,7 @@ func previewWarnings(platform, body string, media []MediaRef) []string {
 		warnings = append(warnings, "platform requires at least one media asset")
 	}
 	if platform == "snapchat" {
-		warnings = append(warnings, "organic Snapchat publishing is not supported by the current provider API")
+		warnings = append(warnings, "Snapchat posts as a Public Profile Story/Spotlight; live posting is allowlist-gated and requires SNAPCHAT_LIVE_PUBLISHING to be enabled")
 	}
 	return warnings
 }

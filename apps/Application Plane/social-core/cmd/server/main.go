@@ -60,13 +60,15 @@ func main() {
 		InternalAPIKey: cfg.InternalAPIKey,
 	})
 	publisher := social.NewHTTPPublisher(integrationClient, nil, social.PublisherConfig{
-		LinkedInAPIBaseURL:       cfg.LinkedInAPIBaseURL,
-		LinkedInAPIVersion:       cfg.LinkedInAPIVersion,
-		XAPIBaseURL:              cfg.XAPIBaseURL,
-		InstagramGraphAPIBaseURL: cfg.InstagramGraphAPIBaseURL,
-		FacebookGraphAPIBaseURL:  cfg.FacebookGraphAPIBaseURL,
-		TikTokAPIBaseURL:         cfg.TikTokAPIBaseURL,
-		SnapchatAPIBaseURL:       cfg.SnapchatAPIBaseURL,
+		LinkedInAPIBaseURL:         cfg.LinkedInAPIBaseURL,
+		LinkedInAPIVersion:         cfg.LinkedInAPIVersion,
+		XAPIBaseURL:                cfg.XAPIBaseURL,
+		InstagramGraphAPIBaseURL:   cfg.InstagramGraphAPIBaseURL,
+		FacebookGraphAPIBaseURL:    cfg.FacebookGraphAPIBaseURL,
+		TikTokAPIBaseURL:           cfg.TikTokAPIBaseURL,
+		SnapchatAPIBaseURL:         cfg.SnapchatAPIBaseURL,
+		SnapchatBusinessAPIBaseURL: cfg.SnapchatBusinessAPIBaseURL,
+		SnapchatLivePublishing:     cfg.SnapchatLivePublishing,
 	})
 	service := social.NewService(
 		repository,

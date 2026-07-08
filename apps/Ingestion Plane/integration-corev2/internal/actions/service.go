@@ -70,6 +70,8 @@ func (s *Service) Execute(ctx context.Context, input ExecuteInput) (ExecuteResul
 		result, err = s.executeLinkedIn(ctx, input.AccessToken, operation, input.Params, input.Body)
 	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
 		result, err = s.executeMeta(ctx, input.Connection.ProviderKey, input.AccessToken, operation, input.Params, input.Body)
+	case "snapchat":
+		result, err = s.executeSnapchat(ctx, input.AccessToken, operation, input.Params, input.Body)
 	case "okta":
 		result, err = s.executeOkta(ctx, input.AccessToken, operation, input.Params)
 	default:
@@ -881,6 +883,167 @@ func (s *Service) executeMeta(ctx context.Context, providerKey, token, operation
 	default:
 		return nil, fmt.Errorf("unsupported Meta operation %q", operation)
 	}
+}
+
+// executeSnapchat dispatches Snapchat Marketing API operations. Snapchat spans
+// two hosts that share ONE OAuth (accounts.snapchat.com, scope
+// snapchat-marketing-api):
+//
+//   - Ads/Marketing API (adsapi.snapchat.com, SnapchatAPIBaseURL): organizations,
+//     ad accounts, ad-creative media containers, creatives, and reporting. This
+//     is the ads-publishing path and is generally available to any approved
+//     Snap Ads app.
+//   - Public Profile API (businessapi.snapchat.com, SnapchatBusinessAPIBaseURL):
+//     organic Story/Spotlight/Saved Story content management. This is
+//     ALLOWLIST-ONLY — Snap must allowlist the OAuth app's client id, and
+//     content management additionally needs a Partnership Role on the target
+//     profile. See docs/actions-surface-operations.md.
+//
+// Both hosts take Bearer tokens and return JSON. Only the JSON write/read
+// primitives live here: the raw media-BYTES upload (ads POST /media/{id}/upload,
+// Public Profile multipart ADD/FINALIZE with client-side AES-256-CBC encryption)
+// is a binary/multipart flow that does not fit this JSON action surface —
+// social-core's publisher owns that pipeline. The operations below reference a
+// media_id whose bytes were uploaded out of band.
+func (s *Service) executeSnapchat(ctx context.Context, token, operation string, params, body map[string]any) (any, error) {
+	adsBase := strings.TrimRight(firstNonEmpty(s.cfg.SnapchatAPIBaseURL, "https://adsapi.snapchat.com/v1"), "/")
+	profileBase := strings.TrimRight(firstNonEmpty(s.cfg.SnapchatBusinessAPIBaseURL, "https://businessapi.snapchat.com/v1"), "/")
+	switch strings.TrimSpace(strings.ToLower(operation)) {
+	// --- Ads / Marketing API (adsapi.snapchat.com) reads ---
+	case "organizations", "snapchat.organizations":
+		return s.getBearer(ctx, token, adsBase+"/me/organizations", nil)
+	case "adaccounts", "snapchat.adaccounts":
+		organizationID, err := requiredStringParam(params, "organizationId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, adsBase+"/organizations/"+url.PathEscape(organizationID)+"/adaccounts", nil)
+	case "media.list", "snapchat.media.list":
+		adAccountID, err := requiredStringParam(params, "adAccountId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, adsBase+"/adaccounts/"+url.PathEscape(adAccountID)+"/media", nil)
+	case "creatives.list", "snapchat.creatives.list":
+		adAccountID, err := requiredStringParam(params, "adAccountId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, adsBase+"/adaccounts/"+url.PathEscape(adAccountID)+"/creatives", nil)
+	case "ads.stats", "snapchat.ads.stats":
+		adAccountID, err := requiredStringParam(params, "adAccountId")
+		if err != nil {
+			return nil, err
+		}
+		values := url.Values{}
+		for _, key := range []string{"granularity", "fields", "start_time", "end_time", "breakdown"} {
+			if v := stringParam(params, key, ""); v != "" {
+				values.Set(key, v)
+			}
+		}
+		endpoint := adsBase + "/adaccounts/" + url.PathEscape(adAccountID) + "/stats"
+		if encoded := values.Encode(); encoded != "" {
+			endpoint += "?" + encoded
+		}
+		return s.getBearer(ctx, token, endpoint, nil)
+	// --- Ads / Marketing API writes (JSON; media BYTES uploaded out of band) ---
+	case "ads.media.create", "snapchat.ads.media.create":
+		adAccountID, err := requiredStringParam(params, "adAccountId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for snapchat.ads.media.create")
+		}
+		return s.postBearer(ctx, token, adsBase+"/adaccounts/"+url.PathEscape(adAccountID)+"/media", body, nil)
+	case "ads.creative.create", "snapchat.ads.creative.create":
+		adAccountID, err := requiredStringParam(params, "adAccountId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for snapchat.ads.creative.create")
+		}
+		return s.postBearer(ctx, token, adsBase+"/adaccounts/"+url.PathEscape(adAccountID)+"/creatives", body, nil)
+	// --- Public Profile API (businessapi.snapchat.com) reads ---
+	case "profile.stories", "snapchat.profile.stories":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/stories?"+snapchatPaging(params), nil)
+	case "profile.spotlights", "snapchat.profile.spotlights":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/spotlights?"+snapchatPaging(params), nil)
+	case "profile.saved_stories", "snapchat.profile.saved_stories":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/saved_stories?"+snapchatPaging(params), nil)
+	case "spotlight.get", "snapchat.spotlight.get":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		spotlightID, err := requiredStringParam(params, "spotlightId")
+		if err != nil {
+			return nil, err
+		}
+		return s.getBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/spotlights/"+url.PathEscape(spotlightID), nil)
+	// --- Public Profile API writes (JSON; media BYTES uploaded out of band) ---
+	case "profile.media.create", "snapchat.profile.media.create":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for snapchat.profile.media.create")
+		}
+		return s.postBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/media", body, nil)
+	case "story.post", "snapchat.story.post":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for snapchat.story.post")
+		}
+		return s.postBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/stories", body, nil)
+	case "spotlight.post", "snapchat.spotlight.post":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for snapchat.spotlight.post")
+		}
+		return s.postBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/spotlights", body, nil)
+	case "saved_story.create", "snapchat.saved_story.create":
+		profileID, err := requiredStringParam(params, "profileId")
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("body is required for snapchat.saved_story.create")
+		}
+		return s.postBearer(ctx, token, profileBase+"/public_profiles/"+url.PathEscape(profileID)+"/saved_stories", body, nil)
+	default:
+		return nil, fmt.Errorf("unsupported Snapchat operation %q", operation)
+	}
+}
+
+// snapchatPaging builds the common limit/cursor query for Public Profile list
+// reads. limit is clamped to Snapchat's paging contract (default 10).
+func snapchatPaging(params map[string]any) string {
+	values := url.Values{"limit": {limitParam(params, "limit", 10, 100)}}
+	if cursor := stringParam(params, "cursor", ""); cursor != "" {
+		values.Set("cursor", cursor)
+	}
+	return values.Encode()
 }
 
 func (s *Service) executeOkta(ctx context.Context, token, operation string, params map[string]any) (any, error) {

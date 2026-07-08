@@ -2258,14 +2258,19 @@ fn platform_adapters() -> Vec<PlatformAdapter> {
         PlatformAdapter {
             provider_key: "snapchat",
             label: "Snapchat",
-            mode: "marketing_api",
-            endpoint: "Ads/creative workflows, not organic post publishing",
+            mode: "public_profile_api",
+            endpoint: "POST /public_profiles/{id}/media + /stories|/spotlights",
             max_characters: 250,
-            media_required: false,
-            required_capabilities: vec!["social.profile.read", "social.ads.manage"],
+            media_required: true,
+            required_capabilities: vec![
+                "social.profile.read",
+                "social.post.write",
+                "social.media.upload",
+            ],
             notes: vec![
-                "Snapchat is available for marketing, creative, campaign, and reporting workflows.",
-                "Organic Story/Spotlight publishing is intentionally blocked until an approved API path exists.",
+                "Organic posting uploads media to a Snapchat Public Profile as a Story (default) or Spotlight (video).",
+                "Live posting is allowlist-gated: it requires Snap to allowlist the OAuth app plus SNAPCHAT_LIVE_PUBLISHING enabled server-side.",
+                "Marketing/creative/reporting workflows also run through the Snapchat Marketing API.",
             ],
         },
     ]
@@ -2648,7 +2653,10 @@ fn adapted_copy(
         "facebook" => format!("{}\n\n{}", title, body),
         "tiktok" => format!("{} | {}", title, body),
         "snapchat" => {
-            warnings.push("Snapchat organic publishing is not supported; use ads/boost workflows.".to_owned());
+            warnings.push(
+                "Snapchat posts as a Public Profile Story/Spotlight; live posting is allowlist-gated (requires SNAPCHAT_LIVE_PUBLISHING enabled server-side)."
+                    .to_owned(),
+            );
             format!("{} — {}", title, body)
         }
         _ => body.to_owned(),
@@ -2897,7 +2905,7 @@ mod tests {
         assert!(snapchat
             .warnings
             .iter()
-            .any(|warning| warning.contains("organic publishing is not supported")));
+            .any(|warning| warning.contains("allowlist-gated")));
     }
 
     #[test]

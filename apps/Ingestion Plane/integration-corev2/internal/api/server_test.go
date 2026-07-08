@@ -1835,6 +1835,44 @@ func TestLinkedInActionCapabilityAndApprovalGates(t *testing.T) {
 	}
 }
 
+func TestSnapchatActionCapabilityAndApprovalGates(t *testing.T) {
+	tests := []struct {
+		operation     string
+		wantCap       string
+		wantSensitive bool
+		wantApproval  bool
+	}{
+		{operation: "organizations", wantCap: "social.profile.read"},
+		{operation: "profile.spotlights", wantCap: "social.profile.read"},
+		{operation: "spotlight.get", wantCap: "social.profile.read"},
+		{operation: "adaccounts", wantCap: "social.ads.manage", wantSensitive: true},
+		{operation: "creatives.list", wantCap: "social.ads.manage", wantSensitive: true},
+		{operation: "ads.stats", wantCap: "social.analytics.read", wantSensitive: true},
+		{operation: "ads.media.create", wantCap: "social.ads.manage", wantSensitive: true, wantApproval: true},
+		{operation: "ads.creative.create", wantCap: "social.ads.manage", wantSensitive: true, wantApproval: true},
+		{operation: "profile.media.create", wantCap: "social.media.upload", wantSensitive: true, wantApproval: true},
+		{operation: "story.post", wantCap: "social.post.write", wantSensitive: true, wantApproval: true},
+		{operation: "spotlight.post", wantCap: "social.post.write", wantSensitive: true, wantApproval: true},
+		{operation: "saved_story.create", wantCap: "social.post.write", wantSensitive: true, wantApproval: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.operation, func(t *testing.T) {
+			gotCap, sensitive := requiredCapabilityForOperation("snapchat", tt.operation)
+			if gotCap != tt.wantCap || sensitive != tt.wantSensitive {
+				t.Fatalf("requiredCapabilityForOperation = %q/%v, want %q/%v", gotCap, sensitive, tt.wantCap, tt.wantSensitive)
+			}
+			if got := actionRequiresApproval("snapchat", tt.operation); got != tt.wantApproval {
+				t.Fatalf("actionRequiresApproval(%q) = %v, want %v", tt.operation, got, tt.wantApproval)
+			}
+			// The provider-prefixed alias must classify identically.
+			gotCapAlias, sensitiveAlias := requiredCapabilityForOperation("snapchat", "snapchat."+tt.operation)
+			if gotCapAlias != tt.wantCap || sensitiveAlias != tt.wantSensitive {
+				t.Fatalf("alias requiredCapabilityForOperation = %q/%v, want %q/%v", gotCapAlias, sensitiveAlias, tt.wantCap, tt.wantSensitive)
+			}
+		})
+	}
+}
+
 func TestLegacyProxyRouteIsNotSupported(t *testing.T) {
 	app := testServer(t)
 	req := httptest.NewRequest("POST", "/integrations/slack/proxy", strings.NewReader(`{"method":"channels.list"}`))

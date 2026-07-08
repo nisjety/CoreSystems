@@ -98,7 +98,7 @@ In the tables below, "Sensitive" is the boolean from step 3; "Approval" is step 
 Every operation also accepts a provider-prefixed alias (e.g. `mail.send` ≡
 `microsoft.mail.send`) — aliases are listed inline. `service.go` matches operation strings
 **case-sensitively** for microsoft/slack/google/github/notion/shopify/stripe/okta, and
-lowercases them for linkedin and the meta family — send lowercase operation strings always.
+lowercases them for linkedin, the meta family, and snapchat — send lowercase operation strings always.
 
 Param notation: `name*` = required; `(d=X, max=Y)` = default/clamp applied server-side.
 
@@ -257,7 +257,27 @@ Param notation: `name*` = required; `(d=X, max=Y)` = default/clamp applied serve
 | `threads.insights` | GET `{threads}/me/threads_insights?metric=` | `metric` (d=`views,likes,replies,reposts,quotes`) | ignored | `social.analytics.read` | yes | no | 847 |
 | `oembed` / `meta.oembed` | GET `/{oembed_post\|oembed_video\|oembed_page\|instagram_oembed\|threads_oembed}?url=(&maxwidth=)` | `url`* (params or body), `kind` (d=`post`; `video`/`live`, `page`, `instagram`, `threads`), `maxWidth` (opt) | `url` fallback only | `social.oembed.read` | no | no | 849 |
 
-Row totals: microsoft 5, slack 5, google 5, github 15, notion 3, shopify 3, stripe 4, okta 5, linkedin 19, meta family 37 — **101 operations**.
+### snapchat (15 ops) — TWO hosts, one OAuth. Ads/Marketing API base = `SnapchatAPIBaseURL` (default `https://adsapi.snapchat.com/v1`); Public Profile API base = `SnapchatBusinessAPIBaseURL` (default `https://businessapi.snapchat.com/v1`). Both take the same Bearer token (Snapchat Marketing API OAuth, scope `snapchat-marketing-api`). Operation strings lowercased before matching. **Access reality:** the Ads/Marketing path needs an approved Snap Ads app (api-apply); the Public Profile path (`public_profiles/*`) is **allowlist-only** — Snap must allowlist the OAuth app's client id, and content management needs a Partnership Role on the target profile. Only JSON read/write primitives live here — the raw media-BYTES upload (ads `POST /media/{id}/upload`; Public Profile multipart ADD/FINALIZE with client-side AES-256-CBC encryption) is a binary flow owned by `social-core`'s publisher, not this surface. The `media_id` referenced below is uploaded out of band.
+
+| Operation (aliases) | Method + Endpoint | Required params | Body semantics | Capability | Sensitive | Approval | service.go |
+|---|---|---|---|---|---|---|---|
+| `organizations` / `snapchat.organizations` | GET `{ads}/me/organizations` | — | ignored | `social.profile.read` | no | no | 913 |
+| `adaccounts` / `snapchat.adaccounts` | GET `{ads}/organizations/{organizationId}/adaccounts` | `organizationId`* | ignored | `social.ads.manage` | yes | no | 915 |
+| `media.list` / `snapchat.media.list` | GET `{ads}/adaccounts/{adAccountId}/media` | `adAccountId`* | ignored | `social.ads.manage` | yes | no | 921 |
+| `creatives.list` / `snapchat.creatives.list` | GET `{ads}/adaccounts/{adAccountId}/creatives` | `adAccountId`* | ignored | `social.ads.manage` | yes | no | 927 |
+| `ads.stats` / `snapchat.ads.stats` | GET `{ads}/adaccounts/{adAccountId}/stats?…` | `adAccountId`*, `granularity`/`fields`/`start_time`/`end_time`/`breakdown` (opt) | ignored | `social.analytics.read` | yes | no | 933 |
+| `ads.media.create` / `snapchat.ads.media.create` | POST `{ads}/adaccounts/{adAccountId}/media` | `adAccountId`* | JSON, forwarded verbatim; **required** (`type` VIDEO/IMAGE, `name`); returns `media_status: PENDING_UPLOAD` | `social.ads.manage` | yes | **yes** | 950 |
+| `ads.creative.create` / `snapchat.ads.creative.create` | POST `{ads}/adaccounts/{adAccountId}/creatives` | `adAccountId`* | JSON, forwarded verbatim; **required** (`name`, `type`, `top_snap_media_id`, `brand_name`, `headline`); returns `review_status: PENDING_REVIEW` | `social.ads.manage` | yes | **yes** | 959 |
+| `profile.stories` / `snapchat.profile.stories` | GET `{profile}/public_profiles/{profileId}/stories?limit=&cursor=` | `profileId`*, `limit` (d=10, max=100), `cursor` (opt) | ignored | `social.profile.read` | no | no | 969 |
+| `profile.spotlights` / `snapchat.profile.spotlights` | GET `{profile}/public_profiles/{profileId}/spotlights?limit=&cursor=` | `profileId`*, `limit`, `cursor` (opt) | ignored | `social.profile.read` | no | no | 975 |
+| `profile.saved_stories` / `snapchat.profile.saved_stories` | GET `{profile}/public_profiles/{profileId}/saved_stories?limit=&cursor=` | `profileId`*, `limit`, `cursor` (opt) | ignored | `social.profile.read` | no | no | 981 |
+| `spotlight.get` / `snapchat.spotlight.get` | GET `{profile}/public_profiles/{profileId}/spotlights/{spotlightId}` | `profileId`*, `spotlightId`* | ignored | `social.profile.read` | no | no | 987 |
+| `profile.media.create` / `snapchat.profile.media.create` | POST `{profile}/public_profiles/{profileId}/media` | `profileId`* | JSON, forwarded verbatim; **required** (`type`, `name`, base64 `key`/`iv`); returns `media_id` + `add_path`/`finalize_path` | `social.media.upload` | yes | **yes** | 998 |
+| `story.post` / `snapchat.story.post` | POST `{profile}/public_profiles/{profileId}/stories` | `profileId`* | JSON, forwarded verbatim; **required** (`media_id`) | `social.post.write` | yes | **yes** | 1007 |
+| `spotlight.post` / `snapchat.spotlight.post` | POST `{profile}/public_profiles/{profileId}/spotlights` | `profileId`* | JSON, forwarded verbatim; **required** (`media_id`, `description`, `locale`); returns status `SUBMITTED` → review → `LIVE`/`REJECTED` | `social.post.write` | yes | **yes** | 1016 |
+| `saved_story.create` / `snapchat.saved_story.create` | POST `{profile}/public_profiles/{profileId}/saved_stories` | `profileId`* | JSON, forwarded verbatim; **required** (`saved_stories` list with `snap_sources[]`, `title`) | `social.post.write` | yes | **yes** | 1025 |
+
+Row totals: microsoft 5, slack 5, google 5, github 15, notion 3, shopify 3, stripe 4, okta 5, linkedin 19, meta family 37, snapchat 15 — **116 operations**.
 
 ---
 
@@ -269,7 +289,6 @@ live connections, but have **no branch in the Execute switch** (service.go:54-77
 **Do not guess operation names for these** — none exist yet:
 
 - `tiktok` (catalog.go:1488)
-- `snapchat` (catalog.go:1551)
 - `discord` (catalog.go:1207)
 - `x` (Twitter/X, catalog.go:891; aliases `twitter`, `twitter-x`, `x-twitter` normalize to `x`)
 
