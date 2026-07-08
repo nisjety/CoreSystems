@@ -1,117 +1,219 @@
-"""Tests for eval_lab runner."""
+"""Harness self-tests — the CI path (no network, recorded fixtures only).
+
+These keep the harness itself from rotting: case-schema validation over the
+real checked-in suite, the SSE parser against a canned stream, and every
+metric runner against recorded outcomes.
+"""
 
 from __future__ import annotations
 
-import pytest
-
-from eval_lab.runner import EvalRunner, run_suite
-from eval_lab.types import EvalCase, EvalResult, EvalSuite
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-def _echo_fn(prompt: str) -> str:
-    """Simple invoke_fn that echoes back the prompt."""
-    return prompt
-
-
-def _error_fn(prompt: str) -> str:
-    """invoke_fn that always raises."""
-    raise RuntimeError("boom")
+from eval_lab import metrics
+from eval_lab.cases import CASES_DIR, load_cases
+from eval_lab.client import parse_sse_lines, _assemble_outcome
+from eval_lab.report import render_report
+from eval_lab.types import (
+    CaseResult,
+    CaseSpec,
+    Checks,
+    GroundednessSpec,
+    InvokeOutcome,
+    LoopBounds,
+    MetricOutcome,
+)
 
 
-def _make_suite(cases: list[EvalCase] | None = None) -> EvalSuite:
-    if cases is None:
-        cases = [
-            EvalCase(
-                id="c1",
-                name="echo test",
-                input_prompt="hello",
-                expected_output="hello",
-            ),
-            EvalCase(
-                id="c2",
-                name="mismatch test",
-                input_prompt="hello",
-                expected_output="world",
-            ),
-        ]
-    return EvalSuite(id="s1", name="Test Suite", cases=cases, description="A test suite")
+# ── case schema ──────────────────────────────────────────────────────────
 
 
-# ---------------------------------------------------------------------------
-# EvalRunner tests
-# ---------------------------------------------------------------------------
-
-class TestEvalRunner:
-    def test_exact_match_pass(self) -> None:
-        case = EvalCase(
-            id="c1", name="match", input_prompt="hi", expected_output="hi"
-        )
-        runner = EvalRunner(_echo_fn)
-        result = runner.run_case(case)
-        assert result.passed is True
-        assert result.score == 1.0
-        assert result.error is None
-
-    def test_exact_match_fail(self) -> None:
-        case = EvalCase(
-            id="c2", name="no-match", input_prompt="hi", expected_output="bye"
-        )
-        runner = EvalRunner(_echo_fn)
-        result = runner.run_case(case)
-        assert result.passed is False
-        assert result.score == 0.0
-
-    def test_no_expected_output_defaults_pass(self) -> None:
-        case = EvalCase(id="c3", name="open", input_prompt="anything")
-        runner = EvalRunner(_echo_fn)
-        result = runner.run_case(case)
-        assert result.passed is True
-        assert result.score == 1.0
-
-    def test_invoke_error_captured(self) -> None:
-        case = EvalCase(
-            id="c4", name="error", input_prompt="x", expected_output="x"
-        )
-        runner = EvalRunner(_error_fn)
-        result = runner.run_case(case)
-        assert result.passed is False
-        assert result.error == "boom"
-        assert result.score == 0.0
-
-    def test_latency_recorded(self) -> None:
-        case = EvalCase(id="c5", name="timing", input_prompt="fast")
-        runner = EvalRunner(_echo_fn)
-        result = runner.run_case(case)
-        assert result.latency_ms >= 0.0
-
-    def test_run_suite(self) -> None:
-        suite = _make_suite()
-        runner = EvalRunner(_echo_fn)
-        results = runner.run_suite(suite)
-        assert len(results) == 2
-        assert results[0].passed is True
-        assert results[1].passed is False
+def test_baseline_suite_loads_and_validates() -> None:
+    cases = load_cases(CASES_DIR)
+    assert len(cases) == 12, f"baseline suite must hold 12 cases, got {len(cases)}"
+    assert len({case.id for case in cases}) == 12
 
 
-# ---------------------------------------------------------------------------
-# Convenience function tests
-# ---------------------------------------------------------------------------
+def test_deployed_agent_cases_request_the_agentic_feature() -> None:
+    # model-gateway only drives execution-core's tool catalog when the
+    # request opts into the "agentic" feature (sse.rs: `features.iter().any(
+    # |f| f == "agentic")`); profile=deployed_agent alone only affects
+    # approval POSTURE once a run is already agentic. Missing this made
+    # every deployed_agent case silently fall back to a plain completion
+    # with zero tool calls (discovered 2026-07-08 calibrating case 07 — the
+    # "multitool-loop-health" case had been passing vacuously on 0 tool
+    # calls). This test makes that class of bug impossible to reintroduce.
+    for case in load_cases(CASES_DIR):
+        if case.profile == "deployed_agent":
+            assert "agentic" in case.features, (
+                f"{case.id}: profile=deployed_agent but features={case.features} "
+                "is missing 'agentic' — the tool loop will never run"
+            )
 
-class TestRunSuite:
-    def test_convenience_wrapper(self) -> None:
-        suite = _make_suite()
-        results = run_suite(suite, _echo_fn)
-        assert len(results) == 2
-        assert all(isinstance(r, EvalResult) for r in results)
 
-    def test_custom_threshold(self) -> None:
-        case = EvalCase(
-            id="c1", name="threshold", input_prompt="hi", expected_output="hi"
-        )
-        suite = _make_suite(cases=[case])
-        results = run_suite(suite, _echo_fn, threshold=1.0)
-        assert results[0].passed is True
+def test_vendor_dependent_cases_declare_requirements() -> None:
+    # Cases that need seeded fixtures must say so — that is what turns a
+    # missing fixture into an honest SKIP instead of a fake pass.
+    cases = {case.id: case for case in load_cases(CASES_DIR)}
+    assert "knowledge-fixtures" in cases["02-knowledge-crawled-fact"].requires
+    assert "image-fixture" in cases["05-cross-modal-retrieval"].requires
+    assert "zdr-fixture" in cases["12-zdr-restricted-grounding"].requires
+
+
+# ── SSE parsing ──────────────────────────────────────────────────────────
+
+
+CANNED_STREAM = [
+    "event: connected",
+    'data: {"request_id": "req_1", "ok": true}',
+    "",
+    "event: chunk",
+    'data: {"delta": "Hei "}',
+    "",
+    "event: chunk",
+    'data: {"delta": "verden"}',
+    "",
+    "event: tool_call",
+    'data: {"name": "knowledge_search", "args": {}}',
+    "",
+    "event: usage",
+    'data: {"input_tokens": 12, "output_tokens": 5, "cost_usd": 0.00042, "latency_ms": 900}',
+    "",
+    "event: done",
+    'data: {"model_used": "velion-budget"}',
+    "",
+]
+
+
+def test_sse_parser_and_outcome_assembly() -> None:
+    events = parse_sse_lines(iter(CANNED_STREAM))
+    outcome = _assemble_outcome(events, fallback_latency_ms=1.0)
+    assert outcome.text == "Hei verden"
+    assert outcome.request_id == "req_1"
+    assert outcome.cost_usd == 0.00042
+    assert outcome.input_tokens == 12 and outcome.output_tokens == 5
+    assert outcome.tool_calls == ["knowledge_search"]
+    assert outcome.model_used == "velion-budget"
+    assert not outcome.paused_for_approval
+
+
+def test_sse_parser_detects_approval_pause() -> None:
+    stream = [
+        "event: run.paused_for_approval",
+        'data: {"run_id": "run_9", "approval_id": "appr_1"}',
+        "",
+        "event: done",
+        "data: {}",
+        "",
+    ]
+    outcome = _assemble_outcome(parse_sse_lines(iter(stream)), fallback_latency_ms=1.0)
+    assert outcome.paused_for_approval
+    assert outcome.run_id == "run_9"
+
+
+# ── metric runners against recorded outcomes ─────────────────────────────
+
+
+def spec(**overrides: object) -> CaseSpec:
+    base: dict[str, object] = {"id": "t", "name": "t", "prompt": "p"}
+    base.update(overrides)
+    return CaseSpec.model_validate(base)
+
+
+def test_accuracy_deterministic_checks() -> None:
+    case = spec(
+        checks=Checks(
+            contains=["pong"], not_contains=["feil"], regex=[r"PO\w+"]
+        ).model_dump()
+    )
+    good = metrics.accuracy(case, InvokeOutcome(text="PONG"))
+    assert good.passed and good.score == 1.0
+    bad = metrics.accuracy(case, InvokeOutcome(text="feil svar"))
+    assert not bad.passed and bad.score < 1.0
+    assert "missing expected text" in bad.detail
+
+
+def test_accuracy_judge_rubric_skips_without_judge() -> None:
+    case = spec(checks=Checks(judge_rubric="good answer").model_dump())
+    outcome = metrics.accuracy(case, InvokeOutcome(text="whatever"), judge=None)
+    assert "SKIPPED" in outcome.detail  # honest, visible skip
+
+
+def test_accuracy_judge_floor_enforced() -> None:
+    case = spec(checks=Checks(judge_rubric="rubric", judge_floor=4.0).model_dump())
+    low_judge = lambda answer, rubric: (2.0, "weak")  # noqa: E731
+    outcome = metrics.accuracy(case, InvokeOutcome(text="x"), judge=low_judge)
+    assert not outcome.passed
+
+
+def test_pause_assertions() -> None:
+    must_pause = spec(checks=Checks(must_pause=True).model_dump())
+    paused = InvokeOutcome(paused_for_approval=True)
+    unpaused = InvokeOutcome()
+    assert metrics.accuracy(must_pause, paused).passed
+    assert not metrics.accuracy(must_pause, unpaused).passed
+
+
+def test_groundedness_refusal_paths() -> None:
+    case = spec(
+        groundedness=GroundednessSpec(enabled=True, expect_refusal=True).model_dump()
+    )
+    refused = metrics.groundedness(
+        case, InvokeOutcome(text="Jeg finner ikke dette i kildene.")
+    )
+    assert refused.passed
+    fabricated = metrics.groundedness(
+        case, InvokeOutcome(text="Dørkoden er 4471 og den gjelder hele bygget.")
+    )
+    assert not fabricated.passed
+
+
+def test_groundedness_requires_citations() -> None:
+    case = spec(groundedness=GroundednessSpec(enabled=True).model_dump())
+    no_sources = metrics.groundedness(case, InvokeOutcome(text="Påstand uten kilde."))
+    assert not no_sources.passed
+    assert "unattributable" in no_sources.detail
+
+
+def test_cost_ceiling() -> None:
+    case = spec(cost_ceiling_usd=0.01)
+    under = metrics.cost(case, InvokeOutcome(cost_usd=0.004))
+    assert under.passed
+    over = metrics.cost(case, InvokeOutcome(cost_usd=0.02))
+    assert not over.passed
+    missing = metrics.cost(case, InvokeOutcome())
+    assert not missing.passed  # unprovable ceiling = fail, not silent pass
+
+
+def test_loop_health_bounds() -> None:
+    case = spec(loop=LoopBounds(max_tool_calls=2, max_errors=0).model_dump())
+    ok = metrics.loop_health(case, InvokeOutcome(tool_calls=["a", "b"]))
+    assert ok.passed
+    too_many = metrics.loop_health(
+        case, InvokeOutcome(tool_calls=["a", "b", "c"], tool_errors=1)
+    )
+    assert not too_many.passed
+
+
+# ── report ───────────────────────────────────────────────────────────────
+
+
+def test_report_renders_pass_fail_and_skip() -> None:
+    results = [
+        CaseResult(
+            case_id="ok",
+            passed=True,
+            metrics=[MetricOutcome(metric="accuracy", passed=True, score=1.0)],
+        ),
+        CaseResult(
+            case_id="bad",
+            passed=False,
+            metrics=[
+                MetricOutcome(
+                    metric="cost", passed=False, score=0.0, detail="over ceiling"
+                )
+            ],
+        ),
+        CaseResult(case_id="later", passed=False, skipped=True, skip_reason="no fixture"),
+    ]
+    report = render_report(results)
+    assert "1/2 passed" in report
+    assert "⏭ SKIP" in report
+    assert "over ceiling" in report

@@ -1,5 +1,15 @@
 # Eval Harness MVP — Scoping (2026-07-07)
 
+> **STATUS: SHIPPED 2026-07-08** — implemented in `apps/Model Plane/python/eval-lab-py`
+> (`make selftest` = CI path, `make eval` = live path; report in `docs/eval-reports/`).
+> First calibrated baseline: **6/7 live cases pass, 1 known-failing, 5 skip pending
+> fixtures** (knowledge/image/ZDR seeding — enable via `EVAL_CAPABILITIES`).
+> **First real finding (case 07, known-failing by design):** the `deployed_agent`
+> invoke path never surfaces a social-publish tool, so the model drafts text instead
+> of attempting the action and the HITL approval gate is never exercised for social
+> posting. The case turns green when social publishing joins the agent tool catalog
+> with its approval gate intact.
+
 ## Why (and why now)
 
 The 2026-07-05 isolation/AI-first audit confirmed: **no eval loop exists**.
