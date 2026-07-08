@@ -52,6 +52,33 @@ struct CreateSessionBody {
     persistent_profile: bool,
     #[serde(default)]
     viewport: Option<Viewport>,
+    /// Phase 3: caller-requested Zero Data Retention mode. Enforcement of
+    /// "a ZDR session may never attach a persistent profile" happens
+    /// server-side in `create_session` (`reject_zdr_persistent_profile`) —
+    /// this flag is never trusted blindly for anything else, it only gates
+    /// that one check plus the metadata recorded for this session.
+    #[serde(default)]
+    zdr: bool,
+}
+
+/// Phase 3 ZDR enforcement: a ZDR session must never be able to select or
+/// attach a persistent browser profile — persisted cookies/storage would
+/// defeat the point of "no data retained for this session". This is checked
+/// server-side, before any upstream Quarry call, so a client can't bypass it
+/// by racing the request body against stale UI state.
+fn reject_zdr_persistent_profile(
+    zdr: bool,
+    profile_id: Option<&str>,
+    persistent_profile: bool,
+) -> Option<(&'static str, &'static str)> {
+    if zdr && (profile_id.is_some() || persistent_profile) {
+        Some((
+            "zdr_persistent_profile_forbidden",
+            "A Zero Data Retention session cannot use a persistent browser profile.",
+        ))
+    } else {
+        None
+    }
 }
 
 pub(crate) type BrowserRunStore = Arc<StdMutex<HashMap<String, BrowserRunMetadata>>>;
@@ -285,13 +312,20 @@ async fn create_session(
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty());
+    let requested_persistent_profile = body.persistent_profile || profile_id.is_some();
+    if let Some((code, message)) =
+        reject_zdr_persistent_profile(body.zdr, profile_id, requested_persistent_profile)
+    {
+        return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response();
+    }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let allowed_domain = hostname(&target);
 
-    // ZDR sessions are a Phase-3 concern; the flag is threaded through metadata
-    // so the SPA renders persistence state from data instead of assuming it.
-    let zdr = false;
+    // ZDR is caller-requested and enforced above against persistent profiles;
+    // the flag is threaded through metadata so the SPA renders persistence
+    // state from data instead of assuming it.
+    let zdr = body.zdr;
     let mut start_body = json!({
         "constraints": {
             "max_steps": 12,
@@ -307,7 +341,6 @@ async fn create_session(
     if let Some(profile_id) = profile_id {
         start_body["profile_id"] = Value::String(profile_id.to_owned());
     }
-    let requested_persistent_profile = body.persistent_profile || profile_id.is_some();
     if requested_persistent_profile {
         start_body["persist_profile"] = Value::Bool(true);
     }
@@ -3017,6 +3050,30 @@ mod tests {
         }))
         .expect_err("oversized wheel delta should be rejected");
         assert_eq!(err.0, "invalid_browser_action");
+    }
+
+    #[test]
+    fn zdr_session_is_rejected_when_requesting_a_persistent_profile_by_id() {
+        let err = reject_zdr_persistent_profile(true, Some("prof_123"), false)
+            .expect("a ZDR session selecting a persistent profile id must be rejected");
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn zdr_session_is_rejected_when_requesting_persistence_by_flag() {
+        let err = reject_zdr_persistent_profile(true, None, true)
+            .expect("a ZDR session requesting persistent_profile must be rejected");
+        assert_eq!(err.0, "zdr_persistent_profile_forbidden");
+    }
+
+    #[test]
+    fn zdr_session_without_a_persistent_profile_request_is_allowed() {
+        assert!(reject_zdr_persistent_profile(true, None, false).is_none());
+    }
+
+    #[test]
+    fn non_zdr_session_may_use_a_persistent_profile() {
+        assert!(reject_zdr_persistent_profile(false, Some("prof_123"), true).is_none());
     }
 
     #[test]

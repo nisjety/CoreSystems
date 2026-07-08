@@ -241,6 +241,12 @@ export type CreateBrowserSessionRequest = {
     height: number
     width: number
   }
+  /**
+   * Zero Data Retention mode for this session. Enforced server-side: the
+   * gateway rejects (400 `zdr_persistent_profile_forbidden`) any request
+   * that sets `zdr: true` together with `profileId` or `persistentProfile`.
+   */
+  zdr?: boolean
 }
 
 function orgHeaders(orgId: string): Record<string, string> {
