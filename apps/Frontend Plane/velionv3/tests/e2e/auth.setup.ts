@@ -31,12 +31,20 @@ setup('authenticate and ensure org', async ({ page, baseURL }) => {
   const me = await api.get('/api/v1/me')
   expect(me.status(), 'protected /me should be 200 with a verified session').toBe(200)
 
-  // 3. Ensure an active org (create-organization dedupes if one exists).
+  // 3. Ensure an org exists. Some local stacks return a duplicate error instead
+  // of deduping, so accept the proven duplicate case and keep the authenticated
+  // session state.
   const org = await api.post('/api/v1/onboarding/actions/create-organization', {
     headers: { 'content-type': 'application/json', origin },
     data: { name: 'Velion E2E Org', plan: 'trial' },
   })
-  expect([200, 201], `create-organization status ${org.status()}`).toContain(org.status())
+  if (![200, 201].includes(org.status())) {
+    const orgBody = await org.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
+    expect(
+      org.status() === 400 && orgBody?.error?.message === 'Organization already exists',
+      `create-organization status ${org.status()}: ${JSON.stringify(orgBody)}`,
+    ).toBeTruthy()
+  }
 
   // 4. Persist cookies (session + active-org) for the e2e project.
   await page.context().storageState({ path: STORAGE_STATE })
