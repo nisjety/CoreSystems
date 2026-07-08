@@ -97,6 +97,53 @@ describe('streamRunEvents dispatch', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 
+  it('dispatches browser_action_dispatched with reason and browser_run_paused/resumed (Phase 2)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('browser_action_dispatched', {
+          run_id: 'run_1',
+          plan_id: 'plan_1',
+          action_id: 'act_1',
+          action_type: 'goto',
+          url: 'https://example.com',
+          reason: 'navigating to the landing page',
+        }),
+        sseFrame('browser_observation_received', {
+          run_id: 'run_1',
+          plan_id: 'plan_1',
+          action_id: 'act_1',
+          status: 'success',
+          screenshot_ref: 'art_shot_1',
+          dom_snapshot_ref: 'art_dom_1',
+        }),
+        sseFrame('browser_run_paused', { run_id: 'run_1', plan_id: 'plan_1' }),
+        sseFrame('browser_run_resumed', { run_id: 'run_1', plan_id: 'plan_1' }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onBrowserAction = vi.fn()
+    const onBrowserObservation = vi.fn()
+    const onBrowserRunPaused = vi.fn()
+    const onBrowserRunResumed = vi.fn()
+
+    await streamRunEvents('run_1', {
+      onBrowserAction,
+      onBrowserObservation,
+      onBrowserRunPaused,
+      onBrowserRunResumed,
+    })
+
+    expect(onBrowserAction).toHaveBeenCalledWith(
+      expect.objectContaining({ actionType: 'goto', reason: 'navigating to the landing page' }),
+    )
+    expect(onBrowserObservation).toHaveBeenCalledWith(
+      expect.objectContaining({ screenshotRef: 'art_shot_1', domSnapshotRef: 'art_dom_1' }),
+    )
+    expect(onBrowserRunPaused).toHaveBeenCalledWith({ runId: 'run_1', planId: 'plan_1', at: undefined })
+    expect(onBrowserRunResumed).toHaveBeenCalledWith({ runId: 'run_1', planId: 'plan_1', at: undefined })
+  })
+
   it('accepts camelCase payloads via the defensive fallbacks', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([sseFrame('approval_state_changed', { approvalId: 'appr_2', runId: 'run_2', to: 'GRANTED' })]),

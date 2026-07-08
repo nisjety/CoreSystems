@@ -70,6 +70,9 @@ export type BrowserActionDispatchedEvent = {
   actionId?: string
   actionType?: string
   url?: string
+  /** The model's rationale for choosing this action (Phase 2). Empty for the
+   * deterministic fallback (no LLM reason available). */
+  reason?: string
   at?: string
 }
 
@@ -80,6 +83,24 @@ export type BrowserObservationReceivedEvent = {
   status?: string
   pageUrl?: string
   pageTitle?: string
+  /** Artifact reference id (Phase 2) — never inlined bytes; fetch evidence via
+   * the existing artifact endpoint. */
+  screenshotRef?: string
+  domSnapshotRef?: string
+  at?: string
+}
+
+/** User-initiated browser-run pause/resume (Phase 2 B5) — distinct from the
+ * HITL-approval `RunPausedForApprovalEvent`/`RunResumedAfterApprovalEvent`. */
+export type BrowserRunPausedEvent = {
+  runId?: string
+  planId?: string
+  at?: string
+}
+
+export type BrowserRunResumedEvent = {
+  runId?: string
+  planId?: string
   at?: string
 }
 
@@ -100,6 +121,8 @@ export type RunEventHandlers = {
   onSubagentStopped?: (event: SubagentStoppedEvent) => void
   onBrowserAction?: (event: BrowserActionDispatchedEvent) => void
   onBrowserObservation?: (event: BrowserObservationReceivedEvent) => void
+  onBrowserRunPaused?: (event: BrowserRunPausedEvent) => void
+  onBrowserRunResumed?: (event: BrowserRunResumedEvent) => void
   onStep?: (event: RunStepEvent) => void
   onError?: (err: unknown) => void
   onDone?: () => void
@@ -183,6 +206,7 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         actionId: str(payload.action_id) ?? str(payload.actionId),
         actionType: str(payload.action_type) ?? str(payload.actionType),
         url: str(payload.url),
+        reason: str(payload.reason),
         at: str(payload.at),
       })
       break
@@ -194,6 +218,22 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         status: str(payload.status),
         pageUrl: str(payload.page_url) ?? str(payload.pageUrl),
         pageTitle: str(payload.page_title) ?? str(payload.pageTitle),
+        screenshotRef: str(payload.screenshot_ref) ?? str(payload.screenshotRef),
+        domSnapshotRef: str(payload.dom_snapshot_ref) ?? str(payload.domSnapshotRef),
+        at: str(payload.at),
+      })
+      break
+    case 'browser_run_paused':
+      handlers.onBrowserRunPaused?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        planId: str(payload.plan_id) ?? str(payload.planId),
+        at: str(payload.at),
+      })
+      break
+    case 'browser_run_resumed':
+      handlers.onBrowserRunResumed?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        planId: str(payload.plan_id) ?? str(payload.planId),
         at: str(payload.at),
       })
       break
