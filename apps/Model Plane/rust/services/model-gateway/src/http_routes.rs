@@ -102,6 +102,10 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
         // Browser reasoning: Model Plane proposes one safe browser action from
         // Quarry evidence; Quarry remains the only executor/capture layer.
         .route("/v1/browser/suggest-action", post(browser_suggest_action))
+        // Durable browser-agent run (Phase 2) — start/pause/resume/stop a
+        // bounded multi-step browser-agent loop; progress streams over the
+        // existing `/v1/runs/:run_id/events` route above.
+        .merge(crate::browser_run::router())
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)

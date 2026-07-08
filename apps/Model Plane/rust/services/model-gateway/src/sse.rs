@@ -132,8 +132,8 @@ pub async fn invoke_stream_sse(
     // resolved server-side from the authenticated principal and the client can
     // only ratchet it STRICTER — never send `profile:"chat"` to disable gating.
     let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
-    let posture = crate::profile::resolve_posture(posture_floor(&claims), profile)
-        .as_permission_mode();
+    let posture =
+        crate::profile::resolve_posture(posture_floor(&claims), profile).as_permission_mode();
 
     let start = std::time::Instant::now();
 
