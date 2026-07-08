@@ -626,7 +626,16 @@ message OrchestrationEvent {
 
   // Event payload. Tags 10-16 align with the original 7-variant Rust enum
   // order; tags 17-18 are additive browser-agent progress events (B4); tags
-  // 19-20 are additive user-initiated browser-run pause/resume events (Phase 2).
+  // 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
+  // tags 21-22 are additive browser-specific HITL approval-gate events
+  // (Phase 5 — "Approvals & policy"). Phase 5 reuses the general
+  // CreateApproval/DecideApproval RPCs and the generic
+  // RunPausedForApproval/RunResumedAfterApproval/ApprovalStateChanged events
+  // above unchanged (a browser-action approval IS a normal Approval record,
+  // kind=DESTRUCTIVE) — tags 21-22 are additive companions that carry the
+  // browser-specific detail (which action, why it was classified risky) the
+  // generic events don't, so the run timeline shows more than a bare
+  // "risky tool" label.
   oneof event {
     PlanTransitioned plan_transitioned = 10;
     TodoTransitioned todo_transitioned = 11;
@@ -639,6 +648,8 @@ message OrchestrationEvent {
     BrowserObservationReceived browser_observation_received = 18;
     BrowserRunPaused browser_run_paused = 19;
     BrowserRunResumed browser_run_resumed = 20;
+    BrowserActionApprovalRequired browser_action_approval_required = 21;
+    BrowserActionDecided browser_action_decided = 22;
   }
 
   message PlanTransitioned {
@@ -738,6 +749,57 @@ message OrchestrationEvent {
   message BrowserRunResumed {
     string run_id = 1;
     string plan_id = 2;
+  }
+
+  // A browser action was classified risky (login, checkout, posting a form,
+  // a destructive operation, cross-domain navigation, or reuse of a
+  // persistent cookie-bearing profile — plan capability #8) and is paused
+  // for human approval (Phase 5). Fired by execution-core's in-loop gate
+  // right before dispatch, via the SAME `CreateApproval` RPC the generic
+  // tool-call HITL gate uses (`RunPausedForApproval`/`ApprovalStateChanged`
+  // above are broadcast by that RPC as usual) — this event is the
+  // browser-specific companion that names the actual action.
+  message BrowserActionApprovalRequired {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Browser-agent plan id driving this session.
+    string plan_id = 2;
+    // Id of the gated action. Empty for a run-level gate that isn't tied to
+    // one specific dispatched action (e.g. persistent_cookie_use, gated once
+    // at run start rather than per-action).
+    string action_id = 3;
+    // Action type slug: goto|click|type|extract|observe|scroll|wait, or a
+    // synthetic slug for a run-level gate (e.g. "start_run").
+    string action_type = 4;
+    // Target URL, when known. Empty when not applicable.
+    string url = 5;
+    // CSS selector, when known. Empty when not applicable.
+    string selector = 6;
+    // Human-readable reason the action was classified risky.
+    string reason = 7;
+    // login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use
+    string risk_category = 8;
+    // Durable approval id (from the CreateApproval call this event
+    // accompanies) — lets a UI jump straight to deciding it via the existing
+    // generic `POST /v1/orchestration/approvals/{id}/decide` route.
+    string approval_id = 9;
+  }
+
+  // The pending browser-action approval above was decided (granted, denied,
+  // or timed out). The durable decision and the generic
+  // `ApprovalStateChanged`/`RunResumedAfterApproval` events are recorded by
+  // the existing `DecideApproval` RPC as usual; this is the browser-specific
+  // companion that carries the action back so the timeline can show
+  // "checkout on example.com — granted", not just an approval id.
+  message BrowserActionDecided {
+    string run_id = 1;
+    string plan_id = 2;
+    string action_id = 3;
+    string approval_id = 4;
+    // granted|denied|timed_out
+    string decision = 5;
+    // Principal who decided, when known. Empty for a system timeout.
+    string decided_by = 6;
   }
 }
 

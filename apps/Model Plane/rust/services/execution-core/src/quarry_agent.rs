@@ -441,6 +441,7 @@ mod tests {
             url: url.to_owned(),
             max_wait_ms: 3000,
             reason: String::new(),
+            risk_category: None,
         }
     }
 

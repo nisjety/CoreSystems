@@ -16,6 +16,8 @@ use mp_contracts::model_plane::v1::{
 };
 use orchestration_event::{
     ApprovalStateChanged as PbApprovalStateChanged,
+    BrowserActionApprovalRequired as PbBrowserActionApprovalRequired,
+    BrowserActionDecided as PbBrowserActionDecided,
     BrowserActionDispatched as PbBrowserActionDispatched,
     BrowserObservationReceived as PbBrowserObservationReceived,
     BrowserRunPaused as PbBrowserRunPaused, BrowserRunResumed as PbBrowserRunResumed,
@@ -360,6 +362,50 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                 at,
                 ProtoEvent::BrowserRunResumed(PbBrowserRunResumed { run_id, plan_id }),
             ),
+            OrchestrationEvent::BrowserActionApprovalRequired {
+                run_id,
+                plan_id,
+                action_id,
+                action_type,
+                url,
+                selector,
+                reason,
+                risk_category,
+                approval_id,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserActionApprovalRequired(PbBrowserActionApprovalRequired {
+                    run_id,
+                    plan_id,
+                    action_id,
+                    action_type,
+                    url,
+                    selector,
+                    reason,
+                    risk_category,
+                    approval_id,
+                }),
+            ),
+            OrchestrationEvent::BrowserActionDecided {
+                run_id,
+                plan_id,
+                action_id,
+                approval_id,
+                decision,
+                decided_by,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserActionDecided(PbBrowserActionDecided {
+                    run_id,
+                    plan_id,
+                    action_id,
+                    approval_id,
+                    decision,
+                    decided_by,
+                }),
+            ),
         }
     }
 }
@@ -447,6 +493,29 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 plan_id: p.plan_id,
                 at,
             },
+            ProtoEvent::BrowserActionApprovalRequired(p) => {
+                OrchestrationEvent::BrowserActionApprovalRequired {
+                    run_id: p.run_id,
+                    plan_id: p.plan_id,
+                    action_id: p.action_id,
+                    action_type: p.action_type,
+                    url: p.url,
+                    selector: p.selector,
+                    reason: p.reason,
+                    risk_category: p.risk_category,
+                    approval_id: p.approval_id,
+                    at,
+                }
+            }
+            ProtoEvent::BrowserActionDecided(p) => OrchestrationEvent::BrowserActionDecided {
+                run_id: p.run_id,
+                plan_id: p.plan_id,
+                action_id: p.action_id,
+                approval_id: p.approval_id,
+                decision: p.decision,
+                decided_by: p.decided_by,
+                at,
+            },
         })
     }
 }
@@ -526,6 +595,35 @@ mod tests {
         round_trip(&OrchestrationEvent::BrowserRunResumed {
             run_id: "run-1".into(),
             plan_id: "plan-1".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_browser_action_approval_required() {
+        round_trip(&OrchestrationEvent::BrowserActionApprovalRequired {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            action_id: "act_0002".into(),
+            action_type: "click".into(),
+            url: "https://example.com/checkout".into(),
+            selector: "button.place-order".into(),
+            reason: "action appears to interact with a checkout/payment flow".into(),
+            risk_category: "checkout".into(),
+            approval_id: "appr-1".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_browser_action_decided() {
+        round_trip(&OrchestrationEvent::BrowserActionDecided {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            action_id: "act_0002".into(),
+            approval_id: "appr-1".into(),
+            decision: "granted".into(),
+            decided_by: "user@example.com".into(),
             at: fixture_at(),
         });
     }

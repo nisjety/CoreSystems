@@ -54,7 +54,7 @@ use crate::runtime_loop::{self, StepOutcome};
 /// the model stays on the offered tools — including the WRITE-capable ones,
 /// which earlier wording omitted entirely (it described the toolset as
 /// exclusively "read-only fact-gathering," a leftover from before
-/// book_shipment/execute_provider_action/publish_social_post existed). That
+/// `book_shipment`/`execute_provider_action`/`publish_social_post` existed). That
 /// framing measurably suppressed real tool use: models defaulted to a
 /// generic "I cannot post on your behalf" refusal and drafted copy-paste
 /// text instead of calling the tool, even with a genuinely connected

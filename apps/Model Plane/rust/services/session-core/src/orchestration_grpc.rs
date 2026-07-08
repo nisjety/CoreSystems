@@ -739,6 +739,14 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::BrowserObservationReceived(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunPaused(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunResumed(p) => Some(&p.run_id),
+        // Phase 5 — browser-specific HITL approval-gate detail events. Reuse
+        // the same `RecordOrchestrationEvent` best-effort delivery path as
+        // `BrowserActionDispatched`/`BrowserObservationReceived` above; the
+        // durable approval itself is still created via the general
+        // `CreateApproval`/`DecideApproval` RPCs (unchanged), these are just
+        // the browser-specific companions carrying which action/why.
+        orchestration_event::Event::BrowserActionApprovalRequired(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserActionDecided(p) => Some(&p.run_id),
     }
 }
 

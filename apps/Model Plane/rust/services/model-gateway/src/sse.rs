@@ -2137,6 +2137,10 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::BrowserObservationReceived(_) => "browser_observation_received",
         orchestration_event::Event::BrowserRunPaused(_) => "browser_run_paused",
         orchestration_event::Event::BrowserRunResumed(_) => "browser_run_resumed",
+        orchestration_event::Event::BrowserActionApprovalRequired(_) => {
+            "browser_action_approval_required"
+        }
+        orchestration_event::Event::BrowserActionDecided(_) => "browser_action_decided",
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
@@ -2259,6 +2263,28 @@ fn orchestration_event_to_step_update(
             "user resumed the browser run".to_owned(),
             "running".to_owned(),
         ),
+        Event::BrowserActionApprovalRequired(p) => {
+            let mut detail = format!("{} · {}", p.risk_category, p.reason);
+            if !p.url.is_empty() {
+                detail = format!("{detail} ({})", p.url);
+            }
+            (
+                format!("browser-{}", p.action_id),
+                "Approval required".to_owned(),
+                detail,
+                "waiting_approval".to_owned(),
+            )
+        }
+        Event::BrowserActionDecided(p) => (
+            format!("browser-{}", p.action_id),
+            "Approval decided".to_owned(),
+            format!("{} · approval {}", p.decision, p.approval_id),
+            if p.decision == "granted" {
+                "running".to_owned()
+            } else {
+                "denied".to_owned()
+            },
+        ),
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -2268,6 +2294,10 @@ fn orchestration_event_to_step_update(
     })
 }
 
+// One match arm per oneof variant (mirrors `orchestration_event_to_step_update`
+// above); Phase 5's two additive browser-approval variants pushed this past
+// the line threshold.
+#[allow(clippy::too_many_lines)]
 fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
     let mut object = serde_json::Map::new();
     if let Some(at) = event.at.as_ref() {
@@ -2368,6 +2398,25 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             object.insert("run_id".to_owned(), json!(payload.run_id));
             object.insert("plan_id".to_owned(), json!(payload.plan_id));
         }
+        orchestration_event::Event::BrowserActionApprovalRequired(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            object.insert("action_id".to_owned(), json!(payload.action_id));
+            object.insert("action_type".to_owned(), json!(payload.action_type));
+            object.insert("url".to_owned(), json!(payload.url));
+            object.insert("selector".to_owned(), json!(payload.selector));
+            object.insert("reason".to_owned(), json!(payload.reason));
+            object.insert("risk_category".to_owned(), json!(payload.risk_category));
+            object.insert("approval_id".to_owned(), json!(payload.approval_id));
+        }
+        orchestration_event::Event::BrowserActionDecided(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            object.insert("action_id".to_owned(), json!(payload.action_id));
+            object.insert("approval_id".to_owned(), json!(payload.approval_id));
+            object.insert("decision".to_owned(), json!(payload.decision));
+            object.insert("decided_by".to_owned(), json!(payload.decided_by));
+        }
     }
 
     Some(Value::Object(object))
@@ -2450,6 +2499,84 @@ mod tests {
         use mp_contracts::model_plane::v1::OrchestrationEvent;
         let ev = OrchestrationEvent::default();
         assert!(orchestration_event_to_step_update(&ev).is_none());
+    }
+
+    // ── Phase 5: browser-action approval-gate SSE mappings ─────────────────
+
+    #[test]
+    fn browser_action_approval_required_maps_to_step_update() {
+        use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
+        use orchestration_event::BrowserActionApprovalRequired;
+        let ev = OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserActionApprovalRequired(
+                BrowserActionApprovalRequired {
+                    run_id: "run-1".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    action_id: "act_0002".to_owned(),
+                    action_type: "click".to_owned(),
+                    url: "https://shop.example.com/checkout".to_owned(),
+                    selector: "button.place-order".to_owned(),
+                    reason: "action appears to interact with a checkout/payment flow".to_owned(),
+                    risk_category: "checkout".to_owned(),
+                    approval_id: "appr-1".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        match orchestration_event_to_step_update(&ev) {
+            Some(crate::sse_events::ChatEvent::StepUpdate {
+                id,
+                title,
+                detail,
+                status,
+            }) => {
+                assert_eq!(id, "browser-act_0002");
+                assert_eq!(title, "Approval required");
+                assert!(detail.contains("checkout"));
+                assert_eq!(status, "waiting_approval");
+            }
+            other => panic!("expected an Approval-required StepUpdate, got {other:?}"),
+        }
+
+        let payload = super::event_payload_value(&ev).expect("payload");
+        assert_eq!(payload["run_id"], "run-1");
+        assert_eq!(payload["risk_category"], "checkout");
+        assert_eq!(payload["approval_id"], "appr-1");
+
+        // `axum::response::sse::Event` has no public accessor for the event
+        // name it was built with — `event_payload_value`/`_to_step_update`
+        // above already assert the payload content this event carries; this
+        // just confirms the mapping produces a real SSE frame, not `None`.
+        assert!(super::orchestration_event_to_sse(&ev).is_some());
+    }
+
+    #[test]
+    fn browser_action_decided_maps_to_step_update() {
+        use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
+        use orchestration_event::BrowserActionDecided;
+        let ev = OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserActionDecided(
+                BrowserActionDecided {
+                    run_id: "run-1".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    action_id: "act_0002".to_owned(),
+                    approval_id: "appr-1".to_owned(),
+                    decision: "granted".to_owned(),
+                    decided_by: "user@example.com".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        match orchestration_event_to_step_update(&ev) {
+            Some(crate::sse_events::ChatEvent::StepUpdate { status, .. }) => {
+                assert_eq!(status, "running");
+            }
+            other => panic!("expected an Approval-decided StepUpdate, got {other:?}"),
+        }
+
+        let payload = super::event_payload_value(&ev).expect("payload");
+        assert_eq!(payload["decision"], "granted");
+        assert_eq!(payload["decided_by"], "user@example.com");
     }
 
     // Golden parity: every envelope the gateway emits derives its

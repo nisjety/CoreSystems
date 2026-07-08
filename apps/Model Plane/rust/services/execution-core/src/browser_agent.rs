@@ -101,6 +101,113 @@ pub struct BrowserAction {
     /// deterministic fallback (no LLM reason available). Surfaced on the
     /// run-event stream (Phase 2) so the UI can show model reasoning live.
     pub reason: String,
+    /// The planner's self-reported risk classification (Phase 5), when the
+    /// model provided one. `None` here does NOT mean "not risky" — the
+    /// in-loop gate ORs this with a deterministic backstop
+    /// (`classify_action_risk`) that runs regardless, so a model that omits
+    /// or under-reports risk cannot silently bypass the HITL gate.
+    pub risk_category: Option<RiskCategory>,
+}
+
+/// Category of elevated-risk browser action or run-level condition requiring
+/// human approval before it proceeds (Phase 5 — HITL gates, plan capability
+/// #8: "login, checkout, posting forms, destructive actions, downloads,
+/// uploads, cross-domain navigation, persistent cookie use").
+///
+/// Deliberately does NOT cover `downloads`/`uploads`: no `ActionType`
+/// variant (or Quarry-side manual-browsing capability) represents a file
+/// transfer today — plan target capability #10 ("File upload/download
+/// handling") is not yet built anywhere in the stack. Classifying risk for
+/// an action that cannot occur would be a fabricated classifier, not a real
+/// gate; this is an explicit, honest scope cut for this stage, not an
+/// oversight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskCategory {
+    /// The action interacts with a login/authentication form.
+    Login,
+    /// The action interacts with a checkout/payment flow.
+    Checkout,
+    /// The action submits/posts a form (comment, message, publish, …).
+    PostingForm,
+    /// The action looks destructive/irreversible (delete, remove, cancel,
+    /// unsubscribe, deactivate, …).
+    Destructive,
+    /// A navigation whose target host differs from the last observed page's
+    /// host. Distinct from — and additive to — the unconditional
+    /// `allowed_domains` allow-list enforced at dispatch: a domain can be on
+    /// the allow-list and still represent a meaningful hop worth a human's
+    /// attention (e.g. moving from a shopping site to a third-party payment
+    /// processor it redirects to).
+    CrossDomainNavigation,
+    /// The run reuses a persistent, cookie-bearing Quarry browser profile
+    /// (not ZDR, not ephemeral). Gated once per run rather than per action.
+    PersistentCookieUse,
+}
+
+impl RiskCategory {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Login => "login",
+            Self::Checkout => "checkout",
+            Self::PostingForm => "posting_form",
+            Self::Destructive => "destructive",
+            Self::CrossDomainNavigation => "cross_domain_navigation",
+            Self::PersistentCookieUse => "persistent_cookie_use",
+        }
+    }
+
+    /// Parse a planner- or caller-supplied risk-category string (Phase 5's
+    /// `ACTION_SCHEMA.risk_category`). Unknown, empty, or `"none"` values are
+    /// not an error — they just mean "no self-reported risk"; the
+    /// deterministic backstop (`classify_action_risk`) still runs regardless.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "login" => Some(Self::Login),
+            "checkout" => Some(Self::Checkout),
+            "posting_form" | "post" | "form_submit" | "posting form" => Some(Self::PostingForm),
+            "destructive" => Some(Self::Destructive),
+            "cross_domain" | "cross_domain_navigation" | "cross-domain" => {
+                Some(Self::CrossDomainNavigation)
+            }
+            "persistent_cookie" | "persistent_cookie_use" | "persistent cookie" => {
+                Some(Self::PersistentCookieUse)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Detail describing WHICH browser action (or run-level condition) triggered
+/// the Phase 5 HITL approval gate, and WHY — carried onto the
+/// `BrowserActionApprovalRequired`/`BrowserActionDecided` orchestration
+/// events so the run timeline shows a specific reason instead of a generic
+/// "risky tool" label (contrast the outer, whole-tool `is_risky_tool` gate).
+#[derive(Debug, Clone)]
+pub struct RiskyActionDetail {
+    /// Empty for a run-level gate (e.g. `PersistentCookieUse`) not tied to
+    /// one specific dispatched action.
+    pub action_id: String,
+    /// Action type slug, or a synthetic slug (e.g. `"start_run"`) for a
+    /// run-level gate.
+    pub action_type: String,
+    pub url: String,
+    pub selector: String,
+    pub risk_category: RiskCategory,
+    pub reason: String,
+}
+
+/// Outcome of the Phase 5 in-loop HITL approval gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    /// A human granted the approval — proceed with the gated action/run.
+    Granted,
+    /// A human denied it, or the gate could not be reached at all (fail
+    /// closed — see `BrowserEventSink::require_approval`'s doc).
+    Denied(String),
+    /// No decision arrived within the wait budget.
+    TimedOut,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +247,26 @@ pub trait BrowserEventSink: Send + Sync {
     async fn run_paused(&self, config: &PlanConfig);
     /// Emit that a user resumed the run/plan in `config` (Phase 2 B5).
     async fn run_resumed(&self, config: &PlanConfig);
+    /// Request human approval for a risky browser action/condition (Phase 5)
+    /// before it proceeds, and block until decided.
+    ///
+    /// Unlike the telemetry methods above, this is NOT best-effort: it is
+    /// the actual gate. Implementations MUST reuse the EXISTING general HITL
+    /// approval machinery (`OrchestrationCoreServiceClient::create_approval`
+    /// / `get_approval`, the same durable `Approval` record and
+    /// `RunPausedForApproval`/`ApprovalStateChanged` events the outer
+    /// whole-tool `ask` gate uses) rather than a parallel approval system,
+    /// and MUST fail CLOSED: any transport/session-core error, a missing
+    /// run id, or the absence of a wired sink is `Denied`, never silently
+    /// `Granted`. A caller that never wires a real sink (e.g. a unit test)
+    /// gets the same fail-closed behavior via the default in
+    /// `gate_risky_action`/`gate_persistent_cookie_use` when `sink` is
+    /// `None` — see those functions.
+    async fn require_approval(
+        &self,
+        config: &PlanConfig,
+        detail: &RiskyActionDetail,
+    ) -> ApprovalOutcome;
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +309,11 @@ pub struct AgentPlan {
     pub status: PlanStatus,
     pub observations: Vec<BrowserObservation>,
     started_at: Instant,
+    /// Whether the Phase 5 run-level `PersistentCookieUse` gate has already
+    /// run for this plan. Checked once, at the first `decide_next_action`
+    /// call (after `start_run` has already succeeded) — never re-asked on
+    /// later steps of the same run.
+    cookie_use_gate_done: bool,
 }
 
 impl AgentPlan {
@@ -192,6 +324,7 @@ impl AgentPlan {
             status: PlanStatus::Planning,
             observations: Vec::new(),
             started_at: Instant::now(),
+            cookie_use_gate_done: false,
         }
     }
 
@@ -352,6 +485,7 @@ pub fn plan_next_action(
                 url: url.to_owned(),
                 max_wait_ms: 15_000,
                 reason: "navigate to the run's starting page".to_owned(),
+                risk_category: None,
             },
             None => BrowserAction {
                 action_id,
@@ -362,6 +496,7 @@ pub fn plan_next_action(
                 url: String::new(),
                 max_wait_ms: 5000,
                 reason: String::new(),
+                risk_category: None,
             },
         });
     }
@@ -375,6 +510,7 @@ pub fn plan_next_action(
         url: String::new(),
         max_wait_ms: 5000,
         reason: String::new(),
+        risk_category: None,
     })
 }
 
@@ -530,12 +666,16 @@ fn pause_poll_interval() -> std::time::Duration {
 }
 
 /// Decide the next step: first poll for a user-initiated cancel/pause
-/// (Phase 2 B5, see [`wait_out_pause_or_cancel`]), then run the deterministic
-/// gate (`plan_next_action` — terminal/limit/stop-criteria/approval checks +
-/// step bookkeeping), then, when it yields an action and an LLM planner is
+/// (Phase 2 B5, see [`wait_out_pause_or_cancel`]); then, once per run, gate
+/// persistent-cookie-profile reuse (Phase 5, see
+/// [`gate_persistent_cookie_use`]); then run the deterministic gate
+/// (`plan_next_action` — terminal/limit/stop-criteria/approval checks + step
+/// bookkeeping); then, when it yields an action and an LLM planner is
 /// configured, let the model choose the real action from the latest
-/// observation. Falls back to the deterministic `Observe` action when the
-/// planner is absent or errors.
+/// observation (falling back to the deterministic `Observe` action when the
+/// planner is absent or errors); finally, gate the resulting action if it is
+/// classified risky (Phase 5, see [`classify_action_risk`]) before returning
+/// it for dispatch.
 async fn decide_next_action(
     plan: &mut AgentPlan,
     last_observation: Option<&BrowserObservation>,
@@ -547,28 +687,279 @@ async fn decide_next_action(
         return aborted;
     }
 
+    if let Some(gated) = gate_persistent_cookie_use(plan, sink).await {
+        return gated;
+    }
+
     let gate = plan_next_action(plan, last_observation);
     let PlanStepResult::Action(candidate) = gate else {
         return gate;
     };
-    let Some(planner) = planner else {
-        return PlanStepResult::Action(candidate);
+    let action = match planner {
+        None => candidate,
+        Some(planner) => match planner.next_action(&plan.config, last_observation).await {
+            Ok(Some(action)) => BrowserAction {
+                action_id: candidate.action_id,
+                grant_id: candidate.grant_id,
+                ..action
+            },
+            Ok(None) => {
+                plan.status = PlanStatus::Completed;
+                return PlanStepResult::Completed("agent reported task complete".to_owned());
+            }
+            Err(e) => {
+                warn!(error = %e, "llm planner failed; falling back to deterministic observe");
+                candidate
+            }
+        },
     };
-    match planner.next_action(&plan.config, last_observation).await {
-        Ok(Some(action)) => PlanStepResult::Action(BrowserAction {
-            action_id: candidate.action_id,
-            grant_id: candidate.grant_id,
-            ..action
-        }),
-        Ok(None) => {
-            plan.status = PlanStatus::Completed;
-            PlanStepResult::Completed("agent reported task complete".to_owned())
+
+    gate_risky_action(plan, last_observation, action, sink).await
+}
+
+/// Phase 5 run-level gate: reusing a persistent, cookie-bearing Quarry
+/// profile (`PlanConfig.profile_id.is_some() && !zdr`) is itself a listed
+/// risk category ("persistent cookie use", plan capability #8) — gated once,
+/// the first time `decide_next_action` runs for this plan, rather than once
+/// per action. Returns `None` when there is nothing to gate (already gated,
+/// ZDR, or no profile) so the caller falls through to normal planning.
+async fn gate_persistent_cookie_use(
+    plan: &mut AgentPlan,
+    sink: Option<&dyn BrowserEventSink>,
+) -> Option<PlanStepResult> {
+    if plan.cookie_use_gate_done {
+        return None;
+    }
+    plan.cookie_use_gate_done = true;
+    if plan.config.zdr {
+        return None;
+    }
+    let profile_id = plan.config.profile_id.clone()?;
+
+    let detail = RiskyActionDetail {
+        action_id: String::new(),
+        action_type: "start_run".to_owned(),
+        url: plan.config.start_url.clone().unwrap_or_default(),
+        selector: String::new(),
+        risk_category: RiskCategory::PersistentCookieUse,
+        reason: format!(
+            "run reuses persistent browser profile '{profile_id}' — cookies/session state carry over from prior sessions"
+        ),
+    };
+    match request_approval(&plan.config, &detail, sink).await {
+        // Approved — nothing to report; the caller falls through to normal
+        // planning for this step.
+        ApprovalOutcome::Granted => None,
+        ApprovalOutcome::Denied(reason) => {
+            plan.status = PlanStatus::Aborted;
+            Some(PlanStepResult::Aborted(format!(
+                "persistent cookie use denied: {reason}"
+            )))
         }
-        Err(e) => {
-            warn!(error = %e, "llm planner failed; falling back to deterministic observe");
-            PlanStepResult::Action(candidate)
+        ApprovalOutcome::TimedOut => {
+            plan.status = PlanStatus::Aborted;
+            Some(PlanStepResult::Aborted(
+                "persistent cookie use approval timed out".to_owned(),
+            ))
         }
     }
+}
+
+/// Phase 5 per-action gate: classify `action` (self-report OR deterministic
+/// backstop) and, if risky, request approval before it is returned for
+/// dispatch. Approving proceeds with `action` unchanged. Denial or timeout
+/// **aborts the run** rather than letting the planner silently try a
+/// different action the human never saw — the safest, simplest behavior for
+/// this stage (a human wanting the run to continue after a denial can start
+/// a new one with a narrower goal).
+async fn gate_risky_action(
+    plan: &mut AgentPlan,
+    last_observation: Option<&BrowserObservation>,
+    action: BrowserAction,
+    sink: Option<&dyn BrowserEventSink>,
+) -> PlanStepResult {
+    let Some(category) = classify_action_risk(&action, last_observation) else {
+        return PlanStepResult::Action(action);
+    };
+
+    let detail = RiskyActionDetail {
+        action_id: action.action_id.clone(),
+        action_type: action.action_type.as_str().to_owned(),
+        url: action.url.clone(),
+        selector: action.selector.clone(),
+        risk_category: category,
+        reason: risk_reason(category, &action),
+    };
+    match request_approval(&plan.config, &detail, sink).await {
+        ApprovalOutcome::Granted => PlanStepResult::Action(action),
+        ApprovalOutcome::Denied(reason) => {
+            plan.status = PlanStatus::Aborted;
+            PlanStepResult::Aborted(format!("browser action denied: {reason}"))
+        }
+        ApprovalOutcome::TimedOut => {
+            plan.status = PlanStatus::Aborted;
+            PlanStepResult::Aborted("browser action approval timed out".to_owned())
+        }
+    }
+}
+
+/// Route a gate request to the sink, failing CLOSED when none is wired. In
+/// production `execute_step`'s gRPC handler always constructs a real sink
+/// (`grpc.rs`); `None` is only reachable from a caller (e.g. a unit test)
+/// that deliberately omits one, and a classified-risky action must never
+/// silently proceed unattended just because nothing was there to ask.
+async fn request_approval(
+    config: &PlanConfig,
+    detail: &RiskyActionDetail,
+    sink: Option<&dyn BrowserEventSink>,
+) -> ApprovalOutcome {
+    match sink {
+        Some(sink) => sink.require_approval(config, detail).await,
+        None => ApprovalOutcome::Denied(
+            "no approval sink configured to gate this risky browser action".to_owned(),
+        ),
+    }
+}
+
+// Keyword/URL-path backstop marker lists for categories with no structural
+// signal in `BrowserAction` (mirrors `permission::is_risky_tool`'s
+// keyword-list pattern). Checked in a fixed, most-specific-first order (see
+// `classify_action_risk` below) so an action touching more than one marker
+// set (e.g. a checkout page's own login gate) still gets a single, sensible
+// classification.
+const CHECKOUT_MARKERS: &[&str] = &[
+    "/checkout",
+    "/cart",
+    "/payment",
+    "/billing",
+    "place-order",
+    "placeorder",
+    "buy-now",
+    "buynow",
+    "pay-now",
+    "paynow",
+];
+const LOGIN_MARKERS: &[&str] = &["/login", "/signin", "/sign-in", "password", "passwd", "pwd"];
+const DESTRUCTIVE_MARKERS: &[&str] = &[
+    "delete",
+    "remove",
+    "unsubscribe",
+    "cancel-order",
+    "cancelorder",
+    "deactivate",
+    "close-account",
+    "closeaccount",
+];
+const POSTING_MARKERS: &[&str] = &["submit", "post-comment", "publish", "send-message"];
+
+/// Deterministic backstop risk classification, OR'd with the planner's own
+/// self-reported `action.risk_category` (checked first — a positive
+/// self-report always wins). Never classifies `downloads`/`uploads` — see
+/// [`RiskCategory`]'s doc for why.
+fn classify_action_risk(
+    action: &BrowserAction,
+    last_observation: Option<&BrowserObservation>,
+) -> Option<RiskCategory> {
+    if let Some(reported) = action.risk_category {
+        return Some(reported);
+    }
+
+    // Cross-domain navigation: compare the target host of a `Goto` against
+    // the host of the last page actually observed — NOT the allow-list
+    // (`AgentPlan::is_domain_allowed`), which is a separate, unconditional
+    // dispatch-time check that stays unchanged. A page can legitimately
+    // redirect across allow-listed domains (e.g. a shop to its payment
+    // processor); that hop is still worth a human's attention. The very
+    // first navigation of a run (no prior observation yet) is never flagged
+    // here — there is no "prior domain" to have moved away from.
+    if action.action_type == ActionType::Goto {
+        if let (Some(target_host), Some(prior_host)) = (
+            extract_host(&action.url),
+            last_observation.and_then(|o| extract_host(&o.page_url)),
+        ) {
+            if target_host != prior_host {
+                return Some(RiskCategory::CrossDomainNavigation);
+            }
+        }
+    }
+
+    let haystack = format!(
+        "{} {} {}",
+        action.url.to_ascii_lowercase(),
+        action.selector.to_ascii_lowercase(),
+        action.value.to_ascii_lowercase(),
+    );
+
+    if CHECKOUT_MARKERS.iter().any(|m| haystack.contains(m)) {
+        return Some(RiskCategory::Checkout);
+    }
+    if LOGIN_MARKERS.iter().any(|m| haystack.contains(m)) {
+        return Some(RiskCategory::Login);
+    }
+    if DESTRUCTIVE_MARKERS.iter().any(|m| haystack.contains(m)) {
+        return Some(RiskCategory::Destructive);
+    }
+    if matches!(action.action_type, ActionType::Click)
+        && POSTING_MARKERS.iter().any(|m| haystack.contains(m))
+    {
+        return Some(RiskCategory::PostingForm);
+    }
+
+    None
+}
+
+/// Human-readable "why" for a per-action gate, combining the classification
+/// with the model's own rationale (`action.reason`) when present.
+fn risk_reason(category: RiskCategory, action: &BrowserAction) -> String {
+    let base = match category {
+        RiskCategory::CrossDomainNavigation => {
+            format!("navigation to a new domain: {}", action.url)
+        }
+        RiskCategory::Login => {
+            "action appears to interact with a login/authentication form".to_owned()
+        }
+        RiskCategory::Checkout => {
+            "action appears to interact with a checkout/payment flow".to_owned()
+        }
+        RiskCategory::PostingForm => "action appears to submit/post a form".to_owned(),
+        RiskCategory::Destructive => {
+            "action appears destructive (delete/remove/cancel/unsubscribe/deactivate)".to_owned()
+        }
+        RiskCategory::PersistentCookieUse => {
+            "run reuses a persistent cookie-bearing profile".to_owned()
+        }
+    };
+    if action.reason.is_empty() {
+        base
+    } else {
+        format!("{base} (model: {})", action.reason)
+    }
+}
+
+/// Polling interval while waiting on a Phase 5 HITL approval decision.
+/// Shortened under test, mirrors [`pause_poll_interval`].
+pub(crate) fn approval_poll_interval() -> std::time::Duration {
+    if cfg!(test) {
+        std::time::Duration::from_millis(5)
+    } else {
+        std::time::Duration::from_millis(500)
+    }
+}
+
+/// How long (seconds) to wait for a human decision before a risky browser
+/// action's approval gate gives up and treats it as timed out (fail closed —
+/// never `Granted` by default). Overridable via
+/// `QUARRY_BROWSER_AGENT_APPROVAL_TIMEOUT_S` for ops; short under test so the
+/// unit suite never blocks on real wall-clock time.
+pub(crate) fn approval_timeout_seconds() -> u32 {
+    if cfg!(test) {
+        return 1;
+    }
+    std::env::var("QUARRY_BROWSER_AGENT_APPROVAL_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1800)
 }
 
 /// Poll `state` for a user-initiated cancel or pause (Phase 2 B5) and block
@@ -909,6 +1300,17 @@ mod tests {
             self.resumed
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        // Not exercised by the pause/resume/cancel suite below — every
+        // scenario there uses non-risky actions, so this is never called.
+        // Phase 5's own gate tests use a dedicated `ApprovingSink`/
+        // `DecidingSink` further down instead of this fixture.
+        async fn require_approval(
+            &self,
+            _config: &PlanConfig,
+            _detail: &RiskyActionDetail,
+        ) -> ApprovalOutcome {
+            ApprovalOutcome::Granted
+        }
     }
 
     #[tokio::test]
@@ -993,5 +1395,333 @@ mod tests {
         assert_eq!(sink.paused.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Cancelled from Paused, never flipped through Running — no resume announced.
         assert_eq!(sink.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    // ── Phase 5: risk classification + in-loop HITL approval gate ──────────
+
+    fn action(action_type: ActionType, url: &str, selector: &str, value: &str) -> BrowserAction {
+        BrowserAction {
+            action_id: "act_1".to_owned(),
+            grant_id: "grant_1".to_owned(),
+            action_type,
+            selector: selector.to_owned(),
+            value: value.to_owned(),
+            url: url.to_owned(),
+            max_wait_ms: 5000,
+            reason: String::new(),
+            risk_category: None,
+        }
+    }
+
+    fn observation_at(url: &str) -> BrowserObservation {
+        BrowserObservation {
+            observation_id: "obs_1".to_owned(),
+            action_id: "act_0".to_owned(),
+            grant_id: "grant_1".to_owned(),
+            status: ObservationStatus::Success,
+            page_url: url.to_owned(),
+            page_title: String::new(),
+            extracted_text: String::new(),
+            screenshot_ref: String::new(),
+            dom_snapshot_ref: String::new(),
+            error_message: String::new(),
+        }
+    }
+
+    #[test]
+    fn classify_planner_self_report_wins_over_backstop() {
+        let mut a = action(
+            ActionType::Click,
+            "https://example.com/help",
+            "button.info",
+            "",
+        );
+        a.risk_category = Some(RiskCategory::Destructive);
+        assert_eq!(
+            classify_action_risk(&a, None),
+            Some(RiskCategory::Destructive)
+        );
+    }
+
+    #[test]
+    fn classify_detects_checkout_by_url() {
+        let a = action(
+            ActionType::Goto,
+            "https://shop.example.com/checkout",
+            "",
+            "",
+        );
+        assert_eq!(classify_action_risk(&a, None), Some(RiskCategory::Checkout));
+    }
+
+    #[test]
+    fn classify_detects_login_by_selector() {
+        let a = action(
+            ActionType::Type,
+            "https://example.com/account",
+            "input[type=password]",
+            "hunter2",
+        );
+        assert_eq!(classify_action_risk(&a, None), Some(RiskCategory::Login));
+    }
+
+    #[test]
+    fn classify_detects_destructive_by_selector() {
+        let a = action(
+            ActionType::Click,
+            "https://example.com/settings",
+            "button.delete-account",
+            "",
+        );
+        assert_eq!(
+            classify_action_risk(&a, None),
+            Some(RiskCategory::Destructive)
+        );
+    }
+
+    #[test]
+    fn classify_detects_posting_form_on_click_only() {
+        let click = action(
+            ActionType::Click,
+            "https://example.com/comments",
+            "button[type=submit]",
+            "",
+        );
+        assert_eq!(
+            classify_action_risk(&click, None),
+            Some(RiskCategory::PostingForm)
+        );
+
+        // Same marker on a non-click action type doesn't count (no submit
+        // affordance actually being invoked).
+        let scroll = action(
+            ActionType::Scroll,
+            "https://example.com/comments",
+            "button[type=submit]",
+            "",
+        );
+        assert_eq!(classify_action_risk(&scroll, None), None);
+    }
+
+    #[test]
+    fn classify_detects_cross_domain_navigation_relative_to_last_observation() {
+        let goto = action(
+            ActionType::Goto,
+            "https://alt-domain.example/landing",
+            "",
+            "",
+        );
+        let last = observation_at("https://shop.example.com/cart");
+        assert_eq!(
+            classify_action_risk(&goto, Some(&last)),
+            Some(RiskCategory::CrossDomainNavigation)
+        );
+    }
+
+    #[test]
+    fn classify_does_not_flag_same_domain_navigation() {
+        let goto = action(ActionType::Goto, "https://shop.example.com/about", "", "");
+        let last = observation_at("https://shop.example.com/cart");
+        assert_eq!(classify_action_risk(&goto, Some(&last)), None);
+    }
+
+    #[test]
+    fn classify_does_not_flag_the_first_navigation_of_a_run() {
+        // No prior observation yet — nothing to have moved "away" from.
+        let goto = action(ActionType::Goto, "https://example.com/", "", "");
+        assert_eq!(classify_action_risk(&goto, None), None);
+    }
+
+    #[test]
+    fn classify_returns_none_for_a_benign_action() {
+        let observe = action(ActionType::Observe, "", "", "");
+        assert_eq!(classify_action_risk(&observe, None), None);
+    }
+
+    /// Test double for the Phase 5 approval gate: replays a scripted sequence
+    /// of `ApprovalOutcome`s (one per `require_approval` call, FIFO) and
+    /// records the `RiskyActionDetail` each call was made with, so tests can
+    /// assert BOTH the loop's behavior and WHAT it asked approval for.
+    #[derive(Default)]
+    struct ScriptedApprovalSink {
+        outcomes: std::sync::Mutex<std::collections::VecDeque<ApprovalOutcome>>,
+        calls: std::sync::Mutex<Vec<RiskyActionDetail>>,
+    }
+
+    impl ScriptedApprovalSink {
+        fn new(outcomes: Vec<ApprovalOutcome>) -> Self {
+            Self {
+                outcomes: std::sync::Mutex::new(outcomes.into()),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl BrowserEventSink for ScriptedApprovalSink {
+        async fn action_dispatched(&self, _config: &PlanConfig, _action: &BrowserAction) {}
+        async fn observation_received(
+            &self,
+            _config: &PlanConfig,
+            _observation: &BrowserObservation,
+        ) {
+        }
+        async fn run_paused(&self, _config: &PlanConfig) {}
+        async fn run_resumed(&self, _config: &PlanConfig) {}
+        async fn require_approval(
+            &self,
+            _config: &PlanConfig,
+            detail: &RiskyActionDetail,
+        ) -> ApprovalOutcome {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(detail.clone());
+            self.outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| ApprovalOutcome::Denied("sink exhausted".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_persistent_cookie_use_skips_when_zdr() {
+        let mut config = test_config();
+        config.zdr = true;
+        config.profile_id = Some("prof_1".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![]);
+
+        let result = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
+        assert!(result.is_none());
+        assert_eq!(sink.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn gate_persistent_cookie_use_skips_when_no_profile() {
+        let mut plan = AgentPlan::new(test_config());
+        let sink = ScriptedApprovalSink::new(vec![]);
+
+        let result = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
+        assert!(result.is_none());
+        assert_eq!(sink.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn gate_persistent_cookie_use_asks_once_and_proceeds_on_grant() {
+        let mut config = test_config();
+        config.profile_id = Some("prof_1".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Granted]);
+
+        let first = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
+        assert!(
+            first.is_none(),
+            "granted — nothing to report, proceed normally"
+        );
+        assert_eq!(sink.call_count(), 1);
+
+        // A second call on the same plan must NOT ask again.
+        let second = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
+        assert!(second.is_none());
+        assert_eq!(sink.call_count(), 1, "gated exactly once per run");
+    }
+
+    #[tokio::test]
+    async fn gate_persistent_cookie_use_aborts_the_run_on_denial() {
+        let mut config = test_config();
+        config.profile_id = Some("prof_1".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Denied("no".to_owned())]);
+
+        let result = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
+        assert!(matches!(result, Some(PlanStepResult::Aborted(_))));
+        assert_eq!(plan.status, PlanStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn decide_next_action_gates_a_risky_first_navigation_and_proceeds_on_grant() {
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/login".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Granted]);
+
+        let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
+        match result {
+            PlanStepResult::Action(action) => {
+                assert_eq!(action.action_type, ActionType::Goto);
+                assert_eq!(action.url, "https://example.com/login");
+            }
+            _ => panic!("expected Action"),
+        }
+        assert_eq!(sink.call_count(), 1);
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls[0].risk_category, RiskCategory::Login);
+    }
+
+    #[tokio::test]
+    async fn decide_next_action_aborts_the_run_when_a_risky_action_is_denied() {
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/login".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Denied("not now".to_owned())]);
+
+        let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
+        match result {
+            PlanStepResult::Aborted(reason) => assert!(reason.contains("denied")),
+            _ => panic!("expected Aborted"),
+        }
+        assert_eq!(plan.status, PlanStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn decide_next_action_aborts_the_run_when_approval_times_out() {
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/checkout".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::TimedOut]);
+
+        let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
+        match result {
+            PlanStepResult::Aborted(reason) => assert!(reason.contains("timed out")),
+            _ => panic!("expected Aborted"),
+        }
+        assert_eq!(plan.status, PlanStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn decide_next_action_lets_non_risky_actions_through_without_asking() {
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/about".to_owned());
+        let mut plan = AgentPlan::new(config);
+        // Would return "sink exhausted" (Denied) if ever called — proves the
+        // non-risky path never reaches the gate at all.
+        let sink = ScriptedApprovalSink::new(vec![]);
+
+        let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
+        assert!(matches!(result, PlanStepResult::Action(_)));
+        assert_eq!(sink.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn decide_next_action_fails_closed_when_risky_and_no_sink_is_configured() {
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/login".to_owned());
+        let mut plan = AgentPlan::new(config);
+
+        let result = decide_next_action(&mut plan, None, None, None, None).await;
+        match result {
+            PlanStepResult::Aborted(reason) => assert!(reason.contains("no approval sink")),
+            _ => panic!("expected Aborted (fail closed)"),
+        }
+        assert_eq!(plan.status, PlanStatus::Aborted);
     }
 }

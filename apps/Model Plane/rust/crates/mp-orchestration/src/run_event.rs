@@ -41,6 +41,10 @@ pub enum OrchestrationEventKind {
     BrowserRunPaused,
     /// A user resumed a paused browser-agent loop (Phase 2 B5).
     BrowserRunResumed,
+    /// A browser action was classified risky and paused for approval (Phase 5).
+    BrowserActionApprovalRequired,
+    /// A pending browser-action approval was decided (Phase 5).
+    BrowserActionDecided,
 }
 
 /// Typed orchestration event payload. Each variant carries the minimum fields
@@ -177,6 +181,46 @@ pub enum OrchestrationEvent {
         /// Timestamp.
         at: DateTime<Utc>,
     },
+    /// A browser action was classified risky and paused for approval (Phase 5).
+    BrowserActionApprovalRequired {
+        /// Run this browser session belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving this session.
+        plan_id: String,
+        /// Id of the gated action. Empty for a run-level gate.
+        action_id: String,
+        /// Action type slug, or a synthetic slug for a run-level gate.
+        action_type: String,
+        /// Target URL, when known.
+        url: String,
+        /// CSS selector, when known.
+        selector: String,
+        /// Human-readable reason the action was classified risky.
+        reason: String,
+        /// `login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use`
+        risk_category: String,
+        /// Durable approval id this event accompanies.
+        approval_id: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
+    /// A pending browser-action approval was decided (Phase 5).
+    BrowserActionDecided {
+        /// Run this browser session belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving this session.
+        plan_id: String,
+        /// Id of the gated action.
+        action_id: String,
+        /// Durable approval id.
+        approval_id: String,
+        /// `granted|denied|timed_out`
+        decision: String,
+        /// Principal who decided, when known.
+        decided_by: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
 }
 
 impl OrchestrationEvent {
@@ -197,6 +241,10 @@ impl OrchestrationEvent {
             }
             Self::BrowserRunPaused { .. } => OrchestrationEventKind::BrowserRunPaused,
             Self::BrowserRunResumed { .. } => OrchestrationEventKind::BrowserRunResumed,
+            Self::BrowserActionApprovalRequired { .. } => {
+                OrchestrationEventKind::BrowserActionApprovalRequired
+            }
+            Self::BrowserActionDecided { .. } => OrchestrationEventKind::BrowserActionDecided,
         }
     }
 }
@@ -267,7 +315,9 @@ mod tests {
             OrchestrationEventKind::BrowserObservationReceived,
             OrchestrationEventKind::BrowserRunPaused,
             OrchestrationEventKind::BrowserRunResumed,
+            OrchestrationEventKind::BrowserActionApprovalRequired,
+            OrchestrationEventKind::BrowserActionDecided,
         ];
-        assert_eq!(kinds.len(), 11);
+        assert_eq!(kinds.len(), 13);
     }
 }

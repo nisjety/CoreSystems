@@ -27,9 +27,19 @@ use mp_contracts::model_plane::v1::inference_core_client::InferenceCoreClient;
 use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 use tonic::transport::Channel;
 
-use crate::browser_agent::{ActionType, BrowserAction, BrowserObservation, PlanConfig};
+use crate::browser_agent::{
+    ActionType, BrowserAction, BrowserObservation, PlanConfig, RiskCategory,
+};
 
 /// JSON Schema describing the single next action the model must return.
+///
+/// `risk_category` (Phase 5 — HITL gates, plan capability #8) lets the model
+/// self-report when an action it is about to choose looks like a login,
+/// checkout, form submission, or other destructive/elevated-risk step — the
+/// same self-report pattern already used for `reason`. This is deliberately
+/// advisory, not the only signal: `classify_action_risk` in `browser_agent.rs`
+/// ORs it with a deterministic keyword/URL backstop so a model that omits or
+/// under-reports risk doesn't silently bypass the gate.
 const ACTION_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -37,7 +47,8 @@ const ACTION_SCHEMA: &str = r#"{
     "selector": {"type": "string"},
     "value": {"type": "string"},
     "url": {"type": "string"},
-    "reason": {"type": "string"}
+    "reason": {"type": "string"},
+    "risk_category": {"type": "string", "enum": ["login","checkout","posting_form","destructive","cross_domain_navigation","persistent_cookie_use","none"]}
   },
   "required": ["action"]
 }"#;
@@ -178,6 +189,12 @@ struct NextAction {
     /// `BrowserAction.reason` so it reaches the run-event stream (Phase 2).
     #[serde(default)]
     reason: String,
+    /// The model's self-reported risk classification (Phase 5). Free-form on
+    /// the wire (`#[serde(default)]`, no enum) so an unrecognized or absent
+    /// value degrades to "no self-reported risk" rather than a parse error —
+    /// `classify_action_risk`'s deterministic backstop still runs regardless.
+    #[serde(default)]
+    risk_category: String,
 }
 
 impl NextAction {
@@ -204,6 +221,7 @@ impl NextAction {
             url: self.url,
             max_wait_ms: 5000,
             reason: self.reason,
+            risk_category: RiskCategory::from_wire(&self.risk_category),
         })
     }
 }
@@ -287,6 +305,35 @@ mod tests {
             .into_browser_action()
             .expect("scroll is not terminal");
         assert_eq!(action.reason, "");
+    }
+
+    #[test]
+    fn risk_category_self_report_is_captured_onto_the_browser_action() {
+        // Phase 5: the model can self-report a risk classification alongside
+        // its rationale — carried onto `BrowserAction.risk_category` so the
+        // in-loop HITL gate can use it (ORed with the deterministic backstop).
+        let action = parse(r##"{"action":"click","selector":"#pay","risk_category":"checkout"}"##)
+            .into_browser_action()
+            .expect("click is not terminal");
+        assert_eq!(action.risk_category, Some(RiskCategory::Checkout));
+    }
+
+    #[test]
+    fn risk_category_defaults_to_none_when_absent_or_unrecognized() {
+        let absent = parse(r#"{"action":"scroll"}"#)
+            .into_browser_action()
+            .expect("scroll is not terminal");
+        assert_eq!(absent.risk_category, None);
+
+        let none_value = parse(r#"{"action":"scroll","risk_category":"none"}"#)
+            .into_browser_action()
+            .expect("scroll is not terminal");
+        assert_eq!(none_value.risk_category, None);
+
+        let hallucinated = parse(r#"{"action":"scroll","risk_category":"frobnicate"}"#)
+            .into_browser_action()
+            .expect("scroll is not terminal");
+        assert_eq!(hallucinated.risk_category, None);
     }
 
     #[test]
