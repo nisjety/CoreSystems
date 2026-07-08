@@ -149,13 +149,30 @@ RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/reg
 # operators can shell in for triage. Chromium is included so the local
 # Chromiumoxide browser driver can render JavaScript when Browserbase is not
 # configured.
+#
+# Chromium is pinned to an explicit version via a snapshot.debian.org source
+# rather than left to float on bare `chromium` from bookworm-security. A
+# `docker buildx prune --all` once wiped the apt cache mount and a fresh
+# install pulled 150.0.7871.46-1~deb12u1, which crashes every headless
+# launch with SIGTRAP on arm64 Docker Desktop hosts (matches upstream
+# chromium reports of aarch64/hypervisor SIGTRAP regressions; see
+# docs/BROWSER_WORKSPACE_PLAN.md for the incident). 149.0.7827.102-1~deb12u1
+# is confirmed working (headless --dump-dom exits 0 with real output) and is
+# the newest release with an arm64 build below the broken one. Pinning here
+# means a future forced cache-clear can no longer silently regress this.
 FROM debian:bookworm-slim
+ARG CHROMIUM_VERSION=149.0.7827.102-1~deb12u1
+ARG CHROMIUM_SNAPSHOT=20260610T215132Z
 RUN set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
+        > /etc/apt/sources.list.d/chromium-pin.list; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
         ca-certificates \
-        chromium \
+        "chromium=${CHROMIUM_VERSION}" \
+        "chromium-common=${CHROMIUM_VERSION}" \
+        "chromium-sandbox=${CHROMIUM_VERSION}" \
         fonts-liberation \
         wget \
         > /tmp/apt-install.log 2>&1; then \
