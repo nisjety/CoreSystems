@@ -443,6 +443,9 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: execution-core
       SESSION_CORE_ADDR: http://session-core:9091
+      # Social workspace tools (list_social_accounts / publish_social_post)
+      # dial the Application Plane social-core via its host-published port.
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://host.docker.internal:3162}
       INFERENCE_CORE_ADDR: http://inference-core:9092
       # model-gateway gRPC — governed loop fetches/proxies an org's registered
       # MCP tools (ListMcpTools + ProxyMcpTool). Same model-plane-network, so the

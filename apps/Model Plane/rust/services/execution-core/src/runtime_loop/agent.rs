@@ -50,13 +50,29 @@ use tracing::{info, warn};
 use crate::permission::PermissionMode;
 use crate::runtime_loop::{self, StepOutcome};
 
-/// Short agent preamble used as the system message. Names the bound scope so the
-/// model stays on the offered read tools.
+/// Short agent preamble used as the system message. Names the bound scope so
+/// the model stays on the offered tools — including the WRITE-capable ones,
+/// which earlier wording omitted entirely (it described the toolset as
+/// exclusively "read-only fact-gathering," a leftover from before
+/// book_shipment/execute_provider_action/publish_social_post existed). That
+/// framing measurably suppressed real tool use: models defaulted to a
+/// generic "I cannot post on your behalf" refusal and drafted copy-paste
+/// text instead of calling the tool, even with a genuinely connected
+/// account (observed 2026-07-08 calibrating the eval harness's HITL case).
 const AGENT_PREAMBLE: &str = "You are Velion, a concise and helpful assistant for a Norwegian \
-business. You may call the provided read-only tools to gather facts (weather, traffic, news, \
+business. You have two kinds of tools: READ tools to gather facts (weather, traffic, news, \
 shipment tracking, the Brønnøysund company registry, the organization's own knowledge base, and \
-the public web) before answering. Only use the tools you have been given. When you have enough \
-information, answer the user's request directly and clearly.";
+the public web), and ACTION tools that take REAL effect for this organization — booking a \
+shipment, running a connected provider's operation (e.g. posting to Meta/LinkedIn/Slack), or \
+publishing a social media post. You DO have genuine capability to take these actions through the \
+listed tools; you are not limited to suggesting text for the user to act on themselves. When the \
+user asks you to do something an action tool covers, CALL the tool — do not default to 'I cannot \
+access your accounts' or offer copy-paste text instead, and do not ask the user to do it manually \
+unless the tool call itself reports that it cannot proceed (e.g. no connected account). Risky \
+action tools require human approval before they run; that pause is expected and is not a reason \
+to avoid calling the tool — say what you are attempting and let the approval step do its job. \
+Only use the tools you have been given. When you have enough information or have taken the \
+requested action, answer the user's request directly and clearly.";
 
 /// Temperature for each inference round.
 const TEMPERATURE: f32 = 0.7;
@@ -458,6 +474,16 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             name: "book_shipment".to_owned(),
             description: "BOOK a shipment with a carrier from Velion's shipping aggregator — this places a REAL freight order (costs money; a courier will collect the parcel) and always requires human approval. Only call it after get_shipping_quotes, with the exact carrier_code/service_name/price from the quote the user chose. Cross-border shipments (from.country != to.country) REQUIRE a customs object; the server rejects them otherwise. Returns the booking id, carrier reference, and tracking number.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"quote_ref":{"type":"string","description":"Reference of the chosen quote"},"carrier_code":{"type":"string","description":"carrier_code from the chosen quote"},"service_name":{"type":"string","description":"service_name from the chosen quote"},"price_amount_cents":{"type":"integer","description":"Quoted price in minor units"},"price_currency":{"type":"string","description":"ISO 4217, e.g. NOK"},"from":{"type":"object","properties":{"name":{"type":"string"},"street":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"is_business":{"type":"boolean"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","properties":{"name":{"type":"string"},"street":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"is_business":{"type":"boolean"}},"required":["name","postal_code","city","country"]},"weight_kg":{"type":"number"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"},"dangerous_good":{"type":"boolean"},"customs":{"type":"object","description":"Required cross-border: {contents_type: merchandise|gift|documents|sample|return, items:[{description,quantity,value_cents,currency,weight_kg,hs_code,origin_country}], incoterms?}"}},"required":["carrier_code","service_name","price_amount_cents","price_currency","from","to","weight_kg","length_cm","width_cm","height_cm"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "list_social_accounts".to_owned(),
+            description: "List the organization's connected SOCIAL MEDIA accounts (Meta/Facebook, Instagram, LinkedIn, TikTok, X, Snapchat) with status and capabilities. Read-only discovery — call this FIRST when the user asks to post/publish on social media, to learn which platforms are actually connected. Velion CAN publish social posts: draft with publish_social_post after checking here.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{},"required":[]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "publish_social_post".to_owned(),
+            description: "Create a social media post in Velion's Social workspace and request its publish to the chosen platforms. This is a REAL outbound action and always requires human approval — first in this run, and the post then waits for workspace approval under Social → Approvals before anything goes live (report that honestly; never claim content is already published). Use platform keys from list_social_accounts. Optional scheduled_at (RFC 3339) schedules instead of publishing immediately.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Optional internal title for the workspace"},"body":{"type":"string","description":"The post text"},"platforms":{"type":"array","items":{"type":"string"},"description":"Platform keys from list_social_accounts, e.g. ["linkedin","meta"]"},"scheduled_at":{"type":"string","description":"Optional RFC 3339 publish time"},"media":{"type":"array","items":{"type":"object"},"description":"Optional media refs, e.g. [{"type":"image","url":"https://…"}]"}},"required":["body","platforms"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "knowledge_search".to_owned(),

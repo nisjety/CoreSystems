@@ -141,6 +141,13 @@ pub fn is_risky_tool(tool_name: &str) -> bool {
         // above matches it, so gate it explicitly; under `ask` it pauses for a
         // human, under `auto` (chat) it runs as before.
         "browser_agent",
+        // publish_social_post creates a REAL workspace post and requests its
+        // publish to connected platforms. The "post" keyword above already
+        // matches it, but list it explicitly so the gate is intent-visible
+        // and survives a rename (same rationale as execute_provider_action).
+        // Its read-side sibling list_social_accounts matches no keyword and
+        // stays ungated by design.
+        "publish_social_post",
     ];
     if tool_name.starts_with("mcp__") {
         return true;
@@ -219,6 +226,22 @@ mod tests {
     }
 
     #[test]
+    fn social_publish_is_gated_and_account_listing_is_not() {
+        // The write side pauses for a human under `ask`…
+        assert!(is_risky_tool("publish_social_post"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "publish_social_post"),
+            PermissionDecision::AwaitApproval
+        );
+        // …while read-only account discovery proceeds without a gate.
+        assert!(!is_risky_tool("list_social_accounts"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "list_social_accounts"),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
     fn browser_agent_is_gated_under_ask() {
         // browser_agent drives real page side effects → treated as write-risky.
         assert!(is_risky_tool("browser_agent"));
@@ -260,7 +283,11 @@ mod tests {
         );
         // Malformed input → gated (fail safe).
         assert_eq!(
-            evaluate_call(PermissionMode::Ask, EXECUTE_PROVIDER_ACTION_TOOL, "not json"),
+            evaluate_call(
+                PermissionMode::Ask,
+                EXECUTE_PROVIDER_ACTION_TOOL,
+                "not json"
+            ),
             PermissionDecision::AwaitApproval
         );
 

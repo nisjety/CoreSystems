@@ -50,6 +50,17 @@ const GET_SHIPPING_QUOTES_TOOL: &str = "get_shipping_quotes";
 const SHIPPING_CARRIERS_TOOL: &str = "shipping_carriers";
 const BOOK_SHIPMENT_TOOL: &str = "book_shipment";
 
+/// Social workspace tools backed by the Application Plane `social-core`
+/// (`social_tools`): `list_social_accounts` is read-only discovery of the
+/// org's connected social accounts; `publish_social_post` creates a REAL
+/// workspace post and requests its publish — it is in
+/// `permission::is_risky_tool`, so under `ask` posture the run pauses for
+/// explicit human approval, AND the post is always created
+/// approval-required so social-core's own org-visible `ApprovalState` gate
+/// holds as defense in depth (eval case 07 closed this capability gap).
+const LIST_SOCIAL_ACCOUNTS_TOOL: &str = "list_social_accounts";
+const PUBLISH_SOCIAL_POST_TOOL: &str = "publish_social_post";
+
 /// Provider-action tools backed by the Ingestion Plane `integration-corev2`
 /// actions gateway (`integration_tools`): `list_provider_actions` is
 /// read-only discovery (org's live connections × the operations catalog);
@@ -177,6 +188,10 @@ pub async fn execute_step(
         execute_shipping_carriers().await
     } else if tool_name == BOOK_SHIPMENT_TOOL {
         execute_book_shipment(tool_input, user_id).await
+    } else if tool_name == LIST_SOCIAL_ACCOUNTS_TOOL {
+        execute_list_social_accounts(org_id).await
+    } else if tool_name == PUBLISH_SOCIAL_POST_TOOL {
+        execute_publish_social_post(tool_input, org_id, user_id, run_id).await
     } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
         execute_list_provider_actions(org_id).await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
@@ -557,6 +572,57 @@ async fn execute_book_shipment(tool_input: &str, user_id: &str) -> tool_bridge::
         );
     };
     match client.book_shipment(&input).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `list_social_accounts` tool — no input. Read-only discovery of the org's
+/// connected social accounts (provider, status, capabilities) via
+/// social-core; the model's prerequisite step before `publish_social_post`.
+async fn execute_list_social_accounts(org_id: &str) -> tool_bridge::ToolExecution {
+    let Some(client) = crate::social_tools::SocialToolsClient::from_env() else {
+        return tool_error(
+            "list_social_accounts unavailable: social tools client could not be built \
+             (INTERNAL_API_KEY unset?)"
+                .to_owned(),
+        );
+    };
+    match client.list_accounts(org_id).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `publish_social_post` tool — WRITE side: creates a real workspace post and
+/// requests its publish. Reaches here only after the HITL approval gate
+/// (`permission::is_risky_tool` matches this name, so `ask` posture pauses
+/// the run for a human); the post is additionally created approval-required
+/// so social-core's own workspace approval gates the actual publish.
+async fn execute_publish_social_post(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+) -> tool_bridge::ToolExecution {
+    let input: crate::social_tools::PublishPostInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid publish_social_post input: {e}")),
+    };
+    let Some(client) = crate::social_tools::SocialToolsClient::from_env() else {
+        return tool_error(
+            "publish_social_post unavailable: social tools client could not be built \
+             (INTERNAL_API_KEY unset?)"
+                .to_owned(),
+        );
+    };
+    match client.publish_post(org_id, user_id, run_id, &input).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
