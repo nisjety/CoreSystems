@@ -358,7 +358,6 @@ mod tests {
         let store = PostgresEventHistory::new(pool);
 
         let earlier = Utc::now() - chrono::Duration::hours(2);
-        let later = Utc::now();
 
         let mut e_early = JobHistoryEvent::new(
             quarry_core::ids::Id::new(),

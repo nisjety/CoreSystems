@@ -211,10 +211,7 @@ mod tests {
 
     fn baseline(org: &str, url: &str, fp: &str, prev: Option<&str>) -> BaselineSnapshot {
         BaselineSnapshot {
-            baseline_id: format!(
-                "bln_{}",
-                quarry_core::ids::Id::<quarry_core::ids::kinds::ArtifactKind>::new()
-            ),
+            baseline_id: format!("bln_{}", quarry_core::ids::kinds::ArtifactKind::new()),
             org_id: org.into(),
             source_url: url.into(),
             fingerprint: fp.into(),

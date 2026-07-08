@@ -196,6 +196,10 @@ impl PostgresRequestQueue {
     /// Record a retry decision for audit. Append-only; failures here
     /// log-warn instead of bubbling — losing an audit row is preferable
     /// to failing the underlying retry.
+    // reason: pre-existing 8-field audit-row shape (unrelated to Browser
+    // Workspace Phase 3); a struct-based refactor is out of scope here
+    // and would touch every call site for no behavior change.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_retry(
         &self,
         request_id: &str,
