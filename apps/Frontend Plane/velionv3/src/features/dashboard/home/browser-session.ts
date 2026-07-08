@@ -9,6 +9,10 @@ import type {
   BrowserTimelineEntry,
   BrowserSessionResponse,
 } from '@/shared/api/browser-client'
+import type {
+  BrowserActionApprovalRequiredEvent,
+  BrowserActionDecidedEvent,
+} from '@/shared/api/run-console-client'
 import { gatewayBaseUrl } from '@/shared/api/config'
 import { hostnameOf, type ScrapePreview } from './knowledge-preview'
 
@@ -648,4 +652,113 @@ export function withStepRationale(
   rationale: BrowserStepRationale,
 ): BrowserStepRationale[] {
   return [...rationales.filter((existing) => existing.step !== rationale.step), rationale]
+}
+
+// --- Phase 5: HITL browser-action approvals -----------------------------------
+//
+// These are NOT part of the Quarry-derived timeline above: a HITL gate fires
+// on the Model Plane orchestration-event stream *before* an action dispatches
+// (or once at run start for the persistent-cookie-use run-level gate), so a
+// denied action never produces a Quarry observation/step to attach to. This
+// keeps approvals as their own ordered list, rendered as a dedicated section
+// of the evidence drawer — distinct from a normal completed/failed timeline
+// step, per the plan's own authority split (Quarry never judges policy; only
+// Model Plane orchestration events carry this).
+
+export type BrowserApprovalStatus = 'pending' | 'granted' | 'denied' | 'timed_out'
+
+export type BrowserApprovalEntry = {
+  /** Correlates a `required` event to its later `decided` event. See
+   * `browserApprovalEntryKey` — not necessarily the durable approval id
+   * (which is unknown until `create_approval` resolves server-side). */
+  key: string
+  approvalId: string
+  runId: string
+  planId: string
+  actionId: string
+  actionType: string
+  url: string
+  selector: string
+  reason: string
+  /** login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use */
+  riskCategory: string
+  status: BrowserApprovalStatus
+  decidedBy: string | null
+  requestedAt: string
+  decidedAt: string | null
+}
+
+const maxBrowserApprovalEntries = 16
+
+/**
+ * Correlation key for a HITL gate. `actionId` is empty for a run-level gate
+ * (persistent_cookie_use, gated once before the first action) — the plan's
+ * own `cookie_use_gate_done` flag guarantees at most one such gate is ever
+ * pending per run, so a fixed per-run key is safe and unambiguous.
+ */
+function browserApprovalEntryKey(runId: string, actionId: string): string {
+  return actionId ? actionId : `${runId}:run-level`
+}
+
+function normalizeApprovalDecision(decision?: string): BrowserApprovalStatus {
+  if (decision === 'granted') return 'granted'
+  if (decision === 'timed_out') return 'timed_out'
+  return 'denied'
+}
+
+/** Record a newly-required approval, replacing any stale entry with the same key. */
+export function withBrowserApprovalRequested(
+  entries: BrowserApprovalEntry[],
+  event: BrowserActionApprovalRequiredEvent,
+): BrowserApprovalEntry[] {
+  const runId = event.runId ?? ''
+  const actionId = event.actionId ?? ''
+  const key = browserApprovalEntryKey(runId, actionId)
+  const entry: BrowserApprovalEntry = {
+    key,
+    approvalId: event.approvalId ?? '',
+    runId,
+    planId: event.planId ?? '',
+    actionId,
+    actionType: event.actionType ?? '',
+    url: event.url ?? '',
+    selector: event.selector ?? '',
+    reason: event.reason ?? '',
+    riskCategory: event.riskCategory ?? '',
+    status: 'pending',
+    decidedBy: null,
+    requestedAt: event.at ?? new Date().toISOString(),
+    decidedAt: null,
+  }
+  return [...entries.filter((existing) => existing.key !== key), entry].slice(
+    -maxBrowserApprovalEntries,
+  )
+}
+
+/** Apply a decision to the matching pending entry (a no-op if it was never recorded). */
+export function withBrowserApprovalDecided(
+  entries: BrowserApprovalEntry[],
+  event: BrowserActionDecidedEvent,
+): BrowserApprovalEntry[] {
+  const key = browserApprovalEntryKey(event.runId ?? '', event.actionId ?? '')
+  return entries.map((entry) =>
+    entry.key === key
+      ? {
+          ...entry,
+          approvalId: event.approvalId || entry.approvalId,
+          status: normalizeApprovalDecision(event.decision),
+          decidedBy: event.decidedBy ?? null,
+          decidedAt: event.at ?? new Date().toISOString(),
+        }
+      : entry,
+  )
+}
+
+/** The single most recent still-pending approval, if any — the one the AI bubble surfaces. */
+export function pendingBrowserApproval(entries: BrowserApprovalEntry[]): BrowserApprovalEntry | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry?.status === 'pending') return entry
+  }
+  return null
 }

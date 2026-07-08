@@ -5203,6 +5203,45 @@ textarea:focus-visible {
   cursor: progress;
 }
 
+/* Phase 5 HITL gate (browser evidence drawer) — a DECIDED approval card: no
+ * glow/pulse (that's reserved for "needs attention now"), just a clear,
+ * distinct marker so a denied browser action reads as neither a normal
+ * completed step nor a still-pending one. */
+.velion-run-approval--granted,
+.velion-run-approval--denied,
+.velion-run-approval--timed_out {
+  animation: none;
+  box-shadow: none;
+}
+
+.velion-run-approval--granted {
+  border-color: #166534;
+  background: color-mix(in srgb, #166534 8%, var(--velion-surface));
+}
+
+.dark .velion-run-approval--granted {
+  background: color-mix(in srgb, #166534 12%, #15161a);
+}
+
+.velion-run-approval--denied,
+.velion-run-approval--timed_out {
+  border-color: #991b1b;
+  background: color-mix(in srgb, #991b1b 8%, var(--velion-surface));
+}
+
+.dark .velion-run-approval--denied,
+.dark .velion-run-approval--timed_out {
+  background: color-mix(in srgb, #991b1b 12%, #15161a);
+}
+
+.velion-run-approval__badge--granted {
+  color: #166534;
+}
+
+.velion-run-approval__badge--denied {
+  color: #991b1b;
+}
+
 /* P2 — runs-history rail + run-telemetry panel (Relevance/Rox-style). */
 .velion-run-history {
   display: flex;
@@ -10100,6 +10139,13 @@ textarea:focus-visible {
   color: #b26340;
 }
 
+/* Phase 5 HITL gate — more urgent than a user-initiated pause: the run is
+ * blocked on a decision, not merely on hold. */
+.knowledge-browser-loop-chip--awaiting_approval {
+  background: rgb(185 28 28 / 12%);
+  color: #991b1b;
+}
+
 /* Always-visible ZDR honesty marker for ephemeral sessions. */
 .knowledge-browser-zdr-chip {
   display: inline-flex;
@@ -10792,6 +10838,36 @@ textarea:focus-visible {
   color: rgb(22 78 99);
 }
 
+.knowledge-browser-ai-bubble__meta {
+  margin: 6px 0 0;
+  color: rgb(96 104 112);
+  font-size: 10.5px;
+}
+
+/* Phase 5 HITL gate — a pending approval takes over the AI bubble's slot: no
+ * dismiss button (a required human decision can't be waved away), red/danger
+ * accent instead of the AI-suggestion cyan so it reads as blocking, not as a
+ * routine suggestion. */
+.knowledge-browser-ai-bubble--approval {
+  grid-template-columns: auto minmax(0, 1fr);
+  border-color: rgb(185 28 28 / 28%);
+  background: rgb(254 242 242 / 97%);
+  color: #7f1d1d;
+}
+
+.knowledge-browser-ai-bubble--approval > svg {
+  color: #991b1b;
+}
+
+.knowledge-browser-ai-bubble--approval .knowledge-browser-ai-bubble__kind {
+  background: rgb(185 28 28 / 11%);
+  color: #991b1b;
+}
+
+.knowledge-browser-ai-bubble--approval p {
+  color: #7f1d1d;
+}
+
 .knowledge-browser-timeline {
   display: flex;
   align-items: center;
@@ -11084,6 +11160,35 @@ textarea:focus-visible {
   padding: 4px 12px 12px;
   color: var(--velion-text-muted);
   font-size: 11.5px;
+}
+
+/* Phase 5 HITL gate — approvals are a distinct section, not timeline steps:
+ * a denied action never dispatches, so it never produces a step to attach a
+ * marker to. Rendered above the timeline regardless of step count, since the
+ * very first action of a run can itself be gated. */
+.knowledge-browser-evidence__approvals {
+  border-bottom: 1px solid rgb(23 23 23 / 8%);
+  padding: 0 12px 12px;
+}
+
+.knowledge-browser-evidence__approvals-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 6px;
+  color: rgb(76 84 92);
+  font-size: 10.5px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.knowledge-browser-evidence__approvals-head strong {
+  border-radius: 999px;
+  background: rgb(23 23 23 / 7%);
+  padding: 2px 7px;
+  color: var(--velion-text, #1a1a1a);
+  font-size: 10.5px;
 }
 
 /* Timeline step detail: before/after evidence, deltas, rationale, artifacts. */

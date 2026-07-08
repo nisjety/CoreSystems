@@ -104,6 +104,41 @@ export type BrowserRunResumedEvent = {
   at?: string
 }
 
+/** Phase 5 HITL gate: a specific browser action (or a run-level condition
+ * like persistent-cookie reuse) requires a human decision before it
+ * proceeds. `approvalId` lets the UI decide it via the existing generic
+ * `POST /api/v1/orchestration/approvals/:id/decide` route — this event only
+ * adds the browser-specific "what and why" the generic `Approval` record
+ * doesn't carry. `actionId` is empty for a run-level gate (e.g.
+ * persistent_cookie_use, gated once at run start). */
+export type BrowserActionApprovalRequiredEvent = {
+  runId?: string
+  planId?: string
+  actionId?: string
+  actionType?: string
+  url?: string
+  selector?: string
+  reason?: string
+  /** login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use */
+  riskCategory?: string
+  approvalId?: string
+  at?: string
+}
+
+/** Phase 5 HITL gate: the companion "what happened to it" event for a
+ * `BrowserActionApprovalRequiredEvent` — granted resumes the same action
+ * unchanged, denied/timed-out aborts the run. */
+export type BrowserActionDecidedEvent = {
+  runId?: string
+  planId?: string
+  actionId?: string
+  approvalId?: string
+  /** granted|denied|timed_out */
+  decision?: string
+  decidedBy?: string
+  at?: string
+}
+
 export type RunStepEvent = {
   id?: string
   title?: string
@@ -123,6 +158,8 @@ export type RunEventHandlers = {
   onBrowserObservation?: (event: BrowserObservationReceivedEvent) => void
   onBrowserRunPaused?: (event: BrowserRunPausedEvent) => void
   onBrowserRunResumed?: (event: BrowserRunResumedEvent) => void
+  onBrowserActionApprovalRequired?: (event: BrowserActionApprovalRequiredEvent) => void
+  onBrowserActionDecided?: (event: BrowserActionDecidedEvent) => void
   onStep?: (event: RunStepEvent) => void
   onError?: (err: unknown) => void
   onDone?: () => void
@@ -234,6 +271,31 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
       handlers.onBrowserRunResumed?.({
         runId: str(payload.run_id) ?? str(payload.runId),
         planId: str(payload.plan_id) ?? str(payload.planId),
+        at: str(payload.at),
+      })
+      break
+    case 'browser_action_approval_required':
+      handlers.onBrowserActionApprovalRequired?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        planId: str(payload.plan_id) ?? str(payload.planId),
+        actionId: str(payload.action_id) ?? str(payload.actionId),
+        actionType: str(payload.action_type) ?? str(payload.actionType),
+        url: str(payload.url),
+        selector: str(payload.selector),
+        reason: str(payload.reason),
+        riskCategory: str(payload.risk_category) ?? str(payload.riskCategory),
+        approvalId: str(payload.approval_id) ?? str(payload.approvalId),
+        at: str(payload.at),
+      })
+      break
+    case 'browser_action_decided':
+      handlers.onBrowserActionDecided?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        planId: str(payload.plan_id) ?? str(payload.planId),
+        actionId: str(payload.action_id) ?? str(payload.actionId),
+        approvalId: str(payload.approval_id) ?? str(payload.approvalId),
+        decision: str(payload.decision),
+        decidedBy: str(payload.decided_by) ?? str(payload.decidedBy),
         at: str(payload.at),
       })
       break

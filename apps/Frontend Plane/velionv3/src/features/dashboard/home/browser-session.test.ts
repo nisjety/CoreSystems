@@ -10,11 +10,15 @@ import {
   describeTimelineDelta,
   evidenceIsEphemeral,
   initialBrowserChromeState,
+  pendingBrowserApproval,
   rationaleForStep,
   timelineDetail,
   toggleBrowserChromePanel,
   toggleBrowserChromePopover,
+  withBrowserApprovalDecided,
+  withBrowserApprovalRequested,
   withStepRationale,
+  type BrowserApprovalEntry,
   type BrowserStepRationale,
   type BrowserTimelineViewEntry,
 } from './browser-session'
@@ -616,5 +620,116 @@ describe('browser AI loop controller', () => {
 
     expect(loop.begin('a')).toBe(true)
     expect(loop.state().status).toBe('suggesting')
+  })
+})
+
+describe('Phase 5 HITL browser-action approvals', () => {
+  const requiredEvent = {
+    runId: 'run_1',
+    planId: 'plan_1',
+    actionId: 'act_1',
+    actionType: 'click',
+    url: 'https://shop.example.com/checkout',
+    selector: '#pay-now',
+    reason: 'clicking a checkout/payment control',
+    riskCategory: 'checkout',
+    approvalId: '',
+    at: '2026-07-08T10:00:00Z',
+  }
+
+  it('records a newly-required approval as pending', () => {
+    const entries = withBrowserApprovalRequested([], requiredEvent)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      key: 'act_1',
+      status: 'pending',
+      riskCategory: 'checkout',
+      url: 'https://shop.example.com/checkout',
+    })
+    expect(pendingBrowserApproval(entries)).toMatchObject({ key: 'act_1' })
+  })
+
+  it('applies a granted decision to the matching pending entry', () => {
+    const withRequest = withBrowserApprovalRequested([], requiredEvent)
+    const decided = withBrowserApprovalDecided(withRequest, {
+      runId: 'run_1',
+      actionId: 'act_1',
+      approvalId: 'appr_9',
+      decision: 'granted',
+      decidedBy: 'user_1',
+      at: '2026-07-08T10:00:05Z',
+    })
+
+    expect(decided).toHaveLength(1)
+    expect(decided[0]).toMatchObject({
+      status: 'granted',
+      approvalId: 'appr_9',
+      decidedBy: 'user_1',
+    })
+    expect(pendingBrowserApproval(decided)).toBeNull()
+  })
+
+  it('applies a denied decision, leaving a distinct marker (not granted or pending)', () => {
+    const withRequest = withBrowserApprovalRequested([], requiredEvent)
+    const decided = withBrowserApprovalDecided(withRequest, {
+      runId: 'run_1',
+      actionId: 'act_1',
+      approvalId: 'appr_9',
+      decision: 'denied',
+      decidedBy: 'user_1',
+    })
+
+    expect(decided[0]?.status).toBe('denied')
+    expect(pendingBrowserApproval(decided)).toBeNull()
+  })
+
+  it('defaults an unrecognized decision string to denied (fail closed)', () => {
+    const withRequest = withBrowserApprovalRequested([], requiredEvent)
+    const decided = withBrowserApprovalDecided(withRequest, {
+      runId: 'run_1',
+      actionId: 'act_1',
+      decision: 'timed_out',
+    })
+    expect(decided[0]?.status).toBe('timed_out')
+  })
+
+  it('correlates a run-level gate (empty actionId) by run id, not by risk category alone', () => {
+    const cookieUseRequired = {
+      runId: 'run_2',
+      planId: 'plan_2',
+      actionId: '',
+      actionType: 'start_run',
+      url: '',
+      selector: '',
+      reason: "run reuses persistent browser profile 'prof_1'",
+      riskCategory: 'persistent_cookie_use',
+      approvalId: '',
+    }
+    const withRequest = withBrowserApprovalRequested([], cookieUseRequired)
+    expect(withRequest[0]?.key).toBe('run_2:run-level')
+
+    const decided = withBrowserApprovalDecided(withRequest, {
+      runId: 'run_2',
+      actionId: '',
+      approvalId: 'appr_run2',
+      decision: 'granted',
+    })
+    expect(decided[0]?.status).toBe('granted')
+  })
+
+  it('is a no-op decide when no matching pending entry exists', () => {
+    const entries: BrowserApprovalEntry[] = []
+    const decided = withBrowserApprovalDecided(entries, {
+      runId: 'run_3',
+      actionId: 'unknown',
+      decision: 'granted',
+    })
+    expect(decided).toEqual([])
+  })
+
+  it('pendingBrowserApproval returns the most recent pending entry', () => {
+    const first = withBrowserApprovalRequested([], { ...requiredEvent, actionId: 'act_1' })
+    const both = withBrowserApprovalRequested(first, { ...requiredEvent, actionId: 'act_2' })
+    expect(pendingBrowserApproval(both)?.actionId).toBe('act_2')
   })
 })

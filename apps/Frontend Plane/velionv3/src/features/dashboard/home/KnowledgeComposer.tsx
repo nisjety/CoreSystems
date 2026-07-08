@@ -44,6 +44,7 @@ import {
 } from '@/shared/api/browser-client'
 import { startBrowserAiRun } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
+import { decideApproval, listApprovals, type ApprovalDecision } from '@/shared/api/orchestration-client'
 import {
   crawlSelectedPages,
   createDocument,
@@ -75,7 +76,10 @@ import {
   attachBrowserObservation,
   attachBrowserSession,
   attachBrowserTabs,
+  withBrowserApprovalDecided,
+  withBrowserApprovalRequested,
   withStepRationale,
+  type BrowserApprovalEntry,
   type BrowserStepRationale,
 } from './browser-session'
 import {
@@ -204,6 +208,14 @@ export function KnowledgeComposer(props: {
   // visible tab session's observation steps, while an AI run executes in its
   // own Quarry session with its own step numbering.
   const [aiRunRationale, setAiRunRationale] = createSignal<BrowserStepRationale | null>(null)
+  // Phase 5 HITL gate: pending/decided browser-action approvals for the
+  // active durable AI run. Reset alongside `aiRunRationale` at the start of
+  // every run — a stale approval from a previous run must never linger.
+  const [browserApprovals, setBrowserApprovals] = createSignal<BrowserApprovalEntry[]>([])
+  // Approval *keys* (not approval ids — the id is often still unknown, see
+  // `handleDecideBrowserApproval`) with an in-flight decide call, so the
+  // Approve/Reject buttons can show a busy state and avoid double-submits.
+  const [decidingApprovalKeys, setDecidingApprovalKeys] = createSignal<string[]>([])
   let aiRunAbort: AbortController | null = null
   onCleanup(() => aiRunAbort?.abort())
   const [preview, setPreview] = createSignal<ScrapePreview | null>(null)
@@ -941,6 +953,8 @@ export function KnowledgeComposer(props: {
     if (!browserLoop.begin(goal)) return null
     setFormError(null)
     setAiRunRationale(null)
+    setBrowserApprovals([])
+    setDecidingApprovalKeys([])
     aiRunAbort?.abort()
     const controller = new AbortController()
     aiRunAbort = controller
@@ -972,6 +986,18 @@ export function KnowledgeComposer(props: {
         },
         onBrowserRunPaused: () => browserLoop.onRunPaused(),
         onBrowserRunResumed: () => browserLoop.onRunResumed(),
+        // Phase 5 HITL gate: a risky browser action (or the run-level
+        // persistent-cookie-use check) is blocking on a human decision.
+        // Distinct from onBrowserRunPaused above, which is the user-initiated
+        // pause/resume from Phase 2 — this is never user-initiated.
+        onBrowserActionApprovalRequired: (event) => {
+          setBrowserApprovals((entries) => withBrowserApprovalRequested(entries, event))
+          browserLoop.onApprovalRequired()
+        },
+        onBrowserActionDecided: (event) => {
+          setBrowserApprovals((entries) => withBrowserApprovalDecided(entries, event))
+          browserLoop.onApprovalDecided(event.decision === 'granted' ? 'granted' : event.decision === 'timed_out' ? 'timed_out' : 'denied')
+        },
         onError: (streamError) => {
           // A deliberate abort (new link, preview cleared, unmount) is not an
           // error the user should see.
@@ -1001,6 +1027,57 @@ export function KnowledgeComposer(props: {
       return null
     } finally {
       if (aiRunAbort === controller) aiRunAbort = null
+    }
+  }
+
+  // Phase 5 HITL gate: approve or reject a pending browser-action approval,
+  // reusing the SAME generic `/api/v1/orchestration/approvals/:id/decide`
+  // route AgentRunConsole's approval deck calls — there is no browser-specific
+  // decide endpoint. `entryKey` (not the durable approval id) identifies the
+  // card: execution-core publishes the `browser_action_approval_required`
+  // event with an empty `approval_id` (the durable `CreateApproval` call
+  // happens right after, so the id genuinely doesn't exist yet when the
+  // event that announces the gate goes out) — so the id is frequently still
+  // unknown when the user acts. When that happens, fall back to the generic
+  // `listApprovals(runId)` to resolve it: the in-loop browser gate only ever
+  // has at most one pending approval per run, so "the pending one" is
+  // unambiguous. Unlike AgentRunConsole's outer tool-call gate, a browser
+  // in-loop grant resumes the SAME action by itself (execution-core polls the
+  // approval and continues the loop in place) — no separate resume/cancel
+  // call is needed or correct here.
+  const handleDecideBrowserApproval = async (entryKey: string, decision: ApprovalDecision) => {
+    const entry = browserApprovals().find((candidate) => candidate.key === entryKey)
+    if (!entry) return
+    setDecidingApprovalKeys((keys) => (keys.includes(entryKey) ? keys : [...keys, entryKey]))
+    try {
+      let approvalId = entry.approvalId
+      if (!approvalId) {
+        if (!entry.runId) throw new Error(i18n.tr('Fant ikke kjøringen denne handlingen tilhører.', 'Could not find the run this action belongs to.'))
+        const pending = await listApprovals(entry.runId)
+        const match = pending.find((candidate) => (candidate.status ?? '').toUpperCase() === 'PENDING')
+        if (!match) {
+          setFormError(i18n.tr('Fant ingen ventende godkjenning for denne handlingen ennå — prøv igjen om et øyeblikk.', 'No pending approval was found for this action yet — try again in a moment.'))
+          return
+        }
+        approvalId = match.id
+      }
+      await decideApproval(approvalId, decision)
+      // Optimistic, in case the run's own SSE stream is slow or has already
+      // ended — `withBrowserApprovalDecided` is idempotent, so the real
+      // `browser_action_decided` event (when it arrives) simply confirms this.
+      const resolved = decision === 'approve' ? 'granted' : 'denied'
+      setBrowserApprovals((entries) => withBrowserApprovalDecided(entries, {
+        runId: entry.runId,
+        actionId: entry.actionId,
+        approvalId,
+        decision: resolved,
+      }))
+      browserLoop.onApprovalDecided(resolved)
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : i18n.tr('Kunne ikke registrere beslutningen.', 'Could not record the decision.')
+      setFormError(message)
+    } finally {
+      setDecidingApprovalKeys((keys) => keys.filter((key) => key !== entryKey))
     }
   }
 
@@ -1416,16 +1493,19 @@ export function KnowledgeComposer(props: {
         {(current) => (
           <ScrapePreviewPanel
             adding={adding()}
+            browserApprovals={browserApprovals()}
             browserBusy={browserBusy()}
             browserLoop={browserLoopState()}
             browserLoopRationale={aiRunRationale()}
             browserRationales={browserRationales()}
+            decidingBrowserApprovalKeys={decidingApprovalKeys()}
             onBrowserAction={(action) => void performBrowserAction(action)}
             onBrowserAutoRun={beginBrowserAiRun}
             onBrowserControlMode={(mode) => void updateBrowserControlMode(mode)}
             onBrowserLoopPause={() => browserLoop.requestPause()}
             onBrowserLoopResume={() => browserLoop.requestResume()}
             onBrowserLoopStop={() => browserLoop.requestStop()}
+            onDecideBrowserApproval={(key, decision) => void handleDecideBrowserApproval(key, decision)}
             onBrowserNewTab={createPreviewBrowserTab}
             onBrowserSelectTab={selectPreviewBrowserTab}
             onBrowserSuggestAction={performBrowserSuggestedAction}

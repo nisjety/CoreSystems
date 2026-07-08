@@ -14,9 +14,10 @@ import type {
   BrowserObservation,
   BrowserProfileRestoreProbe,
 } from '@/shared/api/browser-client'
+import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import type { BrowserLoopState } from './browser-loop'
 import { BrowserChrome, type BrowserProfileManagerProps } from './BrowserChrome'
-import { browserSessionFromPreview, type BrowserStepRationale } from './browser-session'
+import { browserSessionFromPreview, type BrowserApprovalEntry, type BrowserStepRationale } from './browser-session'
 import { hostnameOf, type ScrapeBlock, type ScrapePreview } from './knowledge-preview'
 
 // Inline markdown → safe JSX. We only resolve the tokens that are reliable to
@@ -203,10 +204,12 @@ function ScrapeRegion(props: {
 }
 
 function BrowserSessionSurface(props: {
+  browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
   browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
+  decidingBrowserApprovalKeys?: string[]
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -218,6 +221,7 @@ function BrowserSessionSurface(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
+  onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   onEnter: (index: number) => void
   onLeave: (index: number) => void
   onSelectAll: () => void
@@ -248,10 +252,12 @@ function BrowserSessionSurface(props: {
       }}
     >
       <BrowserChrome
+        browserApprovals={props.browserApprovals}
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
         browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
+        decidingBrowserApprovalKeys={props.decidingBrowserApprovalKeys}
         frameControls={
           <div class="knowledge-browser-frame__controls">
             <button
@@ -284,6 +290,7 @@ function BrowserSessionSurface(props: {
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onDecideBrowserApproval={props.onDecideBrowserApproval}
         profileManager={props.profileManager}
         profileProbe={props.profileProbe}
         session={session()}
@@ -397,10 +404,12 @@ function BrowserSessionSurface(props: {
 
 export function ScrapePreviewPanel(props: {
   adding: boolean
+  browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
   browserLoopRationale?: BrowserStepRationale | null
   browserRationales?: BrowserStepRationale[]
+  decidingBrowserApprovalKeys?: string[]
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserControlMode?: (mode: BrowserControlMode) => void
@@ -411,6 +420,7 @@ export function ScrapePreviewPanel(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
+  onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
   preview: ScrapePreview
@@ -450,10 +460,12 @@ export function ScrapePreviewPanel(props: {
       aria-label="Nettleser"
     >
       <BrowserSessionSurface
+        browserApprovals={props.browserApprovals}
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
         browserLoopRationale={props.browserLoopRationale}
         browserRationales={props.browserRationales}
+        decidingBrowserApprovalKeys={props.decidingBrowserApprovalKeys}
         expanded={browserExpanded()}
         hovered={hovered()}
         onBrowserAction={props.onBrowserAction}
@@ -466,6 +478,7 @@ export function ScrapePreviewPanel(props: {
         onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onDecideBrowserApproval={props.onDecideBrowserApproval}
         onEnter={enter}
         onLeave={leave}
         onClose={() => props.onDiscard()}

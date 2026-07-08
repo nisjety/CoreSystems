@@ -90,3 +90,59 @@ describe('createBrowserLoopController — durable server-side run (Phase 2, mode
     expect(spy).not.toHaveBeenCalled()
   })
 })
+
+describe('createBrowserLoopController — HITL approval gate (Phase 5)', () => {
+  it('onApprovalRequired sets awaiting_approval while the loop is running', () => {
+    const controller = createBrowserLoopController()
+    controller.begin('find flights')
+    controller.attachRun({ orgId: 'org_1', runId: 'run_1' })
+    controller.onActionDispatched() // status: acting
+
+    controller.onApprovalRequired()
+    expect(controller.state().status).toBe('awaiting_approval')
+  })
+
+  it('is a no-op when the loop is not running', () => {
+    const controller = createBrowserLoopController()
+    controller.onApprovalRequired()
+    expect(controller.state().status).toBe('idle')
+  })
+
+  it('onApprovalDecided(granted) returns to acting from awaiting_approval', () => {
+    const controller = createBrowserLoopController()
+    controller.begin('find flights')
+    controller.attachRun({ orgId: 'org_1', runId: 'run_1' })
+    controller.onApprovalRequired()
+
+    controller.onApprovalDecided('granted')
+    expect(controller.state().status).toBe('acting')
+  })
+
+  it('onApprovalDecided(denied) ends the loop and records a reason', () => {
+    const spy = vi.spyOn(browserRunClient, 'controlBrowserAiRun').mockResolvedValue(undefined)
+    const controller = createBrowserLoopController()
+    controller.begin('find flights')
+    controller.attachRun({ orgId: 'org_1', runId: 'run_1' })
+    controller.onApprovalRequired()
+
+    controller.onApprovalDecided('denied')
+    expect(controller.state().status).toBe('stopped')
+    expect(controller.state().error).toBe('Handlingen ble avslått.')
+
+    // The run is treated as finished — a later local control call is a no-op.
+    controller.requestPause()
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('onApprovalDecided(timed_out) ends the loop with a timeout-specific reason', () => {
+    const controller = createBrowserLoopController()
+    controller.begin('find flights')
+    controller.attachRun({ orgId: 'org_1', runId: 'run_1' })
+    controller.onApprovalRequired()
+
+    controller.onApprovalDecided('timed_out')
+    expect(controller.state().status).toBe('stopped')
+    expect(controller.state().error).toBe('Handlingen fikk ikke godkjenning innen tidsfristen.')
+  })
+})

@@ -57,15 +57,18 @@ import type {
   BrowserTab,
   CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
+import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import {
   closeBrowserChromePopover,
   evidenceIsEphemeral,
   initialBrowserChromeState,
+  pendingBrowserApproval,
   rationaleForStep,
   timelineDetail,
   toggleBrowserChromePanel,
   toggleBrowserChromePopover,
+  type BrowserApprovalEntry,
   type BrowserChromePanel,
   type BrowserChromePopover,
   type BrowserReplayViewEvent,
@@ -140,12 +143,38 @@ const CREATABLE_PROFILE_SCOPES: CreatableBrowserProfileScope[] = ['user_private'
 
 const LOOP_STATUS_LABELS: Record<BrowserLoopState['status'], string> = {
   acting: 'Utfører',
+  awaiting_approval: 'Venter på godkjenning',
   done: 'Ferdig',
   idle: 'Inaktiv',
   paused: 'Pauset',
   stopped: 'Stoppet',
   suggesting: 'Foreslår',
 }
+
+/** Phase 5 HITL gate: Bokmål label per risk category self-reported by the
+ * planner or derived by execution-core's deterministic backstop classifier.
+ * Falls back to a generic label for any category not in this list, since the
+ * category is a free-form string from the wire, not a closed union here. */
+const BROWSER_APPROVAL_RISK_LABELS: Record<string, string> = {
+  checkout: 'Utsjekk/betaling',
+  cross_domain_navigation: 'Navigering til nytt domene',
+  destructive: 'Ødeleggende handling',
+  login: 'Innlogging',
+  persistent_cookie_use: 'Bruker vedvarende profil/informasjonskapsler',
+  posting_form: 'Skjemainnsending',
+}
+
+function browserApprovalRiskLabel(riskCategory: string): string {
+  return BROWSER_APPROVAL_RISK_LABELS[riskCategory] ?? 'Risikofylt handling'
+}
+
+const BROWSER_APPROVAL_STATUS_LABELS: Record<BrowserApprovalEntry['status'], string> = {
+  denied: 'Avslått',
+  granted: 'Godkjent',
+  pending: 'Venter på godkjenning',
+  timed_out: 'Tidsavbrutt',
+}
+
 const BROWSER_WHEEL_THROTTLE_MS = 280
 const LIVE_FRAME_REFRESH_MS = 700
 const MAX_BROWSER_WHEEL_DELTA = 1200
@@ -252,6 +281,89 @@ function DomNodeList(props: { nodes: BrowserSessionViewModel['domNodes'] }) {
 }
 
 /**
+ * Phase 5 HITL gate: one pending/decided browser-action approval, rendered
+ * in the evidence drawer's "Godkjenninger" section. Reuses the SAME
+ * `.velion-run-approval*` classes as AgentRunConsole's approval deck (the
+ * app's one existing approve/reject pattern) rather than inventing a new
+ * visual language — only the state-modifier classes below (granted/denied/
+ * timed_out) are new, so a decided browser-action approval reads as a
+ * distinct, deliberate marker instead of a normal completed/failed timeline
+ * step (a denied action never reaches the timeline at all — Quarry never
+ * dispatches it, so there is no step to attach a marker to).
+ */
+function BrowserApprovalCard(props: {
+  approval: BrowserApprovalEntry
+  deciding: boolean
+  onDecide?: (approvalKey: string, decision: ApprovalDecision) => void
+}) {
+  const approval = () => props.approval
+  const isPending = () => approval().status === 'pending'
+  return (
+    <div
+      class="velion-run-approval"
+      classList={{
+        [`velion-run-approval--${approval().status}`]: !isPending(),
+      }}
+    >
+      <div class="velion-run-approval__head">
+        <span
+          class="velion-run-approval__badge"
+          classList={{
+            'velion-run-approval__badge--granted': approval().status === 'granted',
+            'velion-run-approval__badge--denied': approval().status === 'denied' || approval().status === 'timed_out',
+          }}
+        >
+          <Show when={isPending()} fallback={approval().status === 'granted' ? <ShieldCheck class="size-3" /> : <AlertCircle class="size-3" />}>
+            <Pause class="size-3" />
+          </Show>
+          {BROWSER_APPROVAL_STATUS_LABELS[approval().status]}
+        </span>
+        <span class="velion-run-approval__kind">{browserApprovalRiskLabel(approval().riskCategory)}</span>
+      </div>
+      <p class="velion-run-approval__detail">
+        {approval().reason || 'Handlingen krever godkjenning før den utføres.'}
+      </p>
+      <Show when={approval().url || approval().selector}>
+        <p class="velion-run-approval__meta">
+          <Show when={approval().actionType}>{approval().actionType} · </Show>
+          <Show when={approval().url}>{compactBrowserUrl(approval().url)}</Show>
+          <Show when={approval().selector}> · {approval().selector}</Show>
+        </p>
+      </Show>
+      <Show when={approval().decidedBy}>
+        <p class="velion-run-approval__meta">Avgjort av {approval().decidedBy}</p>
+      </Show>
+      <Show when={isPending()}>
+        <div class="velion-run-approval__actions">
+          <button
+            type="button"
+            class="velion-run-approval__approve"
+            disabled={props.deciding}
+            onClick={() => props.onDecide?.(approval().key, 'approve')}
+          >
+            <Show when={props.deciding}>
+              <Loader2 class="size-3.5 velion-run-spin" />
+            </Show>
+            Godkjenn
+          </button>
+          <button
+            type="button"
+            class="velion-run-approval__reject"
+            disabled={props.deciding}
+            onClick={() => props.onDecide?.(approval().key, 'reject')}
+          >
+            <Show when={props.deciding}>
+              <Loader2 class="size-3.5 velion-run-spin" />
+            </Show>
+            Avslå
+          </button>
+        </div>
+      </Show>
+    </div>
+  )
+}
+
+/**
  * Unified browser chrome for the knowledge-card browser tab: ONE tab strip
  * (live + snapshot frames), ONE toolbar (nav, padlock+address, status, tools),
  * and content that dominates. Everything that used to be a permanent band —
@@ -262,6 +374,11 @@ function DomNodeList(props: { nodes: BrowserSessionViewModel['domNodes'] }) {
  * say so at all times.
  */
 export function BrowserChrome(props: {
+  /** Phase 5 HITL gate: pending/decided browser-action approvals for the
+   * current durable AI run, oldest first. Surfaced in the AI bubble (the
+   * single most recent still-pending one) and listed in full in the evidence
+   * drawer's "Godkjenninger" section. */
+  browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
   /** Latest streamed rationale from a durable server-side AI run (Phase 2):
@@ -271,6 +388,9 @@ export function BrowserChrome(props: {
   browserRationales?: BrowserStepRationale[]
   /** Fallback body (non-live render modes); shown instead of the live page. */
   children?: JSX.Element
+  /** Approval *keys* (see `BrowserApprovalEntry.key`) with an in-flight
+   * decide call — disables that card's Approve/Reject buttons. */
+  decidingBrowserApprovalKeys?: string[]
   frameControls?: JSX.Element
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
@@ -282,6 +402,8 @@ export function BrowserChrome(props: {
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
+  /** Phase 5 HITL gate: approve or reject a pending browser-action approval. */
+  onDecideBrowserApproval?: (approvalKey: string, decision: ApprovalDecision) => void
   /** Phase 3 continuation: full profile CRUD surfaced in the popover. Omit
    * to fall back to the read-only current-session info the popover always
    * showed before this. */
@@ -326,6 +448,7 @@ export function BrowserChrome(props: {
   let liveFrameSocketGeneration = 0
   let lastLiveFrameTransportKey = ''
   let lastDevtoolsSessionId = ''
+  let lastAutoOpenedApprovalKey = ''
   let wsActionTimer: number | undefined
 
   const session = () => props.session
@@ -333,6 +456,10 @@ export function BrowserChrome(props: {
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
   const loopStatus = () => props.browserLoop?.status ?? 'idle'
   const loopRunning = () => isBrowserLoopRunning(loopStatus())
+  // Phase 5 HITL gate: the single most recent still-pending browser-action
+  // approval, if any — the one the AI bubble surfaces over the live page.
+  const pendingApproval = () => pendingBrowserApproval(props.browserApprovals ?? [])
+  const decidingBrowserApprovalKeys = () => props.decidingBrowserApprovalKeys ?? []
   const humanTakeoverActive = () => session().controlMode === 'human_takeover'
   const liveBrowserTabs = () => session().tabs.length > 0
     ? session().tabs
@@ -732,6 +859,19 @@ export function BrowserChrome(props: {
     if (sessionId === lastDevtoolsSessionId) return
     lastDevtoolsSessionId = sessionId
     setDevtoolsEvents(session().devtoolsEvents)
+  })
+
+  // Phase 5 HITL gate: a pending browser-action approval is the highest-
+  // priority surface in the whole chrome — a blocked run needs a decision
+  // now. Auto-open the evidence drawer the moment a NEW one appears (once
+  // per approval key, so a user who deliberately closes the drawer again
+  // isn't fought on every re-render), mirroring how AgentRunConsole's
+  // approval deck scrolls itself into view.
+  createEffect(() => {
+    const approval = pendingApproval()
+    if (!approval || approval.key === lastAutoOpenedApprovalKey) return
+    lastAutoOpenedApprovalKey = approval.key
+    setChrome((state) => (state.evidenceOpen ? state : { ...state, evidenceOpen: true, popover: null }))
   })
 
   createEffect(() => {
@@ -1574,7 +1714,55 @@ export function BrowserChrome(props: {
       >
         <Show when={isLive()} fallback={props.children}>
           <div class="knowledge-browser-chrome__page" aria-label="Gjengitt nettleserside">
-            <Show when={!suggestionDismissed() && (props.browserLoopRationale?.reason ?? lastSuggestion()?.suggestion.reason)}>
+            <Show when={pendingApproval()}>
+              {(approval) => (
+                <div
+                  class="knowledge-browser-ai-bubble knowledge-browser-ai-bubble--approval"
+                  role="alert"
+                  aria-label="Venter på godkjenning"
+                >
+                  <AlertCircle class="size-3.5" aria-hidden="true" />
+                  <div class="knowledge-browser-ai-bubble__body">
+                    <span class="knowledge-browser-ai-bubble__kind">
+                      {browserApprovalRiskLabel(approval().riskCategory)}
+                    </span>
+                    <p>{approval().reason || 'Handlingen krever godkjenning før den utføres.'}</p>
+                    <Show when={approval().url || approval().selector}>
+                      <p class="knowledge-browser-ai-bubble__meta">
+                        <Show when={approval().actionType}>{approval().actionType} · </Show>
+                        <Show when={approval().url}>{compactBrowserUrl(approval().url)}</Show>
+                        <Show when={approval().selector}> · {approval().selector}</Show>
+                      </p>
+                    </Show>
+                    <div class="velion-run-approval__actions">
+                      <button
+                        type="button"
+                        class="velion-run-approval__approve"
+                        disabled={decidingBrowserApprovalKeys().includes(approval().key)}
+                        onClick={() => props.onDecideBrowserApproval?.(approval().key, 'approve')}
+                      >
+                        <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
+                          <Loader2 class="size-3.5 velion-run-spin" />
+                        </Show>
+                        Godkjenn
+                      </button>
+                      <button
+                        type="button"
+                        class="velion-run-approval__reject"
+                        disabled={decidingBrowserApprovalKeys().includes(approval().key)}
+                        onClick={() => props.onDecideBrowserApproval?.(approval().key, 'reject')}
+                      >
+                        <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
+                          <Loader2 class="size-3.5 velion-run-spin" />
+                        </Show>
+                        Avslå
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </Show>
+            <Show when={!pendingApproval() && !suggestionDismissed() && (props.browserLoopRationale?.reason ?? lastSuggestion()?.suggestion.reason)}>
               {(reason) => (
                 <div class="knowledge-browser-ai-bubble" role="status" aria-label="Siste AI-forslag">
                   <Sparkles class="size-3.5" aria-hidden="true" />
@@ -1795,6 +1983,26 @@ export function BrowserChrome(props: {
               <X class="size-3.5" />
             </button>
           </header>
+          <Show when={(props.browserApprovals ?? []).length > 0}>
+            <div class="knowledge-browser-evidence__approvals" aria-label="Godkjenninger">
+              <header class="knowledge-browser-evidence__approvals-head">
+                <ShieldCheck class="size-3.5" aria-hidden="true" />
+                <span>Godkjenninger</span>
+                <strong>{(props.browserApprovals ?? []).length}</strong>
+              </header>
+              <div class="velion-run-approvals" role="group" aria-label="Nettleserhandlinger som krever godkjenning">
+                <For each={props.browserApprovals}>
+                  {(approval) => (
+                    <BrowserApprovalCard
+                      approval={approval}
+                      deciding={decidingBrowserApprovalKeys().includes(approval.key)}
+                      onDecide={props.onDecideBrowserApproval}
+                    />
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
           <Show
             when={session().timeline.length > 0}
             fallback={<p class="knowledge-browser-evidence__hint">Ingen steg registrert ennå — naviger eller kjør en handling for å bygge tidslinjen.</p>}

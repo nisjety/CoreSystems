@@ -28,7 +28,14 @@
 
 import { controlBrowserAiRun } from '@/shared/api/browser-run-client'
 
-export type BrowserLoopStatus = 'idle' | 'suggesting' | 'acting' | 'paused' | 'stopped' | 'done'
+export type BrowserLoopStatus =
+  | 'idle'
+  | 'suggesting'
+  | 'acting'
+  | 'paused'
+  | 'awaiting_approval'
+  | 'stopped'
+  | 'done'
 
 export type BrowserLoopState = {
   error: string | null
@@ -73,13 +80,29 @@ export type BrowserLoopController = {
   /** Phase 2 reducer: the server confirmed the run resumed — returns to
    * whichever running status the loop was in before the pause. */
   onRunResumed: () => void
+  /** Phase 5 reducer: a risky browser action (or the run-level
+   * persistent-cookie-use gate) is now blocking on a human decision. Distinct
+   * from `onRunPaused`, which is user-initiated pause/resume, not HITL. */
+  onApprovalRequired: () => void
+  /** Phase 5 reducer: the pending approval was decided. `granted` is a
+   * best-effort immediate status flip — the next real
+   * `onActionDispatched`/`onObservationReceived` event (which always follows
+   * a grant) confirms it. `denied`/`timed_out` end the run server-side, so
+   * this ends the loop client-side too rather than leaving the chip stuck on
+   * "awaiting approval". */
+  onApprovalDecided: (decision: 'granted' | 'denied' | 'timed_out') => void
   requestPause: () => void
   requestResume: () => void
   requestStop: () => void
   state: () => BrowserLoopState
 }
 
-const RUNNING_STATUSES: ReadonlySet<BrowserLoopStatus> = new Set(['suggesting', 'acting', 'paused'])
+const RUNNING_STATUSES: ReadonlySet<BrowserLoopStatus> = new Set([
+  'suggesting',
+  'acting',
+  'paused',
+  'awaiting_approval',
+])
 
 export function isBrowserLoopRunning(status: BrowserLoopStatus): boolean {
   return RUNNING_STATUSES.has(status)
@@ -180,6 +203,29 @@ export function createBrowserLoopController(
     onRunResumed() {
       emit({ status: statusBeforePause ?? 'acting' })
       statusBeforePause = null
+    },
+    onApprovalRequired() {
+      if (isBrowserLoopRunning(state.status)) emit({ status: 'awaiting_approval' })
+    },
+    onApprovalDecided(decision) {
+      if (decision === 'granted') {
+        if (state.status === 'awaiting_approval') emit({ status: 'acting' })
+        return
+      }
+      // Denied/timed-out aborts the run server-side — end the loop
+      // client-side too rather than leaving the chip stuck on "awaiting
+      // approval". Mirrors `finish('stopped', ...)` exactly (kept inline,
+      // not a `this.finish` call, so this method stays safe to detach from
+      // the returned object).
+      pauseRequested = false
+      stopRequested = false
+      activeRun = null
+      statusBeforePause = null
+      releaseWaiters()
+      const reason = decision === 'timed_out'
+        ? 'Handlingen fikk ikke godkjenning innen tidsfristen.'
+        : 'Handlingen ble avslått.'
+      emit({ error: reason, status: 'stopped' })
     },
     requestPause() {
       if (controlActiveRun('pause')) return

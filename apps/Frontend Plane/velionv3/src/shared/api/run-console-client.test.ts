@@ -144,6 +144,50 @@ describe('streamRunEvents dispatch', () => {
     expect(onBrowserRunResumed).toHaveBeenCalledWith({ runId: 'run_1', planId: 'plan_1', at: undefined })
   })
 
+  it('dispatches browser_action_approval_required and browser_action_decided (Phase 5)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('browser_action_approval_required', {
+          run_id: 'run_1',
+          plan_id: 'plan_1',
+          action_id: 'act_1',
+          action_type: 'click',
+          url: 'https://shop.example.com/checkout',
+          selector: '#pay-now',
+          reason: 'clicking a checkout/payment control',
+          risk_category: 'checkout',
+          approval_id: '',
+        }),
+        sseFrame('browser_action_decided', {
+          run_id: 'run_1',
+          plan_id: 'plan_1',
+          action_id: 'act_1',
+          approval_id: 'appr_1',
+          decision: 'granted',
+          decided_by: 'user_1',
+        }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onBrowserActionApprovalRequired = vi.fn()
+    const onBrowserActionDecided = vi.fn()
+
+    await streamRunEvents('run_1', { onBrowserActionApprovalRequired, onBrowserActionDecided })
+
+    expect(onBrowserActionApprovalRequired).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionType: 'click',
+        url: 'https://shop.example.com/checkout',
+        selector: '#pay-now',
+        riskCategory: 'checkout',
+      }),
+    )
+    expect(onBrowserActionDecided).toHaveBeenCalledWith(
+      expect.objectContaining({ decision: 'granted', decidedBy: 'user_1', approvalId: 'appr_1' }),
+    )
+  })
+
   it('accepts camelCase payloads via the defensive fallbacks', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([sseFrame('approval_state_changed', { approvalId: 'appr_2', runId: 'run_2', to: 'GRANTED' })]),
