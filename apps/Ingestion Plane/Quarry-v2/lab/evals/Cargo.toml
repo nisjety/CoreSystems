@@ -7,6 +7,11 @@ publish = false
 [dependencies]
 quarry-transform = { path = "../../crates/quarry-transform" }
 quarry-core = { path = "../../crates/quarry-core" }
+quarry-browser = { path = "../../crates/quarry-browser" }
+quarry-runtime = { path = "../../crates/quarry-runtime" }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -14,6 +19,7 @@ url = { version = "2.5", features = ["serde"] }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+libc = "0.2"
 
 [[bin]]
 name = "quarry-eval"
@@ -30,3 +36,7 @@ path = "src/provider_matrix.rs"
 [[bin]]
 name = "quarry-release-matrix"
 path = "src/release_matrix.rs"
+
+[[bin]]
+name = "quarry-browser-benchmark"
+path = "src/browser_benchmark.rs"

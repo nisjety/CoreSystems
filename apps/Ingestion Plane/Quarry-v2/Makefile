@@ -1,4 +1,4 @@
-.PHONY: bootstrap build build-rust build-go test test-rust test-go test-vision fmt lint dev down clean tidy
+.PHONY: bootstrap build build-rust build-go test test-rust test-go test-vision bench-browser fmt lint dev down clean tidy
 
 bootstrap:
 	@command -v cargo >/dev/null || { echo "install rust toolchain: https://rustup.rs"; exit 1; }
@@ -30,6 +30,9 @@ test-go:
 
 test-vision:
 	cd services/quarry-vision-sidecar && python -m pytest
+
+bench-browser:
+	cargo run -p quarry-evals --bin quarry-browser-benchmark -- --frames 30 --actions 10 --out lab/evals/browser_benchmark.json
 
 fmt:
 	cargo fmt
