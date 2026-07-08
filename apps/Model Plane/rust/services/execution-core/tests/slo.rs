@@ -41,6 +41,7 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         "",   // empty step id → noop tool path does not use it
         None, // no session channel → noop tool path does not use it
         None, // no browser event sink → noop tool path does not use it
+        None, // no state store → noop tool path does not use it
     )
     .await
 }

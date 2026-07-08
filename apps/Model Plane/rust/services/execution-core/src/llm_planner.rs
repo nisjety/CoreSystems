@@ -173,6 +173,11 @@ struct NextAction {
     value: String,
     #[serde(default)]
     url: String,
+    /// The model's rationale for choosing this action. Requested by
+    /// `ACTION_SCHEMA` but previously discarded — now carried onto
+    /// `BrowserAction.reason` so it reaches the run-event stream (Phase 2).
+    #[serde(default)]
+    reason: String,
 }
 
 impl NextAction {
@@ -198,6 +203,7 @@ impl NextAction {
             value: self.value,
             url: self.url,
             max_wait_ms: 5000,
+            reason: self.reason,
         })
     }
 }
@@ -265,10 +271,28 @@ mod tests {
     }
 
     #[test]
-    fn extra_unknown_fields_are_ignored() {
-        // The model emits a `reason` field (present in ACTION_SCHEMA) that
-        // NextAction does not capture; serde must ignore it, not reject.
+    fn reason_is_captured_onto_the_browser_action() {
+        // Phase 2: `reason` (present in ACTION_SCHEMA) is no longer discarded —
+        // it flows onto `BrowserAction.reason` for the run-event stream.
         let action = parse(r#"{"action":"scroll","reason":"need to see more"}"#)
+            .into_browser_action()
+            .expect("scroll is not terminal");
+        assert_eq!(action.action_type, ActionType::Scroll);
+        assert_eq!(action.reason, "need to see more");
+    }
+
+    #[test]
+    fn reason_defaults_to_empty_when_absent() {
+        let action = parse(r#"{"action":"scroll"}"#)
+            .into_browser_action()
+            .expect("scroll is not terminal");
+        assert_eq!(action.reason, "");
+    }
+
+    #[test]
+    fn truly_unknown_fields_are_still_ignored() {
+        // Any field NextAction doesn't declare must be ignored, not rejected.
+        let action = parse(r#"{"action":"scroll","confidence":0.9,"unused":"x"}"#)
             .into_browser_action()
             .expect("scroll is not terminal");
         assert_eq!(action.action_type, ActionType::Scroll);

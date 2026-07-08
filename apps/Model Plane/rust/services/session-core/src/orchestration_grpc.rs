@@ -737,6 +737,8 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::RunResumedAfterApproval(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserActionDispatched(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserObservationReceived(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserRunPaused(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserRunResumed(p) => Some(&p.run_id),
     }
 }
 
@@ -1697,6 +1699,10 @@ mod tests {
     }
 
     #[test]
+    // One assertion per oneof variant — a single flat test keeps the mapping
+    // exhaustively visible in one place instead of splitting trivial per-variant
+    // fixtures across many tiny tests.
+    #[allow(clippy::too_many_lines)]
     fn event_run_id_extracts_per_variant() {
         let plan = proto::OrchestrationEvent {
             event_id: String::new(),
@@ -1767,6 +1773,7 @@ mod tests {
                     action_id: "act_0001".into(),
                     action_type: "goto".into(),
                     url: "https://example.com".into(),
+                    reason: "navigating to the landing page".into(),
                 },
             )),
         };
@@ -1783,10 +1790,36 @@ mod tests {
                     status: "success".into(),
                     page_url: "https://example.com/landing".into(),
                     page_title: "Example".into(),
+                    screenshot_ref: "art_shot".into(),
+                    dom_snapshot_ref: String::new(),
                 },
             )),
         };
         assert_eq!(event_run_id(&browser_obs), Some("run_o"));
+
+        let paused = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserRunPaused(
+                orchestration_event::BrowserRunPaused {
+                    run_id: "run_p".into(),
+                    plan_id: "plan_p".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&paused), Some("run_p"));
+
+        let resumed_run = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserRunResumed(
+                orchestration_event::BrowserRunResumed {
+                    run_id: "run_p".into(),
+                    plan_id: "plan_p".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&resumed_run), Some("run_p"));
     }
 
     #[tokio::test]
@@ -1804,6 +1837,7 @@ mod tests {
                     action_id: "act_0001".into(),
                     action_type: "observe".into(),
                     url: String::new(),
+                    reason: String::new(),
                 },
             )),
         };

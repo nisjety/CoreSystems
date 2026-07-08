@@ -19,6 +19,12 @@ service ExecutionCore {
   // Cancel an active run.
   rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
 
+  // Pause an active run (Phase 2 B5 — user-initiated browser-run control).
+  // Mirrors ResumeRun/CancelRun. A paused run's in-flight loop (e.g. the
+  // browser-agent loop) polls this state and blocks between steps until
+  // resumed or cancelled; it never aborts a step already in flight.
+  rpc PauseRun(PauseRunRequest) returns (PauseRunResponse);
+
   // Drive a whole agent run to completion: plan → infer → persist → finalize.
   // MVP no-tool slice — a single InferenceCore.Infer round persisted to the
   // run's thread, with the run flipped to a terminal status. Dispatched by the
@@ -140,5 +146,20 @@ message ResumeRunResponse {
 
   // Current step index after resume.
   uint32 step_index = 2;
+}
+
+// PauseRunRequest — pause an active run (Phase 2 B5).
+message PauseRunRequest {
+  // Run to pause.
+  string run_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+}
+
+// PauseRunResponse — acknowledgement that the run has been paused.
+message PauseRunResponse {
+  // True if the run was successfully paused.
+  bool paused = 1;
 }
 

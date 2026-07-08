@@ -21,6 +21,9 @@ pub enum PlanStatus {
     WaitingApproval,
     Completed,
     Failed,
+    /// User cancelled the run mid-loop (Phase 2 B5), or the loop was aborted
+    /// for another non-planner reason. Distinct from `Failed` — an abort is
+    /// user/operator-initiated, not an execution error.
     Aborted,
 }
 
@@ -94,6 +97,10 @@ pub struct BrowserAction {
     pub value: String,
     pub url: String,
     pub max_wait_ms: i32,
+    /// The planner's rationale for choosing this action. Empty for the
+    /// deterministic fallback (no LLM reason available). Surfaced on the
+    /// run-event stream (Phase 2) so the UI can show model reasoning live.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +136,10 @@ pub trait BrowserEventSink: Send + Sync {
     async fn action_dispatched(&self, config: &PlanConfig, action: &BrowserAction);
     /// Emit that `observation` was received for the run/plan in `config`.
     async fn observation_received(&self, config: &PlanConfig, observation: &BrowserObservation);
+    /// Emit that a user paused the run/plan in `config` (Phase 2 B5).
+    async fn run_paused(&self, config: &PlanConfig);
+    /// Emit that a user resumed the run/plan in `config` (Phase 2 B5).
+    async fn run_resumed(&self, config: &PlanConfig);
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +158,10 @@ pub struct PlanConfig {
     pub max_cost_usd: Option<f64>,
     /// Zero-data-retention: when true, Quarry must not persist page content.
     pub zdr: bool,
+    /// Persistent Quarry browser profile to reuse cookie/session state from
+    /// (Phase 2). `None` acquires a fresh, isolated Quarry session — the same
+    /// default a manual `create_session` gets without an explicit profile.
+    pub profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +227,8 @@ pub enum PlanStepResult {
     Completed(String),
     WaitingApproval,
     Failed(String),
+    /// The run was cancelled by the user mid-loop (Phase 2 B5).
+    Aborted(String),
 }
 
 /// Extract the host portion of a URL without bringing in a full URL parser.
@@ -311,6 +328,7 @@ pub fn plan_next_action(
             value: String::new(),
             url: String::new(),
             max_wait_ms: 5000,
+            reason: String::new(),
         });
     }
 
@@ -322,6 +340,7 @@ pub fn plan_next_action(
         value: String::new(),
         url: String::new(),
         max_wait_ms: 5000,
+        reason: String::new(),
     })
 }
 
@@ -333,11 +352,15 @@ pub fn plan_next_action(
 /// fails fast rather than silently no-op'ing. The planner (`plan_next_action`)
 /// is still deterministic (always `Observe`) until the LLM decider lands; the
 /// dispatch path itself is real.
+// Cohesive single-loop driver (lease → dispatch/observe → release); splitting
+// it would obscure the linear dispatch/observe/cleanup flow.
+#[allow(clippy::too_many_lines)]
 pub async fn run_browser_agent_loop(
     config: PlanConfig,
     client: Option<&crate::quarry_agent::QuarryAgentClient>,
     planner: Option<&crate::llm_planner::LlmPlanner>,
     sink: Option<&dyn BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
 ) -> (PlanStatus, Vec<BrowserObservation>, String) {
     let mut plan = AgentPlan::new(config);
     info!(plan_id = %plan.config.plan_id, "browser-agent loop started");
@@ -363,9 +386,16 @@ pub async fn run_browser_agent_loop(
     };
     let zdr = plan.config.zdr;
 
-    // Acquire a leased browser session for this run.
+    // Acquire a leased browser session for this run. `profile_id` threads
+    // through so an AI run launched from a tab with a persistent profile
+    // inherits its cookie state (Phase 2); `None` behaves exactly as before.
     let run = match client
-        .start_run(&plan.config.org_id, &constraints, zdr, None)
+        .start_run(
+            &plan.config.org_id,
+            &constraints,
+            zdr,
+            plan.config.profile_id.clone(),
+        )
         .await
     {
         Ok(r) => r,
@@ -383,7 +413,7 @@ pub async fn run_browser_agent_loop(
     let mut pending: Option<BrowserObservation> = None;
     let summary = loop {
         let last = pending.take();
-        let result = decide_next_action(&mut plan, last.as_ref(), planner).await;
+        let result = decide_next_action(&mut plan, last.as_ref(), planner, state, sink).await;
         match result {
             PlanStepResult::Action(action) => {
                 // Enforce the domain allow-list at dispatch for navigations
@@ -435,7 +465,11 @@ pub async fn run_browser_agent_loop(
                     }
                 }
             }
-            PlanStepResult::Completed(reason) => break reason,
+            // `Completed`/`Aborted` share a body today (both simply end the
+            // loop with their reason string) but are intentionally distinct
+            // variants — `plan.status` already diverged (Completed/Aborted)
+            // before reaching here, and callers may branch on it later.
+            PlanStepResult::Completed(reason) | PlanStepResult::Aborted(reason) => break reason,
             PlanStepResult::WaitingApproval => break "paused for approval".to_owned(),
             PlanStepResult::Failed(error) => break error,
         }
@@ -451,16 +485,34 @@ pub async fn run_browser_agent_loop(
     (plan.status, observations, summary)
 }
 
-/// Decide the next step: run the deterministic gate (`plan_next_action` —
-/// terminal/limit/stop-criteria/approval checks + step bookkeeping), then, when
-/// it yields an action and an LLM planner is configured, let the model choose
-/// the real action from the latest observation. Falls back to the deterministic
-/// `Observe` action when the planner is absent or errors.
+/// Polling interval while a run is paused (Phase 2 B5). Shortened under test
+/// so pause/resume unit tests don't sleep in real wall-clock time.
+fn pause_poll_interval() -> std::time::Duration {
+    if cfg!(test) {
+        std::time::Duration::from_millis(5)
+    } else {
+        std::time::Duration::from_millis(500)
+    }
+}
+
+/// Decide the next step: first poll for a user-initiated cancel/pause
+/// (Phase 2 B5, see [`wait_out_pause_or_cancel`]), then run the deterministic
+/// gate (`plan_next_action` — terminal/limit/stop-criteria/approval checks +
+/// step bookkeeping), then, when it yields an action and an LLM planner is
+/// configured, let the model choose the real action from the latest
+/// observation. Falls back to the deterministic `Observe` action when the
+/// planner is absent or errors.
 async fn decide_next_action(
     plan: &mut AgentPlan,
     last_observation: Option<&BrowserObservation>,
     planner: Option<&crate::llm_planner::LlmPlanner>,
+    state: Option<&crate::state::StateStore>,
+    sink: Option<&dyn BrowserEventSink>,
 ) -> PlanStepResult {
+    if let Some(aborted) = wait_out_pause_or_cancel(plan, state, sink).await {
+        return aborted;
+    }
+
     let gate = plan_next_action(plan, last_observation);
     let PlanStepResult::Action(candidate) = gate else {
         return gate;
@@ -481,6 +533,53 @@ async fn decide_next_action(
         Err(e) => {
             warn!(error = %e, "llm planner failed; falling back to deterministic observe");
             PlanStepResult::Action(candidate)
+        }
+    }
+}
+
+/// Poll `state` for a user-initiated cancel or pause (Phase 2 B5) and block
+/// accordingly. Returns `Some(PlanStepResult::Aborted(..))` when the run was
+/// cancelled (whether immediately or while paused); returns `None` once the
+/// run is (or becomes) `Running`, so the caller proceeds to the planner gate.
+///
+/// No-op when `state` is absent or the plan has no `run_id` — mirrors the
+/// existing best-effort shape of `BrowserEventSink`: a caller that never
+/// wires a `StateStore` (e.g. existing tests, or a loop driven outside
+/// `ExecuteStep`) sees unchanged behavior.
+async fn wait_out_pause_or_cancel(
+    plan: &mut AgentPlan,
+    state: Option<&crate::state::StateStore>,
+    sink: Option<&dyn BrowserEventSink>,
+) -> Option<PlanStepResult> {
+    let state = state?;
+    if plan.config.run_id.is_empty() {
+        return None;
+    }
+
+    let mut announced_paused = false;
+    loop {
+        match state.get_or_create(&plan.config.run_id).status {
+            crate::state::RunStatus::Cancelled => {
+                plan.status = PlanStatus::Aborted;
+                return Some(PlanStepResult::Aborted("cancelled by user".to_owned()));
+            }
+            crate::state::RunStatus::Paused => {
+                if !announced_paused {
+                    if let Some(sink) = sink {
+                        sink.run_paused(&plan.config).await;
+                    }
+                    announced_paused = true;
+                }
+                tokio::time::sleep(pause_poll_interval()).await;
+            }
+            _ => {
+                if announced_paused {
+                    if let Some(sink) = sink {
+                        sink.run_resumed(&plan.config).await;
+                    }
+                }
+                return None;
+            }
         }
     }
 }
@@ -555,6 +654,7 @@ mod tests {
             require_approval: false,
             max_cost_usd: None,
             zdr: false,
+            profile_id: None,
         }
     }
 
@@ -716,5 +816,116 @@ mod tests {
         assert!(store.abort("plan_001"));
         assert_eq!(store.get("plan_001").unwrap().status, PlanStatus::Aborted);
         assert!(!store.abort("plan_001")); // already terminal
+    }
+
+    // ── Phase 2 B5: user-initiated pause/resume/cancel gate ────────────────
+
+    #[derive(Default)]
+    struct RecordingSink {
+        paused: std::sync::atomic::AtomicUsize,
+        resumed: std::sync::atomic::AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl BrowserEventSink for RecordingSink {
+        async fn action_dispatched(&self, _config: &PlanConfig, _action: &BrowserAction) {}
+        async fn observation_received(
+            &self,
+            _config: &PlanConfig,
+            _observation: &BrowserObservation,
+        ) {
+        }
+        async fn run_paused(&self, _config: &PlanConfig) {
+            self.paused
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        async fn run_resumed(&self, _config: &PlanConfig) {
+            self.resumed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_out_pause_or_cancel_is_noop_without_a_state_store() {
+        let mut plan = AgentPlan::new(test_config());
+        let result = wait_out_pause_or_cancel(&mut plan, None, None).await;
+        assert!(result.is_none());
+        assert_eq!(plan.status, PlanStatus::Planning);
+    }
+
+    #[tokio::test]
+    async fn wait_out_pause_or_cancel_is_noop_without_a_run_id() {
+        let mut config = test_config();
+        config.run_id = String::new();
+        let mut plan = AgentPlan::new(config);
+        let store = crate::state::StateStore::new();
+        let _ = store.cancel("run_001", None); // a different (empty) run id — irrelevant
+        let result = wait_out_pause_or_cancel(&mut plan, Some(&store), None).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_out_pause_or_cancel_aborts_immediately_on_cancelled() {
+        let store = crate::state::StateStore::new();
+        let _ = store.cancel("run_001", Some("user_stop".to_owned()));
+        let mut plan = AgentPlan::new(test_config());
+        let result = wait_out_pause_or_cancel(&mut plan, Some(&store), None).await;
+        match result {
+            Some(PlanStepResult::Aborted(reason)) => assert_eq!(reason, "cancelled by user"),
+            other => panic!(
+                "expected Aborted, got a different result: {}",
+                other.is_some()
+            ),
+        }
+        assert_eq!(plan.status, PlanStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn wait_out_pause_or_cancel_blocks_until_resumed_and_announces_once() {
+        let store = crate::state::StateStore::new();
+        let _ = store.pause("run_001");
+        let sink = RecordingSink::default();
+
+        let resumer_store = store.clone();
+        let resumer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            resumer_store.update(crate::state::RunSnapshot {
+                run_id: "run_001".to_owned(),
+                step_index: 0,
+                status: crate::state::RunStatus::Running,
+                last_error: None,
+            });
+        });
+
+        let mut plan = AgentPlan::new(test_config());
+        let result = wait_out_pause_or_cancel(&mut plan, Some(&store), Some(&sink)).await;
+        resumer.await.expect("resumer task");
+
+        assert!(result.is_none(), "run resumed — loop should proceed");
+        assert_eq!(sink.paused.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(sink.resumed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_out_pause_or_cancel_aborts_while_paused_when_later_cancelled() {
+        let store = crate::state::StateStore::new();
+        let _ = store.pause("run_001");
+        let sink = RecordingSink::default();
+
+        let canceller_store = store.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let _ = canceller_store.cancel("run_001", Some("user_stop".to_owned()));
+        });
+
+        let mut plan = AgentPlan::new(test_config());
+        let result = wait_out_pause_or_cancel(&mut plan, Some(&store), Some(&sink)).await;
+        canceller.await.expect("canceller task");
+
+        assert!(matches!(result, Some(PlanStepResult::Aborted(_))));
+        assert_eq!(plan.status, PlanStatus::Aborted);
+        assert_eq!(sink.paused.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Cancelled from Paused, never flipped through Running — no resume announced.
+        assert_eq!(sink.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

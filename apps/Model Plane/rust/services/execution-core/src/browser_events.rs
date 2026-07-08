@@ -77,6 +77,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 action_id: action.action_id.clone(),
                 action_type: action.action_type.as_str().to_owned(),
                 url: action.url.clone(),
+                reason: action.reason.clone(),
             },
         );
         self.publish(&config.run_id, event).await;
@@ -94,8 +95,36 @@ impl BrowserEventSink for OrchestrationEventSink {
                 status: observation.status.as_str().to_owned(),
                 page_url: observation.page_url.clone(),
                 page_title: observation.page_title.clone(),
+                // Reference ids only — never inlined bytes, and `extracted_text`
+                // is deliberately excluded from the wire event (ZDR intent).
+                screenshot_ref: observation.screenshot_ref.clone(),
+                dom_snapshot_ref: observation.dom_snapshot_ref.clone(),
             },
         );
+        self.publish(&config.run_id, event).await;
+    }
+
+    async fn run_paused(&self, config: &PlanConfig) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event =
+            orchestration_event::Event::BrowserRunPaused(orchestration_event::BrowserRunPaused {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+            });
+        self.publish(&config.run_id, event).await;
+    }
+
+    async fn run_resumed(&self, config: &PlanConfig) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event =
+            orchestration_event::Event::BrowserRunResumed(orchestration_event::BrowserRunResumed {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+            });
         self.publish(&config.run_id, event).await;
     }
 }

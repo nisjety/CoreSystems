@@ -433,6 +433,7 @@ mod tests {
             value: value.to_owned(),
             url: url.to_owned(),
             max_wait_ms: 3000,
+            reason: String::new(),
         }
     }
 

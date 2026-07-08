@@ -86,6 +86,7 @@ impl ExecutionCore for ExecutionService {
             &req.step_id,
             Some(self.session_channel.clone()),
             Some(&browser_sink),
+            Some(&self.state),
         )
         .await;
 
@@ -223,6 +224,21 @@ impl ExecutionCore for ExecutionService {
         let cancelled = self.state.cancel(&req.run_id, Some(req.reason));
 
         Ok(Response::new(pb::CancelRunResponse { cancelled }))
+    }
+
+    /// Pause an active run (Phase 2 B5). Mirrors `resume_run`/`cancel_run`:
+    /// flips the in-memory `StateStore` entry so an in-flight loop's own
+    /// gate (e.g. `browser_agent::decide_next_action`) observes it between
+    /// steps and blocks there — never mid-step.
+    async fn pause_run(
+        &self,
+        request: Request<pb::PauseRunRequest>,
+    ) -> Result<Response<pb::PauseRunResponse>, Status> {
+        let req = request.into_inner();
+        let paused = self.state.pause(&req.run_id);
+        info!(run_id = %req.run_id, "pause_run: run state set to Paused");
+
+        Ok(Response::new(pb::PauseRunResponse { paused }))
     }
 
     /// Drive a whole agent run to a terminal answer (MVP no-tool slice).

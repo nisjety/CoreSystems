@@ -300,6 +300,7 @@ async fn run_agent_with_tools(
                 &step_id,
                 Some(session_channel.clone()),
                 None,
+                None,
             )
             .await;
 

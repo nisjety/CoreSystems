@@ -3273,7 +3273,7 @@ async fn delete_skill_proxy(
     proxy_to_capability_core(&s, &format!("skills/{id}"), "DELETE", None).await
 }
 
-fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
+pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
     let status = match error.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::NotFound => StatusCode::NOT_FOUND,

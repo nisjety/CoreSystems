@@ -17,8 +17,10 @@ use mp_contracts::model_plane::v1::{
 use orchestration_event::{
     ApprovalStateChanged as PbApprovalStateChanged,
     BrowserActionDispatched as PbBrowserActionDispatched,
-    BrowserObservationReceived as PbBrowserObservationReceived, Event as ProtoEvent,
-    PlanTransitioned as PbPlanTransitioned, RunPausedForApproval as PbRunPausedForApproval,
+    BrowserObservationReceived as PbBrowserObservationReceived,
+    BrowserRunPaused as PbBrowserRunPaused, BrowserRunResumed as PbBrowserRunResumed,
+    Event as ProtoEvent, PlanTransitioned as PbPlanTransitioned,
+    RunPausedForApproval as PbRunPausedForApproval,
     RunResumedAfterApproval as PbRunResumedAfterApproval, SubagentAttached as PbSubagentAttached,
     SubagentStopped as PbSubagentStopped, TodoTransitioned as PbTodoTransitioned,
 };
@@ -314,6 +316,10 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     action_id,
                     action_type,
                     url,
+                    // The domain enum has no `reason` field — this direction is
+                    // vestigial (browser_events.rs constructs the wire event
+                    // directly and never round-trips through this domain enum).
+                    reason: String::new(),
                 }),
             ),
             OrchestrationEvent::BrowserObservationReceived {
@@ -333,7 +339,26 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     status,
                     page_url,
                     page_title,
+                    // See note above: vestigial direction, no domain equivalent.
+                    screenshot_ref: String::new(),
+                    dom_snapshot_ref: String::new(),
                 }),
+            ),
+            OrchestrationEvent::BrowserRunPaused {
+                run_id,
+                plan_id,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserRunPaused(PbBrowserRunPaused { run_id, plan_id }),
+            ),
+            OrchestrationEvent::BrowserRunResumed {
+                run_id,
+                plan_id,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::BrowserRunResumed(PbBrowserRunResumed { run_id, plan_id }),
             ),
         }
     }
@@ -407,9 +432,21 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                     status: p.status,
                     page_url: p.page_url,
                     page_title: p.page_title,
+                    // `p.screenshot_ref`/`p.dom_snapshot_ref` have no domain
+                    // equivalent (see the `From` direction's note) — dropped.
                     at,
                 }
             }
+            ProtoEvent::BrowserRunPaused(p) => OrchestrationEvent::BrowserRunPaused {
+                run_id: p.run_id,
+                plan_id: p.plan_id,
+                at,
+            },
+            ProtoEvent::BrowserRunResumed(p) => OrchestrationEvent::BrowserRunResumed {
+                run_id: p.run_id,
+                plan_id: p.plan_id,
+                at,
+            },
         })
     }
 }
@@ -471,6 +508,24 @@ mod tests {
             status: "success".into(),
             page_url: "https://example.com/landing".into(),
             page_title: "Example Domain".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_browser_run_paused() {
+        round_trip(&OrchestrationEvent::BrowserRunPaused {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_browser_run_resumed() {
+        round_trip(&OrchestrationEvent::BrowserRunResumed {
+            run_id: "run-1".into(),
+            plan_id: "plan-1".into(),
             at: fixture_at(),
         });
     }

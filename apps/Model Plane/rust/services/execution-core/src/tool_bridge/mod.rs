@@ -91,6 +91,7 @@ fn execute_wiki_lint(tool_input: &str) -> ToolExecution {
 pub(crate) async fn execute_browser_agent(
     tool_input: &str,
     sink: Option<&dyn browser_agent::BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
 ) -> ToolExecution {
     let config: Result<BrowserAgentInput, _> = serde_json::from_str(tool_input);
     match config {
@@ -108,6 +109,7 @@ pub(crate) async fn execute_browser_agent(
                 require_approval: input.require_approval.unwrap_or(false),
                 max_cost_usd: input.max_cost_usd,
                 zdr: input.zdr.unwrap_or(false),
+                profile_id: input.profile_id,
             };
             // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
             // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
@@ -118,6 +120,7 @@ pub(crate) async fn execute_browser_agent(
                 client.as_ref(),
                 planner.as_ref(),
                 sink,
+                state,
             )
             .await;
             ToolExecution {
@@ -150,4 +153,7 @@ struct BrowserAgentInput {
     require_approval: Option<bool>,
     max_cost_usd: Option<f64>,
     zdr: Option<bool>,
+    /// Persistent Quarry browser profile to reuse cookie/session state from
+    /// (Phase 2). `None` acquires a fresh, isolated Quarry session.
+    profile_id: Option<String>,
 }

@@ -2135,6 +2135,8 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::RunResumedAfterApproval(_) => "run_resumed_after_approval",
         orchestration_event::Event::BrowserActionDispatched(_) => "browser_action_dispatched",
         orchestration_event::Event::BrowserObservationReceived(_) => "browser_observation_received",
+        orchestration_event::Event::BrowserRunPaused(_) => "browser_run_paused",
+        orchestration_event::Event::BrowserRunResumed(_) => "browser_run_resumed",
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
@@ -2145,6 +2147,9 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
 /// renders in the chat timeline. A derived view of `mp.v1.orchestration.*` —
 /// the raw event still carries the resume id. Returns `None` for events that
 /// don't correspond to a visible step.
+// One match arm per oneof variant keeps the mapping exhaustively visible in a
+// single place rather than splitting it across helper functions.
+#[allow(clippy::too_many_lines)]
 fn orchestration_event_to_step_update(
     event: &OrchestrationEvent,
 ) -> Option<crate::sse_events::ChatEvent> {
@@ -2208,11 +2213,14 @@ fn orchestration_event_to_step_update(
             "running".to_owned(),
         ),
         Event::BrowserActionDispatched(p) => {
-            let detail = if p.url.is_empty() {
+            let mut detail = if p.url.is_empty() {
                 p.action_type.clone()
             } else {
                 format!("{} {}", p.action_type, p.url)
             };
+            if !p.reason.is_empty() {
+                detail = format!("{detail} — {}", p.reason);
+            }
             (
                 format!("browser-{}", p.action_id),
                 "Browser".to_owned(),
@@ -2221,11 +2229,17 @@ fn orchestration_event_to_step_update(
             )
         }
         Event::BrowserObservationReceived(p) => {
-            let detail = if p.page_title.is_empty() {
+            let mut detail = if p.page_title.is_empty() {
                 p.status.clone()
             } else {
                 format!("{} · {}", p.status, p.page_title)
             };
+            if !p.screenshot_ref.is_empty() {
+                detail = format!("{detail} [shot:{}]", p.screenshot_ref);
+            }
+            if !p.dom_snapshot_ref.is_empty() {
+                detail = format!("{detail} [dom:{}]", p.dom_snapshot_ref);
+            }
             (
                 format!("browser-{}", p.action_id),
                 "Browser".to_owned(),
@@ -2233,6 +2247,18 @@ fn orchestration_event_to_step_update(
                 p.status.clone(),
             )
         }
+        Event::BrowserRunPaused(p) => (
+            p.run_id.clone(),
+            "Paused".to_owned(),
+            "user paused the browser run".to_owned(),
+            "paused".to_owned(),
+        ),
+        Event::BrowserRunResumed(p) => (
+            p.run_id.clone(),
+            "Resumed".to_owned(),
+            "user resumed the browser run".to_owned(),
+            "running".to_owned(),
+        ),
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -2319,6 +2345,7 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             object.insert("action_id".to_owned(), json!(payload.action_id));
             object.insert("action_type".to_owned(), json!(payload.action_type));
             object.insert("url".to_owned(), json!(payload.url));
+            object.insert("reason".to_owned(), json!(payload.reason));
         }
         orchestration_event::Event::BrowserObservationReceived(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
@@ -2327,6 +2354,19 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             object.insert("status".to_owned(), json!(payload.status));
             object.insert("page_url".to_owned(), json!(payload.page_url));
             object.insert("page_title".to_owned(), json!(payload.page_title));
+            object.insert("screenshot_ref".to_owned(), json!(payload.screenshot_ref));
+            object.insert(
+                "dom_snapshot_ref".to_owned(),
+                json!(payload.dom_snapshot_ref),
+            );
+        }
+        orchestration_event::Event::BrowserRunPaused(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
+        }
+        orchestration_event::Event::BrowserRunResumed(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
         }
     }
 

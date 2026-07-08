@@ -49,10 +49,11 @@ async fn browser_agent_drives_real_quarry_loop() {
         require_approval: false,
         max_cost_usd: Some(0.50),
         zdr: false,
+        profile_id: None,
     };
 
     let (status, observations, summary) =
-        run_browser_agent_loop(config, Some(&client), planner.as_ref(), None).await;
+        run_browser_agent_loop(config, Some(&client), planner.as_ref(), None, None).await;
 
     eprintln!(
         "E2E result: status={} observations={} summary={summary}",

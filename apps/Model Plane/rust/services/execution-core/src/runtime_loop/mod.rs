@@ -126,6 +126,7 @@ pub async fn execute_step(
     step_id: &str,
     session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
 ) -> StepOutcome {
     if hook::is_blocked(hook_context) {
         return StepOutcome::failed("blocked by pre-tool hook");
@@ -153,7 +154,7 @@ pub async fn execute_step(
     let exec = if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == BROWSER_AGENT_TOOL {
-        tool_bridge::execute_browser_agent(tool_input, browser_event_sink).await
+        tool_bridge::execute_browser_agent(tool_input, browser_event_sink, state).await
     } else if tool_name == WEB_SEARCH_TOOL {
         execute_web_search(tool_input).await
     } else if tool_name == WEB_FETCH_TOOL {
@@ -754,9 +755,9 @@ async fn resolve_write_approval(
         .map_err(|e| format!("provider write blocked: could not reach approval store: {e}"))?
         .into_inner();
 
-    let approval = created.approval.ok_or_else(|| {
-        "provider write blocked: approval store returned no record".to_owned()
-    })?;
+    let approval = created
+        .approval
+        .ok_or_else(|| "provider write blocked: approval store returned no record".to_owned())?;
     let granted = approval.state == pb::ApprovalState::Granted as i32;
 
     if PermissionMode::from_wire(permission_mode) == PermissionMode::Ask {
@@ -825,6 +826,7 @@ mod tests {
             "step_test",
             None,
             None,
+            None,
         )
         .await;
         assert_eq!(out.status, "completed", "outcome: {out:?}");
@@ -842,6 +844,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            None,
             None,
             None,
         )
@@ -862,6 +865,7 @@ mod tests {
             "step_test",
             None,
             None,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -878,6 +882,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            None,
             None,
             None,
         )
@@ -899,6 +904,7 @@ mod tests {
             "step_test",
             None,
             None,
+            None,
         )
         .await;
         assert_eq!(out.status, "permission_denied");
@@ -913,8 +919,8 @@ mod tests {
 
     #[tokio::test]
     async fn provider_write_without_session_channel_is_blocked() {
-        let r = resolve_write_approval(None, "org", "user", "run", "step", "auto", "pages.post")
-            .await;
+        let r =
+            resolve_write_approval(None, "org", "user", "run", "step", "auto", "pages.post").await;
         assert!(r.is_err(), "a write with no approval store must be blocked");
         assert!(r.unwrap_err().contains("session-core"));
     }
@@ -925,7 +931,10 @@ mod tests {
         let ch = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let r =
             resolve_write_approval(Some(&ch), "org", "user", "", "", "auto", "pages.post").await;
-        assert!(r.is_err(), "a write with no run/step context must be blocked");
+        assert!(
+            r.is_err(),
+            "a write with no run/step context must be blocked"
+        );
         assert!(r.unwrap_err().contains("run/step"));
     }
 }

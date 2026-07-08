@@ -37,6 +37,10 @@ pub enum OrchestrationEventKind {
     BrowserActionDispatched,
     /// The browser agent received an observation back from the executor.
     BrowserObservationReceived,
+    /// A user paused a running browser-agent loop (Phase 2 B5).
+    BrowserRunPaused,
+    /// A user resumed a paused browser-agent loop (Phase 2 B5).
+    BrowserRunResumed,
 }
 
 /// Typed orchestration event payload. Each variant carries the minimum fields
@@ -155,6 +159,24 @@ pub enum OrchestrationEvent {
         /// Timestamp.
         at: DateTime<Utc>,
     },
+    /// A user paused a running browser-agent loop (Phase 2 B5).
+    BrowserRunPaused {
+        /// Run this browser session belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving this session.
+        plan_id: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
+    /// A user resumed a paused browser-agent loop (Phase 2 B5).
+    BrowserRunResumed {
+        /// Run this browser session belongs to.
+        run_id: String,
+        /// Browser-agent plan id driving this session.
+        plan_id: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
 }
 
 impl OrchestrationEvent {
@@ -173,6 +195,8 @@ impl OrchestrationEvent {
             Self::BrowserObservationReceived { .. } => {
                 OrchestrationEventKind::BrowserObservationReceived
             }
+            Self::BrowserRunPaused { .. } => OrchestrationEventKind::BrowserRunPaused,
+            Self::BrowserRunResumed { .. } => OrchestrationEventKind::BrowserRunResumed,
         }
     }
 }
@@ -241,7 +265,9 @@ mod tests {
             OrchestrationEventKind::RunResumedAfterApproval,
             OrchestrationEventKind::BrowserActionDispatched,
             OrchestrationEventKind::BrowserObservationReceived,
+            OrchestrationEventKind::BrowserRunPaused,
+            OrchestrationEventKind::BrowserRunResumed,
         ];
-        assert_eq!(kinds.len(), 9);
+        assert_eq!(kinds.len(), 11);
     }
 }
