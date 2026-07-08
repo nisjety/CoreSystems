@@ -238,16 +238,30 @@ impl ChromiumoxideDriver {
         })?;
         self.install_devtools_collectors(session_key.clone(), tab_id.clone(), &page)
             .await;
-        if let Some(snapshot) = snapshot.as_ref() {
-            hydrate_cookies(&page, snapshot).await?;
-        }
         if initial_url != "about:blank" {
             page.goto(initial_url).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
                     .with_details(json!({ "error": e.to_string(), "url": initial_url }))
             })?;
             if let Some(snapshot) = snapshot.as_ref() {
-                if hydrate_storage(&page, snapshot).await? {
+                // chromiumoxide's `Page::set_cookies` hard-requires the page to
+                // already be on a real http(s) URL — it validates `page.url()`
+                // itself before ever looking at any per-cookie `url` field, and
+                // errors "Blank page can not have cookie" otherwise. Cookies must
+                // therefore be hydrated AFTER the initial navigation, not before
+                // it (as this previously did): restoring a profile with saved
+                // cookies into a fresh tab/session used to fail outright — every
+                // attach of a persistent, cookie-bearing profile 502'd — because
+                // hydration ran while the page was still `about:blank`.
+                let cookies_restored = !snapshot.cookies.is_empty();
+                if cookies_restored {
+                    hydrate_cookies(&page, snapshot).await?;
+                }
+                let storage_restored = hydrate_storage(&page, snapshot).await?;
+                if cookies_restored || storage_restored {
+                    // Reload so the already-completed initial `goto` request is
+                    // replayed with the freshly restored cookies/storage attached
+                    // (matches the pre-existing storage-only reload behavior).
                     page.reload().await.map_err(|e| {
                         QuarryError::new(
                             ErrorCode::DriverFailed,
@@ -258,6 +272,10 @@ impl ChromiumoxideDriver {
                 }
             }
         }
+        // A genuinely blank tab (no initial URL — e.g. `new_tab` with no `url`)
+        // has no origin to scope cookies to, and chromiumoxide cannot set cookies
+        // on `about:blank` regardless; cookie/storage hydration is skipped for
+        // that case instead of hard-failing tab creation.
         install_popup_bridge(&page).await?;
 
         let mut pages = self.pages.lock().await;
@@ -1652,6 +1670,61 @@ mod tests {
 
         assert_eq!(frame.mime_type, "image/jpeg");
         assert!(frame.data_base64.len() > 100);
+
+        driver.release(session).await.expect("release");
+    }
+
+    /// Regression test for the "Blank page can not have cookie" bug: opening a
+    /// session/tab against a profile that already has saved cookies used to
+    /// hard-fail because cookie hydration ran on the freshly-created
+    /// `about:blank` page, before the first real navigation — chromiumoxide's
+    /// `Page::set_cookies` requires the page to already be on a real http(s)
+    /// URL. Integration test that requires a local Chromium/Chrome binary.
+    /// Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
+    #[tokio::test]
+    async fn reopening_a_session_with_a_saved_profile_restores_cookies_without_erroring() {
+        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+            return;
+        }
+
+        let profile_store: Arc<dyn ProfileStore> =
+            Arc::new(crate::session::InMemoryProfileStore::new());
+        let mut lease = make_lease();
+        lease.persist_profile = true;
+        let profile_id = lease.profile_id.clone();
+
+        // Pre-seed the profile store exactly as a prior session's close would
+        // have: a snapshot with at least one real cookie for a real origin.
+        let snapshot = SessionSnapshot {
+            cookies: vec![Cookie {
+                name: "velion_test".into(),
+                value: "livecheck123".into(),
+                domain: "example.com".into(),
+                path: "/".into(),
+                secure: false,
+                http_only: false,
+                expires: None,
+            }],
+            local_storage: vec![],
+            session_storage: vec![],
+            indexed_db: vec![],
+            user_agent: None,
+            viewport: None,
+            locale: None,
+            timezone: None,
+        };
+        profile_store
+            .save(&lease.org_id, &profile_id, &snapshot)
+            .await
+            .expect("seed profile snapshot");
+
+        let driver = ChromiumoxideDriver::new().with_profile_store(profile_store);
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .goto(&session, "https://example.com/")
+            .await
+            .expect("goto should succeed with a persisted profile's cookies restored");
 
         driver.release(session).await.expect("release");
     }
