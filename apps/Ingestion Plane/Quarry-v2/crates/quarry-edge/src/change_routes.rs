@@ -379,7 +379,7 @@ async fn record_check(
             "content fingerprint changed: {} → {}",
             prev.fingerprint, req.fresh_fingerprint
         );
-        let artifact_run: RunKind = run_kind.unwrap_or_else(RunKind::new);
+        let artifact_run: RunKind = run_kind.unwrap_or_default();
         let handle = artifacts
             .put(
                 &artifact_run,

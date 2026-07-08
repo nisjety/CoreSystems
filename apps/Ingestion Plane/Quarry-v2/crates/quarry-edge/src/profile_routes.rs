@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use quarry_browser::session::SessionSnapshot;
+use quarry_browser::session::{ProfileMetadata, ProfileScope, ProfileSummary, SessionSnapshot};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::{ProfileKind, RequestKind};
@@ -29,9 +29,56 @@ pub struct SaveProfileResponse {
     pub profile_id: String,
 }
 
+/// Wire shape for one profile row — used by both `list_profiles` and
+/// `create_profile`/`update_profile`. Phase 3 continuation: replaces the
+/// bare `Vec<String>` the SPA previously had to render with truncated
+/// ids alone.
+#[derive(Debug, Serialize)]
+pub struct ProfileSummaryResponse {
+    pub profile_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub scope: String,
+}
+
+impl From<ProfileSummary> for ProfileSummaryResponse {
+    fn from(summary: ProfileSummary) -> Self {
+        Self {
+            profile_id: summary.profile_id.to_string(),
+            name: summary.name,
+            scope: summary.scope.as_str().to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ListProfilesResponse {
-    pub profiles: Vec<String>,
+    pub profiles: Vec<ProfileSummaryResponse>,
+}
+
+/// `POST /v1/profiles/create` — explicitly create a named, scoped
+/// profile with no browsing history yet (as opposed to `save_profile`,
+/// which is Quarry's own internal snapshot-capture write path). Rejects
+/// `scope: "ephemeral"` — an ephemeral *session* simply attaches no
+/// profile at all, so a stored profile row with that scope would be a
+/// contradiction in terms.
+#[derive(Debug, Deserialize)]
+pub struct CreateProfileRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub scope: ProfileScope,
+}
+
+/// `PATCH /v1/profiles/:id` — rename and/or rescope an existing profile.
+/// Fields are independently optional so a pure rename never has to
+/// re-send the current scope (and vice versa); at least one must be
+/// present.
+#[derive(Debug, Deserialize)]
+pub struct UpdateProfileRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub scope: Option<ProfileScope>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +121,146 @@ pub async fn save_profile(
         request_id,
         SaveProfileResponse {
             profile_id: profile_id.to_string(),
+        },
+    )))
+}
+
+pub async fn create_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<CreateProfileRequest>,
+) -> Result<Json<Envelope<ProfileSummaryResponse>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+
+    if req.scope == ProfileScope::Ephemeral {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                "a created profile cannot use the ephemeral scope; omit the profile entirely for ephemeral browsing",
+            ),
+        ));
+    }
+
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let profile_id: ProfileKind = quarry_core::ids::Id::new();
+    let metadata = ProfileMetadata {
+        name: name.clone(),
+        scope: req.scope,
+    };
+
+    state
+        .profiles
+        .save_metadata(&claims.org_id, &profile_id, &metadata)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+
+    Ok(Json(Envelope::ok(
+        request_id,
+        ProfileSummaryResponse {
+            profile_id: profile_id.to_string(),
+            name,
+            scope: req.scope.as_str().to_owned(),
+        },
+    )))
+}
+
+pub async fn update_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(profile_id): Path<String>,
+    Json(req): Json<UpdateProfileRequest>,
+) -> Result<Json<Envelope<ProfileSummaryResponse>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+    let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
+
+    if req.name.is_none() && req.scope.is_none() {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::BadRequest, "provide name and/or scope to update"),
+        ));
+    }
+    if req.scope == Some(ProfileScope::Ephemeral) {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                "a stored profile cannot be rescoped to ephemeral; delete it instead",
+            ),
+        ));
+    }
+
+    // A profile that predates this metadata (or was never explicitly
+    // named) still exists via its snapshot — `load` confirms it's real
+    // before we allow a rename, rather than silently creating a
+    // metadata-only row for an id nobody asked for.
+    let exists = state
+        .profiles
+        .load(&claims.org_id, &parsed)
+        .await
+        .map_err(|e| err_response(&request_id, e))?
+        .is_some();
+    if !exists {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::NotFound,
+                format!("profile not found: {profile_id}"),
+            ),
+        ));
+    }
+
+    let current = state
+        .profiles
+        .load_metadata(&claims.org_id, &parsed)
+        .await
+        .map_err(|e| err_response(&request_id, e))?
+        .unwrap_or_default();
+
+    let name = match req.name.as_deref().map(str::trim) {
+        // An explicit empty string clears the name.
+        Some("") => None,
+        Some(trimmed) => Some(trimmed.to_owned()),
+        None => current.name,
+    };
+    // `req.scope` is already known non-ephemeral at this point (rejected
+    // above). `current.scope` can still resolve to `Ephemeral` though — that
+    // is `ProfileMetadata::default()`'s in-language value for "no metadata
+    // was ever explicitly saved for this profile", returned via
+    // `unwrap_or_default()` a few lines up. A profile in that state is, by
+    // construction, real and persisted (it passed the `load` existence
+    // check above) — never actually ephemeral — so a bare rename/rescope
+    // that merges in that defaulted value must not durably write the
+    // contradiction `scope: "ephemeral"` back to storage. Coerce it to
+    // `UserPrivate`, mirroring the Postgres migration's own backfill
+    // default for exactly this "row exists, no explicit scope was ever
+    // recorded" case.
+    let scope = match req.scope.unwrap_or(current.scope) {
+        ProfileScope::Ephemeral => ProfileScope::UserPrivate,
+        other => other,
+    };
+    let metadata = ProfileMetadata {
+        name: name.clone(),
+        scope,
+    };
+
+    state
+        .profiles
+        .save_metadata(&claims.org_id, &parsed, &metadata)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+
+    Ok(Json(Envelope::ok(
+        request_id,
+        ProfileSummaryResponse {
+            profile_id: parsed.to_string(),
+            name,
+            scope: scope.as_str().to_owned(),
         },
     )))
 }
@@ -156,6 +343,9 @@ pub struct RestoreProbeRequest {
 #[derive(Debug, serde::Serialize)]
 pub struct RestoreProbeResponse {
     pub profile_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub scope: String,
     pub url: String,
     pub restorable: bool,
     pub cookies_count: usize,
@@ -205,6 +395,13 @@ pub async fn restore_probe(
             )
         })?;
 
+    let metadata = state
+        .profiles
+        .load_metadata(&claims.org_id, &parsed)
+        .await
+        .map_err(|e| err_response(&request_id, e))?
+        .unwrap_or_default();
+
     let cookies_count = snapshot.cookies.len();
     let local_storage_count = snapshot.local_storage.len();
     let session_storage_count = snapshot.session_storage.len();
@@ -216,6 +413,8 @@ pub async fn restore_probe(
         request_id,
         RestoreProbeResponse {
             profile_id: parsed.to_string(),
+            name: metadata.name,
+            scope: metadata.scope.as_str().to_owned(),
             url: req.url,
             restorable,
             cookies_count,
@@ -236,7 +435,7 @@ pub async fn list_profiles(
 ) -> Result<Json<Envelope<ListProfilesResponse>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
 
-    let ids = state
+    let summaries = state
         .profiles
         .list(&claims.org_id)
         .await
@@ -245,7 +444,10 @@ pub async fn list_profiles(
     Ok(Json(Envelope::ok(
         request_id,
         ListProfilesResponse {
-            profiles: ids.into_iter().map(|i| i.to_string()).collect(),
+            profiles: summaries
+                .into_iter()
+                .map(ProfileSummaryResponse::from)
+                .collect(),
         },
     )))
 }

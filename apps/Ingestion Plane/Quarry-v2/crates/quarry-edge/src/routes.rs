@@ -5,7 +5,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -131,7 +131,18 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/batch", post(batch_handoff))
         .route("/v1/profiles", post(crate::profile_routes::save_profile))
         .route("/v1/profiles", get(crate::profile_routes::list_profiles))
+        // Browser Workspace Phase 3 continuation — explicit named/scoped
+        // profile create + rename/rescope, independent of the internal
+        // snapshot-capture `save_profile` write path above.
+        .route(
+            "/v1/profiles/create",
+            post(crate::profile_routes::create_profile),
+        )
         .route("/v1/profiles/:id", get(crate::profile_routes::load_profile))
+        .route(
+            "/v1/profiles/:id",
+            patch(crate::profile_routes::update_profile),
+        )
         .route(
             "/v1/profiles/:id",
             delete(crate::profile_routes::delete_profile),
