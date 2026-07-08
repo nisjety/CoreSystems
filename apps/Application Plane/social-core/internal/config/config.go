@@ -30,6 +30,11 @@ type Config struct {
 	FacebookGraphAPIBaseURL   string
 	TikTokAPIBaseURL          string
 	SnapchatAPIBaseURL        string
+	// SnapchatBusinessAPIBaseURL is the Public Profile API host (organic
+	// Story/Spotlight posting); SnapchatLivePublishing gates real posting to it
+	// (default off — allowlist-only vendor API, needs credentials).
+	SnapchatBusinessAPIBaseURL string
+	SnapchatLivePublishing     bool
 	// Ads system wiring. Meta ads ride the same Graph API base as Pages; the
 	// Marketing API is versioned in lockstep with Graph. Google Ads API calls
 	// additionally require a developer token (`developer-token` header, from a
@@ -43,27 +48,29 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		HTTPPort:                  getEnvInt("PORT", 3162),
-		DatabaseURL:               strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		ServiceName:               strings.TrimSpace(getEnv("SERVICE_NAME", "social-core")),
-		InternalAPIKey:            strings.TrimSpace(getEnv("INTERNAL_API_KEY", "")),
-		IntegrationCoreURL:        strings.TrimRight(strings.TrimSpace(getEnv("INTEGRATION_CORE_URL", "http://integration-api:3026")), "/"),
-		NATSURL:                   strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
-		NATSToken:                 strings.TrimSpace(getEnv("VELION_NATS_TOKEN", getEnv("NATS_TOKEN", ""))),
-		PublishWorkerEnabled:      getEnvBool("SOCIAL_PUBLISH_WORKER_ENABLED", true),
-		PublishWorkerPollInterval: getEnvDuration("SOCIAL_PUBLISH_WORKER_POLL_INTERVAL", 5*time.Second),
-		PublishWorkerBatchSize:    getEnvInt("SOCIAL_PUBLISH_WORKER_BATCH_SIZE", 10),
-		MetricsWorkerEnabled:      getEnvBool("SOCIAL_METRICS_WORKER_ENABLED", true),
-		MetricsWorkerPollInterval: getEnvDuration("SOCIAL_METRICS_WORKER_POLL_INTERVAL", 6*time.Hour),
-		LinkedInAPIBaseURL:        strings.TrimRight(strings.TrimSpace(getEnv("LINKEDIN_API_BASE_URL", "https://api.linkedin.com")), "/"),
-		LinkedInAPIVersion:        strings.TrimSpace(getEnv("LINKEDIN_API_VERSION", "202606")),
-		XAPIBaseURL:               strings.TrimRight(strings.TrimSpace(getEnv("X_API_BASE_URL", "https://api.x.com")), "/"),
-		InstagramGraphAPIBaseURL:  strings.TrimRight(strings.TrimSpace(getEnv("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")), "/"),
-		FacebookGraphAPIBaseURL:   strings.TrimRight(strings.TrimSpace(getEnv("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")), "/"),
-		TikTokAPIBaseURL:          strings.TrimRight(strings.TrimSpace(getEnv("TIKTOK_API_BASE_URL", "https://open.tiktokapis.com")), "/"),
-		SnapchatAPIBaseURL:        strings.TrimRight(strings.TrimSpace(getEnv("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1")), "/"),
-		GoogleAdsAPIBaseURL:       strings.TrimRight(strings.TrimSpace(getEnv("GOOGLE_ADS_API_BASE_URL", "https://googleads.googleapis.com/v24")), "/"),
-		GoogleAdsDeveloperToken:   strings.TrimSpace(getEnv("GOOGLE_ADS_DEVELOPER_TOKEN", "")),
+		HTTPPort:                   getEnvInt("PORT", 3162),
+		DatabaseURL:                strings.TrimSpace(getEnv("DATABASE_URL", "")),
+		ServiceName:                strings.TrimSpace(getEnv("SERVICE_NAME", "social-core")),
+		InternalAPIKey:             strings.TrimSpace(getEnv("INTERNAL_API_KEY", "")),
+		IntegrationCoreURL:         strings.TrimRight(strings.TrimSpace(getEnv("INTEGRATION_CORE_URL", "http://integration-api:3026")), "/"),
+		NATSURL:                    strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
+		NATSToken:                  strings.TrimSpace(getEnv("VELION_NATS_TOKEN", getEnv("NATS_TOKEN", ""))),
+		PublishWorkerEnabled:       getEnvBool("SOCIAL_PUBLISH_WORKER_ENABLED", true),
+		PublishWorkerPollInterval:  getEnvDuration("SOCIAL_PUBLISH_WORKER_POLL_INTERVAL", 5*time.Second),
+		PublishWorkerBatchSize:     getEnvInt("SOCIAL_PUBLISH_WORKER_BATCH_SIZE", 10),
+		MetricsWorkerEnabled:       getEnvBool("SOCIAL_METRICS_WORKER_ENABLED", true),
+		MetricsWorkerPollInterval:  getEnvDuration("SOCIAL_METRICS_WORKER_POLL_INTERVAL", 6*time.Hour),
+		LinkedInAPIBaseURL:         strings.TrimRight(strings.TrimSpace(getEnv("LINKEDIN_API_BASE_URL", "https://api.linkedin.com")), "/"),
+		LinkedInAPIVersion:         strings.TrimSpace(getEnv("LINKEDIN_API_VERSION", "202606")),
+		XAPIBaseURL:                strings.TrimRight(strings.TrimSpace(getEnv("X_API_BASE_URL", "https://api.x.com")), "/"),
+		InstagramGraphAPIBaseURL:   strings.TrimRight(strings.TrimSpace(getEnv("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")), "/"),
+		FacebookGraphAPIBaseURL:    strings.TrimRight(strings.TrimSpace(getEnv("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")), "/"),
+		TikTokAPIBaseURL:           strings.TrimRight(strings.TrimSpace(getEnv("TIKTOK_API_BASE_URL", "https://open.tiktokapis.com")), "/"),
+		SnapchatAPIBaseURL:         strings.TrimRight(strings.TrimSpace(getEnv("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1")), "/"),
+		SnapchatBusinessAPIBaseURL: strings.TrimRight(strings.TrimSpace(getEnv("SNAPCHAT_BUSINESS_API_BASE_URL", "https://businessapi.snapchat.com/v1")), "/"),
+		SnapchatLivePublishing:     getEnvBool("SNAPCHAT_LIVE_PUBLISHING", false),
+		GoogleAdsAPIBaseURL:        strings.TrimRight(strings.TrimSpace(getEnv("GOOGLE_ADS_API_BASE_URL", "https://googleads.googleapis.com/v24")), "/"),
+		GoogleAdsDeveloperToken:    strings.TrimSpace(getEnv("GOOGLE_ADS_DEVELOPER_TOKEN", "")),
 	}
 
 	if cfg.DatabaseURL == "" {

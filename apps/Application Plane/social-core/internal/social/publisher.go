@@ -3,9 +3,14 @@ package social
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,6 +27,15 @@ type PublisherConfig struct {
 	FacebookGraphAPIBaseURL  string
 	TikTokAPIBaseURL         string
 	SnapchatAPIBaseURL       string
+	// SnapchatBusinessAPIBaseURL is the Public Profile API host
+	// (businessapi.snapchat.com) used for organic Story/Spotlight posting.
+	SnapchatBusinessAPIBaseURL string
+	// SnapchatLivePublishing gates real organic posting to the Public Profile
+	// API. It defaults OFF: the Public Profile API is allowlist-only (Snap must
+	// allowlist the OAuth app's client id) and needs vendor credentials, so
+	// live posting stays disabled until an operator explicitly enables it —
+	// same hard test-mode pattern as the Bring shipping adapter.
+	SnapchatLivePublishing bool
 }
 
 type HTTPPublisher struct {
@@ -39,13 +53,15 @@ func NewHTTPPublisher(tokenBroker TokenBroker, httpClient *http.Client, cfg Publ
 		tokenBroker: tokenBroker,
 		httpClient:  httpClient,
 		cfg: PublisherConfig{
-			LinkedInAPIBaseURL:       strings.TrimRight(fallback(cfg.LinkedInAPIBaseURL, "https://api.linkedin.com"), "/"),
-			LinkedInAPIVersion:       fallback(cfg.LinkedInAPIVersion, "202606"),
-			XAPIBaseURL:              strings.TrimRight(fallback(cfg.XAPIBaseURL, "https://api.x.com"), "/"),
-			InstagramGraphAPIBaseURL: strings.TrimRight(fallback(cfg.InstagramGraphAPIBaseURL, "https://graph.facebook.com/v23.0"), "/"),
-			FacebookGraphAPIBaseURL:  strings.TrimRight(fallback(cfg.FacebookGraphAPIBaseURL, "https://graph.facebook.com/v23.0"), "/"),
-			TikTokAPIBaseURL:         strings.TrimRight(fallback(cfg.TikTokAPIBaseURL, "https://open.tiktokapis.com"), "/"),
-			SnapchatAPIBaseURL:       strings.TrimRight(fallback(cfg.SnapchatAPIBaseURL, "https://adsapi.snapchat.com/v1"), "/"),
+			LinkedInAPIBaseURL:         strings.TrimRight(fallback(cfg.LinkedInAPIBaseURL, "https://api.linkedin.com"), "/"),
+			LinkedInAPIVersion:         fallback(cfg.LinkedInAPIVersion, "202606"),
+			XAPIBaseURL:                strings.TrimRight(fallback(cfg.XAPIBaseURL, "https://api.x.com"), "/"),
+			InstagramGraphAPIBaseURL:   strings.TrimRight(fallback(cfg.InstagramGraphAPIBaseURL, "https://graph.facebook.com/v23.0"), "/"),
+			FacebookGraphAPIBaseURL:    strings.TrimRight(fallback(cfg.FacebookGraphAPIBaseURL, "https://graph.facebook.com/v23.0"), "/"),
+			TikTokAPIBaseURL:           strings.TrimRight(fallback(cfg.TikTokAPIBaseURL, "https://open.tiktokapis.com"), "/"),
+			SnapchatAPIBaseURL:         strings.TrimRight(fallback(cfg.SnapchatAPIBaseURL, "https://adsapi.snapchat.com/v1"), "/"),
+			SnapchatBusinessAPIBaseURL: strings.TrimRight(fallback(cfg.SnapchatBusinessAPIBaseURL, "https://businessapi.snapchat.com/v1"), "/"),
+			SnapchatLivePublishing:     cfg.SnapchatLivePublishing,
 		},
 		now: func() time.Time { return time.Now().UTC() },
 	}
@@ -120,8 +136,7 @@ func (p *HTTPPublisher) Publish(ctx context.Context, job PublishJob, post Post, 
 	case "tiktok":
 		return p.publishTikTok(ctx, attempt, post, account, token.AccessToken)
 	case "snapchat":
-		attempt.Message = "Snapchat organic publishing is not available through the connected API; use ads/boost workflows."
-		return attempt
+		return p.publishSnapchat(ctx, attempt, post, account, token.AccessToken)
 	default:
 		attempt.Message = "Unsupported social provider."
 		return attempt
@@ -392,6 +407,303 @@ func (p *HTTPPublisher) publishTikTok(ctx context.Context, attempt PublishAttemp
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	return p.doJSON(attempt, req, http.StatusOK, "TikTok publish initialized.")
+}
+
+const (
+	// Snapchat Public Profile multipart upload: chunks up to 32MB, max 35 parts
+	// (~1GB). See Profile Asset Management docs.
+	snapchatChunkSize = 32 * 1024 * 1024
+	snapchatMaxParts  = 35
+	// Bound the media we download+encrypt+push. Organic Snapchat content is
+	// short-form (Story/Spotlight ≤60s); this caps memory well under Snapchat's
+	// 1GB hard ceiling.
+	snapchatMaxMediaBytes = 200 * 1024 * 1024
+)
+
+// publishSnapchat posts organic content to a Snapchat Public Profile via the
+// Public Profile API (businessapi.snapchat.com). Unlike Meta/TikTok, Snapchat
+// has no pull-from-URL: the file bytes must be AES-256-CBC encrypted
+// (openssl-compatible) and PUSHed via a create-container → multipart
+// ADD/FINALIZE → post-story/spotlight sequence, which this method owns.
+//
+// It is hard-gated behind SnapchatLivePublishing (default off): the Public
+// Profile API is allowlist-only and needs vendor credentials, so with the gate
+// off — the honest default until an operator wires both — every attempt returns
+// a clear blocked result instead of pretending to post. The approval gate is
+// enforced upstream in service.go (ensurePublishApproved) for every provider,
+// so this path inherits it identically.
+func (p *HTTPPublisher) publishSnapchat(ctx context.Context, attempt PublishAttempt, post Post, account Account, accessToken string) PublishAttempt {
+	attempt.Endpoint = "POST /v1/public_profiles/{profile_id}/media + /stories|/spotlights"
+	if !p.cfg.SnapchatLivePublishing {
+		attempt.Message = "Snapchat organic publishing is config-gated (SNAPCHAT_LIVE_PUBLISHING is off). The Public Profile API is allowlist-only and requires vendor credentials plus Snap allowlisting of the OAuth app before live posting can be enabled."
+		attempt.Warnings = append(attempt.Warnings, "snapchat_live_publishing_disabled")
+		return attempt
+	}
+	profileID := firstNonEmpty(
+		metadataString(account.Metadata, "public_profile_id", "publicProfileId", "profile_id", "snapchat_profile_id"),
+		account.Handle,
+	)
+	if profileID == "" {
+		attempt.Message = "Snapchat organic publishing requires a Public Profile id (public_profile_id) in the connected account's provider context."
+		return attempt
+	}
+	mediaURL := publicMediaURL(post)
+	if mediaURL == "" {
+		attempt.Message = "Snapchat organic publishing requires a public image or video URL."
+		return attempt
+	}
+
+	mediaBytes, err := p.downloadMedia(ctx, mediaURL)
+	if err != nil {
+		return failedAttempt(attempt, "Could not download post media for Snapchat upload.", err)
+	}
+	key := make([]byte, 32)
+	iv := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		return failedAttempt(attempt, "Could not generate Snapchat media key.", err)
+	}
+	if _, err := rand.Read(iv); err != nil {
+		return failedAttempt(attempt, "Could not generate Snapchat media iv.", err)
+	}
+	encrypted, err := encryptSnapchatMedia(mediaBytes, key, iv)
+	if err != nil {
+		return failedAttempt(attempt, "Could not encrypt Snapchat media.", err)
+	}
+
+	mediaType := "IMAGE"
+	if mediaKind(post) == "video" {
+		mediaType = "VIDEO"
+	}
+	base := p.cfg.SnapchatBusinessAPIBaseURL
+
+	// 1. Create the media container (carries the base64 key/iv Snapchat needs to decrypt).
+	createBody := map[string]any{
+		"type": mediaType,
+		"name": fallback(post.Title, "velion-media"),
+		"key":  base64.StdEncoding.EncodeToString(key),
+		"iv":   base64.StdEncoding.EncodeToString(iv),
+	}
+	createReq, err := jsonRequest(ctx, http.MethodPost, base+"/public_profiles/"+url.PathEscape(profileID)+"/media", createBody)
+	if err != nil {
+		return failedAttempt(attempt, "Could not build Snapchat media container request.", err)
+	}
+	createReq.Header.Set("Authorization", "Bearer "+accessToken)
+	createResp, err := p.doRaw(createReq)
+	if err != nil {
+		return failedAttempt(attempt, "Snapchat media container request failed.", err)
+	}
+	if !snapchatOK(createResp) {
+		return providerErrorAttempt(attempt, "Snapchat rejected the media container.", createResp)
+	}
+	mediaID, _ := createResp.body["media_id"].(string)
+	addPath, _ := createResp.body["add_path"].(string)
+	finalizePath, _ := createResp.body["finalize_path"].(string)
+	if mediaID == "" || addPath == "" || finalizePath == "" {
+		attempt.Status = AttemptStatusFailed
+		attempt.Message = "Snapchat media container response was missing media_id/add_path/finalize_path."
+		attempt.Response = redactProviderBody(createResp.body)
+		return attempt
+	}
+
+	// 2. Multipart-upload the encrypted bytes in ≤32MB chunks, then finalize.
+	origin, err := snapchatOrigin(base)
+	if err != nil {
+		return failedAttempt(attempt, "Snapchat business API base URL is invalid.", err)
+	}
+	chunks := chunkBytes(encrypted, snapchatChunkSize)
+	if len(chunks) > snapchatMaxParts {
+		attempt.Status = AttemptStatusFailed
+		attempt.Message = fmt.Sprintf("Snapchat media is too large: %d chunks exceeds the %d-part limit.", len(chunks), snapchatMaxParts)
+		return attempt
+	}
+	for i, chunk := range chunks {
+		addResp, err := p.snapchatMultipart(ctx, accessToken, origin+addPath, map[string]string{
+			"action":      "ADD",
+			"part_number": fmt.Sprintf("%d", i+1),
+		}, "file", "media.enc", chunk)
+		if err != nil {
+			return failedAttempt(attempt, "Snapchat media chunk upload failed.", err)
+		}
+		if !snapchatOK(addResp) {
+			return providerErrorAttempt(attempt, "Snapchat rejected a media chunk.", addResp)
+		}
+	}
+	finalizeResp, err := p.snapchatMultipart(ctx, accessToken, origin+finalizePath, map[string]string{"action": "FINALIZE"}, "", "", nil)
+	if err != nil {
+		return failedAttempt(attempt, "Snapchat media finalize failed.", err)
+	}
+	if !snapchatOK(finalizeResp) {
+		return providerErrorAttempt(attempt, "Snapchat rejected the media finalize.", finalizeResp)
+	}
+
+	// 3. Post the uploaded media as a Story (default) or Spotlight (video only).
+	if strings.EqualFold(metadataString(account.Metadata, "snapchat_post_type", "snapchatPostType"), "spotlight") && mediaType == "VIDEO" {
+		return p.snapchatPostSpotlight(ctx, attempt, post, account, accessToken, base, profileID, mediaID)
+	}
+	return p.snapchatPostStory(ctx, attempt, accessToken, base, profileID, mediaID)
+}
+
+func (p *HTTPPublisher) snapchatPostStory(ctx context.Context, attempt PublishAttempt, accessToken, base, profileID, mediaID string) PublishAttempt {
+	req, err := jsonRequest(ctx, http.MethodPost, base+"/public_profiles/"+url.PathEscape(profileID)+"/stories", map[string]any{"media_id": mediaID})
+	if err != nil {
+		return failedAttempt(attempt, "Could not build Snapchat story request.", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := p.doRaw(req)
+	if err != nil {
+		return failedAttempt(attempt, "Snapchat story post failed.", err)
+	}
+	if !snapchatOK(resp) {
+		return providerErrorAttempt(attempt, "Snapchat rejected the story post.", resp)
+	}
+	attempt.Status = AttemptStatusSucceeded
+	attempt.Message = "Snapchat Story published to the Public Profile."
+	attempt.ExternalID = mediaID
+	attempt.Response = redactProviderBody(resp.body)
+	return attempt
+}
+
+func (p *HTTPPublisher) snapchatPostSpotlight(ctx context.Context, attempt PublishAttempt, post Post, account Account, accessToken, base, profileID, mediaID string) PublishAttempt {
+	body := map[string]any{
+		"media_id": mediaID,
+		"locale":   fallback(metadataString(account.Metadata, "snapchat_locale", "snapchatLocale"), "en_US"),
+	}
+	if desc := previewText(post, "snapchat"); desc != "" {
+		body["description"] = desc
+	}
+	req, err := jsonRequest(ctx, http.MethodPost, base+"/public_profiles/"+url.PathEscape(profileID)+"/spotlights", body)
+	if err != nil {
+		return failedAttempt(attempt, "Could not build Snapchat spotlight request.", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := p.doRaw(req)
+	if err != nil {
+		return failedAttempt(attempt, "Snapchat spotlight post failed.", err)
+	}
+	if !snapchatOK(resp) {
+		return providerErrorAttempt(attempt, "Snapchat rejected the spotlight post.", resp)
+	}
+	attempt.Status = AttemptStatusSucceeded
+	attempt.Message = "Snapchat Spotlight submitted (Spotlights are reviewed by Snapchat before going LIVE)."
+	attempt.ExternalID = mediaID
+	attempt.Response = redactProviderBody(resp.body)
+	attempt.Warnings = append(attempt.Warnings, "spotlight_pending_snapchat_review")
+	return attempt
+}
+
+func (p *HTTPPublisher) downloadMedia(ctx context.Context, mediaURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("media download returned status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, snapchatMaxMediaBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > snapchatMaxMediaBytes {
+		return nil, fmt.Errorf("media exceeds the %d byte upload cap", snapchatMaxMediaBytes)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("media download returned no content")
+	}
+	return data, nil
+}
+
+func (p *HTTPPublisher) snapchatMultipart(ctx context.Context, accessToken, endpoint string, fields map[string]string, fileField, fileName string, fileBytes []byte) (providerResponse, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			return providerResponse{}, err
+		}
+	}
+	if fileField != "" {
+		part, err := writer.CreateFormFile(fileField, fileName)
+		if err != nil {
+			return providerResponse{}, err
+		}
+		if _, err := part.Write(fileBytes); err != nil {
+			return providerResponse{}, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return providerResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
+	if err != nil {
+		return providerResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+	return p.doRaw(req)
+}
+
+// snapchatOK treats a Public Profile API response as successful only when the
+// HTTP status is 2xx AND the in-band request_status (SUCCESS/ERROR/PARTIAL) is
+// SUCCESS — Snapchat returns 200 with request_status:ERROR on validation
+// failures, so the HTTP status alone is not enough.
+func snapchatOK(resp providerResponse) bool {
+	if resp.status < 200 || resp.status >= 300 {
+		return false
+	}
+	if status, ok := resp.body["request_status"].(string); ok {
+		return strings.EqualFold(status, "SUCCESS")
+	}
+	return true
+}
+
+func snapchatOrigin(base string) (string, error) {
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid Snapchat business API base url %q", base)
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
+// encryptSnapchatMedia AES-256-CBC encrypts media with openssl-compatible
+// PKCS#7 padding, matching Snapchat's documented `openssl enc -aes-256-cbc
+// -nosalt` upload contract. key must be 32 bytes, iv 16 bytes.
+func encryptSnapchatMedia(plaintext, key, iv []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(iv) != block.BlockSize() {
+		return nil, fmt.Errorf("iv must be %d bytes, got %d", block.BlockSize(), len(iv))
+	}
+	padded := pkcs7Pad(plaintext, block.BlockSize())
+	out := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, padded)
+	return out, nil
+}
+
+func pkcs7Pad(data []byte, blockSize int) []byte {
+	pad := blockSize - (len(data) % blockSize)
+	return append(data, bytes.Repeat([]byte{byte(pad)}, pad)...)
+}
+
+func chunkBytes(data []byte, size int) [][]byte {
+	if size <= 0 || len(data) <= size {
+		return [][]byte{data}
+	}
+	chunks := make([][]byte, 0, (len(data)+size-1)/size)
+	for i := 0; i < len(data); i += size {
+		end := i + size
+		if end > len(data) {
+			end = len(data)
+		}
+		chunks = append(chunks, data[i:end])
+	}
+	return chunks
 }
 
 type providerResponse struct {
