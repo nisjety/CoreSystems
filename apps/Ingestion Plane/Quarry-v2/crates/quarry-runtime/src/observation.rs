@@ -1,12 +1,13 @@
 //! Observation protocol — executes an AgentActionRequest, produces a BrowserObservation.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use quarry_browser::actions::{Action, ScrollTarget};
-use quarry_browser::BrowserDriver;
+use quarry_browser::{BrowserDevtoolsEvent, BrowserDriver};
 use quarry_core::contracts::{
-    AgentAction, AgentActionRequest, BrowserObservation, DomSummary, InteractiveElement,
+    AgentAction, AgentActionRequest, BrowserObservation, ConsoleLine, DomSummary,
+    InteractiveElement, NetworkEntry,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::EventType;
@@ -39,6 +40,7 @@ impl ObservationRunner {
             AgentAction::Click { selector } => Action::Click {
                 selector: selector.clone(),
             },
+            AgentAction::ClickPoint { x, y } => Action::ClickPoint { x: *x, y: *y },
             AgentAction::Type { selector, text } => Action::Type {
                 selector: selector.clone(),
                 text: text.clone(),
@@ -46,6 +48,17 @@ impl ObservationRunner {
             AgentAction::Press { key } => Action::Press { key: key.clone() },
             AgentAction::Scroll { target } => Action::Scroll {
                 to: ScrollTarget::Selector(target.clone()),
+            },
+            AgentAction::MouseWheel {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => Action::MouseWheel {
+                x: *x,
+                y: *y,
+                delta_x: *delta_x,
+                delta_y: *delta_y,
             },
             AgentAction::Select { selector, value } => Action::Select {
                 selector: selector.clone(),
@@ -104,6 +117,9 @@ impl ObservationRunner {
             AgentAction::Click { selector } => {
                 self.browser.click(session, selector).await?;
             }
+            AgentAction::ClickPoint { x, y } => {
+                self.browser.click_point(session, *x, *y).await?;
+            }
             AgentAction::Type { selector, text } => {
                 self.browser.type_text(session, selector, text).await?;
             }
@@ -113,6 +129,16 @@ impl ObservationRunner {
             AgentAction::Scroll { target } => {
                 self.browser
                     .scroll(session, &ScrollTarget::Selector(target.clone()))
+                    .await?;
+            }
+            AgentAction::MouseWheel {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => {
+                self.browser
+                    .mouse_wheel(session, *x, *y, *delta_x, *delta_y)
                     .await?;
             }
             AgentAction::Select { selector, value } => {
@@ -173,6 +199,11 @@ impl ObservationRunner {
         if let Some(url) = page_state.url.as_deref().filter(|url| !url.is_empty()) {
             ctx.current_url = url.to_owned();
         }
+        let devtools_events = self
+            .browser
+            .devtools_events(session, 0, 512)
+            .await
+            .unwrap_or_default();
 
         let html_bytes = self.browser.content(session).await.ok();
 
@@ -393,8 +424,8 @@ impl ObservationRunner {
             dom_summary,
             screenshot_artifact_id,
             visual_observation_artifact_id,
-            console_summary: vec![],
-            network_summary: vec![],
+            console_summary: console_summary_from_devtools(&devtools_events),
+            network_summary: network_summary_from_devtools(&devtools_events),
             policy_denials,
             observed_at: Utc::now(),
         };
@@ -495,6 +526,64 @@ fn attach_related(
 struct PageState {
     url: Option<String>,
     title: Option<String>,
+}
+
+fn console_summary_from_devtools(events: &[BrowserDevtoolsEvent]) -> Vec<ConsoleLine> {
+    let mut summary = events
+        .iter()
+        .filter(|event| event.category == "console")
+        .filter_map(|event| {
+            let text = event.text.as_deref()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(ConsoleLine {
+                level: event.level.clone().unwrap_or_else(|| "info".to_owned()),
+                text: text.chars().take(500).collect(),
+            })
+        })
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>();
+    summary.reverse();
+    summary
+}
+
+fn network_summary_from_devtools(events: &[BrowserDevtoolsEvent]) -> Vec<NetworkEntry> {
+    let mut methods_by_url = HashMap::<String, String>::new();
+    for event in events {
+        if event.name == "Network.requestWillBeSent" {
+            if let (Some(url), Some(method)) = (&event.url, &event.method) {
+                methods_by_url.insert(url.clone(), method.clone());
+            }
+        }
+    }
+
+    let mut summary = events
+        .iter()
+        .filter(|event| event.name == "Network.responseReceived")
+        .filter_map(|event| {
+            let url = event.url.clone()?;
+            Some(NetworkEntry {
+                method: methods_by_url
+                    .get(&url)
+                    .cloned()
+                    .unwrap_or_else(|| "GET".to_owned()),
+                url,
+                status: event.status.unwrap_or(0),
+                content_type: event
+                    .payload
+                    .get("response")
+                    .and_then(|response| response.get("mimeType"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .rev()
+        .take(30)
+        .collect::<Vec<_>>();
+    summary.reverse();
+    summary
 }
 
 fn extract_title(html: &str) -> Option<String> {
@@ -646,6 +735,62 @@ mod tests {
             .unwrap();
         assert_eq!(link.selector, "#link1");
         assert_eq!(link.text.as_deref(), Some("Click"));
+    }
+
+    #[test]
+    fn devtools_events_build_console_and_network_summaries() {
+        let events = vec![
+            BrowserDevtoolsEvent {
+                sequence: 1,
+                tab_id: Some("tab-1".to_owned()),
+                category: "console".to_owned(),
+                name: "Runtime.consoleAPICalled".to_owned(),
+                level: Some("warning".to_owned()),
+                method: Some("warning".to_owned()),
+                url: None,
+                status: None,
+                text: Some("slow script".to_owned()),
+                timestamp_ms: 1,
+                payload: serde_json::json!({}),
+            },
+            BrowserDevtoolsEvent {
+                sequence: 2,
+                tab_id: Some("tab-1".to_owned()),
+                category: "network".to_owned(),
+                name: "Network.requestWillBeSent".to_owned(),
+                level: None,
+                method: Some("POST".to_owned()),
+                url: Some("https://example.com/api".to_owned()),
+                status: None,
+                text: None,
+                timestamp_ms: 2,
+                payload: serde_json::json!({}),
+            },
+            BrowserDevtoolsEvent {
+                sequence: 3,
+                tab_id: Some("tab-1".to_owned()),
+                category: "network".to_owned(),
+                name: "Network.responseReceived".to_owned(),
+                level: None,
+                method: None,
+                url: Some("https://example.com/api".to_owned()),
+                status: Some(201),
+                text: None,
+                timestamp_ms: 3,
+                payload: serde_json::json!({
+                    "response": { "mimeType": "application/json" }
+                }),
+            },
+        ];
+
+        let console = console_summary_from_devtools(&events);
+        let network = network_summary_from_devtools(&events);
+
+        assert_eq!(console[0].level, "warning");
+        assert_eq!(console[0].text, "slow script");
+        assert_eq!(network[0].method, "POST");
+        assert_eq!(network[0].status, 201);
+        assert_eq!(network[0].content_type.as_deref(), Some("application/json"));
     }
 
     #[test]

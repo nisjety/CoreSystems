@@ -219,6 +219,7 @@ fn agent_action_all_variants_serialize() {
         AgentAction::Click {
             selector: "#a".into(),
         },
+        AgentAction::ClickPoint { x: 320.0, y: 240.0 },
         AgentAction::Type {
             selector: "#i".into(),
             text: "hi".into(),
@@ -228,6 +229,12 @@ fn agent_action_all_variants_serialize() {
         },
         AgentAction::Scroll {
             target: "#footer".into(),
+        },
+        AgentAction::MouseWheel {
+            x: 320.0,
+            y: 240.0,
+            delta_x: 0.0,
+            delta_y: 480.0,
         },
         AgentAction::Select {
             selector: "select".into(),

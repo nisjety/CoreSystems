@@ -600,6 +600,23 @@ impl BrowserDriver for KernelDriver {
             .map(|_| ())
     }
 
+    async fn click_point(&self, session: &BrowserSession, x: f64, y: f64) -> QuarryResult<()> {
+        let script = format!(
+            r#"(() => {{
+  const x = {x};
+  const y = {y};
+  const target = document.elementFromPoint(x, y);
+  if (!target) return {{ clicked: false }};
+  target.dispatchEvent(new MouseEvent('mousemove', {{ bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, buttons: 0 }}));
+  target.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, buttons: 1 }}));
+  target.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, buttons: 0 }}));
+  if (typeof target.click === 'function') target.click();
+  return {{ clicked: true, tag: target.tagName || null }};
+}})()"#
+        );
+        self.evaluate(session, &script).await.map(|_| ())
+    }
+
     async fn type_text(
         &self,
         session: &BrowserSession,
@@ -645,6 +662,39 @@ impl BrowserDriver for KernelDriver {
         self.post_bytes(&id, "scroll", json!({ "target": target }))
             .await
             .map(|_| ())
+    }
+
+    async fn mouse_wheel(
+        &self,
+        session: &BrowserSession,
+        x: f64,
+        y: f64,
+        delta_x: f64,
+        delta_y: f64,
+    ) -> QuarryResult<()> {
+        let script = format!(
+            r#"(() => {{
+  const x = {x};
+  const y = {y};
+  const deltaX = {delta_x};
+  const deltaY = {delta_y};
+  const target = document.elementFromPoint(x, y) || document.scrollingElement || document.documentElement;
+  const event = new WheelEvent('wheel', {{ bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, deltaX, deltaY }});
+  const prevented = !target.dispatchEvent(event);
+  if (!prevented) {{
+    let scroller = target;
+    while (scroller && scroller !== document.body && scroller !== document.documentElement) {{
+      const style = window.getComputedStyle(scroller);
+      if (/(auto|scroll)/.test(style.overflowY) && scroller.scrollHeight > scroller.clientHeight) break;
+      scroller = scroller.parentElement;
+    }}
+    if (scroller && scroller !== document.body && scroller !== document.documentElement) scroller.scrollBy(deltaX, deltaY);
+    else window.scrollBy(deltaX, deltaY);
+  }}
+  return {{ prevented }};
+}})()"#
+        );
+        self.evaluate(session, &script).await.map(|_| ())
     }
 
     async fn select(

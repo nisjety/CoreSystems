@@ -579,7 +579,7 @@ impl PageRunner {
         // ZDR forbids durable writes).
         if let Some(idx) = self.local_index.clone() {
             if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
-                let host = url::Url::parse(&resp.final_url.to_string())
+                let host = url::Url::parse(resp.final_url.as_ref())
                     .ok()
                     .and_then(|u| u.host_str().map(|s| s.to_string()))
                     .unwrap_or_default();

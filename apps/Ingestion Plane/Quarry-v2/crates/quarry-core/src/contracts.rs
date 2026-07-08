@@ -88,17 +88,50 @@ pub struct AgentActionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentAction {
-    Navigate { url: String },
-    Click { selector: String },
-    Type { selector: String, text: String },
-    Press { key: String },
-    Scroll { target: String },
-    Select { selector: String, value: String },
-    Wait { ms: u32 },
-    WaitFor { selector: String, timeout_ms: u32 },
-    Screenshot { full_page: bool },
+    Navigate {
+        url: String,
+    },
+    Click {
+        selector: String,
+    },
+    ClickPoint {
+        x: f64,
+        y: f64,
+    },
+    Type {
+        selector: String,
+        text: String,
+    },
+    Press {
+        key: String,
+    },
+    Scroll {
+        target: String,
+    },
+    MouseWheel {
+        x: f64,
+        y: f64,
+        delta_x: f64,
+        delta_y: f64,
+    },
+    Select {
+        selector: String,
+        value: String,
+    },
+    Wait {
+        ms: u32,
+    },
+    WaitFor {
+        selector: String,
+        timeout_ms: u32,
+    },
+    Screenshot {
+        full_page: bool,
+    },
     Pdf,
-    Evaluate { script: String },
+    Evaluate {
+        script: String,
+    },
     Back,
     Forward,
     GetContent,

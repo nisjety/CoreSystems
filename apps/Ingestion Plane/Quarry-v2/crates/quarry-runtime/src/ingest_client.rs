@@ -298,9 +298,7 @@ struct CreateDocumentBody {
 /// and the default `CustomerPrivate` maps to `internal` (matching the receiver's
 /// prior default, so callers that set no policy see no behavior change).
 fn zdr_classification_for(policy: Option<&PrivacyPolicy>) -> &'static str {
-    let classification = policy
-        .map(|p| p.privacy_classification)
-        .unwrap_or_default();
+    let classification = policy.map(|p| p.privacy_classification).unwrap_or_default();
     match classification {
         PrivacyClassification::PublicNonPersonal => "public",
         PrivacyClassification::CustomerPrivate => "internal",
@@ -635,7 +633,10 @@ mod tests {
         // The default policy (CustomerPrivate) maps to "internal" and the full
         // policy contract is preserved in metadata for audit/DSAR provenance.
         assert_eq!(v["zdr_classification"], "internal");
-        assert_eq!(v["metadata"]["privacy_policy"]["privacy_classification"], "customer_private");
+        assert_eq!(
+            v["metadata"]["privacy_policy"]["privacy_classification"],
+            "customer_private"
+        );
     }
 
     #[test]
@@ -685,8 +686,14 @@ mod tests {
 
         assert_eq!(v["zdr_classification"], "restricted");
         // Full contract survives in metadata.
-        assert_eq!(v["metadata"]["privacy_policy"]["purpose_id"], "support_triage");
-        assert_eq!(v["metadata"]["privacy_policy"]["lawful_basis"], "legitimate_interest");
+        assert_eq!(
+            v["metadata"]["privacy_policy"]["purpose_id"],
+            "support_triage"
+        );
+        assert_eq!(
+            v["metadata"]["privacy_policy"]["lawful_basis"],
+            "legitimate_interest"
+        );
         assert_eq!(v["metadata"]["privacy_policy"]["residency"], "eu");
     }
 }

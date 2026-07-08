@@ -256,6 +256,21 @@ impl ActionRuntime {
                 }
                 None
             }
+            Action::ClickPoint { x, y } => {
+                if let (Some(driver), Some(session)) =
+                    (self.browser.as_ref(), self.session.as_ref())
+                {
+                    driver.click_point(session, *x, *y).await?;
+                } else {
+                    trace!(
+                        action_index = index,
+                        x = *x,
+                        y = *y,
+                        "click_point (dry-run)"
+                    );
+                }
+                None
+            }
             Action::Type { selector, text } => {
                 if let (Some(driver), Some(session)) =
                     (self.browser.as_ref(), self.session.as_ref())
@@ -283,6 +298,30 @@ impl ActionRuntime {
                             trace!(action_index = index, target = %sel, "scroll (dry-run)")
                         }
                     }
+                }
+                None
+            }
+            Action::MouseWheel {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => {
+                if let (Some(driver), Some(session)) =
+                    (self.browser.as_ref(), self.session.as_ref())
+                {
+                    driver
+                        .mouse_wheel(session, *x, *y, *delta_x, *delta_y)
+                        .await?;
+                } else {
+                    trace!(
+                        action_index = index,
+                        x = *x,
+                        y = *y,
+                        delta_x = *delta_x,
+                        delta_y = *delta_y,
+                        "mouse_wheel (dry-run)"
+                    );
                 }
                 None
             }
@@ -384,12 +423,19 @@ mod tests {
                 Action::Click {
                     selector: "#btn".into(),
                 },
+                Action::ClickPoint { x: 320.0, y: 240.0 },
                 Action::Type {
                     selector: "#input".into(),
                     text: "hi".into(),
                 },
                 Action::Scroll {
                     to: ScrollTarget::Bottom,
+                },
+                Action::MouseWheel {
+                    x: 320.0,
+                    y: 240.0,
+                    delta_x: 0.0,
+                    delta_y: 480.0,
                 },
                 Action::Press {
                     key: "Enter".into(),
@@ -403,7 +449,7 @@ mod tests {
             OnError::Abort,
         );
         let results = runtime.run(&s).await.unwrap();
-        assert_eq!(results.len(), 10);
+        assert_eq!(results.len(), 12);
         assert!(results.iter().all(|r| r.success));
     }
 
