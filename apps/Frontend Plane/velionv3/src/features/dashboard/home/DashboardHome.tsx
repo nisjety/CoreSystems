@@ -57,6 +57,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   // Default when a result appears: show the result, hide the cards. The chevron
   // flips `cardsRevealed` → cards come back and the result is tucked away.
   const resultsView = () => resultPresent() && !cardsRevealed()
+  const knowledgeBrowserHeaderInline = () => activeTab() === 'Crawl' && resultsView()
 
   // Once the result clears, drop any manual card reveal so the next result
   // starts from the default (results shown).
@@ -71,6 +72,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   }
   const composerSectionClass = () => {
     if (searchExpanded()) return 'velion-home-composer-section velion-home-composer-section--expanded'
+    if (knowledgeBrowserHeaderInline()) return 'velion-home-composer-section velion-home-composer-section--results velion-home-composer-section--knowledge-browser'
     if (resultsView()) return 'velion-home-composer-section velion-home-composer-section--results'
     return 'velion-home-composer-section velion-home-band velion-home-band-middle px-4 transition-[padding] duration-500'
   }
@@ -102,13 +104,15 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
         <DashboardTabs activeTab={activeTab()} onTabChange={changeActiveTab} />
 
         <div class={bandsClass()}>
-          <Show when={!searchExpanded()}>
+          <Show when={!searchExpanded() && !knowledgeBrowserHeaderInline()}>
             <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} title={homeTitle()} />
           </Show>
 
           <section class={composerSectionClass()}>
             <DashboardComposerPanel
               activeTab={activeTab()}
+              knowledgeInlinePlanLabel={knowledgeBrowserHeaderInline() ? planLabel() : undefined}
+              knowledgeInlineTitle={knowledgeBrowserHeaderInline() ? homeTitle() : undefined}
               message={message()}
               onKnowledgePreviewActiveChange={setKnowledgePreviewActive}
               onLaunchStart={() => setIsLaunching(true)}

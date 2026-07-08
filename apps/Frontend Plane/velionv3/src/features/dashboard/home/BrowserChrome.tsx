@@ -2,10 +2,12 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  Bot,
   Camera,
   Code2,
   Copy,
   ExternalLink,
+  Hand,
   Eye,
   History,
   Keyboard,
@@ -17,6 +19,7 @@ import {
   PanelRight,
   Pause,
   Play,
+  Plus,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -37,12 +40,17 @@ import {
   onCleanup,
   Show,
   Switch,
+  untrack,
   type JSX,
 } from 'solid-js'
 import type {
   BrowserAction,
   BrowserActionSuggestionResponse,
+  BrowserDevtoolsEvent,
+  BrowserObservation,
   BrowserProfileRestoreProbe,
+  BrowserSession,
+  BrowserTab,
 } from '@/shared/api/browser-client'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import {
@@ -55,11 +63,13 @@ import {
   toggleBrowserChromePopover,
   type BrowserChromePanel,
   type BrowserChromePopover,
+  type BrowserReplayViewEvent,
   type BrowserSessionViewModel,
   type BrowserStepRationale,
   type BrowserTimelineViewEntry,
 } from './browser-session'
 import { BrowserTimelineDetailPanel, compactBrowserUrl, consoleTone, networkTone } from './BrowserTimelineDetail'
+import { browserOmniboxTarget } from './browser-omnibox'
 import { hostnameOf } from './knowledge-preview'
 
 export const SESSION_STATUS_LABELS: Record<BrowserSessionViewModel['status'], string> = {
@@ -89,19 +99,87 @@ const LOOP_STATUS_LABELS: Record<BrowserLoopState['status'], string> = {
   stopped: 'Stoppet',
   suggesting: 'Foreslår',
 }
+const BROWSER_WHEEL_THROTTLE_MS = 280
+const LIVE_FRAME_REFRESH_MS = 700
+const MAX_BROWSER_WHEEL_DELTA = 1200
 
 function compactArtifactId(value: string): string {
   if (value.length <= 22) return value
   return `${value.slice(0, 9)}...${value.slice(-8)}`
 }
 
+function clampWheelDelta(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(-MAX_BROWSER_WHEEL_DELTA, Math.min(MAX_BROWSER_WHEEL_DELTA, value))
+}
+
+function browserKeyFromKeyboardEvent(event: KeyboardEvent): string | null {
+  if (event.key === ' ') return 'Space'
+  if (event.key === 'Dead' || event.key === 'Unidentified') return null
+  return event.key
+}
+
 type DevtoolsTab = 'console' | 'dom' | 'network' | 'vision'
+type BrowserWheelAction = Extract<BrowserAction, { type: 'mouse_wheel' }>
+type LiveFrameStreamPayload = {
+  dataBase64?: string
+  mimeType?: string
+  sequence?: number
+  zdr?: boolean
+}
+type BrowserWsServerMessage = LiveFrameStreamPayload & {
+  control?: { mode?: BrowserSessionViewModel['controlMode'] }
+  events?: BrowserDevtoolsEvent[]
+  message?: string
+  observation?: BrowserObservation
+  session?: BrowserSession
+  type?: 'control' | 'devtools' | 'done' | 'error' | 'frame' | 'observation' | 'pong'
+}
 
 /** Kort fanetekst for et snapshot-steg: tittel, ellers vertsnavn, ellers stegnummer. */
 function snapshotTabLabel(entry: BrowserTimelineViewEntry): string {
   if (entry.title) return entry.title
   if (entry.url) return hostnameOf(entry.url)
   return `Steg ${entry.step}`
+}
+
+function replayEventLabel(event: BrowserReplayViewEvent): string {
+  if (event.kind === 'control') {
+    return event.controlMode === 'human_takeover' ? 'Menneske tok over' : 'Agentkontroll aktiv'
+  }
+  if (event.kind === 'tab') {
+    if (event.operation === 'new') return 'Ny fane'
+    if (event.operation === 'select') return 'Fane valgt'
+    if (event.operation === 'close') return 'Fane lukket'
+    return 'Fanehendelse'
+  }
+  if (event.kind === 'frame') return 'Live frame'
+  if (event.kind === 'devtools') return 'DevTools'
+  if (event.actionType) return event.actionType.replaceAll('_', ' ')
+  return event.title || 'Observasjon'
+}
+
+function replayEventMeta(event: BrowserReplayViewEvent): string {
+  if (event.kind === 'frame') {
+    return [
+      event.transport || 'websocket',
+      event.sequence !== undefined && event.sequence !== null ? `#${event.sequence}` : null,
+      event.mimeType ?? null,
+      event.persisted === false ? 'flyktig' : null,
+    ].filter(Boolean).join(' · ')
+  }
+  if (event.kind === 'devtools') {
+    return [
+      event.eventCount !== undefined && event.eventCount !== null ? `${event.eventCount} hendelser` : null,
+      event.lastSequence !== undefined && event.lastSequence !== null ? `seq ${event.lastSequence}` : null,
+    ].filter(Boolean).join(' · ') || 'DevTools'
+  }
+  const parts = [
+    event.actor,
+    event.step !== undefined && event.step !== null ? `#${event.step}` : null,
+    event.url ? compactBrowserUrl(event.url) : null,
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : 'Ingen detalj'
 }
 
 /** DOM-nodeliste delt mellom sidevisningens fallback og DevTools-panelet. */
@@ -142,12 +220,17 @@ export function BrowserChrome(props: {
   browserRationales?: BrowserStepRationale[]
   /** Fallback body (non-live render modes); shown instead of the live page. */
   children?: JSX.Element
+  frameControls?: JSX.Element
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserControlMode?: (mode: BrowserSessionViewModel['controlMode']) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onBrowserNewTab?: () => Promise<void> | void
+  onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
   profileProbe?: BrowserProfileRestoreProbe | null
   session: BrowserSessionViewModel
 }) {
@@ -171,13 +254,41 @@ export function BrowserChrome(props: {
   const [lastSuggestion, setLastSuggestion] = createSignal<BrowserActionSuggestionResponse | null>(null)
   const [suggestionDismissed, setSuggestionDismissed] = createSignal(false)
   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
+  const [streamFrameSrc, setStreamFrameSrc] = createSignal<string | null>(null)
+  const [devtoolsEvents, setDevtoolsEvents] = createSignal<BrowserDevtoolsEvent[]>([])
+  const [liveFrameWsConnected, setLiveFrameWsConnected] = createSignal(false)
+  const [liveFrameWsFailed, setLiveFrameWsFailed] = createSignal(false)
+  const [liveFrameSseFailed, setLiveFrameSseFailed] = createSignal(false)
+  const [wsActionPending, setWsActionPending] = createSignal(false)
+  const [liveFrameTick, setLiveFrameTick] = createSignal(0)
+  let addressInputRef: HTMLInputElement | undefined
+  let lastWheelDispatchMs = 0
+  let queuedWheelAction: BrowserWheelAction | null = null
+  let queuedWheelTimer: number | undefined
+  let liveFrameTimer: number | undefined
+  let liveFrameSource: EventSource | undefined
+  let liveFrameSocket: WebSocket | undefined
+  let liveFrameSocketGeneration = 0
+  let lastLiveFrameTransportKey = ''
+  let lastDevtoolsSessionId = ''
+  let wsActionTimer: number | undefined
 
   const session = () => props.session
   const isLive = () => session().renderMode === 'chromium'
-  const controlsDisabled = () => !isLive() || props.browserBusy || !session().sessionId
+  const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
   const loopStatus = () => props.browserLoop?.status ?? 'idle'
   const loopRunning = () => isBrowserLoopRunning(loopStatus())
-  const timelineTabs = () => session().timeline.slice(-8)
+  const humanTakeoverActive = () => session().controlMode === 'human_takeover'
+  const liveBrowserTabs = () => session().tabs.length > 0
+    ? session().tabs
+    : [{
+        active: true,
+        tabId: 'tab-1',
+        title: session().title || session().host,
+        url: session().url,
+      }]
+  const timelineTabs = () => session().timeline.filter((entry) => entry.step > 0).slice(-8)
+  const replayEvents = () => session().replayEvents.slice(-12)
   const selectedTimelineEntry = () => {
     const selected = selectedTimelineStep()
     if (selected === null) return null
@@ -185,9 +296,42 @@ export function BrowserChrome(props: {
   }
   const selectedTimelineDetail = () => timelineDetail(session().timeline, selectedTimelineStep())
   const selectedRationale = () => rationaleForStep(props.browserRationales ?? [], selectedTimelineStep())
+  const liveFrameWsAvailable = () =>
+    isLive() && !props.browserBusy && selectedTimelineStep() === null && Boolean(session().liveFrameWsUrl)
+      && !liveFrameWsFailed()
+  const liveFrameStreamAvailable = () =>
+    isLive() && !props.browserBusy && selectedTimelineStep() === null && Boolean(session().liveFrameStreamUrl)
+      && (!session().liveFrameWsUrl || liveFrameWsFailed()) && !liveFrameSseFailed()
+  const pollingLiveFrameAvailable = () =>
+    isLive() && !props.browserBusy && selectedTimelineStep() === null && Boolean(session().liveFrameUrl)
+      && (!session().liveFrameWsUrl || liveFrameWsFailed())
+      && (!session().liveFrameStreamUrl || liveFrameSseFailed())
+  const liveFrameWsSrc = () => {
+    const url = liveFrameWsAvailable() ? session().liveFrameWsUrl : null
+    if (!url) return null
+    const separator = url.includes('?') ? '&' : '?'
+    return `${url}${separator}maxWidth=${session().viewport.width}&maxHeight=${session().viewport.height}`
+  }
+  const liveFrameStreamSrc = () => {
+    const url = liveFrameStreamAvailable() ? session().liveFrameStreamUrl : null
+    if (!url) return null
+    const separator = url.includes('?') ? '&' : '?'
+    return `${url}${separator}maxWidth=${session().viewport.width}&maxHeight=${session().viewport.height}`
+  }
+  const liveFrameSrc = () => {
+    const url = pollingLiveFrameAvailable() ? session().liveFrameUrl : null
+    if (!url) return null
+    const separator = url.includes('?') ? '&' : '?'
+    return `${url}${separator}maxWidth=${session().viewport.width}&maxHeight=${session().viewport.height}&t=${liveFrameTick()}`
+  }
   const frameUrl = () => {
-    const url = selectedTimelineEntry()?.screenshotUrl ?? session().frameUrl
-    return url && brokenFrameUrl() !== url ? url : null
+    const candidates = [
+      selectedTimelineEntry()?.screenshotUrl,
+      selectedTimelineStep() === null ? streamFrameSrc() : null,
+      liveFrameSrc(),
+      session().frameUrl,
+    ].filter((url): url is string => Boolean(url))
+    return candidates.find((url) => brokenFrameUrl() !== url) ?? null
   }
   const selector = () => selectorInput().trim()
   const address = () => addressInput().trim()
@@ -195,8 +339,8 @@ export function BrowserChrome(props: {
   const keyValue = () => keyInput().trim() || 'Enter'
   const selectorActionDisabled = () => controlsDisabled() || selector().length === 0
   const typeActionDisabled = () => selectorActionDisabled() || textValue().length === 0
-  const modelLoopDisabled = () => controlsDisabled() || !props.onBrowserAutoRun
-  const modelActionDisabled = () => controlsDisabled() || !props.onBrowserSuggestAction
+  const modelLoopDisabled = () => controlsDisabled() || humanTakeoverActive() || !props.onBrowserAutoRun
+  const modelActionDisabled = () => controlsDisabled() || humanTakeoverActive() || !props.onBrowserSuggestAction
   const probe = () => {
     const current = props.profileProbe
     return current && current.profile_id === session().profileId ? current : null
@@ -204,7 +348,14 @@ export function BrowserChrome(props: {
   const statusTitle = () => {
     const base = `Øktstatus: ${SESSION_STATUS_LABELS[session().status]}`
     const reason = session().degradedReason
-    return reason ? `${base} — ${reason}` : base
+    const transport = `Visuell transport: ${frameTransportLabel()}`
+    return reason ? `${base} — ${reason} · ${transport}` : `${base} · ${transport}`
+  }
+  const frameTransportLabel = () => {
+    if (liveFrameWsConnected()) return 'WebSocket'
+    if (liveFrameStreamAvailable()) return 'SSE'
+    if (pollingLiveFrameAvailable()) return 'polling'
+    return 'artifact'
   }
   const loopTitle = () => {
     const parts = [`AI-loop: ${LOOP_STATUS_LABELS[loopStatus()]}`]
@@ -215,20 +366,278 @@ export function BrowserChrome(props: {
     return parts.join(' · ')
   }
   const shotArtifactId = () => session().frameArtifactId ?? session().screenshotArtifactId ?? null
+  const liveTabLabel = (tab: BrowserTab) =>
+    tab.title || hostnameOf(tab.url ?? session().url) || session().host || 'Browser'
+  const liveConsoleEntries = () => {
+    const events = devtoolsEvents()
+      .filter((event) => event.category === 'console' && event.text?.trim())
+      .map((event) => ({
+        level: event.level || 'info',
+        text: event.text ?? '',
+      }))
+    return [...session().consoleEntries, ...events].slice(-80)
+  }
+  const liveNetworkEntries = () => {
+    const requestMethods = new Map<string, string>()
+    for (const event of devtoolsEvents()) {
+      if (event.name === 'Network.requestWillBeSent' && event.url && event.method) {
+        requestMethods.set(event.url, event.method)
+      }
+    }
+    const events = devtoolsEvents()
+      .filter((event) => event.name === 'Network.responseReceived' && event.url)
+      .map((event) => ({
+        content_type: null,
+        method: event.url ? requestMethods.get(event.url) ?? 'GET' : 'GET',
+        status: event.status ?? 0,
+        url: event.url ?? '',
+      }))
+    return [...session().networkEntries, ...events].slice(-120)
+  }
 
   const togglePanel = (panel: BrowserChromePanel) => setChrome((state) => toggleBrowserChromePanel(state, panel))
   const togglePopover = (popover: BrowserChromePopover) =>
     setChrome((state) => toggleBrowserChromePopover(state, popover))
   const closePopover = () => setChrome(closeBrowserChromePopover)
 
+  const browserControlUnavailable = () => !isLive() || !session().sessionId
+  const browserControlModeDisabled = () => browserControlUnavailable() || props.browserBusy || !props.onBrowserControlMode
+  const toggleBrowserControlMode = () => {
+    if (browserControlModeDisabled()) return
+    const nextMode = humanTakeoverActive() ? 'agent_control' : 'human_takeover'
+    if (sendBrowserWsControl(nextMode)) return
+    props.onBrowserControlMode?.(nextMode)
+  }
   const runAction = (action: BrowserAction) => {
     if (controlsDisabled()) return
+    if (sendBrowserWsAction(action)) return
     props.onBrowserAction?.(action)
   }
+  const clearQueuedWheelTimer = () => {
+    if (queuedWheelTimer === undefined) return
+    window.clearTimeout(queuedWheelTimer)
+    queuedWheelTimer = undefined
+  }
+  const clearLiveFrameTimer = () => {
+    if (liveFrameTimer === undefined) return
+    window.clearTimeout(liveFrameTimer)
+    liveFrameTimer = undefined
+  }
+  const clearWsActionTimer = () => {
+    if (wsActionTimer === undefined) return
+    window.clearTimeout(wsActionTimer)
+    wsActionTimer = undefined
+  }
+  const closeLiveFrameSource = () => {
+    liveFrameSource?.close()
+    liveFrameSource = undefined
+  }
+  const closeLiveFrameSocket = () => {
+    liveFrameSocketGeneration += 1
+    liveFrameSocket?.close()
+    liveFrameSocket = undefined
+    setLiveFrameWsConnected(false)
+    clearWsActionPending()
+  }
+  const beginWsActionPending = () => {
+    clearWsActionTimer()
+    setWsActionPending(true)
+    wsActionTimer = window.setTimeout(() => {
+      wsActionTimer = undefined
+      setWsActionPending(false)
+      setLiveFrameWsFailed(true)
+    }, 20_000)
+  }
+  const clearWsActionPending = () => {
+    clearWsActionTimer()
+    setWsActionPending(false)
+  }
+  const frameDataUrl = (payload: LiveFrameStreamPayload) => {
+    const data = payload.dataBase64?.trim()
+    if (!data) return null
+    const mimeType = payload.mimeType === 'image/png' ? 'image/png' : 'image/jpeg'
+    return `data:${mimeType};base64,${data}`
+  }
+  const handleBrowserWsMessage = (payload: BrowserWsServerMessage) => {
+    if (payload.type === 'frame') {
+      const dataUrl = frameDataUrl(payload)
+      if (dataUrl) setStreamFrameSrc(dataUrl)
+      return
+    }
+    if (payload.type === 'observation' && payload.observation) {
+      clearWsActionPending()
+      props.onBrowserSocketObservation?.(payload.observation, payload.session)
+      return
+    }
+    if (payload.type === 'control' && payload.observation && payload.session) {
+      clearWsActionPending()
+      props.onBrowserSocketObservation?.(payload.observation, payload.session)
+      return
+    }
+    if (payload.type === 'devtools' && payload.events?.length) {
+      setDevtoolsEvents((current) => {
+        const bySequence = new Map<number, BrowserDevtoolsEvent>()
+        for (const event of current) bySequence.set(event.sequence, event)
+        for (const event of payload.events ?? []) bySequence.set(event.sequence, event)
+        return [...bySequence.values()]
+          .sort((a, b) => a.sequence - b.sequence)
+          .slice(-512)
+      })
+      return
+    }
+    if (payload.type === 'error') {
+      clearWsActionPending()
+      setLiveFrameWsFailed(true)
+    }
+  }
+  const sendBrowserWsAction = (action: BrowserAction) => {
+    if (!props.onBrowserSocketObservation || wsActionPending()) return false
+    const socket = liveFrameSocket
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false
+    try {
+      beginWsActionPending()
+      socket.send(JSON.stringify({
+        type: 'action',
+        actor: 'human',
+        action,
+        instruction: 'Human browser takeover action from Velion.',
+      }))
+      return true
+    } catch {
+      clearWsActionPending()
+      setLiveFrameWsFailed(true)
+      return false
+    }
+  }
+  const sendBrowserWsControl = (mode: BrowserSessionViewModel['controlMode']) => {
+    if (!props.onBrowserSocketObservation) return false
+    const socket = liveFrameSocket
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false
+    try {
+      socket.send(JSON.stringify({
+        type: 'control',
+        actor: 'human',
+        mode,
+      }))
+      return true
+    } catch {
+      setLiveFrameWsFailed(true)
+      return false
+    }
+  }
+  const isLiveFrameSource = (src: string) => {
+    const url = session().liveFrameUrl
+    return Boolean(url && src.startsWith(url))
+  }
+  const scheduleLiveFrameRefresh = () => {
+    clearLiveFrameTimer()
+    if (!pollingLiveFrameAvailable()) return
+    liveFrameTimer = window.setTimeout(() => {
+      liveFrameTimer = undefined
+      if (untrack(pollingLiveFrameAvailable)) setLiveFrameTick((tick) => tick + 1)
+    }, LIVE_FRAME_REFRESH_MS)
+  }
+  const handleFrameLoad = (src: string) => {
+    if (isLiveFrameSource(src)) scheduleLiveFrameRefresh()
+  }
+  const handleFrameError = (src: string) => {
+    setBrokenFrameUrl(src)
+    if (isLiveFrameSource(src)) scheduleLiveFrameRefresh()
+  }
+  const flushQueuedWheelAction = () => {
+    if (controlsDisabled() || !queuedWheelAction) return
+    const action = queuedWheelAction
+    queuedWheelAction = null
+    lastWheelDispatchMs = Date.now()
+    runAction(action)
+  }
+  const scheduleQueuedWheelFlush = () => {
+    if (queuedWheelTimer !== undefined) return
+    const elapsed = Date.now() - lastWheelDispatchMs
+    const delay = Math.max(0, BROWSER_WHEEL_THROTTLE_MS - elapsed)
+    queuedWheelTimer = window.setTimeout(() => {
+      untrack(() => {
+        queuedWheelTimer = undefined
+        flushQueuedWheelAction()
+        if (queuedWheelAction && !props.browserBusy) scheduleQueuedWheelFlush()
+      })
+    }, delay)
+  }
+  const queueWheelAction = (action: BrowserWheelAction) => {
+    queuedWheelAction = queuedWheelAction
+      ? {
+          ...action,
+          delta_x: clampWheelDelta(queuedWheelAction.delta_x + action.delta_x),
+          delta_y: clampWheelDelta(queuedWheelAction.delta_y + action.delta_y),
+        }
+      : action
+    if (!props.browserBusy) scheduleQueuedWheelFlush()
+  }
+  const viewportPoint = (event: MouseEvent | WheelEvent, element: HTMLElement) => {
+    const target = element.querySelector('img') ?? element
+    const rect = target.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return null
+    const localX = event.clientX - rect.left
+    const localY = event.clientY - rect.top
+    if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return null
+    return {
+      x: (localX / rect.width) * session().viewport.width,
+      y: (localY / rect.height) * session().viewport.height,
+    }
+  }
+  const runViewportClick = (event: MouseEvent & { currentTarget: HTMLDivElement }) => {
+    if (controlsDisabled() || event.button !== 0) return
+    const point = viewportPoint(event, event.currentTarget)
+    if (!point) return
+    event.preventDefault()
+    event.currentTarget.focus({ preventScroll: true })
+    runAction({ type: 'click_point', x: point.x, y: point.y })
+  }
+  const runViewportWheel = (event: WheelEvent & { currentTarget: HTMLDivElement }) => {
+    if (browserControlUnavailable()) return
+    const point = viewportPoint(event, event.currentTarget)
+    if (!point) return
+    event.preventDefault()
+    const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? session().viewport.height
+        : 1
+    const action: BrowserWheelAction = {
+      type: 'mouse_wheel',
+      x: point.x,
+      y: point.y,
+      delta_x: clampWheelDelta(event.deltaX * scale),
+      delta_y: clampWheelDelta(event.deltaY * scale),
+    }
+
+    const now = Date.now()
+    if (props.browserBusy || now - lastWheelDispatchMs < BROWSER_WHEEL_THROTTLE_MS) {
+      queueWheelAction(action)
+      return
+    }
+    lastWheelDispatchMs = now
+    runAction(action)
+  }
+  const runViewportKey = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    if (controlsDisabled() || event.metaKey || event.ctrlKey || event.altKey) return
+    const key = browserKeyFromKeyboardEvent(event)
+    if (!key) return
+    event.preventDefault()
+    runAction({ type: 'press', key })
+  }
   const navigateFromAddress = () => {
-    const target = address() || session().url
+    const target = browserOmniboxTarget(address(), session().url)
     if (!target) return
+    setAddressInput(target)
     runAction({ type: 'navigate', url: target })
+  }
+  const prepareNewTabNavigation = async () => {
+    if (controlsDisabled()) return
+    setSelectedTimelineStep(null)
+    await props.onBrowserNewTab?.()
+    setAddressInput('')
+    window.requestAnimationFrame(() => addressInputRef?.focus())
   }
   const suggestAction = async () => {
     if (modelActionDisabled()) return
@@ -264,6 +673,34 @@ export function BrowserChrome(props: {
   })
 
   createEffect(() => {
+    const sessionId = session().sessionId ?? ''
+    if (sessionId === lastDevtoolsSessionId) return
+    lastDevtoolsSessionId = sessionId
+    setDevtoolsEvents(session().devtoolsEvents)
+  })
+
+  createEffect(() => {
+    const cachedEvents = session().devtoolsEvents
+    if (cachedEvents.length === 0) return
+    setDevtoolsEvents((current) => {
+      const bySequence = new Map<number, BrowserDevtoolsEvent>()
+      for (const event of current) bySequence.set(event.sequence, event)
+      for (const event of cachedEvents) bySequence.set(event.sequence, event)
+      return [...bySequence.values()]
+        .sort((a, b) => a.sequence - b.sequence)
+        .slice(-512)
+    })
+  })
+
+  createEffect(() => {
+    const transportKey = `${session().liveFrameWsUrl ?? ''}|${session().liveFrameStreamUrl ?? ''}`
+    if (transportKey === lastLiveFrameTransportKey) return
+    lastLiveFrameTransportKey = transportKey
+    setLiveFrameWsFailed(false)
+    setLiveFrameSseFailed(false)
+  })
+
+  createEffect(() => {
     const selected = selectedTimelineStep()
     if (selected === null) return
     if (!session().timeline.some((entry) => entry.step === selected)) {
@@ -278,6 +715,87 @@ export function BrowserChrome(props: {
   })
 
   createEffect(() => {
+    if (controlsDisabled() || !queuedWheelAction) return
+    clearQueuedWheelTimer()
+    flushQueuedWheelAction()
+  })
+
+  createEffect(() => {
+    if (!pollingLiveFrameAvailable()) {
+      clearLiveFrameTimer()
+      return
+    }
+    setLiveFrameTick((tick) => tick + 1)
+  })
+
+  createEffect(() => {
+    const src = liveFrameWsSrc()
+    closeLiveFrameSocket()
+    setStreamFrameSrc(null)
+    if (!src) return
+
+    const generation = liveFrameSocketGeneration
+    const socket = new WebSocket(src)
+    liveFrameSocket = socket
+    setLiveFrameWsConnected(false)
+    setLiveFrameWsFailed(false)
+    setLiveFrameSseFailed(false)
+
+    socket.onopen = () => setLiveFrameWsConnected(true)
+    socket.onmessage = (event) => {
+      try {
+        handleBrowserWsMessage(JSON.parse(String(event.data)) as BrowserWsServerMessage)
+      } catch {
+        // Ignore malformed socket frames; the transport fallback remains available.
+      }
+    }
+    socket.onerror = () => {
+      if (generation !== liveFrameSocketGeneration) return
+      setLiveFrameWsFailed(true)
+      clearWsActionPending()
+    }
+    socket.onclose = () => {
+      if (generation !== liveFrameSocketGeneration) return
+      setLiveFrameWsConnected(false)
+      clearWsActionPending()
+      setLiveFrameWsFailed(true)
+    }
+
+    onCleanup(closeLiveFrameSocket)
+  })
+
+  createEffect(() => {
+    const src = liveFrameStreamSrc()
+    closeLiveFrameSource()
+    setStreamFrameSrc(null)
+    if (!src) return
+
+    const source = new EventSource(src)
+    liveFrameSource = source
+    setLiveFrameSseFailed(false)
+    source.addEventListener('frame', (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as LiveFrameStreamPayload
+        const dataUrl = frameDataUrl(payload)
+        if (dataUrl) setStreamFrameSrc(dataUrl)
+      } catch {
+        // Ignore malformed stream frames; the fallback artifact frame remains visible.
+      }
+    })
+    source.addEventListener('done', () => closeLiveFrameSource())
+    source.addEventListener('error', () => {
+      setLiveFrameSseFailed(true)
+      closeLiveFrameSource()
+    })
+    onCleanup(closeLiveFrameSource)
+  })
+
+  onCleanup(clearQueuedWheelTimer)
+  onCleanup(clearLiveFrameTimer)
+  onCleanup(closeLiveFrameSource)
+  onCleanup(closeLiveFrameSocket)
+
+  createEffect(() => {
     if (!chrome().popover) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closePopover()
@@ -288,50 +806,84 @@ export function BrowserChrome(props: {
 
   return (
     <div class="knowledge-browser-chrome">
-      <Show when={isLive()}>
-        <div class="knowledge-browser-chrome__tabstrip" role="tablist" aria-label="Nettleserfaner">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={selectedTimelineStep() === null}
-            class="knowledge-browser-tab"
-            classList={{ 'knowledge-browser-tab--active': selectedTimelineStep() === null }}
-            title={`Live · ${session().title || session().host}`}
-            onClick={() => setSelectedTimelineStep(null)}
+      <div class="knowledge-browser-frame__topbar knowledge-browser-frame__topbar--minimal">
+        <div class="knowledge-browser-frame__window">
+          <span class="knowledge-browser-traffic" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <Show
+            when={isLive()}
+            fallback={<strong>{session().title || session().host || 'Browser'}</strong>}
           >
-            <span class="knowledge-browser-tab__dot" data-status={session().status} aria-hidden="true" />
-            <span class="knowledge-browser-tab__mode">Live</span>
-            <strong class="knowledge-browser-tab__label">{session().title || session().host}</strong>
-          </button>
-          <For each={timelineTabs()}>
-            {(entry) => (
+            <div
+              class="knowledge-browser-chrome__tabstrip knowledge-browser-chrome__tabstrip--frame"
+              role="tablist"
+              aria-label="Nettleserfaner"
+            >
+              <For each={liveBrowserTabs()}>
+                {(tab) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={selectedTimelineStep() === null && tab.active}
+                    class="knowledge-browser-tab"
+                    classList={{ 'knowledge-browser-tab--active': selectedTimelineStep() === null && tab.active }}
+                    title={`Live · ${liveTabLabel(tab)}`}
+                    onClick={() => {
+                      setSelectedTimelineStep(null)
+                      if (!tab.active) void props.onBrowserSelectTab?.(tab.tabId)
+                    }}
+                  >
+                    <span class="knowledge-browser-tab__dot" data-status={session().status} aria-hidden="true" />
+                    <span class="knowledge-browser-tab__mode">Live</span>
+                    <strong class="knowledge-browser-tab__label">{liveTabLabel(tab)}</strong>
+                  </button>
+                )}
+              </For>
+              <For each={timelineTabs()}>
+                {(entry) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={selectedTimelineStep() === entry.step}
+                    class="knowledge-browser-tab"
+                    classList={{ 'knowledge-browser-tab--active': selectedTimelineStep() === entry.step }}
+                    title={`Snapshot fra steg ${entry.step} — ${snapshotTabLabel(entry)}`}
+                    onClick={() => setSelectedTimelineStep((current) => (current === entry.step ? null : entry.step))}
+                  >
+                    <span class="knowledge-browser-tab__dot knowledge-browser-tab__dot--snapshot" aria-hidden="true" />
+                    <span class="knowledge-browser-tab__mode">#{entry.step}</span>
+                    <strong class="knowledge-browser-tab__label">{snapshotTabLabel(entry)}</strong>
+                    <Show when={rationaleForStep(props.browserRationales ?? [], entry.step) || entry.visualObservationArtifactId}>
+                      <span class="knowledge-browser-tab__markers">
+                        <Show when={rationaleForStep(props.browserRationales ?? [], entry.step)}>
+                          <Sparkles class="size-3" aria-label="AI-foreslått steg" />
+                        </Show>
+                        <Show when={entry.visualObservationArtifactId}>
+                          <Eye class="size-3" aria-label="Visuell observasjon tilgjengelig" />
+                        </Show>
+                      </span>
+                    </Show>
+                  </button>
+                )}
+              </For>
               <button
                 type="button"
-                role="tab"
-                aria-selected={selectedTimelineStep() === entry.step}
-                class="knowledge-browser-tab"
-                classList={{ 'knowledge-browser-tab--active': selectedTimelineStep() === entry.step }}
-                title={`Snapshot fra steg ${entry.step} — ${snapshotTabLabel(entry)}`}
-                onClick={() => setSelectedTimelineStep((current) => (current === entry.step ? null : entry.step))}
+                class="knowledge-browser-tab-new"
+                aria-label="Ny fane"
+                title="Ny fane"
+                disabled={controlsDisabled()}
+                onClick={() => void prepareNewTabNavigation()}
               >
-                <span class="knowledge-browser-tab__dot knowledge-browser-tab__dot--snapshot" aria-hidden="true" />
-                <span class="knowledge-browser-tab__mode">#{entry.step}</span>
-                <strong class="knowledge-browser-tab__label">{snapshotTabLabel(entry)}</strong>
-                <Show when={rationaleForStep(props.browserRationales ?? [], entry.step) || entry.visualObservationArtifactId}>
-                  <span class="knowledge-browser-tab__markers">
-                    <Show when={rationaleForStep(props.browserRationales ?? [], entry.step)}>
-                      <Sparkles class="size-3" aria-label="AI-foreslått steg" />
-                    </Show>
-                    <Show when={entry.visualObservationArtifactId}>
-                      <Eye class="size-3" aria-label="Visuell observasjon tilgjengelig" />
-                    </Show>
-                  </span>
-                </Show>
+                <Plus class="size-3.5" />
               </button>
-            )}
-          </For>
+            </div>
+          </Show>
         </div>
-      </Show>
+        {props.frameControls}
+      </div>
 
       <div class="knowledge-browser-chrome__toolbar" aria-label="Nettleserkontroller">
         <div class="knowledge-browser-chrome__nav">
@@ -378,6 +930,7 @@ export function BrowserChrome(props: {
             <LockKeyhole class="size-3.5" />
           </button>
           <input
+            ref={(element) => { addressInputRef = element }}
             value={addressInput()}
             disabled={controlsDisabled()}
             aria-label="Nettleseradresse"
@@ -412,6 +965,23 @@ export function BrowserChrome(props: {
           <span class="knowledge-browser-mode-badge" title={`Gjengivelsesmodus: ${session().renderMode}`}>
             {RENDER_MODE_LABELS[session().renderMode]}
           </span>
+          <button
+            type="button"
+            class="knowledge-browser-control-chip"
+            classList={{ 'knowledge-browser-control-chip--human': humanTakeoverActive() }}
+            aria-pressed={humanTakeoverActive()}
+            aria-label={humanTakeoverActive() ? 'Gi nettleserkontroll tilbake til AI-agenten' : 'Ta over nettleserkontrollen manuelt'}
+            title={humanTakeoverActive() ? 'Gi kontroll til AI-agenten' : 'Ta over nettleseren'}
+            disabled={browserControlModeDisabled()}
+            onClick={toggleBrowserControlMode}
+          >
+            <Show
+              when={humanTakeoverActive()}
+              fallback={<><Bot class="size-3" aria-hidden="true" /> AI</>}
+            >
+              <Hand class="size-3" aria-hidden="true" /> Manuell
+            </Show>
+          </button>
           <Show when={evidenceIsEphemeral(session())}>
             <span
               class="knowledge-browser-zdr-chip"
@@ -846,12 +1416,21 @@ export function BrowserChrome(props: {
               }
             >
               {(src) => (
-                <div class="knowledge-browser-screenshot" aria-label="Gjengitt Chromium-side">
+                <div
+                  class="knowledge-browser-screenshot knowledge-browser-screenshot--interactive"
+                  aria-label="Interaktiv Chromium-side. Klikk, scroll eller fokuser for tastatur."
+                  role="application"
+                  tabIndex={0}
+                  onClick={runViewportClick}
+                  onKeyDown={runViewportKey}
+                  onWheel={runViewportWheel}
+                >
                   <img
                     src={src}
                     alt={`Gjengitt nettleserside for ${session().title}`}
                     decoding="async"
-                    onError={() => setBrokenFrameUrl(src)}
+                    onLoad={() => handleFrameLoad(src)}
+                    onError={() => handleFrameError(src)}
                   />
                 </div>
               )}
@@ -863,7 +1442,7 @@ export function BrowserChrome(props: {
               <header class="knowledge-browser-devtools__head">
                 <span>DevTools</span>
                 <span class="knowledge-browser-devtools__stats">
-                  {session().domNodes.length}/{session().nodeCount ?? session().domNodes.length} DOM · {session().networkEntries.length} network
+                  {session().domNodes.length}/{session().nodeCount ?? session().domNodes.length} DOM · {liveNetworkEntries().length} network
                 </span>
                 <Show when={shotArtifactId()}>
                   {(artifactId) => <code title={artifactId()}>shot {compactArtifactId(artifactId())}</code>}
@@ -895,7 +1474,7 @@ export function BrowserChrome(props: {
                   classList={{ 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'console' }}
                   onClick={() => setDevtoolsTab('console')}
                 >
-                  <Terminal class="size-3.5" /> Console <em>{session().consoleEntries.length}</em>
+                  <Terminal class="size-3.5" /> Console <em>{liveConsoleEntries().length}</em>
                 </button>
                 <button
                   type="button"
@@ -905,7 +1484,7 @@ export function BrowserChrome(props: {
                   classList={{ 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'network' }}
                   onClick={() => setDevtoolsTab('network')}
                 >
-                  <Network class="size-3.5" /> Network <em>{session().networkEntries.length}</em>
+                  <Network class="size-3.5" /> Network <em>{liveNetworkEntries().length}</em>
                 </button>
                 <Show when={session().visualObservationArtifactId}>
                   <button
@@ -931,7 +1510,7 @@ export function BrowserChrome(props: {
                   <Match when={devtoolsTab() === 'console'}>
                     <div class="knowledge-browser-console-list">
                       <For
-                        each={session().consoleEntries}
+                        each={liveConsoleEntries()}
                         fallback={<p class="knowledge-browser-empty">Ingen console-hendelser.</p>}
                       >
                         {(entry) => (
@@ -946,7 +1525,7 @@ export function BrowserChrome(props: {
                   <Match when={devtoolsTab() === 'network'}>
                     <div class="knowledge-browser-network-list">
                       <For
-                        each={session().networkEntries}
+                        each={liveNetworkEntries()}
                         fallback={<p class="knowledge-browser-empty">Ingen nettverkskall returnert ennå.</p>}
                       >
                         {(entry) => (
@@ -1003,7 +1582,7 @@ export function BrowserChrome(props: {
           <header class="knowledge-browser-evidence__head">
             <History class="size-3.5" aria-hidden="true" />
             <span>Tidslinje</span>
-            <strong>{session().timeline.length} steg</strong>
+            <strong>{session().timeline.length} steg · {session().replayEvents.length} hendelser</strong>
             <button
               type="button"
               aria-label="Lukk tidslinjen"
@@ -1016,6 +1595,38 @@ export function BrowserChrome(props: {
             when={session().timeline.length > 0}
             fallback={<p class="knowledge-browser-evidence__hint">Ingen steg registrert ennå — naviger eller kjør en handling for å bygge tidslinjen.</p>}
           >
+            <Show when={session().replayEvents.length > 0}>
+              <div class="knowledge-browser-replay" aria-label="Agent replay">
+                <header>
+                  <span>Replay</span>
+                  <strong>{session().replayEvents.length}</strong>
+                </header>
+                <For each={replayEvents()}>
+                  {(event) => (
+                    <div class={`knowledge-browser-replay__event knowledge-browser-replay__event--${event.kind}`}>
+                      <span class="knowledge-browser-replay__kind">{event.kind}</span>
+                      <div>
+                        <strong>{replayEventLabel(event)}</strong>
+                        <p>{replayEventMeta(event)}</p>
+                      </div>
+                      <Show when={event.screenshotArtifactId || event.visualObservationArtifactId || event.tabId}>
+                        <span class="knowledge-browser-replay__markers">
+                          <Show when={event.screenshotArtifactId}>
+                            <Camera class="size-3" aria-label="Screenshot" />
+                          </Show>
+                          <Show when={event.visualObservationArtifactId}>
+                            <Eye class="size-3" aria-label="Visuell observasjon" />
+                          </Show>
+                          <Show when={event.tabId}>
+                            <span>{event.tabId}</span>
+                          </Show>
+                        </span>
+                      </Show>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
             <div class="knowledge-browser-timeline" aria-label="Nettleserhistorikk">
               <button
                 type="button"

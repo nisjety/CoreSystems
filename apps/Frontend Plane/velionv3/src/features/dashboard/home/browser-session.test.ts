@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import type { BrowserSessionResponse } from '@/shared/api/browser-client'
 import {
   artifactsForTimelineEntry,
+  attachBrowserObservation,
   attachBrowserSession,
+  attachBrowserTabs,
   browserSessionFromPreview,
   closeBrowserChromePopover,
   describeTimelineDelta,
@@ -43,6 +45,41 @@ describe('browser session view model', () => {
     expect(model.domNodes.map((node) => node.text)).toEqual(['TriodeLab', 'Digital transformasjon.'])
   })
 
+  it('merges live browser tabs without dropping the existing observation', () => {
+    const current = attachBrowserSession(preview(), {
+      session: {
+        capabilities: ['navigate', 'tabs'],
+        control: { mode: 'agent_control' },
+        id: 'run-1',
+        profile: { scope: 'run_scoped', storage: 'isolated' },
+        renderMode: 'chromium',
+        status: 'live',
+        tabs: [{ active: true, tabId: 'tab-1', title: 'TriodeLab', url: 'https://triodelab.no/' }],
+        title: 'TriodeLab',
+        url: 'https://triodelab.no/',
+        viewport: { width: 1280, height: 800 },
+      },
+      observation: {
+        run_id: 'run-1',
+        step: 0,
+        title: 'TriodeLab',
+        url: 'https://triodelab.no/',
+      },
+    })
+
+    const next = attachBrowserTabs(current, {
+      tabs: [
+        { active: false, tabId: 'tab-1', title: 'TriodeLab', url: 'https://triodelab.no/' },
+        { active: true, tabId: 'tab-2', title: null, url: 'about:blank' },
+      ],
+    })
+    const model = browserSessionFromPreview(next)
+
+    expect(next.browserSession?.observation?.url).toBe('https://triodelab.no/')
+    expect(model.tabs).toHaveLength(2)
+    expect(model.tabs[1]?.active).toBe(true)
+  })
+
   it('prefers live Quarry browser observations when present', () => {
     const response: BrowserSessionResponse = {
       session: {
@@ -53,8 +90,10 @@ describe('browser session view model', () => {
           mediaType: 'image/png',
           url: '/api/v1/browser/sessions/run-1/artifacts/artifact-shot',
         },
+        control: { mode: 'human_takeover' },
         id: 'run-1',
         leaseId: 'lease-1',
+        liveFrameWsUrl: '/api/v1/browser/sessions/run-1/frames/ws',
         profile: { scope: 'run_scoped', storage: 'isolated' },
         renderMode: 'chromium',
         status: 'live',
@@ -69,6 +108,25 @@ describe('browser session view model', () => {
             visualObservationUrl: '/api/v1/browser/sessions/run-1/artifacts/art_vision_1',
           },
         ],
+        replay: {
+          eventCount: 1,
+          events: [
+            {
+              actionType: 'navigate',
+              actor: 'system',
+              controlMode: 'agent_control',
+              id: 'run-1:observation:0',
+              kind: 'observation',
+              screenshotArtifactId: 'artifact-shot',
+              screenshotUrl: '/api/v1/browser/sessions/run-1/artifacts/artifact-shot',
+              step: 0,
+              title: 'Rendered TriodeLab',
+              url: 'https://triodelab.no/',
+              visualObservationArtifactId: 'art_vision_1',
+              visualObservationUrl: '/api/v1/browser/sessions/run-1/artifacts/art_vision_1',
+            },
+          ],
+        },
         title: 'Live title',
         url: 'https://triodelab.no/',
         visual: {
@@ -104,8 +162,10 @@ describe('browser session view model', () => {
 
     expect(model.renderMode).toBe('chromium')
     expect(model.status).toBe('live')
+    expect(model.controlMode).toBe('human_takeover')
     expect(model.title).toBe('Rendered TriodeLab')
     expect(model.frameUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/artifact-shot')
+    expect(model.liveFrameWsUrl).toContain('/api/v1/browser/sessions/run-1/frames/ws')
     expect(model.sourceLabel).toBe('Chromium frame')
     expect(model.screenshotArtifactId).toBe('artifact-shot')
     expect(model.visualObservationArtifactId).toBe('art_vision_1')
@@ -113,6 +173,9 @@ describe('browser session view model', () => {
     expect(model.timeline).toHaveLength(1)
     expect(model.timeline[0]?.screenshotUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/artifact-shot')
     expect(model.timeline[0]?.visualObservationUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/art_vision_1')
+    expect(model.replayEvents).toHaveLength(1)
+    expect(model.replayEvents[0]?.screenshotUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/artifact-shot')
+    expect(model.replayEvents[0]?.visualObservationUrl).toBe('/api/v1/browser/sessions/run-1/artifacts/art_vision_1')
     expect(model.nodeCount).toBe(42)
     expect(model.consoleEntries).toEqual([
       { level: 'warning', text: 'Third-party script blocked' },
@@ -161,6 +224,7 @@ describe('browser session view model', () => {
     const current = attachBrowserSession(preview(), {
       session: {
         capabilities: ['navigate', 'back'],
+        control: { mode: 'human_takeover' },
         frame: null,
         id: 'run-1',
         leaseId: 'lease-1',
@@ -200,8 +264,59 @@ describe('browser session view model', () => {
     expect(model.profileId).toBe('prof_01JZ9XM7EXAMPLEPROFILE0001')
     expect(model.profileScope).toBe('user_private')
     expect(model.profileStorage).toBe('persistent')
+    expect(model.controlMode).toBe('human_takeover')
     expect(model.visualObservationArtifactId).toBe('art_vision_1')
+    expect(next.browserSession?.session.control?.mode).toBe('human_takeover')
     expect(next.browserSession?.session.leaseId).toBe('lease-1')
+  })
+
+  it('merges websocket observations into the active browser session', () => {
+    const current = attachBrowserSession(preview(), {
+      session: {
+        capabilities: ['navigate', 'click_point', 'live_frame_ws'],
+        control: { mode: 'agent_control' },
+        frame: null,
+        id: 'run-1',
+        leaseId: 'lease-1',
+        liveFrameWsUrl: '/api/v1/browser/sessions/run-1/frames/ws',
+        profile: { scope: 'run_scoped', storage: 'isolated' },
+        renderMode: 'chromium',
+        status: 'live',
+        title: 'Live title',
+        url: 'https://triodelab.no/',
+        viewport: { width: 1280, height: 800 },
+      },
+      observation: null,
+    })
+
+    const next = attachBrowserObservation(current, {
+      console_summary: [{ level: 'info', text: 'clicked' }],
+      dom_summary: {
+        interactive_elements: [{ selector: 'button.cta', tag: 'button', text: 'Kontakt' }],
+        node_count: 51,
+      },
+      network_summary: [],
+      observed_at: '2026-07-08T00:00:00Z',
+      policy_denials: [],
+      run_id: 'run-1',
+      screenshot_artifact_id: 'art_socket_shot',
+      step: 2,
+      title: 'Socket title',
+      url: 'https://triodelab.no/kontakt',
+    }, { controlMode: 'human_takeover' })
+
+    const model = browserSessionFromPreview(next)
+
+    expect(model.controlMode).toBe('human_takeover')
+    expect(model.title).toBe('Socket title')
+    expect(model.url).toBe('https://triodelab.no/kontakt')
+    expect(model.frameArtifactId).toBe('art_socket_shot')
+    expect(model.frameUrl).toContain('/api/v1/browser/sessions/run-1/artifacts/art_socket_shot')
+    expect(model.timeline.at(-1)?.step).toBe(2)
+    expect(model.timeline.at(-1)?.domNodeCount).toBe(51)
+    expect(model.replayEvents.at(-1)?.kind).toBe('observation')
+    expect(model.replayEvents.at(-1)?.controlMode).toBe('human_takeover')
+    expect(model.replayEvents.at(-1)?.screenshotUrl).toContain('/api/v1/browser/sessions/run-1/artifacts/art_socket_shot')
   })
 
   it('surfaces the gateway ZDR marker and per-step evidence on timeline entries', () => {

@@ -122,9 +122,10 @@ describe('v2 dashboard shell port', () => {
     expect(screen.queryByText('AI operations status')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Innhent' }))
+    // The unified browser chrome dropped the composer's decorative caption
+    // block ("… Velion indekserer alt."), so the panel heading now appears
+    // exactly once and the caption text is gone by design.
     expect(screen.getByRole('heading', { name: 'Hent inn kunnskap' })).toBeTruthy()
-    expect(screen.getAllByText('Hent inn kunnskap').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByText(/Velion indekserer alt/)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Last opp filer' })).toBeTruthy()
     expect(screen.getByRole('link', { name: /Åpne kunnskapsbase/ })).toBeTruthy()
   })

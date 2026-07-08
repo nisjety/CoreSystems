@@ -1,6 +1,11 @@
 import type {
+  BrowserControlMode,
+  BrowserDevtoolsEvent,
   BrowserObservation,
+  BrowserReplayEvent,
   BrowserSession,
+  BrowserTab,
+  BrowserTabsResponse,
   BrowserTimelineEntry,
   BrowserSessionResponse,
 } from '@/shared/api/browser-client'
@@ -33,6 +38,11 @@ export type BrowserTimelineViewEntry = BrowserTimelineEntry & {
   visualObservationUrl?: string | null
 }
 
+export type BrowserReplayViewEvent = BrowserReplayEvent & {
+  screenshotUrl?: string | null
+  visualObservationUrl?: string | null
+}
+
 export type BrowserSessionViewModel = {
   capabilities: string[]
   commentAnchors: Array<{
@@ -48,6 +58,12 @@ export type BrowserSessionViewModel = {
   frameMediaType?: string | null
   frameUrl?: string | null
   host: string
+  controlMode: BrowserControlMode
+  devtoolsEvents: BrowserDevtoolsEvent[]
+  devtoolsUrl?: string | null
+  liveFrameStreamUrl?: string | null
+  liveFrameUrl?: string | null
+  liveFrameWsUrl?: string | null
   networkEntries: BrowserNetworkEntry[]
   nodeCount?: number | null
   observation?: BrowserObservation | null
@@ -57,10 +73,13 @@ export type BrowserSessionViewModel = {
   profileScope: BrowserSession['profile']['scope']
   profileStorage: BrowserSession['profile']['storage']
   renderMode: BrowserSurfaceMode
+  replayEvents: BrowserReplayViewEvent[]
   screenshotArtifactId?: string | null
   sessionId?: string
   sourceLabel: string
   status: BrowserSession['status']
+  tabs: BrowserTab[]
+  tabsUrl?: string | null
   timeline: BrowserTimelineViewEntry[]
   title: string
   url: string
@@ -74,13 +93,21 @@ export type BrowserSessionViewModel = {
 }
 
 const fallbackViewport = { width: 1280, height: 800 }
+const maxBrowserTimelineEntries = 32
+const maxBrowserReplayEvents = 96
 
 export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessionViewModel {
   const mode = preview.browserSession?.session.renderMode ?? 'readability_fallback'
   const observation = preview.browserSession?.observation ?? null
   const session = preview.browserSession?.session
   const frameUrl = resolveBrowserArtifactUrl(session?.frame?.url)
+  const liveFrameStreamUrl = resolveBrowserArtifactUrl(session?.liveFrameStreamUrl)
+  const liveFrameUrl = resolveBrowserArtifactUrl(session?.liveFrameUrl)
+  const liveFrameWsUrl = resolveBrowserWsUrl(session?.liveFrameWsUrl)
+  const devtoolsUrl = resolveBrowserArtifactUrl(session?.devtoolsUrl)
   const timeline = normalizeTimeline(session?.timeline)
+  const replayEvents = normalizeReplayEvents(session?.replay?.events)
+  const tabs = normalizeBrowserTabs(session?.tabs, session, preview)
   const visualObservationArtifactId =
     session?.visual?.observationArtifactId ?? observation?.visual_observation_artifact_id ?? null
   const visualObservationUrl =
@@ -106,6 +133,12 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     frameMediaType: session?.frame?.mediaType ?? null,
     frameUrl,
     host: hostnameOf(session?.url ?? preview.url),
+    controlMode: session?.control?.mode ?? 'agent_control',
+    devtoolsEvents: session?.devtools?.events ?? [],
+    devtoolsUrl,
+    liveFrameStreamUrl,
+    liveFrameUrl,
+    liveFrameWsUrl,
     networkEntries: observation?.network_summary ?? [],
     nodeCount: observation?.dom_summary?.node_count ?? null,
     observation,
@@ -115,10 +148,13 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     profileScope: session?.profile.scope ?? 'run_scoped',
     profileStorage: session?.profile.storage ?? 'isolated',
     renderMode: mode,
+    replayEvents,
     screenshotArtifactId: observation?.screenshot_artifact_id ?? null,
     sessionId: session?.id,
     sourceLabel: frameUrl ? 'Chromium frame' : sourceLabel(mode),
     status: session?.status ?? 'degraded',
+    tabs,
+    tabsUrl: resolveBrowserArtifactUrl(session?.tabsUrl),
     timeline,
     title: observation?.title || session?.title || preview.title,
     url: observation?.url || session?.url || preview.url,
@@ -153,6 +189,18 @@ export function attachBrowserSession(
       ? session.capabilities
       : previous?.capabilities ?? session.capabilities,
     leaseId: session.leaseId ?? previous?.leaseId ?? null,
+    liveFrameStreamUrl: session.liveFrameStreamUrl ?? previous?.liveFrameStreamUrl ?? null,
+    liveFrameUrl: session.liveFrameUrl ?? previous?.liveFrameUrl ?? null,
+    liveFrameWsUrl: session.liveFrameWsUrl ?? previous?.liveFrameWsUrl ?? null,
+    devtoolsUrl: session.devtoolsUrl ?? previous?.devtoolsUrl ?? null,
+    devtools: session.devtools?.events?.length
+      ? session.devtools
+      : previous?.devtools ?? { events: [], eventCount: 0, lastSequence: null },
+    tabs: session.tabs?.length
+      ? session.tabs
+      : previous?.tabs ?? [],
+    tabsUrl: session.tabsUrl ?? previous?.tabsUrl ?? null,
+    control: session.control ?? previous?.control ?? { mode: 'agent_control' },
     profile: {
       id: session.profile.id ?? previous?.profile.id ?? null,
       scope: session.profile.id ? session.profile.scope : previous?.profile.scope ?? session.profile.scope,
@@ -162,6 +210,9 @@ export function attachBrowserSession(
     timeline: session.timeline?.length
       ? session.timeline
       : previous?.timeline ?? [],
+    replay: session.replay?.events?.length
+      ? session.replay
+      : previous?.replay ?? { events: [], eventCount: 0 },
     viewport: session.viewport ?? previous?.viewport,
     zdr: session.zdr ?? previous?.zdr ?? false,
   }
@@ -177,6 +228,112 @@ export function attachBrowserSession(
     title: browserSession.observation?.title || mergedSession.title || preview.title,
     url: browserSession.observation?.url || mergedSession.url || preview.url,
   }
+}
+
+export function attachBrowserTabs(
+  preview: ScrapePreview,
+  tabsResponse: BrowserTabsResponse,
+): ScrapePreview {
+  const previous = preview.browserSession
+  if (!previous) return preview
+  const session = tabsResponse.session
+    ? {
+        ...previous.session,
+        ...tabsResponse.session,
+        tabs: tabsResponse.tabs.length > 0
+          ? tabsResponse.tabs
+          : tabsResponse.session.tabs ?? previous.session.tabs ?? [],
+        timeline: tabsResponse.session.timeline ?? previous.session.timeline ?? [],
+        replay: tabsResponse.session.replay ?? previous.session.replay ?? { events: [], eventCount: 0 },
+        devtools: tabsResponse.session.devtools ?? previous.session.devtools ?? { events: [], eventCount: 0, lastSequence: null },
+        devtoolsUrl: tabsResponse.session.devtoolsUrl ?? previous.session.devtoolsUrl ?? null,
+        visual: tabsResponse.session.visual ?? previous.session.visual ?? null,
+      }
+    : {
+        ...previous.session,
+        tabs: tabsResponse.tabs,
+      }
+
+  return {
+    ...preview,
+    browserSession: {
+      ...previous,
+      session,
+    },
+  }
+}
+
+export function attachBrowserObservation(
+  preview: ScrapePreview,
+  observation: BrowserObservation,
+  options?: { controlMode?: BrowserControlMode },
+): ScrapePreview {
+  const previous = preview.browserSession
+  if (!previous) return preview
+
+  const session = previous.session
+  const screenshotArtifactId = observation.screenshot_artifact_id ?? null
+  const screenshotUrl = browserArtifactUrl(session.id, screenshotArtifactId)
+  const visualObservationArtifactId = observation.visual_observation_artifact_id ?? null
+  const visualObservationUrl = browserArtifactUrl(session.id, visualObservationArtifactId)
+  const timelineEntry: BrowserTimelineEntry = {
+    consoleSummary: observation.console_summary ?? [],
+    domInteractiveCount: observation.dom_summary?.interactive_elements?.length ?? null,
+    domNodeCount: observation.dom_summary?.node_count ?? null,
+    networkSummary: observation.network_summary ?? [],
+    observedAt: observation.observed_at ?? null,
+    policyDenials: observation.policy_denials ?? [],
+    screenshotArtifactId,
+    screenshotUrl,
+    step: observation.step,
+    title: observation.title ?? null,
+    url: observation.url,
+    visualObservationArtifactId,
+    visualObservationUrl,
+  }
+  const timeline = [
+    ...(session.timeline ?? []).filter((entry) => entry.step !== observation.step),
+    timelineEntry,
+  ].slice(-maxBrowserTimelineEntries)
+  const replayEvent = replayEventFromObservation(
+    session.id,
+    observation,
+    options?.controlMode ?? session.control?.mode ?? 'human_takeover',
+    session.zdr ?? false,
+  )
+  const replayEvents = [
+    ...(session.replay?.events ?? []).filter((entry) => entry.id !== replayEvent.id),
+    replayEvent,
+  ].slice(-maxBrowserReplayEvents)
+
+  return attachBrowserSession(preview, {
+    observation,
+    session: {
+      ...session,
+      control: { mode: options?.controlMode ?? session.control?.mode ?? 'human_takeover' },
+      frame: screenshotArtifactId
+        ? {
+            artifactId: screenshotArtifactId,
+            kind: 'screenshot',
+            mediaType: 'image/png',
+            url: screenshotUrl,
+          }
+        : session.frame ?? null,
+      timeline,
+      replay: {
+        events: replayEvents,
+        eventCount: replayEvents.length,
+      },
+      title: observation.title || session.title,
+      url: observation.url || session.url,
+      visual: visualObservationArtifactId
+        ? {
+            observationArtifactId: visualObservationArtifactId,
+            observationUrl: visualObservationUrl,
+          }
+        : session.visual ?? null,
+    },
+  })
 }
 
 function domNodesFromObservation(observation: BrowserObservation): BrowserDomNode[] {
@@ -220,6 +377,21 @@ function resolveBrowserArtifactUrl(url?: string | null): string | null {
   return null
 }
 
+function resolveBrowserWsUrl(url?: string | null): string | null {
+  const value = url?.trim()
+  if (!value) return null
+  if (/^wss?:\/\//i.test(value)) return value
+  const absolute = value.startsWith('/')
+    ? gatewayBaseUrl()
+      ? `${gatewayBaseUrl()}${value}`
+      : `${globalThis.location.protocol === 'https:' ? 'wss' : 'ws'}://${globalThis.location.host}${value}`
+    : value
+  if (/^wss?:\/\//i.test(absolute)) return absolute
+  if (/^http:\/\//i.test(absolute)) return absolute.replace(/^http:\/\//i, 'ws://')
+  if (/^https:\/\//i.test(absolute)) return absolute.replace(/^https:\/\//i, 'wss://')
+  return null
+}
+
 function resolveVisualObservationUrl(sessionId?: string, artifactId?: string | null): string | null {
   const normalizedSessionId = sessionId?.trim()
   const normalizedArtifactId = artifactId?.trim()
@@ -229,12 +401,86 @@ function resolveVisualObservationUrl(sessionId?: string, artifactId?: string | n
   )
 }
 
+function normalizeBrowserTabs(
+  tabs: BrowserTab[] | null | undefined,
+  session: BrowserSession | undefined,
+  preview: ScrapePreview,
+): BrowserTab[] {
+  const normalized = (tabs ?? []).reduce<BrowserTab[]>((items, tab) => {
+    const tabId = tab.tabId?.trim()
+    if (!tabId) return items
+    return [
+      ...items,
+      {
+        active: Boolean(tab.active),
+        tabId,
+        title: tab.title?.trim() || null,
+        url: tab.url?.trim() || null,
+      },
+    ]
+  }, [])
+  if (normalized.length > 0) {
+    return normalized.some((tab) => tab.active)
+      ? normalized
+      : normalized.map((tab, index) => ({ ...tab, active: index === 0 }))
+  }
+  if (!session?.id) return []
+  return [{
+    active: true,
+    tabId: 'tab-1',
+    title: session.title || preview.title,
+    url: session.url || preview.url,
+  }]
+}
+
 function normalizeTimeline(entries?: BrowserTimelineEntry[] | null): BrowserTimelineViewEntry[] {
   return (entries ?? []).map((entry) => ({
     ...entry,
     screenshotUrl: resolveBrowserArtifactUrl(entry.screenshotUrl),
     visualObservationUrl: resolveBrowserArtifactUrl(entry.visualObservationUrl),
   }))
+}
+
+function normalizeReplayEvents(entries?: BrowserReplayEvent[] | null): BrowserReplayViewEvent[] {
+  return (entries ?? []).map((entry) => ({
+    ...entry,
+    screenshotUrl: resolveBrowserArtifactUrl(entry.screenshotUrl),
+    visualObservationUrl: resolveBrowserArtifactUrl(entry.visualObservationUrl),
+  }))
+}
+
+function replayEventFromObservation(
+  sessionId: string,
+  observation: BrowserObservation,
+  controlMode: BrowserControlMode,
+  zdr: boolean,
+): BrowserReplayEvent {
+  const screenshotArtifactId = observation.screenshot_artifact_id ?? null
+  const visualObservationArtifactId = observation.visual_observation_artifact_id ?? null
+  const timestampMs = observation.observed_at
+    ? Date.parse(observation.observed_at)
+    : Number.NaN
+  return {
+    actor: 'human',
+    consoleCount: observation.console_summary?.length ?? 0,
+    controlMode,
+    domInteractiveCount: observation.dom_summary?.interactive_elements?.length ?? null,
+    domNodeCount: observation.dom_summary?.node_count ?? null,
+    id: `${sessionId}:observation:${observation.step}`,
+    kind: 'observation',
+    networkCount: observation.network_summary?.length ?? 0,
+    observedAt: observation.observed_at ?? null,
+    policyDenialCount: observation.policy_denials?.length ?? 0,
+    screenshotArtifactId,
+    screenshotUrl: browserArtifactUrl(sessionId, screenshotArtifactId),
+    step: observation.step,
+    timestampMs: Number.isFinite(timestampMs) ? timestampMs : observation.step,
+    title: observation.title ?? null,
+    url: observation.url,
+    visualObservationArtifactId,
+    visualObservationUrl: browserArtifactUrl(sessionId, visualObservationArtifactId),
+    zdr,
+  }
 }
 
 /** Gateway artifact URL for a session-scoped artifact id, or null when either id is unusable. */

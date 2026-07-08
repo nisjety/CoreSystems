@@ -37,6 +37,7 @@ export default defineConfig({
       '/api': {
         target: gatewayProxyTarget,
         changeOrigin: true,
+        ws: true,
       },
       '/health': {
         target: gatewayProxyTarget,

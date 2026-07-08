@@ -2,11 +2,7 @@ import {
   AlertCircle,
   Check,
   Code2,
-  ExternalLink,
-  Globe2,
-  Loader2,
   Maximize2,
-  MessageSquare,
   ShieldCheck,
   X,
 } from 'lucide-solid'
@@ -14,6 +10,8 @@ import { createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX }
 import type {
   BrowserAction,
   BrowserActionSuggestionResponse,
+  BrowserControlMode,
+  BrowserObservation,
   BrowserProfileRestoreProbe,
 } from '@/shared/api/browser-client'
 import type { BrowserLoopState } from './browser-loop'
@@ -211,21 +209,28 @@ function BrowserSessionSurface(props: {
   hovered: number | null
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserControlMode?: (mode: BrowserControlMode) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onBrowserNewTab?: () => Promise<void> | void
+  onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserSocketObservation?: (observation: BrowserObservation) => void
   onEnter: (index: number) => void
   onLeave: (index: number) => void
   onSelectAll: () => void
   onSelectNone: () => void
+  onClose: () => void
   onToggle: (index: number) => void
+  onToggleExpanded: () => void
   preview: ScrapePreview
   profileProbe?: BrowserProfileRestoreProbe | null
   selected: Set<number>
   selectedChars: number
   selectedCount: number
   total: number
+  expanded: boolean
 }) {
   const session = createMemo(() => browserSessionFromPreview(props.preview))
   const allSelected = () => props.total > 0 && props.selectedCount === props.total
@@ -235,38 +240,47 @@ function BrowserSessionSurface(props: {
     <div
       class="knowledge-browser-frame"
       classList={{
+        'knowledge-browser-frame--expanded': props.expanded,
         'knowledge-browser-frame--live': isLive(),
         'knowledge-browser-frame--fallback': !isLive(),
       }}
     >
-      <div class="knowledge-browser-frame__topbar">
-        <div class="knowledge-browser-frame__tabs">
-          <span class="knowledge-browser-traffic" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          <span class="knowledge-browser-frame__tab">Sammendrag</span>
-          <span class="knowledge-browser-frame__tab knowledge-browser-frame__tab--active">
-            <Globe2 class="size-3.5" /> Browser
-          </span>
-          <span class="knowledge-browser-frame__plus">+</span>
-        </div>
-        <span class="knowledge-browser-commenting">
-          <MessageSquare class="size-3.5" /> Annotering
-        </span>
-      </div>
-
       <BrowserChrome
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
         browserRationales={props.browserRationales}
+        frameControls={
+          <div class="knowledge-browser-frame__controls">
+            <button
+              type="button"
+              class="knowledge-browser-close"
+              aria-label="Lukk nettleseren og gå tilbake"
+              title="Lukk nettleser"
+              onClick={() => props.onClose()}
+            >
+              <X class="size-3.5" />
+            </button>
+            <button
+              type="button"
+              class="knowledge-browser-expand"
+              aria-label={props.expanded ? 'Reduser nettleseren' : 'Utvid nettleseren'}
+              title={props.expanded ? 'Reduser' : 'Utvid'}
+              onClick={() => props.onToggleExpanded()}
+            >
+              <Maximize2 class="size-3.5" />
+            </button>
+          </div>
+        }
         onBrowserAction={props.onBrowserAction}
         onBrowserAutoRun={props.onBrowserAutoRun}
+        onBrowserControlMode={props.onBrowserControlMode}
         onBrowserLoopPause={props.onBrowserLoopPause}
         onBrowserLoopResume={props.onBrowserLoopResume}
         onBrowserLoopStop={props.onBrowserLoopStop}
+        onBrowserNewTab={props.onBrowserNewTab}
+        onBrowserSelectTab={props.onBrowserSelectTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
+        onBrowserSocketObservation={props.onBrowserSocketObservation}
         profileProbe={props.profileProbe}
         session={session()}
       >
@@ -384,10 +398,14 @@ export function ScrapePreviewPanel(props: {
   browserRationales?: BrowserStepRationale[]
   onBrowserAction?: (action: BrowserAction) => void
   onBrowserAutoRun?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserControlMode?: (mode: BrowserControlMode) => void
   onBrowserLoopPause?: () => void
   onBrowserLoopResume?: () => void
   onBrowserLoopStop?: () => void
+  onBrowserNewTab?: () => Promise<void> | void
+  onBrowserSelectTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
+  onBrowserSocketObservation?: (observation: BrowserObservation) => void
   onAdd: (selectedMarkdown: string, allSelected: boolean) => void
   onDiscard: () => void
   preview: ScrapePreview
@@ -399,15 +417,12 @@ export function ScrapePreviewPanel(props: {
     untrack(() => new Set(props.preview.blocks.map((_, index) => index))),
   )
   const [hovered, setHovered] = createSignal<number | null>(null)
+  const [browserExpanded, setBrowserExpanded] = createSignal(false)
   const selectedCount = () => selected().size
-  const allSelected = () => total() > 0 && selectedCount() === total()
   const selectedChars = createMemo(() => {
     const selectedSet = selected()
     return props.preview.blocks.reduce((sum, block, index) => (selectedSet.has(index) ? sum + block.raw.length : sum), 0)
   })
-  const emptyMessage = createMemo(() => props.preview.source === 'artifact'
-    ? 'Siden ble hentet, men forhåndsvisningen kunne ikke lese tekstinnholdet fra Quarry-artefakten ennå — bruk Crawl for hele nettstedet, eller prøv igjen.'
-    : 'Ingen tekst ble hentet fra siden — prøv en annen lenke, eller bruk Crawl for et helt nettsted.')
 
   const toggle = (index: number) => {
     setSelected((current) => {
@@ -422,85 +437,42 @@ export function ScrapePreviewPanel(props: {
   const selectAll = () => setSelected(new Set(props.preview.blocks.map((_, index) => index)))
   const selectNone = () => setSelected(new Set<number>())
 
-  const handleAdd = () => {
-    if (selectedCount() === 0) return
-    const markdown = props.preview.blocks
-      .filter((_, index) => selected().has(index))
-      .map((block) => block.raw)
-      .join('\n\n')
-    props.onAdd(markdown, allSelected())
-  }
-
   return (
-    <section class="velion-fade-up knowledge-scrape-preview" aria-label="Forhåndsvisning av skrapet side">
-      <div class="knowledge-scrape-preview__head">
-        <div class="knowledge-scrape-preview__heading">
-          <span class="knowledge-scrape-preview__tag">Nettleserøkt · ikke lagt til ennå</span>
-          <p class="knowledge-scrape-preview__title">{props.preview.title}</p>
-          <a
-            href={props.preview.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            class="knowledge-scrape-preview__src"
-          >
-            {hostnameOf(props.preview.url)}
-            <ExternalLink class="size-3" aria-hidden="true" />
-          </a>
-        </div>
-        <span class="knowledge-scrape-preview__stat">
-          {selectedCount()}/{total()} valgt · {selectedChars().toLocaleString('nb-NO')} tegn
-        </span>
-      </div>
-
-      <Show when={props.preview.description}>
-        <p class="knowledge-scrape-preview__desc">{props.preview.description}</p>
-      </Show>
-
-      <Show
-        when={total() > 0}
-        fallback={<p class="knowledge-scrape-preview__empty">{emptyMessage()}</p>}
-      >
-        <BrowserSessionSurface
-          browserBusy={props.browserBusy}
-          browserLoop={props.browserLoop}
-          browserRationales={props.browserRationales}
-          hovered={hovered()}
-          onBrowserAction={props.onBrowserAction}
-          onBrowserAutoRun={props.onBrowserAutoRun}
-          onBrowserLoopPause={props.onBrowserLoopPause}
-          onBrowserLoopResume={props.onBrowserLoopResume}
-          onBrowserLoopStop={props.onBrowserLoopStop}
-          onBrowserSuggestAction={props.onBrowserSuggestAction}
-          onEnter={enter}
-          onLeave={leave}
-          onSelectAll={selectAll}
-          onSelectNone={selectNone}
-          onToggle={toggle}
-          preview={props.preview}
-          profileProbe={props.profileProbe}
-          selected={selected()}
-          selectedChars={selectedChars()}
-          selectedCount={selectedCount()}
-          total={total()}
-        />
-      </Show>
-
-      <div class="knowledge-scrape-preview__actions">
-        <button type="button" class="knowledge-scrape-preview__discard" onClick={() => props.onDiscard()} disabled={props.adding}>
-          <X class="size-4" /> Forkast
-        </button>
-        <button
-          type="button"
-          class="knowledge-scrape-preview__add"
-          onClick={handleAdd}
-          disabled={props.adding || selectedCount() === 0}
-        >
-          <Show when={!props.adding} fallback={<Loader2 class="size-4 dashboard-xsearch-spin" />}>
-            <Check class="size-4" />
-          </Show>
-          {allSelected() ? 'Legg til hele siden' : `Legg til ${selectedCount()} valgte`}
-        </button>
-      </div>
+    <section
+      class="velion-fade-up knowledge-scrape-preview knowledge-scrape-preview--browser-only"
+      classList={{ 'knowledge-scrape-preview--expanded': browserExpanded() }}
+      aria-label="Nettleser"
+    >
+      <BrowserSessionSurface
+        browserBusy={props.browserBusy}
+        browserLoop={props.browserLoop}
+        browserRationales={props.browserRationales}
+        expanded={browserExpanded()}
+        hovered={hovered()}
+        onBrowserAction={props.onBrowserAction}
+        onBrowserAutoRun={props.onBrowserAutoRun}
+        onBrowserControlMode={props.onBrowserControlMode}
+        onBrowserLoopPause={props.onBrowserLoopPause}
+        onBrowserLoopResume={props.onBrowserLoopResume}
+        onBrowserLoopStop={props.onBrowserLoopStop}
+        onBrowserNewTab={props.onBrowserNewTab}
+        onBrowserSelectTab={props.onBrowserSelectTab}
+        onBrowserSuggestAction={props.onBrowserSuggestAction}
+        onBrowserSocketObservation={props.onBrowserSocketObservation}
+        onEnter={enter}
+        onLeave={leave}
+        onClose={() => props.onDiscard()}
+        onSelectAll={selectAll}
+        onSelectNone={selectNone}
+        onToggle={toggle}
+        onToggleExpanded={() => setBrowserExpanded((current) => !current)}
+        preview={props.preview}
+        profileProbe={props.profileProbe}
+        selected={selected()}
+        selectedChars={selectedChars()}
+        selectedCount={selectedCount()}
+        total={total()}
+      />
     </section>
   )
 }
