@@ -87,6 +87,24 @@ struct RestoreProbeBody {
     url: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartAiRunBody {
+    goal: String,
+    #[serde(default)]
+    allowed_domains: Option<Vec<String>>,
+    #[serde(default)]
+    max_steps: Option<i32>,
+    #[serde(default)]
+    max_runtime_s: Option<i32>,
+    #[serde(default)]
+    stop_criteria: Option<String>,
+    #[serde(default)]
+    require_approval: Option<bool>,
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+}
+
 const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280,
     height: 800,
@@ -114,6 +132,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/browser/sessions/:session_id/suggestions",
             post(suggest_action),
         )
+        // Phase 2: start/control a durable, server-side, multi-step
+        // browser-agent run. Progress streams over the existing chat run-event
+        // route (`GET /api/v1/runs/:run_id/events`), unchanged by this facade.
+        .route(
+            "/api/v1/browser/sessions/:session_id/ai-runs",
+            post(start_ai_run),
+        )
+        .route("/api/v1/browser/runs/:run_id/control", post(control_ai_run))
         .route(
             "/api/v1/browser/sessions/:session_id/artifacts/:artifact_id",
             get(get_artifact),
@@ -393,6 +419,132 @@ async fn suggest_action(
         Method::POST,
         &url,
         Some(request_body),
+        token.as_deref(),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, response_body);
+    }
+
+    (StatusCode::OK, Json(ok(response_body))).into_response()
+}
+
+/// `POST /api/v1/browser/sessions/:session_id/ai-runs` — start a durable,
+/// server-side, multi-step browser-agent run (Phase 2). The Quarry browser
+/// session's own `profile_id`/`zdr` (never a client-supplied value) are
+/// forwarded so cookie continuity and Zero-Data-Retention carry over from
+/// the tab the run was launched from. `grant_id` is an interim,
+/// session-scoped string — real Model-Plane browser-grant issuance is
+/// Phase 5's job (see docs/BROWSER_WORKSPACE_PLAN.md).
+async fn start_ai_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(body): Json<StartAiRunBody>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let goal = body.goal.trim();
+    if goal.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_goal",
+                "A goal is required to start an AI browser run.",
+            )),
+        )
+            .into_response();
+    }
+
+    let metadata = browser_run_metadata(&state, &session_id);
+    if metadata.last_observation.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not active.",
+            )),
+        )
+            .into_response();
+    }
+
+    let request_body = json!({
+        "goal": goal,
+        "grant_id": format!("session:{session_id}"),
+        "profile_id": metadata.profile_id,
+        "allowed_domains": body.allowed_domains,
+        "max_steps": body.max_steps,
+        "max_runtime_s": body.max_runtime_s,
+        "stop_criteria": body.stop_criteria,
+        "require_approval": body.require_approval.unwrap_or(false),
+        "max_cost_usd": body.max_cost_usd,
+        // Server-derived only — mirrors `create_session`'s own zdr handling;
+        // never sourced from the request body.
+        "zdr": metadata.zdr,
+    });
+
+    let token = model_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/browser/runs", state.model_gateway_url);
+    let (status, Json(response_body)) = proxy_model_json(
+        &state,
+        Method::POST,
+        &url,
+        Some(request_body),
+        token.as_deref(),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, response_body);
+    }
+
+    (StatusCode::OK, Json(ok(response_body))).into_response()
+}
+
+/// `POST /api/v1/browser/runs/:run_id/control` — pause / resume / stop a
+/// durable browser-agent run (Phase 2 B5). A thin proxy: the body
+/// (`{"action": "pause" | "resume" | "stop"}`) is forwarded verbatim to
+/// model-gateway, which maps it onto `ExecutionCore`'s
+/// `PauseRun`/`ResumeRun`/`CancelRun` RPCs.
+async fn control_ai_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !is_valid_path_segment(&run_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_run",
+                "The requested browser run id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let token = model_token(&state, &user, &headers).await;
+    let url = format!(
+        "{}/v1/browser/runs/{}/control",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id)
+    );
+    let (status, Json(response_body)) = proxy_model_json(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
         token.as_deref(),
         &user,
     )

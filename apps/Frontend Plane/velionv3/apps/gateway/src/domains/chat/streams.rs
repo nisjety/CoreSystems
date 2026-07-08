@@ -72,6 +72,15 @@ pub(super) async fn run_events_stream(
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    // Phase 2: forward `last-event-id` like `resume_stream` already does — a
+    // reconnecting client (e.g. a durable browser-agent run) must resume via
+    // `after_event_id` on the upstream replay buffer, not silently restart
+    // from the live tail. Pre-existing gap on a route Phase 2 newly depends
+    // on for browser-agent runs; not new scope.
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let url = format!(
         "{}/v1/runs/{}/events",
         state.model_gateway_url,
@@ -83,7 +92,7 @@ pub(super) async fn run_events_stream(
         &url,
         None,
         token.as_deref(),
-        None,
+        last_event_id.as_deref(),
         Some((&user.user_id, org_id.as_str())),
         false,
     )
