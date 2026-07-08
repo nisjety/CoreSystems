@@ -1,0 +1,8 @@
+id: "05-cross-modal-retrieval"
+name: "Cross-modal retrieval (text -> page image, Embed v4 arm)"
+prompt: "Finn siden i kunnskapsbasen som viser produktdiagrammet, og beskriv hva diagrammet viser."
+profile: deployed_agent
+groundedness:
+  enabled: true
+requires: [image-fixture]
+tags: [knowledge, multimodal]

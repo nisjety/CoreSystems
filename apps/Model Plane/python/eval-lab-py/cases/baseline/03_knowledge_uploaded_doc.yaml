@@ -1,0 +1,8 @@
+id: "03-knowledge-uploaded-doc"
+name: "knowledge_search groundedness: uploaded-doc fact"
+prompt: "Hva er innholdet i evalueringsdokumentet 'Eval Fixture Alpha'? Oppgi kilder."
+profile: deployed_agent
+groundedness:
+  enabled: true
+requires: [knowledge-fixtures]
+tags: [groundedness, knowledge]

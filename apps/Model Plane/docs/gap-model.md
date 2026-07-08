@@ -53,7 +53,7 @@ Go durable control:
 
 Python labs:
   ✅ graph-lab-py         LangGraph/LangChain/Deep Agents prototyping only                — IMPLEMENTED (ReasoningGraph, BFS/DFS traversal, networkx export, tests)
-  ⚠️ eval-lab-py          exact-match eval scaffold only (unused)                         — SCAFFOLD: EvalCase/EvalSuite/EvalRunner + exact-string-match scoring + unit tests, but UNUSED — zero non-test references, not wired into any service, CI, or replay/regression loop (no real eval harness exists yet)
+  ✅ eval-lab-py          live-stack eval harness (docs/EVAL_HARNESS_MVP.md)              — IMPLEMENTED 2026-07-08: YAML cases → model-gateway /v1/invoke SSE, 4 metrics (accuracy incl. LLM-judge, groundedness, cost via B5 cost_usd, loop health), make selftest (CI, no network) + make eval (live, scored report to docs/eval-reports/); 12-case baseline live-calibrated
   ✅ provider-research-py SDK experiments only                                            — IMPLEMENTED (ProviderProfile/ModelProfile, cost ranking, capability matrix, budget filtering, tests)
 
 Cross-language infra (not in target list but implemented):

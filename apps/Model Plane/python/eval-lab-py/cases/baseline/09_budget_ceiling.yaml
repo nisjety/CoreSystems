@@ -1,0 +1,9 @@
+id: "09-budget-ceiling"
+name: "velion-budget stays under the cost ceiling"
+prompt: "Oppsummer i to setninger hvorfor kundeservice bør svare raskt."
+model: velion-budget
+max_cost_usd: 0.02
+cost_ceiling_usd: 0.02
+checks:
+  regex: ["\\S+"]
+tags: [cost, routing]
