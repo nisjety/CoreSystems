@@ -1143,6 +1143,8 @@ async fn browser_visual_summary(
     req: &BrowserSuggestActionRequest,
     request_id: &str,
 ) -> Result<Option<String>, HttpJsonError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
     let Some(raw_base64) = req
         .screenshot_base64
         .as_deref()
@@ -1151,8 +1153,6 @@ async fn browser_visual_summary(
     else {
         return Ok(None);
     };
-
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let encoded = raw_base64
         .split_once(',')
@@ -1218,9 +1218,10 @@ fn browser_suggestion_prompt(
     let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
     let visual_observation =
         compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
-    let visual_summary = visual_summary
-        .map(|summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS))
-        .unwrap_or_else(|| "not provided".to_owned());
+    let visual_summary = visual_summary.map_or_else(
+        || "not provided".to_owned(),
+        |summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS),
+    );
     let visual_artifact = req
         .visual_observation_artifact_id
         .as_deref()
@@ -1239,8 +1240,7 @@ fn browser_suggestion_value(parsed: &Value) -> Value {
     let action_kind = parsed
         .get("action")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("done");
+        .map_or("done", str::trim);
     let action = browser_action_value(action_kind, parsed);
     json!({
         "done": action_kind == "done",
@@ -1252,12 +1252,13 @@ fn browser_suggestion_value(parsed: &Value) -> Value {
 
 fn browser_action_value(action_kind: &str, parsed: &Value) -> Value {
     match action_kind {
-        "navigate" => string_value(parsed, "url", 2_000)
-            .is_empty()
-            .then_some(Value::Null)
-            .unwrap_or_else(
-                || json!({ "type": "navigate", "url": string_value(parsed, "url", 2_000) }),
-            ),
+        "navigate" => {
+            if string_value(parsed, "url", 2_000).is_empty() {
+                Value::Null
+            } else {
+                json!({ "type": "navigate", "url": string_value(parsed, "url", 2_000) })
+            }
+        }
         "click" => selector_action(parsed, "click"),
         "type" => {
             let selector = string_value(parsed, "selector", 1_000);
@@ -4172,7 +4173,7 @@ mod browser_suggestion_tests {
         let suggestion = browser_suggestion_value(&json!({
             "action": "wait_for",
             "selector": "#ready",
-            "timeout_ms": 120000,
+            "timeout_ms": 120_000,
             "reason": "Wait for dynamic content.",
             "confidence": 2.0
         }));
