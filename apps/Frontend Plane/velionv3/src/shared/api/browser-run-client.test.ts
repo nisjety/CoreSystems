@@ -14,8 +14,17 @@ describe('startBrowserAiRun', () => {
   })
 
   it('posts to the session ai-runs route with camelCase params and org header', async () => {
+    // The REAL wire response is snake_case — model-gateway's `browser_run.rs`
+    // constructs `json!({ "run_id", "thread_id", "plan_id" })` directly and
+    // the Velion gateway forwards it verbatim (confirmed live: a prior
+    // version of this test mocked a camelCase response here, which let a
+    // real snake_case/camelCase mismatch bug ship silently — every AI-loop
+    // run through the SPA started successfully server-side but the client
+    // never resolved a `runId` to stream events for, so it looked stuck
+    // forever with no visible error. Regression-tested end-to-end by
+    // `tests/e2e/browser-workspace-hitl.spec.ts`).
     const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({ runId: 'run_1', threadId: 'thread_1', planId: 'plan_1' }),
+      jsonResponse({ run_id: 'run_1', thread_id: 'thread_1', plan_id: 'plan_1' }),
     )
     vi.stubGlobal('fetch', fetchMock)
 

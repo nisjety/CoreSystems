@@ -30,6 +30,33 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+/**
+ * Canonicalize a provider approval-state string to the short form
+ * `Approval.status` documents (`PENDING`/`GRANTED`/`DENIED`/`EXPIRED`).
+ *
+ * The live wire value is the FULL protobuf enum name from
+ * `model_plane/v1/orchestration.proto`'s `ApprovalState`
+ * (`APPROVAL_STATE_REQUESTED`, `APPROVAL_STATE_GRANTED`,
+ * `APPROVAL_STATE_DENIED`, `APPROVAL_STATE_TIMED_OUT`) — never the bare
+ * `PENDING`/`GRANTED`/`DENIED`/`EXPIRED` every caller of `listApprovals`
+ * (`AgentRunConsole.tsx`, `use-chat-controller.ts`,
+ * `KnowledgeComposer.tsx`'s browser-workspace HITL gate) filters on. Without
+ * this normalization every one of them silently found zero pending
+ * approvals — `(approval.status ?? 'PENDING').toUpperCase() === 'PENDING'`
+ * never matched `'APPROVAL_STATE_REQUESTED'` — so a real, correctly-fired
+ * backend approval gate looked to the UI exactly like there was nothing to
+ * decide. Substring-matched (not exact) so it tolerates either convention.
+ */
+function canonicalApprovalStatus(raw: string | undefined): string | undefined {
+  if (!raw) return raw
+  const upper = raw.toUpperCase()
+  if (upper.includes('REQUESTED') || upper.includes('PENDING')) return 'PENDING'
+  if (upper.includes('GRANTED')) return 'GRANTED'
+  if (upper.includes('DENIED')) return 'DENIED'
+  if (upper.includes('TIMED_OUT') || upper.includes('EXPIRED')) return 'EXPIRED'
+  return upper
+}
+
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
 function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
@@ -40,7 +67,7 @@ function normalizeApproval(raw: RawApproval): Approval | null {
     planId: str(raw.plan_id) ?? str(raw.planId),
     stepId: str(raw.step_id) ?? str(raw.stepId),
     kind: str(raw.kind) ?? str(raw.approval_kind),
-    status: str(raw.status) ?? str(raw.state),
+    status: canonicalApprovalStatus(str(raw.status) ?? str(raw.state)),
     requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
     detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),
   }

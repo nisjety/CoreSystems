@@ -15,20 +15,40 @@ import { defineConfig, devices } from '@playwright/test'
  *
  * The `local-setup`/`local` projects are a second, independent pair targeting
  * the dockerized v3 *dev* stack instead (bind-mounted Vite on :5173, HMR) as
- * `local@velion.dev` — used by specs that need the source-mounted dev stack
- * specifically (e.g. browser-workspace-zdr.spec.ts). `testMatch`/`testIgnore`
- * below keep the two pairs from picking up each other's spec/setup files.
+ * `local@velion.dev` — used by the Phase 6 `browser-workspace-*.spec.ts`
+ * family, which needs a real Quarry-org-token-minting account against the
+ * source-mounted dev stack specifically. `testMatch`/`testIgnore` below keep
+ * the two pairs from picking up each other's spec/setup files.
+ *
+ * `workers: 1` (all projects, not just `local`): the `browser-workspace-*`
+ * specs drive real Chromium sessions through the live Quarry-edge stack, and
+ * more than one worker running them concurrently against the SAME external
+ * origin (e.g. two specs both using `EXAMPLE_URL`) reliably reproduces a
+ * real, pre-existing bug — `KnowledgeComposer.tsx`'s link-mode submit fires
+ * a second, *concurrent* `/v1/scrape` render (via `scrapePreview`) alongside
+ * the interactive session create, and quarry-edge's scrape/fetch driver
+ * pools its browser lease by domain host, not by run id
+ * (`BrowserDriverAdapter::do_fetch`, `quarry-runtime/src/browser_driver.rs`).
+ * Two concurrent scrape-previews for the same host can poison and evict each
+ * other's lease, which was observed to cascade into the *unrelated*
+ * interactive session's own live-frame polling failing with sustained 502s
+ * until the page closed. That is a genuine backend concurrency bug worth
+ * fixing in quarry-edge separately — out of scope for this E2E-coverage
+ * pass — so this suite avoids triggering it by never running these specs in
+ * parallel, rather than papering over the flakiness with looser assertions.
  */
 const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5199'
 const STORAGE_STATE = 'tests/e2e/.auth/state.json'
 const LOCAL_BASE_URL = process.env.LOCAL_E2E_BASE_URL || 'http://localhost:5173'
 const LOCAL_STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
+const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
 
 export default defineConfig({
   testDir: 'tests/e2e',
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
+  workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['github'], ['list']] : [['list']],
@@ -47,7 +67,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: /browser-workspace-zdr\.spec\.ts/,
+      testIgnore: BROWSER_WORKSPACE_SPECS,
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -58,7 +78,7 @@ export default defineConfig({
     },
     {
       name: 'local',
-      testMatch: /browser-workspace-zdr\.spec\.ts/,
+      testMatch: BROWSER_WORKSPACE_SPECS,
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
     },
