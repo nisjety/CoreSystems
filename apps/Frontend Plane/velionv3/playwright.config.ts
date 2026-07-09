@@ -38,7 +38,12 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'setup', testMatch: /^auth\.setup\.ts$/ },
+    // testMatch regexes are evaluated against the full file path Playwright
+    // resolves for each candidate file, not the testDir-relative basename —
+    // an unqualified `^...$` anchor never matches anything (the string
+    // always starts with `/`). Anchor on a preceding "/" or start-of-string
+    // instead, so `auth.setup.ts` never also matches `local-auth.setup.ts`.
+    { name: 'setup', testMatch: /(^|\/)auth\.setup\.ts$/ },
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
@@ -48,7 +53,7 @@ export default defineConfig({
     },
     {
       name: 'local-setup',
-      testMatch: /^local-auth\.setup\.ts$/,
+      testMatch: /(^|\/)local-auth\.setup\.ts$/,
       use: { baseURL: LOCAL_BASE_URL },
     },
     {
