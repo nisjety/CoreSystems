@@ -12,9 +12,17 @@ import { defineConfig, devices } from '@playwright/test'
  * The `setup` project seeds a verified account + org and saves its session
  * as storageState; the `e2e` project reuses that state so every spec starts
  * signed in.
+ *
+ * The `local-setup`/`local` projects are a second, independent pair targeting
+ * the dockerized v3 *dev* stack instead (bind-mounted Vite on :5173, HMR) as
+ * `local@velion.dev` — used by specs that need the source-mounted dev stack
+ * specifically (e.g. browser-workspace-zdr.spec.ts). `testMatch`/`testIgnore`
+ * below keep the two pairs from picking up each other's spec/setup files.
  */
 const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5199'
 const STORAGE_STATE = 'tests/e2e/.auth/state.json'
+const LOCAL_BASE_URL = process.env.LOCAL_E2E_BASE_URL || 'http://localhost:5173'
+const LOCAL_STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -30,12 +38,24 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'setup', testMatch: /auth\.setup\.ts/ },
+    { name: 'setup', testMatch: /^auth\.setup\.ts$/ },
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
+      testIgnore: /browser-workspace-zdr\.spec\.ts/,
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
+    },
+    {
+      name: 'local-setup',
+      testMatch: /^local-auth\.setup\.ts$/,
+      use: { baseURL: LOCAL_BASE_URL },
+    },
+    {
+      name: 'local',
+      testMatch: /browser-workspace-zdr\.spec\.ts/,
+      dependencies: ['local-setup'],
+      use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
     },
   ],
 })

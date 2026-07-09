@@ -7,12 +7,16 @@
 //! browser process per `ChromiumoxideDriver` and reuses it across leases;
 //! each lease owns a small tab set keyed by its session affinity key.
 
+use ::chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use ::chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventPointerType, DispatchMouseEventType, MouseButton,
 };
 use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, EventRequestWillBeSent, EventResponseReceived,
+};
+use ::chromiumoxide::cdp::browser_protocol::target::{
+    CreateBrowserContextParams, CreateTargetParamsBuilder,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -70,6 +74,11 @@ struct SessionPages {
     active_tab_id: Option<String>,
     tabs: Vec<TabPage>,
     next_tab_index: u64,
+    /// The isolated CDP browser context this session's tabs live in. Created
+    /// lazily on the session's first tab and reused for every subsequent tab
+    /// so multiple tabs in the same session share one cookie/storage jar,
+    /// while distinct sessions (distinct `session_affinity_key`s) never do.
+    browser_context_id: Option<BrowserContextId>,
 }
 
 /// Local Chromium driver backed by chromiumoxide.
@@ -223,16 +232,53 @@ impl ChromiumoxideDriver {
         })?;
 
         let session_key = Self::session_key(session);
-        let tab_id = {
+        let (tab_id, existing_context_id) = {
             let mut pages = self.pages.lock().await;
             let session_pages = pages.entry(session_key.clone()).or_default();
             session_pages.next_tab_index = session_pages.next_tab_index.saturating_add(1);
-            format!("tab-{}", session_pages.next_tab_index)
+            let tab_id = format!("tab-{}", session_pages.next_tab_index);
+            (tab_id, session_pages.browser_context_id.clone())
+        };
+
+        // Every session gets its own isolated CDP browser context on its first
+        // tab, created once and reused for every later tab on that same
+        // session. Without this, `browser.new_page` puts every session's tabs
+        // — across every org, user, profile, and ZDR declaration — into the
+        // browser's single default context, sharing one global cookie jar.
+        let context_id = match existing_context_id {
+            Some(id) => id,
+            None => {
+                let id = browser
+                    .create_browser_context(CreateBrowserContextParams::default())
+                    .await
+                    .map_err(|e| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide create_browser_context failed",
+                        )
+                        .with_details(json!({ "error": e.to_string() }))
+                    })?;
+                let mut pages = self.pages.lock().await;
+                let session_pages = pages.entry(session_key.clone()).or_default();
+                session_pages.browser_context_id = Some(id.clone());
+                id
+            }
         };
 
         let snapshot = self.load_snapshot(&session.lease).await;
         let initial_url = url.unwrap_or("about:blank");
-        let page = browser.new_page("about:blank").await.map_err(|e| {
+        let new_page_params = CreateTargetParamsBuilder::default()
+            .url("about:blank")
+            .browser_context_id(context_id)
+            .build()
+            .map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide new_page params build failed",
+                )
+                .with_details(json!({ "error": e }))
+            })?;
+        let page = browser.new_page(new_page_params).await.map_err(|e| {
             QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide new_page failed")
                 .with_details(json!({ "error": e.to_string(), "url": "about:blank" }))
         })?;
@@ -1005,6 +1051,18 @@ impl BrowserDriver for ChromiumoxideDriver {
                     );
                 }
             }
+            if let Some(context_id) = session_pages.browser_context_id {
+                let browser_guard = self.browser.lock().await;
+                if let Some(browser) = browser_guard.as_ref() {
+                    if let Err(err) = browser.dispose_browser_context(context_id).await {
+                        tracing::warn!(
+                            session_key = %session_key,
+                            error = %err,
+                            "chromiumoxide dispose_browser_context failed"
+                        );
+                    }
+                }
+            }
         }
         self.devtools_events.lock().await.remove(&session_key);
         self.invalidate_live_frame_cache().await;
@@ -1554,6 +1612,12 @@ mod tests {
         }
     }
 
+    fn make_lease_with_key(key: &str) -> BrowserLease {
+        let mut lease = make_lease();
+        lease.session_affinity_key = key.into();
+        lease
+    }
+
     #[test]
     fn chromium_viewport_maps_desktop_dimensions() {
         let viewport = chromium_viewport(BrowserViewport {
@@ -1725,6 +1789,106 @@ mod tests {
             .goto(&session, "https://example.com/")
             .await
             .expect("goto should succeed with a persisted profile's cookies restored");
+
+        driver.release(session).await.expect("release");
+    }
+
+    /// Regression test for the cross-session cookie leak: every session used
+    /// to share one global Chromium browser context, so a cookie set by one
+    /// session's very first tab was already visible to a brand-new, unrelated
+    /// session's very first tab. Integration test that requires a local
+    /// Chromium/Chrome binary. Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
+    #[tokio::test]
+    async fn distinct_sessions_do_not_share_cookies() {
+        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+            return;
+        }
+
+        let driver = ChromiumoxideDriver::new();
+
+        let lease_a = make_lease_with_key("isolation-session-a");
+        let session_a = driver.acquire(&lease_a).await.expect("acquire a");
+        driver
+            .goto(&session_a, "https://example.com/")
+            .await
+            .expect("goto a");
+        driver
+            .evaluate(&session_a, "document.cookie = 'leak_test=from_a; path=/'")
+            .await
+            .expect("set cookie on a");
+
+        let lease_b = make_lease_with_key("isolation-session-b");
+        let session_b = driver.acquire(&lease_b).await.expect("acquire b");
+        driver
+            .goto(&session_b, "https://example.com/")
+            .await
+            .expect("goto b");
+        let cookie_b = driver
+            .evaluate(&session_b, "document.cookie")
+            .await
+            .expect("read cookie on b");
+        let cookie_b = cookie_b.as_str().unwrap_or_default();
+        assert!(
+            !cookie_b.contains("leak_test"),
+            "session b must not see session a's cookie, saw: {cookie_b:?}"
+        );
+
+        // Releasing session a's context must not disturb session b, which is
+        // still concurrently live.
+        driver.release(session_a).await.expect("release a");
+        let cookie_b_after = driver
+            .evaluate(&session_b, "document.cookie")
+            .await
+            .expect("read cookie on b after a released");
+        let cookie_b_after = cookie_b_after.as_str().unwrap_or_default();
+        assert!(
+            !cookie_b_after.contains("leak_test"),
+            "session b must remain unaffected after session a's context is disposed"
+        );
+
+        driver.release(session_b).await.expect("release b");
+    }
+
+    /// A second tab opened on an EXISTING session must land in that same
+    /// session's own isolated context, not a fresh one — otherwise per-tab
+    /// state within one logical session would incorrectly fragment.
+    /// Integration test that requires a local Chromium/Chrome binary. Skipped
+    /// unless `CHROMIUMOXIDE_TEST=1` is set.
+    #[tokio::test]
+    async fn second_tab_on_same_session_shares_that_sessions_cookies() {
+        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+            return;
+        }
+
+        let driver = ChromiumoxideDriver::new();
+        let lease = make_lease_with_key("same-session-multi-tab");
+        let session = driver.acquire(&lease).await.expect("acquire");
+
+        driver
+            .goto(&session, "https://example.com/")
+            .await
+            .expect("goto tab 1");
+        driver
+            .evaluate(&session, "document.cookie = 'shared_tab_test=abc; path=/'")
+            .await
+            .expect("set cookie on tab 1");
+
+        // Opens a second tab on the SAME session/lease; new_tab makes it active.
+        driver
+            .new_tab(&session, Some("https://example.com/"))
+            .await
+            .expect("new_tab");
+        let cookie_on_tab2 = driver
+            .evaluate(&session, "document.cookie")
+            .await
+            .expect("read cookie on tab 2");
+        let cookie_on_tab2 = cookie_on_tab2.as_str().unwrap_or_default();
+        assert!(
+            cookie_on_tab2.contains("shared_tab_test"),
+            "second tab on the same session must see that session's own cookie, saw: {cookie_on_tab2:?}"
+        );
 
         driver.release(session).await.expect("release");
     }
