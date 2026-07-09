@@ -57,7 +57,7 @@ describe('listApprovals', () => {
       },
     ])
     // The exact check every consumer performs — must actually match now.
-    expect((approvals[0].status ?? '').toUpperCase()).toBe('PENDING')
+    expect((approvals[0]?.status ?? '').toUpperCase()).toBe('PENDING')
   })
 
   it('still recognizes an already-short status string (defensive, in case a caller sends one)', async () => {
@@ -67,7 +67,7 @@ describe('listApprovals', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const approvals = await listApprovals('run_2')
-    expect(approvals[0].status).toBe('PENDING')
+    expect(approvals[0]?.status).toBe('PENDING')
   })
 
   it('canonicalizes granted/denied/timed-out terminal states', async () => {
