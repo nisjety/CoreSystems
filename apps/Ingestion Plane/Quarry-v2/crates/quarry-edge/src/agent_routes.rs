@@ -104,6 +104,30 @@ mod enabled {
         }
     }
 
+    /// Defense-in-depth ZDR guard for `POST /v1/agent/runs`, independent of
+    /// (and not reliant on) the Velion gateway's own `effective_profile_scope`
+    /// check. The gateway already rejects a client-supplied
+    /// `{zdr: true, profileId: "<real>"}` combination before ever proxying to
+    /// Quarry-edge (`fix(gateway): close ZDR bypass via explicit ephemeral
+    /// scope claim`), but Quarry-edge is the layer that actually launches the
+    /// browser and calls `ProfileStore::save` on release — any other direct
+    /// caller of this route (a different consumer, a future service, a bug
+    /// upstream) must not be able to make a ZDR run's cookies/storage durable
+    /// just by supplying a `profile_id` or `persist_profile: true`. Without
+    /// this check, `persist_profile = body.persist_profile ||
+    /// body.profile_id.is_some()` ignored `zdr` entirely, so `close_run` →
+    /// `agent_driver.release()` → `persist_current_page()` (gated only on
+    /// `lease.persist_profile`, which has no notion of ZDR at all — see
+    /// `quarry_core::lease::BrowserLease`) would happily write a ZDR
+    /// session's cookies into a named profile.
+    fn zdr_forbids_persistent_profile(
+        zdr: ZdrMode,
+        persist_profile_flag: bool,
+        has_profile_id: bool,
+    ) -> bool {
+        zdr.is_active() && (persist_profile_flag || has_profile_id)
+    }
+
     #[derive(Debug, Serialize)]
     pub struct StartRunData {
         pub run_id: String,
@@ -301,6 +325,14 @@ mod enabled {
         let viewport = normalize_viewport(body.viewport)
             .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg.as_str()))?;
 
+        if zdr_forbids_persistent_profile(zdr, body.persist_profile, body.profile_id.is_some()) {
+            return Err(status_err(
+                StatusCode::BAD_REQUEST,
+                &request_id,
+                "zdr_persistent_profile_forbidden: a ZDR run cannot request a persistent profile or profile_id",
+            ));
+        }
+
         let persist_profile = body.persist_profile || body.profile_id.is_some();
         let lease = BrowserLease {
             lease_id: lease_id.clone(),
@@ -434,6 +466,31 @@ mod enabled {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn zdr_forbids_persistent_profile_when_profile_id_supplied() {
+            assert!(zdr_forbids_persistent_profile(ZdrMode::On, false, true));
+        }
+
+        #[test]
+        fn zdr_forbids_persistent_profile_when_flag_set_without_id() {
+            assert!(zdr_forbids_persistent_profile(ZdrMode::On, true, false));
+        }
+
+        #[test]
+        fn zdr_forbids_persistent_profile_when_both_signals_present() {
+            assert!(zdr_forbids_persistent_profile(ZdrMode::On, true, true));
+        }
+
+        #[test]
+        fn zdr_run_with_no_persistence_signal_is_allowed() {
+            assert!(!zdr_forbids_persistent_profile(ZdrMode::On, false, false));
+        }
+
+        #[test]
+        fn non_zdr_run_may_request_a_persistent_profile() {
+            assert!(!zdr_forbids_persistent_profile(ZdrMode::Off, true, true));
+        }
 
         #[test]
         fn normalize_viewport_accepts_reasonable_desktop_size() {
