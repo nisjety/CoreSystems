@@ -228,11 +228,16 @@ services:
       OPENAI_STT_MODEL: ${OPENAI_STT_MODEL:-whisper-1}
       # Wave 9 — Quarry-v2 edge for Fetch + ExtractStructured RPCs.
       # Empty / unset → both RPCs return Unimplemented (gateway still
-      # serves Invoke, Health, etc.). On the developer Mac the edge
-      # lives in a separate compose project; reach it via the host
-      # gateway. In a unified deploy this should point at the in-
-      # network service name (e.g. http://quarry-edge:8082).
-      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://host.docker.internal:8082}
+      # serves Invoke, Health, etc.). quarry-edge lives in a separate
+      # compose project (Ingestion Plane) but, like this gateway, is
+      # joined to the shared external `inter-plane-bus` network — so
+      # the in-network service name resolves directly (Phase 6
+      # compose-wiring fix: this previously defaulted to
+      # host.docker.internal, a stale carry-over from before quarry-edge
+      # joined inter-plane-bus; live-verified both routes work, the
+      # in-network name removes the dependency on quarry-edge's
+      # host-published port staying bound to 127.0.0.1).
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
       QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-dev-token}
       QUARRY_EDGE_TIMEOUT_SECS: ${QUARRY_EDGE_TIMEOUT_SECS:-30}
       # Local semantic-response cache (Dragonfly exact-match). Default ON,

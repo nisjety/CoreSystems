@@ -26,6 +26,19 @@ services:
       # QUARRY_EDGE__DATABASE_URL → EdgeConfig.database_url (prefix QUARRY_EDGE,
       # separator `__`); plain DATABASE_URL is NOT read.
       QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_edge?sslmode=disable
+      # Phase 6 compose-wiring fix — the edge is built with `postgres-queue`
+      # and the `quarry_profiles`/`quarry_profile_metadata` migrations already
+      # run automatically against QUARRY_EDGE__DATABASE_URL above (see
+      # `quarry_runtime::migrations::run_migrations`, invoked unconditionally
+      # once a DSN is set). Without this var main.rs defaults to
+      # `InMemoryProfileStore`, so every named/persistent browser profile
+      # (Phase 3's profile manager) silently evaporated on container
+      # restart — "durable profile/cookie management" was not actually
+      # durable. `postgres` here wires `PostgresProfileStore` (falls back to
+      # in-memory with a warning if the DSN is unreachable, never a hard
+      # failure). Redis (QUARRY_EDGE__REDIS_URL below) still layers a
+      # read-through cache in front of either backend.
+      QUARRY_EDGE__PROFILE_STORE_KIND: ${QUARRY_EDGE_PROFILE_STORE_KIND:-postgres}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
