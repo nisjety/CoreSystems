@@ -133,6 +133,32 @@ export function McpServersSection() {
       return
     }
 
+    // Transport and URL scheme MUST agree, or discovery silently fails and the
+    // server registers but exposes zero tools. The most common mistake is
+    // leaving transport on the default «stdio» while pasting an https:// URL:
+    // model-gateway then tries to spawn that URL as a local command
+    // (parse_stdio_command requires a stdio:// scheme), discovery errors, the
+    // empty allowlist enumerates nothing, and the UI shows the server as active
+    // with no working tools. Catch it here with a clear, actionable message.
+    const activeTransport = transport()
+    if (activeTransport === 'stdio' && !trimmedUrl.startsWith('stdio://')) {
+      setFormError(
+        'For «stdio»-transport må URL være en stdio://-kommando (f.eks. ' +
+          'stdio:///usr/local/bin/mcp-server --flag). Skal du koble til en ' +
+          'ekstern HTTPS-tjener, velg transport «http» i stedet.',
+      )
+      return
+    }
+    if (
+      (activeTransport === 'http' || activeTransport === 'sse') &&
+      !/^https?:\/\//i.test(trimmedUrl)
+    ) {
+      setFormError(
+        `For «${activeTransport}»-transport må URL starte med http:// eller https://.`,
+      )
+      return
+    }
+
     setSubmitting(true)
     setFormError(null)
     try {

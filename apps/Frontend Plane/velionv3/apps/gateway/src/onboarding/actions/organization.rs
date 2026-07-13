@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    Json,
+    Extension, Json,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -12,6 +12,7 @@ use crate::{
     config::AppState,
     contracts::CreateOrganizationRequest,
     envelope::error,
+    middleware::AuthenticatedUser,
     upstream::{browser_origin, proxy_json},
     utils::{slugify, trim_opt},
 };
@@ -20,18 +21,17 @@ use crate::{
 /// as the source of truth for org identity and membership.
 ///
 /// Flow (each step depends on the previous):
-///   1. DEDUPE — list the caller's Better Auth orgs; if one already exists, set it
-///      active and return it. This stops the duplicate-org accumulation where every
-///      onboarding revisit minted a fresh org.
+///   1. DEDUPE — list the caller's Better Auth orgs; if one already exists, reuse it.
+///      Reuse never skips reconciliation: the org-core mirror + owner membership
+///      must be healthy before the org can become active.
 ///   2. CREATE via Better Auth (`/organization/create`) so BA records the org AND an
 ///      owner membership for the caller. The id BA returns is canonical.
-///   3. SET-ACTIVE that BA id on the session — now succeeds because membership exists
-///      (the old bug: set-active 403'd USER_IS_NOT_A_MEMBER on an org-core-only org).
-///   4. MIRROR to org-core under the SAME id (idempotent) so org-core + the user-core
-///      membership it publishes share BA's id. Mirror failures are best-effort and
-///      never fail onboarding; set-active, however, must have succeeded by here.
+///   3. PROVISION org-core under the SAME id, atomically with the first owner.
+///   4. SET-ACTIVE only after provisioning succeeds. A partial control-plane write
+///      fails closed and remains retryable instead of advancing onboarding.
 pub(crate) async fn create_organization(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<CreateOrganizationRequest>,
 ) -> Response {
@@ -63,14 +63,11 @@ pub(crate) async fn create_organization(
     // browser origin must travel with every server-to-server hop below (same as
     // the sign-in proxy) — without it BA rejects create/set-active with 403.
     let origin = browser_origin(&headers);
-
-    // 1. Dedupe: reuse an existing membership instead of creating a duplicate.
-    if let Some(existing) = existing_org(&state, &cookie, origin.as_deref()).await {
-        if let Some(org_id) = ba_org_id(&existing) {
-            let cookies = set_active_org(&state, &cookie, origin.as_deref(), &org_id).await;
-            return respond_json(StatusCode::OK, normalize_org(&existing), cookies);
-        }
-    }
+    let actor = actor_from_request(
+        input.actor.as_ref(),
+        Some(&headers),
+        state.allow_dev_actor_headers,
+    );
 
     let slug = slugify(&name);
     let plan = input.plan.unwrap_or_else(|| "trial".into());
@@ -90,32 +87,66 @@ pub(crate) async fn create_organization(
         "slug": slug,
         "metadata": metadata,
     });
-    let (ba_status, ba_org) =
-        match ba_post(&state, &cookie, origin.as_deref(), "create", create_body).await {
-            Some(result) => result,
-            None => {
-                return (
+    let (ba_status, ba_org, full_org) = match existing_owned_org(
+        &state,
+        &cookie,
+        origin.as_deref(),
+        actor.user_id.as_str(),
+    )
+    .await
+    {
+        Ok(Some((existing, full))) => (StatusCode::OK, existing, full),
+        Ok(None) => {
+            match ba_post(&state, &cookie, origin.as_deref(), "create", create_body).await {
+                Some((status, body)) if status.is_success() => {
+                    let Some(org_id) = ba_org_id(&body) else {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(error(
+                                "create_failed",
+                                "Identity service did not return an organization id.",
+                            )),
+                        )
+                            .into_response();
+                    };
+                    let Some(full) =
+                        full_organization(&state, &cookie, origin.as_deref(), &org_id).await
+                    else {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(error(
+                                "organization_membership_unavailable",
+                                "The organization membership could not be verified. Please retry.",
+                            )),
+                        )
+                            .into_response();
+                    };
+                    (StatusCode::CREATED, body, full)
+                }
+                Some((status, body)) => return create_error_response(status, &body),
+                None => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(error(
+                            "upstream_unavailable",
+                            "Could not reach the identity service to create the organization.",
+                        )),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        Err(()) => {
+            return (
                     StatusCode::BAD_GATEWAY,
                     Json(error(
-                        "upstream_unavailable",
-                        "Could not reach the identity service to create the organization.",
+                        "organization_lookup_failed",
+                        "Existing organizations could not be verified. Please retry; no new organization was created.",
                     )),
                 )
                     .into_response();
-            }
-        };
-    if !ba_status.is_success() {
-        let code = if ba_status.as_u16() == 403 {
-            "forbidden"
-        } else {
-            "create_failed"
-        };
-        return (
-            ba_status,
-            Json(error(code, ba_error_message(&ba_org, ba_status))),
-        )
-            .into_response();
-    }
+        }
+    };
 
     let Some(org_id) = ba_org_id(&ba_org) else {
         return (
@@ -128,28 +159,31 @@ pub(crate) async fn create_organization(
             .into_response();
     };
 
-    // 3. Set-active — membership now exists, so this must succeed. Capture the
-    // refreshed Better Auth session cookie so the browser's cookie-cache
-    // reflects the new active org immediately (otherwise a `get-session` can
-    // read a stale null `activeOrganizationId` until the cookie-cache TTL).
-    let active_cookies = set_active_org(&state, &cookie, origin.as_deref(), &org_id).await;
+    if canonical_owner_id(&full_org).as_deref() != Some(actor.user_id.as_str()) {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_owner_required",
+                "Only the organization owner can provision this workspace. Ask the owner for an invitation or choose another organization.",
+            )),
+        )
+            .into_response();
+    }
 
-    // 4. Mirror to org-core under the SAME id (best-effort, never fatal).
-    let actor = actor_from_request(
-        input.actor.as_ref(),
-        Some(&headers),
-        state.allow_dev_actor_headers,
-    );
+    // 3. Provision the org-core projection + first owner before the session is
+    // allowed to activate the organization. The endpoint is idempotent, so this
+    // also repairs a previous partial attempt on retry.
     let mirror_body = json!({
         "id": org_id,
         "name": name,
         "slug": slug,
-        "plan": plan,
+        "plan": "free",
         "org_number": org_number,
         "brreg_data": input.brreg_data,
         "metadata": metadata,
+        "primary_domain": verified_company_domain(&user),
     });
-    let _ = proxy_json(
+    let (mirror_status, _) = proxy_json(
         &state,
         Method::POST,
         &format!("{}/orgs", state.org_core_url),
@@ -160,7 +194,68 @@ pub(crate) async fn create_organization(
     )
     .await;
 
-    respond_json(StatusCode::CREATED, normalize_org(&ba_org), active_cookies)
+    if !mirror_status.is_success() {
+        let status = if mirror_status == StatusCode::CONFLICT {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        return (
+            status,
+            Json(error(
+                "organization_provisioning_failed",
+                "Your organization could not be safely provisioned. No onboarding progress was lost; please retry.",
+            )),
+        )
+            .into_response();
+    }
+
+    // 4. Set-active only after both organization authorities agree. Capture the
+    // refreshed Better Auth session cookie so the browser cookie-cache reflects
+    // the new active org immediately.
+    let active_cookies = match set_active_org(&state, &cookie, origin.as_deref(), &org_id).await {
+        Ok(cookies) => cookies,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "organization_activation_failed",
+                    "Your organization was created, but the session could not activate it. Please retry.",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    respond_json(ba_status, normalize_org(&ba_org), active_cookies)
+}
+
+fn verified_company_domain(user: &AuthenticatedUser) -> Option<String> {
+    if !user.email_verified {
+        return None;
+    }
+    let normalized_email = user.user_email.trim().to_lowercase();
+    let (_, domain) = normalized_email.rsplit_once('@')?;
+    let domain = domain.trim_end_matches('.');
+    if domain.is_empty()
+        || matches!(
+            domain,
+            "gmail.com"
+                | "googlemail.com"
+                | "hotmail.com"
+                | "outlook.com"
+                | "live.com"
+                | "icloud.com"
+                | "me.com"
+                | "yahoo.com"
+                | "proton.me"
+                | "protonmail.com"
+                | "privaterelay.appleid.com"
+        )
+    {
+        return None;
+    }
+    Some(domain.to_owned())
 }
 
 /// Build a JSON response, replaying any captured `Set-Cookie` headers (the
@@ -213,8 +308,48 @@ fn build_metadata(
 
 /// GET the caller's Better Auth orgs and return the first one, if any. `None` on
 /// any transport/parse failure or an empty list — the caller then creates a new org.
-async fn existing_org(state: &AppState, cookie: &str, origin: Option<&str>) -> Option<Value> {
+async fn existing_owned_org(
+    state: &AppState,
+    cookie: &str,
+    origin: Option<&str>,
+    user_id: &str,
+) -> Result<Option<(Value, Value)>, ()> {
     let url = format!("{}/api/auth/organization/list", state.auth_core_url);
+    let mut request = state.client.get(&url).header("cookie", cookie);
+    if let Some(origin) = origin.filter(|value| !value.trim().is_empty()) {
+        request = request.header("origin", origin);
+    }
+    let response = request.send().await.map_err(|_| ())?;
+    if !response.status().is_success() {
+        return Err(());
+    }
+    let body = response.json::<Value>().await.map_err(|_| ())?;
+    let organizations = organization_entries(&body).ok_or(())?;
+    for organization in organizations {
+        let Some(org_id) = ba_org_id(organization) else {
+            continue;
+        };
+        let full = full_organization(state, cookie, origin, &org_id)
+            .await
+            .ok_or(())?;
+        if canonical_owner_id(&full).as_deref() == Some(user_id) {
+            return Ok(Some((organization.clone(), full)));
+        }
+    }
+    Ok(None)
+}
+
+async fn full_organization(
+    state: &AppState,
+    cookie: &str,
+    origin: Option<&str>,
+    org_id: &str,
+) -> Option<Value> {
+    let url = format!(
+        "{}/api/auth/organization/get-full-organization?organizationId={}",
+        state.auth_core_url,
+        urlencoding::encode(org_id),
+    );
     let mut request = state.client.get(&url).header("cookie", cookie);
     if let Some(origin) = origin.filter(|value| !value.trim().is_empty()) {
         request = request.header("origin", origin);
@@ -223,18 +358,45 @@ async fn existing_org(state: &AppState, cookie: &str, origin: Option<&str>) -> O
     if !response.status().is_success() {
         return None;
     }
-    let body = response.json::<Value>().await.ok()?;
-    first_org(&body)
+    response.json::<Value>().await.ok()
+}
+
+fn canonical_owner_id(full_org: &Value) -> Option<String> {
+    let members = full_org
+        .get("members")
+        .or_else(|| full_org.pointer("/data/members"))
+        .and_then(Value::as_array)?;
+    members.iter().find_map(|member| {
+        let is_owner = member
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| role.split(',').any(|part| part.trim() == "owner"));
+        is_owner
+            .then(|| {
+                member
+                    .get("userId")
+                    .or_else(|| member.get("user_id"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .flatten()
+    })
 }
 
 /// Better Auth's `organization/list` returns an array (sometimes wrapped under
 /// `data`/`organizations`). Return the first entry that carries an id.
+#[cfg(test)]
 fn first_org(body: &Value) -> Option<Value> {
-    let array = body
-        .as_array()
+    organization_entries(body)?
+        .iter()
+        .find(|item| ba_org_id(item).is_some())
+        .cloned()
+}
+
+fn organization_entries(body: &Value) -> Option<&Vec<Value>> {
+    body.as_array()
         .or_else(|| body.get("data").and_then(Value::as_array))
-        .or_else(|| body.get("organizations").and_then(Value::as_array))?;
-    array.iter().find(|item| ba_org_id(item).is_some()).cloned()
+        .or_else(|| body.get("organizations").and_then(Value::as_array))
 }
 
 /// POST to a Better Auth organization sub-route with the caller cookie.
@@ -270,7 +432,7 @@ async fn set_active_org(
     cookie: &str,
     origin: Option<&str>,
     org_id: &str,
-) -> Vec<Vec<u8>> {
+) -> Result<Vec<Vec<u8>>, StatusCode> {
     let url = format!("{}/api/auth/organization/set-active", state.auth_core_url);
     let mut request = state
         .client
@@ -280,15 +442,40 @@ async fn set_active_org(
     if let Some(origin) = origin.filter(|value| !value.trim().is_empty()) {
         request = request.header("origin", origin);
     }
-    match request.send().await {
-        Ok(response) => response
-            .headers()
-            .get_all(reqwest::header::SET_COOKIE)
-            .iter()
-            .map(|value| value.as_bytes().to_vec())
-            .collect(),
-        Err(_) => Vec::new(),
+    let response = request.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !status.is_success() {
+        return Err(status);
     }
+    Ok(response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .map(|value| value.as_bytes().to_vec())
+        .collect())
+}
+
+fn create_error_response(status: StatusCode, body: &Value) -> Response {
+    let message = ba_error_message(body, status);
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("organization already exists") || normalized.contains("slug already") {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_conflict",
+                "This organization already exists. Sign in with an invited administrator account or ask an owner for access.",
+            )),
+        )
+            .into_response();
+    }
+
+    let code = if status == StatusCode::FORBIDDEN {
+        "forbidden"
+    } else {
+        "create_failed"
+    };
+    (status, Json(error(code, message))).into_response()
 }
 
 /// Extract a Better Auth organization id from a create/list entry. BA returns the
@@ -425,5 +612,39 @@ mod tests {
             out.pointer("/plan").and_then(Value::as_str),
             Some("starter")
         );
+    }
+
+    #[test]
+    fn canonical_owner_must_match_the_authenticated_creator() {
+        let full_org = json!({
+            "id": "org_x",
+            "members": [
+                { "userId": "member-1", "role": "member" },
+                { "userId": "owner-1", "role": "owner" }
+            ]
+        });
+
+        assert_eq!(canonical_owner_id(&full_org), Some("owner-1".into()));
+        assert_ne!(canonical_owner_id(&full_org).as_deref(), Some("member-1"));
+    }
+
+    #[test]
+    fn company_domain_requires_a_verified_non_public_email() {
+        let user = |email: &str, verified| AuthenticatedUser {
+            user_id: "user-1".into(),
+            user_email: email.into(),
+            user_name: "User".into(),
+            user_image: None,
+            email_verified: verified,
+            auth_role: None,
+            active_org_id: None,
+            authorized_membership: None,
+        };
+        assert_eq!(
+            verified_company_domain(&user("Ima@Aquatiq.com", true)).as_deref(),
+            Some("aquatiq.com")
+        );
+        assert!(verified_company_domain(&user("ima@aquatiq.com", false)).is_none());
+        assert!(verified_company_domain(&user("ima@gmail.com", true)).is_none());
     }
 }

@@ -1,3 +1,8 @@
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use axum::{
     body::Body,
     http::{header::SET_COOKIE, HeaderMap, StatusCode},
@@ -5,16 +10,22 @@ use axum::{
     Json,
 };
 use futures_util::StreamExt;
+use hmac::{Hmac, Mac};
 use reqwest::Method;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use url::Url;
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::{
     auth::actor_with_defaults,
     config::AppState,
     contracts::ActionActor,
     envelope::{error, ok},
-    middleware::AuthenticatedUser,
+    middleware::{AuthenticatedUser, AuthorizedMembership},
 };
 
 /// Per-user TTL for the cached session-context lookup. Short enough that an org
@@ -59,6 +70,27 @@ pub(crate) async fn resolve_session_context(state: &AppState, user: &Authenticat
         return cached;
     }
 
+    let context = fetch_session_context(state, user).await;
+    if !context.is_null() {
+        state.cache.store(&key, &context).await;
+    }
+    context
+}
+
+async fn fetch_session_context(state: &AppState, user: &AuthenticatedUser) -> Value {
+    let (status, body) = fetch_session_context_response(state, user).await;
+    if !status.is_success() {
+        return Value::Null;
+    }
+
+    crate::envelope::unwrap_data(&body)
+}
+
+async fn fetch_session_context_response(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Value) {
+    let scope_org = scope_org_id(user);
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -78,13 +110,162 @@ pub(crate) async fn resolve_session_context(state: &AppState, user: &Authenticat
         None,
     )
     .await;
+    (status, body)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ActiveMembershipResolution {
+    Member(AuthorizedMembership),
+    Missing,
+    AuthorityUnavailable,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MembershipAuthorityContext {
+    user_id: String,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    org_id: AuthorityOptionalString,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    role: AuthorityOptionalString,
+    onboarding_status: String,
+}
+
+#[derive(Debug, Default)]
+enum AuthorityOptionalString {
+    #[default]
+    Missing,
+    Value(String),
+}
+
+fn deserialize_present_string<'de, D>(deserializer: D) -> Result<AuthorityOptionalString, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(AuthorityOptionalString::Value)
+}
+
+fn active_membership_from_authority_body(
+    user: &AuthenticatedUser,
+    status: StatusCode,
+    body: &[u8],
+) -> ActiveMembershipResolution {
+    if scope_org_id(user).is_none() {
+        return ActiveMembershipResolution::Missing;
+    }
     if !status.is_success() {
-        return Value::Null;
+        return ActiveMembershipResolution::AuthorityUnavailable;
     }
 
-    let context = crate::envelope::unwrap_data(&body);
-    state.cache.store(&key, &context).await;
-    context
+    let Ok(context) = serde_json::from_slice::<MembershipAuthorityContext>(body) else {
+        return ActiveMembershipResolution::AuthorityUnavailable;
+    };
+    if context.user_id.trim() != user.user_id.trim()
+        || !matches!(
+            context.onboarding_status.trim(),
+            "CREATED" | "PROFILE_READY" | "COMPLETED"
+        )
+    {
+        return ActiveMembershipResolution::AuthorityUnavailable;
+    }
+
+    let (organization_id, role) = match (context.org_id, context.role) {
+        (AuthorityOptionalString::Value(organization_id), AuthorityOptionalString::Value(role)) => {
+            (organization_id, role)
+        }
+        pair => {
+            return match pair {
+                (AuthorityOptionalString::Missing, AuthorityOptionalString::Missing) => {
+                    ActiveMembershipResolution::Missing
+                }
+                _ => ActiveMembershipResolution::AuthorityUnavailable,
+            };
+        }
+    };
+    let organization_id = organization_id.trim();
+    let role = role.trim().to_ascii_lowercase();
+    if organization_id.is_empty()
+        || scope_org_id(user) != Some(organization_id)
+        || !matches!(role.as_str(), "owner" | "admin" | "member" | "viewer")
+    {
+        return ActiveMembershipResolution::AuthorityUnavailable;
+    }
+
+    ActiveMembershipResolution::Member(AuthorizedMembership {
+        organization_id: organization_id.to_owned(),
+        role,
+    })
+}
+
+const MEMBERSHIP_AUTHORITY_MAX_BODY_BYTES: usize = 64 * 1024;
+
+fn membership_authority_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("valid membership-authority HTTP client")
+    })
+}
+
+pub(crate) async fn resolve_active_membership(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> ActiveMembershipResolution {
+    if scope_org_id(user).is_none() {
+        return ActiveMembershipResolution::Missing;
+    }
+
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let url = format!("{}/api/v1/me/session-context", state.user_core_url);
+    let headers = user_core_delegation_headers(
+        &state.user_core_service_token,
+        &Method::GET,
+        &url,
+        &[],
+        &actor,
+        scope_org_id(user),
+        user.user_image.as_deref().unwrap_or_default(),
+        Utc::now(),
+    );
+    let mut request = membership_authority_http_client().get(url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let Ok(response) = send_with_retry(request).await else {
+        return ActiveMembershipResolution::AuthorityUnavailable;
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    if !status.is_success() {
+        return ActiveMembershipResolution::AuthorityUnavailable;
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MEMBERSHIP_AUTHORITY_MAX_BODY_BYTES as u64)
+    {
+        return ActiveMembershipResolution::AuthorityUnavailable;
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return ActiveMembershipResolution::AuthorityUnavailable;
+        };
+        if body.len().saturating_add(chunk.len()) > MEMBERSHIP_AUTHORITY_MAX_BODY_BYTES {
+            return ActiveMembershipResolution::AuthorityUnavailable;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    active_membership_from_authority_body(user, status, &body)
 }
 
 pub(crate) async fn invalidate_session_context_cache(
@@ -109,30 +290,20 @@ pub(crate) async fn invalidate_session_context_cache(
     }
 }
 
-/// The authenticated user's authoritative org id, from the validated session /
-/// cached session-context (never a client-supplied header). Empty string when
-/// there is none / on failure.
-pub(crate) async fn authorized_org_id(state: &AppState, user: &AuthenticatedUser) -> String {
-    // The org the user is currently acting as: the session's active organization
-    // (already in the validated session — zero extra round-trip), falling back to the
-    // primary-org membership from the cached session-context before any org switch.
-    if let Some(active) = scope_org_id(user) {
-        return active.to_owned();
-    }
-    resolve_session_context(state, user)
-        .await
-        .get("orgId")
-        .and_then(Value::as_str)
+/// The authenticated user's authoritative org id from the live membership
+/// decision attached by `require_session` (never a client-supplied header or
+/// cached session context). Empty only on intentional session-only flows.
+pub(crate) async fn authorized_org_id(_state: &AppState, user: &AuthenticatedUser) -> String {
+    user.authorized_membership
+        .as_ref()
+        .map(|membership| membership.organization_id.clone())
         .unwrap_or_default()
-        .to_owned()
 }
 
-/// Send a request, retrying ONCE on a connection/send-level error. Such errors
-/// mean the request never reached the upstream (e.g. a pooled keep-alive socket
-/// that died while idle — the root cause of intermittent "error sending request"
-/// 502s), so a retry is safe even for non-idempotent methods; reqwest opens a
-/// fresh connection on the second attempt. Streaming bodies that can't be cloned
-/// simply skip the retry.
+/// Retry once only when no connection was established. A generic request/send
+/// error is ambiguous: the upstream may already have accepted a non-idempotent
+/// request, so replaying it can duplicate external actions. Streaming bodies
+/// that cannot be cloned also skip the retry.
 async fn send_with_retry(
     builder: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, reqwest::Error> {
@@ -140,9 +311,7 @@ async fn send_with_retry(
     match builder.send().await {
         Ok(resp) => Ok(resp),
         Err(err) => match retry {
-            Some(retry_builder) if err.is_connect() || err.is_request() => {
-                retry_builder.send().await
-            }
+            Some(retry_builder) if err.is_connect() => retry_builder.send().await,
             _ => Err(err),
         },
     }
@@ -158,20 +327,471 @@ pub(crate) async fn proxy_json(
     content_type: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
     let actor = actor_with_defaults(actor);
-    let mut request = state.client.request(method, url);
-    request = request.header("x-internal-api-key", &state.internal_api_key);
-    request = request.header("x-user-id", actor.user_id);
+    let is_user_core = same_upstream_origin(url, &state.user_core_url);
+    let mut headers = if is_user_core {
+        let body_bytes = body
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .unwrap_or_default()
+            .unwrap_or_default();
+        user_core_delegation_headers(
+            &state.user_core_service_token,
+            &method,
+            url,
+            &body_bytes,
+            &actor,
+            org_id,
+            "",
+            Utc::now(),
+        )
+    } else {
+        BTreeMap::from([
+            (
+                "x-internal-api-key".to_owned(),
+                state.internal_api_key.clone(),
+            ),
+            ("x-user-id".to_owned(), actor.user_id),
+        ])
+    };
     if !actor.user_email.is_empty() {
-        request = request.header("x-user-email", actor.user_email);
+        headers.insert("x-user-email".to_owned(), actor.user_email);
     }
     if !actor.user_name.is_empty() {
-        request = request.header("x-user-name", actor.user_name);
+        headers.insert("x-user-name".to_owned(), actor.user_name);
     }
-    if !actor.user_role.is_empty() {
-        request = request.header("x-user-role", actor.user_role);
+    if !is_user_core && !actor.user_role.is_empty() {
+        headers.insert("x-user-role".to_owned(), actor.user_role);
     }
     if let Some(org_id) = org_id.filter(|value| !value.trim().is_empty()) {
-        request = request.header("x-org-id", org_id.trim());
+        headers.insert("x-org-id".to_owned(), org_id.trim().to_owned());
+    }
+
+    proxy_json_with_headers(state, method, url, body, headers, content_type).await
+}
+
+#[allow(clippy::too_many_arguments)] // explicit fields mirror the signed cross-language contract
+pub(crate) fn user_core_delegation_headers(
+    service_token: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    org_id: Option<&str>,
+    avatar: &str,
+    timestamp: DateTime<Utc>,
+) -> BTreeMap<String, String> {
+    service_delegation_headers(
+        service_token,
+        "velion-gateway",
+        "user-core",
+        method,
+        url,
+        body,
+        actor,
+        org_id,
+        avatar,
+        timestamp,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // explicit fields mirror the signed cross-language contract
+fn service_delegation_headers(
+    service_token: &str,
+    principal: &str,
+    audience: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    org_id: Option<&str>,
+    avatar: &str,
+    timestamp: DateTime<Utc>,
+) -> BTreeMap<String, String> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Secs, false);
+    let uri = Url::parse(url)
+        .map(|parsed| match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        })
+        .unwrap_or_default();
+    let org_id = org_id.map(str::trim).unwrap_or_default();
+    let body_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(body));
+    let canonical = [
+        "v1",
+        principal,
+        audience,
+        timestamp.as_str(),
+        method.as_str(),
+        uri.as_str(),
+        actor.user_id.trim(),
+        org_id,
+        actor.user_email.trim(),
+        actor.user_name.trim(),
+        avatar.trim(),
+        body_digest.as_str(),
+    ]
+    .join("\n");
+    let mut mac = HmacSha256::new_from_slice(service_token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(canonical.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+
+    let mut headers = BTreeMap::from([
+        ("x-service-token".to_owned(), service_token.to_owned()),
+        ("x-service-id".to_owned(), principal.to_owned()),
+        ("x-user-id".to_owned(), actor.user_id.trim().to_owned()),
+        ("x-org-id".to_owned(), org_id.to_owned()),
+        (
+            "x-user-email".to_owned(),
+            actor.user_email.trim().to_owned(),
+        ),
+        ("x-user-name".to_owned(), actor.user_name.trim().to_owned()),
+        ("x-user-avatar".to_owned(), avatar.trim().to_owned()),
+        ("x-delegation-timestamp".to_owned(), timestamp),
+        ("x-delegation-body-sha256".to_owned(), body_digest),
+        ("x-delegation-signature".to_owned(), signature),
+    ]);
+    headers.retain(|_, value| !value.is_empty());
+    headers
+}
+
+#[allow(clippy::too_many_arguments)]
+fn notification_delegation_headers(
+    service_token: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    org_id: &str,
+    timestamp: DateTime<Utc>,
+    nonce: &str,
+) -> BTreeMap<String, String> {
+    v2_delegation_headers(
+        service_token,
+        "notification-core",
+        method,
+        url,
+        body,
+        actor,
+        org_id,
+        timestamp,
+        nonce,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conversation_delegation_headers(
+    service_token: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    org_id: &str,
+    timestamp: DateTime<Utc>,
+    nonce: &str,
+) -> BTreeMap<String, String> {
+    v2_delegation_headers(
+        service_token,
+        "conversation-core",
+        method,
+        url,
+        body,
+        actor,
+        org_id,
+        timestamp,
+        nonce,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn v2_delegation_headers(
+    service_token: &str,
+    audience: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    org_id: &str,
+    timestamp: DateTime<Utc>,
+    nonce: &str,
+) -> BTreeMap<String, String> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Secs, false);
+    let uri = Url::parse(url)
+        .map(|parsed| match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        })
+        .unwrap_or_default();
+    let body_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(body));
+    let canonical = [
+        "v2",
+        "velion-gateway",
+        audience,
+        timestamp.as_str(),
+        nonce,
+        method.as_str(),
+        uri.as_str(),
+        actor.user_id.trim(),
+        org_id.trim(),
+        actor.user_role.trim(),
+        body_digest.as_str(),
+    ]
+    .join("\n");
+    let mut mac = HmacSha256::new_from_slice(service_token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(canonical.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+
+    let mut headers = BTreeMap::from([
+        ("x-service-id".to_owned(), "velion-gateway".to_owned()),
+        ("x-user-id".to_owned(), actor.user_id.trim().to_owned()),
+        ("x-org-id".to_owned(), org_id.trim().to_owned()),
+        ("x-user-role".to_owned(), actor.user_role.trim().to_owned()),
+        ("x-delegation-timestamp".to_owned(), timestamp),
+        ("x-delegation-nonce".to_owned(), nonce.to_owned()),
+        ("x-delegation-body-sha256".to_owned(), body_digest),
+        ("x-delegation-signature".to_owned(), signature),
+    ]);
+    headers.retain(|_, value| !value.is_empty());
+    headers
+}
+
+static DELEGATION_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NOTIFICATION_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn notification_http_client() -> &'static reqwest::Client {
+    NOTIFICATION_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(25))
+            .pool_idle_timeout(Duration::from_secs(20))
+            .tcp_keepalive(Duration::from_secs(20))
+            .build()
+            .expect("build notification-core HTTP client")
+    })
+}
+
+fn conversation_http_client() -> &'static reqwest::Client {
+    // Both signed Application Plane clients require the same transport policy:
+    // pinned caller-side origins and no redirect following with authority headers.
+    notification_http_client()
+}
+
+fn delegation_nonce(now: DateTime<Utc>) -> String {
+    let counter = DELEGATION_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seed = format!(
+        "{}:{}:{}",
+        now.timestamp_nanos_opt().unwrap_or_default(),
+        std::process::id(),
+        counter
+    );
+    URL_SAFE_NO_PAD.encode(Sha256::digest(seed.as_bytes()))
+}
+
+pub(crate) async fn proxy_notification_json(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: &str,
+    actor: &ActionActor,
+) -> (StatusCode, Json<Value>) {
+    if !notification_target_is_configured_origin(url, &state.notification_core_url) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "notification_upstream_target_rejected",
+                "Notification request target does not match the configured notification-core origin",
+            )),
+        );
+    }
+    let body_bytes = body
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let now = Utc::now();
+    let nonce = delegation_nonce(now);
+    let headers = notification_delegation_headers(
+        &state.notification_core_service_token,
+        &method,
+        url,
+        &body_bytes,
+        actor,
+        org_id,
+        now,
+        &nonce,
+    );
+    proxy_json_with_client_and_headers(notification_http_client(), method, url, body, headers, None)
+        .await
+}
+
+pub(crate) async fn proxy_conversation_json(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    user: &AuthenticatedUser,
+    content_type: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    if !conversation_target_is_configured_origin(url, &state.conversation_core_url) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "conversation_upstream_target_rejected",
+                "Conversation request target does not match the configured conversation-core origin",
+            )),
+        );
+    }
+
+    // `require_session` attaches a fresh canonical membership on every sensitive
+    // request. Reuse it here so Inbox does not perform a second authority lookup.
+    let Some(membership) = user.authorized_membership.as_ref() else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "conversation_membership_required",
+                "An explicit active organization membership is required.",
+            )),
+        );
+    };
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: membership.role.clone(),
+    };
+    let body_bytes = match body.as_ref().map(serde_json::to_vec).transpose() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "invalid_json",
+                    "Conversation request body could not be serialized.",
+                )),
+            )
+        }
+    };
+    let now = Utc::now();
+    let nonce = delegation_nonce(now);
+    let headers = conversation_delegation_headers(
+        &state.conversation_core_service_token,
+        &method,
+        url,
+        body_bytes.as_deref().unwrap_or_default(),
+        &actor,
+        &membership.organization_id,
+        now,
+        &nonce,
+    );
+    proxy_json_bytes_with_client_and_headers(
+        conversation_http_client(),
+        method,
+        url,
+        body_bytes.as_deref(),
+        headers,
+        content_type,
+    )
+    .await
+}
+
+fn notification_target_is_configured_origin(target: &str, configured_base: &str) -> bool {
+    same_upstream_origin(target, configured_base)
+}
+
+fn conversation_target_is_configured_origin(target: &str, configured_base: &str) -> bool {
+    same_upstream_origin(target, configured_base)
+}
+
+fn same_upstream_origin(target: &str, configured_base: &str) -> bool {
+    let (Ok(target), Ok(base)) = (Url::parse(target), Url::parse(configured_base)) else {
+        return false;
+    };
+    target.scheme() == base.scheme()
+        && target.host_str() == base.host_str()
+        && target.port_or_known_default() == base.port_or_known_default()
+}
+
+fn session_service_headers(
+    service_token: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    timestamp: DateTime<Utc>,
+) -> BTreeMap<String, String> {
+    service_delegation_headers(
+        service_token,
+        "velion-gateway",
+        "session-core",
+        method,
+        url,
+        body,
+        actor,
+        None,
+        "",
+        timestamp,
+    )
+}
+
+pub(crate) async fn proxy_session_json(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    actor: Option<&ActionActor>,
+) -> (StatusCode, Json<Value>) {
+    let actor = actor_with_defaults(actor);
+    let body_bytes = body
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let headers = session_service_headers(
+        &state.session_core_service_token,
+        &method,
+        url,
+        &body_bytes,
+        &actor,
+        Utc::now(),
+    );
+    proxy_json_with_headers(state, method, url, body, headers, None).await
+}
+
+async fn proxy_json_with_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    headers: BTreeMap<String, String>,
+    content_type: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    proxy_json_with_client_and_headers(&state.client, method, url, body, headers, content_type)
+        .await
+}
+
+async fn proxy_json_with_client_and_headers(
+    client: &reqwest::Client,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    headers: BTreeMap<String, String>,
+    content_type: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    let mut request = client.request(method, url);
+    for (name, value) in headers {
+        if !value.trim().is_empty() {
+            request = request.header(name, value);
+        }
     }
     if let Some(content_type) = content_type {
         request = request.header("content-type", content_type);
@@ -188,6 +808,55 @@ pub(crate) async fn proxy_json(
             // On a non-success status with an empty / non-JSON upstream body, synthesize
             // a proper {error:{code,message}} envelope instead of forwarding `{}` with an
             // error status — otherwise the SPA gets a failing status it cannot explain.
+            let needs_envelope = !status.is_success()
+                && (body.is_null() || body.as_object().map(|o| o.is_empty()).unwrap_or(false));
+            if needs_envelope {
+                (
+                    status,
+                    Json(error(
+                        "upstream_error",
+                        format!("Upstream returned {}", status.as_u16()),
+                    )),
+                )
+            } else {
+                (status, Json(if body.is_null() { json!({}) } else { body }))
+            }
+        }
+        Err(request_error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(error("upstream_unavailable", request_error.to_string())),
+        ),
+    }
+}
+
+async fn proxy_json_bytes_with_client_and_headers(
+    client: &reqwest::Client,
+    method: Method,
+    url: &str,
+    body: Option<&[u8]>,
+    headers: BTreeMap<String, String>,
+    content_type: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    let mut request = client.request(method, url);
+    for (name, value) in headers {
+        if !value.trim().is_empty() {
+            request = request.header(name, value);
+        }
+    }
+    if body.is_some() {
+        request = request.header("content-type", content_type.unwrap_or("application/json"));
+    } else if let Some(content_type) = content_type {
+        request = request.header("content-type", content_type);
+    }
+    if let Some(body) = body {
+        request = request.body(body.to_vec());
+    }
+
+    match send_with_retry(request).await {
+        Ok(response) => {
+            let status =
+                StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let body = response.json::<Value>().await.unwrap_or(Value::Null);
             let needs_envelope = !status.is_success()
                 && (body.is_null() || body.as_object().map(|o| o.is_empty()).unwrap_or(false));
             if needs_envelope {
@@ -342,10 +1011,11 @@ pub(crate) async fn proxy_integration_json(
     method: Method,
     url: &str,
     body: Option<Value>,
-    actor: Option<&ActionActor>,
-    org_id: Option<&str>,
+    bearer_token: Option<&str>,
+    user_id: &str,
 ) -> (StatusCode, Json<Value>) {
-    let (status, Json(raw)) = proxy_json(state, method, url, body, org_id, actor, None).await;
+    let (status, Json(raw)) =
+        proxy_bearer_json(state, method, url, body, bearer_token, user_id).await;
 
     if let Some(success) = raw.get("success").and_then(|v| v.as_bool()) {
         if success {
@@ -423,10 +1093,104 @@ pub(crate) async fn proxy_sse_stream(
     actor: Option<(&str, &str)>,
     zdr: bool,
 ) -> Response {
+    proxy_sse_stream_with_data_plane(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        None,
+        None,
+        None,
+        last_event_id,
+        actor,
+        zdr,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_sse_stream_with_session(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    session_bearer: Option<&str>,
+    last_event_id: Option<&str>,
+    actor: Option<(&str, &str)>,
+    zdr: bool,
+) -> Response {
+    proxy_sse_stream_with_data_plane(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        None,
+        None,
+        session_bearer,
+        last_event_id,
+        actor,
+        zdr,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_sse_stream_with_data_plane(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    data_plane_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    execution_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    last_event_id: Option<&str>,
+    actor: Option<(&str, &str)>,
+    zdr: bool,
+) -> Response {
     let mut req = state.streaming_client.request(method, url);
 
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);
+    }
+    if let Some(token) = data_plane_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-data-plane-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = cost_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-cost-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = inference_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-inference-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = execution_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-execution-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = session_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-session-authorization", format!("Bearer {token}"));
     }
 
     if let Some((user_id, org_id)) = actor {
@@ -513,6 +1277,39 @@ mod tests {
     use crate::middleware::AuthenticatedUser;
     use axum::http::{HeaderMap, HeaderValue};
 
+    #[tokio::test]
+    async fn notification_client_does_not_follow_redirects() {
+        use axum::{response::Redirect, routing::get, Router};
+
+        let app = Router::new()
+            .route(
+                "/redirect",
+                get(|| async { Redirect::temporary("/target") }),
+            )
+            .route(
+                "/target",
+                get(|| async { "delegation must not reach here" }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect test server");
+        let address = listener.local_addr().expect("redirect test address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve redirect test")
+        });
+
+        let response = notification_http_client()
+            .get(format!("http://{address}/redirect"))
+            .send()
+            .await
+            .expect("notification request");
+        server.abort();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    }
+
     fn user_with_active_org(active: Option<&str>) -> AuthenticatedUser {
         AuthenticatedUser {
             user_id: "user-1".to_owned(),
@@ -522,6 +1319,7 @@ mod tests {
             email_verified: true,
             auth_role: None,
             active_org_id: active.map(str::to_owned),
+            authorized_membership: None,
         }
     }
 
@@ -561,6 +1359,346 @@ mod tests {
         assert_ne!(org_a, org_b);
         // A blank active org collapses onto the primary (None) key.
         assert_eq!(primary, key(&user_with_active_org(Some("  "))));
+    }
+
+    #[test]
+    fn active_membership_uses_control_role_and_requires_exact_scope() {
+        let user = AuthenticatedUser {
+            auth_role: Some("superadmin".to_owned()),
+            ..user_with_active_org(Some("org-active"))
+        };
+        let context = json!({
+            "userId": "user-1",
+            "orgId": "org-active",
+            "role": "member",
+            "onboardingStatus": "COMPLETED"
+        });
+        let ActiveMembershipResolution::Member(membership) = active_membership_from_authority_body(
+            &user,
+            StatusCode::OK,
+            &serde_json::to_vec(&context).unwrap(),
+        ) else {
+            panic!("matching Control membership must be accepted")
+        };
+        assert_eq!(membership.organization_id, "org-active");
+        assert_eq!(membership.role, "member");
+
+        let wrong_org = json!({
+            "userId": "user-1",
+            "orgId": "org-primary",
+            "role": "owner",
+            "onboardingStatus": "COMPLETED"
+        });
+        assert_eq!(
+            active_membership_from_authority_body(
+                &user,
+                StatusCode::OK,
+                &serde_json::to_vec(&wrong_org).unwrap(),
+            ),
+            ActiveMembershipResolution::AuthorityUnavailable
+        );
+    }
+
+    #[test]
+    fn active_membership_requires_an_explicit_active_organization() {
+        let user = user_with_active_org(None);
+        let context = json!({
+            "userId": "user-1",
+            "orgId": "org-primary",
+            "role": "owner",
+            "onboardingStatus": "COMPLETED"
+        });
+
+        assert_eq!(
+            active_membership_from_authority_body(
+                &user,
+                StatusCode::OK,
+                &serde_json::to_vec(&context).unwrap(),
+            ),
+            ActiveMembershipResolution::Missing
+        );
+    }
+
+    #[test]
+    fn active_membership_non_success_is_authority_unavailable() {
+        let user = user_with_active_org(Some("org-active"));
+        for authority_status in [
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert_eq!(
+                active_membership_from_authority_body(&user, authority_status, b""),
+                ActiveMembershipResolution::AuthorityUnavailable
+            );
+        }
+    }
+
+    #[test]
+    fn active_membership_absence_is_distinct_from_authority_failure() {
+        let user = user_with_active_org(Some("org-active"));
+        assert_eq!(
+            active_membership_from_authority_body(
+                &user,
+                StatusCode::OK,
+                br#"{"userId":"user-1","onboardingStatus":"COMPLETED"}"#,
+            ),
+            ActiveMembershipResolution::Missing
+        );
+    }
+
+    #[test]
+    fn active_membership_malformed_success_is_authority_unavailable() {
+        let user = user_with_active_org(Some("org-active"));
+        for body in [
+            br#"{"unexpected":"shape"}"#.as_slice(),
+            br#"{"userId":"user-1","orgId":null,"role":"member","onboardingStatus":"COMPLETED"}"#.as_slice(),
+            br#"{"userId":"user-1","orgId":"org-active","role":"member","onboardingStatus":"COMPLETED","extra":true}"#.as_slice(),
+            br#"{"userId":"user-1","orgId":"org-active","role":"member","onboardingStatus":"COMPLETED"}{}"#.as_slice(),
+        ] {
+            assert_eq!(
+                active_membership_from_authority_body(&user, StatusCode::OK, body),
+                ActiveMembershipResolution::AuthorityUnavailable
+            );
+        }
+    }
+
+    #[test]
+    fn active_membership_rejects_mismatch_partial_and_unknown_role() {
+        let user = user_with_active_org(Some("org-1"));
+        for context in [
+            json!({"userId":"user-1","orgId":"","role":"member","onboardingStatus":"COMPLETED"}),
+            json!({"userId":"user-1","orgId":"org-1","onboardingStatus":"COMPLETED"}),
+            json!({"userId":"user-1","orgId":"org-1","role":"","onboardingStatus":"COMPLETED"}),
+            json!({"userId":"user-1","orgId":"org-1","role":"superadmin","onboardingStatus":"COMPLETED"}),
+            json!({"userId":"other-user","orgId":"org-1","role":"owner","onboardingStatus":"COMPLETED"}),
+        ] {
+            assert_eq!(
+                active_membership_from_authority_body(
+                    &user,
+                    StatusCode::OK,
+                    &serde_json::to_vec(&context).unwrap(),
+                ),
+                ActiveMembershipResolution::AuthorityUnavailable
+            );
+        }
+    }
+
+    #[test]
+    fn session_service_headers_use_scoped_credential_without_shared_authority() {
+        use chrono::{TimeZone, Utc};
+
+        let actor = ActionActor {
+            user_id: "verified-user".to_owned(),
+            user_email: "verified@example.com".to_owned(),
+            user_name: "Verified User".to_owned(),
+            user_role: "admin".to_owned(),
+        };
+
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 11, 2, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+        let headers = session_service_headers(
+            "0123456789abcdef0123456789abcdef",
+            &Method::GET,
+            "http://session-core:3017/api/v1/sessions/current",
+            &[],
+            &actor,
+            timestamp,
+        );
+
+        assert_eq!(
+            headers.get("x-service-token"),
+            Some(&"0123456789abcdef0123456789abcdef".to_owned())
+        );
+        assert_eq!(headers.get("x-user-id"), Some(&"verified-user".to_owned()));
+        assert!(headers.contains_key("x-delegation-timestamp"));
+        assert!(headers.contains_key("x-delegation-body-sha256"));
+        assert_eq!(
+            headers.get("x-delegation-signature").map(String::as_str),
+            Some("4dgUVZ5Z-eyZrNkVl-GrS5j7MfOHTDna2V8_vSRBbcA")
+        );
+        assert!(!headers.contains_key("x-internal-api-key"));
+        assert!(!headers.contains_key("x-user-role"));
+    }
+
+    #[test]
+    fn user_core_self_delegation_signature_matches_cross_language_contract() {
+        use chrono::{TimeZone, Utc};
+
+        let actor = ActionActor {
+            user_id: "user-1".to_owned(),
+            user_email: "verified@example.com".to_owned(),
+            user_name: "Verified User".to_owned(),
+            user_role: "admin".to_owned(),
+        };
+        let body = br#"{"theme":"dark"}"#;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 11, 2, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+
+        let headers = user_core_delegation_headers(
+            "0123456789abcdef0123456789abcdef",
+            &Method::PATCH,
+            "http://user-core:3012/api/v1/preferences?view=all",
+            body,
+            &actor,
+            Some("org-1"),
+            "",
+            timestamp,
+        );
+
+        assert_eq!(
+            headers.get("x-delegation-body-sha256").map(String::as_str),
+            Some("D0-H20VnIyp_F1aqFTTsExR3eznDv1IJ-Hz5c5Mhzdw")
+        );
+        assert_eq!(
+            headers.get("x-delegation-signature").map(String::as_str),
+            Some("talCmu20E_nloJpxD5JLDYrnEWzxM1z0e2Ux-0GPtuU")
+        );
+        assert_eq!(
+            headers.get("x-delegation-timestamp").map(String::as_str),
+            Some("2026-07-11T02:00:00+00:00")
+        );
+        assert!(!headers.contains_key("x-user-role"));
+    }
+
+    #[test]
+    fn notification_delegation_binds_scope_role_nonce_and_body_without_shared_key() {
+        use chrono::{TimeZone, Utc};
+
+        let actor = ActionActor {
+            user_id: "user-1".to_owned(),
+            user_email: "verified@example.com".to_owned(),
+            user_name: "Verified User".to_owned(),
+            user_role: "admin".to_owned(),
+        };
+        let body = br#"{"organization_id":"org-1","recipient":{"kind":"user","id":"user-1"}}"#;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 13, 12, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+
+        let headers = notification_delegation_headers(
+            "0123456789abcdef0123456789abcdef",
+            &Method::POST,
+            "http://notification-core:3140/api/v1/notification-requests",
+            body,
+            &actor,
+            "org-1",
+            timestamp,
+            "fixed-nonce-1234567890",
+        );
+
+        assert_eq!(
+            headers.get("x-service-id").map(String::as_str),
+            Some("velion-gateway")
+        );
+        assert_eq!(headers.get("x-org-id").map(String::as_str), Some("org-1"));
+        assert_eq!(
+            headers.get("x-user-role").map(String::as_str),
+            Some("admin")
+        );
+        assert_eq!(
+            headers.get("x-delegation-nonce").map(String::as_str),
+            Some("fixed-nonce-1234567890")
+        );
+        assert_eq!(
+            headers.get("x-delegation-body-sha256").map(String::as_str),
+            Some("KSAem_coGl1Xx_rU84ulYwo1-4Joui0ynxMypC4vHSk")
+        );
+        assert_eq!(
+            headers.get("x-delegation-signature").map(String::as_str),
+            Some("pcjRMdFhwUheFX-sD8K7H-KMnVDum8gMyfD005mDqtc")
+        );
+        assert!(!headers.contains_key("x-internal-api-key"));
+        assert!(!headers.contains_key("x-service-token"));
+    }
+
+    #[test]
+    fn conversation_delegation_matches_go_cross_language_contract() {
+        use chrono::{TimeZone, Utc};
+
+        let actor = ActionActor {
+            user_id: "user-1".to_owned(),
+            user_email: "verified@example.com".to_owned(),
+            user_name: "Verified User".to_owned(),
+            user_role: "admin".to_owned(),
+        };
+        let body = br#"{"body_text":"hello"}"#;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 13, 12, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+        let headers = conversation_delegation_headers(
+            "0123456789abcdef0123456789abcdef",
+            &Method::POST,
+            "http://conversation-core:3160/api/v1/conversations/conversation-1/messages?source=inbox",
+            body,
+            &actor,
+            "org-1",
+            timestamp,
+            "fixed-nonce-1234567890",
+        );
+
+        assert_eq!(
+            headers.get("x-delegation-body-sha256").map(String::as_str),
+            Some("zIWXrcFcB2V6qcMYvMSL9BWhHM37zJ5N96fr8I-wyRI")
+        );
+        assert_eq!(
+            headers.get("x-delegation-signature").map(String::as_str),
+            Some("0BVt97NOdBwX5Yo-YuEw5RkrWT4imcuTCaNMXWokB28")
+        );
+        assert_eq!(
+            headers.get("x-user-role").map(String::as_str),
+            Some("admin")
+        );
+        assert!(!headers.contains_key("x-internal-api-key"));
+        assert!(!headers.contains_key("x-service-token"));
+    }
+
+    #[test]
+    fn conversation_signing_is_restricted_to_configured_origin() {
+        assert!(conversation_target_is_configured_origin(
+            "http://conversation-core:3160/api/v1/inboxes",
+            "http://conversation-core:3160"
+        ));
+        assert!(!conversation_target_is_configured_origin(
+            "http://conversation-core.attacker:3160/api/v1/inboxes",
+            "http://conversation-core:3160"
+        ));
+    }
+
+    #[test]
+    fn notification_signing_is_restricted_to_the_configured_notification_origin() {
+        assert!(notification_target_is_configured_origin(
+            "http://notification-core:3140/notifications",
+            "http://notification-core:3140"
+        ));
+        assert!(!notification_target_is_configured_origin(
+            "http://dpv2-retrieval-engine:8004/v1/search",
+            "http://notification-core:3140"
+        ));
+        assert!(!notification_target_is_configured_origin(
+            "http://notification-core.attacker:3140/notifications",
+            "http://notification-core:3140"
+        ));
+    }
+
+    #[test]
+    fn user_core_origin_is_matched_exactly() {
+        assert!(same_upstream_origin(
+            "http://user-core:3012/api/v1/users/me",
+            "http://user-core:3012"
+        ));
+        assert!(!same_upstream_origin(
+            "http://user-core.attacker:3012/api/v1/users/me",
+            "http://user-core:3012"
+        ));
     }
 
     #[test]

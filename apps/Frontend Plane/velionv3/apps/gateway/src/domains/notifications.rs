@@ -11,7 +11,7 @@ use crate::{
     contracts::ActionActor,
     envelope::ok,
     middleware::{require_session, AuthenticatedUser},
-    upstream::proxy_json,
+    upstream::{authorized_org_id, proxy_notification_json},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -48,17 +48,9 @@ async fn get_preferences(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!("{}/preferences", state.notification_core_url);
-    proxy_json(
-        &state,
-        Method::GET,
-        &url,
-        None,
-        None,
-        Some(&actor_for(&user)),
-        None,
-    )
-    .await
+    proxy_notification_json(&state, Method::GET, &url, None, &org_id, &actor_for(&user)).await
 }
 
 async fn update_preference(
@@ -67,20 +59,20 @@ async fn update_preference(
     Path((event_type, channel)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/preferences/{}/{}",
         state.notification_core_url,
         urlencoding::encode(&event_type),
         urlencoding::encode(&channel)
     );
-    proxy_json(
+    proxy_notification_json(
         &state,
         Method::PUT,
         &url,
         Some(body),
-        None,
-        Some(&actor_for(&user)),
-        None,
+        &org_id,
+        &actor_for(&user),
     )
     .await
 }
@@ -91,17 +83,10 @@ async fn list_notifications(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!("{}/notifications", state.notification_core_url);
-    let (status, Json(body)) = proxy_json(
-        &state,
-        Method::GET,
-        &url,
-        None,
-        None,
-        Some(&actor_for(&user)),
-        None,
-    )
-    .await;
+    let (status, Json(body)) =
+        proxy_notification_json(&state, Method::GET, &url, None, &org_id, &actor_for(&user)).await;
     if !status.is_success() {
         return (status, Json(body));
     }
@@ -127,17 +112,9 @@ async fn unread_count(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!("{}/notifications/unread/count", state.notification_core_url);
-    proxy_json(
-        &state,
-        Method::GET,
-        &url,
-        None,
-        None,
-        Some(&actor_for(&user)),
-        None,
-    )
-    .await
+    proxy_notification_json(&state, Method::GET, &url, None, &org_id, &actor_for(&user)).await
 }
 
 async fn mark_read(
@@ -145,41 +122,25 @@ async fn mark_read(
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/notifications/{}/read",
         state.notification_core_url,
         urlencoding::encode(&id)
     );
-    proxy_json(
-        &state,
-        Method::POST,
-        &url,
-        None,
-        None,
-        Some(&actor_for(&user)),
-        None,
-    )
-    .await
+    proxy_notification_json(&state, Method::POST, &url, None, &org_id, &actor_for(&user)).await
 }
 
 async fn mark_all_read(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/notifications/mark-all-read",
         state.notification_core_url
     );
-    proxy_json(
-        &state,
-        Method::POST,
-        &url,
-        None,
-        None,
-        Some(&actor_for(&user)),
-        None,
-    )
-    .await
+    proxy_notification_json(&state, Method::POST, &url, None, &org_id, &actor_for(&user)).await
 }
 
 async fn delete_notification(
@@ -187,19 +148,19 @@ async fn delete_notification(
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/notifications/{}",
         state.notification_core_url,
         urlencoding::encode(&id)
     );
-    proxy_json(
+    proxy_notification_json(
         &state,
         Method::DELETE,
         &url,
         None,
-        None,
-        Some(&actor_for(&user)),
-        None,
+        &org_id,
+        &actor_for(&user),
     )
     .await
 }

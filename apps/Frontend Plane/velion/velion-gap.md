@@ -492,7 +492,7 @@ notification-core's `ControlSessionSubscriber` (G14 §8.17) already turns every 
 # g3-smoke@example.com):
 
 $ docker run --rm --network=controlplane-net natsio/nats-box:latest \
-    nats pub --server=nats://nats@controlplane-nats:4222 \
+    nats pub --server=nats://controlplane-nats:4222 --token "$NATS_TOKEN" \
     auth.user.provider_linked \
     '{"type":"auth.user.provider_linked","userId":"TXMAHgZcNEQ6zN19JqDTF6XBKIFfPRpw","email":"g3-smoke@example.com","provider":"microsoft","providerAccountId":"Jw2QYJU3OSewZrXUTLoTA9R5UUTnjhAueIC9zZO59vk","tokenRef":"Jw2QYJU3OSewZrXUTLoTA9R5UUTnjhAueIC9zZO59vk","timestamp":"2026-05-13T07:30:00Z"}'
 

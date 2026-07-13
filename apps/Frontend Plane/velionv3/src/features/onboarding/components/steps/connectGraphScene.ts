@@ -41,6 +41,7 @@ type GraphSceneOptions = {
   reducedMotion: boolean
   onHoverNode?: (node?: SourceGraphVisualNode) => void
   onSelectNode?: (pick?: SourceGraphPickResult) => void
+  onZoomChange?: (zoomPercent: number) => void
 }
 
 type FallbackNode = SourceGraphVisualNode & {
@@ -71,10 +72,10 @@ const DEFAULT_ZOOM = 1
 const MIN_ZOOM = 0.72
 const MAX_ZOOM = 1.55
 const MAX_DEVICE_PIXEL_RATIO = 1.75
-const FALLBACK_GRAPH_RADIUS = 172
-const FALLBACK_CAMERA_DISTANCE = 520
+const FALLBACK_GRAPH_RADIUS = 142
+const FALLBACK_CAMERA_DISTANCE = 480
 
-export const GRAPH_CORE_COLOR = '#f7f4ee'
+export const GRAPH_CORE_COLOR = '#ee7a50'
 
 const GRAPH_HUE_PALETTE: readonly string[] = [
   '#ee7a50', // velion coral / accent
@@ -82,9 +83,11 @@ const GRAPH_HUE_PALETTE: readonly string[] = [
   '#53b75a', // agent-role ecommerce green
   '#b94f9b', // agent-role workflow plum
   '#dd7a1f', // warning amber
-  '#29404a', // velion teal-deep ink
-  '#3578f6', // info blue
-  '#793819', // velion earth
+  '#7ca7a5', // velion teal mist
+  '#e68da1', // velion rose
+  '#b797e5', // velion lavender
+  '#d9a441', // velion gold
+  '#59a18d', // velion sea green
 ]
 
 export function hueForKey(key: string): string {
@@ -114,7 +117,7 @@ function hexToRgb(hexColor: string) {
   }
 }
 
-const LINK_COLOR = 'rgba(247, 200, 168, 0.26)'
+const LINK_COLOR = 'rgba(247, 200, 168, 0.42)'
 const LINK_HIGHLIGHT_COLOR = 'rgba(238, 122, 80, 0.78)'
 
 export function createConnectGraphScene(
@@ -250,13 +253,17 @@ function createCanvasGraphScene(
     zoom(direction) {
       zoom = clamp(zoom + direction * 0.12, MIN_ZOOM, MAX_ZOOM)
       draw()
-      return toZoomPercent(zoom)
+      const percent = toZoomPercent(zoom)
+      options.onZoomChange?.(percent)
+      return percent
     },
     reset() {
       zoom = DEFAULT_ZOOM
       angle = 0
       draw()
-      return toZoomPercent(zoom)
+      const percent = toZoomPercent(zoom)
+      options.onZoomChange?.(percent)
+      return percent
     },
     zoomPercent() {
       return toZoomPercent(zoom)
@@ -344,22 +351,30 @@ function createCanvasGraphScene(
 
     for (const node of sortedNodes) {
       const state = nodeState(node.id)
-      const radius = Math.max(3.6, node.screenRadius * (state.active ? 1.18 : state.hovered ? 1.08 : 1))
-      const alpha = state.dimmed ? 0.3 : node.connected ? 0.95 : 0.64
-      const color = state.highlighted ? '#f7f4ee' : node.color
+      const radius = Math.max(2.6, node.screenRadius * (state.active ? 1.18 : state.hovered ? 1.08 : 1))
+      const alpha = state.dimmed ? 0.22 : node.connected ? 0.95 : 0.6
+      const color = state.active || state.hovered ? lightenHex(node.color, 0.3) : node.color
 
-      drawGlow(node, radius, color, state.highlighted ? 0.34 : 0.16)
+      drawGlow(node, radius, color, state.highlighted ? 0.24 : 0.1)
+      const shading = context!.createRadialGradient(
+        node.screenX - radius * 0.35,
+        node.screenY - radius * 0.35,
+        radius * 0.15,
+        node.screenX,
+        node.screenY,
+        radius,
+      )
+      shading.addColorStop(0, withAlpha(lightenHex(color, 0.45), alpha))
+      shading.addColorStop(1, withAlpha(color, alpha))
       context!.beginPath()
       context!.arc(node.screenX, node.screenY, radius, 0, Math.PI * 2)
-      context!.fillStyle = withAlpha(color, alpha)
+      context!.fillStyle = shading
       context!.fill()
-      context!.lineWidth = state.highlighted ? 1.4 : 0.7
-      context!.strokeStyle = state.active ? 'rgba(238, 122, 80, 0.88)' : 'rgba(247, 244, 238, 0.42)'
+      context!.lineWidth = state.highlighted ? 1.2 : 0.6
+      context!.strokeStyle = state.active ? 'rgba(238, 122, 80, 0.88)' : 'rgba(247, 244, 238, 0.3)'
       context!.stroke()
 
-      if (state.highlighted || node.role === 'core') {
-        drawLabel(node, radius, state)
-      }
+      drawLabel(node, radius, state)
     }
   }
 
@@ -370,38 +385,34 @@ function createCanvasGraphScene(
       0,
       node.screenX,
       node.screenY,
-      radius * 4.8,
+      radius * 2.1,
     )
     gradient.addColorStop(0, withAlpha(color, opacity))
     gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
     context!.fillStyle = gradient
     context!.beginPath()
-    context!.arc(node.screenX, node.screenY, radius * 4.8, 0, Math.PI * 2)
+    context!.arc(node.screenX, node.screenY, radius * 2.1, 0, Math.PI * 2)
     context!.fill()
   }
 
+  // Plain floating text next to every node, like the reference graphs — no
+  // boxes; emphasis is carried by alpha alone.
   function drawLabel(
     node: FallbackNode,
     radius: number,
     state: { active: boolean; hovered: boolean; highlighted: boolean; dimmed: boolean },
   ) {
     const label = truncateLabel(node.label)
-    const fontSize = node.kind === 'core' ? 13 : 11
-    context!.font = `700 ${fontSize}px Inter, ui-sans-serif, system-ui`
-    const labelWidth = Math.min(context!.measureText(label).width, 184)
-    const boxWidth = labelWidth + 18
-    const boxHeight = node.kind === 'core' ? 34 : 26
-    const x = clamp(node.screenX + radius + 8, 12, width - boxWidth - 12)
-    const y = clamp(node.screenY - boxHeight / 2, 54, height - boxHeight - 12)
+    const fontSize = node.role === 'core' ? 12.5 : node.role === 'leaf' ? 9 : 10.5
+    const weight = node.role === 'core' ? 800 : 650
+    const alpha = state.dimmed ? 0.08 : state.highlighted ? 0.96 : node.role === 'leaf' ? 0.5 : 0.8
 
-    roundRect(context!, x, y, boxWidth, boxHeight, 7)
-    context!.fillStyle = state.active ? 'rgba(41, 64, 74, 0.86)' : 'rgba(3, 6, 7, 0.74)'
-    context!.fill()
-    context!.strokeStyle = state.active ? 'rgba(238, 122, 80, 0.72)' : 'rgba(247, 200, 168, 0.26)'
-    context!.lineWidth = 1
-    context!.stroke()
-    context!.fillStyle = state.dimmed ? 'rgba(247, 244, 238, 0.38)' : 'rgba(247, 244, 238, 0.92)'
-    context!.fillText(label, x + 9, y + boxHeight / 2 + fontSize * 0.34, boxWidth - 18)
+    context!.font = `${weight} ${fontSize}px Inter, ui-sans-serif, system-ui`
+    context!.shadowColor = 'rgba(5, 8, 7, 0.9)'
+    context!.shadowBlur = 4
+    context!.fillStyle = `rgba(247, 244, 238, ${alpha})`
+    context!.fillText(label, node.screenX + radius + 5, node.screenY + fontSize * 0.35)
+    context!.shadowBlur = 0
   }
 
   function nodeFromPointer(event: PointerEvent | MouseEvent) {
@@ -517,7 +528,9 @@ function fallbackSpherePosition(node: SourceGraphVisualNode, index: number) {
 
 function nodeRadius(node: SourceGraphVisualNode) {
   if (node.role === 'core') return 22
-  return clamp(4.6 + node.sizeWeight * 9, 4.6, 34)
+  if (node.role === 'hub') return clamp(5 + node.sizeWeight * 4.4, 7, 17)
+  if (node.role === 'standalone') return 4.4 + node.sizeWeight * 3.2
+  return 3 + node.sizeWeight * 2.4
 }
 
 async function loadWebglSceneFactory() {
@@ -543,23 +556,6 @@ function hasWebglSupport() {
 function withAlpha(hexColor: string, alpha: number) {
   const { red, green, blue } = hexToRgb(hexColor)
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`
-}
-
-function roundRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-) {
-  context.beginPath()
-  context.moveTo(x + radius, y)
-  context.arcTo(x + width, y, x + width, y + height, radius)
-  context.arcTo(x + width, y + height, x, y + height, radius)
-  context.arcTo(x, y + height, x, y, radius)
-  context.arcTo(x, y, x + width, y, radius)
-  context.closePath()
 }
 
 function truncateLabel(label: string) {

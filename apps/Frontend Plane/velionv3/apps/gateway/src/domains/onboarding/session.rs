@@ -7,8 +7,8 @@ use crate::{
     config::AppState,
     onboarding::{
         session::{
-            complete_onboarding, get_onboarding_state, onboarding_status, put_onboarding_state,
-            session_bootstrap,
+            complete_onboarding, get_onboarding_state, onboarding_lifecycle, onboarding_status,
+            put_onboarding_state, session_bootstrap,
         },
         theme::update_brand_theme,
     },
@@ -18,6 +18,7 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/session/bootstrap", get(session_bootstrap))
         .route("/api/v1/onboarding/status", get(onboarding_status))
+        .route("/api/v1/onboarding/lifecycle", get(onboarding_lifecycle))
         .route("/api/v1/onboarding/state", get(get_onboarding_state))
         .route("/api/v1/onboarding/state", put(put_onboarding_state))
         .route("/api/v1/onboarding/theme", put(update_brand_theme))

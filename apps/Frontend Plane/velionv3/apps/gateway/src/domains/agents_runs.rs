@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use crate::{
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json},
+    domains::chat::shared::{model_token, proxy_model_json_with_session, session_token},
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
     upstream::authorized_org_id,
@@ -94,9 +94,18 @@ async fn list_runs(
         .join("&");
 
     let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
     let url = format!("{}/v1/runs?{}", state.model_gateway_url, query_string);
-    let (status, body) =
-        proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await;
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
     (status, body).into_response()
 }
 
@@ -107,12 +116,21 @@ async fn get_run(
     Path(run_id): Path<String>,
 ) -> impl IntoResponse {
     let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
     let url = format!(
         "{}/v1/runs/{}",
         state.model_gateway_url,
         urlencoding::encode(&run_id)
     );
-    let (status, body) =
-        proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await;
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
     (status, body).into_response()
 }

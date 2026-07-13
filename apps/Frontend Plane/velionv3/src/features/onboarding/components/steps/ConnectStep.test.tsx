@@ -66,29 +66,42 @@ describe('ConnectStepVisual', () => {
             sourceCount: 3,
           },
         ]}
-        graphNodes={[
-          {
-            id: 'org',
-            label: 'AQUATIQ AS',
-            group: 'org',
-            position: { left: '50%', top: '50%' },
-          },
-          {
-            id: 'knowledge-1',
-            label: 'Cleaning systems and chemical product catalog',
-            group: 'knowledge',
-            position: { left: '64%', top: '44%' },
-          },
-        ]}
         organizationName="AQUATIQ AS"
-        websiteUrl="https://aquatiq.com"
+        currentUserId="user-42"
+        currentUserName="Ima Fernandes"
       />
     ))
 
     expect(screen.getByLabelText('Integration knowledge graph')).toBeTruthy()
     expect(screen.getByText('Slack')).toBeTruthy()
     expect(screen.getByText('Microsoft 365')).toBeTruthy()
+    expect(screen.getByText('Ima Fernandes')).toBeTruthy()
     expect(screen.queryByText('aquatiq.com + integrations')).toBeNull()
     expect(screen.queryByText('5 connected sources')).toBeNull()
+  })
+
+  it('keeps the graph empty until an integration is confirmed connected', () => {
+    render(() => (
+      <ConnectStepVisual
+        connectedSources={[
+          {
+            id: 'slack',
+            label: 'Slack',
+            status: 'pending',
+            sources: ['messages'],
+          },
+        ]}
+        organizationName="AQUATIQ AS"
+        currentUserId="user-42"
+        currentUserName="Ima Fernandes"
+      />
+    ))
+
+    expect(screen.getByLabelText('Integration graph with no connected sources')).toBeTruthy()
+    expect(screen.getByText('No connected integrations. The graph is empty.')).toBeTruthy()
+    expect(screen.queryByLabelText('Zoom in')).toBeNull()
+    expect(screen.queryByText('Slack')).toBeNull()
+    expect(screen.queryByText('AQUATIQ AS')).toBeNull()
+    expect(screen.queryByText('Ima Fernandes')).toBeNull()
   })
 })

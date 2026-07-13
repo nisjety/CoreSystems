@@ -60,12 +60,25 @@ async fn list_skills(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
     let url = format!(
         "{}/v1/skills{}",
         state.model_gateway_url,
         build_query(&params)
     );
-    shared::proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
 }
 
 async fn list_capabilities(
@@ -75,10 +88,23 @@ async fn list_capabilities(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
     let url = format!(
         "{}/v1/capabilities{}",
         state.model_gateway_url,
         build_query(&params)
     );
-    shared::proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
 }

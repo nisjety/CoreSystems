@@ -7,11 +7,12 @@ use reqwest::Method;
 use serde_json::{json, Value};
 
 use crate::{
+    audience_tokens::get_audience_token,
     config::AppState,
     contracts::ActionActor,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
-    upstream::{proxy_bearer_json, proxy_json},
+    upstream::{proxy_bearer_json, proxy_conversation_json, proxy_json},
 };
 
 use super::shared::{cookie_header, quarry_token};
@@ -240,6 +241,7 @@ pub(super) async fn dispatch_import_source(
 pub(super) async fn dispatch_connect_source(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let source_type = input
@@ -259,11 +261,16 @@ pub(super) async fn dispatch_connect_source(
     }
 
     let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
+    let cookie = cookie_header(headers);
+    let Some(token) = get_audience_token(state, &user.user_id, &cookie, "ingestion").await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "imports_auth_unavailable",
+                "Import authentication is temporarily unavailable.",
+            )),
+        )
+            .into_response();
     };
 
     let body = json!({
@@ -274,14 +281,13 @@ pub(super) async fn dispatch_connect_source(
     });
 
     let url = format!("{}/api/v1/import/jobs/source", state.imports_api_url);
-    let (status, Json(resp)) = proxy_json(
+    let (status, Json(resp)) = proxy_bearer_json(
         state,
         Method::POST,
         &url,
         Some(body),
-        Some(org_id.as_str()),
-        Some(&actor),
-        None,
+        Some(&token),
+        &user.user_id,
     )
     .await;
 
@@ -678,26 +684,8 @@ async fn forward_ticket_action(
     path: &str,
     body: Option<Value>,
 ) -> Response {
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
-    if org_id.trim().is_empty() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "org_scope_required",
-                "An authorized organization scope is required.",
-            )),
-        )
-            .into_response();
-    }
-    let actor = ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
-    };
     let url = format!("{}{}", state.conversation_core_url, path);
-    let (status, Json(resp)) =
-        proxy_json(state, method, &url, body, Some(&org_id), Some(&actor), None).await;
+    let (status, Json(resp)) = proxy_conversation_json(state, method, &url, body, user, None).await;
     if !status.is_success() {
         return (status, Json(resp)).into_response();
     }

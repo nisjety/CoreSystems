@@ -41,6 +41,14 @@ pub(super) async fn quarry_token(
     get_audience_token(state, &user.user_id, cookie, "quarry").await
 }
 
+pub(super) async fn ingestion_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    cookie: &str,
+) -> Option<String> {
+    get_audience_token(state, &user.user_id, cookie, "ingestion").await
+}
+
 /// Mint the `data-plane` audience token for the current user. Attached as a
 /// Bearer on Data Plane legs (documents-api, retrieval-engine, graph-index) so
 /// documents-api can verify tenant identity once `AUTHCTX_ENFORCE=1`. Cached

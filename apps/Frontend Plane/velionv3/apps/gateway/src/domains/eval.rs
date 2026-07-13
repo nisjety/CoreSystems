@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json},
+    domains::chat::shared::{model_token, proxy_model_json_with_session, session_token},
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
     upstream::authorized_org_id,
@@ -103,18 +103,20 @@ async fn quality(
 ) -> impl IntoResponse {
     let _org_id = authorized_org_id(&state, &user).await;
     let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
 
     // 1) List the caller's recent threads (model-gateway derives scope from the token).
     let threads_url = format!(
         "{}/v1/threads?limit={}",
         state.model_gateway_url, MAX_THREADS
     );
-    let (status, Json(threads_body)) = proxy_model_json(
+    let (status, Json(threads_body)) = proxy_model_json_with_session(
         &state,
         Method::GET,
         &threads_url,
         None,
         token.as_deref(),
+        session_token.as_deref(),
         &user,
     )
     .await;
@@ -148,9 +150,18 @@ async fn quality(
         let state = &state;
         let user = &user;
         let token = token.clone();
+        let session_token = session_token.clone();
         async move {
-            let (st, Json(body)) =
-                proxy_model_json(state, Method::GET, &url, None, token.as_deref(), user).await;
+            let (st, Json(body)) = proxy_model_json_with_session(
+                state,
+                Method::GET,
+                &url,
+                None,
+                token.as_deref(),
+                session_token.as_deref(),
+                user,
+            )
+            .await;
             if st.is_success() {
                 body.get("runs")
                     .and_then(Value::as_array)

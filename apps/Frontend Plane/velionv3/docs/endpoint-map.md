@@ -457,8 +457,8 @@ Shared internal API key (per-route granularity undocumented; endpoints from rese
 | Surface | Purpose | v3 |
 |---|---|---|
 | WS `convex-backend:3210` | Reactive projections (orgs, users, control sessions, agent runs, conversations, planner docs, knowledge Q&A) | core **if** v3 adopts Convex realtime — requires a WS-proxy/exposure decision; defer until then |
-| `:3211/webhooks/rag/complete`, `/webhooks/job/progress` | Depend on **missing** `api.jobs.*` functions — stale/broken | none |
-| `:3211/webhooks/ai/stream`, `/webhooks/health`, `/ingest/*`, `/api/webhook/nats/*` | Inter-plane mirrors/webhooks (placeholder signature verification) | none |
+| removed legacy job webhooks | Dead `api.jobs.*` callers were removed in 2026-07-13 source; no no-op jobs module was added | none |
+| `:3211/webhooks/ai/stream`, `/webhooks/health`, `/ingest/*`, `/api/webhook/nats/*`, `/api/operator/reconcile-memberships` | Inter-plane mirrors plus a dedicated HMAC/timestamp/nonce-gated, removal-only operator reconciliation endpoint; changed bundle not deployed | none |
 
 ### 4.5 information-core — HTTP :3190 (Gin, in-memory cache)
 
@@ -468,7 +468,7 @@ Internal-key gated.
 |---|---|---|---|---|
 | GET | `/health`, `/ready` | Probes | HTTP | none |
 | GET | `/api/v1/weather` (+ `/api/v1/weather/oslo`) | Weather for dashboard cards | HTTP | core |
-| GET | `/api/v1/traffic` | Traffic for dashboard cards | HTTP | core |
+| GET | `/api/v1/traffic` | Traffic metadata plus nullable provenance-bearing observations; UI must label measured/estimated/synthetic/stale/unavailable | HTTP | core |
 | GET | `/api/v1/news` | News feed for dashboard cards | HTTP | core |
 
 ### 4.6 notification-core — HTTP :3140
@@ -488,6 +488,8 @@ Internal API key required (even healthcheck); user identity via forwarded header
 | PUT | `/preferences/:eventType/:channel` | Update one preference | HTTP | core |
 | GET/PATCH | `/channels/config[...]` | Channel config (admin-ish) | HTTP | **later** |
 | POST | `/internal/recipients/upsert` | Identity sync (internal) | HTTP | none |
+
+2026-07-13 release note: the navbar support caller uses canonical notification intake and a non-PII deterministic idempotency key in source, but notification organization scope and typed destination resolution are unresolved. Do not treat that support action as production-ready or enable it for arbitrary recipients.
 
 ### 4.7 zammad-foundation
 

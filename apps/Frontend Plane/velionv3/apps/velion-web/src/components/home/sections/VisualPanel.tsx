@@ -35,19 +35,19 @@ const variantBackgrounds: Record<VisualPanelVariant, string> = {
 
 const assetBackgrounds: Partial<Record<VisualPanelVariant, string>> = {
 	craft:
-		"bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.08)),url('/velion-vibe/mist-bloom.png')]",
+		"bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.08)),url('/mist-bloom.png')]",
 	surface:
-		"bg-[linear-gradient(180deg,rgba(13,15,17,0.18),rgba(13,15,17,0.36)),url('/velion-vibe/signal-ridge.png')]",
+		"bg-[linear-gradient(180deg,rgba(13,15,17,0.18),rgba(13,15,17,0.36)),url('/signal-ridge.png')]",
 	mark:
-		"bg-[linear-gradient(180deg,rgba(248,248,247,0.04),rgba(248,248,247,0.14)),url('/velion-vibe/glass-edge.png')]",
+		"bg-[linear-gradient(180deg,rgba(248,248,247,0.04),rgba(248,248,247,0.14)),url('/glass-edge.png')]",
 	icon:
-		"bg-[linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.08)),url('/velion-vibe/warm-flight.png')]",
+		"bg-[linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.08)),url('/warm-flight.png')]",
 	open:
-		"bg-[linear-gradient(180deg,rgba(248,248,247,0.04),rgba(248,248,247,0.12)),url('/velion-vibe/mist-bloom.png')]",
+		"bg-[linear-gradient(180deg,rgba(248,248,247,0.04),rgba(248,248,247,0.12)),url('/mist-bloom.png')]",
 	detail:
-		"bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.1)),url('/velion-vibe/soft-orb.png')]",
+		"bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.1)),url('/soft-orb.png')]",
 	heritage:
-		"bg-[linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.16)),url('/velion-vibe/signal-ridge.png')]",
+		"bg-[linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.16)),url('/signal-ridge.png')]",
 };
 
 function getVariantTone(variant: VisualPanelVariant) {

@@ -5,7 +5,7 @@
 
 use axum::{
     extract::{Extension, Path, State},
-    http::{StatusCode, Uri},
+    http::Uri,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -15,10 +15,8 @@ use serde_json::Value;
 
 use crate::{
     config::AppState,
-    contracts::ActionActor,
-    envelope::error,
     middleware::{require_session, AuthenticatedUser},
-    upstream::{authorized_org_id, proxy_json},
+    upstream::proxy_conversation_json,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -77,30 +75,6 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-fn actor_for(user: &AuthenticatedUser) -> ActionActor {
-    ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
-    }
-}
-
-async fn scoped_org_id(state: &AppState, user: &AuthenticatedUser) -> Result<String, Response> {
-    let org_id = authorized_org_id(state, user).await;
-    if !org_id.trim().is_empty() {
-        return Ok(org_id);
-    }
-    Err((
-        StatusCode::FORBIDDEN,
-        Json(error(
-            "org_scope_required",
-            "An authorized organization scope is required.",
-        )),
-    )
-        .into_response())
-}
-
 fn qs(uri: &Uri) -> String {
     uri.query()
         .filter(|q| !q.is_empty())
@@ -113,22 +87,10 @@ async fn list_tickets(
     Extension(user): Extension<AuthenticatedUser>,
     uri: Uri,
 ) -> Response {
-    let org_id = match scoped_org_id(&state, &user).await {
-        Ok(org_id) => org_id,
-        Err(response) => return response,
-    };
     let url = format!("{}/api/v1/tickets{}", state.conversation_core_url, qs(&uri));
-    proxy_json(
-        &state,
-        Method::GET,
-        &url,
-        None,
-        Some(&org_id),
-        Some(&actor_for(&user)),
-        None,
-    )
-    .await
-    .into_response()
+    proxy_conversation_json(&state, Method::GET, &url, None, &user, None)
+        .await
+        .into_response()
 }
 
 async fn create_ticket(
@@ -364,20 +326,8 @@ async fn forward_ticket_json(
     path: &str,
     body: Option<Value>,
 ) -> Response {
-    let org_id = match scoped_org_id(state, user).await {
-        Ok(org_id) => org_id,
-        Err(response) => return response,
-    };
     let url = format!("{}{}", state.conversation_core_url, path);
-    proxy_json(
-        state,
-        method,
-        &url,
-        body,
-        Some(&org_id),
-        Some(&actor_for(user)),
-        None,
-    )
-    .await
-    .into_response()
+    proxy_conversation_json(state, method, &url, body, user, None)
+        .await
+        .into_response()
 }

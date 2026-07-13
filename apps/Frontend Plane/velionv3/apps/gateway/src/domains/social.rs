@@ -22,7 +22,7 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, ok, ok_with_source},
     middleware::{require_session, AuthenticatedUser},
-    upstream::proxy_json,
+    upstream::{proxy_conversation_json, proxy_json},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -1205,22 +1205,14 @@ async fn social_core_json(
 async fn conversation_core_json(
     state: &AppState,
     user: &AuthenticatedUser,
-    org_id: &str,
+    _org_id: &str,
     method: Method,
     path: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
     let url = format!("{}{}", state.conversation_core_url, path);
-    let (status, Json(body)) = proxy_json(
-        state,
-        method,
-        &url,
-        body,
-        Some(org_id),
-        Some(&actor_for(user)),
-        Some("application/json"),
-    )
-    .await;
+    let (status, Json(body)) =
+        proxy_conversation_json(state, method, &url, body, user, Some("application/json")).await;
     (status, body)
 }
 

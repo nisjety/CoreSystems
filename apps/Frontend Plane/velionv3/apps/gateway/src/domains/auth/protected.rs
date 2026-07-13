@@ -11,7 +11,7 @@ use crate::{
     config::AppState,
     envelope::{error, ok, unwrap_data},
     middleware::AuthenticatedUser,
-    upstream::{browser_origin, proxy_auth, proxy_json},
+    upstream::{browser_origin, proxy_auth, proxy_json, user_core_delegation_headers},
 };
 
 use super::shared::{actor_for, cookie_header};
@@ -98,33 +98,27 @@ pub(super) async fn get_me(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
-    let mut request = state
-        .client
-        .get(format!("{}/api/v1/users/me", state.user_core_url))
-        .header("x-internal-api-key", &state.internal_api_key)
-        .header("x-user-id", user.user_id.as_str());
-
-    if !user.user_email.trim().is_empty() {
-        request = request.header("x-user-email", user.user_email.as_str());
-    }
-    if !user.user_name.trim().is_empty() {
-        request = request.header("x-user-name", user.user_name.as_str());
-    }
-    if let Some(role) = user
-        .auth_role
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        request = request.header("x-user-role", role);
-    }
-    if let Some(image) = user
+    let url = format!("{}/api/v1/users/me", state.user_core_url);
+    let avatar = user
         .user_image
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        request = request.header("x-user-avatar", image);
+        .unwrap_or_default();
+    let actor = actor_for(&user);
+    let headers = user_core_delegation_headers(
+        &state.user_core_service_token,
+        &Method::GET,
+        &url,
+        &[],
+        &actor,
+        user.active_org_id.as_deref(),
+        avatar,
+        chrono::Utc::now(),
+    );
+    let mut request = state.client.get(url);
+    for (name, value) in headers {
+        request = request.header(name, value);
     }
 
     match request.send().await {

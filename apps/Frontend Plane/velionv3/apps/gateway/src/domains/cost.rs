@@ -13,6 +13,7 @@
 
 use axum::{
     extract::{Extension, Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -22,9 +23,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::{
+    audience_tokens::{require_model_service_token, ModelServiceAudience},
     config::AppState,
+    envelope::error,
     middleware::{require_session, AuthenticatedUser},
-    upstream::{authorized_org_id, proxy_json},
+    upstream::authorized_org_id,
 };
 
 /// Default number of recent ledger entries returned by `/cost/entries`.
@@ -110,6 +113,7 @@ fn normalize_rate(rate: &Value) -> Value {
 async fn summary(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let org_id = authorized_org_id(&state, &user).await;
     if org_id.trim().is_empty() {
@@ -121,8 +125,7 @@ async fn summary(
         state.cost_core_url,
         urlencoding::encode(&org_id)
     );
-    let (status, Json(body)) =
-        proxy_json(&state, Method::GET, &url, None, Some(&org_id), None, None).await;
+    let (status, Json(body)) = proxy_cost_json(&state, Method::GET, &url, &user, &headers).await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
@@ -132,6 +135,7 @@ async fn summary(
 async fn entries(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let org_id = authorized_org_id(&state, &user).await;
@@ -151,8 +155,7 @@ async fn entries(
         urlencoding::encode(&org_id),
         limit
     );
-    let (status, Json(body)) =
-        proxy_json(&state, Method::GET, &url, None, Some(&org_id), None, None).await;
+    let (status, Json(body)) = proxy_cost_json(&state, Method::GET, &url, &user, &headers).await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
@@ -166,11 +169,15 @@ async fn entries(
     Json(json!({ "data": rows, "meta": { "count": count }, "error": null })).into_response()
 }
 
-async fn pricing(State(state): State<AppState>) -> impl IntoResponse {
+async fn pricing(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     // The catalogue is global (not org-scoped); still session-gated by the
     // route_layer above.
     let url = format!("{}/api/v1/pricing", state.cost_core_url);
-    let (status, Json(body)) = proxy_json(&state, Method::GET, &url, None, None, None, None).await;
+    let (status, Json(body)) = proxy_cost_json(&state, Method::GET, &url, &user, &headers).await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
@@ -181,6 +188,50 @@ async fn pricing(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_default();
     let count = rates.len();
     Json(json!({ "data": rates, "meta": { "count": count }, "error": null })).into_response()
+}
+
+async fn proxy_cost_json(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let cookie = headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let Ok(token) =
+        require_model_service_token(state, &user.user_id, cookie, ModelServiceAudience::CostCore)
+            .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "cost_auth_unavailable",
+                "Cost service authentication is unavailable",
+            )),
+        );
+    };
+    let response = match state
+        .client
+        .request(method, url)
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(request_error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error("upstream_unavailable", request_error.to_string())),
+            );
+        }
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    (status, Json(body))
 }
 
 #[cfg(test)]

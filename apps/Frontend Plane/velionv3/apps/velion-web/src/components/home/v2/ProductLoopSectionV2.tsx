@@ -3,7 +3,7 @@
 import type { CSSProperties } from "react";
 import { useRef } from "react";
 import { ArrowButton } from "@/components/ui/ArrowButton";
-import { EditorialGrid } from "../sections/EditorialGrid";
+import { EditorialGrid } from "../extras/EditorialGrid";
 import { Reveal } from "../sections/Reveal";
 import { useEditorialParallax } from "../sections/useEditorialParallax";
 
@@ -51,7 +51,8 @@ export function ProductLoopSectionV2() {
 						<span className="text-[color-mix(in_srgb,var(--velion-coral)_72%,var(--velion-j-text))]">
 							stoppe for godkjenning
 						</span>{" "}
-						og holde kildesporet synlig før noen handling når en kunde.
+						og holde kildesporet synlig før noen handling når en
+						kunde.
 					</p>
 
 					<div className="mt-[clamp(34px,4vw,56px)]">
@@ -92,7 +93,9 @@ export function ProductLoopSectionV2() {
 									className="relative overflow-hidden border border-velion-j-text/10 bg-white/48 px-4 py-3 backdrop-blur-[14px]"
 									key={state}
 									style={
-										{ "--state-index": index } as CSSProperties
+										{
+											"--state-index": index,
+										} as CSSProperties
 									}
 								>
 									<span

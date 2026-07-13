@@ -1,25 +1,10 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.89-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.89-bookworm@sha256:0a0b3f65242ff7f1d5c3ea5c3ae10f4a1897204fedb8a4602651014f4302a129 AS chef
 WORKDIR /app
-ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120 \
     CARGO_HTTP_MULTIPLEXING=false
-# Pin cargo-chef (and use --locked) so an unpinned install can't pull a newer
-# transitive dep that demands a rustc newer than this base image. Matches the
-# Data Plane v2 Rust Dockerfiles.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    set -e; \
-    for i in 1 2 3 4 5; do \
-        if cargo install cargo-chef --locked --version 0.1.77; then \
-            exit 0; \
-        fi; \
-        echo "cargo-chef install retry $i"; \
-        sleep 8; \
-    done; \
-    exit 1
-
 # Planner: produce the dependency recipe from the manifests only.
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock* ./
@@ -44,11 +29,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && test "$(stat -c%s target/release/velion-gateway-rs)" -gt 2000000 \
     && cp target/release/velion-gateway-rs /usr/local/bin/velion-gateway-rs
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y ca-certificates curl
+    set -e; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends ca-certificates curl; \
+    groupadd --gid 10001 appuser; \
+    useradd --uid 10001 --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser
 WORKDIR /app
 COPY --from=build /usr/local/bin/velion-gateway-rs /usr/local/bin/velion-gateway-rs
+USER appuser
 EXPOSE 3185
 CMD ["velion-gateway-rs"]

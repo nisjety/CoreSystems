@@ -1,22 +1,92 @@
-use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Extension, Json,
+};
 use reqwest::Method;
 use serde_json::{json, Value};
 
 use crate::{
-    auth::actor_from_request, config::AppState, contracts::CompleteOnboardingRequest, envelope::ok,
-    upstream::proxy_json, utils::empty_to_none,
+    auth::actor_from_request,
+    config::AppState,
+    contracts::CompleteOnboardingRequest,
+    envelope::{error, ok},
+    middleware::AuthenticatedUser,
+    onboarding::session::canonical_membership_active,
+    upstream::proxy_json,
+    utils::empty_to_none,
 };
 
 pub(crate) async fn complete_onboarding(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<CompleteOnboardingRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let actor = actor_from_request(
         input.actor.as_ref(),
         Some(&headers),
         state.allow_dev_actor_headers,
     );
+    let Some(org_id) = input
+        .org_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_required",
+                "An active organization is required before onboarding can be completed.",
+            )),
+        )
+            .into_response();
+    };
+    if user.active_org_id.as_deref().map(str::trim) != Some(org_id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_not_ready",
+                "The requested organization is not active for this session.",
+            )),
+        )
+            .into_response();
+    }
+    if !canonical_membership_active(&state, &headers, org_id, &user.user_id).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_membership_stale",
+                "Your organization access changed. Ask an owner for a new invitation before completing onboarding.",
+            )),
+        )
+            .into_response();
+    }
+
+    let (org_status, _) = proxy_json(
+        &state,
+        Method::GET,
+        &format!(
+            "{}/orgs/{}",
+            state.org_core_url,
+            urlencoding::encode(org_id),
+        ),
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !org_status.is_success() {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_recovery_required",
+                "Organization membership is still being reconciled. Your progress was kept; please retry.",
+            )),
+        )
+            .into_response();
+    }
+
     let user_identifier = empty_to_none(&actor.user_email).unwrap_or_else(|| actor.user_id.clone());
 
     let mut url = format!(
@@ -34,15 +104,29 @@ pub(crate) async fn complete_onboarding(
 
     let (status, _) = proxy_json(&state, Method::POST, &url, None, None, Some(&actor), None).await;
 
-    if status.is_success() {
-        persist_org_onboarding_completion(&state, &input).await;
-        crate::upstream::invalidate_session_context_cache(
-            &state,
-            &actor.user_id,
-            input.org_id.as_deref(),
+    if !status.is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "onboarding_completion_failed",
+                "Onboarding could not be completed safely. Your progress was kept; please retry.",
+            )),
         )
-        .await;
+            .into_response();
     }
+
+    // user-core is the canonical onboarding-completion commit. The org-core
+    // status is a repairable projection: after canonical success we must never
+    // return an error that invites the client to repeat an already-committed
+    // completion. Reconciliation can safely replay this idempotent projection.
+    let org_projection_synced = persist_org_onboarding_completion(&state, &input).await;
+
+    crate::upstream::invalidate_session_context_cache(
+        &state,
+        &actor.user_id,
+        input.org_id.as_deref(),
+    )
+    .await;
 
     let clear_state = json!({ "step": "", "state": Value::Null });
     let _ = proxy_json(
@@ -59,24 +143,29 @@ pub(crate) async fn complete_onboarding(
     (
         StatusCode::OK,
         Json(ok(json!({
-            "completed": status.is_success(),
-            "configured": status.is_success(),
+            "completed": true,
+            "configured": true,
+            "orgProjectionSynced": org_projection_synced,
             "orgId": input.org_id,
             "plan": input.plan,
             "source": input.source.unwrap_or_else(|| "velion-v3".into()),
             "metadata": input.metadata,
         }))),
     )
+        .into_response()
 }
 
-async fn persist_org_onboarding_completion(state: &AppState, input: &CompleteOnboardingRequest) {
+async fn persist_org_onboarding_completion(
+    state: &AppState,
+    input: &CompleteOnboardingRequest,
+) -> bool {
     let Some(org_id) = input
         .org_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return;
+        return false;
     };
 
     let body = json!({
@@ -88,7 +177,7 @@ async fn persist_org_onboarding_completion(state: &AppState, input: &CompleteOnb
         },
     });
 
-    let _ = state
+    let Ok(response) = state
         .client
         .post(format!(
             "{}/internal/orgs/{}/onboarding/state",
@@ -98,5 +187,10 @@ async fn persist_org_onboarding_completion(state: &AppState, input: &CompleteOnb
         .header("x-internal-api-key", &state.internal_api_key)
         .json(&body)
         .send()
-        .await;
+        .await
+    else {
+        return false;
+    };
+
+    response.status().is_success()
 }

@@ -1,4 +1,6 @@
-use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Extension, Json,
+};
 use reqwest::Method;
 use serde_json::{json, Value};
 
@@ -9,9 +11,29 @@ use crate::{
         ActionActor, ConnectSessionRequest, OrgActionRequest, SourceCleanupRequest,
         SourceDiscoveryRequest,
     },
-    upstream::proxy_json,
+    envelope::error,
+    middleware::AuthenticatedUser,
+    upstream::{authorized_org_id, proxy_json},
     utils::{empty_to_none, trim_opt},
 };
+
+async fn exact_authorized_org(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    requested_org_id: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let authorized = authorized_org_id(state, user).await;
+    if authorized.is_empty() || requested_org_id.trim() != authorized {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "The requested organization is not authorized for this session.",
+            )),
+        ));
+    }
+    Ok(authorized)
+}
 
 /// Resolve the org's connection id for a provider via integration-core's
 /// connections list (newest active connection wins). The onboarding SPA only
@@ -66,17 +88,22 @@ async fn resolve_connection_id(
 
 pub(crate) async fn start_connect_session(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<ConnectSessionRequest>,
 ) -> impl IntoResponse {
+    let org_id = match exact_authorized_org(&state, &user, &input.org_id).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let actor = actor_from_request(
         input.actor.as_ref(),
         Some(&headers),
         state.allow_dev_actor_headers,
     );
     let body = json!({
-        "organizationId": input.org_id.trim(),
-        "workspaceId": input.org_id.trim(),
+        "organizationId": org_id,
+        "workspaceId": org_id,
         "userId": actor.user_id,
         "userEmail": empty_to_none(&actor.user_email),
         "selectedSources": input.selected_sources,
@@ -94,7 +121,7 @@ pub(crate) async fn start_connect_session(
             urlencoding::encode(input.provider.trim())
         ),
         Some(body),
-        Some(input.org_id.trim()),
+        Some(&org_id),
         Some(&actor),
         Some("application/json"),
     )
@@ -107,6 +134,7 @@ pub(crate) async fn start_connect_session(
 // resolve the freshly-created connection first.
 pub(crate) async fn discover_source(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<SourceDiscoveryRequest>,
 ) -> impl IntoResponse {
@@ -115,7 +143,10 @@ pub(crate) async fn discover_source(
         Some(&headers),
         state.allow_dev_actor_headers,
     );
-    let org_id = input.org_id.trim().to_string();
+    let org_id = match exact_authorized_org(&state, &user, &input.org_id).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let provider = input.provider.trim().to_string();
 
     let connection_id = match resolve_connection_id(&state, &actor, &org_id, &provider).await {
@@ -157,16 +188,21 @@ pub(crate) async fn discover_source(
 
 pub(crate) async fn cleanup_source(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<SourceCleanupRequest>,
 ) -> impl IntoResponse {
+    let org_id = match exact_authorized_org(&state, &user, &input.org_id).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let actor = actor_from_request(
         input.actor.as_ref(),
         Some(&headers),
         state.allow_dev_actor_headers,
     );
     let body = json!({
-        "organizationId": input.org_id.trim(),
+        "organizationId": org_id,
         "sourceId": input.source_id.trim(),
     });
 
@@ -178,7 +214,7 @@ pub(crate) async fn cleanup_source(
             state.integration_core_url
         ),
         Some(body),
-        Some(input.org_id.trim()),
+        Some(&org_id),
         Some(&actor),
         Some("application/json"),
     )
@@ -187,17 +223,22 @@ pub(crate) async fn cleanup_source(
 
 pub(crate) async fn warm_sharepoint_discovery(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<OrgActionRequest>,
 ) -> impl IntoResponse {
+    let org_id = match exact_authorized_org(&state, &user, &input.org_id).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let actor = actor_from_request(
         input.actor.as_ref(),
         Some(&headers),
         state.allow_dev_actor_headers,
     );
     let body = json!({
-        "organizationId": input.org_id.trim(),
-        "workspaceId": input.org_id.trim(),
+        "organizationId": org_id,
+        "workspaceId": org_id,
     });
 
     proxy_json(
@@ -208,7 +249,7 @@ pub(crate) async fn warm_sharepoint_discovery(
             state.integration_core_url
         ),
         Some(body),
-        Some(input.org_id.trim()),
+        Some(&org_id),
         Some(&actor),
         Some("application/json"),
     )
@@ -220,6 +261,7 @@ pub(crate) async fn warm_sharepoint_discovery(
 // connection: POST /api/v1/connections/{id}/sync.
 pub(crate) async fn start_integration_sync(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(input): Json<SourceDiscoveryRequest>,
 ) -> impl IntoResponse {
@@ -228,7 +270,10 @@ pub(crate) async fn start_integration_sync(
         Some(&headers),
         state.allow_dev_actor_headers,
     );
-    let org_id = input.org_id.trim().to_string();
+    let org_id = match exact_authorized_org(&state, &user, &input.org_id).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
     let provider = input.provider.trim().to_string();
 
     let connection_id = match resolve_connection_id(&state, &actor, &org_id, &provider).await {

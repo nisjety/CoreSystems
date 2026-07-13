@@ -39,6 +39,21 @@ const conversationDetail = {
   ],
 }
 
+const submittedReply = {
+  id: 'msg-1002',
+  conversation_id: conversationSummary.id,
+  direction: 'outbound',
+  sender_type: 'agent',
+  sender_name: 'Velion Demo',
+  body_text: 'I am checking the delivery scan now.',
+  internal: false,
+  occurred_at: '2026-07-13T14:00:00.000Z',
+  created_at: '2026-07-13T14:00:00.000Z',
+}
+
+let failFirstReply = false
+let replyAttempts = 0
+
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify({ data }), {
     headers: { 'Content-Type': 'application/json' },
@@ -47,7 +62,7 @@ function jsonResponse(data: unknown, status = 200) {
 }
 
 function mockInboxGateway() {
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.endsWith('/api/v1/auth/session')) {
       return jsonResponse({
@@ -72,6 +87,18 @@ function mockInboxGateway() {
     }
     if (url.endsWith('/api/v1/inbox/inboxes')) {
       return jsonResponse([{ id: 'inbox-support', name: 'Commerce context' }])
+    }
+    if (url.endsWith(`/api/v1/inbox/conversations/${conversationSummary.id}/messages`) && init?.method === 'POST') {
+      replyAttempts += 1
+      if (failFirstReply && replyAttempts === 1) {
+        return new Response(JSON.stringify({
+          error: { code: 'provider_unavailable', message: 'Delivery outcome is not yet known.' },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 502,
+        })
+      }
+      return jsonResponse(submittedReply)
     }
     if (url.endsWith('/api/v1/social/drafts/from-inbox')) {
       return jsonResponse({
@@ -114,6 +141,8 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  failFirstReply = false
+  replyAttempts = 0
   mockInboxGateway()
 })
 
@@ -163,5 +192,59 @@ describe('InboxPage', () => {
     )
     expect(socialCall?.[1]).toMatchObject({ method: 'POST' })
     expect(String(socialCall?.[1]?.body)).toContain('Order marked delivered but missing')
+  })
+
+  it('shows submitted language after a reply and never claims provider delivery', async () => {
+    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'manual-reply-1234567890') })
+    renderInbox()
+
+    const ticketList = await screen.findByRole('list', { name: /tickets/i })
+    fireEvent.click(within(ticketList).getByRole('button', { name: /order marked delivered but missing/i }))
+
+    const composer = await screen.findByRole('textbox', { name: /reply to maya solberg/i })
+    fireEvent.input(composer, { target: { value: submittedReply.body_text } })
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+
+    expect(await screen.findByText('Reply submitted.')).toBeTruthy()
+    expect(screen.queryByText('Reply sent.')).toBeNull()
+
+    const replyCall = vi.mocked(fetch).mock.calls.find(([input]) =>
+      String(input).endsWith(`/api/v1/inbox/conversations/${conversationSummary.id}/messages`),
+    )
+    expect(JSON.parse(String(replyCall?.[1]?.body))).toMatchObject({
+      body_text: submittedReply.body_text,
+      idempotency_key: 'manual-reply-1234567890',
+      internal: false,
+    })
+  })
+
+  it('reuses the same idempotency key when an ambiguous reply is retried unchanged', async () => {
+    failFirstReply = true
+    const randomUUID = vi.fn(() => 'manual-reply-1234567890')
+    vi.stubGlobal('crypto', { randomUUID })
+    renderInbox()
+
+    const ticketList = await screen.findByRole('list', { name: /tickets/i })
+    fireEvent.click(within(ticketList).getByRole('button', { name: /order marked delivered but missing/i }))
+
+    const composer = await screen.findByRole('textbox', { name: /reply to maya solberg/i })
+    fireEvent.input(composer, { target: { value: submittedReply.body_text } })
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+
+    expect(await screen.findByText('Delivery outcome is not yet known.')).toBeTruthy()
+    await waitFor(() => expect((composer as HTMLTextAreaElement).value).toBe(submittedReply.body_text))
+
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+    expect(await screen.findByText('Reply submitted.')).toBeTruthy()
+
+    const replyCalls = vi.mocked(fetch).mock.calls.filter(([input]) =>
+      String(input).endsWith(`/api/v1/inbox/conversations/${conversationSummary.id}/messages`),
+    )
+    expect(replyCalls).toHaveLength(2)
+    expect(replyCalls.map(([, init]) => JSON.parse(String(init?.body)).idempotency_key)).toEqual([
+      'manual-reply-1234567890',
+      'manual-reply-1234567890',
+    ])
+    expect(randomUUID).toHaveBeenCalledTimes(1)
   })
 })

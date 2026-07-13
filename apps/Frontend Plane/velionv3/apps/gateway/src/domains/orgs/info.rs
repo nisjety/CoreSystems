@@ -1,18 +1,18 @@
-use axum::{
-    extract::{Extension, Path, State},
-    response::IntoResponse,
-};
+use axum::extract::{Extension, Path, State};
 use reqwest::Method;
 
 use crate::{config::AppState, middleware::AuthenticatedUser, upstream::proxy_json};
 
-use super::shared::actor_for;
+use super::shared::{actor_for, require_active_org, GatewayJsonResponse};
 
 pub(super) async fn get_org(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> GatewayJsonResponse {
+    if let Err(response) = require_active_org(&user, &id) {
+        return response;
+    }
     let url = format!(
         "{}/api/v1/organizations/{}",
         state.org_core_url,
@@ -34,7 +34,10 @@ pub(super) async fn get_org_entitlements(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> GatewayJsonResponse {
+    if let Err(response) = require_active_org(&user, &id) {
+        return response;
+    }
     let url = format!(
         "{}/api/v1/organizations/{}/entitlements",
         state.org_core_url,

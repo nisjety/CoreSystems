@@ -19,31 +19,44 @@ pub(super) fn actor_for(user: &AuthenticatedUser) -> ActionActor {
     }
 }
 
+pub(super) fn require_active_org(
+    user: &AuthenticatedUser,
+    requested_org_id: &str,
+) -> Result<(), GatewayJsonResponse> {
+    let Some(membership) = user.authorized_membership.as_ref() else {
+        return Err(forbidden_org_response());
+    };
+    if membership.organization_id != requested_org_id.trim() {
+        return Err(forbidden_org_response());
+    }
+    Ok(())
+}
+
 pub(super) async fn require_org_admin(
-    state: &AppState,
+    _state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
 ) -> Result<(), GatewayJsonResponse> {
-    if has_any_role(user.auth_role.as_deref(), &["admin", "superadmin"]) {
-        return Ok(());
-    }
-
-    let authorized_org_id = crate::upstream::authorized_org_id(state, user).await;
-    if authorized_org_id.trim().is_empty() || authorized_org_id != org_id {
-        return Err(forbidden_response());
-    }
-
-    let org_role = crate::upstream::resolve_session_context(state, user)
-        .await
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    if has_any_role(Some(org_role.as_str()), &["owner", "admin"]) {
+    require_active_org(user, org_id)?;
+    if user
+        .authorized_membership
+        .as_ref()
+        .is_some_and(|membership| has_any_role(Some(&membership.role), &["owner", "admin"]))
+    {
         Ok(())
     } else {
         Err(forbidden_response())
     }
+}
+
+fn forbidden_org_response() -> GatewayJsonResponse {
+    (
+        StatusCode::FORBIDDEN,
+        Json(error(
+            "forbidden",
+            "The requested organization is not authorized for this session.",
+        )),
+    )
 }
 
 fn forbidden_response() -> GatewayJsonResponse {

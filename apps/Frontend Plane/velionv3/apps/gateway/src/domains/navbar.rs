@@ -1,5 +1,6 @@
 use axum::{
     extract::{Extension, Query, State},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
@@ -11,9 +12,9 @@ use std::collections::HashMap;
 use crate::{
     config::AppState,
     contracts::ActionActor,
-    envelope::ok,
+    envelope::{error, ok},
     middleware::{require_session, AuthenticatedUser},
-    upstream::proxy_json,
+    upstream::{authorized_org_id, proxy_json, proxy_notification_json},
 };
 
 /// Navbar/app-shell projection. The SPA's CoreShell loads `/api/v1/navbar` on
@@ -64,6 +65,7 @@ async fn navbar(
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
     let actor = actor_for(&user);
+    let org_id = authorized_org_id(&state, &user).await;
 
     // Profile ← user-core /me, with the validated session identity as fallback
     // so the navbar always renders a real user even if user-core is unreachable.
@@ -87,14 +89,13 @@ async fn navbar(
     });
 
     // Notifications ← notification-core feed + unread count.
-    let (notif_status, Json(feed)) = proxy_json(
+    let (notif_status, Json(feed)) = proxy_notification_json(
         &state,
         Method::GET,
         &format!("{}/notifications", state.notification_core_url),
         None,
-        None,
-        Some(&actor),
-        None,
+        &org_id,
+        &actor,
     )
     .await;
     let notifications: Vec<Value> = feed
@@ -121,14 +122,13 @@ async fn navbar(
         })
         .unwrap_or_default();
 
-    let (_, Json(count_body)) = proxy_json(
+    let (_, Json(count_body)) = proxy_notification_json(
         &state,
         Method::GET,
         &format!("{}/notifications/unread/count", state.notification_core_url),
         None,
-        None,
-        Some(&actor),
-        None,
+        &org_id,
+        &actor,
     )
     .await;
     let unread_count = count_body
@@ -142,7 +142,6 @@ async fn navbar(
     // Plan ← billing-core is the source of truth for the org's plan (user-core
     // /me carries no plan). Fall back to any plan on /me, then "trial" only when
     // billing-core is unavailable / no account exists.
-    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let plan = {
         let (status, Json(acct)) = proxy_json(
             &state,
@@ -192,6 +191,7 @@ async fn navbar_search(
     Extension(user): Extension<AuthenticatedUser>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
     let query = params.get("q").cloned().unwrap_or_default();
     if query.trim().is_empty() {
         return Json(ok(json!({ "results": [] })));
@@ -204,7 +204,7 @@ async fn navbar_search(
         Method::POST,
         &format!("{}/v1/search", state.retrieval_engine_url),
         Some(json!({ "query": query, "limit": 6 })),
-        None,
+        Some(&org_id),
         Some(&actor_for(&user)),
         None,
     )
@@ -269,7 +269,8 @@ async fn mark_notification_read(
     if id.is_empty() {
         return Json(ok(json!({ "ok": true }))).into_response();
     }
-    let (status, Json(body)) = proxy_json(
+    let org_id = authorized_org_id(&state, &user).await;
+    let (status, Json(body)) = proxy_notification_json(
         &state,
         Method::POST,
         &format!(
@@ -278,9 +279,8 @@ async fn mark_notification_read(
             urlencoding::encode(&id)
         ),
         None,
-        None,
-        Some(&actor_for(&user)),
-        None,
+        &org_id,
+        &actor_for(&user),
     )
     .await;
     if !status.is_success() {
@@ -320,28 +320,16 @@ async fn create_calendar_entry(
 }
 
 async fn submit_support(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
-    Json(body): Json<Value>,
+    State(_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Json(_body): Json<Value>,
 ) -> impl IntoResponse {
-    // Route a support request through notification-core's request intake.
-    let (status, Json(body_out)) = proxy_json(
-        &state,
-        Method::POST,
-        &format!("{}/requests", state.notification_core_url),
-        Some(json!({
-            "type": "support",
-            "subject": body.get("subject").cloned().unwrap_or(Value::Null),
-            "message": body.get("message").cloned().unwrap_or(Value::Null),
-            "context": body.get("context").cloned().unwrap_or(Value::Null),
-        })),
-        None,
-        Some(&actor_for(&user)),
-        None,
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error(
+            "support_intake_unavailable",
+            "Support intake is disabled until an authoritative support identity mapping is configured",
+        )),
     )
-    .await;
-    if !status.is_success() {
-        return (status, Json(body_out)).into_response();
-    }
-    Json(ok(json!({ "ok": true }))).into_response()
+        .into_response()
 }

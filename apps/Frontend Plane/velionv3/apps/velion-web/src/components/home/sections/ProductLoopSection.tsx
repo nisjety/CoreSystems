@@ -1,72 +1,77 @@
 "use client";
 
-import Image from "next/image";
 import { useLayoutEffect, useRef } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ArrowButton } from "@/components/ui/ArrowButton";
+import {
+	ProductLoopMediaContent,
+	type ProductLoopMedia,
+} from "./ProductLoopProductDemos";
 
 gsap.registerPlugin(ScrollTrigger);
 
-type LoopStage = {
-	alt: string;
+type LoopStage = ProductLoopMedia & {
 	body: string;
 	expands?: boolean;
-	kind: "image" | "video";
-	poster?: string;
-	src: string;
 	state: string;
 	step: string;
 	title: string;
 };
 
+const loopIntro: ProductLoopMedia = {
+	kind: "image",
+	src: "/velion-product-shots/dashboard-live-overview.png",
+	alt: "Velion-oversikten med arbeidsflater, søk og innganger til teamets daglige arbeid.",
+	objectPosition: "center 42%",
+};
+
 const loopStages: LoopStage[] = [
 	{
-		step: "04",
-		state: "Revider",
-		title: "Arbeidsloopen er allerede i gang.",
-		body: "Start i ferdig loop: Velion skriver, sjekker, oppdaterer og holder neste handling synlig før noe sendes videre.",
-		kind: "video",
-		src: "/velion-product-shots/velion-dashboard-typing.mp4",
-		poster: "/velion-product-shots/dashboard-expanded-prompt.png",
-		alt: "Opptak av Velion-dashbordet der norske instruksjoner skrives inn.",
-	},
-	{
-		step: "03",
-		state: "Godkjenn",
-		title: "Så ser du stoppunktet.",
-		body: "Når en handling kan nå kunden, viser Velion hva som skal skje, hvorfor den foreslås og hvem som må godkjenne.",
+		step: "01",
+		state: "Spør",
+		title: "Start der arbeidet allerede begynner.",
+		body: "Skriv hva du trenger i Velion. Instruksen blir satt inn i virksomhetens kontekst før noe arbeid starter.",
 		kind: "image",
-		src: "/velion-product-shots/chat-agent-steps.png",
-		alt: "Velion-grensesnitt med agentsteg og godkjenning per handling.",
+		src: "/velion-product-shots/dashboard-live-prompt.png",
+		alt: "Velion-oversikten med en norsk instruksjon klar i arbeidsfeltet.",
+		objectPosition: "center 38%",
 	},
 	{
 		step: "02",
 		state: "Utkast",
-		title: "Bak det ligger utkastet.",
-		body: "Svar, sammendrag og neste steg skrives fra tilgjengelige kilder, med nok kontekst til at teamet kan korrigere før publisering.",
+		title: "Velion gjør spørsmålet om til arbeid.",
+		body: "Utkastet bygges fra samtalen, retningslinjene og kildene deres. Teamet ser både svaret og grunnlaget bak det.",
 		kind: "image",
-		src: "/velion-product-shots/chat-draft-answer-expanded.png",
+		src: "/velion-product-shots/chat-draft-sources-focus.jpg",
 		alt: "Velion-chat med svarutkast og synlige arbeidsdetaljer.",
+		objectPosition: "center 42%",
 	},
 	{
-		step: "01",
-		state: "Spør",
-		title: "Og alt starter med et signal.",
-		body: "En enkel instruksjon, en kundesamtale eller en intern oppgave blir starten på en kontrollert arbeidsflyt.",
+		step: "03",
+		state: "Godkjenn",
+		title: "Risikable handlinger stopper hos dere.",
+		body: "Se beløp, policy, kilde og konsekvens i samme visning. Godkjenn, revider eller gjør handlingen manuelt.",
+		kind: "approval",
+		alt: "Velion-innboksen med kundesamtale, kildebasert utkast og en refusjon som krever menneskelig godkjenning.",
+	},
+	{
+		step: "04",
+		state: "Revider",
+		title: "Korriger én gang. Forbedre neste runde.",
+		body: "Oppdater kilden eller regelen bak svaret. Endringen blir sporbar, kan rulles tilbake og brukes i neste arbeidsflyt.",
 		expands: true,
-		kind: "image",
-		src: "https://images.unsplash.com/photo-1588345921523-c2dcdb7f1dcd?w=800&dpr=2&q=80",
-		alt: "Lys, rolig tekstur som fyller skjermen når første signal utvides.",
+		kind: "knowledge",
+		alt: "Velions kunnskapsflate med en revidert leveringspolicy, versjonshistorikk og synkroniserte kilder.",
 	},
 ];
 
 function LoopMediaLayer({
 	index,
-	stage,
+	media,
 }: {
 	index: number;
-	stage: LoopStage;
+	media: ProductLoopMedia;
 }) {
 	return (
 		<div
@@ -78,41 +83,15 @@ function LoopMediaLayer({
 				opacity: index === 0 ? 1 : 0,
 			}}
 		>
-			{stage.kind === "video" ? (
-				<video
-					autoPlay
-					className="h-full w-full object-cover object-center"
-					loop
-					muted
-					playsInline
-					poster={stage.poster}
-					preload="metadata"
-				>
-					<source src={stage.src} type="video/mp4" />
-				</video>
-			) : (
-				<Image
-					alt={stage.alt}
-					className="object-cover object-center saturate-[0.82] contrast-[1.03]"
-					fill
-					priority={index === 0 || Boolean(stage.expands)}
-					sizes="(max-width: 899px) 92vw, 72vw"
-					src={stage.src}
-					unoptimized={Boolean(stage.expands)}
-				/>
-			)}
-			<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.04),rgba(248,248,247,0.28)),radial-gradient(circle_at_74%_22%,rgba(238,122,80,0.1),transparent_26%)]" />
+			<ProductLoopMediaContent media={media} priority={index === 0} />
+			{media.kind === "image" || media.kind === "video" ? (
+				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.2)),radial-gradient(circle_at_74%_22%,rgba(238,122,80,0.08),transparent_26%)]" />
+			) : null}
 		</div>
 	);
 }
 
-function LoopCopyPanel({
-	index,
-	stage,
-}: {
-	index: number;
-	stage: LoopStage;
-}) {
+function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 	return (
 		<div
 			className="absolute left-0 top-0 max-w-[640px] text-left"
@@ -138,7 +117,7 @@ function LoopCopyPanel({
 			{index === 0 ? (
 				<div className="mt-[clamp(30px,3.8vw,52px)]">
 					<ArrowButton href="#plattform" variant="coral">
-						Følg arbeidssløyfen bakover
+						Følg arbeidssløyfen
 					</ArrowButton>
 				</div>
 			) : null}
@@ -170,18 +149,24 @@ function ProductLoopMobileFallback() {
 		<div className="hidden max-[899px]:grid max-[899px]:gap-10">
 			{loopStages.map((stage) => (
 				<article
-					className="border-t border-velion-j-text/10 pt-5"
+					className="grid gap-5 border-t border-velion-j-text/10 pt-5"
 					key={stage.step}
 				>
-					<p className="velion-eyebrow mb-4 text-velion-coral">
+					<p className="velion-eyebrow text-velion-coral">
 						{stage.step} / {stage.state}
 					</p>
 					<h3 className="m-0 font-arbeit text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-velion-j-text text-balance">
 						{stage.title}
 					</h3>
-					<p className="mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-velion-text-muted">
+					<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-velion-text-muted">
 						{stage.body}
 					</p>
+					<div
+						aria-hidden="true"
+						className="relative aspect-[1.5] overflow-hidden rounded-[16px] border border-velion-j-text/8 bg-[#f8f8f7] shadow-[0_18px_56px_rgba(23,23,23,0.08)]"
+					>
+						<ProductLoopMediaContent media={stage} />
+					</div>
 				</article>
 			))}
 		</div>
@@ -217,22 +202,30 @@ export function ProductLoopSection() {
 			"[data-product-loop-copy]",
 		);
 		const frameMarkers = Array.from(
-			section.querySelectorAll<HTMLElement>("[data-product-loop-frame-marker]"),
+			section.querySelectorAll<HTMLElement>(
+				"[data-product-loop-frame-marker]",
+			),
 		);
 		const copyMarkers = Array.from(
-			section.querySelectorAll<HTMLElement>("[data-product-loop-copy-marker]"),
+			section.querySelectorAll<HTMLElement>(
+				"[data-product-loop-copy-marker]",
+			),
 		);
 		const layers = Array.from(
 			section.querySelectorAll<HTMLElement>("[data-product-loop-layer]"),
 		);
 		const panels = Array.from(
-			section.querySelectorAll<HTMLElement>("[data-product-loop-copy-panel]"),
+			section.querySelectorAll<HTMLElement>(
+				"[data-product-loop-copy-panel]",
+			),
 		);
 		const stateCards = Array.from(
 			section.querySelectorAll<HTMLElement>("[data-product-loop-state]"),
 		);
 		const stateAccents = Array.from(
-			section.querySelectorAll<HTMLElement>("[data-product-loop-state-accent]"),
+			section.querySelectorAll<HTMLElement>(
+				"[data-product-loop-state-accent]",
+			),
 		);
 
 		if (
@@ -245,7 +238,7 @@ export function ProductLoopSection() {
 			!copyFloat ||
 			frameMarkers.length !== loopStages.length ||
 			copyMarkers.length !== loopStages.length ||
-			layers.length !== loopStages.length ||
+			layers.length !== loopStages.length + 1 ||
 			panels.length !== loopStages.length ||
 			stateCards.length !== loopStages.length ||
 			stateAccents.length !== loopStages.length
@@ -265,11 +258,16 @@ export function ProductLoopSection() {
 			};
 		};
 
-		const placeFrame = (index: number) => boxFromMarker(frameMarkers[index]);
+		const placeFrame = (index: number) =>
+			boxFromMarker(frameMarkers[index]);
 		const placeCopy = (index: number) => boxFromMarker(copyMarkers[index]);
-		const sectionTop = () => section.getBoundingClientRect().top + window.scrollY;
+		const sectionTop = () =>
+			section.getBoundingClientRect().top + window.scrollY;
 		const sectionScrollRange = () =>
-			Math.max(window.innerHeight, section.offsetHeight - window.innerHeight);
+			Math.max(
+				window.innerHeight,
+				section.offsetHeight - window.innerHeight,
+			);
 		const fullFrame = () => {
 			const viewportRect = viewport.getBoundingClientRect();
 
@@ -284,7 +282,11 @@ export function ProductLoopSection() {
 		let timeline: gsap.core.Timeline | null = null;
 
 		const context = gsap.context(() => {
-			const expandingStageIndex = loopStages.findIndex((stage) => stage.expands);
+			const expandingStageIndex = loopStages.findIndex(
+				(stage) => stage.expands,
+			);
+			const introLayer = layers[0];
+			const stageLayers = layers.slice(1);
 
 			gsap.set(frame, {
 				...fullFrame(),
@@ -297,17 +299,17 @@ export function ProductLoopSection() {
 			});
 			gsap.set(chrome, { autoAlpha: 0 });
 			gsap.set(copyFloat, {
-				...placeCopy(1),
+				...placeCopy(0),
 				autoAlpha: 0,
 				pointerEvents: "none",
 				y: 28,
 			});
-			gsap.set(layers[0], { autoAlpha: 1, clipPath: "inset(0% 0% 0%)" });
-			gsap.set(layers.slice(1), {
+			gsap.set(introLayer, { autoAlpha: 1, clipPath: "inset(0% 0% 0%)" });
+			gsap.set(stageLayers, {
 				autoAlpha: 0,
 				clipPath: "inset(0% 0% 100%)",
 			});
-			gsap.set(layers, {
+			gsap.set(stageLayers, {
 				force3D: true,
 				scale: (index) => (index === expandingStageIndex ? 1.06 : 1),
 				transformOrigin: "50% 50%",
@@ -317,14 +319,13 @@ export function ProductLoopSection() {
 				y: 16,
 				pointerEvents: "none",
 			});
-			gsap.set(panels[1], { autoAlpha: 1, y: 0, pointerEvents: "auto" });
 			gsap.set(stateCards, {
 				autoAlpha: 0,
-				y: (index) => (index === 0 ? 0 : 8),
+				y: 8,
 				force3D: true,
 			});
 			gsap.set(stateAccents, {
-				scaleX: (index) => (index === 1 ? 1 : 0.12),
+				scaleX: 0.12,
 				transformOrigin: "0% 50%",
 			});
 
@@ -339,7 +340,8 @@ export function ProductLoopSection() {
 					.to(
 						stateCards,
 						{
-							autoAlpha: (index) => (index === stageIndex ? 1 : 0.42),
+							autoAlpha: (index) =>
+								index === stageIndex ? 1 : 0.42,
 							y: (index) => (index === stageIndex ? 0 : 8),
 							duration: 0.22,
 						},
@@ -348,7 +350,8 @@ export function ProductLoopSection() {
 					.to(
 						stateAccents,
 						{
-							scaleX: (index) => (index === stageIndex ? 1 : 0.12),
+							scaleX: (index) =>
+								index === stageIndex ? 1 : 0.12,
 							duration: 0.22,
 						},
 						at,
@@ -360,7 +363,7 @@ export function ProductLoopSection() {
 					.to(frame, { ...placeFrame(to), duration: 0.48 }, at)
 					.to(copyFloat, { ...placeCopy(to), duration: 0.48 }, at)
 					.to(
-						layers[from],
+						stageLayers[from],
 						{
 							autoAlpha: 0,
 							clipPath: "inset(100% 0% 0%)",
@@ -369,7 +372,7 @@ export function ProductLoopSection() {
 						at + 0.08,
 					)
 					.to(
-						layers[to],
+						stageLayers[to],
 						{
 							autoAlpha: 1,
 							clipPath: "inset(0% 0% 0%)",
@@ -401,68 +404,82 @@ export function ProductLoopSection() {
 				activateStage(to, at + 0.16);
 			};
 
+			// The dashboard acts as the full-screen product prologue. It contracts into
+			// stage 01, then every numbered stage receives its own readable beat before
+			// the final knowledge view expands back to the full product frame.
 			loopTimeline
 				.to(
 					frame,
 					{
-						...placeFrame(1),
+						...placeFrame(0),
 						borderColor: "rgba(31,31,29,0.08)",
 						borderRadius: "20px",
 						boxShadow: "0 28px 96px rgba(23,23,23,0.09)",
-						duration: 0.78,
+						duration: 0.7,
 					},
-					0.72,
+					0,
 				)
 				.to(
-					layers[0],
+					introLayer,
 					{
 						autoAlpha: 0,
 						clipPath: "inset(100% 0% 0%)",
-						duration: 0.34,
+						duration: 0.3,
 					},
-					1.02,
+					0.24,
 				)
 				.to(
-					layers[1],
+					stageLayers[0],
 					{
 						autoAlpha: 1,
 						clipPath: "inset(0% 0% 0%)",
-						duration: 0.42,
+						duration: 0.38,
 					},
-					1.1,
+					0.31,
 				)
-				.to(chrome, { autoAlpha: 1, duration: 0.24 }, 1.25)
+				.to(chrome, { autoAlpha: 1, duration: 0.22 }, 0.48)
 				.to(
 					copyFloat,
 					{
-						...placeCopy(1),
+						...placeCopy(0),
 						autoAlpha: 1,
 						pointerEvents: "auto",
 						y: 0,
-						duration: 0.42,
+						duration: 0.34,
 					},
-					1.38,
+					0.52,
+				)
+				.to(
+					panels[0],
+					{
+						autoAlpha: 1,
+						pointerEvents: "auto",
+						y: 0,
+						duration: 0.3,
+					},
+					0.56,
 				)
 				.to(
 					stateCards,
 					{
-						autoAlpha: (index) => (index === 1 ? 1 : 0.42),
-						y: (index) => (index === 1 ? 0 : 8),
-						duration: 0.34,
+						autoAlpha: (index) => (index === 0 ? 1 : 0.42),
+						y: (index) => (index === 0 ? 0 : 8),
+						duration: 0.3,
 					},
-					1.38,
+					0.56,
 				)
 				.to(
 					stateAccents,
 					{
-						scaleX: (index) => (index === 1 ? 1 : 0.12),
-						duration: 0.34,
+						scaleX: (index) => (index === 0 ? 1 : 0.12),
+						duration: 0.3,
 					},
-					1.38,
+					0.56,
 				);
 
-			transition(1, 2, 2.15);
-			transition(2, 3, 2.95);
+			transition(0, 1, 1.02);
+			transition(1, 2, 1.62);
+			transition(2, 3, 2.22);
 
 			if (expandingStageIndex >= 0) {
 				loopTimeline
@@ -473,45 +490,45 @@ export function ProductLoopSection() {
 							borderColor: "rgba(31,31,29,0)",
 							borderRadius: "0px",
 							boxShadow: "none",
-							duration: 0.96,
+							duration: 0.56,
 						},
-						3.68,
+						2.82,
 					)
 					.to(
-						layers[expandingStageIndex],
+						stageLayers[expandingStageIndex],
 						{
 							scale: 1,
-							duration: 0.96,
+							duration: 0.56,
 						},
-						3.68,
+						2.82,
 					)
-					.to(chrome, { autoAlpha: 0, duration: 0.24 }, 3.82)
+					.to(chrome, { autoAlpha: 0, duration: 0.18 }, 2.84)
 					.to(
 						copyFloat,
 						{
 							autoAlpha: 0,
 							pointerEvents: "none",
 							y: -26,
-							duration: 0.38,
+							duration: 0.18,
 						},
-						3.82,
+						2.84,
 					)
 					.to(
 						stateCards,
 						{
 							autoAlpha: 0,
 							y: 12,
-							duration: 0.32,
+							duration: 0.18,
 						},
-						3.92,
+						2.86,
 					)
 					.to(
 						stateAccents,
 						{
 							scaleX: 0.12,
-							duration: 0.32,
+							duration: 0.18,
 						},
-						3.92,
+						2.86,
 					);
 			}
 		}, section);
@@ -622,14 +639,28 @@ export function ProductLoopSection() {
 		};
 	}, []);
 
+	// h-[377svh]: pin length derived from the timeline above, not chosen by eye.
+	// sectionScrollRange() = offsetHeight - innerHeight, and updateProgress() maps
+	// that whole range to the timeline's 0-1 progress, so vh-per-timeline-unit is
+	// (heightMultiple - 1) / totalTimelineUnits. The timeline above totals 3.38
+	// units, so 377 keeps ~0.82vh per unit — the same pace the beats had before
+	// the dead zones were removed. Retiming the timeline without adjusting this
+	// number makes every beat play slower or faster than intended (Law 3).
 	return (
 		<section
 			aria-labelledby="product-loop-title"
-			className="relative isolate z-[1] h-[480svh] overflow-visible border-t border-velion-j-text/8 bg-background text-velion-j-text max-[899px]:h-auto max-[899px]:overflow-hidden"
+			className="relative isolate z-[1] h-[377svh] overflow-visible border-t border-velion-j-text/8 bg-background text-velion-j-text max-[899px]:h-auto max-[899px]:overflow-hidden"
 			data-product-loop
 			id="flyt"
 			ref={sectionRef}
 		>
+			{/* Anchor for the navbar's "Produkt" link; not a visible element. */}
+			<span
+				aria-hidden="true"
+				className="absolute left-0 top-0 h-px w-px"
+				id="produkt"
+			/>
+
 			<div
 				className="sticky top-0 min-h-svh overflow-hidden max-[899px]:relative max-[899px]:min-h-0"
 				data-product-loop-pin=""
@@ -696,11 +727,12 @@ export function ProductLoopSection() {
 						data-product-loop-frame=""
 					>
 						<div className="relative h-full w-full">
+							<LoopMediaLayer index={0} media={loopIntro} />
 							{loopStages.map((stage, index) => (
 								<LoopMediaLayer
-									index={index}
-									key={`${stage.step}-${stage.src}`}
-									stage={stage}
+									index={index + 1}
+									key={`${stage.step}-${stage.kind}`}
+									media={stage}
 								/>
 							))}
 						</div>
@@ -721,7 +753,7 @@ export function ProductLoopSection() {
 					</div>
 
 					<div
-						aria-label="Velion arbeidssløyfe, lest bakover"
+						aria-label="Velion arbeidssløyfe, fra signal til revidert handling"
 						className="absolute bottom-[clamp(42px,6vh,70px)] left-1/2 z-30 grid w-[min(86vw,980px)] -translate-x-1/2 grid-cols-4 gap-[clamp(8px,0.8vw,12px)] max-[899px]:relative max-[899px]:bottom-auto max-[899px]:left-auto max-[899px]:z-auto max-[899px]:w-full max-[899px]:translate-x-0 max-[640px]:grid-cols-2"
 					>
 						{loopStages.map((stage, index) => (
@@ -739,7 +771,9 @@ export function ProductLoopSection() {
 									data-product-loop-state-accent=""
 									style={{
 										transform:
-											index === 0 ? "scaleX(1)" : "scaleX(0.12)",
+											index === 0
+												? "scaleX(1)"
+												: "scaleX(0.12)",
 									}}
 								/>
 								<span className="block font-arbeit text-[0.76rem] font-normal uppercase leading-none tracking-[0.14em] text-velion-j-text/42">
@@ -757,7 +791,7 @@ export function ProductLoopSection() {
 			</div>
 
 			<h2 className="sr-only" id="product-loop-title">
-				Arbeidssløyfen bakover fra ferdig loop til første signal
+				Arbeidssløyfen fra første signal til revidert handling
 			</h2>
 		</section>
 	);

@@ -18,6 +18,8 @@ type PaywallIdentity = {
   websitePages?: number
   connectorCount?: number
   connectedSourceCount?: number
+  sourceCount?: number
+  employeeCount?: number
   branding?: BrandingSignals
 }
 
@@ -52,18 +54,25 @@ export function PaywallStep(props: PaywallStepProps) {
   // only the 2 strongest proof points stay here; scope signals + opportunities
   // move to the assembly "workspace getting ready" step.
   const proofPoints = createMemo(() => props.recommendation?.proofPoints?.filter(Boolean).slice(0, 2) ?? [])
-  const suggestionSummary = () => (
-    props.loadingRecommendation
-      ? i18n.tr(
-          'Velion AI analyserer nettsted, organisasjon og kildene du har valgt.',
-          'Velion AI is analyzing your website, organization, and selected sources.',
-        )
-      : props.recommendation?.summary ||
-        i18n.tr(
-          'Lite signal ennå. Gratis lar deg teste i 14 dager før Velion anbefaler en betalt plan.',
-          'There is still limited signal. Free lets you test for 14 days before Velion recommends a paid plan.',
-        )
-  )
+  const suggestionSummary = () => {
+    if (props.loadingRecommendation) {
+      return i18n.tr(
+        'Velion AI analyserer nettsted, organisasjon og kildene du har valgt.',
+        'Velion AI is analyzing your website, organization, and selected sources.',
+      )
+    }
+
+    const summary = props.recommendation?.summary
+    if (!summary) {
+      return i18n.tr(
+        'Lite signal ennå. Gratis lar deg teste i 14 dager før Velion anbefaler en betalt plan.',
+        'There is still limited signal. Free lets you test for 14 days before Velion recommends a paid plan.',
+      )
+    }
+
+    return buildStructuredRecommendationSummary(props.recommendation?.planId, props.identity, i18n)
+      ?? alignRecommendationCopy(summary, props.recommendation?.planId, i18n)
+  }
   const suggestionTitle = () => {
     if (props.loadingRecommendation) return i18n.tr('Velion AI finner beste plan', 'Velion AI is finding the best plan')
     return i18n.tr(`${planName(recommendedPlan().id, i18n)} anbefales`, `${planName(recommendedPlan().id, i18n)} recommended`)
@@ -197,7 +206,7 @@ export function PaywallStep(props: PaywallStepProps) {
           <strong>{suggestionTitle()}</strong>
           <p>{suggestionSummary()}</p>
           <Show when={props.recommendation?.reason}>
-            {(reason) => <small>{reason()}</small>}
+            {(reason) => <small>{recommendationReason(reason(), props.recommendation?.planId, i18n)}</small>}
           </Show>
         </div>
 
@@ -307,6 +316,70 @@ type PaywallI18n = ReturnType<typeof useI18n>
 
 function planName(planId: PlanId, i18n: PaywallI18n): string {
   return planCopy(planId, i18n).name
+}
+
+function buildStructuredRecommendationSummary(
+  planId: PlanId | undefined,
+  identity: PaywallIdentity | undefined,
+  i18n: PaywallI18n,
+): string | undefined {
+  const totalSourceCount = identity?.sourceCount
+  const connectedSourceCount = identity?.connectedSourceCount
+  const employeeCount = identity?.employeeCount
+  if (
+    !planId ||
+    typeof totalSourceCount !== 'number' ||
+    typeof connectedSourceCount !== 'number'
+  ) {
+    return undefined
+  }
+
+  const sourceText = totalSourceCount > connectedSourceCount
+    ? totalSourceCount === 1
+      ? i18n.tr(
+          `${totalSourceCount} kilde totalt (${connectedSourceCount} ${connectedSourceCount === 1 ? 'tilkoblet' : 'tilkoblede'})`,
+          `${totalSourceCount} source total (${connectedSourceCount} connected)`,
+        )
+      : i18n.tr(
+          `${totalSourceCount} kilder totalt (${connectedSourceCount} ${connectedSourceCount === 1 ? 'tilkoblet' : 'tilkoblede'})`,
+          `${totalSourceCount} total sources (${connectedSourceCount} connected)`,
+        )
+    : i18n.tr(
+        `${totalSourceCount} ${totalSourceCount === 1 ? 'kilde' : 'kilder'}`,
+        `${totalSourceCount} ${totalSourceCount === 1 ? 'source' : 'sources'}`,
+      )
+
+  const employeeText = typeof employeeCount === 'number' && employeeCount > 0
+    ? {
+        nb: ` og ${employeeCount} ${employeeCount === 1 ? 'ansatt' : 'ansatte'}`,
+        en: ` and ${employeeCount} ${employeeCount === 1 ? 'employee' : 'employees'}`,
+      }
+    : { nb: '', en: '' }
+  const hasEmployeeSubject = employeeText.en.length > 0
+
+  return i18n.tr(
+    `${sourceText}${employeeText.nb} gir best start med ${planName(planId, i18n)}.`,
+    `${sourceText}${employeeText.en} ${totalSourceCount === 1 && !hasEmployeeSubject ? 'makes' : 'make'} ${planName(planId, i18n)} the best starting point.`,
+  )
+}
+
+function recommendationReason(value: string, planId: PlanId | undefined, i18n: PaywallI18n): string {
+  if (planId === 'enterprise') {
+    return i18n.tr(
+      'Kompleksitet, volum eller governance-signaler peker mot Custom.',
+      'Complexity, volume, or governance signals point to Custom.',
+    )
+  }
+  return value
+}
+
+function alignRecommendationCopy(
+  value: string,
+  planId: PlanId | undefined,
+  i18n: PaywallI18n,
+): string {
+  if (planId !== 'enterprise') return value
+  return value.replace(/\bEnterprise\b/gi, planName(planId, i18n))
 }
 
 function planCopy(planId: PlanId, i18n: PaywallI18n): { name: string; description: string; features: string[] } {

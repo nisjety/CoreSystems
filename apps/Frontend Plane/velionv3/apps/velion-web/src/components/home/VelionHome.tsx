@@ -6,6 +6,7 @@ import { Navbar } from "@/components/core/navbar/Navbar";
 import { MenuModal } from "@/components/ui/MenuModal";
 import { HeroSection } from "./sections/HeroSection";
 import { BrandLogosSection } from "./sections/BrandLogosSection";
+import { ProblemSection } from "./sections/ProblemSection";
 import { FeatureCardsSection } from "./sections/FeatureCardsSection";
 import { ProductLoopSection } from "./sections/ProductLoopSection";
 import { Testimonials } from "./sections/TestimonialSection";
@@ -291,6 +292,7 @@ export function VelionHome() {
 					/>
 				</div>
 				<BrandLogosSection />
+				<ProblemSection />
 				<FeatureCardsSection />
 				<SensesSection />
 				<ProductLoopSection />

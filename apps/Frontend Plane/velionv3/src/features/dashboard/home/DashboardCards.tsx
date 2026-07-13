@@ -4,7 +4,9 @@ import { Activity, ArrowUpRight, CloudSun, MessageSquare, Newspaper, RefreshCw, 
 import { createEffect, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js'
 import type { DashboardCard } from '@/features/dashboard/home/dashboard-cards'
 import {
+  formatDerivedTrafficMetadata,
   loadDashboardInformationSnapshot,
+  formatTrafficObservation,
   loadNews,
   loadTraffic,
   loadWeather,
@@ -256,7 +258,7 @@ function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
             <div class="dashboard-info-row">
               <span>
                 <strong>Statens vegvesen</strong>
-                <small>{payload.data.length} {i18n.tr('aktive målepunkter', 'active sensors')} · {traffic.usingLiveLocation() ? i18n.tr('Nær deg', 'Near you') : i18n.tr('Oslo-område', 'Oslo area')}</small>
+                <small>{payload.data.length} {i18n.tr('registreringspunkter', 'registration points')} · {traffic.usingLiveLocation() ? i18n.tr('Nær deg', 'Near you') : i18n.tr('Oslo-område', 'Oslo area')}</small>
               </span>
               <em>{formatRelativeTime(payload.timestamp, i18n)}</em>
             </div>
@@ -265,11 +267,11 @@ function TrafficDashboardCard(props: { card: DashboardCard; onPrompt: (card: Das
                 <div class="dashboard-info-row">
                   <span>
                     <strong>{station.name}</strong>
-                    <small>{station.roadReference} · {station.county}</small>
+                    <small>{formatDerivedTrafficMetadata(station, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}</small>
                   </span>
                   <em class="dashboard-info-row__metric">
-                    {station.averageSpeed} km/t
-                    <small>{station.trafficVolume.toLocaleString(i18n.locale() === 'no' ? 'nb-NO' : 'en-US')} {i18n.tr('biler', 'cars')}</small>
+                    {formatTrafficObservation(station.averageSpeed, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}
+                    <small>{formatTrafficObservation(station.trafficVolume, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}</small>
                   </em>
                 </div>
               )}

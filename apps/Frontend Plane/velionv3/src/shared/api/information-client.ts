@@ -25,17 +25,45 @@ export type InformationWeatherPayload = {
   }>
 }
 
+export type InformationObservationType =
+  | 'measured'
+  | 'estimated'
+  | 'synthetic'
+  | 'unavailable'
+
+export type InformationObservation = {
+  confidence: number | null
+  fetchedAt: string
+  freshness: string
+  observationType: InformationObservationType
+  observedAt: string | null
+  provider: string
+  quality: string
+  source: string
+  unavailableReason?: string
+  unit: string
+  value: number | null
+}
+
 export type InformationTrafficStation = {
-  averageSpeed: number
+  averageSpeed: InformationObservation
   county: string
+  countyProvenance: InformationDerivedFieldProvenance
   distanceKm?: number
   id: string
   lastUpdated: string
   locationName: string
   name: string
   roadReference: string
+  roadReferenceProvenance: InformationDerivedFieldProvenance
   status: string
-  trafficVolume: number
+  trafficVolume: InformationObservation
+}
+
+export type InformationDerivedFieldProvenance = {
+  observationType: 'estimated'
+  quality: string
+  source: string
 }
 
 export type InformationTrafficPayload = {
@@ -75,6 +103,56 @@ export type BrowserLocationCoordinates = {
   altitude?: number | null
   latitude: number
   longitude: number
+}
+
+export function formatTrafficObservation(
+  observation: InformationObservation,
+  locale: string,
+): string {
+  const norwegian = /^(nb|nn|no)(-|$)/i.test(locale)
+  const labels: Record<InformationObservationType, string> = norwegian
+    ? {
+      measured: 'Målt',
+      estimated: 'Estimert',
+      synthetic: 'Syntetisk',
+      unavailable: 'Utilgjengelig',
+    }
+    : {
+      measured: 'Measured',
+      estimated: 'Estimated',
+      synthetic: 'Synthetic',
+      unavailable: 'Unavailable',
+    }
+  const provider = observation.provider === 'statens_vegvesen_atlas'
+    ? 'Statens vegvesen'
+    : observation.provider
+  const effectiveType = observation.value === null
+    ? 'unavailable'
+    : observation.observationType
+  const status = observation.freshness === 'stale'
+    ? `${labels[effectiveType]} · ${norwegian ? 'Foreldet' : 'Stale'}`
+    : labels[effectiveType]
+
+  if (observation.value === null) {
+    return `${status} · ${provider}`
+  }
+
+  const unit = observation.unit === 'vehicles_per_hour'
+    ? norwegian ? 'kjøretøy/time' : 'vehicles/hour'
+    : observation.unit
+  return `${observation.value.toLocaleString(locale)} ${unit} · ${status} · ${provider}`
+}
+
+export function formatDerivedTrafficMetadata(
+  metadata: Pick<InformationTrafficStation, 'county' | 'roadReference'>,
+  locale: string,
+): string {
+  const values = [metadata.roadReference, metadata.county].filter((value) => value.trim())
+  const norwegian = /^(nb|nn|no)(-|$)/i.test(locale)
+  if (values.length === 0) {
+    return norwegian ? 'Metadata utilgjengelig' : 'Metadata unavailable'
+  }
+  return `${values.join(' · ')} · ${norwegian ? 'Estimert metadata' : 'Estimated metadata'}`
 }
 
 type DashboardInformationSnapshot = InformationDashboardPayload & {

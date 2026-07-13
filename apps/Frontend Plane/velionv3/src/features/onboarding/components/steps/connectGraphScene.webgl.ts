@@ -2,6 +2,7 @@ import ForceGraph3D, { type ForceGraph3DInstance } from '3d-force-graph'
 import { forceCollide } from 'd3-force-3d'
 import * as THREE from 'three'
 import SpriteText from 'three-spritetext'
+import { createGraphNodeHalo, createGraphNodeSphere, graphNodeRadius } from './connectGraphGeometry'
 
 export type SourceGraphNodeKind = 'core' | 'integration' | 'service' | 'knowledge' | 'signal'
 
@@ -46,6 +47,7 @@ type GraphSceneOptions = {
   reducedMotion: boolean
   onHoverNode?: (node?: SourceGraphVisualNode) => void
   onSelectNode?: (pick?: SourceGraphPickResult) => void
+  onZoomChange?: (zoomPercent: number) => void
 }
 
 type ForceGraphNode = SourceGraphVisualNode & {
@@ -80,18 +82,33 @@ type OrbitControlsLike = {
   autoRotateSpeed?: number
   enableDamping?: boolean
   dampingFactor?: number
+  addEventListener?: (type: 'change', listener: () => void) => void
+  removeEventListener?: (type: 'change', listener: () => void) => void
 }
 
-const DEFAULT_CAMERA_DISTANCE = 360
-const MIN_CAMERA_DISTANCE = 230
-const MAX_CAMERA_DISTANCE = 560
+type NodeVisualState = {
+  active: boolean
+  hovered: boolean
+  highlighted: boolean
+  dimmed: boolean
+}
+
+type NodeParts = {
+  sphere: THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>
+  halo: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>
+  label: SpriteText
+}
+
+const DEFAULT_CAMERA_DISTANCE = 480
+const MIN_CAMERA_DISTANCE = 250
+const MAX_CAMERA_DISTANCE = 760
 const MAX_DEVICE_PIXEL_RATIO = 1.65
-const GRAPH_RADIUS = 130
+const GRAPH_RADIUS = 112
 const POINTER_TAP_TOLERANCE = 6
 
-const HIGHLIGHT_COLOR = '#f4f1eb'
-const LINK_COLOR = 'rgba(247, 200, 168, 0.32)'
-const LINK_HIGHLIGHT_COLOR = 'rgba(238, 122, 80, 0.72)'
+const LINK_COLOR = 'rgba(247, 200, 168, 0.62)'
+const LINK_HIGHLIGHT_COLOR = 'rgba(238, 122, 80, 0.92)'
+const WHITE = new THREE.Color('#ffffff')
 
 export function createConnectGraphScene(
   graphElement: HTMLElement,
@@ -103,12 +120,21 @@ export function createConnectGraphScene(
 
   let graph: ForceGraph3DInstance<ForceGraphNode, ForceGraphLink> | undefined
   let nodes: ForceGraphNode[] = []
+  let nodeById = new Map<string, ForceGraphNode>()
   let links: ForceGraphLink[] = []
   let activeNodeId: string | undefined
   let hoveredNodeId: string | undefined
+  const nodeObjects = new Map<string, THREE.Object3D>()
+  const raycaster = new THREE.Raycaster()
+  const pointer = new THREE.Vector2()
   let cameraDistance = DEFAULT_CAMERA_DISTANCE
+  let fitCameraDistance = DEFAULT_CAMERA_DISTANCE
+  let lastReportedZoomPercent = 100
   let disposed = false
+  let fittedAfterData = false
+  let framingScheduled = false
   let pointerDownPoint: { x: number; y: number } | undefined
+  const pendingTimeouts = new Set<number>()
 
   graphElement.replaceChildren()
 
@@ -126,42 +152,68 @@ export function createConnectGraphScene(
     .backgroundColor('rgba(0,0,0,0)')
     .showNavInfo(false)
     .nodeId('id')
-    .nodeRelSize(7)
-    .nodeVal((node) => node.sizeWeight)
-    .nodeLabel((node) => `${node.label}: ${node.detail}`)
+    .nodeLabel(() => '')
     .nodeThreeObject((node) => {
-      return createNodeObject(node, nodeVisualState(node.id))
+      const object = createNodeObject(node, nodeVisualState(node.id))
+      registerNodeObject(node.id, object)
+      return object
     })
     .linkLabel((link) => link.label)
     .linkColor((link) => (isHighlightedLink(link) ? LINK_HIGHLIGHT_COLOR : LINK_COLOR))
-    .linkOpacity(0.42)
-    .linkWidth((link) => (isHighlightedLink(link) ? 2.2 : 0.75))
+    .linkOpacity(0.64)
+    .linkWidth(0)
     .linkDirectionalParticles(0)
-    .enableNodeDrag(false)
-    .enablePointerInteraction(false)
+    .enableNodeDrag(true)
+    .enablePointerInteraction(true)
     .showPointerCursor(() => false)
     .warmupTicks(options.reducedMotion ? 70 : 120)
     .cooldownTicks(options.reducedMotion ? 80 : 220)
     .cooldownTime(options.reducedMotion ? 1800 : 6500)
     .d3AlphaDecay(0.026)
     .d3VelocityDecay(0.34)
+    .onNodeDragEnd((node) => {
+      node.fx = node.x
+      node.fy = node.y
+      node.fz = node.z
+    })
+    // The layout keeps expanding well past the early fit, so the framing
+    // shot has to wait for the simulation to actually stop.
+    .onEngineStop(() => {
+      if (disposed || fittedAfterData || framingScheduled) return
+      framingScheduled = true
+      cameraDistance = DEFAULT_CAMERA_DISTANCE
+      fitCameraDistance = DEFAULT_CAMERA_DISTANCE
+      graph?.cameraPosition({ x: 0, y: 0, z: cameraDistance }, { x: 0, y: 0, z: 0 }, 420)
+      scheduleTimeout(() => {
+        fittedAfterData = true
+        framingScheduled = false
+        syncCameraDistance(true)
+      }, 460)
+    })
 
   const renderer = graphInstance.renderer()
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_DEVICE_PIXEL_RATIO))
 
-  graphInstance.scene().fog = new THREE.FogExp2(0x080e0c, 0.0018)
-  configureControls(graphInstance.controls())
+  const graphScene = graphInstance.scene()
+  const ambientLight = new THREE.HemisphereLight(0xffefe4, 0x08130f, 1.5)
+  const keyLight = new THREE.DirectionalLight(0xffc7a5, 2.25)
+  keyLight.position.set(120, 180, 260)
+  graphScene.add(ambientLight, keyLight)
+  graphScene.fog = new THREE.FogExp2(0x080e0c, 0.0007)
+  const orbitControls = graphInstance.controls() as OrbitControlsLike
+  orbitControls.addEventListener?.('change', handleControlsChange)
+  configureControls(orbitControls)
   configureForces()
 
   const handlePointerMove = (event: MouseEvent | PointerEvent) => {
     setHoveredNode(pickNodeFromPointer(event)?.id)
   }
 
-  const handlePointerDown = (event: MouseEvent | PointerEvent) => {
+  const handlePointerDown = (event: PointerEvent) => {
     pointerDownPoint = { x: event.clientX, y: event.clientY }
   }
 
-  const handlePointerUp = (event: MouseEvent | PointerEvent) => {
+  const handlePointerUp = (event: PointerEvent) => {
     if (!pointerDownPoint) return
     const movement = Math.hypot(event.clientX - pointerDownPoint.x, event.clientY - pointerDownPoint.y)
     pointerDownPoint = undefined
@@ -175,7 +227,6 @@ export function createConnectGraphScene(
     }
   }
 
-  graphElement.addEventListener('mousemove', handlePointerMove)
   graphElement.addEventListener('pointermove', handlePointerMove)
   graphElement.addEventListener('pointerdown', handlePointerDown, true)
   graphElement.addEventListener('pointerup', handlePointerUp, true)
@@ -196,50 +247,59 @@ export function createConnectGraphScene(
   return {
     setData(nextNodes, nextEdges) {
       const graphData = buildGraphData(nextNodes, nextEdges)
+      clearPendingTimeouts()
+      nodeObjects.clear()
       nodes = graphData.nodes
+      nodeById = new Map(nodes.map((node) => [node.id, node]))
       links = graphData.links
+      fittedAfterData = false
+      framingScheduled = false
       graph?.graphData(graphData)
       configureForces()
-      refreshGraphStyles()
-      window.setTimeout(() => {
-        if (!disposed) graph?.zoomToFit(420, 66)
-      }, 120)
     },
     setActiveNode(nodeId) {
       activeNodeId = nodeId
-      refreshGraphStyles()
-      const node = nodeId ? nodes.find((item) => item.id === nodeId) : undefined
+      applyVisualStates()
+      syncAutoRotation()
+      const node = nodeId ? nodeById.get(nodeId) : undefined
       options.onSelectNode?.(node ? projectNode(node) : undefined)
     },
     pick() {
-      const node = activeNodeId ? nodes.find((item) => item.id === activeNodeId) : undefined
+      const node = activeNodeId ? nodeById.get(activeNodeId) : undefined
       return node ? projectNode(node) : undefined
     },
     zoom(direction) {
-      cameraDistance = clamp(cameraDistance - direction * 36, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE)
+      cameraDistance = clamp(cameraDistance - direction * 40, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE)
       graph?.cameraPosition({ x: 0, y: 0, z: cameraDistance }, { x: 0, y: 0, z: 0 }, 260)
-      return toZoomPercent(cameraDistance)
+      return reportZoomPercent()
     },
     reset() {
-      cameraDistance = DEFAULT_CAMERA_DISTANCE
+      cameraDistance = fitCameraDistance
+      for (const node of nodes) {
+        if (node.role === 'core') continue
+        node.fx = undefined
+        node.fy = undefined
+        node.fz = undefined
+      }
       configureControls(graph?.controls())
       graph?.cameraPosition({ x: 0, y: 0, z: cameraDistance }, { x: 0, y: 0, z: 0 }, 360)
       graph?.d3ReheatSimulation()
-      window.setTimeout(() => {
-        if (!disposed) graph?.zoomToFit(360, 66)
-      }, 120)
-      return toZoomPercent(cameraDistance)
+      return reportZoomPercent()
     },
     zoomPercent() {
-      return toZoomPercent(cameraDistance)
+      return toZoomPercent(cameraDistance, fitCameraDistance)
     },
     dispose() {
       disposed = true
+      clearPendingTimeouts()
       resizeObserver?.disconnect()
       window.removeEventListener('resize', resize)
       graph?._destructor()
       graph = undefined
-      graphElement.removeEventListener('mousemove', handlePointerMove)
+      orbitControls.removeEventListener?.('change', handleControlsChange)
+      graphScene.remove(ambientLight, keyLight)
+      nodeObjects.clear()
+      nodeById.clear()
       graphElement.removeEventListener('pointermove', handlePointerMove)
       graphElement.removeEventListener('pointerdown', handlePointerDown, true)
       graphElement.removeEventListener('pointerup', handlePointerUp, true)
@@ -247,17 +307,66 @@ export function createConnectGraphScene(
     },
   }
 
+  function handleControlsChange() {
+    if (!fittedAfterData) return
+    syncCameraDistance()
+  }
+
+  function syncCameraDistance(setFitBaseline = false) {
+    if (!graph || disposed) return
+    const position = graph.cameraPosition()
+    const distance = Math.hypot(position.x, position.y, position.z)
+    if (Number.isFinite(distance) && distance > 1) {
+      cameraDistance = clamp(distance, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE)
+      if (setFitBaseline) fitCameraDistance = cameraDistance
+      reportZoomPercent()
+    }
+  }
+
+  function reportZoomPercent() {
+    const percent = toZoomPercent(cameraDistance, fitCameraDistance)
+    if (percent !== lastReportedZoomPercent) {
+      lastReportedZoomPercent = percent
+      options.onZoomChange?.(percent)
+    }
+    return percent
+  }
+
+  function scheduleTimeout(callback: () => void, delay: number) {
+    const timeoutId = window.setTimeout(() => {
+      pendingTimeouts.delete(timeoutId)
+      callback()
+    }, delay)
+    pendingTimeouts.add(timeoutId)
+  }
+
+  function clearPendingTimeouts() {
+    pendingTimeouts.forEach((timeoutId) => window.clearTimeout(timeoutId))
+    pendingTimeouts.clear()
+  }
+
+  function registerNodeObject(nodeId: string, object: THREE.Object3D) {
+    object.userData.nodeId = nodeId
+    object.traverse((child) => {
+      child.userData.nodeId = nodeId
+    })
+    nodeObjects.set(nodeId, object)
+  }
+
   function setHoveredNode(nodeId: string | undefined) {
     if (hoveredNodeId === nodeId) return
     hoveredNodeId = nodeId
-    options.onHoverNode?.(nodeId ? nodes.find((node) => node.id === nodeId) : undefined)
-    refreshGraphStyles()
+    graphElement.classList.toggle('onboarding-source-graph__engine--hovering', Boolean(nodeId))
+    options.onHoverNode?.(nodeId ? nodeById.get(nodeId) : undefined)
+    applyVisualStates()
+    syncAutoRotation()
   }
 
   function selectNode(node: ForceGraphNode) {
     activeNodeId = node.id
     options.onSelectNode?.(projectNode(node))
-    refreshGraphStyles()
+    applyVisualStates()
+    syncAutoRotation()
     if (node.x !== undefined && node.y !== undefined && node.z !== undefined) {
       graph?.cameraPosition(
         { x: node.x * 0.38, y: node.y * 0.38, z: cameraDistance },
@@ -270,7 +379,21 @@ export function createConnectGraphScene(
   function clearSelection() {
     activeNodeId = undefined
     options.onSelectNode?.(undefined)
-    refreshGraphStyles()
+    applyVisualStates()
+    syncAutoRotation()
+  }
+
+  /** Mutates existing node materials/scales in place — never rebuilds the
+   * scene graph, so hover/selection stays smooth and clicks are never lost
+   * to a mid-frame teardown. */
+  function applyVisualStates() {
+    for (const node of nodes) {
+      const object = nodeObjects.get(node.id)
+      const parts = object?.userData.parts as NodeParts | undefined
+      if (!parts) continue
+      applyStateToParts(node, parts, nodeVisualState(node.id))
+    }
+    graph?.linkColor((link) => (isHighlightedLink(link) ? LINK_HIGHLIGHT_COLOR : LINK_COLOR))
   }
 
   function pickNodeFromPointer(event: MouseEvent | PointerEvent) {
@@ -279,66 +402,53 @@ export function createConnectGraphScene(
     const bounds = graphElement.getBoundingClientRect()
     if (bounds.width <= 0 || bounds.height <= 0) return undefined
 
-    const pointerX = event.clientX - bounds.left
-    const pointerY = event.clientY - bounds.top
-    let bestPick: { node: ForceGraphNode; score: number } | undefined
+    pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
+    pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+    raycaster.setFromCamera(pointer, graph.camera())
 
-    for (const node of nodes) {
-      const hitArea = projectNodeHitArea(node)
-      if (!hitArea) continue
-
-      const distance = Math.hypot(hitArea.x - pointerX, hitArea.y - pointerY)
-      if (distance > hitArea.radius) continue
-
-      const score = distance / hitArea.radius
-      if (!bestPick || score < bestPick.score) {
-        bestPick = { node, score }
-      }
+    const intersections = raycaster.intersectObjects([...nodeObjects.values()], true)
+    for (const intersection of intersections) {
+      const nodeId = findNodeId(intersection.object)
+      if (!nodeId) continue
+      const node = nodeById.get(nodeId)
+      if (node) return node
     }
 
-    return bestPick?.node
+    return undefined
   }
 
   function configureControls(rawControls?: object) {
     const controls = rawControls as OrbitControlsLike | undefined
     if (!controls) return
-    controls.autoRotate = !options.reducedMotion
-    controls.autoRotateSpeed = 0.55
+    controls.autoRotate = !options.reducedMotion && !activeNodeId && !hoveredNodeId
+    controls.autoRotateSpeed = 0.45
     controls.enableDamping = true
     controls.dampingFactor = 0.08
+  }
+
+  function syncAutoRotation() {
+    configureControls(graph?.controls())
   }
 
   function configureForces() {
     if (!graph) return
 
     const charge = graph.d3Force('charge') as ForceWithStrength | undefined
-    charge?.strength?.((node) => (node.role === 'leaf' ? -16 : -76))
+    charge?.strength?.((node) => (node.role === 'leaf' ? -12 : node.role === 'hub' ? -82 : -48))
 
     const link = graph.d3Force('link') as LinkForce | undefined
     link?.distance?.((item) => {
-      if (linkTouchesRole(item, 'leaf')) return 24
-      if (linkTouchesKind(item, 'core')) return 90
-      return 118
+      if (linkTouchesRole(item, 'leaf')) return 22
+      if (linkTouchesKind(item, 'core')) return 88
+      return 72
     })
-    link?.strength?.(0.4)
+    link?.strength?.((item) => (linkTouchesRole(item, 'leaf') ? 0.9 : 0.3))
 
-    graph.d3Force('collide', forceCollide<ForceGraphNode>((node) => nodeRadius(node) * 1.35).strength(0.86))
+    graph.d3Force('collide', forceCollide<ForceGraphNode>((node) => graphNodeRadius(node) * 1.35).strength(0.92))
     graph.d3Force('sphere', createSphereForce(GRAPH_RADIUS))
   }
 
-  function refreshGraphStyles() {
-    if (!graph) return
-    graph
-      .nodeThreeObject((node) => {
-        return createNodeObject(node, nodeVisualState(node.id))
-      })
-      .linkColor((link) => (isHighlightedLink(link) ? LINK_HIGHLIGHT_COLOR : LINK_COLOR))
-      .linkWidth((link) => (isHighlightedLink(link) ? 2.2 : 0.75))
-      .linkDirectionalParticles(0)
-      .refresh()
-  }
-
-  function nodeVisualState(nodeId: string) {
+  function nodeVisualState(nodeId: string): NodeVisualState {
     const highlighted = nodeId === activeNodeId || nodeId === hoveredNodeId || isNeighborOfActiveNode(nodeId)
     return {
       active: nodeId === activeNodeId,
@@ -376,25 +486,6 @@ export function createConnectGraphScene(
 
     return { node, x: coords.x, y: coords.y }
   }
-
-  function projectNodeHitArea(node: ForceGraphNode) {
-    if (!graph || node.x === undefined || node.y === undefined || node.z === undefined) return undefined
-
-    const center = graph.graph2ScreenCoords(node.x, node.y, node.z)
-    if (!center || typeof center.x !== 'number' || typeof center.y !== 'number') return undefined
-
-    const radius = nodeRadius(node) * (node.id === activeNodeId ? 1.14 : 1)
-    const projectedRadii = [
-      graph.graph2ScreenCoords(node.x + radius, node.y, node.z),
-      graph.graph2ScreenCoords(node.x, node.y + radius, node.z),
-      graph.graph2ScreenCoords(node.x, node.y, node.z + radius),
-    ]
-      .filter((coords): coords is { x: number; y: number; z: number } => Boolean(coords))
-      .map((coords) => Math.hypot(coords.x - center.x, coords.y - center.y))
-
-    const projectedRadius = Math.max(...projectedRadii, 7) * 0.92
-    return { x: center.x, y: center.y, radius: projectedRadius }
-  }
 }
 
 function buildGraphData(
@@ -420,68 +511,77 @@ function buildGraphData(
   }
 }
 
-function createNodeObject(
-  node: ForceGraphNode,
-  state: { active: boolean; hovered: boolean; highlighted: boolean; dimmed: boolean },
-) {
+function createNodeObject(node: ForceGraphNode, state: NodeVisualState) {
   const group = new THREE.Group()
-  const baseColor = state.highlighted ? HIGHLIGHT_COLOR : node.color
-  const radius = nodeRadius(node) * (state.active ? 1.18 : state.hovered ? 1.1 : 1)
-  const opacity = state.dimmed ? 0.28 : node.connected ? 0.94 : 0.58
+  const radius = graphNodeRadius(node)
 
-  const halo = new THREE.Mesh(
-    new THREE.SphereGeometry(radius * (state.highlighted ? 2.28 : 1.78), 24, 16),
-    new THREE.MeshBasicMaterial({
-      color: baseColor,
-      transparent: true,
-      opacity: state.highlighted ? 0.22 : 0.1,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    }),
-  )
+  const halo = createGraphNodeHalo(node)
   group.add(halo)
 
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 28, 18),
-    new THREE.MeshBasicMaterial({
-      color: baseColor,
-      transparent: true,
-      opacity,
-      depthWrite: false,
-    }),
-  )
+  const sphere = createGraphNodeSphere(node)
+  sphere.userData.nodeId = node.id
   group.add(sphere)
 
-  if (state.highlighted || node.role === 'core') {
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(radius * 1.75, Math.max(0.08, radius * 0.055), 8, 44),
-      new THREE.MeshBasicMaterial({
-        color: state.active ? '#ee7a50' : baseColor,
-        transparent: true,
-        opacity: state.dimmed ? 0.14 : state.active ? 0.48 : 0.3,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      }),
-    )
-    ring.rotation.x = Math.PI / 2
-    group.add(ring)
-  }
+  // Invisible, oversized raycast target so small leaves stay easy to
+  // hover/click.
+  const hitProxy = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 8, 6),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false }),
+  )
+  hitProxy.scale.setScalar(Math.max(radius * 1.5, radius + 4))
+  group.add(hitProxy)
 
-  if (state.highlighted || node.role === 'core') {
-    const label = new SpriteText(truncateLabel(node.label), node.role === 'core' ? 4.8 : 3.2, '#f7f4ee')
-    label.fontFace = 'Inter, ui-sans-serif, system-ui'
-    label.fontWeight = state.highlighted || node.role === 'core' ? '800' : '650'
-    label.backgroundColor = false
-    label.padding = 0.4
-    label.borderRadius = 2
-    label.strokeWidth = state.highlighted ? 0.8 : 0.4
-    label.strokeColor = 'rgba(8, 14, 12, 0.82)'
-    label.position.set(radius + 5.2, radius * 0.18, 0)
-    label.material.opacity = state.dimmed ? 0.22 : node.role === 'leaf' ? 0.62 : 0.88
-    group.add(label)
+  const label = new SpriteText(truncateLabel(node.label), labelTextHeight(node.role), '#f7f4ee')
+  label.fontFace = 'Inter, ui-sans-serif, system-ui'
+  label.fontWeight = node.role === 'core' ? '800' : '650'
+  label.backgroundColor = false
+  label.strokeWidth = 0.5
+  label.strokeColor = 'rgba(8, 14, 12, 0.85)'
+  label.material.transparent = true
+  label.material.depthWrite = false
+  label.center.set(0, 0.5)
+  label.position.set(radius + 2.4, 0, 0)
+  group.add(label)
+
+  const parts: NodeParts = {
+    sphere,
+    halo,
+    label,
   }
+  group.userData.parts = parts
+  applyStateToParts(node, parts, state)
 
   return group
+}
+
+function applyStateToParts(node: ForceGraphNode, parts: NodeParts, state: NodeVisualState) {
+  const radius = graphNodeRadius(node)
+  const focusScale = state.active ? 1.2 : state.hovered ? 1.1 : 1
+
+  parts.sphere.material.color.set(node.color)
+  if (state.active || state.hovered) parts.sphere.material.color.lerp(WHITE, 0.3)
+  parts.sphere.material.opacity = state.dimmed ? 0.18 : node.connected ? 0.96 : 0.6
+  parts.sphere.scale.setScalar(radius * focusScale)
+
+  parts.halo.material.color.set(node.color)
+  parts.halo.material.opacity = state.dimmed ? 0.02 : state.highlighted ? 0.24 : 0.09
+  parts.halo.scale.setScalar(radius * (state.highlighted ? 1.7 : 1.35) * focusScale)
+
+  parts.label.material.opacity = state.dimmed ? 0.08 : state.highlighted ? 1 : restLabelOpacity(node.role)
+}
+
+function restLabelOpacity(role: SourceGraphNodeRole) {
+  if (role === 'core') return 0.95
+  if (role === 'hub') return 0.94
+  if (role === 'standalone') return 0.86
+  return 0.68
+}
+
+function labelTextHeight(role: SourceGraphNodeRole) {
+  if (role === 'core') return 8
+  if (role === 'hub') return 5.2
+  if (role === 'standalone') return 4.4
+  return 3.2
 }
 
 function createSphereForce(radius: number) {
@@ -537,11 +637,6 @@ function initialSpherePosition(node: SourceGraphVisualNode, index: number) {
   }
 }
 
-function nodeRadius(node: { role: SourceGraphNodeRole; sizeWeight: number }) {
-  if (node.role === 'core') return 24
-  return clamp(4 + node.sizeWeight * 6.4, 4, 22)
-}
-
 function hashString(key: string) {
   let hash = 0
   for (let index = 0; index < key.length; index += 1) {
@@ -553,6 +648,16 @@ function hashString(key: string) {
 function linkEndpointId(endpoint: string | ForceGraphNode | undefined) {
   if (typeof endpoint === 'object' && endpoint) return endpoint.id
   return String(endpoint ?? '')
+}
+
+function findNodeId(object: THREE.Object3D): string | undefined {
+  let current: THREE.Object3D | null = object
+  while (current) {
+    const nodeId = current.userData.nodeId
+    if (typeof nodeId === 'string') return nodeId
+    current = current.parent
+  }
+  return undefined
 }
 
 function linkTouchesKind(link: ForceGraphLink, kind: SourceGraphNodeKind) {
@@ -571,8 +676,8 @@ function truncateLabel(label: string) {
   return label.length > 28 ? `${label.slice(0, 25)}...` : label
 }
 
-function toZoomPercent(distance: number) {
-  return Math.round((DEFAULT_CAMERA_DISTANCE / distance) * 100)
+function toZoomPercent(distance: number, baseline = DEFAULT_CAMERA_DISTANCE) {
+  return Math.round((baseline / distance) * 100)
 }
 
 function clamp(value: number, min: number, max: number) {

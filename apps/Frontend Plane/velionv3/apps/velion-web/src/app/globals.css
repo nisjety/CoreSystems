@@ -288,7 +288,6 @@ body {
 		color-mix(in srgb, var(--background) 1%, transparent) 95.2%,
 		transparent 100%
 	);
-	will-change: opacity, transform;
 }
 
 .velion-hima-fog.scrolled {
@@ -393,6 +392,38 @@ canvas {
 ::selection {
 	background: var(--velion-coral);
 	color: #ffffff;
+}
+
+/* Cursor-style shimmer for "working…" microcopy inside feature demos. */
+.velion-shimmer {
+	background: linear-gradient(
+		90deg,
+		color-mix(in srgb, var(--velion-j-text) 32%, transparent) 25%,
+		color-mix(in srgb, var(--velion-j-text) 88%, transparent) 50%,
+		color-mix(in srgb, var(--velion-j-text) 32%, transparent) 75%
+	);
+	background-size: 200% 100%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	-webkit-text-fill-color: transparent;
+	animation: velion-shimmer 1.5s linear infinite;
+}
+
+@keyframes velion-shimmer {
+	from {
+		background-position: 200% 0;
+	}
+	to {
+		background-position: -200% 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.velion-shimmer {
+		animation: none;
+		background: none;
+		-webkit-text-fill-color: currentColor;
+	}
 }
 
 @keyframes velion-menu-enter {

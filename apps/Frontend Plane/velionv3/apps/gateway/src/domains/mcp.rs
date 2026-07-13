@@ -10,7 +10,8 @@
 //! Ownership/sharing: servers are private (`scope == "user"`) by default;
 //! org-wide servers (`scope == "org"`) require an org admin — gated here before
 //! proxying — and model-gateway re-derives admin/owner authoritatively from the
-//! verified token (it also honors the forwarded `x-user-role`).
+//! verified token. Forwarded role headers are presentation hints only and grant
+//! no Model Plane authority.
 //!
 //! Org scope is resolved server-side from the validated session — the browser
 //! never picks which org's servers it reads or writes. model-gateway re-derives
@@ -30,7 +31,10 @@ use serde_json::Value;
 
 use crate::{
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json},
+    domains::chat::shared::{
+        delegated_auth_unavailable, model_token, proxy_model_json_with_capability,
+        required_capability_token,
+    },
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
@@ -58,8 +62,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// `superadmin` on the Better Auth role short-circuits, otherwise the active
 /// org's session-context role must be `owner` / `admin`. Used as the
 /// authoritative gate before forwarding an org-scoped registration to
-/// model-gateway (which independently re-derives admin from token scopes or
-/// the forwarded `x-user-role`).
+/// model-gateway (which independently derives authorization from verified token
+/// scopes).
 async fn is_org_admin(state: &AppState, user: &AuthenticatedUser) -> bool {
     if has_any_role(user.auth_role.as_deref(), &["admin", "superadmin"]) {
         return true;
@@ -92,16 +96,30 @@ async fn list_servers(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!("{}/v1/mcp/servers", state.model_gateway_url);
-    let (status, body) =
-        proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await;
+    let (status, body) = proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await;
     (status, body).into_response()
 }
 
 /// Register a new MCP server. The JSON body (`name`, `url`, `transport`,
-/// `token`, `tool_allowlist`, `enabled`, `server_id`, `scope`) is forwarded
-/// verbatim — org id is NEVER injected, since model-gateway derives it from the
-/// verified model-plane token's claims.
+/// `tool_allowlist`, `enabled`, `scope`) is forwarded for strict
+/// validation — org id is NEVER injected, since model-gateway derives it from
+/// the verified model-plane token's claims. Raw tokens and caller-selected
+/// server IDs are rejected by model-gateway; secret-reference onboarding is not
+/// implemented yet.
 ///
 /// `scope` defaults to `user` (private). Creating an org-wide server
 /// (`scope == "org"`) requires an org admin: this gate rejects non-admins with
@@ -130,13 +148,18 @@ async fn register_server(
     }
 
     let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!("{}/v1/mcp/servers", state.model_gateway_url);
-    let (status, body) = proxy_model_json(
+    let (status, body) = proxy_model_json_with_capability(
         &state,
         Method::POST,
         &url,
         Some(body),
         token.as_deref(),
+        Some(&capability),
         &user,
     )
     .await;
@@ -155,17 +178,22 @@ async fn share_server(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!(
         "{}/v1/mcp/servers/{}/share",
         state.model_gateway_url,
         urlencoding::encode(&server_id)
     );
-    let (status, body) = proxy_model_json(
+    let (status, body) = proxy_model_json_with_capability(
         &state,
         Method::POST,
         &url,
         Some(body),
         token.as_deref(),
+        Some(&capability),
         &user,
     )
     .await;
@@ -179,12 +207,24 @@ async fn delete_server(
     Path(server_id): Path<String>,
 ) -> impl IntoResponse {
     let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!(
         "{}/v1/mcp/servers/{}",
         state.model_gateway_url,
         urlencoding::encode(&server_id)
     );
-    let (status, body) =
-        proxy_model_json(&state, Method::DELETE, &url, None, token.as_deref(), &user).await;
+    let (status, body) = proxy_model_json_with_capability(
+        &state,
+        Method::DELETE,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await;
     (status, body).into_response()
 }

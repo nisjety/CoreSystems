@@ -7,8 +7,8 @@
 //!
 //! 1. Validated session identity when present — `AuthenticatedUser` is inserted
 //!    into request extensions by [`crate::middleware::require_session`]. We key
-//!    by the session's active org (`active_org_id`) when set, otherwise the
-//!    trusted `user_id`. Both originate from auth-core, never the client.
+//!    by the live canonical membership's organization when present, otherwise
+//!    the trusted `user_id`. Neither scope can originate from the client.
 //! 2. Client IP for pre-auth routes (auth / onboarding) where no session exists,
 //!    read from a validated forwarded-for header. The browser cannot present an
 //!    `AuthenticatedUser` extension, so spoofing the key requires spoofing the
@@ -61,6 +61,10 @@ const DEFAULT_RPM: f64 = 600.0;
 /// upper bound that defends against an unbounded-allocation key from a hostile
 /// proxy hop while comfortably fitting a realistic proxy chain.
 const MAX_FORWARDED_LEN: usize = 256;
+
+/// A cache optimization must never hold an HTTP request open while the shared
+/// connection manager reconnects. After this deadline the local bucket decides.
+const DISTRIBUTED_RATE_LIMIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Atomic token-bucket refill+consume, evaluated server-side in one round trip.
 ///
@@ -154,14 +158,25 @@ impl RateLimiter {
     /// to the in-process bucket (fail-open: a Redis blip never rejects traffic).
     async fn try_acquire(&self, key: &str) -> Result<(), u64> {
         if let Some(conn) = self.conn.clone() {
-            match self.try_acquire_distributed(conn, key).await {
-                Ok(result) => return result,
-                Err(error) => {
+            match tokio::time::timeout(
+                DISTRIBUTED_RATE_LIMIT_TIMEOUT,
+                self.try_acquire_distributed(conn, key),
+            )
+            .await
+            {
+                Ok(Ok(result)) => return result,
+                Ok(Err(error)) => {
                     // Degrade to the in-process bucket rather than failing the
                     // request. Log the error class only — never the key value.
                     tracing::warn!(
                         %error,
                         "distributed rate-limit backend errored; falling back to in-process bucket"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_ms = DISTRIBUTED_RATE_LIMIT_TIMEOUT.as_millis(),
+                        "distributed rate-limit backend timed out; falling back to in-process bucket"
                     );
                 }
             }
@@ -240,8 +255,9 @@ fn distributed_key(key: &str) -> String {
 fn rate_limit_key(user: Option<&AuthenticatedUser>, headers: &HeaderMap) -> (String, &'static str) {
     if let Some(user) = user {
         if let Some(org) = user
-            .active_org_id
-            .as_deref()
+            .authorized_membership
+            .as_ref()
+            .map(|membership| membership.organization_id.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
@@ -327,7 +343,7 @@ pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Respo
     // IP (it runs before `require_session`), letting a burst from one IP 429 it
     // would lock every co-located client out of the very endpoint they need to
     // log back in. It is a cheap, side-effect-free read auth-core can absorb.
-    if request.uri().path() == "/api/v1/auth/session" {
+    if is_rate_limit_exempt_path(request.uri().path()) {
         return next.run(request).await;
     }
 
@@ -351,6 +367,10 @@ pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Respo
                 .into_response()
         }
     }
+}
+
+fn is_rate_limit_exempt_path(path: &str) -> bool {
+    matches!(path, "/health" | "/metrics" | "/api/v1/auth/session")
 }
 
 #[cfg(test)]
@@ -424,6 +444,19 @@ mod tests {
     }
 
     #[test]
+    fn operational_endpoints_never_depend_on_the_rate_limit_backend() {
+        assert!(is_rate_limit_exempt_path("/health"));
+        assert!(is_rate_limit_exempt_path("/metrics"));
+        assert!(is_rate_limit_exempt_path("/api/v1/auth/session"));
+        assert!(!is_rate_limit_exempt_path("/api/v1/sessions/bootstrap"));
+    }
+
+    #[test]
+    fn distributed_rate_limit_call_has_a_short_deadline() {
+        assert!(DISTRIBUTED_RATE_LIMIT_TIMEOUT <= Duration::from_secs(1));
+    }
+
+    #[test]
     fn distributed_key_is_namespaced_and_scannable() {
         // Operators scan throttling state with `KEYS '*ratelimit*'`.
         assert_eq!(
@@ -456,6 +489,10 @@ mod tests {
             email_verified: true,
             auth_role: None,
             active_org_id: Some("org_42".into()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org_42".into(),
+                role: "member".into(),
+            }),
         };
         let (key, source) = rate_limit_key(Some(&with_org), &headers);
         assert_eq!(key, "org:org_42");
@@ -463,6 +500,7 @@ mod tests {
 
         let no_org = AuthenticatedUser {
             active_org_id: None,
+            authorized_membership: None,
             ..with_org
         };
         let (key, source) = rate_limit_key(Some(&no_org), &headers);

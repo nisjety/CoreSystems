@@ -39,7 +39,7 @@ const mediaLayers: MediaLayer[] = [
 	},
 	{
 		kind: "image",
-		src: "/velion-vibe/human-haze.png",
+		src: "/human-haze.png",
 		alt: "Dataklassifisering",
 	},
 ];
@@ -410,7 +410,7 @@ function FeatureMobileFallback() {
 						className="object-cover opacity-70 saturate-[0.72]"
 						fill
 						sizes="72vw"
-						src="/velion-vibe/human-haze.png"
+						src="/human-haze.png"
 					/>
 				</div>
 

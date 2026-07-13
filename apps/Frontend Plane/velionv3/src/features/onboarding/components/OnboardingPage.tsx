@@ -5,7 +5,6 @@ import { createOnboardingGatewayActions } from '@/features/onboarding/lib/action
 import {
   type BrregEnhet,
   type CheckoutSession,
-  createEmptyPreviewResponse,
   getBrowserActor,
   saveOnboardingState,
 } from '@/features/onboarding/lib/api'
@@ -14,7 +13,6 @@ import { requestJson } from '@/shared/api/http'
 import { clearSession, getSession, loadSession, markSessionOnboardingComplete } from '@/shared/session/session-store'
 import { createCrawlPreviewStream } from '@/features/onboarding/lib/crawl-preview'
 import {
-  type GraphDisplayNode,
   type ConnectorOption,
   type OnboardingState,
   type PlanId,
@@ -37,7 +35,6 @@ import {
 import { createOnboardingStepTransition } from '@/features/onboarding/lib/step-transition'
 import {
   approxEmployeesFromSize,
-  graphNodePosition,
   inferOrganizationQuery,
   rankBrregSuggestions,
   sizeFromEmployees,
@@ -71,8 +68,8 @@ const storageKey = 'velionv3.onboarding.state.v1'
 
 export default function OnboardingPage() {
   // Identity comes from the validated session (RequireOnboarding guarantees an
-  // authenticated user before this mounts); fall back to the dev actor only when
-  // no session user is present (local development without auth-core).
+  // authenticated user before this mounts). The dev actor fallback only keeps
+  // local gateway actions usable; the graph itself remains session-gated.
   const sessionUser = getSession().user
   const actor = sessionUser
     ? { userId: sessionUser.id, userEmail: sessionUser.email, userName: sessionUser.name }
@@ -107,8 +104,6 @@ export default function OnboardingPage() {
   const leftPaneSize = createElementHeight<HTMLDivElement>()
   const currentStep = () => state.step
   const { displayedStep, stepTransitionPhase } = createOnboardingStepTransition(currentStep)
-  const emptyGraph = createEmptyPreviewResponse()
-
   let introTimer: number | undefined
   let assemblyTimer: number | undefined
   let completionTimer: number | undefined
@@ -212,18 +207,6 @@ export default function OnboardingPage() {
     const height = viewportHeight()
     const fittedScale = height ? Math.min(1, Math.max(0.52, (height - 18) / onboardingCardBaseHeight)) : 1
     return Math.min(1.04, fittedScale * 1.04)
-  })
-  const graphDisplayNodes = createMemo<GraphDisplayNode[]>(() => {
-    const graph = graphQuery.data ?? emptyGraph
-    const nodes =
-      graph.nodes.length > 0
-        ? graph.nodes.slice(0, 9)
-        : [{ id: 'org', label: state.organization.name || 'Org', group: 'org' }]
-
-    return nodes.map((node, index) => ({
-      ...node,
-      position: graphNodePosition(index, nodes.length),
-    }))
   })
   const sourceSummary = createMemo(() => summarizeOnboardingSources({
     connectors: state.connectors,
@@ -688,6 +671,22 @@ export default function OnboardingPage() {
     }
   }
 
+  async function continueToPaywall() {
+    setError(undefined)
+    try {
+      await requestJson<{ state: 'PROFILE_READY' | 'COMPLETED'; orgId: string }>(
+        '/api/v1/onboarding/lifecycle',
+      )
+      setState('step', 'paywall')
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : 'Organisasjonen er ikke klar ennå. Prøv igjen før du velger plan.',
+      )
+    }
+  }
+
   async function finalizePaidCheckout(payment: {
     paymentId?: string
     clientSecret?: string
@@ -913,7 +912,7 @@ export default function OnboardingPage() {
           />
         )
       case 'social-proof':
-        return <SocialProofStepContent onContinue={() => setState('step', 'paywall')} />
+        return <SocialProofStepContent onContinue={() => void continueToPaywall()} />
       case 'assembly':
         return (
           <AssemblyStepContent
@@ -940,9 +939,9 @@ export default function OnboardingPage() {
         return (
           <ConnectStepVisual
             connectedSources={state.connectors}
-            graphNodes={graphDisplayNodes()}
             organizationName={state.organization.name}
-            websiteUrl={state.website.url}
+            currentUserId={sessionUser?.id ?? ''}
+            currentUserName={sessionUser?.name?.trim() ?? ''}
           />
         )
       case 'social-proof':
@@ -1039,6 +1038,8 @@ export default function OnboardingPage() {
             websitePages: state.website.pages,
             connectedSourceCount: sourceSummary().connectedSourceCount,
             connectorCount: sourceSummary().connectorCount,
+            sourceCount: sourceSummary().totalSourceCount,
+            employeeCount: state.organization.employeeCount ?? approxEmployeesFromSize(state.organization.size),
             branding: state.website.branding,
           }}
           loadingRecommendation={recommendationQuery.isFetching}

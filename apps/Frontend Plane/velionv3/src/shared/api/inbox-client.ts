@@ -199,13 +199,14 @@ export async function sendReply(
   conversationId: string,
   body: string,
   internal: boolean,
+  idempotencyKey: string,
 ): Promise<ZammadArticle> {
   const path = internal ? 'notes' : 'messages'
   const message = await requestJson<ConversationMessage>(
     `/api/v1/inbox/conversations/${encodeURIComponent(conversationId)}/${path}`,
     {
       method: 'POST',
-      body: JSON.stringify({ body_text: body, internal }),
+      body: JSON.stringify({ body_text: body, internal, idempotency_key: idempotencyKey }),
       headers: orgHeaders(orgId),
     },
   )

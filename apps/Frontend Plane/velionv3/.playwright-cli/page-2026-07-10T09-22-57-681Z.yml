@@ -1,0 +1,206 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e6]:
+        - link "Gå til hjem" [ref=f1e7] [cursor=pointer]:
+          - /url: /dashboard
+          - text: V
+        - generic [ref=f1e8]:
+          - button "Gå tilbake" [ref=f1e9] [cursor=pointer]
+          - button "Gå fremover" [ref=f1e12] [cursor=pointer]
+        - generic [ref=f1e15]:
+          - button "Velion Trial" [ref=f1e142] [cursor=pointer]:
+            - generic [ref=f1e19]: Velion
+            - strong [ref=f1e20]: Trial
+          - link "Chat" [ref=f1e452] [cursor=pointer]:
+            - /url: /chat
+          - link "Oppgaver" [ref=f1e453] [cursor=pointer]:
+            - /url: /chat
+      - button "Åpne kunnskapssøk" [ref=f1e28] [cursor=pointer]:
+        - generic [ref=f1e32]: Søk i kunnskapsbasen
+        - generic [ref=f1e33]: /
+        - generic [ref=f1e34]: CMD+K
+      - generic [ref=f1e36]:
+        - button "Bytt mørk modus" [ref=f1e38] [cursor=pointer]
+        - button "Bytt til English" [ref=f1e47] [cursor=pointer]:
+          - generic [ref=f1e48]: "NO"
+        - button "Åpne AI-assistent" [ref=f1e55] [cursor=pointer]
+        - button "0 uleste meldinger" [ref=f1e60] [cursor=pointer]
+        - button "0 uleste varsler" [ref=f1e64] [cursor=pointer]
+        - button "Kalender" [ref=f1e68] [cursor=pointer]
+        - button "Åpne profilmeny" [ref=f1e72] [cursor=pointer]:
+          - generic [ref=f1e73]: L
+  - complementary "Primærnavigasjon" [ref=f1e74]:
+    - generic [ref=f1e75]:
+      - generic [ref=f1e76]:
+        - button "Slå sammen sidefelt" [ref=f1e454] [cursor=pointer]
+        - navigation "Arbeidsområdeseksjoner" [ref=f1e82]:
+          - generic [ref=f1e83]:
+            - link "Oversikt" [ref=f1e143] [cursor=pointer]:
+              - /url: /dashboard
+            - link "Chat" [ref=f1e146] [cursor=pointer]:
+              - /url: /chat
+            - link "Studio" [ref=f1e149] [cursor=pointer]:
+              - /url: /studio
+            - link "Innboks" [ref=f1e152] [cursor=pointer]:
+              - /url: /inbox
+            - link "Saker" [ref=f1e156] [cursor=pointer]:
+              - /url: /tickets
+            - link "Sosialt" [ref=f1e160] [cursor=pointer]:
+              - /url: /social
+            - link "Agenter" [ref=f1e163] [cursor=pointer]:
+              - /url: /agents
+            - link "Innhenting" [ref=f1e167] [cursor=pointer]:
+              - /url: /ingestions
+            - link "Kunnskap" [ref=f1e175] [cursor=pointer]:
+              - /url: /knowledge
+            - link "Innsikt" [ref=f1e178] [cursor=pointer]:
+              - /url: /insights
+        - generic [ref=f1e122]:
+          - link "Konto" [ref=f1e124] [cursor=pointer]:
+            - /url: /account
+          - link "Innstillinger" [ref=f1e181] [cursor=pointer]:
+            - /url: /settings
+          - button "Søk" [ref=f1e133] [cursor=pointer]
+      - generic [ref=f1e459]:
+        - link [ref=f1e460] [cursor=pointer]:
+          - /url: /chat
+        - navigation "Chat-samtaler" [ref=f1e464]:
+          - 'button "Read-only task: first call shipping_carriers, t... Akkurat nå" [ref=f1e1176] [cursor=pointer]':
+            - 'generic "Read-only task: first call shipping_carriers, t..." [ref=f1e1177]'
+            - emphasis [ref=f1e1178]: Akkurat nå
+          - button "Find Bring current official delivery-time infor... Akkurat nå" [ref=f1e1179] [cursor=pointer]:
+            - generic "Find Bring current official delivery-time infor..." [ref=f1e1180]
+            - emphasis [ref=f1e1181]: Akkurat nå
+          - button "Can you check the current shipping time from Os... 1m siden" [ref=f1e1182] [cursor=pointer]:
+            - generic "Can you check the current shipping time from Os..." [ref=f1e1183]
+            - emphasis [ref=f1e1184]: 1m siden
+          - 'button "Read-only task: first call shipping_carriers, then call get_shipping_quotes for a 1 kg non-da... 6m siden" [ref=f1e1185] [cursor=pointer]':
+            - 'generic "Read-only task: first call shipping_carriers, then call get_shipping_quotes for a 1 kg non-da..." [ref=f1e1186]'
+            - emphasis [ref=f1e1187]: 6m siden
+          - button "Use the knowledge_search tool exactly once to search our internal knowledge for Velion system... 6m siden" [ref=f1e1188] [cursor=pointer]:
+            - generic "Use the knowledge_search tool exactly once to search our internal knowledge for Velion system..." [ref=f1e1189]
+            - emphasis [ref=f1e1190]: 6m siden
+          - button "can you check the shiping time from oslo to trondheim 10t siden" [ref=f1e1191] [cursor=pointer]:
+            - generic "can you check the shiping time from oslo to trondheim" [ref=f1e1192]
+            - emphasis [ref=f1e1193]: 10t siden
+          - button "01KX3D6HVTS2H7RWBQSMB4SZPK 21t siden" [ref=f1e1194] [cursor=pointer]:
+            - generic "01KX3D6HVTS2H7RWBQSMB4SZPK" [ref=f1e1195]
+            - emphasis [ref=f1e1196]: 21t siden
+          - button "01KX3D68B5ZMWCM45WYGP1JTSY 21t siden" [ref=f1e1197] [cursor=pointer]:
+            - generic "01KX3D68B5ZMWCM45WYGP1JTSY" [ref=f1e1198]
+            - emphasis [ref=f1e1199]: 21t siden
+          - button "01KX3CTBFKDRAENFRW173M3VP0 21t siden" [ref=f1e1200] [cursor=pointer]:
+            - generic "01KX3CTBFKDRAENFRW173M3VP0" [ref=f1e1201]
+            - emphasis [ref=f1e1202]: 21t siden
+          - button "01KX3CRR78DJ3VVD2JN5CA8S0K 21t siden" [ref=f1e1203] [cursor=pointer]:
+            - generic "01KX3CRR78DJ3VVD2JN5CA8S0K" [ref=f1e1204]
+            - emphasis [ref=f1e1205]: 21t siden
+          - button "01KX3CQ3FSYGCM9MTH31WE77YR 21t siden" [ref=f1e1206] [cursor=pointer]:
+            - generic "01KX3CQ3FSYGCM9MTH31WE77YR" [ref=f1e1207]
+            - emphasis [ref=f1e1208]: 21t siden
+          - button "01KX3CPK1Q99E4SVC4920JZZ7R 21t siden" [ref=f1e1209] [cursor=pointer]:
+            - generic "01KX3CPK1Q99E4SVC4920JZZ7R" [ref=f1e1210]
+            - emphasis [ref=f1e1211]: 21t siden
+          - button "01KX38YVM79HHGFJZTCWPV45JQ 22t siden" [ref=f1e1212] [cursor=pointer]:
+            - generic "01KX38YVM79HHGFJZTCWPV45JQ" [ref=f1e1213]
+            - emphasis [ref=f1e1214]: 22t siden
+          - button "01KX38YN9X8P8TVZE8Z9RZZ4DP 22t siden" [ref=f1e1215] [cursor=pointer]:
+            - generic "01KX38YN9X8P8TVZE8Z9RZZ4DP" [ref=f1e1216]
+            - emphasis [ref=f1e1217]: 22t siden
+          - button "01KX38EQPJ28PV4PBM9SXWYN9D 22t siden" [ref=f1e1218] [cursor=pointer]:
+            - generic "01KX38EQPJ28PV4PBM9SXWYN9D" [ref=f1e1219]
+            - emphasis [ref=f1e1220]: 22t siden
+          - button "01KX38EG630XFEJ8MT5VQGVEGB 22t siden" [ref=f1e1221] [cursor=pointer]:
+            - generic "01KX38EG630XFEJ8MT5VQGVEGB" [ref=f1e1222]
+            - emphasis [ref=f1e1223]: 22t siden
+          - button "01KX38DMXNMC9X3MYZRWJY8D7Z 22t siden" [ref=f1e1224] [cursor=pointer]:
+            - generic "01KX38DMXNMC9X3MYZRWJY8D7Z" [ref=f1e1225]
+            - emphasis [ref=f1e1226]: 22t siden
+          - button "01KX38DDJ045QC6DSJN0G4R43G 22t siden" [ref=f1e1227] [cursor=pointer]:
+            - generic "01KX38DDJ045QC6DSJN0G4R43G" [ref=f1e1228]
+            - emphasis [ref=f1e1229]: 22t siden
+          - button "01KX389PXTZXX09CG1T35YFJRY 22t siden" [ref=f1e1230] [cursor=pointer]:
+            - generic "01KX389PXTZXX09CG1T35YFJRY" [ref=f1e1231]
+            - emphasis [ref=f1e1232]: 22t siden
+          - button "01KX38424F256KBHQG9KA0670N 23t siden" [ref=f1e1233] [cursor=pointer]:
+            - generic "01KX38424F256KBHQG9KA0670N" [ref=f1e1234]
+            - emphasis [ref=f1e1235]: 23t siden
+          - button "01KX380C2JETSXCM35AFTH2EQT 23t siden" [ref=f1e1236] [cursor=pointer]:
+            - generic "01KX380C2JETSXCM35AFTH2EQT" [ref=f1e1237]
+            - emphasis [ref=f1e1238]: 23t siden
+          - button "01KX37R2CX75WBM54Y7J28A1T9 23t siden" [ref=f1e1239] [cursor=pointer]:
+            - generic "01KX37R2CX75WBM54Y7J28A1T9" [ref=f1e1240]
+            - emphasis [ref=f1e1241]: 23t siden
+          - button "01KX37KY7NA83D6953NHAGARQF 23t siden" [ref=f1e1242] [cursor=pointer]:
+            - generic "01KX37KY7NA83D6953NHAGARQF" [ref=f1e1243]
+            - emphasis [ref=f1e1244]: 23t siden
+          - button "01KX37KBDXR8NTN3R6YZYHMJTY 23t siden" [ref=f1e1245] [cursor=pointer]:
+            - generic "01KX37KBDXR8NTN3R6YZYHMJTY" [ref=f1e1246]
+            - emphasis [ref=f1e1247]: 23t siden
+          - button "01KX37DKNKDZ27ZH01DCHP57VQ 23t siden" [ref=f1e1248] [cursor=pointer]:
+            - generic "01KX37DKNKDZ27ZH01DCHP57VQ" [ref=f1e1249]
+            - emphasis [ref=f1e1250]: 23t siden
+          - button "01KX37BM9YZZ2K39683Y25JJNQ 23t siden" [ref=f1e1251] [cursor=pointer]:
+            - generic "01KX37BM9YZZ2K39683Y25JJNQ" [ref=f1e1252]
+            - emphasis [ref=f1e1253]: 23t siden
+          - button "01KX36E87PYBHBS90G7TTMYHJT 23t siden" [ref=f1e1254] [cursor=pointer]:
+            - generic "01KX36E87PYBHBS90G7TTMYHJT" [ref=f1e1255]
+            - emphasis [ref=f1e1256]: 23t siden
+          - button "01KX36C95HMKQ32ZKN6BY23QWD 23t siden" [ref=f1e1257] [cursor=pointer]:
+            - generic "01KX36C95HMKQ32ZKN6BY23QWD" [ref=f1e1258]
+            - emphasis [ref=f1e1259]: 23t siden
+          - button "01KX35XY59SR026RHJBK4W7RST 23t siden" [ref=f1e1260] [cursor=pointer]:
+            - generic "01KX35XY59SR026RHJBK4W7RST" [ref=f1e1261]
+            - emphasis [ref=f1e1262]: 23t siden
+          - button "01KX35VZ0912E5P5M69KQ7VTYW 23t siden" [ref=f1e1263] [cursor=pointer]:
+            - generic "01KX35VZ0912E5P5M69KQ7VTYW" [ref=f1e1264]
+            - emphasis [ref=f1e1265]: 23t siden
+          - button "01KX260E6QDR4FMGP1PAW7YHGK 9. juli" [ref=f1e1266] [cursor=pointer]:
+            - generic "01KX260E6QDR4FMGP1PAW7YHGK" [ref=f1e1267]
+            - emphasis [ref=f1e1268]: 9. juli
+          - button "01KX25TBZEDGCGZ5C2MBK3EA2R 9. juli" [ref=f1e1269] [cursor=pointer]:
+            - generic "01KX25TBZEDGCGZ5C2MBK3EA2R" [ref=f1e1270]
+            - emphasis [ref=f1e1271]: 9. juli
+          - button "01KX25S9FXAY84Y1QMH5VJJTHS 9. juli" [ref=f1e1272] [cursor=pointer]:
+            - generic "01KX25S9FXAY84Y1QMH5VJJTHS" [ref=f1e1273]
+            - emphasis [ref=f1e1274]: 9. juli
+          - button "01KX1TDT0X25H9K5YHPRJYEHWG 8. juli" [ref=f1e1275] [cursor=pointer]:
+            - generic "01KX1TDT0X25H9K5YHPRJYEHWG" [ref=f1e1276]
+            - emphasis [ref=f1e1277]: 8. juli
+          - button "01KX1TCBP5A7RA8KTN4HD7Z0CC 8. juli" [ref=f1e1278] [cursor=pointer]:
+            - generic "01KX1TCBP5A7RA8KTN4HD7Z0CC" [ref=f1e1279]
+            - emphasis [ref=f1e1280]: 8. juli
+          - button "01KX1TC9XQCP0NVDJVAM6T0AJE 8. juli" [ref=f1e1281] [cursor=pointer]:
+            - generic "01KX1TC9XQCP0NVDJVAM6T0AJE" [ref=f1e1282]
+            - emphasis [ref=f1e1283]: 8. juli
+          - button "01KX1T9RS7KBJ3KVM9HWBFDA41 8. juli" [ref=f1e1284] [cursor=pointer]:
+            - generic "01KX1T9RS7KBJ3KVM9HWBFDA41" [ref=f1e1285]
+            - emphasis [ref=f1e1286]: 8. juli
+          - button "01KX1T9QCM3SZ0E38JESHW2WR8 8. juli" [ref=f1e1287] [cursor=pointer]:
+            - generic "01KX1T9QCM3SZ0E38JESHW2WR8" [ref=f1e1288]
+            - emphasis [ref=f1e1289]: 8. juli
+          - button "01KX1T8AGPT7CZ9FR69FJX06VD 8. juli" [ref=f1e1290] [cursor=pointer]:
+            - generic "01KX1T8AGPT7CZ9FR69FJX06VD" [ref=f1e1291]
+            - emphasis [ref=f1e1292]: 8. juli
+          - button "01KX1T880DZ56D4V96ATY9C089 8. juli" [ref=f1e1293] [cursor=pointer]:
+            - generic "01KX1T880DZ56D4V96ATY9C089" [ref=f1e1294]
+            - emphasis [ref=f1e1295]: 8. juli
+        - button "Tøm chathistorikk" [ref=f1e585] [cursor=pointer]
+  - main [ref=f1e137]:
+    - region "Velion chat workspace" [ref=f1e590]:
+      - generic [ref=f1e841]:
+        - generic [ref=f1e842]:
+          - 'heading "Read-only task: first call shipping_carriers, t..." [level=1] [ref=f1e1296]'
+          - paragraph [ref=f1e844]: 2 messages · 0 regenerations
+        - generic [ref=f1e845]:
+          - button "Regenerate latest response" [ref=f1e846] [cursor=pointer]
+          - button "New chat" [ref=f1e852] [cursor=pointer]
+      - tablist "Chat workspace views" [ref=f1e855]:
+        - tab "Chat" [ref=f1e1297] [cursor=pointer]
+        - tab "Kilder" [selected] [ref=f1e1301] [cursor=pointer]
+        - tab "Artefakter" [ref=f1e1306] [cursor=pointer]
+        - tab "Steg" [ref=f1e1313] [cursor=pointer]
+      - generic [ref=f1e1027]:
+        - heading "Ingen kilder ennå" [level=2] [ref=f1e1032]
+        - paragraph [ref=f1e1033]: Interne kunnskapskilder og websøk dukker opp her når Velion bruker dem i svaret.

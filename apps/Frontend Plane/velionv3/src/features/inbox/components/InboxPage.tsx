@@ -51,6 +51,12 @@ export default function InboxPage() {
   const [notice, setNotice] = createSignal<string | null>(null)
   const [replySending, setReplySending] = createSignal(false)
   const [replyText, setReplyText] = createSignal('')
+  const [pendingReplyIntent, setPendingReplyIntent] = createSignal<{
+    conversationId: string
+    body: string
+    internal: boolean
+    key: string
+  } | null>(null)
   const [searchQuery, setSearchQuery] = createSignal('')
   const [selectedTicket, setSelectedTicket] = createSignal<LiveTicket | null>(null)
   const [sentiment, setSentiment] = createSignal<TicketSentiment | null>(null)
@@ -241,6 +247,19 @@ export default function InboxPage() {
     const body = text.trim()
     const ticket = selectedTicket()
     if (!body || !ticket || replySending()) return
+    const pending = pendingReplyIntent()
+    const intent = pending
+      && pending.conversationId === ticket.conversationId
+      && pending.body === body
+      && pending.internal === internal
+      ? pending
+      : {
+        conversationId: ticket.conversationId,
+        body,
+        internal,
+        key: crypto.randomUUID(),
+      }
+    setPendingReplyIntent(intent)
 
     const optimistic: ZammadArticle = {
       id: -Date.now(),
@@ -257,9 +276,10 @@ export default function InboxPage() {
     setReplyText('')
 
     try {
-      const saved = await postReply(orgId(), ticket.conversationId, body, internal)
+      const saved = await postReply(orgId(), ticket.conversationId, body, internal, intent.key)
       setArticles((current) => current.map((article) => (article.id === optimistic.id ? saved : article)))
-      setNotice(internal ? 'Internal note added.' : 'Reply sent.')
+      setPendingReplyIntent(null)
+      setNotice(internal ? 'Internal note added.' : 'Reply submitted.')
     } catch (reason) {
       setArticles((current) => current.filter((article) => article.id !== optimistic.id))
       setReplyText(body)

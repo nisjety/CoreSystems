@@ -53,11 +53,15 @@ use url::Url;
 use crate::{
     audience_tokens::{get_audience_token, get_onboarding_preview_token},
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json},
+    domains::chat::shared::{
+        data_plane_token, delegated_auth_unavailable, model_token, proxy_model_json,
+        proxy_model_json_with_data_plane, required_execution_token, required_inference_token,
+        required_session_token,
+    },
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
-    upstream::{proxy_bearer_json, proxy_sse_stream},
+    upstream::{authorized_org_id, proxy_bearer_json, proxy_sse_stream},
 };
 
 /// Mirrors the SPA's `BrowserProfileScope` union (`browser-client.ts`).
@@ -173,8 +177,15 @@ fn reject_zdr_persistent_profile(
 
 pub(crate) type BrowserRunStore = Arc<StdMutex<HashMap<String, BrowserRunMetadata>>>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BrowserRunOwner {
+    user_id: String,
+    org_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserRunMetadata {
+    owner: BrowserRunOwner,
     lease_id: Option<String>,
     profile_id: Option<String>,
     /// Phase 3 continuation: the real requested/inferred scope (see
@@ -401,6 +412,10 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionBody>,
 ) -> Response {
+    let owner = match resolve_browser_run_owner(&state, &user).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
     let target = match normalize_public_http_url(&body.url) {
         Ok(value) => value,
         Err(message) => {
@@ -509,6 +524,7 @@ async fn create_session(
         Err(response) => return response,
     };
     let metadata = BrowserRunMetadata {
+        owner,
         lease_id,
         profile_id: returned_profile_id,
         profile_scope,
@@ -528,8 +544,8 @@ async fn create_session(
         control_mode: BrowserControlMode::AgentControl,
         zdr,
     };
-    if let Ok(mut runs) = state.browser_run_store.lock() {
-        runs.insert(run_id.clone(), metadata.clone());
+    if let Err(store_error) = store_browser_run_metadata(&state, &run_id, metadata.clone()) {
+        return store_error.into_response();
     }
 
     let response = browser_response(&run_id, &metadata, Some(observation));
@@ -550,7 +566,10 @@ async fn run_action(
         }
     };
     let actor = body.actor;
-    let current_metadata = browser_run_metadata(&state, &session_id);
+    let current_metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
     if actor == BrowserActionActor::Agent
         && current_metadata.control_mode == BrowserControlMode::HumanTakeover
     {
@@ -598,7 +617,17 @@ async fn run_action(
     }
 
     let observation = unwrap_data(&body);
-    let mut metadata = update_browser_observation(&state, &session_id, observation.clone());
+    let Some(mut metadata) = update_browser_observation(&state, &session_id, observation.clone())
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The browser session is not active.",
+            )),
+        )
+            .into_response();
+    };
     if let Some(next_metadata) = append_replay_event(
         &state,
         &session_id,
@@ -624,9 +653,13 @@ async fn run_action(
 
 async fn set_control_mode(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(session_id): Path<String>,
     Json(body): Json<ControlBody>,
 ) -> Response {
+    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
+        return response;
+    }
     let Some(metadata) = update_browser_control_mode(&state, &session_id, body.mode) else {
         return (
             StatusCode::NOT_FOUND,
@@ -664,17 +697,10 @@ async fn get_tabs(
         )
             .into_response();
     }
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not active.",
-            )),
-        )
-            .into_response();
-    }
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
 
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
@@ -708,17 +734,10 @@ async fn new_tab(
         )
             .into_response();
     }
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not active.",
-            )),
-        )
-            .into_response();
-    }
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
     let url = match normalize_optional_public_url(body.url.as_deref()) {
         Ok(url) => url,
         Err(message) => {
@@ -856,17 +875,10 @@ async fn tab_mutation(
         )
             .into_response();
     }
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not active.",
-            )),
-        )
-            .into_response();
-    }
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
 
     let suffix = if operation == "select" { "/select" } else { "" };
     let path = format!(
@@ -912,6 +924,9 @@ async fn close_session(
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
+    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
+        return response;
+    }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
@@ -950,7 +965,10 @@ async fn suggest_action(
             .into_response();
     }
 
-    let metadata = browser_run_metadata(&state, &session_id);
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
     let Some(observation) = metadata.last_observation.clone() else {
         return (
             StatusCode::CONFLICT,
@@ -1120,17 +1138,10 @@ async fn start_ai_run(
             .into_response();
     }
 
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not active.",
-            )),
-        )
-            .into_response();
-    }
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
 
     // Server-derived only, from the session's own last observation: a freshly
     // `start_run`'d Quarry lease the AI run acquires has no page loaded, so
@@ -1146,19 +1157,69 @@ async fn start_ai_run(
     let request_body =
         build_ai_run_request(goal, &session_id, &metadata, &body, start_url.as_deref());
 
-    let token = model_token(&state, &user, &headers).await;
+    let (token, data_plane, inference, execution, session) = tokio::join!(
+        model_token(&state, &user, &headers),
+        data_plane_token(&state, &user, &headers),
+        required_inference_token(&state, &user, &headers),
+        required_execution_token(&state, &user, &headers),
+        required_session_token(&state, &user, &headers),
+    );
+    let Some(data_plane) = data_plane else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Required data-plane authentication is temporarily unavailable",
+            )),
+        )
+            .into_response();
+    };
+    let inference = match inference {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let execution = match execution {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let session = match session {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
-    let (status, Json(response_body)) = proxy_model_json(
+    let (status, Json(response_body)) = proxy_model_json_with_data_plane(
         &state,
         Method::POST,
         &url,
         Some(request_body),
         token.as_deref(),
+        Some(&data_plane),
+        Some(&inference),
+        Some(&execution),
+        None,
+        Some(&session),
         &user,
     )
     .await;
     if !status.is_success() {
         return forward_quarry_failure(status, response_body);
+    }
+
+    let response_data = unwrap_data(&response_body);
+    let Some(run_id) =
+        str_field(&response_data, "run_id").or_else(|| str_field(&response_data, "runId"))
+    else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "browser_run_invalid",
+                "Model Gateway did not return a browser run id.",
+            )),
+        )
+            .into_response();
+    };
+    if let Err(store_error) = store_browser_run_metadata(&state, &run_id, metadata) {
+        return store_error.into_response();
     }
 
     (StatusCode::OK, Json(ok(response_body))).into_response()
@@ -1186,19 +1247,39 @@ async fn control_ai_run(
         )
             .into_response();
     }
+    if let Err(response) = owned_browser_run_metadata(&state, &user, &run_id).await {
+        return response;
+    }
 
-    let token = model_token(&state, &user, &headers).await;
+    let (token, execution, session) = tokio::join!(
+        model_token(&state, &user, &headers),
+        required_execution_token(&state, &user, &headers),
+        required_session_token(&state, &user, &headers),
+    );
+    let execution = match execution {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let session = match session {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!(
         "{}/v1/browser/runs/{}/control",
         state.model_gateway_url,
         urlencoding::encode(&run_id)
     );
-    let (status, Json(response_body)) = proxy_model_json(
+    let (status, Json(response_body)) = proxy_model_json_with_data_plane(
         &state,
         Method::POST,
         &url,
         Some(body),
         token.as_deref(),
+        None,
+        None,
+        Some(&execution),
+        None,
+        Some(&session),
         &user,
     )
     .await;
@@ -1224,6 +1305,9 @@ async fn get_artifact(
             )),
         )
             .into_response();
+    }
+    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
+        return response;
     }
 
     let cookie = cookie_header(&headers);
@@ -1334,17 +1418,10 @@ async fn get_live_frame(
             .into_response();
     }
 
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not available.",
-            )),
-        )
-            .into_response();
-    }
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
 
     let format = match query
         .format
@@ -1463,17 +1540,10 @@ async fn stream_live_frames(
             .into_response();
     }
 
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not available.",
-            )),
-        )
-            .into_response();
-    }
+    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
 
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
@@ -1515,16 +1585,8 @@ async fn get_devtools_events(
             .into_response();
     }
 
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not available.",
-            )),
-        )
-            .into_response();
+    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
+        return response;
     }
 
     let cookie = cookie_header(&headers);
@@ -1590,16 +1652,8 @@ async fn proxy_live_frames_ws(
             .into_response();
     }
 
-    let metadata = browser_run_metadata(&state, &session_id);
-    if metadata.last_observation.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not available.",
-            )),
-        )
-            .into_response();
+    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
+        return response;
     }
 
     let cookie = cookie_header(&headers);
@@ -1925,7 +1979,7 @@ fn process_upstream_ws_message(
         return Some(AxumWsMessage::Text(value.to_string()));
     };
 
-    let mut metadata = update_browser_observation(state, session_id, observation.clone());
+    let mut metadata = update_browser_observation(state, session_id, observation.clone())?;
     if let Some(next_metadata) = append_replay_event(
         state,
         session_id,
@@ -2670,18 +2724,17 @@ fn update_browser_observation(
     state: &AppState,
     session_id: &str,
     observation: Value,
-) -> BrowserRunMetadata {
-    let mut metadata = browser_run_metadata(state, session_id);
+) -> Option<BrowserRunMetadata> {
+    let mut runs = state.browser_run_store.lock().ok()?;
+    let mut metadata = runs.get(session_id)?.clone();
     metadata.last_observation = Some(observation.clone());
     metadata.observation_history.push(observation);
     if metadata.observation_history.len() > MAX_BROWSER_TIMELINE_ENTRIES {
         let remove_count = metadata.observation_history.len() - MAX_BROWSER_TIMELINE_ENTRIES;
         metadata.observation_history.drain(0..remove_count);
     }
-    if let Ok(mut runs) = state.browser_run_store.lock() {
-        runs.insert(session_id.to_owned(), metadata.clone());
-    }
-    metadata
+    runs.insert(session_id.to_owned(), metadata.clone());
+    Some(metadata)
 }
 
 fn update_browser_tabs(
@@ -2765,6 +2818,126 @@ fn update_browser_control_mode(
     Some(next_metadata)
 }
 
+fn browser_run_owner_matches(
+    owner_user_id: &str,
+    owner_org_id: &str,
+    user_id: &str,
+    org_id: &str,
+) -> bool {
+    !owner_user_id.is_empty()
+        && !owner_org_id.is_empty()
+        && !user_id.is_empty()
+        && !org_id.is_empty()
+        && owner_user_id == user_id
+        && owner_org_id == org_id
+}
+
+async fn resolve_browser_run_owner(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Result<BrowserRunOwner, Response> {
+    let user_id = user.user_id.trim();
+    let org_id = authorized_org_id(state, user).await;
+    let org_id = org_id.trim();
+    if user_id.is_empty() || org_id.is_empty() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "browser_owner_unavailable",
+                "An authenticated organization is required for browser access.",
+            )),
+        )
+            .into_response());
+    }
+    Ok(BrowserRunOwner {
+        user_id: user_id.to_owned(),
+        org_id: org_id.to_owned(),
+    })
+}
+
+async fn owned_browser_run_metadata(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    run_id: &str,
+) -> Result<BrowserRunMetadata, Response> {
+    let owner = resolve_browser_run_owner(state, user).await?;
+    let runs = state.browser_run_store.lock().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "browser_store_unavailable",
+                "Browser run ownership could not be verified.",
+            )),
+        )
+            .into_response()
+    })?;
+    runs.get(run_id)
+        .filter(|metadata| {
+            browser_run_owner_matches(
+                &metadata.owner.user_id,
+                &metadata.owner.org_id,
+                &owner.user_id,
+                &owner.org_id,
+            )
+        })
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(error(
+                    "browser_session_not_found",
+                    "The browser session is not active.",
+                )),
+            )
+                .into_response()
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserRunStoreError {
+    Unavailable,
+    Conflict,
+}
+
+impl BrowserRunStoreError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "browser_store_unavailable",
+                    "Browser run ownership could not be recorded.",
+                )),
+            )
+                .into_response(),
+            Self::Conflict => (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "browser_run_conflict",
+                    "The browser run id is already active.",
+                )),
+            )
+                .into_response(),
+        }
+    }
+}
+
+fn store_browser_run_metadata(
+    state: &AppState,
+    run_id: &str,
+    metadata: BrowserRunMetadata,
+) -> Result<(), BrowserRunStoreError> {
+    let mut runs = state
+        .browser_run_store
+        .lock()
+        .map_err(|_| BrowserRunStoreError::Unavailable)?;
+    if runs.contains_key(run_id) {
+        return Err(BrowserRunStoreError::Conflict);
+    }
+    runs.insert(run_id.to_owned(), metadata);
+    Ok(())
+}
+
 fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadata {
     state
         .browser_run_store
@@ -2772,6 +2945,7 @@ fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadat
         .ok()
         .and_then(|runs| runs.get(session_id).cloned())
         .unwrap_or(BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: None,
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3205,6 +3379,316 @@ fn looks_like_json_payload(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn browser_run_owner_requires_exact_validated_user_and_org() {
+        assert!(browser_run_owner_matches(
+            "user-owner",
+            "org-owner",
+            "user-owner",
+            "org-owner"
+        ));
+        assert!(!browser_run_owner_matches(
+            "user-owner",
+            "org-owner",
+            "user-attacker",
+            "org-owner"
+        ));
+        assert!(!browser_run_owner_matches(
+            "user-owner",
+            "org-owner",
+            "user-owner",
+            "org-attacker"
+        ));
+        assert!(!browser_run_owner_matches(
+            "user-owner",
+            "org-owner",
+            "user-owner",
+            ""
+        ));
+    }
+
+    fn test_user(user_id: &str, org_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: user_id.to_owned(),
+            user_email: format!("{user_id}@example.test"),
+            user_name: user_id.to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: None,
+            active_org_id: Some(org_id.to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: org_id.to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_run_lookup_hides_metadata_from_wrong_user_or_org() {
+        let state = test_app_state();
+        let mut metadata = browser_run_metadata(&state, "missing");
+        metadata.owner = BrowserRunOwner {
+            user_id: "user-owner".to_owned(),
+            org_id: "org-owner".to_owned(),
+        };
+        metadata.last_observation = Some(json!({ "url": "https://private.example" }));
+        store_browser_run_metadata(&state, "run-owned", metadata).expect("store owned run");
+
+        let wrong_user = owned_browser_run_metadata(
+            &state,
+            &test_user("user-attacker", "org-owner"),
+            "run-owned",
+        )
+        .await
+        .expect_err("wrong user must not read run metadata");
+        let wrong_org = owned_browser_run_metadata(
+            &state,
+            &test_user("user-owner", "org-attacker"),
+            "run-owned",
+        )
+        .await
+        .expect_err("wrong org must not read run metadata");
+
+        assert_eq!(wrong_user.status(), StatusCode::NOT_FOUND);
+        assert_eq!(wrong_org.status(), StatusCode::NOT_FOUND);
+        assert!(owned_browser_run_metadata(
+            &state,
+            &test_user("user-owner", "org-owner"),
+            "run-owned"
+        )
+        .await
+        .is_ok());
+    }
+
+    #[test]
+    fn browser_run_store_never_overwrites_existing_owner() {
+        let state = test_app_state();
+        let mut owner_metadata = browser_run_metadata(&state, "missing");
+        owner_metadata.owner = BrowserRunOwner {
+            user_id: "user-owner".to_owned(),
+            org_id: "org-owner".to_owned(),
+        };
+        store_browser_run_metadata(&state, "run-owned", owner_metadata)
+            .expect("store original owner");
+
+        let mut attacker_metadata = browser_run_metadata(&state, "missing");
+        attacker_metadata.owner = BrowserRunOwner {
+            user_id: "user-attacker".to_owned(),
+            org_id: "org-attacker".to_owned(),
+        };
+        assert_eq!(
+            store_browser_run_metadata(&state, "run-owned", attacker_metadata),
+            Err(BrowserRunStoreError::Conflict)
+        );
+        assert_eq!(
+            browser_run_metadata(&state, "run-owned").owner.user_id,
+            "user-owner"
+        );
+    }
+
+    #[test]
+    fn browser_run_store_errors_are_fail_closed() {
+        assert_eq!(
+            BrowserRunStoreError::Unavailable.into_response().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            BrowserRunStoreError::Conflict.into_response().status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_run_owner_rejects_missing_validated_identity() {
+        let state = test_app_state();
+        let missing_user = resolve_browser_run_owner(&state, &test_user("", "org-owner"))
+            .await
+            .expect_err("blank user id must fail closed");
+        let missing_org = resolve_browser_run_owner(&state, &test_user("user-owner", " "))
+            .await
+            .expect_err("blank org id must fail closed");
+
+        assert_eq!(missing_user.status(), StatusCode::FORBIDDEN);
+        assert_eq!(missing_org.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn browser_run_store_poisoning_fails_closed() {
+        let state = test_app_state();
+        let store = state.browser_run_store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = store.lock().expect("acquire store before poisoning");
+            panic!("poison browser store for fail-closed test");
+        })
+        .join();
+
+        let lookup =
+            owned_browser_run_metadata(&state, &test_user("user-owner", "org-owner"), "run-owned")
+                .await
+                .expect_err("poisoned lookup must fail closed");
+        assert_eq!(lookup.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            store_browser_run_metadata(
+                &state,
+                "run-owned",
+                BrowserRunMetadata {
+                    owner: BrowserRunOwner {
+                        user_id: "user-owner".to_owned(),
+                        org_id: "org-owner".to_owned(),
+                    },
+                    ..browser_run_metadata(&test_app_state(), "missing")
+                }
+            ),
+            Err(BrowserRunStoreError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_http_operations_reject_wrong_owner_before_upstream_use() {
+        let state = test_app_state();
+        let mut metadata = browser_run_metadata(&state, "missing");
+        metadata.owner = BrowserRunOwner {
+            user_id: "user-owner".to_owned(),
+            org_id: "org-owner".to_owned(),
+        };
+        metadata.last_observation = Some(json!({ "url": "https://private.example" }));
+        store_browser_run_metadata(&state, "run-owned", metadata).expect("store owned run");
+
+        let attacker = test_user("user-attacker", "org-owner");
+        let headers = HeaderMap::new();
+        let responses = vec![
+            run_action(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Json(ActionBody {
+                    action: json!({ "type": "wait", "ms": 10 }),
+                    actor: BrowserActionActor::Human,
+                }),
+            )
+            .await,
+            set_control_mode(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                Path("run-owned".to_owned()),
+                Json(ControlBody {
+                    mode: BrowserControlMode::HumanTakeover,
+                }),
+            )
+            .await,
+            get_tabs(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+            )
+            .await,
+            new_tab(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Json(NewTabBody { url: None }),
+            )
+            .await,
+            tab_mutation(
+                state.clone(),
+                attacker.clone(),
+                headers.clone(),
+                "run-owned".to_owned(),
+                Some("tab-owned".to_owned()),
+                Method::POST,
+                "select",
+                None,
+            )
+            .await,
+            close_session(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+            )
+            .await,
+            suggest_action(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Json(SuggestActionBody {
+                    goal: "private goal".to_owned(),
+                    include_screenshot: false,
+                }),
+            )
+            .await,
+            start_ai_run(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Json(StartAiRunBody {
+                    goal: "private goal".to_owned(),
+                    allowed_domains: None,
+                    max_steps: None,
+                    max_runtime_s: None,
+                    stop_criteria: None,
+                    require_approval: None,
+                    max_cost_usd: None,
+                }),
+            )
+            .await,
+            control_ai_run(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Json(json!({ "action": "stop" })),
+            )
+            .await,
+            get_artifact(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path(("run-owned".to_owned(), "art_owned".to_owned())),
+            )
+            .await,
+            get_live_frame(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Query(FrameQuery {
+                    format: None,
+                    quality: None,
+                    max_width: None,
+                    max_height: None,
+                }),
+            )
+            .await,
+            stream_live_frames(
+                State(state.clone()),
+                Extension(attacker.clone()),
+                headers.clone(),
+                Path("run-owned".to_owned()),
+                Uri::from_static("/frames/stream"),
+            )
+            .await,
+            get_devtools_events(
+                State(state),
+                Extension(attacker),
+                headers,
+                Path("run-owned".to_owned()),
+                Uri::from_static("/devtools"),
+            )
+            .await,
+        ];
+
+        assert_eq!(responses.len(), 13);
+        assert!(responses
+            .iter()
+            .all(|response| response.status() == StatusCode::NOT_FOUND));
+    }
+
     fn test_app_state() -> AppState {
         let cache = crate::cache::ResultCache::disabled();
         AppState {
@@ -3214,6 +3698,8 @@ mod tests {
             enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
             session_core_url: "http://127.0.0.1:1".into(),
+            session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
+            user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
             cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
@@ -3234,11 +3720,11 @@ mod tests {
             wiki_store_url: "http://127.0.0.1:1".into(),
             embedding_engine_url: "http://127.0.0.1:1".into(),
             quickwit_adapter_url: "http://127.0.0.1:1".into(),
-            qdrant_url: "http://127.0.0.1:1".into(),
-            quickwit_url: "http://127.0.0.1:1".into(),
             finspo_core_url: "http://127.0.0.1:1".into(),
             imports_api_url: "http://127.0.0.1:1".into(),
             notification_core_url: "http://127.0.0.1:1".into(),
+            notification_core_service_token: "notification-test-secret-at-least-32-bytes".into(),
+            conversation_core_service_token: "conversation-test-secret-at-least-32-bytes".into(),
             information_core_url: "http://127.0.0.1:1".into(),
             conversation_core_url: "http://127.0.0.1:1".into(),
             social_core_url: "http://127.0.0.1:1".into(),
@@ -3477,6 +3963,7 @@ mod tests {
         // client requests. Real risk-based per-action gating is automatic
         // and does not depend on this flag at all.
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-1".to_owned()),
             profile_id: Some("prof_1".to_owned()),
             profile_scope: BrowserProfileScope::UserPrivate,
@@ -3513,6 +4000,7 @@ mod tests {
     #[test]
     fn build_ai_run_request_forwards_zdr_and_start_url_from_server_state() {
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-1".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3558,6 +4046,7 @@ mod tests {
         // Phase 5 `persistent_cookie_use` gate fire on every AI run, not
         // just genuine persistent-profile reuse.
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-1".to_owned()),
             profile_id: Some("prof_ephemeral_lease".to_owned()),
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3593,6 +4082,7 @@ mod tests {
             BrowserProfileScope::RunScoped,
         ] {
             let metadata = BrowserRunMetadata {
+                owner: BrowserRunOwner::default(),
                 lease_id: Some("lease-1".to_owned()),
                 profile_id: Some("prof_real".to_owned()),
                 profile_scope: scope,
@@ -3628,6 +4118,7 @@ mod tests {
     #[test]
     fn browser_response_includes_scoped_screenshot_frame_url() {
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-1".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3727,6 +4218,7 @@ mod tests {
     #[test]
     fn browser_response_includes_visual_observation_artifact_url() {
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: None,
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3800,6 +4292,7 @@ mod tests {
             false,
         );
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: None,
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3845,6 +4338,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_01";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: None,
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3903,6 +4397,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_agent_blocked";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: None,
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -3956,6 +4451,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_release";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-release".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -4042,6 +4538,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_02";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-1".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -4109,6 +4606,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_devtools";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-devtools".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -4184,6 +4682,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_frame";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-frame".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -4247,6 +4746,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_frame_stress";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-frame-stress".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -4319,6 +4819,7 @@ mod tests {
         let state = test_app_state();
         let session_id = "run_ws_devtools_stress";
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: Some("lease-devtools-stress".to_owned()),
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,
@@ -4432,6 +4933,7 @@ mod tests {
             .map(|index| json!({ "level": "info", "text": format!("line {index}") }))
             .collect();
         let metadata = BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
             lease_id: None,
             profile_id: None,
             profile_scope: BrowserProfileScope::Ephemeral,

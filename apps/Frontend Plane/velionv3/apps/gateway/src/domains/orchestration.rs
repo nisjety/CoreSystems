@@ -47,7 +47,10 @@ use serde_json::Value;
 
 use crate::{
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json},
+    domains::chat::shared::{
+        delegated_auth_unavailable, model_token, proxy_model_json_with_data_plane,
+        proxy_model_json_with_session, required_execution_token, required_session_token,
+    },
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
 };
@@ -118,9 +121,58 @@ async fn mg_get(
     headers: &HeaderMap,
     path: &str,
 ) -> (StatusCode, Json<Value>) {
+    mg_proxy(state, user, headers, Method::GET, path, None, false).await
+}
+
+fn requires_execution_delegation(path: &str) -> bool {
+    path.ends_with("/decide") || path.ends_with("/resume")
+}
+
+async fn mg_proxy(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    require_execution: bool,
+) -> (StatusCode, Json<Value>) {
     let token = model_token(state, user, headers).await;
+    let session = match required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error),
+    };
     let url = format!("{}{}", state.model_gateway_url, path);
-    proxy_model_json(state, Method::GET, &url, None, token.as_deref(), user).await
+    if require_execution {
+        let execution = match required_execution_token(state, user, headers).await {
+            Ok(token) => token,
+            Err(error) => return delegated_auth_unavailable(error),
+        };
+        return proxy_model_json_with_data_plane(
+            state,
+            method,
+            &url,
+            body,
+            token.as_deref(),
+            None,
+            None,
+            Some(&execution),
+            None,
+            Some(&session),
+            user,
+        )
+        .await;
+    }
+    proxy_model_json_with_session(
+        state,
+        method,
+        &url,
+        body,
+        token.as_deref(),
+        Some(&session),
+        user,
+    )
+    .await
 }
 
 /// Proxy a model-gateway orchestration POST with a JSON body (decisions).
@@ -131,15 +183,14 @@ async fn mg_post(
     path: &str,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
-    let token = model_token(state, user, headers).await;
-    let url = format!("{}{}", state.model_gateway_url, path);
-    proxy_model_json(
+    mg_proxy(
         state,
-        Method::POST,
-        &url,
-        Some(body),
-        token.as_deref(),
         user,
+        headers,
+        Method::POST,
+        path,
+        Some(body),
+        requires_execution_delegation(path),
     )
     .await
 }
@@ -151,9 +202,16 @@ async fn mg_post_empty(
     headers: &HeaderMap,
     path: &str,
 ) -> (StatusCode, Json<Value>) {
-    let token = model_token(state, user, headers).await;
-    let url = format!("{}{}", state.model_gateway_url, path);
-    proxy_model_json(state, Method::POST, &url, None, token.as_deref(), user).await
+    mg_proxy(
+        state,
+        user,
+        headers,
+        Method::POST,
+        path,
+        None,
+        requires_execution_delegation(path),
+    )
+    .await
 }
 
 fn enc(value: &str) -> String {
@@ -358,4 +416,25 @@ async fn cancel_run(
         &format!("/v1/orchestration/runs/{}/cancel", enc(&run_id)),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_execution_delegation;
+
+    #[test]
+    fn execution_delegation_is_required_only_for_execution_mutations() {
+        assert!(requires_execution_delegation(
+            "/v1/orchestration/approvals/apr-1/decide"
+        ));
+        assert!(requires_execution_delegation(
+            "/v1/orchestration/runs/run-1/resume"
+        ));
+        assert!(!requires_execution_delegation(
+            "/v1/orchestration/plans/plan-1/approve"
+        ));
+        assert!(!requires_execution_delegation(
+            "/v1/orchestration/runs/run-1/cancel"
+        ));
+    }
 }

@@ -19,6 +19,7 @@ pub(super) async fn upload_chat_document(
     body: Bytes,
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
+    let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -34,6 +35,12 @@ pub(super) async fn upload_chat_document(
 
     if let Some(t) = token {
         req = req.bearer_auth(t);
+    }
+    if let Some(value) = data_plane_token
+        .as_deref()
+        .and_then(shared::data_plane_authorization_value)
+    {
+        req = req.header("x-data-plane-authorization", value);
     }
 
     match req.body(body).send().await {

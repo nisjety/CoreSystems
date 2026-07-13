@@ -16,13 +16,35 @@ pub(super) async fn invoke_chat(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let execution_token = match shared::required_execution_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let cost_token = match shared::required_cost_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
     let url = format!("{}/v1/invoke", state.model_gateway_url);
-    shared::proxy_model_json(
+    shared::proxy_model_json_with_data_plane(
         &state,
         Method::POST,
         &url,
-        Some(body),
+        Some(shared::normalized_model_body(body, &headers)),
         token.as_deref(),
+        data_plane_token.as_deref(),
+        Some(&inference_token),
+        Some(&execution_token),
+        Some(&cost_token),
+        Some(&session_token),
         &user,
     )
     .await
@@ -50,12 +72,22 @@ pub(super) async fn get_thread_messages(
     Path(thread_id): Path<String>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    let session_token = shared::session_token(&state, &user, &headers).await;
     let url = format!(
         "{}/v1/threads/{}/messages",
         state.model_gateway_url,
         urlencoding::encode(&thread_id),
     );
-    shared::proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await
+    shared::proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await
 }
 
 pub(super) async fn list_models(

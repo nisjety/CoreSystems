@@ -327,11 +327,15 @@ async fn read_durable_threads(
     let Some(token) = shared::model_token(state, user, headers).await else {
         return Vec::new();
     };
+    let Some(session_token) = shared::session_token(state, user, headers).await else {
+        return Vec::new();
+    };
     let url = format!("{}/v1/threads?limit={MAX_THREADS}", state.model_gateway_url);
     let response = state
         .client
         .get(url)
         .bearer_auth(token)
+        .header("x-session-authorization", format!("Bearer {session_token}"))
         .header("x-user-id", &scope.user_id)
         .header("x-org-id", &scope.org_id)
         .send()

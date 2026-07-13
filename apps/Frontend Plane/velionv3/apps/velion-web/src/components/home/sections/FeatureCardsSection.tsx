@@ -6,56 +6,73 @@ import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ArrowButtonLabel } from "@/components/ui/ArrowButton";
 import { VelionComposerPreview } from "@/components/ui/VelionComposerPreview";
+import { FeatureCardDemo, type FeatureDemoKind } from "./FeatureCardDemos";
 
 gsap.registerPlugin(ScrollTrigger);
 
 // One tile in the 4-card grid that appears at the end of the pinned sequence.
 type WorkflowCard = {
+	background: string;
+	demo: FeatureDemoKind;
 	href: string;
-	image: string;
 	kicker: string;
 	link: string;
 	title: string;
 	text: string;
 };
 
-// The prompt the typing animation plays inside the composer overlay.
+// The prompt the typing animation plays inside the composer overlay. Its
+// four clauses order the four pillar cards below IN CARD ORDER (la agenten
+// svare -> Bygg, hent fakta fra systemene -> Koble, vis kildene -> Forstå,
+// spør oss før noe sendes -> Deleger), so the send -> reveal beat reads as
+// "the prompt's four asks, answered" — if you reword either side, keep the
+// 1:1 mapping or the payoff stops fitting the story.
 const promptText =
-	"Lag en løsning for dagens uløste kundesamtaler: svarutkast, kilder, prioritet og godkjenning.";
+	"Ta dagens uløste kundesamtaler: la agenten svare, hent fakta fra systemene, vis kildene — og spør oss før noe sendes.";
 
-// The 4 result cards revealed once the "send" beat completes.
+// The 4 result cards revealed once the "send" beat completes. Backgrounds
+// are light abstracts picked per claim (never dark chrome, never assets with
+// third-party text baked in — the earlier ice-six/black-gate/glass-hour picks
+// carried infographic text and stock watermarks): a soft form being shaped
+// from within (bygg), two translucent planes meeting at one seam (koble), a
+// warm signal surfacing between layered folds (forstå), and a lit route
+// running to its destination on its own (deleger).
 const workflowCards: WorkflowCard[] = [
 	{
-		href: "#kunnskap",
-		image: "/velion-product-shots/chat-draft-answer-top.png",
-		kicker: "Svar",
-		link: "Skriv utkast",
-		title: "Skriver utkast",
-		text: "Lager utkast til e-post, chat og meldinger med synlige kildespor før noe sendes.",
-	},
-	{
+		background: "/soft-orb.png",
+		demo: "build",
 		href: "#plattform",
-		image: "/velion-product-shots/dashboard-composer-prompt-state.png",
-		kicker: "Kunnskap",
-		link: "Samle kilder",
-		title: "Bygger kunnskap",
-		text: "Kobler til nettsider, dokumenter og integrasjoner, og bygger et arbeidsminne mennesker kan inspisere.",
+		kicker: "Bygg Velion",
+		link: "Lag en agent",
+		title: "Bygg Velion",
+		text: "Lag chatboter, agenter og modelloppsett rundt egne retningslinjer, tone og data — helt til modeller finjustert for dere.",
 	},
 	{
+		background: "/glass-edge.png",
+		demo: "connect",
 		href: "#produksjon",
-		image: "/velion-product-shots/chat-agent-steps.png",
-		kicker: "Styr",
-		link: "Vurder hastegrad",
-		title: "Ruter risiko",
-		text: "Finner trege saker, klassifiserer hastegrad og spør riktig menneske før eskalering.",
+		kicker: "Koble arbeidet",
+		link: "Koble til et system",
+		title: "Koble arbeidet",
+		text: "Samle sporing, innboks, netthandel og sosiale kanaler ett sted, så Velion kan hente neste nyttige fakta.",
 	},
 	{
+		background: "/81a7cb4f6c7c68fde7a491060dd90e1f.jpg",
+		demo: "understand",
+		href: "#kunnskap",
+		kicker: "Forstå",
+		link: "Se kildene",
+		title: "Forstå",
+		text: "Søk privat med Velions egen søkemotor, samle valgte kunnskapskilder, og se hva Velion vet om selskapet deres.",
+	},
+	{
+		background: "/0c49ef4d22d3f1ad1b49e59e374e1921.jpg",
+		demo: "delegate",
 		href: "/trust",
-		image: "/velion-product-shots/inbox-empty-workspace.png",
-		kicker: "Spor",
-		link: "Revider handling",
-		title: "Reviderer alt",
-		text: "Registrerer godkjenninger, policy-sjekker, koblingsstatus og tilbakerulling for hver arbeidsflyt.",
+		kicker: "Deleger",
+		link: "Se kontrollene",
+		title: "Deleger",
+		text: "Planlegg arbeid, automatiser innenfor policy, og behold godkjenning, revisjon og tilbakerulling i synsfeltet.",
 	},
 ];
 
@@ -76,21 +93,30 @@ function FeatureIntro() {
 
 			{/* Eyebrow + heading + subtext. Children are staggered in by introTimeline. */}
 			<div
-				className="absolute left-1/2 top-[clamp(120px,15vh,168px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
+				className="absolute left-1/2 top-[clamp(90px,10vh,138px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
 				data-feature-copy=""
 			>
 				<p className="mb-4 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-velion-j-text/38">
-					Forankret handling
+					Velion-arbeidsflyten
 				</p>
 
 				<h2 className="m-0 font-arbeit text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-velion-j-text">
 					Tenking, satt i arbeid
 				</h2>
 
-				<p className="mx-auto mt-4 max-w-[540px] font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-velion-text-muted">
-					Ett kundesignal kan bli et svar, en rute, en policy-sjekk og
-					en revidert handling — alt med kildene synlige.
+				<p className="mx-auto mt-4 max-w-[650px] font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-velion-text-muted">
+					Ett kundesignal blir til en arbeidsflyt: Velion bruker agenten dere har formet, henter fakta fra systemene deres, viser kildene bak svaret – og lar et menneske godkjenne før noe skjer.
 				</p>
+
+				<div aria-label="Signal, kontekst, forslag, godkjenning" className="mx-auto mt-6 flex max-w-[650px] flex-wrap items-center justify-center gap-x-2 gap-y-2 font-protokoll text-[0.64rem] font-medium uppercase tracking-[0.18em] text-velion-j-text/48">
+					<span>Signal</span>
+					<span aria-hidden="true" className="text-velion-coral/70">→</span>
+					<span>Kontekst</span>
+					<span aria-hidden="true" className="text-velion-coral/70">→</span>
+					<span>Forslag</span>
+					<span aria-hidden="true" className="text-velion-coral/70">→</span>
+					<span>Godkjenning</span>
+				</div>
 			</div>
 		</div>
 	);
@@ -126,7 +152,7 @@ function FeatureSourceCard() {
 					className="object-cover opacity-70 saturate-[0.72]"
 					fill
 					sizes="260px"
-					src="/velion-vibe/human-haze.png"
+					src="/human-haze.png"
 				/>
 			</div>
 
@@ -152,7 +178,7 @@ function FeatureSourceCard() {
 function FeaturePromptComposer() {
 	return (
 		<div
-			className="absolute left-1/2 top-[calc(clamp(330px,40vh,420px)_+_min(32vh,320px)_+_20px)] z-40 w-[min(91vw,880px)] origin-top -translate-x-1/2 opacity-0 max-[899px]:hidden"
+			className="absolute left-1/2 top-[calc(clamp(330px,40vh,420px)_+_min(32vh,320px)_+_20px_-_5vh)] z-40 w-[min(91vw,880px)] origin-top -translate-x-1/2 opacity-0 max-[899px]:hidden"
 			data-feature-prompt=""
 		>
 			<VelionComposerPreview animateCharacters prompt={promptText} />
@@ -166,9 +192,11 @@ function FeaturePromptComposer() {
 function FeatureOutputCard({
 	animated = true,
 	card,
+	index,
 }: {
 	animated?: boolean;
 	card: WorkflowCard;
+	index: number;
 }) {
 	return (
 		<a
@@ -177,30 +205,43 @@ function FeatureOutputCard({
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
+			{/* Step number, not "Velion-resultat": these are the four surfaces
+			    the signal passes through in order (bygg -> koble -> forstå ->
+			    deleger), not four outputs of the prompt — numbering sells the
+			    pipeline reading and matches the site's "01 / …" eyebrows. */}
 			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-velion-j-text/42">
 				<span className="flex items-center gap-1">
 					<span className="size-[5px] rounded-full bg-velion-coral/70" />
 					{card.kicker}
 				</span>
-				<span>Velion-resultat</span>
+				<span>{`0${index + 1} / 04`}</span>
 			</div>
 
-			<div className="relative aspect-[3/4] overflow-hidden border border-velion-j-text/8 bg-white/55 shadow-[0_10px_28px_rgba(23,23,23,0.035)]">
+			<div className="relative aspect-[3/4] overflow-hidden border border-velion-j-text/8 bg-[#f8f8f7] shadow-[0_10px_28px_rgba(23,23,23,0.035)]">
 				<Image
 					alt=""
-					className="select-none object-cover opacity-[0.76] saturate-[0.72] transition-transform duration-700 group-hover:scale-[1.035]"
+					className="select-none object-cover opacity-95 saturate-[0.88] transition-transform duration-700 group-hover:scale-[1.035]"
 					draggable={false}
 					fill
 					sizes="(max-width: 899px) 92vw, 22vw"
-					src={card.image}
+					src={card.background}
 				/>
 
-				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.08),rgba(248,248,247,0.72))]" />
+				{/* Airy white veil (not a dark scrim): keeps the abstract visible
+				    while carrying dark demo/title text — taito's photo-under-glass
+				    treatment in Velion's own light material. */}
+				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.22),rgba(248,248,247,0.60)_58%,rgba(248,248,247,0.82))]" />
 
-				<div className="absolute bottom-4 left-4 right-4">
+				<div className="absolute inset-3 flex flex-col justify-between sm:inset-4">
+					<div aria-hidden="true" className="mx-auto w-full max-w-[300px]">
+						<FeatureCardDemo demo={card.demo} />
+					</div>
+
+					<div className="mt-auto pt-4">
 					<h3 className="m-0 font-arbeit text-[clamp(1.45rem,2vw,2.2rem)] font-light leading-[1.04] tracking-[-0.055em] text-velion-j-text">
 						{card.title}
 					</h3>
+					</div>
 				</div>
 			</div>
 
@@ -225,8 +266,8 @@ function FeatureOutputStage() {
 			className="absolute bottom-[clamp(30px,7vh,45px)] left-1/2 z-40 grid w-[min(90vw,1440px,max(700px,calc(214svh_-_706px)))] -translate-x-1/2 grid-cols-4 gap-[clamp(12px,1.25vw,22px)] opacity-0 max-[899px]:hidden"
 			data-feature-output-stage=""
 		>
-			{workflowCards.map((card) => (
-				<FeatureOutputCard card={card} key={card.title} />
+			{workflowCards.map((card, index) => (
+				<FeatureOutputCard card={card} index={index} key={card.title} />
 			))}
 		</div>
 	);
@@ -241,7 +282,7 @@ function FeatureMobileFallback() {
 		<div className="hidden max-[899px]:grid max-[899px]:gap-10 max-[899px]:pt-10">
 			<div className="text-center">
 				<p className="mb-4 font-protokoll text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-velion-j-text/38">
-					Forankret handling
+					Velion-arbeidsflyten
 				</p>
 
 				<h2 className="m-0 font-arbeit text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-velion-j-text">
@@ -249,9 +290,18 @@ function FeatureMobileFallback() {
 				</h2>
 
 				<p className="mx-auto mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-velion-text-muted">
-					Velion samler kilder, lager forslag og viser hva som må
-					godkjennes før noe skjer ute hos kunden.
+					Ett kundesignal blir til en arbeidsflyt: Velion bruker agenten dere har formet, henter fakta fra systemene deres, viser kildene bak svaret – og lar et menneske godkjenne før noe skjer.
 				</p>
+
+				<div aria-label="Signal, kontekst, forslag, godkjenning" className="mx-auto mt-5 flex max-w-[34rem] flex-wrap items-center justify-center gap-x-2 gap-y-2 font-protokoll text-[0.62rem] font-medium uppercase tracking-[0.15em] text-velion-j-text/48">
+					<span>Signal</span>
+					<span aria-hidden="true" className="text-velion-coral/70">→</span>
+					<span>Kontekst</span>
+					<span aria-hidden="true" className="text-velion-coral/70">→</span>
+					<span>Forslag</span>
+					<span aria-hidden="true" className="text-velion-coral/70">→</span>
+					<span>Godkjenning</span>
+				</div>
 			</div>
 
 			<div className="mx-auto grid w-full max-w-[760px] gap-8">
@@ -261,7 +311,7 @@ function FeatureMobileFallback() {
 						className="object-cover opacity-70 saturate-[0.72]"
 						fill
 						sizes="72vw"
-						src="/velion-vibe/human-haze.png"
+						src="/human-haze.png"
 					/>
 				</div>
 
@@ -269,10 +319,11 @@ function FeatureMobileFallback() {
 			</div>
 
 			<div className="grid gap-8">
-				{workflowCards.map((card) => (
+				{workflowCards.map((card, index) => (
 					<FeatureOutputCard
 						animated={false}
 						card={card}
+						index={index}
 						key={card.title}
 					/>
 				))}

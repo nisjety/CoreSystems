@@ -1,11 +1,9 @@
 //! Live Data Plane v2 diagnostics for the Knowledge surface.
 //!
 //! Rust port of velionv2's `loadKnowledgeDiagnostics`. Probes the readiness of
-//! every Data Plane v2 service the knowledge stack depends on, lists the Qdrant
-//! vector collections and Quickwit indexes that back retrieval, and derives the
-//! object-storage (MinIO) health from Quickwit's `s3://` index URIs — MinIO is
-//! `dpv2-net`-only and not reachable from the gateway, so it is checked
-//! indirectly exactly as v2 did.
+//! every Data Plane v2 service the knowledge stack depends on. Storage health is
+//! derived only from those service contracts; Qdrant, Quickwit, and MinIO remain
+//! private to `dpv2-net` and are never exposed to the frontend plane.
 
 use std::time::Duration;
 
@@ -33,17 +31,13 @@ pub(super) async fn load_diagnostics(
     let graph_url = format!("{}/readyz", state.graph_index_url);
     let wiki_url = format!("{}/readyz", state.wiki_store_url);
     let quickwit_adapter_url = format!("{}/readyz", state.quickwit_adapter_url);
-    let qdrant_url = format!("{}/collections", state.qdrant_url);
-    let quickwit_url = format!("{}/api/v1/indexes", state.quickwit_url);
-    let (documents, retrieval, embedding, graph, wiki, quickwit_adapter, qdrant, quickwit) = tokio::join!(
+    let (documents, retrieval, embedding, graph, wiki, quickwit_adapter) = tokio::join!(
         probe(state, &documents_url),
         probe(state, &retrieval_url),
         probe(state, &embedding_url),
         probe(state, &graph_url),
         probe(state, &wiki_url),
         probe(state, &quickwit_adapter_url),
-        probe(state, &qdrant_url),
-        probe(state, &quickwit_url),
     );
 
     let documents_ready = is_ready(&documents);
@@ -68,11 +62,8 @@ pub(super) async fn load_diagnostics(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let vector_collections = qdrant_collections(&qdrant);
-    let quickwit_indexes = quickwit_index_ids(&quickwit);
-    let quickwit_minio_backed = quickwit_index_uris(&quickwit)
-        .iter()
-        .any(|u| u.starts_with("s3://"));
+    let vector_collections: Vec<String> = Vec::new();
+    let quickwit_indexes = quickwit_adapter_index_ids(&quickwit_adapter);
 
     let services = json!([
         service_item(
@@ -101,8 +92,12 @@ pub(super) async fn load_diagnostics(
             "Embedding engine",
             embedding_ready,
             &format!(
-                "{} vector collections are provisioned in Qdrant.",
-                format_count(vector_collections.len() as i64)
+                "Qdrant dependency is {} through retrieval-engine readiness.",
+                if qdrant_check {
+                    "healthy"
+                } else {
+                    "unconfirmed"
+                }
             ),
             "embedding-engine readyz did not confirm a healthy status.",
             &service_label(&embedding, "embedding-engine-rs"),
@@ -144,11 +139,8 @@ pub(super) async fn load_diagnostics(
         capability_item(
             "embedding-system",
             "Embedding system",
-            embedding_ready && !vector_collections.is_empty(),
-            &format!(
-                "Dense embeddings indexed across {} collections.",
-                format_count(vector_collections.len() as i64)
-            ),
+            embedding_ready && qdrant_check,
+            "Dense embeddings and the Qdrant dependency are confirmed through Data Plane readiness.",
             "Embedding pipeline is not confirmed online.",
         ),
         capability_item(
@@ -193,14 +185,15 @@ pub(super) async fn load_diagnostics(
         ),
     ]);
 
-    let storage = json!([
+    let storage =
+        json!([
         storage_item(
             "qdrant",
             "Qdrant vectors",
-            qdrant_check && !vector_collections.is_empty(),
-            &format!("Collections include {}.", join_names(&vector_collections, 3)),
-            "Vector collections could not be confirmed from Qdrant.",
-            &format!("{} collections", format_count(vector_collections.len() as i64)),
+            qdrant_check,
+            "retrieval-engine readiness confirms its private Qdrant dependency.",
+            "Qdrant could not be confirmed through the retrieval contract.",
+            "contract check",
         ),
         storage_item(
             "quickwit",
@@ -213,10 +206,10 @@ pub(super) async fn load_diagnostics(
         storage_item(
             "minio",
             "MinIO object storage",
-            quickwit_minio_backed,
-            "Quickwit indexes are mounted under s3://quickwit through the MinIO-backed object store.",
-            "MinIO or its Quickwit backing path could not be confirmed from the live runtime.",
-            "s3://quickwit",
+            false,
+            "MinIO is healthy through a Data Plane service contract.",
+            "MinIO is private to Data Plane and no scoped storage-health contract is available.",
+            "private backend",
         ),
     ]);
 
@@ -226,7 +219,6 @@ pub(super) async fn load_diagnostics(
         || graph_ready
         || wiki_ready
         || quickwit_adapter_ready
-        || !vector_collections.is_empty()
         || input.document_count > 0
         || input.indexed_count > 0;
 
@@ -301,57 +293,15 @@ fn service_label(probe: &Probe, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
-fn qdrant_collections(probe: &Probe) -> Vec<String> {
-    let Some(body) = &probe.body else {
-        return vec![];
-    };
-    body.get("result")
-        .and_then(|r| r.get("collections"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.get("name").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn quickwit_index_records(probe: &Probe) -> Vec<&Value> {
+fn quickwit_adapter_index_ids(probe: &Probe) -> Vec<String> {
     probe
         .body
         .as_ref()
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().collect())
+        .and_then(|body| body.get("index"))
+        .and_then(Value::as_str)
+        .filter(|index| !index.is_empty())
+        .map(|index| vec![index.to_owned()])
         .unwrap_or_default()
-}
-
-fn quickwit_index_ids(probe: &Probe) -> Vec<String> {
-    quickwit_index_records(probe)
-        .into_iter()
-        .filter_map(|record| {
-            record
-                .get("index_config")
-                .and_then(|c| c.get("index_id"))
-                .or_else(|| record.get("index_id"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect()
-}
-
-fn quickwit_index_uris(probe: &Probe) -> Vec<String> {
-    quickwit_index_records(probe)
-        .into_iter()
-        .filter_map(|record| {
-            record
-                .get("index_config")
-                .and_then(|c| c.get("index_uri"))
-                .or_else(|| record.get("index_uri"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect()
 }
 
 // ── Item builders ────────────────────────────────────────────────────────
@@ -440,5 +390,34 @@ fn format_count(value: i64) -> String {
         format!("-{grouped}")
     } else {
         grouped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_quickwit_index_from_adapter_contract() {
+        let probe = Probe {
+            status: 200,
+            body: Some(json!({
+                "status": "ready",
+                "service": "quickwit-adapter-rs",
+                "index": "dataplane-corpus"
+            })),
+        };
+
+        assert_eq!(quickwit_adapter_index_ids(&probe), vec!["dataplane-corpus"]);
+    }
+
+    #[test]
+    fn missing_adapter_index_is_honestly_empty() {
+        let probe = Probe {
+            status: 503,
+            body: Some(json!({"status": "not_ready"})),
+        };
+
+        assert!(quickwit_adapter_index_ids(&probe).is_empty());
     }
 }

@@ -26,32 +26,33 @@ type SenseChapter = {
 const chapters: SenseChapter[] = [
 	{
 		id: "connect",
-		subtitle: "Kilder",
-		titleLines: ["Kunnskapen", "kommer frem."],
-		text: "Velion kobler til nettsider, dokumenter, innboks-historikk, integrasjoner og offentlige registre. Den henter dem ikke bare inn - den bygger et arbeidsminne mennesker kan inspisere, korrigere og bruke.",
-		highlight: "inspisere, korrigere og bruke",
-		image: "/velion-vibe/mist-bloom.png",
+		subtitle: "Felles kontekst",
+		titleLines: ["Felles kontekst,", "før neste", "overlevering."],
+		text: "Velion samler historikken, kunnskapen og det som må skje videre.",
+		highlight: "det som må skje videre",
+		image: "/3-guys-working.jpg",
 		imageAlt:
-			"Lys abstrakt flate med rolige lag som symboliserer samlet kunnskap.",
+			"Tre kolleger arbeider sammen ved et bord, som symboliserer systemene og menneskene Velion samler rundt arbeidet.",
 	},
 	{
 		id: "trace",
-		subtitle: "Spor",
-		titleLines: ["Alt kan", "ettergås."],
-		text: "Når arbeideren skriver et utkast, holder grensesnittet kildesporet synlig: tekstutdrag, policyer, koblingsstatus og handlingen den ber om tillatelse til å utføre.",
-		highlight: "kildesporet synlig",
-		image: "/velion-product-shots/chat-agent-steps.png",
-		imageAlt: "Velion-grensesnitt med agentsteg og forklarbar arbeidsflyt.",
+		subtitle: "Forklaring",
+		titleLines: ["Se hvorfor", "det ble", "foreslått."],
+		text: "Åpne kilden, utdraget, tidspunktet og policyen bak forslaget. Dere ser hva som er sikkert, hva som mangler og hvorfor Velion ber om neste steg.",
+		highlight: "hvorfor Velion ber om neste steg",
+		image: "/aruc-launcher-after.jpg",
+		imageAlt:
+			"Et øye med kodelinjer reflektert i glasset, som symboliserer etterprøvbar innsikt.",
 	},
 	{
 		id: "operate",
 		subtitle: "Kontroll",
-		titleLines: ["Fra modell", "til operativ flate."],
-		text: "Kunnskap er ikke gjemt bak modellen. Den blir en kontrollert arbeidsflate der svar, godkjenninger og neste handling kan bevege seg uten at mennesket mister oversikten.",
-		highlight: "kontrollert arbeidsflate",
-		image: "/velion-product-shots/dashboard-overview-desktop.png",
+		titleLines: ["Deleger", "arbeidet.", "Behold kontrollen."],
+		text: "La Velion forberede, følge opp og utføre arbeidet dere har gitt tillatelse til. Før noe sendes eller endres, kan dere godkjenne, revidere eller rulle tilbake.",
+		highlight: "godkjenne, revidere eller rulle tilbake",
+		image: "/man-talking-and-delegating.jpg",
 		imageAlt:
-			"Velion dashboard som viser oversikt, agentarbeid og kundekontekst.",
+			"En person forklarer og peker, som symboliserer menneskelig vurdering og kontroll over delegert arbeid.",
 	},
 ];
 
@@ -93,6 +94,114 @@ function SensesGrid() {
 			<div className="absolute inset-y-0 left-[var(--velion-edge)] right-[var(--velion-edge)] max-[760px]:left-[var(--velion-page-pad)] max-[760px]:right-[var(--velion-page-pad)]">
 				<span className="absolute inset-y-0 left-0 w-px bg-current" />
 				<span className="absolute inset-y-0 right-0 w-px bg-current" />
+			</div>
+		</div>
+	);
+}
+
+function SourcePill({
+	label,
+	src,
+}: {
+	label: string;
+	src: string;
+}) {
+	return (
+		<span
+			aria-label={label}
+			className="inline-grid h-8 place-items-center rounded-[10px] border border-velion-j-text/10 bg-white/92 px-2 shadow-[0_4px_12px_rgba(23,23,23,0.05)]"
+			role="img"
+			title={label}
+		>
+			<span className="grid size-5 shrink-0 place-items-center bg-white p-px">
+				<Image
+					alt=""
+					aria-hidden="true"
+					className="max-h-full max-w-full object-contain"
+					height={20}
+					src={src}
+					width={20}
+				/>
+			</span>
+		</span>
+	);
+}
+
+const contextSources = [
+	{ label: "Outlook", src: "/brand-logos/outlook.svg" },
+	{ label: "Slack", src: "/brand-logos/slack.svg" },
+	{ label: "Notion", src: "/brand-logos/notion.svg" },
+	{ label: "Microsoft 365", src: "/brand-logos/microsoft-365.svg" },
+	{ label: "Microsoft Teams", src: "/brand-logos/teams.svg" },
+	{ label: "LinkedIn", src: "/brand-logos/linkedin.svg" },
+	{
+		label: "Google Workspace",
+		src: "/brand-logos/google.svg",
+	},
+	{ label: "Meta", src: "/brand-logos/meta.svg" },
+];
+
+function SenseMediaOverlay({ chapterId }: { chapterId: SenseChapter["id"] }) {
+	if (chapterId === "connect") {
+		return (
+			<div className="absolute inset-x-3 bottom-3 z-[2] rounded-[18px] border border-white/72 bg-white/84 p-3 shadow-[0_18px_38px_rgba(23,23,23,0.14)] backdrop-blur-md sm:inset-x-5 sm:bottom-5 sm:p-4">
+				<p className="m-0 font-protokoll text-[8px] font-medium uppercase tracking-[0.16em] text-velion-j-text/45">
+					Kontekst rundt oppgaven
+				</p>
+				<p className="m-0 mt-1.5 font-arbeit text-[clamp(0.95rem,1.4vw,1.22rem)] leading-[1.08] tracking-[-0.035em] text-velion-j-text">
+					Klar for neste overlevering
+				</p>
+				<div className="mt-3 flex flex-wrap gap-1.5">
+					{contextSources.map((source) => (
+						<SourcePill key={source.label} {...source} />
+					))}
+				</div>
+			</div>
+		);
+	}
+
+	if (chapterId === "trace") {
+		return (
+			<div className="absolute inset-x-3 bottom-3 z-[2] rounded-[18px] border border-white/72 bg-white/88 p-3 shadow-[0_18px_38px_rgba(23,23,23,0.16)] backdrop-blur-md sm:inset-x-5 sm:bottom-5 sm:p-4">
+				<div className="flex items-start justify-between gap-3">
+					<div>
+						<p className="m-0 font-protokoll text-[8px] font-medium uppercase tracking-[0.16em] text-velion-j-text/45">
+							Forslaget er dokumentert
+						</p>
+						<p className="m-0 mt-1 font-arbeit text-[clamp(0.9rem,1.35vw,1.16rem)] leading-[1.08] tracking-[-0.03em] text-velion-j-text">
+							Retur innen 30 dager
+						</p>
+					</div>
+					<span className="rounded-full bg-emerald-500/12 px-2 py-1 font-protokoll text-[8px] font-medium text-emerald-800">
+						Høy sikkerhet
+					</span>
+				</div>
+				<div className="mt-3 grid gap-1.5 font-protokoll text-[8px] text-velion-j-text/60">
+					<p className="m-0 rounded-lg bg-velion-j-text/[0.045] px-2 py-1.5">Kilde: Returpolicy 04 · oppdatert i går</p>
+					<p className="m-0 rounded-lg bg-velion-j-text/[0.045] px-2 py-1.5">Policy samsvarer med ordre og kundestatus</p>
+				</div>
+			</div>
+		);
+	}
+
+	return (
+		<div className="absolute inset-x-3 bottom-3 z-[2] rounded-[18px] border border-white/72 bg-white/88 p-3 shadow-[0_18px_38px_rgba(23,23,23,0.14)] backdrop-blur-md sm:inset-x-5 sm:bottom-5 sm:p-4">
+			<div className="flex items-start justify-between gap-3">
+				<div>
+					<p className="m-0 font-protokoll text-[8px] font-medium uppercase tracking-[0.16em] text-velion-j-text/45">
+						Foreslått handling
+					</p>
+					<p className="m-0 mt-1 font-arbeit text-[clamp(0.9rem,1.35vw,1.16rem)] leading-[1.08] tracking-[-0.03em] text-velion-j-text">
+						Send oppfølging til kunden
+					</p>
+				</div>
+				<span className="rounded-full bg-velion-coral/14 px-2 py-1 font-protokoll text-[8px] font-medium text-velion-coral">
+					Venter på dere
+				</span>
+			</div>
+			<div className="mt-3 flex items-center justify-between gap-2 font-protokoll text-[8px]">
+				<span className="text-velion-j-text/54">Kan revideres og rulles tilbake</span>
+				<span className="rounded-full bg-velion-j-text px-2.5 py-1.5 font-medium text-white">Godkjenn</span>
 			</div>
 		</div>
 	);
@@ -332,14 +441,15 @@ export function SensesSection() {
 			>
 				<SensesGrid />
 
-				{/* "02 / Kunnskap" section eyebrow, above the chapter list. */}
-				<div className="relative z-10 px-[var(--velion-edge)] pb-[clamp(28px,4vw,64px)] pt-[clamp(82px,9vw,132px)] max-[760px]:px-[var(--velion-page-pad)]">
+				{/* The section promise is intentionally adoption-led, not a generic
+				    knowledge claim: Velion works with the systems people already know. */}
+				<div className="relative z-10 px-[var(--velion-edge)] pb-[clamp(28px,4vw,64px)] pt-[clamp(104px,11vw,154px)] max-[760px]:px-[var(--velion-page-pad)]">
 					<span className="velion-eyebrow block text-[color-mix(in_srgb,var(--velion-a-earth)_72%,var(--velion-j-text))]">
-						02 / Kunnskap
+						02 / Dere trenger ikke å bytte ut verden deres for å bruke Velion
 					</span>
 				</div>
 
-				<ul className="relative z-10 m-0 flex list-none flex-col gap-0 p-0 pb-[clamp(80px,10vw,180px)] lg:pb-[clamp(96px,12vw,220px)]">
+				<ul className="relative z-10 m-0 flex list-none flex-col gap-0 p-0">
 					{chapters.map((chapter, index) => {
 						// Chapters alternate which side the image sits on
 						// (left/right) as you scroll down the list.
@@ -381,7 +491,7 @@ export function SensesSection() {
 											{chapter.subtitle}
 										</p>
 
-										<h2 className="m-0 max-w-[12ch] py-2 font-arbeit text-[clamp(2.65rem,5.4vw,6.8rem)] font-light leading-[0.9] tracking-[-0.068em] text-velion-j-text text-balance max-lg:max-w-[10ch] max-lg:text-[clamp(2.55rem,14vw,4.8rem)]">
+										<h2 className="m-0 max-w-[14ch] py-2 font-arbeit text-[clamp(2.65rem,5.4vw,6.8rem)] font-light leading-[0.9] tracking-[-0.068em] text-velion-j-text text-balance max-lg:max-w-[11ch] max-lg:text-[clamp(2.55rem,14vw,4.8rem)]">
 											{chapter.titleLines.map((line) => (
 												<span
 													className="block"
@@ -440,11 +550,8 @@ export function SensesSection() {
 												sizes="(max-width: 1024px) 88vw, 33vw"
 												src={chapter.image}
 											/>
-											<span
-												aria-hidden="true"
-												className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.1),rgba(248,248,247,0.34)),radial-gradient(circle_at_68%_24%,rgba(238,122,80,0.12),transparent_28%)]"
-											/>
 										</div>
+										<SenseMediaOverlay chapterId={chapter.id} />
 									</div>
 									{/* Thin vertical rule along the image's inner edge (desktop only). */}
 									<span
@@ -464,6 +571,12 @@ export function SensesSection() {
 						);
 					})}
 				</ul>
+
+				<div className="relative z-10 flex justify-end px-[var(--velion-edge)] pb-[clamp(96px,12vw,220px)] pt-[clamp(52px,6vw,96px)] max-[760px]:px-[var(--velion-page-pad)]">
+					<p className="m-0 max-w-[540px] text-right font-arbeit text-[clamp(1rem,1.06vw,1.22rem)] font-light leading-[1.62] tracking-[-0.02em] text-velion-j-text/66 text-pretty">
+						Mindre leting. Færre avbrudd. Mer ro i arbeidet.
+					</p>
+				</div>
 			</div>
 		</Section>
 	);

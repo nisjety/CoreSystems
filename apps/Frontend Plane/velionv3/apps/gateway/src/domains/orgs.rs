@@ -18,6 +18,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/orgs/switch-active",
             post(switch::switch_active_org),
         )
+        .route(
+            "/api/v1/orgs/invitations/:invitation_id/accept",
+            post(members::accept_invitation),
+        )
         // Org info
         .route("/api/v1/orgs/:id", get(info::get_org))
         .route(

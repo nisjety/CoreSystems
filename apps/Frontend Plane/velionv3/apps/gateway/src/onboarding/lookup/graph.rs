@@ -3,35 +3,45 @@ use std::collections::HashSet;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
     contracts::{GraphCounts, GraphPreviewQuery, GraphPreviewResponse, PreviewEdge, PreviewNode},
-    envelope::{ok, unwrap_data},
+    envelope::{error, ok, unwrap_data},
+    middleware::AuthenticatedUser,
+    upstream::authorized_org_id,
 };
 
 pub(crate) async fn graph_preview(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<GraphPreviewQuery>,
 ) -> (StatusCode, Json<Value>) {
-    if query.org_id.trim().is_empty() {
-        return empty_graph_response();
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.is_empty() || query.org_id.trim() != org_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "The requested organization is not authorized for this session.",
+            )),
+        );
     }
 
     let url = format!(
         "{}/v1/graphs/{}?limit_nodes=2000&limit_edges=8000",
         state.graph_index_url,
-        urlencoding::encode(query.org_id.trim())
+        urlencoding::encode(&org_id)
     );
 
     let response = state
         .client
         .get(url)
         .header("x-internal-api-key", &state.internal_api_key)
-        .header("x-org-id", query.org_id.trim())
+        .header("x-org-id", &org_id)
         .send()
         .await;
 

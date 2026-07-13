@@ -138,6 +138,179 @@ describe('PaywallStep', () => {
     expect(screen.getByText('10 tilkoblede kilder')).toBeTruthy()
   })
 
+  it('keeps enterprise recommendation copy aligned with the Custom plan and source counts', () => {
+    render(() => (
+      <PaywallStep
+        activePlanId="enterprise"
+        checkoutReturnUrl="https://velion.test/onboarding"
+        identity={{
+          orgName: 'AQUATIQ AS',
+          connectedSourceCount: 10,
+          sourceCount: 11,
+          employeeCount: 93,
+        }}
+        loadingRecommendation={false}
+        recommendation={{
+          planId: 'enterprise',
+          reason: 'Kompleksitet, volum eller governance-signaler peker mot Enterprise.',
+          summary: '11 kilder og 93 ansatte gir best start med Enterprise.',
+          proofPoints: ['10 tilkoblede kilder valgt.', 'Brreg eller brukeren oppga 93 ansatte.'],
+          scopeSignals: [],
+          opportunities: [],
+          generatedAt: '2026-07-10T10:00:00.000Z',
+          source: 'local',
+        }}
+        onConfirmCheckout={vi.fn()}
+        onCommitPlan={vi.fn()}
+        onSelectPlan={vi.fn()}
+      />
+    ))
+
+    expect(screen.getByText('Custom anbefales')).toBeTruthy()
+    expect(screen.getByText('11 kilder totalt (10 tilkoblede) og 93 ansatte gir best start med Custom.')).toBeTruthy()
+    expect(screen.getByText('Kompleksitet, volum eller governance-signaler peker mot Custom.')).toBeTruthy()
+    expect(screen.queryByText(/Enterprise/)).toBeNull()
+  })
+
+  it('keeps source counts explicit when employee count is unknown', () => {
+    render(() => (
+      <PaywallStep
+        activePlanId="enterprise"
+        checkoutReturnUrl="https://velion.test/onboarding"
+        identity={{ connectedSourceCount: 10, sourceCount: 11 }}
+        loadingRecommendation={false}
+        recommendation={{
+          planId: 'enterprise',
+          reason: 'Complexity points to Enterprise.',
+          summary: '11 sources and 0 employees make Enterprise the best starting point.',
+          proofPoints: [],
+          scopeSignals: [],
+          opportunities: [],
+          generatedAt: '2026-07-10T10:00:00.000Z',
+          source: 'model',
+        }}
+        onConfirmCheckout={vi.fn()}
+        onCommitPlan={vi.fn()}
+        onSelectPlan={vi.fn()}
+      />
+    ))
+
+    expect(screen.getByText('11 kilder totalt (10 tilkoblede) gir best start med Custom.')).toBeTruthy()
+    expect(screen.queryByText(/0 employees/)).toBeNull()
+  })
+
+  it('uses singular Norwegian recommendation counts', () => {
+    render(() => (
+      <PaywallStep
+        activePlanId="enterprise"
+        checkoutReturnUrl="https://velion.test/onboarding"
+        identity={{ connectedSourceCount: 1, sourceCount: 1, employeeCount: 1 }}
+        loadingRecommendation={false}
+        recommendation={{
+          planId: 'enterprise',
+          reason: 'Kompleksitet peker mot Enterprise.',
+          summary: '1 kilde og 1 ansatt gir best start med Enterprise.',
+          proofPoints: [],
+          scopeSignals: [],
+          opportunities: [],
+          generatedAt: '2026-07-10T10:00:00.000Z',
+          source: 'local',
+        }}
+        onConfirmCheckout={vi.fn()}
+        onCommitPlan={vi.fn()}
+        onSelectPlan={vi.fn()}
+      />
+    ))
+
+    expect(screen.getByText('1 kilde og 1 ansatt gir best start med Custom.')).toBeTruthy()
+  })
+
+  it('uses singular English recommendation counts', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+
+    render(() => (
+      <I18nProvider>
+        <PaywallStep
+          activePlanId="enterprise"
+          checkoutReturnUrl="https://velion.test/onboarding"
+          identity={{ connectedSourceCount: 1, sourceCount: 1, employeeCount: 1 }}
+          loadingRecommendation={false}
+          recommendation={{
+            planId: 'enterprise',
+            reason: 'Complexity points to Enterprise.',
+            summary: '1 source and 1 employee make Enterprise the best starting point.',
+            proofPoints: [],
+            scopeSignals: [],
+            opportunities: [],
+            generatedAt: '2026-07-10T10:00:00.000Z',
+            source: 'model',
+          }}
+          onConfirmCheckout={vi.fn()}
+          onCommitPlan={vi.fn()}
+          onSelectPlan={vi.fn()}
+        />
+      </I18nProvider>
+    ))
+
+    expect(screen.getByText('1 source and 1 employee make Custom the best starting point.')).toBeTruthy()
+  })
+
+  it('uses the connected count for mixed-count grammar', () => {
+    render(() => (
+      <PaywallStep
+        activePlanId="enterprise"
+        checkoutReturnUrl="https://velion.test/onboarding"
+        identity={{ connectedSourceCount: 1, sourceCount: 2, employeeCount: 1 }}
+        loadingRecommendation={false}
+        recommendation={{
+          planId: 'enterprise',
+          reason: 'Kompleksitet peker mot Enterprise.',
+          summary: '2 kilder og 1 ansatt gir best start med Enterprise.',
+          proofPoints: [],
+          scopeSignals: [],
+          opportunities: [],
+          generatedAt: '2026-07-10T10:00:00.000Z',
+          source: 'local',
+        }}
+        onConfirmCheckout={vi.fn()}
+        onCommitPlan={vi.fn()}
+        onSelectPlan={vi.fn()}
+      />
+    ))
+
+    expect(screen.getByText('2 kilder totalt (1 tilkoblet) og 1 ansatt gir best start med Custom.')).toBeTruthy()
+  })
+
+  it('uses singular English grammar when only source counts are known', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+
+    render(() => (
+      <I18nProvider>
+        <PaywallStep
+          activePlanId="enterprise"
+          checkoutReturnUrl="https://velion.test/onboarding"
+          identity={{ connectedSourceCount: 1, sourceCount: 1 }}
+          loadingRecommendation={false}
+          recommendation={{
+            planId: 'enterprise',
+            reason: 'Complexity points to Enterprise.',
+            summary: '1 source makes Enterprise the best starting point.',
+            proofPoints: [],
+            scopeSignals: [],
+            opportunities: [],
+            generatedAt: '2026-07-10T10:00:00.000Z',
+            source: 'model',
+          }}
+          onConfirmCheckout={vi.fn()}
+          onCommitPlan={vi.fn()}
+          onSelectPlan={vi.fn()}
+        />
+      </I18nProvider>
+    ))
+
+    expect(screen.getByText('1 source makes Custom the best starting point.')).toBeTruthy()
+  })
+
   it('renders paywall chrome and plan cards in English when the shared locale is English', () => {
     window.localStorage.setItem(localeStorageKey, 'en')
 

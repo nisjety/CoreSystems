@@ -1,12 +1,17 @@
 use axum::{
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, HeaderValue, StatusCode},
     Json,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
 
 use crate::{
-    audience_tokens::get_audience_token, config::AppState, envelope::error,
+    audience_tokens::{
+        get_audience_token, get_model_service_token, require_model_service_token,
+        ModelServiceAudience, RequiredAudienceTokenError,
+    },
+    config::AppState,
+    envelope::error,
     middleware::AuthenticatedUser,
 };
 
@@ -26,13 +31,35 @@ pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Value {
+    if zdr_flag(headers) {
+        if let Some(object) = body.as_object_mut() {
+            object.insert("zdr".to_owned(), Value::Bool(true));
+        }
+    }
+    body
+}
+
+pub(crate) fn data_plane_authorization_value(token: &str) -> Option<HeaderValue> {
+    let token = token.trim();
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        return None;
+    }
+    HeaderValue::from_str(&format!("Bearer {token}")).ok()
+}
+
 pub(crate) async fn model_token(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
 ) -> Option<String> {
-    if let Some(token) =
-        get_audience_token(state, &user.user_id, &cookie_header(headers), "model-plane").await
+    if let Some(token) = get_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::ModelGateway,
+    )
+    .await
     {
         return Some(token);
     }
@@ -42,6 +69,95 @@ pub(crate) async fn model_token(
     }
 
     dev_bypass_model_token(state, headers)
+}
+
+pub(crate) async fn data_plane_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<String> {
+    get_audience_token(state, &user.user_id, &cookie_header(headers), "data-plane").await
+}
+
+/// Mint the dedicated interactive `aud=session-core` token. It is forwarded
+/// separately from the Model/Data credentials and session-core independently
+/// validates it before any durable session, run, or approval operation.
+pub(crate) async fn session_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<String> {
+    get_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::SessionCore,
+    )
+    .await
+}
+
+async fn required_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    audience: ModelServiceAudience,
+) -> Result<String, RequiredAudienceTokenError> {
+    require_model_service_token(state, &user.user_id, &cookie_header(headers), audience).await
+}
+
+pub(crate) async fn required_capability_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::CapabilityCore).await
+}
+
+pub(crate) async fn required_cost_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::CostCore).await
+}
+
+pub(crate) async fn required_session_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::SessionCore).await
+}
+
+pub(crate) async fn required_inference_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::InferenceCore).await
+}
+
+pub(crate) async fn required_execution_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::ExecutionCore).await
+}
+
+pub(crate) fn delegated_auth_unavailable(
+    error_detail: RequiredAudienceTokenError,
+) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error(
+            "delegated_auth_unavailable",
+            format!(
+                "Required {} authentication is temporarily unavailable",
+                error_detail.audience.claim()
+            ),
+        )),
+    )
 }
 
 fn dev_bypass_model_token(state: &AppState, headers: &HeaderMap) -> Option<String> {
@@ -64,11 +180,125 @@ pub(crate) async fn proxy_model_json(
     bearer_token: Option<&str>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        user,
+    )
+    .await
+}
+
+pub(crate) async fn proxy_model_json_with_data_plane(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    data_plane_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    execution_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        data_plane_bearer,
+        None,
+        inference_bearer,
+        execution_bearer,
+        cost_bearer,
+        session_bearer,
+        user,
+    )
+    .await
+}
+
+pub(crate) async fn proxy_model_json_with_capability(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    capability_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        capability_bearer,
+        None,
+        None,
+        None,
+        None,
+        user,
+    )
+    .await
+}
+
+pub(crate) async fn proxy_model_json_with_session(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    session_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_bearer,
+        user,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn proxy_model_json_with_delegations(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    data_plane_bearer: Option<&str>,
+    capability_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    execution_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
-    // Forward the session user's role so model-gateway can derive admin (it also
-    // accepts admin scopes on the verified token). `auth_role` originates from the
-    // validated Better Auth session, never the browser; a missing role degrades to
-    // the safe, non-privileged default `member`.
+    // Forward the validated session role only as a presentation/compatibility
+    // hint. Model Plane authorization is derived from verified token claims and
+    // scopes; this header must never grant admin authority. A missing role
+    // degrades to the non-privileged `member` value.
     let user_role = user
         .auth_role
         .as_deref()
@@ -86,6 +316,24 @@ pub(crate) async fn proxy_model_json(
 
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);
+    }
+    if let Some(value) = data_plane_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-data-plane-authorization", value);
+    }
+    if let Some(value) = capability_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-capability-authorization", value);
+    }
+    if let Some(value) = inference_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-inference-authorization", value);
+    }
+    if let Some(value) = execution_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-execution-authorization", value);
+    }
+    if let Some(value) = cost_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-cost-authorization", value);
+    }
+    if let Some(value) = session_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-session-authorization", value);
     }
 
     if let Some(b) = body {
@@ -108,11 +356,25 @@ pub(crate) async fn proxy_model_json(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::{
+        http::{HeaderMap, HeaderValue, StatusCode},
+        Json,
+    };
+    use serde_json::json;
 
-    use crate::{audience_tokens::new_audience_token_cache, cache::ResultCache, config::AppState};
+    use crate::{
+        audience_tokens::{
+            new_audience_token_cache, ModelServiceAudience, RequiredAudienceTokenError,
+        },
+        cache::ResultCache,
+        config::AppState,
+        middleware::AuthenticatedUser,
+    };
 
-    use super::dev_bypass_model_token;
+    use super::{
+        data_plane_authorization_value, delegated_auth_unavailable, dev_bypass_model_token,
+        normalized_model_body, proxy_model_json_with_data_plane, proxy_model_json_with_session,
+    };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
         AppState {
@@ -122,6 +384,8 @@ mod tests {
             enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
             session_core_url: "http://127.0.0.1:1".into(),
+            session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
+            user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
             cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
@@ -142,11 +406,11 @@ mod tests {
             wiki_store_url: "http://127.0.0.1:1".into(),
             embedding_engine_url: "http://127.0.0.1:1".into(),
             quickwit_adapter_url: "http://127.0.0.1:1".into(),
-            qdrant_url: "http://127.0.0.1:1".into(),
-            quickwit_url: "http://127.0.0.1:1".into(),
             finspo_core_url: "http://127.0.0.1:1".into(),
             imports_api_url: "http://127.0.0.1:1".into(),
             notification_core_url: "http://127.0.0.1:1".into(),
+            notification_core_service_token: "notification-test-secret-at-least-32-bytes".into(),
+            conversation_core_service_token: "conversation-test-secret-at-least-32-bytes".into(),
             information_core_url: "http://127.0.0.1:1".into(),
             conversation_core_url: "http://127.0.0.1:1".into(),
             social_core_url: "http://127.0.0.1:1".into(),
@@ -170,6 +434,125 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn session_proxy_forwards_dedicated_credential_in_separate_header() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/session-bound"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-session-authorization", "Bearer session-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let (status, _) = proxy_model_json_with_session(
+            &state,
+            Method::GET,
+            &format!("{}/session-bound", server.uri()),
+            None,
+            Some("model-token"),
+            Some("session-token"),
+            &user,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_proxy_forwards_independent_inference_execution_cost_and_session_credentials() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/invoke"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-data-plane-authorization", "Bearer data-token"))
+            .and(header(
+                "x-inference-authorization",
+                "Bearer inference-token",
+            ))
+            .and(header(
+                "x-execution-authorization",
+                "Bearer execution-token",
+            ))
+            .and(header("x-cost-authorization", "Bearer cost-token"))
+            .and(header("x-session-authorization", "Bearer session-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let (status, _) = proxy_model_json_with_data_plane(
+            &state,
+            Method::POST,
+            &format!("{}/invoke", server.uri()),
+            Some(json!({"prompt": "hello"})),
+            Some("model-token"),
+            Some("data-token"),
+            Some("inference-token"),
+            Some("execution-token"),
+            Some("cost-token"),
+            Some("session-token"),
+            &user,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[test]
+    fn required_delegated_token_failure_is_explicit_and_service_unavailable() {
+        let (status, Json(body)) = delegated_auth_unavailable(RequiredAudienceTokenError {
+            audience: ModelServiceAudience::InferenceCore,
+        });
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "delegated_auth_unavailable");
+        assert!(body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("inference-core"));
+    }
+
     #[test]
     fn dev_bypass_model_token_requires_explicit_gate_and_token() {
         let mut headers = HeaderMap::new();
@@ -189,5 +572,31 @@ mod tests {
             HeaderValue::from_static("Bearer other-token"),
         );
         assert_eq!(dev_bypass_model_token(&test_state(true), &headers), None);
+    }
+
+    #[test]
+    fn authenticated_zdr_header_forces_request_body_posture() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", HeaderValue::from_static("true"));
+        assert_eq!(
+            normalized_model_body(json!({"content": "q"}), &headers)["zdr"],
+            true
+        );
+        assert_eq!(
+            normalized_model_body(json!({"content": "q", "zdr": true}), &HeaderMap::new())["zdr"],
+            true
+        );
+    }
+
+    #[test]
+    fn delegated_data_plane_token_uses_a_separate_authorization_header() {
+        assert_eq!(
+            data_plane_authorization_value("signed-data-token")
+                .expect("valid header")
+                .to_str()
+                .unwrap(),
+            "Bearer signed-data-token"
+        );
+        assert!(data_plane_authorization_value("").is_none());
     }
 }

@@ -24,6 +24,8 @@ pub(crate) struct AppState {
     pub(crate) enforcement_mode: String,
     pub(crate) auth_core_url: String,
     pub(crate) session_core_url: String,
+    pub(crate) session_core_service_token: String,
+    pub(crate) user_core_service_token: String,
     pub(crate) billing_core_url: String,
     pub(crate) org_core_url: String,
     pub(crate) integration_core_url: String,
@@ -44,13 +46,13 @@ pub(crate) struct AppState {
     pub(crate) wiki_store_url: String,
     pub(crate) embedding_engine_url: String,
     pub(crate) quickwit_adapter_url: String,
-    pub(crate) qdrant_url: String,
-    pub(crate) quickwit_url: String,
     pub(crate) finspo_core_url: String,
     pub(crate) imports_api_url: String,
     pub(crate) notification_core_url: String,
+    pub(crate) notification_core_service_token: String,
     pub(crate) information_core_url: String,
     pub(crate) conversation_core_url: String,
+    pub(crate) conversation_core_service_token: String,
     pub(crate) social_core_url: String,
     pub(crate) searxng_url: String,
     pub(crate) autocomplete_core_url: String,
@@ -111,8 +113,10 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .filter(|v| matches!(v.as_str(), "off" | "permissive" | "strict"))
             .unwrap_or_else(|| "off".to_string()),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
-        session_core_url: env_url("SESSION_CORE_URL", "http://session-core:3013"),
-        billing_core_url: env_url("BILLING_CORE_URL", "http://billing-core:3017"),
+        session_core_url: env_url("SESSION_CORE_URL", "http://session-core:3017"),
+        session_core_service_token: required_service_token("SESSION_CORE_SERVICE_TOKEN")?,
+        user_core_service_token: required_service_token("USER_CORE_SERVICE_TOKEN")?,
+        billing_core_url: env_url("BILLING_CORE_URL", "http://billing-core:3014"),
         org_core_url: env_url("ORG_CORE_URL", "http://org-core:8080"),
         integration_core_url: env_url("INTEGRATION_CORE_URL", "http://integration-api:3026"),
         // audit-core (Control Plane) serves the audit read API the Trust Center
@@ -149,20 +153,19 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // gateway↔engine traffic rides the container port over inter-plane-bus.
         retrieval_engine_url: env_url("RETRIEVAL_ENGINE_URL", "http://dpv2-retrieval-engine:8004"),
         wiki_store_url: env_url("WIKI_STORE_URL", "http://dpv2-wiki-store:8011"),
-        // Data Plane v2 diagnostics + analytics upstreams. embedding-engine, quickwit-adapter
-        // and qdrant ride inter-plane-bus; minio is dpv2-net-only so storage health is derived
-        // indirectly from quickwit index URIs rather than a direct call.
+        // Data Plane v2 diagnostics stay behind service contracts. Storage
+        // backends (Qdrant, Quickwit, MinIO) remain private to dpv2-net.
         embedding_engine_url: env_url("EMBEDDING_ENGINE_URL", "http://dpv2-embedding-engine:9202"),
         quickwit_adapter_url: env_url("QUICKWIT_ADAPTER_URL", "http://dpv2-quickwit-adapter:9204"),
-        qdrant_url: env_url("QDRANT_URL", "http://dpv2-qdrant:6333"),
-        quickwit_url: env_url("QUICKWIT_URL", "http://dpv2-quickwit:7280"),
         // finspo-core (SharePoint/OneDrive storage analytics + duplicate management).
         finspo_core_url: env_url("FINSPO_CORE_URL", "http://finspo-api:3130"),
         imports_api_url: env_url("IMPORTS_API_URL", "http://imports-core:3025"),
         notification_core_url: env_url("NOTIFICATION_CORE_URL", "http://notification-core:3140"),
+        notification_core_service_token: required_service_token("NOTIFICATION_CORE_SERVICE_TOKEN")?,
         information_core_url: env_url("INFORMATION_CORE_URL", "http://information-core:3190"),
         // Inbox / support conversations (Application Plane conversation-core-go).
         conversation_core_url: env_url("CONVERSATION_CORE_URL", "http://conversation-core-go:3160"),
+        conversation_core_service_token: required_service_token("CONVERSATION_CORE_SERVICE_TOKEN")?,
         // Social publishing and calendar persistence (Application Plane social-core).
         social_core_url: env_url("SOCIAL_CORE_URL", "http://social-core:3162"),
         // Search verticals: SearXNG powers the videos category; quarry-edge (above)
@@ -286,6 +289,21 @@ fn internal_api_key() -> Result<String> {
     }
 }
 
+fn required_service_token(name: &str) -> Result<String> {
+    let value = env::var(name).unwrap_or_default();
+    let trimmed = value.trim();
+    if !service_token_is_secure(trimmed) {
+        anyhow::bail!("{name} must be a non-placeholder secret of at least 32 characters");
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn service_token_is_secure(value: &str) -> bool {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    value.len() >= 32 && !lower.starts_with("change-me") && !lower.starts_with("replace-with")
+}
+
 /// Dev auth escape hatches must never activate in a production deploy, even if
 /// the env var leaks into the profile: `APP_ENV=production` (or `prod`) wins
 /// over the flag.
@@ -324,7 +342,20 @@ fn env_url(key: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::dev_flags_allowed;
+    use super::{dev_flags_allowed, service_token_is_secure};
+
+    #[test]
+    fn service_tokens_reject_public_placeholder_families() {
+        assert!(!service_token_is_secure(
+            "replace-with-dedicated-random-32-byte-minimum-key"
+        ));
+        assert!(!service_token_is_secure(
+            "change-me-notification-gateway-secret-32-bytes"
+        ));
+        assert!(service_token_is_secure(
+            "generated-secret-value-with-at-least-32-bytes"
+        ));
+    }
 
     #[test]
     fn dev_flags_refused_in_production_profiles() {

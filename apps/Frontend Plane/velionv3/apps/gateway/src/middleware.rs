@@ -69,9 +69,20 @@ pub(crate) struct AuthenticatedUser {
     pub(crate) auth_role: Option<String>,
     /// The session's active organization (Better Auth `activeOrganizationId`) — the
     /// org the user is currently acting as (set via `/organization/set-active`).
-    /// `None` until they switch (or before the org plugin sets a default); callers
-    /// fall back to the primary-org membership from user-core's session-context.
+    /// `None` until they switch (or before the org plugin sets a default). This is
+    /// requested scope only; sensitive callers use `authorized_membership` below.
     pub(crate) active_org_id: Option<String>,
+    /// Live user-core/Better Auth membership for `active_org_id`. This is never
+    /// read from the session-validation cache: sensitive routes populate it from
+    /// the canonical authority on every request so removals take effect promptly.
+    #[serde(skip)]
+    pub(crate) authorized_membership: Option<AuthorizedMembership>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthorizedMembership {
+    pub(crate) organization_id: String,
+    pub(crate) role: String,
 }
 
 #[derive(Deserialize)]
@@ -117,7 +128,7 @@ pub(crate) async fn strip_inbound_identity_headers(mut request: Request, next: N
 /// Returns 401 if no cookie is present or auth-core rejects the session.
 pub(crate) async fn require_session(
     State(state): State<AppState>,
-    mut request: Request,
+    request: Request,
     next: Next,
 ) -> Response {
     // A real, validated Better Auth session is ALWAYS authoritative and is
@@ -134,20 +145,14 @@ pub(crate) async fn require_session(
         .to_owned();
 
     if let Some(user) = validate_session_cookie(&state, &cookie_header).await {
-        record_tenant_observability(&user);
-        stamp_trusted_identity(&mut request, &user);
-        request.extensions_mut().insert(user);
-        return next.run(request).await;
+        return authorize_request(state, request, next, user).await;
     }
 
     // Dev-only fallback: applies ONLY when there is no valid session and
     // ALLOW_DEV_AUTH_BYPASS is explicitly enabled (see `dev_bypass_user`). It
     // can never downgrade or impersonate an authenticated user.
     if let Some(user) = dev_bypass_user(&state, request.headers()) {
-        record_tenant_observability(&user);
-        stamp_trusted_identity(&mut request, &user);
-        request.extensions_mut().insert(user);
-        return next.run(request).await;
+        return authorize_request(state, request, next, user).await;
     }
 
     (
@@ -157,12 +162,123 @@ pub(crate) async fn require_session(
         .into_response()
 }
 
+async fn authorize_request(
+    state: AppState,
+    mut request: Request,
+    next: Next,
+    mut user: AuthenticatedUser,
+) -> Response {
+    let membership_required = requires_active_membership(request.uri().path());
+    let membership_optional = optionally_resolves_active_membership(request.uri().path());
+    let has_requested_org = user
+        .active_org_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|org_id| !org_id.is_empty());
+    if membership_required || (membership_optional && has_requested_org) {
+        match crate::upstream::resolve_active_membership(&state, &user).await {
+            crate::upstream::ActiveMembershipResolution::Member(membership) => {
+                // Tenant-facing downstreams historically read `auth_role` when
+                // constructing their actor headers. Replace the platform/session
+                // role with the exact organization role for this request so every
+                // shared caller inherits canonical user/org/role scoping.
+                user.auth_role = Some(membership.role.clone());
+                user.authorized_membership = Some(membership);
+            }
+            crate::upstream::ActiveMembershipResolution::Missing => {
+                if membership_required {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(error(
+                            "organization_membership_required",
+                            "An explicit active organization membership is required.",
+                        )),
+                    )
+                        .into_response();
+                }
+                // Bootstrap endpoints must remain usable after removal so the
+                // caller can select another organization. Do not expose or proxy
+                // the stale active scope as if it were still authorized.
+                user.active_org_id = None;
+            }
+            crate::upstream::ActiveMembershipResolution::AuthorityUnavailable => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(error(
+                        "organization_membership_authority_unavailable",
+                        "The organization membership authority is unavailable.",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    record_tenant_observability(&user);
+    stamp_trusted_identity(&mut request, &user);
+    request.extensions_mut().insert(user);
+    next.run(request).await
+}
+
+/// Session-only routes are the narrowly-scoped flows needed before an active
+/// organization exists (or to select one). Everything else is tenant-sensitive
+/// and requires a fresh canonical membership decision.
+fn requires_active_membership(path: &str) -> bool {
+    if path == "/api/v1/session/current"
+        || path == "/api/v1/me"
+        || path == "/api/v1/me/session-context"
+        || path == "/api/v1/admin/users"
+        || path == "/api/v1/orgs/switch-active"
+        || path.starts_with("/api/v1/auth/2fa/")
+        || is_pre_org_onboarding_route(path)
+    {
+        return false;
+    }
+
+    let invitation = path
+        .strip_prefix("/api/v1/orgs/invitations/")
+        .and_then(|rest| rest.strip_suffix("/accept"));
+    !matches!(invitation, Some(id) if !id.is_empty() && !id.contains('/'))
+}
+
+/// Exact onboarding routes that operate only on the authenticated user or on
+/// public/transient preview data before an organization exists. Any onboarding
+/// route not listed here is tenant-bearing and must pass the live membership
+/// authority before its handler runs.
+fn is_pre_org_onboarding_route(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/session/bootstrap"
+            | "/api/v1/onboarding/status"
+            | "/api/v1/onboarding/state"
+            | "/api/v1/onboarding/theme"
+            | "/api/v1/onboarding/brreg/search"
+            | "/api/v1/onboarding/crawl-preview"
+            | "/api/v1/onboarding/recommend-plan"
+            | "/api/v1/onboarding/translate-recommendation"
+            | "/api/v1/onboarding/actions/create-organization"
+    )
+}
+
+/// Session bootstrap is usable without an organization, but an active scope—if
+/// present—must be checked live before it can influence returned org data.
+fn optionally_resolves_active_membership(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/session/current" | "/api/v1/me/session-context"
+    )
+}
+
 /// Emit per-tenant observability for a validated request (Phase 6 B13): an
 /// org/tenant-labeled Prometheus counter plus a tracing event carrying the
 /// org/tenant + user, so a request can be traced through the cores by tenant.
-/// The org is the authoritative id from the validated session ("none" if unset).
+/// The org is the live canonical membership id ("none" on session-only flows).
 fn record_tenant_observability(user: &AuthenticatedUser) {
-    let org = user.active_org_id.as_deref().unwrap_or("none");
+    let org = user
+        .authorized_membership
+        .as_ref()
+        .map(|membership| membership.organization_id.as_str())
+        .unwrap_or("none");
     crate::observability::record_authenticated_request(org);
     tracing::info!(
         org_id = %org,
@@ -194,6 +310,7 @@ fn dev_bypass_user(state: &AppState, headers: &axum::http::HeaderMap) -> Option<
         email_verified: true,
         auth_role: Some("admin".to_owned()),
         active_org_id: None,
+        authorized_membership: None,
     })
 }
 
@@ -302,6 +419,7 @@ pub(crate) async fn validate_session_cookie(
         email_verified: user.email_verified,
         auth_role: user.role,
         active_org_id,
+        authorized_membership: None,
     };
 
     // Cache only this positive validation, for the short TTL. Failures are
@@ -350,6 +468,64 @@ mod tests {
     fn stripped_headers_includes_velion_org_id() {
         assert!(STRIPPED_HEADERS.contains(&"x-velion-org-id"));
         assert!(STRIPPED_HEADERS.contains(&"x-org-id"));
+    }
+
+    #[test]
+    fn only_explicit_pre_org_flows_are_session_only() {
+        for path in [
+            "/api/v1/session/current",
+            "/api/v1/session/bootstrap",
+            "/api/v1/me",
+            "/api/v1/me/session-context",
+            "/api/v1/auth/2fa/enable",
+            "/api/v1/admin/users",
+            "/api/v1/onboarding/status",
+            "/api/v1/onboarding/state",
+            "/api/v1/onboarding/theme",
+            "/api/v1/onboarding/brreg/search",
+            "/api/v1/onboarding/crawl-preview",
+            "/api/v1/onboarding/recommend-plan",
+            "/api/v1/onboarding/translate-recommendation",
+            "/api/v1/onboarding/actions/create-organization",
+            "/api/v1/orgs/switch-active",
+            "/api/v1/orgs/invitations/inv_123/accept",
+        ] {
+            assert!(!requires_active_membership(path), "{path}");
+        }
+        assert!(optionally_resolves_active_membership(
+            "/api/v1/session/current"
+        ));
+        assert!(optionally_resolves_active_membership(
+            "/api/v1/me/session-context"
+        ));
+        assert!(!optionally_resolves_active_membership(
+            "/api/v1/onboarding/status"
+        ));
+
+        for path in [
+            "/api/v1/router-policy",
+            "/api/v1/notifications",
+            "/api/v1/social/catalog",
+            "/api/v1/leads/search",
+            "/api/v1/inbox/conversations",
+            "/api/v1/orgs/org-victim/members",
+            "/api/v1/onboarding/lifecycle",
+            "/api/v1/onboarding/complete",
+            "/api/v1/onboarding/graph-preview",
+            "/api/v1/onboarding/actions/set-plan",
+            "/api/v1/onboarding/actions/start-checkout",
+            "/api/v1/onboarding/actions/confirm-checkout",
+            "/api/v1/onboarding/actions/start-website-ingest",
+            "/api/v1/onboarding/actions/start-connect-session",
+            "/api/v1/onboarding/actions/discover-source",
+            "/api/v1/onboarding/actions/cleanup-source",
+            "/api/v1/onboarding/actions/warm-sharepoint-discovery",
+            "/api/v1/onboarding/actions/start-integration-sync",
+            "/api/v1/onboarding-evil/session",
+            "/api/v1/orgs/invitations/inv_123/accept/extra",
+        ] {
+            assert!(requires_active_membership(path), "{path}");
+        }
     }
 
     /// B1: the session-validation cache TTL must stay inside the safe [5, 15]s
@@ -410,6 +586,10 @@ mod tests {
             email_verified: true,
             auth_role: Some("admin".into()),
             active_org_id: Some("org_1".into()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org_1".into(),
+                role: "admin".into(),
+            }),
         };
         let value = serde_json::to_value(&user).expect("serialize");
         let back: AuthenticatedUser = serde_json::from_value(value).expect("deserialize");
@@ -417,5 +597,9 @@ mod tests {
         assert_eq!(back.user_email, user.user_email);
         assert_eq!(back.active_org_id, user.active_org_id);
         assert_eq!(back.email_verified, user.email_verified);
+        assert!(
+            back.authorized_membership.is_none(),
+            "live membership decisions must never round-trip through session cache"
+        );
     }
 }

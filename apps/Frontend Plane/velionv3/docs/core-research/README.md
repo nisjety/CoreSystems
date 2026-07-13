@@ -1,15 +1,24 @@
 # Velion v3 Core Research
 
 Generated: 2026-06-09
-Updated: 2026-07-02
+Updated: 2026-07-13 (Model Plane credential/capability correction; 2026-07-11
+full-plane evidence retained)
+
+> Plain chat is intentionally tool-free. Frontend/Auth Core source now forwards
+> separate exact-audience credentials with fail-closed issuance, but the live
+> Model inference path is down and the authoritative capability-state UX is not
+> complete. See
+> [MODEL_PLANE_CAPABILITY_HANDOFF_2026-07-13.md](../MODEL_PLANE_CAPABILITY_HANDOFF_2026-07-13.md).
 
 ## Scope
 
-This pass covers `apps/Frontend Plane/velionv3` only. It intentionally skips the broader `velionv2` Frontend Plane audit.
+This pass covers `apps/Frontend Plane/velionv3` only. velionv2 is deprecated.
 
-Velion v3 is the current Frontend Plane target. It is a SolidJS + Vite + TypeScript app with a Rust Axum same-origin gateway under `apps/gateway`. It does not use the old Velion v2 Next.js route-handler BFF shape.
+Velion v3 is the canonical Frontend Plane target: a SolidJS + Vite + TypeScript SPA with a Rust Axum same-origin BFF gateway under `apps/gateway`.
 
-Latest plane audit: `plane-audit-2026-07-02.md`.
+Latest plane audit: `plane-audit-2026-07-11.md` (renamed from `-07-02`; 2026-07-11 synthesis leads). See also `../../FRONTEND_PLANE_STATUS.md` and `../../FRONTEND_PLANE_ROADMAP.md`.
+
+**2026-07-11 headline — this supersedes the "Highest-Signal Findings" and "Stub/Mock" sections below, which are now OBSOLETE.** velionv3 is **fully migrated off mocks**: `src/shared/mocks/` and `velion-operating-model.ts` are gone (zero refs), `src/shared/graphrest/` and its hardcoded graph are gone, and `src/shared/api` has **56 real client files** (not empty). All 20 `src/features/*` areas call real `/api/v1/*` endpoints; the ~50-domain Rust gateway is real throughout; auth is real (not "presentation-only"); the `x-velion-org-id` IDOR is fixed + tested. So `mock-backed-surfaces.md` is obsolete (→ delete). New findings this pass: a HIGH `onboarding/graph-preview` query-param cross-tenant IDOR, the chat tool-surfacing gap + a HITL-bypass on composer-selected writes, and two residual fabricated settings rows — all detailed in `plane-audit-2026-07-11.md`.
 
 ## Current Shape
 
@@ -39,30 +48,23 @@ Latest plane audit: `plane-audit-2026-07-02.md`.
 - Velion v3 -> Model Plane by action contract intent; action metadata should stay complete even when execution is proxied through the gateway.
 - Velion v3 -> fallback data for some workspace surfaces until each feature is classified as live, planned, or preview-only.
 
-## Highest-Signal Findings
+## Highest-Signal Findings (OBSOLETE — kept for history; see the 2026-07-11 headline above)
 
-1. Velion v3 is real as a Solid/Vite app and has a coherent feature-sliced structure.
-2. It is not equivalent to `velionv2` operationally because the server boundary is a Rust gateway, not Next.js route handlers.
-3. The current test gate failure is in Studio workspace loading when session context lacks `orgs`.
-4. Auth is presentation-only: email/password, social buttons, and passkey all navigate to `/onboarding`.
-5. The action registry is a useful contract surface, but action execution is local-only and returns synthetic run/audit IDs.
-6. `fetchKnowledgeGraphSnapshot()` is a static in-memory GraphREST example, not a Data Plane graph client.
-7. The README mentions `shared/api`, `shared/rpc`, and `shared/graphrest` as future transport areas, but `shared/api`, `shared/rpc`, and `shared/workers` are empty today.
+> The findings below reflect the 2026-06-09 state. Findings 4–7 and the entire "Stub/Mock" section are now FALSE (auth is real, action execution is real, graphrest is deleted, `shared/api` has 56 files, mocks are gone). The current source of truth is `plane-audit-2026-07-11.md`.
 
-## Stub, Mock, Placeholder, and TODO Summary
-
-- `src/shared/mocks/velion-operating-model.ts` backs most non-onboarding workspace pages.
-- `src/shared/actions/action-client.ts` synthesizes `run_*` and `audit_*` IDs locally.
-- `src/shared/graphrest/graphrest-client.ts` returns hard-coded nodes and edges.
-- `src/features/auth/components/AuthPage.tsx` performs no real auth call before routing to onboarding.
-- `src/features/onboarding/lib/api.ts` injects dev actor headers by default in dev mode.
-- Empty planned directories exist under `src/shared/api`, `src/shared/rpc`, and `src/shared/workers`.
+1. Velion v3 is real as a Solid/Vite app with a coherent feature-sliced structure. *(still true)*
+2. It is not equivalent to `velionv2`; the server boundary is a Rust gateway, not Next.js route handlers. *(still true)*
+3. ~~Studio workspace test gate fails when session context lacks `orgs`.~~ *(re-verify)*
+4. ~~Auth is presentation-only.~~ **FALSE now** — real `completeAuth()` via `auth-client.ts`, session-store probe, onboarding-gated routing.
+5. ~~Action execution is local-only with synthetic IDs.~~ **Stale** — action registry is ~22 real descriptors executing via the gateway.
+6. ~~`fetchKnowledgeGraphSnapshot()` is a static GraphREST example.~~ **FALSE now** — graphrest deleted; knowledge calls `/api/v1/knowledge/*`.
+7. ~~`shared/api`/`shared/rpc`/`shared/workers` are empty.~~ **FALSE now** — `shared/api` has 56 client files.
 
 ## Files In This Set
 
-- `runtime-shell.md`
-- `onboarding-gateway.md`
-- `auth-boundary.md`
-- `action-system.md`
-- `mock-backed-surfaces.md`
-- `plane-audit-2026-07-02.md`
+- `runtime-shell.md` (updated 2026-07-11)
+- `onboarding-gateway.md` (updated 2026-07-11)
+- `auth-boundary.md` (rewritten 2026-07-11 — auth is real)
+- `action-system.md` (updated 2026-07-11 — ~22 descriptors)
+- ~~`mock-backed-surfaces.md`~~ (OBSOLETE — flagged for deletion in `apps/STALE_DOC_DELETION_REGISTER.md`)
+- `plane-audit-2026-07-11.md` (current)
