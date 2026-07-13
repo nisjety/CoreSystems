@@ -28,18 +28,29 @@ const (
 const ScopeWildcard = "*"
 
 // ScopeResolver checks the durable capability_scopes grant table. It is the
-// per-(org, agent) authority layer: distinct from a capability's static
+// tenant-bound org invocation authority layer today: distinct from a capability's static
 // EnabledForScopes array, which only declares which scope *kinds* a capability
 // supports. registry.ScopeStore satisfies this interface.
 //
-// HasAnyGrants reports whether the capability is governed by the grant table
-// for the given scope kind at all (no grants of that kind => not opted in, so
-// the engine falls back to the static EnabledForScopes check). IsGrantedForScope
-// reports whether an active grant covers the exact (kind, value) — wildcard '*'
-// grants cover any value.
+// IsGrantedForScope reports whether an active grant owned by the verified
+// tenant covers the exact (kind, value); wildcard values remain tenant-bound.
 type ScopeResolver interface {
-	HasAnyGrants(ctx context.Context, capabilityID, scopeKind string) (bool, error)
-	IsGrantedForScope(ctx context.Context, capabilityID, scopeKind, scopeValue string) (bool, error)
+	IsGrantedForScope(ctx context.Context, capabilityID, orgID, scopeKind, scopeValue string) (bool, error)
+}
+
+// IsSupportedScope reports whether policy can derive the scope authority from
+// the authenticated EvaluatePolicy tuple today. Global has no resource ID and
+// org derives its value from the verified tenant. Agent, run, thread,
+// workspace, and user remain persisted catalog scope kinds but are rejected at
+// invocation until trusted concrete identity/resource bindings are added.
+func IsSupportedScope(scope string) bool {
+	switch scope {
+	case registry.ScopeKindOrg,
+		registry.ScopeKindGlobal:
+		return true
+	default:
+		return false
+	}
 }
 
 // Engine evaluates capability invocation requests against the registry.
@@ -98,21 +109,34 @@ type Result struct {
 // The engine never returns ErrPolicyDenied — denials are modelled as a
 // populated Result. Errors are only surfaced for argument or lookup failures.
 //
-// Scope enforcement (Phase 3 nice-to-have): when `scope` is non-empty and the
-// capability declares a non-empty `EnabledForScopes` list, the engine denies if
-// `scope` is not a member of the list. The wildcard entry "*" matches any
-// scope. Empty `scope` preserves backwards compatibility — callers that have
-// not yet been updated to propagate scope keep the prior allow/deny semantics.
+// Scope is mandatory and must currently be global or org. The
+// capability must explicitly authorize the kind through EnabledForScopes (or
+// the wildcard), so omission and resource scopes without trusted IDs fail
+// closed at both evaluation boundaries.
 func (e *Engine) Evaluate(ctx context.Context, capID, runID, agentID, orgID, scope string) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if capID == "" || runID == "" || agentID == "" || orgID == "" {
+	if capID == "" || runID == "" || agentID == "" || orgID == "" || !IsSupportedScope(scope) {
 		return nil, domain.ErrInvalidArgument
 	}
 	capEntry, err := e.reg.Get(capID, "")
 	if err != nil {
 		return nil, err
+	}
+	return e.EvaluateCapability(ctx, capEntry, runID, agentID, orgID, scope)
+}
+
+// EvaluateCapability evaluates a capability snapshot that the caller has
+// already resolved through a tenant-aware registry lookup. Keeping lookup and
+// evaluation separate lets authenticated boundaries avoid re-reading a mixed
+// process-wide registry after authorization.
+func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capability, runID, agentID, orgID, scope string) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if capEntry == nil || capEntry.ID == "" || runID == "" || agentID == "" || orgID == "" || !IsSupportedScope(scope) {
+		return nil, domain.ErrInvalidArgument
 	}
 	if denial := e.denyOnScope(ctx, capEntry, scope); denial != nil {
 		return denial, nil
@@ -143,7 +167,7 @@ func (e *Engine) Evaluate(ctx context.Context, capID, runID, agentID, orgID, sco
 			Reason:        "medium-risk capability allowed under constrained budget",
 			BudgetContext: "tokens=10000,cost_usd=0.50",
 		}, nil
-	default:
+	case models.RiskLow:
 		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("decision", DecisionAllow),
 			attribute.String("risk", string(capEntry.RiskLevel)),
@@ -153,17 +177,22 @@ func (e *Engine) Evaluate(ctx context.Context, capID, runID, agentID, orgID, sco
 			Reason:        "low-risk capability allowed under default budget",
 			BudgetContext: "tokens=100000,cost_usd=5.00",
 		}, nil
+	default:
+		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("decision", DecisionDeny),
+			attribute.String("risk", string(capEntry.RiskLevel)),
+			attribute.String("reason", "invalid_risk_level"),
+		))
+		return &Result{
+			Decision: DecisionDeny,
+			Reason:   "invalid_risk_level",
+		}, nil
 	}
 }
 
-// denyOnScope returns a Deny Result when `scope` is non-empty, the capability
-// declares a non-empty EnabledForScopes list, and that list does not contain
-// `scope` (and contains no wildcard). Otherwise returns nil (scope check passes
-// or is skipped).
+// denyOnScope returns a Deny Result unless the capability explicitly declares
+// the invocation scope (or the wildcard).
 func (e *Engine) denyOnScope(ctx context.Context, cap *models.Capability, scope string) *Result {
-	if scope == "" || len(cap.EnabledForScopes) == 0 {
-		return nil
-	}
 	for _, s := range cap.EnabledForScopes {
 		if s == ScopeWildcard || s == scope {
 			return nil
@@ -185,46 +214,34 @@ func (e *Engine) denyOnScope(ctx context.Context, cap *models.Capability, scope 
 }
 
 // scopeValueFor resolves the concrete scope_value to look up in the grant table
-// for a given scope kind from the request tuple. org → orgID, agent → agentID.
-// Kinds whose value is not carried in this tuple (run/thread/workspace/user)
-// return "" — the grant check is skipped for them (they fall back to the static
-// EnabledForScopes check already applied by denyOnScope).
-func scopeValueFor(scopeKind, agentID, orgID string) string {
+// for a given scope kind from the authenticated request tuple. Only org has a
+// trusted concrete value today.
+// Unsupported resource kinds never reach this function because evaluation
+// rejects them before capability or durable-grant checks.
+func scopeValueFor(scopeKind, orgID string) string {
 	switch scopeKind {
 	case registry.ScopeKindOrg:
 		return orgID
-	case registry.ScopeKindAgent:
-		return agentID
 	default:
 		return ""
 	}
 }
 
 // denyOnGrant consults the durable capability_scopes grant table. It only acts
-// when a ScopeResolver is configured and `scope` is one of the kinds whose
-// value this tuple carries (org/agent). If the capability has *any* active
-// grant of that kind, the grant table governs it: a request whose resolved
-// scope_value is not covered (exact or wildcard) is denied. If the capability
-// has no grants of that kind, the table is not opted-in for it and the engine
-// defers to the static EnabledForScopes decision (returns nil). Returns
-// (nil, nil) when the check does not apply, (denial, nil) on a grant miss, and
-// (nil, err) only on a resolver/DB error.
-func (e *Engine) denyOnGrant(ctx context.Context, cap *models.Capability, agentID, orgID, scope string) (*Result, error) {
+// when a ScopeResolver is configured and `scope` carries the verified org
+// value. An explicit tenant-bound grant is
+// mandatory; the absence of grants must not turn durable authorization off.
+// Global retains its static catalog semantics. Returns (denial, nil) on a
+// concrete grant miss and (nil, err) on a resolver/DB error.
+func (e *Engine) denyOnGrant(ctx context.Context, cap *models.Capability, _ string, orgID, scope string) (*Result, error) {
 	if e.scopes == nil || scope == "" {
 		return nil, nil
 	}
-	scopeValue := scopeValueFor(scope, agentID, orgID)
+	scopeValue := scopeValueFor(scope, orgID)
 	if scopeValue == "" {
 		return nil, nil
 	}
-	governed, err := e.scopes.HasAnyGrants(ctx, cap.ID, scope)
-	if err != nil {
-		return nil, err
-	}
-	if !governed {
-		return nil, nil
-	}
-	granted, err := e.scopes.IsGrantedForScope(ctx, cap.ID, scope, scopeValue)
+	granted, err := e.scopes.IsGrantedForScope(ctx, cap.ID, orgID, scope, scopeValue)
 	if err != nil {
 		return nil, err
 	}

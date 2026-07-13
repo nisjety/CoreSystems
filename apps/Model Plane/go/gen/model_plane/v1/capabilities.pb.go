@@ -218,9 +218,26 @@ type CapabilityDetail struct {
 	// Whether full definition must be loaded on demand (progressive disclosure).
 	LazyLoad bool `protobuf:"varint,7,opt,name=lazy_load,json=lazyLoad,proto3" json:"lazy_load,omitempty"`
 	// Registry scope: "agent", "workspace", "user", "global".
-	Scope         string `protobuf:"bytes,8,opt,name=scope,proto3" json:"scope,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Scope string `protobuf:"bytes,8,opt,name=scope,proto3" json:"scope,omitempty"`
+	// Runtime state: "available", "disabled", "unhealthy",
+	// "approval_required", "unavailable", or "not_configured". Registry
+	// presence/enabled alone never implies available.
+	State string `protobuf:"bytes,9,opt,name=state,proto3" json:"state,omitempty"`
+	// Stable machine-readable explanation for state.
+	ReasonCode string `protobuf:"bytes,10,opt,name=reason_code,json=reasonCode,proto3" json:"reason_code,omitempty"`
+	// Optional user-safe state explanation. Never contains secret/config data.
+	Reason string `protobuf:"bytes,11,opt,name=reason,proto3" json:"reason,omitempty"`
+	// True when execution must pause for durable human approval.
+	RequiresApproval bool `protobuf:"varint,12,opt,name=requires_approval,json=requiresApproval,proto3" json:"requires_approval,omitempty"`
+	// Governed execution path: "direct_read", "agentic", or "unavailable".
+	ExecutionMode string `protobuf:"bytes,13,opt,name=execution_mode,json=executionMode,proto3" json:"execution_mode,omitempty"`
+	// Coarse price disclosure: "bounded", "variable", or "unknown".
+	CostClass string `protobuf:"bytes,14,opt,name=cost_class,json=costClass,proto3" json:"cost_class,omitempty"`
+	// RFC3339 timestamp for the runtime health attestation; empty means no
+	// attestation and MUST derive to unavailable.
+	HealthCheckedAt string `protobuf:"bytes,15,opt,name=health_checked_at,json=healthCheckedAt,proto3" json:"health_checked_at,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CapabilityDetail) Reset() {
@@ -305,6 +322,55 @@ func (x *CapabilityDetail) GetLazyLoad() bool {
 func (x *CapabilityDetail) GetScope() string {
 	if x != nil {
 		return x.Scope
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetReasonCode() string {
+	if x != nil {
+		return x.ReasonCode
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetRequiresApproval() bool {
+	if x != nil {
+		return x.RequiresApproval
+	}
+	return false
+}
+
+func (x *CapabilityDetail) GetExecutionMode() string {
+	if x != nil {
+		return x.ExecutionMode
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetCostClass() string {
+	if x != nil {
+		return x.CostClass
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetHealthCheckedAt() string {
+	if x != nil {
+		return x.HealthCheckedAt
 	}
 	return ""
 }
@@ -825,7 +891,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"j\n" +
 	"\x14GetCapabilityRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12-\n" +
-	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xed\x01\n" +
+	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xdb\x03\n" +
 	"\x10CapabilityDetail\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -835,7 +901,17 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\n" +
 	"risk_level\x18\x06 \x01(\tR\triskLevel\x12\x1b\n" +
 	"\tlazy_load\x18\a \x01(\bR\blazyLoad\x12\x14\n" +
-	"\x05scope\x18\b \x01(\tR\x05scope\"\x9b\x01\n" +
+	"\x05scope\x18\b \x01(\tR\x05scope\x12\x14\n" +
+	"\x05state\x18\t \x01(\tR\x05state\x12\x1f\n" +
+	"\vreason_code\x18\n" +
+	" \x01(\tR\n" +
+	"reasonCode\x12\x16\n" +
+	"\x06reason\x18\v \x01(\tR\x06reason\x12+\n" +
+	"\x11requires_approval\x18\f \x01(\bR\x10requiresApproval\x12%\n" +
+	"\x0eexecution_mode\x18\r \x01(\tR\rexecutionMode\x12\x1d\n" +
+	"\n" +
+	"cost_class\x18\x0e \x01(\tR\tcostClass\x12*\n" +
+	"\x11health_checked_at\x18\x0f \x01(\tR\x0fhealthCheckedAt\"\x9b\x01\n" +
 	"\x15EvaluatePolicyRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +

@@ -217,11 +217,24 @@ impl DocReadyRegistry {
 pub async fn run(registry: DocReadyRegistry) {
     use futures::StreamExt as _;
 
+    if !unverified_doc_ready_events_enabled(
+        std::env::var("ALLOW_UNVERIFIED_LEGACY_EVENTS")
+            .as_deref()
+            .unwrap_or(""),
+        std::env::var("ALLOW_INSECURE_DEV_DEFAULTS")
+            .as_deref()
+            .unwrap_or(""),
+        std::env::var("ISOLATED_E2E").as_deref().unwrap_or(""),
+    ) {
+        warn!("unsigned doc-indexed readiness consumer disabled in production posture");
+        return;
+    }
+
     let Ok(url) = std::env::var("NATS_URL") else {
         info!("NATS_URL unset; doc-indexed readiness consumer disabled");
         return;
     };
-    let client = match async_nats::connect(&url).await {
+    let client = match crate::nats_connection::connect(&url).await {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "doc-indexed consumer: NATS connect failed; disabled");
@@ -258,6 +271,14 @@ pub async fn run(registry: DocReadyRegistry) {
     info!("doc-indexed readiness consumer stopped (subscription closed)");
 }
 
+fn unverified_doc_ready_events_enabled(
+    legacy: &str,
+    insecure_dev: &str,
+    isolated_e2e: &str,
+) -> bool {
+    legacy == "1" && insecure_dev == "1" && isolated_e2e == "1"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +287,15 @@ mod tests {
     #[allow(clippy::needless_pass_by_value)]
     fn payload(json: serde_json::Value) -> Vec<u8> {
         serde_json::to_vec(&json).expect("valid json")
+    }
+
+    #[test]
+    fn unsigned_readiness_identity_requires_three_isolated_dev_gates() {
+        assert!(!unverified_doc_ready_events_enabled("", "", ""));
+        assert!(!unverified_doc_ready_events_enabled("1", "1", ""));
+        assert!(!unverified_doc_ready_events_enabled("1", "", "1"));
+        assert!(!unverified_doc_ready_events_enabled("", "1", "1"));
+        assert!(unverified_doc_ready_events_enabled("1", "1", "1"));
     }
 
     #[test]

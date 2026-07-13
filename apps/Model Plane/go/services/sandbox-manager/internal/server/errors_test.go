@@ -37,3 +37,33 @@ func TestMapErr(t *testing.T) {
 		})
 	}
 }
+
+func TestTelemetryOutcomeClassifiers(t *testing.T) {
+	leaseCases := []struct {
+		err  error
+		want string
+	}{{nil, "ok"}, {ErrPolicyDenied, "policy_denied"}, {lease.ErrLeaseNotFound, "not_found"}, {lease.ErrLeaseExpired, "expired"}, {errors.New("x"), "internal_error"}}
+	for _, tc := range leaseCases {
+		if got := leaseOutcome(tc.err); got != tc.want {
+			t.Fatalf("leaseOutcome(%v)=%q", tc.err, got)
+		}
+	}
+	snapshotLeaseCases := []struct {
+		err  error
+		want string
+	}{{nil, "ok"}, {ErrPolicyDenied, "policy_denied"}, {lease.ErrLeaseNotFound, "lease_not_found"}, {lease.ErrLeaseExpired, "lease_expired"}, {errors.New("x"), "lease_internal_error"}}
+	for _, tc := range snapshotLeaseCases {
+		if got := snapshotLeaseOutcome(tc.err); got != tc.want {
+			t.Fatalf("snapshotLeaseOutcome(%v)=%q", tc.err, got)
+		}
+	}
+	snapshotCreateCases := []struct {
+		err  error
+		want string
+	}{{nil, "ok"}, {ErrPolicyDenied, "policy_denied"}, {snapshot.ErrInvalidLease, "invalid_lease"}, {errors.New("x"), "snapshot_internal_error"}}
+	for _, tc := range snapshotCreateCases {
+		if got := snapshotCreateOutcome(tc.err); got != tc.want {
+			t.Fatalf("snapshotCreateOutcome(%v)=%q", tc.err, got)
+		}
+	}
+}

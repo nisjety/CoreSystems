@@ -6,6 +6,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -53,6 +54,9 @@ var _ ledger.Ledger = (*Store)(nil)
 // RecordEntry appends a cost event. A non-empty idempotency key dedupes
 // retries via an ON CONFLICT DO NOTHING on the unique index.
 func (s *Store) RecordEntry(ctx context.Context, e ledger.Entry) error {
+	if err := ledger.ValidateEntry(e); err != nil {
+		return err
+	}
 	id, err := uuid.NewRandom()
 	if err != nil {
 		return fmt.Errorf("postgres ledger: new id: %w", err)
@@ -62,16 +66,21 @@ func (s *Store) RecordEntry(ctx context.Context, e ledger.Entry) error {
 		createdAt = time.Now().UTC()
 	}
 
+	scopedKey := scopedIdempotencyKey(e.OrgID, e.IdempotencyKey)
 	const q = `
 		INSERT INTO cost_entries
-			(id, org_id, user_id, run_id, request_id, model,
+			(id, org_id, user_id, producer_id, run_id, request_id, model,
 			 input_tokens, output_tokens, cost_usd, idempotency_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (idempotency_key) WHERE idempotency_key <> '' DO NOTHING`
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		WHERE $13 = '' OR NOT EXISTS (
+			SELECT 1 FROM cost_entries
+			WHERE org_id = $2 AND idempotency_key IN ($11, $13)
+		)
+		ON CONFLICT DO NOTHING`
 
 	_, err = s.pool.Exec(ctx, q,
-		id, e.OrgID, e.UserID, e.RunID, e.RequestID, e.Model,
-		e.InputTokens, e.OutputTokens, e.CostUSD, e.IdempotencyKey, createdAt,
+		id, e.OrgID, e.UserID, e.ProducerID, e.RunID, e.RequestID, e.Model,
+		e.InputTokens, e.OutputTokens, e.CostUSD, scopedKey, createdAt, e.IdempotencyKey,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres ledger: insert entry: %w", err)
@@ -160,7 +169,7 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 	where, args := buildWhere(f)
 	args = append(args, limit)
 	q := `
-		SELECT org_id, user_id, run_id, request_id, model,
+		SELECT org_id, user_id, producer_id, run_id, request_id, model,
 			input_tokens, output_tokens, cost_usd::double precision,
 			idempotency_key, created_at
 		FROM cost_entries` + where + `
@@ -177,7 +186,7 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 	for rows.Next() {
 		var e ledger.Entry
 		if err := rows.Scan(
-			&e.OrgID, &e.UserID, &e.RunID, &e.RequestID, &e.Model,
+			&e.OrgID, &e.UserID, &e.ProducerID, &e.RunID, &e.RequestID, &e.Model,
 			&e.InputTokens, &e.OutputTokens, &e.CostUSD, &e.IdempotencyKey, &e.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("postgres ledger: scan entry: %w", err)
@@ -190,8 +199,27 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 	return out, nil
 }
 
+// scopedIdempotencyKey maps a caller key into the existing globally-unique
+// column without dropping the legacy index. Including orgID makes new writes
+// tenant-scoped, while the INSERT's legacy-key lookup still deduplicates rows
+// written by the previous binary. This is rollback-compatible and requires no
+// destructive rewrite of existing accounting data.
+func scopedIdempotencyKey(orgID, key string) string {
+	if key == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(orgID + "\x00" + key))
+	return fmt.Sprintf("v2:%x", digest[:])
+}
+
 // CheckBudget verifies accumulated org+user usage against caps.
 func (s *Store) CheckBudget(ctx context.Context, orgID, userID string, maxCostUSD float64, maxTokens int64) error {
+	if err := ledger.ValidateScope(orgID, userID); err != nil {
+		return err
+	}
+	if err := ledger.ValidateBudget(maxCostUSD, maxTokens); err != nil {
+		return err
+	}
 	u, err := s.GetUsage(ctx, orgID, userID)
 	if err != nil {
 		if errors.Is(err, ledger.ErrUsageNotFound) {

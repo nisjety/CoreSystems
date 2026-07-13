@@ -34,8 +34,14 @@ redis = { workspace = true }
 prost = { workspace = true }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+tonic-health = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 mp-slo = { path = "../../crates/mp-slo" }
+wiremock = "0.6"
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"

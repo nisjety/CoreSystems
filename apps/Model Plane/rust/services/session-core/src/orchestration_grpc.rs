@@ -28,6 +28,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::warn;
 
+use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::orchestration_store as store;
 use crate::store::Pool;
 
@@ -221,6 +222,112 @@ impl Default for ReplayBuffer {
     }
 }
 
+#[allow(clippy::result_large_err)]
+fn authorize_owner_row(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), Status> {
+    caller.authorize_org(org_id)?;
+    if !caller.is_service() {
+        caller.authorize_user(user_id)?;
+    }
+    Ok(())
+}
+
+async fn authorize_run_owner(
+    pool: &Pool,
+    caller: &VerifiedIdentity,
+    run_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
+    authorize_owner_row(caller, &org_id, &user_id)
+}
+
+async fn authorize_thread_owner(
+    pool: &Pool,
+    caller: &VerifiedIdentity,
+    thread_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    authorize_owner_row(caller, &org_id, &user_id)
+}
+
+async fn authorize_plan_owner(
+    pool: &Pool,
+    caller: &VerifiedIdentity,
+    plan_id: &str,
+) -> Result<(), Status> {
+    let row = store::get_plan(pool, plan_id)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .ok_or_else(|| Status::not_found("plan not found"))?;
+    authorize_owner_row(caller, &row.org_id, &row.user_id)
+}
+
+async fn authorize_todo_owner(
+    pool: &Pool,
+    caller: &VerifiedIdentity,
+    todo_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> = sqlx::query_as(
+        "SELECT p.org_id, p.user_id FROM todos t JOIN plans p ON p.id = t.plan_id WHERE t.id = $1",
+    )
+    .bind(todo_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("todo not found"))?;
+    authorize_owner_row(caller, &org_id, &user_id)
+}
+
+#[allow(clippy::result_large_err)]
+fn pin_create_approval_identity(
+    caller: &VerifiedIdentity,
+    request: &mut proto::CreateApprovalRequest,
+) -> Result<(), Status> {
+    caller.authorize_org(&request.org_id)?;
+    caller
+        .user_id()
+        .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+        .clone_into(&mut request.user_id);
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn pin_approval_decision_identity(
+    caller: &VerifiedIdentity,
+    request: &mut proto::DecideApprovalRequest,
+) -> Result<(), Status> {
+    caller.authorize_org(&request.org_id)?;
+    caller.principal_id().clone_into(&mut request.decided_by);
+    Ok(())
+}
+
+fn is_idempotent_approval_retry(
+    approval: &store::ApprovalRow,
+    status: &str,
+    decided_by: &str,
+    decision_reason: &str,
+) -> bool {
+    !decided_by.is_empty()
+        && approval.status == status
+        && approval.decided_by == decided_by
+        && approval.decision_reason == decision_reason
+}
+
 // ---------------------------------------------------------------------------
 // Service state
 // ---------------------------------------------------------------------------
@@ -259,6 +366,7 @@ impl OrchestrationGrpc {
 
     /// Wrap into a tonic server ready to register with `Server::builder`.
     #[must_use]
+    #[allow(dead_code)] // direct constructor retained for isolated service tests
     pub fn into_server(self) -> OrchestrationCoreServiceServer<Self> {
         OrchestrationCoreServiceServer::new(self)
     }
@@ -368,6 +476,23 @@ pub(crate) fn approval_state_to_str(code: i32) -> Option<&'static str> {
         proto::ApprovalState::Denied => Some("denied"),
         proto::ApprovalState::TimedOut => Some("timed_out"),
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_approval_org(org_id: &str) -> Result<(), Status> {
+    if org_id.trim().is_empty() {
+        return Err(Status::invalid_argument("org_id is required"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<(), Status> {
+    validate_approval_org(org_id)?;
+    if decided_by.trim().is_empty() {
+        return Err(Status::invalid_argument("decided_by is required"));
+    }
+    Ok(())
 }
 
 pub(crate) fn todo_state_from_str(s: &str) -> i32 {
@@ -726,6 +851,57 @@ fn broadcast_event(
     event_id
 }
 
+/// Emit approval decision events only for the request that won the durable
+/// requested-state compare-and-set. Exact or concurrent replays observe the
+/// committed row but must not mint fresh event ids or resume notifications.
+fn broadcast_approval_decision_events(
+    tx: &broadcast::Sender<proto::OrchestrationEvent>,
+    replay: &ReplayBuffer,
+    approval: &store::ApprovalRow,
+    decision: i32,
+    new_status: &str,
+    transition_applied: bool,
+) {
+    if !transition_applied {
+        return;
+    }
+
+    broadcast_event(
+        tx,
+        replay,
+        proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: Some(now_ts()),
+            event: Some(orchestration_event::Event::ApprovalStateChanged(
+                orchestration_event::ApprovalStateChanged {
+                    approval_id: approval.id.clone(),
+                    run_id: approval.run_id.clone(),
+                    approval_kind: approval_kind_from_str(&approval.kind),
+                    to: decision,
+                    decided_by: approval.decided_by.clone(),
+                },
+            )),
+        },
+    );
+
+    if new_status == "granted" {
+        broadcast_event(
+            tx,
+            replay,
+            proto::OrchestrationEvent {
+                event_id: String::new(),
+                at: Some(now_ts()),
+                event: Some(orchestration_event::Event::RunResumedAfterApproval(
+                    orchestration_event::RunResumedAfterApproval {
+                        run_id: approval.run_id.clone(),
+                        approval_id: approval.id.clone(),
+                    },
+                )),
+            },
+        );
+    }
+}
+
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
     match ev.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(p) => Some(&p.run_id),
@@ -755,6 +931,7 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
 // ---------------------------------------------------------------------------
 
 #[tonic::async_trait]
+#[allow(clippy::too_many_lines)]
 impl OrchestrationCoreService for OrchestrationGrpc {
     type StreamRunEventsStream =
         Pin<Box<dyn Stream<Item = Result<proto::OrchestrationEvent, Status>> + Send + 'static>>;
@@ -765,10 +942,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::ListPlansResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::ListPlansResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
             let plan_rows = store::list_plans_by_run(&self.pool, &req.run_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -792,10 +972,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::GetPlanResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::GetPlanResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.plan_id.is_empty() {
                 return Err(Status::invalid_argument("plan_id is required"));
             }
+            authorize_plan_owner(&self.pool, &caller, &req.plan_id).await?;
             let row = store::get_plan(&self.pool, &req.plan_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -820,10 +1003,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::TransitionPlanResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::TransitionPlanResponse>, Status> = async {
-            let req = request.into_inner();
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let mut req = request.into_inner();
             if req.plan_id.is_empty() {
                 return Err(Status::invalid_argument("plan_id is required"));
             }
+            authorize_plan_owner(&self.pool, &caller, &req.plan_id).await?;
+            req.actor = caller.principal_id().to_owned();
             let new_status = plan_state_to_str(req.target_state)
                 .ok_or_else(|| Status::invalid_argument("invalid target_state"))?;
 
@@ -877,10 +1064,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::ListTodosResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::ListTodosResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
             let rows = store::list_todos_by_thread(&self.pool, &req.thread_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -908,10 +1098,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::GetTodoResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::GetTodoResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.todo_id.is_empty() {
                 return Err(Status::invalid_argument("todo_id is required"));
             }
+            authorize_todo_owner(&self.pool, &caller, &req.todo_id).await?;
             let row = store::get_todo(&self.pool, &req.todo_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -930,10 +1123,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::TransitionTodoResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::TransitionTodoResponse>, Status> = async {
-            let req = request.into_inner();
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let mut req = request.into_inner();
             if req.todo_id.is_empty() {
                 return Err(Status::invalid_argument("todo_id is required"));
             }
+            authorize_todo_owner(&self.pool, &caller, &req.todo_id).await?;
+            req.actor = caller.principal_id().to_owned();
             let new_status = todo_state_to_str(req.target_state)
                 .ok_or_else(|| Status::invalid_argument("invalid target_state"))?;
 
@@ -985,13 +1182,23 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::ListApprovalsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::ListApprovalsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
-            let rows = store::list_approvals_by_run_full(&self.pool, &req.run_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            let rows = store::list_approvals_by_run_full_for_org(
+                &self.pool,
+                &req.run_id,
+                &req.org_id,
+                caller.user_id(),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
             let approvals: Vec<proto::Approval> = rows
                 .iter()
                 .filter(|r| {
@@ -1001,11 +1208,6 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                         r.plan_id.as_deref() == Some(req.step_id.as_str())
                     }
                 })
-                // Cross-org IDOR fix (Phase 6): a non-empty org_id scopes the
-                // list to that tenant's own approvals, even when the run_id
-                // itself is known/guessed by a caller from a different org.
-                // Empty org_id is unscoped (internal-only callers).
-                .filter(|r| req.org_id.is_empty() || r.org_id == req.org_id)
                 .map(approval_from_row)
                 .collect();
             Ok(Response::new(proto::ListApprovalsResponse { approvals }))
@@ -1021,12 +1223,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::OrgPendingApprovalsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::OrgPendingApprovalsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
-            // Empty org_id is intentional: it returns ALL pending approvals
-            // across every org for model-gateway's boot rehydrate. A non-empty
-            // org_id scopes the read to that tenant (IDOR-safe). The durable
-            // "pending" status is `'requested'`.
-            let rows = store::list_pending_approvals(&self.pool, &req.org_id)
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            let rows = store::list_pending_approvals(&self.pool, &req.org_id, caller.user_id())
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
             let approvals: Vec<proto::Approval> = rows.iter().map(approval_from_row).collect();
@@ -1045,19 +1247,22 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::GetApprovalResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::GetApprovalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.approval_id.is_empty() {
                 return Err(Status::invalid_argument("approval_id is required"));
             }
-            let row = store::get_approval(&self.pool, &req.approval_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-            // Cross-org IDOR fix (Phase 6): a non-empty org_id scopes the
-            // lookup to that tenant. A cross-org row is treated exactly like
-            // a missing one (mirrors model-gateway's
-            // `ApprovalStore::resolve`) so existence is never leaked across
-            // tenants. Empty org_id is unscoped (internal-only callers).
-            let row = row.filter(|r| req.org_id.is_empty() || r.org_id == req.org_id);
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            let row = store::get_approval_for_org(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                caller.user_id(),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
             Ok(Response::new(proto::GetApprovalResponse {
                 approval: row.as_ref().map(approval_from_row),
             }))
@@ -1073,10 +1278,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::CreateApprovalResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::CreateApprovalResponse>, Status> = async {
-            let req = request.into_inner();
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let mut req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
+            pin_create_approval_identity(&caller, &mut req)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
             let kind = approval_kind_to_str(req.kind)
                 .ok_or_else(|| Status::invalid_argument("invalid approval kind"))?;
 
@@ -1140,6 +1349,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 None if !req.idempotency_key.is_empty() => store::get_approval_by_idempotency_key(
                     &self.pool,
                     &req.org_id,
+                    &req.user_id,
                     &req.idempotency_key,
                 )
                 .await
@@ -1200,10 +1410,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::DecideApprovalResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::DecideApprovalResponse>, Status> = async {
-            let req = request.into_inner();
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "approval:decide")?;
+            let mut req = request.into_inner();
             if req.approval_id.is_empty() {
                 return Err(Status::invalid_argument("approval_id is required"));
             }
+            pin_approval_decision_identity(&caller, &mut req)?;
+            validate_approval_decision_context(&req.org_id, &req.decided_by)?;
             let new_status = approval_state_to_str(req.decision)
                 .ok_or_else(|| Status::invalid_argument("invalid decision state"))?;
             if matches!(new_status, "requested") {
@@ -1212,28 +1426,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 ));
             }
 
-            // Cross-org IDOR fix (Phase 6): resolve the row first and verify
-            // tenant ownership BEFORE mutating it. A non-empty org_id that
-            // doesn't match the approval's own org is treated exactly like a
-            // missing approval (mirrors model-gateway's own
-            // `ApprovalStore::resolve` pattern) — never a distinguishable
-            // "forbidden" that would leak existence across tenants. Empty
-            // org_id stays unscoped for internal-only callers (e.g.
-            // execution-core's in-loop timeout/cancel fail-closed paths,
-            // which already resolved the row themselves via `GetApproval`).
-            if !req.org_id.is_empty() {
-                let existing = store::get_approval(&self.pool, &req.approval_id)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-                match existing {
-                    Some(row) if row.org_id == req.org_id => {}
-                    _ => return Err(Status::not_found("approval not found")),
-                }
-            }
-
-            store::decide_approval(
+            let updated = store::decide_approval(
                 &self.pool,
                 &req.approval_id,
+                &req.org_id,
+                caller.user_id(),
                 new_status,
                 &req.decided_by,
                 &req.decision_reason,
@@ -1241,51 +1438,40 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            let after = store::get_approval(&self.pool, &req.approval_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::internal("approval vanished after update"))?;
+            let after = store::get_approval_for_org(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                caller.user_id(),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            if !updated {
+                match after.as_ref() {
+                    Some(approval)
+                        if is_idempotent_approval_retry(
+                            approval,
+                            new_status,
+                            &req.decided_by,
+                            &req.decision_reason,
+                        ) => {}
+                    Some(_) => {
+                        return Err(Status::failed_precondition("approval is already decided"))
+                    }
+                    None => return Err(Status::not_found("approval not found")),
+                }
+            }
+            let after = after.ok_or_else(|| Status::internal("approval vanished after update"))?;
             let approval = approval_from_row(&after);
 
-            broadcast_event(
+            broadcast_approval_decision_events(
                 &self.events_tx,
                 &self.replay,
-                proto::OrchestrationEvent {
-                    event_id: String::new(),
-                    at: Some(now_ts()),
-                    event: Some(orchestration_event::Event::ApprovalStateChanged(
-                        orchestration_event::ApprovalStateChanged {
-                            approval_id: after.id.clone(),
-                            run_id: after.run_id.clone(),
-                            approval_kind: approval_kind_from_str(&after.kind),
-                            to: req.decision,
-                            decided_by: after.decided_by.clone(),
-                        },
-                    )),
-                },
+                &after,
+                req.decision,
+                new_status,
+                updated,
             );
-
-            // A granted decision unblocks the gated run. Emit the matching
-            // RunResumedAfterApproval (the inverse of RunPausedForApproval at
-            // create_approval time) so SSE consumers — the chat "internal
-            // Claude Code" surface and operator views — resume the run.
-            // Denials/timeouts leave the run paused; no resume signal.
-            if new_status == "granted" {
-                broadcast_event(
-                    &self.events_tx,
-                    &self.replay,
-                    proto::OrchestrationEvent {
-                        event_id: String::new(),
-                        at: Some(now_ts()),
-                        event: Some(orchestration_event::Event::RunResumedAfterApproval(
-                            orchestration_event::RunResumedAfterApproval {
-                                run_id: after.run_id.clone(),
-                                approval_id: after.id.clone(),
-                            },
-                        )),
-                    },
-                );
-            }
 
             Ok(Response::new(proto::DecideApprovalResponse {
                 approval: Some(approval),
@@ -1302,10 +1488,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::GetSubagentLineageResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::GetSubagentLineageResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
             let lineage = fetch_lineage_for_thread(&self.pool, &req.thread_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -1329,6 +1518,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::AttachSubagentResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::AttachSubagentResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:write")?;
             let req = request.into_inner();
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
@@ -1338,6 +1529,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     "parent_run_id and child_run_id are required",
                 ));
             }
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.parent_run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.child_run_id).await?;
             let role_str = subagent_role_to_str(req.role);
 
             store::attach_subagent(
@@ -1392,6 +1586,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     ) -> Result<Response<proto::RecordOrchestrationEventResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<proto::RecordOrchestrationEventResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:write")?;
             let req = request.into_inner();
             let mut ev = req
                 .event
@@ -1406,6 +1602,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     "event must carry a non-empty run_id",
                 ));
             }
+            let run_id = event_run_id(&ev).expect("validated run id");
+            authorize_run_owner(&self.pool, &caller, run_id).await?;
             // Server owns the timestamp; fill it in when the caller left it empty.
             if ev.at.is_none() {
                 ev.at = Some(now_ts());
@@ -1424,10 +1622,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         &self,
         request: Request<proto::StreamRunEventsRequest>,
     ) -> Result<Response<Self::StreamRunEventsStream>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "orchestration:read")?;
         let req = request.into_inner();
         if req.run_id.is_empty() {
             return Err(Status::invalid_argument("run_id is required"));
         }
+        authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
         let target = req.run_id;
         let after = req.after_event_id;
 
@@ -1488,6 +1689,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approval_identity_is_pinned_and_cross_tenant_requests_are_rejected() {
+        let caller = crate::auth::VerifiedIdentity::user_for_test("org-1", "user-1");
+        let mut create = proto::CreateApprovalRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "forged-user".to_owned(),
+            ..Default::default()
+        };
+        pin_create_approval_identity(&caller, &mut create).expect("same tenant");
+        assert_eq!(create.user_id, "user-1");
+
+        let mut decision = proto::DecideApprovalRequest {
+            org_id: "org-1".to_owned(),
+            decided_by: "forged-actor".to_owned(),
+            ..Default::default()
+        };
+        pin_approval_decision_identity(&caller, &mut decision).expect("same tenant");
+        assert_eq!(decision.decided_by, "user-1");
+
+        create.org_id = "org-2".to_owned();
+        assert_eq!(
+            pin_create_approval_identity(&caller, &mut create)
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
     fn plan_state_round_trip() {
         for s in [
             "draft",
@@ -1532,6 +1761,110 @@ mod tests {
             approval_state_from_str("expired"),
             proto::ApprovalState::TimedOut as i32
         );
+    }
+
+    #[test]
+    fn approval_mutations_require_tenant_and_actor() {
+        assert!(validate_approval_decision_context("", "user_1").is_err());
+        assert!(validate_approval_decision_context("   ", "user_1").is_err());
+        assert!(validate_approval_decision_context("org_1", "").is_err());
+        assert!(validate_approval_decision_context("org_1", "   ").is_err());
+        assert!(validate_approval_decision_context("org_1", "user_1").is_ok());
+    }
+
+    #[test]
+    fn exact_approval_decision_retry_is_idempotent_but_conflicts_are_not() {
+        let row = store::ApprovalRow {
+            id: "approval-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            plan_id: None,
+            kind: "tool_call".to_owned(),
+            status: "granted".to_owned(),
+            requested_by: "user-1".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: "approved".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: "decision-1".to_owned(),
+            metadata: JsonValue::Object(serde_json::Map::new()),
+            requested_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            expires_at: None,
+        };
+        assert!(is_idempotent_approval_retry(
+            &row, "granted", "user-1", "approved"
+        ));
+        assert!(!is_idempotent_approval_retry(
+            &row, "denied", "user-1", "approved"
+        ));
+        assert!(!is_idempotent_approval_retry(
+            &row, "granted", "user-2", "approved"
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_decision_replay_does_not_emit_duplicate_events() {
+        let row = store::ApprovalRow {
+            id: "approval-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            plan_id: None,
+            kind: "tool_call".to_owned(),
+            status: "granted".to_owned(),
+            requested_by: "user-1".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: "approved".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: "decision-1".to_owned(),
+            metadata: JsonValue::Object(serde_json::Map::new()),
+            requested_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            expires_at: None,
+        };
+        let (events_tx, mut events_rx) = broadcast::channel(8);
+        let replay = ReplayBuffer::default();
+
+        broadcast_approval_decision_events(
+            &events_tx,
+            &replay,
+            &row,
+            proto::ApprovalState::Granted as i32,
+            "granted",
+            true,
+        );
+        assert!(matches!(
+            events_rx.try_recv().expect("state-change event").event,
+            Some(orchestration_event::Event::ApprovalStateChanged(_))
+        ));
+        assert!(matches!(
+            events_rx.try_recv().expect("run-resumed event").event,
+            Some(orchestration_event::Event::RunResumedAfterApproval(_))
+        ));
+
+        broadcast_approval_decision_events(
+            &events_tx,
+            &replay,
+            &row,
+            proto::ApprovalState::Granted as i32,
+            "granted",
+            false,
+        );
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            replay.replay_after("run-1", "").await.len(),
+            2,
+            "replayed decisions must not add state-change or resume events"
+        );
+    }
+
+    #[test]
+    fn approval_reads_require_tenant() {
+        assert!(validate_approval_org("").is_err());
+        assert!(validate_approval_org("   ").is_err());
+        assert!(validate_approval_org("org_1").is_ok());
     }
 
     #[test]

@@ -2,16 +2,36 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/pkg/publisher"
+	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 )
+
+type registryDatabase interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
 
 // ---------------------------------------------------------------------------
 // SkillsHandler  /api/v1/skills
@@ -69,7 +89,7 @@ type skillRow struct {
 func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		orgID := r.URL.Query().Get("org_id")
+		orgID := verifiedOrganizationID(r)
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, content,
 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
@@ -77,7 +97,8 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			FROM agent_skills WHERE org_id = $1 ORDER BY name
 		`, orgID)
 		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("list skills failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -99,6 +120,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.OrgID = verifiedOrganizationID(r)
 		s.ID = "skill_" + uuid.New().String()
 		now := time.Now().UTC()
 		if s.TriggerKeywords == nil {
@@ -140,8 +162,8 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
 		       enabled, created_at, updated_at
-		FROM agent_skills WHERE id = $1
-	`, id).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
+		FROM agent_skills WHERE id = $1 AND org_id = $2
+	`, id, verifiedOrganizationID(r)).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
 		&s.Enabled, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
@@ -162,20 +184,21 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	now := time.Now().UTC()
+	orgID := verifiedOrganizationID(r)
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET enabled=$1, updated_at=$2 WHERE id=$3`, *update.Enabled, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
 	}
 	if update.Description != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET description=$1, updated_at=$2 WHERE id=$3`, update.Description, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET description=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Description, now, id, orgID)
 	}
 	if update.Content != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET content=$1, updated_at=$2 WHERE id=$3`, update.Content, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET content=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Content, now, id, orgID)
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
-	_, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1`, id)
+	_, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -189,13 +212,52 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
 
 // MCPHandler handles CRUD for mcp_servers.
 type MCPHandler struct {
-	pool *pgxpool.Pool
-	pub  publisher.EventPublisher
+	pool     registryDatabase
+	pub      publisher.EventPublisher
+	resolver mcpHostResolver
 }
+
+type mcpHostResolver interface {
+	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
+}
+
+const (
+	maxMCPRegistrationBodyBytes = 32 << 10
+	maxMCPToolAllowlistEntries  = 64
+)
+
+var (
+	mcpToolNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+	mcpIdentifier      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$`)
+	mcpForbiddenRanges = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("198.18.0.0/15"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("224.0.0.0/4"),
+		netip.MustParsePrefix("240.0.0.0/4"),
+		netip.MustParsePrefix("::/128"),
+		netip.MustParsePrefix("::1/128"),
+		netip.MustParsePrefix("64:ff9b::/96"),
+		netip.MustParsePrefix("100::/64"),
+		netip.MustParsePrefix("2001:db8::/32"),
+		netip.MustParsePrefix("fc00::/7"),
+		netip.MustParsePrefix("fe80::/10"),
+		netip.MustParsePrefix("ff00::/8"),
+	}
+)
 
 // NewMCPHandler constructs the handler.
 func NewMCPHandler(pool *pgxpool.Pool) *MCPHandler {
-	return &MCPHandler{pool: pool}
+	return &MCPHandler{pool: pool, resolver: net.DefaultResolver}
 }
 
 // WithPublisher wires reconcile-event emission (matrix §4.3). Optional and
@@ -207,20 +269,398 @@ func (h *MCPHandler) WithPublisher(pub publisher.EventPublisher) *MCPHandler {
 }
 
 type mcpServerRow struct {
-	ID           string    `json:"id"`
-	OrgID        string    `json:"org_id"`
-	Name         string    `json:"name"`
-	Description  string    `json:"description"`
-	EndpointURL  string    `json:"endpoint_url"`
-	Transport    string    `json:"transport"`
-	AuthKind     string    `json:"auth_kind"`
-	ConfigJSON   any       `json:"config_json"`
-	Scope        string    `json:"scope"`
-	Enabled      bool      `json:"enabled"`
-	RolloutState string    `json:"rollout_state"`
-	RiskLevel    string    `json:"risk_level"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                  string    `json:"id"`
+	OrgID               string    `json:"org_id"`
+	Name                string    `json:"name"`
+	Description         string    `json:"description"`
+	EndpointURL         string    `json:"endpoint_url"`
+	Transport           string    `json:"transport"`
+	AuthKind            string    `json:"auth_kind"`
+	ConfigJSON          any       `json:"-"`
+	ToolAllowlist       []string  `json:"tool_allowlist"`
+	SecretConfigured    bool      `json:"secret_configured"`
+	ConfigurationState  string    `json:"configuration_state"`
+	ConfigurationReason string    `json:"configuration_reason,omitempty"`
+	Scope               string    `json:"scope"`
+	Enabled             bool      `json:"enabled"`
+	RolloutState        string    `json:"rollout_state"`
+	RiskLevel           string    `json:"risk_level"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type mcpServerRegistration struct {
+	ID           string          `json:"id"`
+	OrgID        string          `json:"org_id"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	EndpointURL  string          `json:"endpoint_url"`
+	Transport    string          `json:"transport"`
+	AuthKind     string          `json:"auth_kind"`
+	ConfigJSON   mcpServerConfig `json:"config_json"`
+	Scope        string          `json:"scope"`
+	Enabled      bool            `json:"enabled"`
+	RolloutState string          `json:"rollout_state"`
+	RiskLevel    string          `json:"risk_level"`
+}
+
+// mcpServerConfig deliberately enumerates every durable configuration field.
+// Executable commands, arguments, headers, tokens, and provider configuration
+// are not part of the registry contract and strict JSON decoding rejects them.
+type mcpServerConfig struct {
+	ToolAllowlist []string `json:"tool_allowlist"`
+	SecretRef     string   `json:"secret_ref,omitempty"`
+	OwnerUserID   string   `json:"owner_user_id,omitempty"`
+	SharedWith    []string `json:"shared_with,omitempty"`
+}
+
+func mcpVerifiedOrganization(request *http.Request, requireWrite bool) (string, bool) {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
+		return "", false
+	}
+	if requireWrite && !principal.HasScope(authz.WriteScope) {
+		return "", false
+	}
+	return principal.OrganizationID, true
+}
+
+func decodeMCPRegistration(w http.ResponseWriter, request *http.Request) (mcpServerRegistration, error) {
+	request.Body = http.MaxBytesReader(w, request.Body, maxMCPRegistrationBodyBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input mcpServerRegistration
+	if err := decoder.Decode(&input); err != nil {
+		return mcpServerRegistration{}, err
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return mcpServerRegistration{}, err
+	}
+	return input, nil
+}
+
+func (h *MCPHandler) normalizeMCPRegistration(
+	ctx context.Context,
+	input mcpServerRegistration,
+	organizationID string,
+) (mcpServerRow, mcpServerConfig, error) {
+	input.ID = strings.TrimSpace(input.ID)
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Transport = strings.ToLower(strings.TrimSpace(input.Transport))
+	input.AuthKind = strings.ToLower(strings.TrimSpace(input.AuthKind))
+	input.Scope = strings.ToLower(strings.TrimSpace(input.Scope))
+	input.RolloutState = strings.ToLower(strings.TrimSpace(input.RolloutState))
+	input.RiskLevel = strings.ToLower(strings.TrimSpace(input.RiskLevel))
+	if input.ID == "" {
+		input.ID = "mcp_" + uuid.New().String()
+	}
+	if input.Transport == "" {
+		input.Transport = "http"
+	}
+	if input.AuthKind == "" {
+		input.AuthKind = "none"
+	}
+	if input.Scope == "" {
+		input.Scope = "workspace"
+	}
+	if input.RolloutState == "" {
+		input.RolloutState = "stable"
+	}
+	if input.RiskLevel == "" {
+		input.RiskLevel = "medium"
+	}
+	if !mcpIdentifier.MatchString(input.ID) || !validMCPDisplayName(input.Name) || len(input.Description) > 2_000 {
+		return mcpServerRow{}, mcpServerConfig{}, errors.New("invalid identity fields")
+	}
+	if input.Transport != "http" {
+		return mcpServerRow{}, mcpServerConfig{}, errors.New("only remote HTTP transport is supported")
+	}
+	endpoint, host, err := parseMCPEndpoint(input.EndpointURL)
+	if err != nil {
+		return mcpServerRow{}, mcpServerConfig{}, err
+	}
+	config, err := normalizeMCPConfig(input.ConfigJSON, input.AuthKind, input.Scope)
+	if err != nil {
+		return mcpServerRow{}, mcpServerConfig{}, err
+	}
+	if !validMCPAuthKind(input.AuthKind) || !validMCPScope(input.Scope) ||
+		!validMCPRolloutState(input.RolloutState) || !validMCPRiskLevel(input.RiskLevel) {
+		return mcpServerRow{}, mcpServerConfig{}, errors.New("invalid MCP policy fields")
+	}
+	if h.resolver == nil {
+		return mcpServerRow{}, mcpServerConfig{}, errors.New("DNS resolver unavailable")
+	}
+	lookupContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	addresses, err := h.resolver.LookupNetIP(lookupContext, "ip", host)
+	if err != nil || len(addresses) == 0 {
+		return mcpServerRow{}, mcpServerConfig{}, fmt.Errorf("MCP endpoint DNS lookup failed")
+	}
+	for _, address := range addresses {
+		if !mcpAddressIsPublic(address) {
+			return mcpServerRow{}, mcpServerConfig{}, errors.New("MCP endpoint resolved to a forbidden address")
+		}
+	}
+	return mcpServerRow{
+		ID: input.ID, OrgID: organizationID, Name: input.Name, Description: input.Description,
+		EndpointURL: endpoint, Transport: input.Transport, AuthKind: input.AuthKind,
+		Scope: input.Scope, Enabled: input.Enabled, RolloutState: input.RolloutState, RiskLevel: input.RiskLevel,
+	}, config, nil
+}
+
+func parseMCPEndpoint(raw string) (string, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 2_048 || !allASCII(raw) || strings.ContainsAny(raw, "\\#\r\n\t") {
+		return "", "", errors.New("invalid MCP endpoint")
+	}
+	endpoint, err := url.ParseRequestURI(raw)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Opaque != "" || endpoint.Host == "" ||
+		endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return "", "", errors.New("MCP endpoint must be a credential-free HTTPS URL")
+	}
+	authority := endpoint.Host
+	if strings.Contains(authority, "%") {
+		return "", "", errors.New("encoded MCP endpoint hosts are forbidden")
+	}
+	host := strings.ToLower(endpoint.Hostname())
+	if host == "" || strings.HasSuffix(host, ".") || mcpHostIsForbidden(host) {
+		return "", "", errors.New("MCP endpoint host is forbidden")
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return "", "", errors.New("literal MCP endpoint addresses are forbidden")
+	}
+	if !validMCPHostname(host) {
+		return "", "", errors.New("invalid MCP endpoint hostname")
+	}
+	port := endpoint.Port()
+	if port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65_535 {
+			return "", "", errors.New("invalid MCP endpoint port")
+		}
+		endpoint.Host = net.JoinHostPort(host, port)
+	} else {
+		endpoint.Host = host
+	}
+	endpoint.Scheme = "https"
+	return endpoint.String(), host, nil
+}
+
+func mcpHostIsForbidden(host string) bool {
+	if host == "localhost" || host == "metadata" || host == "instance-data" ||
+		host == "metadata.google.internal" || strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") ||
+		strings.HasSuffix(host, ".home") || strings.HasSuffix(host, ".lan") ||
+		strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".cluster.local") ||
+		strings.HasSuffix(host, ".arpa") {
+		return true
+	}
+	compact := strings.ReplaceAll(host, ".", "")
+	if compact == "" {
+		return true
+	}
+	allNumeric := true
+	for _, character := range compact {
+		if character < '0' || character > '9' {
+			allNumeric = false
+			break
+		}
+	}
+	return allNumeric || strings.HasPrefix(host, "0x")
+}
+
+func validMCPHostname(host string) bool {
+	if len(host) > 253 || !allASCII(host) {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' ||
+			strings.HasPrefix(label, "xn--") {
+			return false
+		}
+		for _, character := range label {
+			if !(character >= 'a' && character <= 'z') && !(character >= '0' && character <= '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func mcpAddressIsPublic(address netip.Addr) bool {
+	if !address.IsValid() {
+		return false
+	}
+	address = address.Unmap()
+	for _, prefix := range mcpForbiddenRanges {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return address.IsGlobalUnicast()
+}
+
+func normalizeMCPConfig(config mcpServerConfig, authKind, scope string) (mcpServerConfig, error) {
+	if len(config.ToolAllowlist) == 0 || len(config.ToolAllowlist) > maxMCPToolAllowlistEntries {
+		return mcpServerConfig{}, errors.New("an exact MCP tool allowlist is required")
+	}
+	seen := make(map[string]struct{}, len(config.ToolAllowlist))
+	tools := make([]string, 0, len(config.ToolAllowlist))
+	for _, raw := range config.ToolAllowlist {
+		tool := strings.TrimSpace(raw)
+		if !mcpToolNamePattern.MatchString(tool) {
+			return mcpServerConfig{}, errors.New("invalid MCP tool allowlist")
+		}
+		if _, exists := seen[tool]; exists {
+			return mcpServerConfig{}, errors.New("duplicate MCP tool allowlist entry")
+		}
+		seen[tool] = struct{}{}
+		tools = append(tools, tool)
+	}
+	config.ToolAllowlist = tools
+	config.SecretRef = strings.TrimSpace(config.SecretRef)
+	if authKind == "none" && config.SecretRef != "" {
+		return mcpServerConfig{}, errors.New("unauthenticated MCP server cannot have a secret reference")
+	}
+	if authKind != "none" && !validMCPSecretReference(config.SecretRef) {
+		return mcpServerConfig{}, errors.New("managed secret reference required")
+	}
+	if len(config.OwnerUserID) > 200 || len(config.SharedWith) > 64 {
+		return mcpServerConfig{}, errors.New("invalid MCP ownership metadata")
+	}
+	if scope == "user" && !mcpIdentifier.MatchString(config.OwnerUserID) {
+		return mcpServerConfig{}, errors.New("user-scoped MCP server requires an owner")
+	}
+	for _, sharedUser := range config.SharedWith {
+		if !mcpIdentifier.MatchString(sharedUser) {
+			return mcpServerConfig{}, errors.New("invalid MCP sharing metadata")
+		}
+	}
+	return config, nil
+}
+
+func validMCPSecretReference(reference string) bool {
+	if reference == "" || len(reference) > 512 || !allASCII(reference) {
+		return false
+	}
+	parsed, err := url.Parse(reference)
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Host == "" || parsed.Path == "" {
+		return false
+	}
+	switch parsed.Scheme {
+	case "secret", "vault", "aws-secretsmanager", "azure-keyvault", "gcp-secretmanager":
+		return true
+	default:
+		return false
+	}
+}
+
+func allASCII(value string) bool {
+	for _, character := range value {
+		if character > 127 || character < 32 {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPDisplayName(value string) bool {
+	if value == "" || len(value) > 200 {
+		return false
+	}
+	for _, character := range value {
+		if character < 32 || character == 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPAuthKind(value string) bool {
+	return value == "none" || value == "bearer" || value == "api_key" || value == "oauth"
+}
+
+func validMCPScope(value string) bool {
+	return value == "workspace" || value == "org" || value == "user"
+}
+
+func validMCPRolloutState(value string) bool {
+	return value == "stable" || value == "canary" || value == "quarantine" || value == "deprecated"
+}
+
+func validMCPRiskLevel(value string) bool {
+	return value == "low" || value == "medium" || value == "high"
+}
+
+func hydrateMCPServerView(server *mcpServerRow) {
+	server.ToolAllowlist = []string{}
+	server.ConfigurationState = "invalid"
+	server.ConfigurationReason = "invalid_registry_record"
+	config, err := decodeStoredMCPConfig(server.ConfigJSON)
+	if err != nil || server.Transport != "http" {
+		quarantineInvalidMCPServer(server)
+		return
+	}
+	if _, _, err := parseMCPEndpoint(server.EndpointURL); err != nil {
+		quarantineInvalidMCPServer(server)
+		return
+	}
+	config, err = normalizeMCPConfig(config, server.AuthKind, server.Scope)
+	if err != nil || !validMCPAuthKind(server.AuthKind) {
+		quarantineInvalidMCPServer(server)
+		return
+	}
+	server.ToolAllowlist = append([]string(nil), config.ToolAllowlist...)
+	server.SecretConfigured = config.SecretRef != ""
+	server.ConfigurationState = "valid"
+	server.ConfigurationReason = ""
+}
+
+func quarantineInvalidMCPServer(server *mcpServerRow) {
+	// Legacy rows may have embedded credentials in endpoint_url. Once any part
+	// of the durable record fails the current contract, do not echo that URL.
+	server.EndpointURL = ""
+	server.Enabled = false
+	server.RolloutState = "quarantine"
+	server.SecretConfigured = false
+}
+
+func decodeStoredMCPConfig(raw any) (mcpServerConfig, error) {
+	var payload []byte
+	switch value := raw.(type) {
+	case nil:
+		payload = []byte("{}")
+	case []byte:
+		payload = append([]byte(nil), value...)
+	case string:
+		payload = []byte(value)
+	case json.RawMessage:
+		payload = append([]byte(nil), value...)
+	default:
+		var err error
+		payload, err = json.Marshal(value)
+		if err != nil {
+			return mcpServerConfig{}, err
+		}
+	}
+	if len(payload) > maxMCPRegistrationBodyBytes {
+		return mcpServerConfig{}, errors.New("stored MCP config exceeds limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var config mcpServerConfig
+	if err := decoder.Decode(&config); err != nil {
+		return mcpServerConfig{}, err
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return mcpServerConfig{}, err
+	}
+	return config, nil
 }
 
 // Register mounts routes.
@@ -244,14 +684,19 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		orgID := r.URL.Query().Get("org_id")
+		orgID, ok := mcpVerifiedOrganization(r, false)
+		if !ok {
+			jsonErr(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, endpoint_url, transport, auth_kind,
 			       config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at
 			FROM mcp_servers WHERE (org_id=$1 OR org_id='global') AND deleted_at IS NULL ORDER BY name
 		`, orgID)
 		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("list MCP servers failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -261,43 +706,49 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.EndpointURL,
 				&s.Transport, &s.AuthKind, &s.ConfigJSON, &s.Scope, &s.Enabled,
 				&s.RolloutState, &s.RiskLevel, &s.CreatedAt, &s.UpdatedAt); err != nil {
-				jsonErr(w, err.Error(), http.StatusInternalServerError)
+				slog.Error("scan MCP server failed", "error", err)
+				jsonErr(w, "database unavailable", http.StatusInternalServerError)
 				return
 			}
+			hydrateMCPServerView(&s)
 			servers = append(servers, s)
 		}
 		writeJSON(w, map[string]any{"servers": servers})
 	case http.MethodPost, http.MethodPut:
-		var s mcpServerRow
-		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
-			jsonErr(w, err.Error(), http.StatusBadRequest)
+		orgID, ok := mcpVerifiedOrganization(r, true)
+		if !ok {
+			jsonErr(w, "capability write scope required", http.StatusForbidden)
 			return
 		}
-		if s.ID == "" {
-			s.ID = "mcp_" + uuid.New().String()
+		input, err := decodeMCPRegistration(w, r)
+		if err != nil {
+			jsonErr(w, "invalid MCP registration", http.StatusBadRequest)
+			return
 		}
-		if s.Transport == "" {
-			s.Transport = "http"
-		}
-		if s.RolloutState == "" {
-			s.RolloutState = "stable"
-		}
-		if s.RiskLevel == "" {
-			s.RiskLevel = "medium"
+		s, config, err := h.normalizeMCPRegistration(r.Context(), input, orgID)
+		if err != nil {
+			jsonErr(w, "invalid MCP registration", http.StatusUnprocessableEntity)
+			return
 		}
 		now := time.Now().UTC()
-		cfgJSON, _ := json.Marshal(s.ConfigJSON)
-		_, err := h.pool.Exec(r.Context(), `
+		cfgJSON, err := json.Marshal(config)
+		if err != nil {
+			jsonErr(w, "invalid MCP registration", http.StatusBadRequest)
+			return
+		}
+		_, err = h.pool.Exec(r.Context(), `
 			INSERT INTO mcp_servers (id, org_id, name, description, endpoint_url, transport, auth_kind,
 			    config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			ON CONFLICT (org_id, name) WHERE deleted_at IS NULL DO UPDATE SET
-			    endpoint_url=$5, transport=$6, config_json=$8, enabled=$10,
-			    rollout_state=$11, risk_level=$12, updated_at=$14
+			    description=$4, endpoint_url=$5, transport=$6, auth_kind=$7,
+			    config_json=$8, scope=$9, enabled=$10, rollout_state=$11,
+			    risk_level=$12, updated_at=$14
 		`, s.ID, s.OrgID, s.Name, s.Description, s.EndpointURL, s.Transport, s.AuthKind,
 			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now)
 		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("persist MCP server failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
 		}
 		// Reconcile (matrix §4.3): notify cache holders an MCP server changed.
@@ -314,45 +765,88 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MCPHandler) get(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, ok := mcpVerifiedOrganization(r, false)
+	if !ok {
+		jsonErr(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	var s mcpServerRow
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, endpoint_url, transport, auth_kind,
 		       config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at
-		FROM mcp_servers WHERE id=$1 AND deleted_at IS NULL
-	`, id).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.EndpointURL,
+		FROM mcp_servers
+		WHERE id=$1 AND (org_id=$2 OR org_id='global') AND deleted_at IS NULL
+	`, id, orgID).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.EndpointURL,
 		&s.Transport, &s.AuthKind, &s.ConfigJSON, &s.Scope, &s.Enabled,
 		&s.RolloutState, &s.RiskLevel, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
+	hydrateMCPServerView(&s)
 	writeJSON(w, s)
 }
 
 func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, ok := mcpVerifiedOrganization(r, true)
+	if !ok {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return
+	}
 	var update struct {
 		Enabled      *bool  `json:"enabled"`
 		RolloutState string `json:"rollout_state"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		jsonErr(w, err.Error(), http.StatusBadRequest)
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPRegistrationBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&update); err != nil || ensureJSONEOF(decoder) != nil {
+		jsonErr(w, "invalid MCP update", http.StatusBadRequest)
+		return
+	}
+	if update.Enabled == nil && update.RolloutState == "" {
+		jsonErr(w, "invalid MCP update", http.StatusUnprocessableEntity)
+		return
+	}
+	// Enabling or promoting a record must go through PUT so the endpoint,
+	// DNS answer, auth reference, and exact tool allowlist are all revalidated.
+	if (update.Enabled != nil && *update.Enabled) || update.RolloutState == "stable" || update.RolloutState == "canary" {
+		jsonErr(w, "full MCP registration required", http.StatusUnprocessableEntity)
+		return
+	}
+	if update.RolloutState != "" && !validMCPRolloutState(update.RolloutState) {
+		jsonErr(w, "invalid MCP update", http.StatusUnprocessableEntity)
 		return
 	}
 	now := time.Now().UTC()
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE mcp_servers SET enabled=$1, updated_at=$2 WHERE id=$3`, *update.Enabled, now, id)
+		if _, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID); err != nil {
+			slog.Error("update MCP server enabled state failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
 	}
 	if update.RolloutState != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE mcp_servers SET rollout_state=$1, updated_at=$2 WHERE id=$3`, update.RolloutState, now, id)
+		if _, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET rollout_state=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.RolloutState, now, id, orgID); err != nil {
+			slog.Error("update MCP server rollout state failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *MCPHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, ok := mcpVerifiedOrganization(r, true)
+	if !ok {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return
+	}
 	now := time.Now().UTC()
-	_, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2`, now, id)
+	_, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, orgID)
 	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		slog.Error("delete MCP server failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -414,7 +908,7 @@ type routingPolicyRow struct {
 func (h *RoutingHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		orgID := r.URL.Query().Get("org_id")
+		orgID := verifiedOrganizationID(r)
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, strategy, config_json, model_ids,
 			       priority, enabled, created_at, updated_at
@@ -443,6 +937,7 @@ func (h *RoutingHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		p.OrgID = verifiedOrganizationID(r)
 		if p.ID == "" {
 			p.ID = "rp_" + uuid.New().String()
 		}
@@ -477,8 +972,9 @@ func (h *RoutingHandler) get(w http.ResponseWriter, r *http.Request, id string) 
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, strategy, config_json, model_ids,
 		       priority, enabled, created_at, updated_at
-		FROM routing_policies WHERE id=$1 AND deleted_at IS NULL
-	`, id).Scan(&p.ID, &p.OrgID, &p.Name, &p.Description, &p.Strategy,
+		FROM routing_policies
+		WHERE id=$1 AND (org_id=$2 OR org_id='global') AND deleted_at IS NULL
+	`, id, verifiedOrganizationID(r)).Scan(&p.ID, &p.OrgID, &p.Name, &p.Description, &p.Strategy,
 		&p.ConfigJSON, &p.ModelIDs, &p.Priority, &p.Enabled, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
@@ -497,18 +993,19 @@ func (h *RoutingHandler) patch(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	now := time.Now().UTC()
+	orgID := verifiedOrganizationID(r)
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET enabled=$1, updated_at=$2 WHERE id=$3`, *update.Enabled, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
 	}
 	if update.Priority != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET priority=$1, updated_at=$2 WHERE id=$3`, *update.Priority, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET priority=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Priority, now, id, orgID)
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	now := time.Now().UTC()
-	_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2`, now, id)
+	_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, verifiedOrganizationID(r))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -568,7 +1065,7 @@ type safetyPolicyRow struct {
 func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		orgID := r.URL.Query().Get("org_id")
+		orgID := verifiedOrganizationID(r)
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, kind, config_json, applies_to,
 			       priority, enabled, created_at, updated_at
@@ -597,6 +1094,7 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		p.OrgID = verifiedOrganizationID(r)
 		if p.ID == "" {
 			p.ID = "sp_" + uuid.New().String()
 		}
@@ -631,8 +1129,9 @@ func (h *SafetyHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, kind, config_json, applies_to,
 		       priority, enabled, created_at, updated_at
-		FROM safety_policies WHERE id=$1 AND deleted_at IS NULL
-	`, id).Scan(&p.ID, &p.OrgID, &p.Name, &p.Description, &p.Kind,
+		FROM safety_policies
+		WHERE id=$1 AND (org_id=$2 OR org_id='global') AND deleted_at IS NULL
+	`, id, verifiedOrganizationID(r)).Scan(&p.ID, &p.OrgID, &p.Name, &p.Description, &p.Kind,
 		&p.ConfigJSON, &p.AppliesTo, &p.Priority, &p.Enabled, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
@@ -651,17 +1150,18 @@ func (h *SafetyHandler) patch(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	now := time.Now().UTC()
+	orgID := verifiedOrganizationID(r)
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET enabled=$1, updated_at=$2 WHERE id=$3`, *update.Enabled, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
 	}
 	if update.Priority != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET priority=$1, updated_at=$2 WHERE id=$3`, *update.Priority, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET priority=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Priority, now, id, orgID)
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *SafetyHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	now := time.Now().UTC()
-	_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2`, now, id)
+	_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, verifiedOrganizationID(r))
 	w.WriteHeader(http.StatusNoContent)
 }

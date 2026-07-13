@@ -5,6 +5,8 @@
 > **Grounded in code, not docs** (audited 2026-05-30 via codegraph + source inspection of `apps/Model Plane/`). Where this matrix and `ARCHITECTURE.md`/`ROADMAP.md` disagree, **this matrix wins** until those are reconciled (see §1).
 >
 > **Scope rule:** canonical target is `apps/Model Plane/` (**v1**). `apps/Model Plane v2/` is **deprecated** — never extend or duplicate it (per MEMORY: "v1 is forward target; v2 deprecated").
+>
+> **Re-verified 2026-07-12** (Phase-4 Model Plane audit, source spot-check — findings still hold): §4.2 task-core is retired (no service dir, no `go.work` entry, no compose block — confirmed on disk); §5 G2 MCP stdio+HTTP transport is wired (`model-gateway/src/mcp_jsonrpc.rs` → `runtime_registries::handle_proxy_mcp_tool`, stdio spawns subprocess + JSON-RPC, sse still `Unimplemented`); shipping tools dial `shipping-core` at `:3156` (`execution-core/src/shipping_tools.rs`, `/api/quotes`,`/api/carriers`,`/api/bookings`) with `book_shipment` in `permission::is_risky_tool`; and **HITL is enforced, not decorative** — `runtime_loop::execute_step` returns `awaiting_approval`/`permission_denied` **before** any `tool_bridge`/`execute_sandboxed` dispatch (`shell` is also risky-listed). Note: no Visma / Visma-Net MCP is wired in the Model Plane — `bridges/mcp-bridge` is a **generic** reference MCP server (filesystem/git examples); the Visma Net MCP is an external Claude connector, not a Model-Plane chat tool.
 
 ---
 

@@ -5,8 +5,9 @@
 //! `org_id` is supplied by the run context (execution-core's verified
 //! `ExecuteStepRequest.org_id`), NOT by the model's tool input, so a tool call
 //! can't read another tenant's knowledge. Auth mirrors `model-gateway`'s
-//! retrieval `authorize()`: a `x-api-key` metadata header from
-//! `DATAPLANE_INTERNAL_KEY` when configured.
+//! retrieval authorization: the originating user bearer is forwarded after
+//! model-gateway has verified it, and Data Plane verifies it again. Caller-
+//! supplied identity headers are never used.
 //!
 //! Transport — gRPC against `dataplane.retrieval.v2.RetrievalService`. The
 //! generated client + messages live in `mp-contracts`.
@@ -28,7 +29,6 @@ const MAX_CHUNK_CHARS: usize = 600;
 #[derive(Clone)]
 pub struct KnowledgeClient {
     client: RetrievalServiceClient<Channel>,
-    api_key: Option<String>,
 }
 
 impl KnowledgeClient {
@@ -42,12 +42,8 @@ impl KnowledgeClient {
             .ok()
             .filter(|s| !s.trim().is_empty())?;
         let channel = Channel::from_shared(url).ok()?.connect_lazy();
-        let api_key = std::env::var("DATAPLANE_INTERNAL_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
         Some(Self {
             client: RetrievalServiceClient::new(channel),
-            api_key,
         })
     }
 
@@ -61,34 +57,11 @@ impl KnowledgeClient {
         user_id: &str,
         query: &str,
         top_k: i32,
+        zdr: bool,
+        bearer: &str,
     ) -> Result<String, String> {
         let top_k = top_k.clamp(1, MAX_TOP_K);
-        let mut request = tonic::Request::new(RetrieveRequest {
-            org_id: org_id.to_owned(),
-            query: query.to_owned(),
-            top_k,
-            // Per-user ownership: the retrieval post-filter grounds AS this user.
-            // Empty → org-scoped fallback (never cross-user).
-            user_id: if user_id.is_empty() {
-                None
-            } else {
-                Some(user_id.to_owned())
-            },
-            ..Default::default()
-        });
-        if let Some(key) = &self.api_key {
-            if let Ok(value) = MetadataValue::try_from(key.as_str()) {
-                request.metadata_mut().insert("x-api-key", value);
-            }
-        }
-        // Forward the viewer as `x-user-id` metadata — the Data Plane binds
-        // per-user ownership from this (trusted transport), not the body. Matches
-        // the body user_id above so the DP's anti-spoof check passes.
-        if !user_id.is_empty() {
-            if let Ok(value) = MetadataValue::try_from(user_id) {
-                request.metadata_mut().insert("x-user-id", value);
-            }
-        }
+        let request = build_request(org_id, user_id, query, top_k, zdr, bearer)?;
         let response = self
             .client
             .clone()
@@ -98,6 +71,37 @@ impl KnowledgeClient {
             .into_inner();
         Ok(format_candidates(query, &response))
     }
+}
+
+fn build_request(
+    org_id: &str,
+    user_id: &str,
+    query: &str,
+    top_k: i32,
+    zdr: bool,
+    bearer: &str,
+) -> Result<tonic::Request<RetrieveRequest>, String> {
+    if bearer.trim().is_empty() || bearer != bearer.trim() {
+        return Err("knowledge retrieval requires a verified user credential".to_owned());
+    }
+    let authorization = MetadataValue::try_from(format!("Bearer {bearer}"))
+        .map_err(|_| "knowledge retrieval credential is malformed".to_owned())?;
+    let mut request = tonic::Request::new(RetrieveRequest {
+        org_id: org_id.to_owned(),
+        query: query.to_owned(),
+        top_k,
+        user_id: if user_id.is_empty() {
+            None
+        } else {
+            Some(user_id.to_owned())
+        },
+        zdr_mode: zdr.then(|| "ephemeral".to_owned()),
+        ..Default::default()
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
 }
 
 /// Format a `RetrieveResponse` into agent-readable text (pure; testable without
@@ -204,5 +208,24 @@ mod tests {
         };
         let out = format_candidates("q", &resp);
         assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn knowledge_request_forwards_verified_bearer_and_zdr_without_identity_headers() {
+        let request = build_request("org-a", "user-a", "query", 5, true, "signed-token")
+            .expect("build authenticated request");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer signed-token")
+        );
+        assert!(request.metadata().get("x-api-key").is_none());
+        assert!(request.metadata().get("x-user-id").is_none());
+        assert_eq!(request.get_ref().org_id, "org-a");
+        assert_eq!(request.get_ref().user_id.as_deref(), Some("user-a"));
+        assert_eq!(request.get_ref().zdr_mode.as_deref(), Some("ephemeral"));
     }
 }

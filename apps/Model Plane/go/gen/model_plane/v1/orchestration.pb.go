@@ -1944,7 +1944,11 @@ type ListApprovalsRequest struct {
 	// Run whose approvals are being listed.
 	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// Optional step filter. Empty means run-level and all steps.
-	StepId        string `protobuf:"bytes,2,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	StepId string `protobuf:"bytes,2,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	// Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+	// callers). Non-empty → only approvals owned by this org are returned,
+	// regardless of what org the run itself belongs to.
+	OrgId         string `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1989,6 +1993,13 @@ func (x *ListApprovalsRequest) GetRunId() string {
 func (x *ListApprovalsRequest) GetStepId() string {
 	if x != nil {
 		return x.StepId
+	}
+	return ""
+}
+
+func (x *ListApprovalsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
 	}
 	return ""
 }
@@ -2133,7 +2144,13 @@ func (x *OrgPendingApprovalsResponse) GetApprovals() []*Approval {
 type GetApprovalRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Approval identifier.
-	ApprovalId    string `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	ApprovalId string `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	// Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+	// callers, e.g. session-core's own boot paths). Non-empty → the approval is
+	// only returned when it belongs to this org; a mismatch is treated as
+	// not-found (never a distinguishable "forbidden") so existence is not
+	// leaked across tenants.
+	OrgId         string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2171,6 +2188,13 @@ func (*GetApprovalRequest) Descriptor() ([]byte, []int) {
 func (x *GetApprovalRequest) GetApprovalId() string {
 	if x != nil {
 		return x.ApprovalId
+	}
+	return ""
+}
+
+func (x *GetApprovalRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
 	}
 	return ""
 }
@@ -2230,8 +2254,14 @@ type DecideApprovalRequest struct {
 	DecidedBy string `protobuf:"bytes,3,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`
 	// Optional free-form reason for the decision.
 	DecisionReason string `protobuf:"bytes,4,opt,name=decision_reason,json=decisionReason,proto3" json:"decision_reason,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+	// callers, e.g. the in-loop browser-agent timeout/cancel fail-closed
+	// paths that already resolved the row themselves). Non-empty → the
+	// decision is only applied when the approval belongs to this org; a
+	// mismatch is treated as not-found, never a distinguishable "forbidden".
+	OrgId         string `protobuf:"bytes,5,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DecideApprovalRequest) Reset() {
@@ -2288,6 +2318,13 @@ func (x *DecideApprovalRequest) GetDecidedBy() string {
 func (x *DecideApprovalRequest) GetDecisionReason() string {
 	if x != nil {
 		return x.DecisionReason
+	}
+	return ""
+}
+
+func (x *DecideApprovalRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
 	}
 	return ""
 }
@@ -2623,7 +2660,17 @@ type OrchestrationEvent struct {
 	// line and as the `after_event_id` resume cursor. Sorts in emission order.
 	EventId string `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
 	// Event payload. Tags 10-16 align with the original 7-variant Rust enum
-	// order; tags 17-18 are additive browser-agent progress events (B4).
+	// order; tags 17-18 are additive browser-agent progress events (B4); tags
+	// 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
+	// tags 21-22 are additive browser-specific HITL approval-gate events
+	// (Phase 5 — "Approvals & policy"). Phase 5 reuses the general
+	// CreateApproval/DecideApproval RPCs and the generic
+	// RunPausedForApproval/RunResumedAfterApproval/ApprovalStateChanged events
+	// above unchanged (a browser-action approval IS a normal Approval record,
+	// kind=DESTRUCTIVE) — tags 21-22 are additive companions that carry the
+	// browser-specific detail (which action, why it was classified risky) the
+	// generic events don't, so the run timeline shows more than a bare
+	// "risky tool" label.
 	//
 	// Types that are valid to be assigned to Event:
 	//
@@ -2636,6 +2683,10 @@ type OrchestrationEvent struct {
 	//	*OrchestrationEvent_RunResumedAfterApproval_
 	//	*OrchestrationEvent_BrowserActionDispatched_
 	//	*OrchestrationEvent_BrowserObservationReceived_
+	//	*OrchestrationEvent_BrowserRunPaused_
+	//	*OrchestrationEvent_BrowserRunResumed_
+	//	*OrchestrationEvent_BrowserActionApprovalRequired_
+	//	*OrchestrationEvent_BrowserActionDecided_
 	Event         isOrchestrationEvent_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2773,6 +2824,42 @@ func (x *OrchestrationEvent) GetBrowserObservationReceived() *OrchestrationEvent
 	return nil
 }
 
+func (x *OrchestrationEvent) GetBrowserRunPaused() *OrchestrationEvent_BrowserRunPaused {
+	if x != nil {
+		if x, ok := x.Event.(*OrchestrationEvent_BrowserRunPaused_); ok {
+			return x.BrowserRunPaused
+		}
+	}
+	return nil
+}
+
+func (x *OrchestrationEvent) GetBrowserRunResumed() *OrchestrationEvent_BrowserRunResumed {
+	if x != nil {
+		if x, ok := x.Event.(*OrchestrationEvent_BrowserRunResumed_); ok {
+			return x.BrowserRunResumed
+		}
+	}
+	return nil
+}
+
+func (x *OrchestrationEvent) GetBrowserActionApprovalRequired() *OrchestrationEvent_BrowserActionApprovalRequired {
+	if x != nil {
+		if x, ok := x.Event.(*OrchestrationEvent_BrowserActionApprovalRequired_); ok {
+			return x.BrowserActionApprovalRequired
+		}
+	}
+	return nil
+}
+
+func (x *OrchestrationEvent) GetBrowserActionDecided() *OrchestrationEvent_BrowserActionDecided {
+	if x != nil {
+		if x, ok := x.Event.(*OrchestrationEvent_BrowserActionDecided_); ok {
+			return x.BrowserActionDecided
+		}
+	}
+	return nil
+}
+
 type isOrchestrationEvent_Event interface {
 	isOrchestrationEvent_Event()
 }
@@ -2813,6 +2900,22 @@ type OrchestrationEvent_BrowserObservationReceived_ struct {
 	BrowserObservationReceived *OrchestrationEvent_BrowserObservationReceived `protobuf:"bytes,18,opt,name=browser_observation_received,json=browserObservationReceived,proto3,oneof"`
 }
 
+type OrchestrationEvent_BrowserRunPaused_ struct {
+	BrowserRunPaused *OrchestrationEvent_BrowserRunPaused `protobuf:"bytes,19,opt,name=browser_run_paused,json=browserRunPaused,proto3,oneof"`
+}
+
+type OrchestrationEvent_BrowserRunResumed_ struct {
+	BrowserRunResumed *OrchestrationEvent_BrowserRunResumed `protobuf:"bytes,20,opt,name=browser_run_resumed,json=browserRunResumed,proto3,oneof"`
+}
+
+type OrchestrationEvent_BrowserActionApprovalRequired_ struct {
+	BrowserActionApprovalRequired *OrchestrationEvent_BrowserActionApprovalRequired `protobuf:"bytes,21,opt,name=browser_action_approval_required,json=browserActionApprovalRequired,proto3,oneof"`
+}
+
+type OrchestrationEvent_BrowserActionDecided_ struct {
+	BrowserActionDecided *OrchestrationEvent_BrowserActionDecided `protobuf:"bytes,22,opt,name=browser_action_decided,json=browserActionDecided,proto3,oneof"`
+}
+
 func (*OrchestrationEvent_PlanTransitioned_) isOrchestrationEvent_Event() {}
 
 func (*OrchestrationEvent_TodoTransitioned_) isOrchestrationEvent_Event() {}
@@ -2830,6 +2933,14 @@ func (*OrchestrationEvent_RunResumedAfterApproval_) isOrchestrationEvent_Event()
 func (*OrchestrationEvent_BrowserActionDispatched_) isOrchestrationEvent_Event() {}
 
 func (*OrchestrationEvent_BrowserObservationReceived_) isOrchestrationEvent_Event() {}
+
+func (*OrchestrationEvent_BrowserRunPaused_) isOrchestrationEvent_Event() {}
+
+func (*OrchestrationEvent_BrowserRunResumed_) isOrchestrationEvent_Event() {}
+
+func (*OrchestrationEvent_BrowserActionApprovalRequired_) isOrchestrationEvent_Event() {}
+
+func (*OrchestrationEvent_BrowserActionDecided_) isOrchestrationEvent_Event() {}
 
 type RecordOrchestrationEventRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3362,7 +3473,10 @@ type OrchestrationEvent_BrowserActionDispatched struct {
 	// Action type slug: goto|click|type|extract|observe|scroll|wait.
 	ActionType string `protobuf:"bytes,4,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
 	// Target URL for navigations. Empty for non-goto actions.
-	Url           string `protobuf:"bytes,5,opt,name=url,proto3" json:"url,omitempty"`
+	Url string `protobuf:"bytes,5,opt,name=url,proto3" json:"url,omitempty"`
+	// Model's rationale for choosing this action (Phase 2). Empty when the
+	// planner is the deterministic fallback (no LLM reason available).
+	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3432,6 +3546,13 @@ func (x *OrchestrationEvent_BrowserActionDispatched) GetUrl() string {
 	return ""
 }
 
+func (x *OrchestrationEvent_BrowserActionDispatched) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 // The browser agent received an observation back from the executor (B4).
 type OrchestrationEvent_BrowserObservationReceived struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3446,9 +3567,16 @@ type OrchestrationEvent_BrowserObservationReceived struct {
 	// Page URL after the action settled. Empty when unavailable.
 	PageUrl string `protobuf:"bytes,5,opt,name=page_url,json=pageUrl,proto3" json:"page_url,omitempty"`
 	// Page title after the action settled. Empty when unavailable.
-	PageTitle     string `protobuf:"bytes,6,opt,name=page_title,json=pageTitle,proto3" json:"page_title,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	PageTitle string `protobuf:"bytes,6,opt,name=page_title,json=pageTitle,proto3" json:"page_title,omitempty"`
+	// Screenshot artifact reference id (Phase 2). Never inlined bytes — the
+	// client fetches evidence via the existing artifact endpoint. Empty when
+	// unavailable (e.g. a ZDR run that captured no persisted reference).
+	ScreenshotRef string `protobuf:"bytes,7,opt,name=screenshot_ref,json=screenshotRef,proto3" json:"screenshot_ref,omitempty"`
+	// DOM snapshot artifact reference id (Phase 2). Same non-inlining rule as
+	// `screenshot_ref`. Empty until Quarry captures DOM snapshot references.
+	DomSnapshotRef string `protobuf:"bytes,8,opt,name=dom_snapshot_ref,json=domSnapshotRef,proto3" json:"dom_snapshot_ref,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *OrchestrationEvent_BrowserObservationReceived) Reset() {
@@ -3519,6 +3647,351 @@ func (x *OrchestrationEvent_BrowserObservationReceived) GetPageUrl() string {
 func (x *OrchestrationEvent_BrowserObservationReceived) GetPageTitle() string {
 	if x != nil {
 		return x.PageTitle
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserObservationReceived) GetScreenshotRef() string {
+	if x != nil {
+		return x.ScreenshotRef
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserObservationReceived) GetDomSnapshotRef() string {
+	if x != nil {
+		return x.DomSnapshotRef
+	}
+	return ""
+}
+
+// User-initiated run pause (Phase 2 B5) — distinct from the pre-existing
+// HITL `RunPausedForApproval`: this fires when a user explicitly pauses a
+// running browser-agent loop from the UI, not when a risky tool call is
+// gated behind approval.
+type OrchestrationEvent_BrowserRunPaused struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	PlanId        string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestrationEvent_BrowserRunPaused) Reset() {
+	*x = OrchestrationEvent_BrowserRunPaused{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestrationEvent_BrowserRunPaused) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestrationEvent_BrowserRunPaused) ProtoMessage() {}
+
+func (x *OrchestrationEvent_BrowserRunPaused) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestrationEvent_BrowserRunPaused.ProtoReflect.Descriptor instead.
+func (*OrchestrationEvent_BrowserRunPaused) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{33, 9}
+}
+
+func (x *OrchestrationEvent_BrowserRunPaused) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserRunPaused) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
+	}
+	return ""
+}
+
+// User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
+type OrchestrationEvent_BrowserRunResumed struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	PlanId        string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestrationEvent_BrowserRunResumed) Reset() {
+	*x = OrchestrationEvent_BrowserRunResumed{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestrationEvent_BrowserRunResumed) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestrationEvent_BrowserRunResumed) ProtoMessage() {}
+
+func (x *OrchestrationEvent_BrowserRunResumed) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestrationEvent_BrowserRunResumed.ProtoReflect.Descriptor instead.
+func (*OrchestrationEvent_BrowserRunResumed) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{33, 10}
+}
+
+func (x *OrchestrationEvent_BrowserRunResumed) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserRunResumed) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
+	}
+	return ""
+}
+
+// A browser action was classified risky (login, checkout, posting a form,
+// a destructive operation, cross-domain navigation, or reuse of a
+// persistent cookie-bearing profile — plan capability #8) and is paused
+// for human approval (Phase 5). Fired by execution-core's in-loop gate
+// right before dispatch, via the SAME `CreateApproval` RPC the generic
+// tool-call HITL gate uses (`RunPausedForApproval`/`ApprovalStateChanged`
+// above are broadcast by that RPC as usual) — this event is the
+// browser-specific companion that names the actual action.
+type OrchestrationEvent_BrowserActionApprovalRequired struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Run this browser session belongs to (stream key).
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Browser-agent plan id driving this session.
+	PlanId string `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	// Id of the gated action. Empty for a run-level gate that isn't tied to
+	// one specific dispatched action (e.g. persistent_cookie_use, gated once
+	// at run start rather than per-action).
+	ActionId string `protobuf:"bytes,3,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	// Action type slug: goto|click|type|extract|observe|scroll|wait, or a
+	// synthetic slug for a run-level gate (e.g. "start_run").
+	ActionType string `protobuf:"bytes,4,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
+	// Target URL, when known. Empty when not applicable.
+	Url string `protobuf:"bytes,5,opt,name=url,proto3" json:"url,omitempty"`
+	// CSS selector, when known. Empty when not applicable.
+	Selector string `protobuf:"bytes,6,opt,name=selector,proto3" json:"selector,omitempty"`
+	// Human-readable reason the action was classified risky.
+	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	// login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use
+	RiskCategory string `protobuf:"bytes,8,opt,name=risk_category,json=riskCategory,proto3" json:"risk_category,omitempty"`
+	// Durable approval id (from the CreateApproval call this event
+	// accompanies) — lets a UI jump straight to deciding it via the existing
+	// generic `POST /v1/orchestration/approvals/{id}/decide` route.
+	ApprovalId    string `protobuf:"bytes,9,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) Reset() {
+	*x = OrchestrationEvent_BrowserActionApprovalRequired{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestrationEvent_BrowserActionApprovalRequired) ProtoMessage() {}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestrationEvent_BrowserActionApprovalRequired.ProtoReflect.Descriptor instead.
+func (*OrchestrationEvent_BrowserActionApprovalRequired) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{33, 11}
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetActionType() string {
+	if x != nil {
+		return x.ActionType
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetSelector() string {
+	if x != nil {
+		return x.Selector
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetRiskCategory() string {
+	if x != nil {
+		return x.RiskCategory
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetApprovalId() string {
+	if x != nil {
+		return x.ApprovalId
+	}
+	return ""
+}
+
+// The pending browser-action approval above was decided (granted, denied,
+// or timed out). The durable decision and the generic
+// `ApprovalStateChanged`/`RunResumedAfterApproval` events are recorded by
+// the existing `DecideApproval` RPC as usual; this is the browser-specific
+// companion that carries the action back so the timeline can show
+// "checkout on example.com — granted", not just an approval id.
+type OrchestrationEvent_BrowserActionDecided struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	RunId      string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	PlanId     string                 `protobuf:"bytes,2,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
+	ActionId   string                 `protobuf:"bytes,3,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	ApprovalId string                 `protobuf:"bytes,4,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	// granted|denied|timed_out
+	Decision string `protobuf:"bytes,5,opt,name=decision,proto3" json:"decision,omitempty"`
+	// Principal who decided, when known. Empty for a system timeout.
+	DecidedBy     string `protobuf:"bytes,6,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) Reset() {
+	*x = OrchestrationEvent_BrowserActionDecided{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestrationEvent_BrowserActionDecided) ProtoMessage() {}
+
+func (x *OrchestrationEvent_BrowserActionDecided) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestrationEvent_BrowserActionDecided.ProtoReflect.Descriptor instead.
+func (*OrchestrationEvent_BrowserActionDecided) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{33, 12}
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) GetPlanId() string {
+	if x != nil {
+		return x.PlanId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) GetApprovalId() string {
+	if x != nil {
+		return x.ApprovalId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionDecided) GetDecidedBy() string {
+	if x != nil {
+		return x.DecidedBy
 	}
 	return ""
 }
@@ -3645,28 +4118,31 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x0fidempotency_key\x18\n" +
 	" \x01(\tR\x0eidempotencyKey\"N\n" +
 	"\x16CreateApprovalResponse\x124\n" +
-	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"F\n" +
+	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"]\n" +
 	"\x14ListApprovalsRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
-	"\astep_id\x18\x02 \x01(\tR\x06stepId\"O\n" +
+	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x15\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"O\n" +
 	"\x15ListApprovalsResponse\x126\n" +
 	"\tapprovals\x18\x01 \x03(\v2\x18.model_plane.v1.ApprovalR\tapprovals\"3\n" +
 	"\x1aOrgPendingApprovalsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\"U\n" +
 	"\x1bOrgPendingApprovalsResponse\x126\n" +
-	"\tapprovals\x18\x01 \x03(\v2\x18.model_plane.v1.ApprovalR\tapprovals\"5\n" +
+	"\tapprovals\x18\x01 \x03(\v2\x18.model_plane.v1.ApprovalR\tapprovals\"L\n" +
 	"\x12GetApprovalRequest\x12\x1f\n" +
 	"\vapproval_id\x18\x01 \x01(\tR\n" +
-	"approvalId\"K\n" +
+	"approvalId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"K\n" +
 	"\x13GetApprovalResponse\x124\n" +
-	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"\xbb\x01\n" +
+	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"\xd2\x01\n" +
 	"\x15DecideApprovalRequest\x12\x1f\n" +
 	"\vapproval_id\x18\x01 \x01(\tR\n" +
 	"approvalId\x129\n" +
 	"\bdecision\x18\x02 \x01(\x0e2\x1d.model_plane.v1.ApprovalStateR\bdecision\x12\x1d\n" +
 	"\n" +
 	"decided_by\x18\x03 \x01(\tR\tdecidedBy\x12'\n" +
-	"\x0fdecision_reason\x18\x04 \x01(\tR\x0edecisionReason\"N\n" +
+	"\x0fdecision_reason\x18\x04 \x01(\tR\x0edecisionReason\x12\x15\n" +
+	"\x06org_id\x18\x05 \x01(\tR\x05orgId\"N\n" +
 	"\x16DecideApprovalResponse\x124\n" +
 	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"8\n" +
 	"\x19GetSubagentLineageRequest\x12\x1b\n" +
@@ -3684,7 +4160,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\alineage\x18\x02 \x01(\v2\x1f.model_plane.v1.SubagentLineageR\alineage\"U\n" +
 	"\x16StreamRunEventsRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12$\n" +
-	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xca\x12\n" +
+	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xe6\x1b\n" +
 	"\x12OrchestrationEvent\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12b\n" +
@@ -3697,7 +4173,11 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x17run_paused_for_approval\x18\x0f \x01(\v27.model_plane.v1.OrchestrationEvent.RunPausedForApprovalH\x00R\x14runPausedForApproval\x12y\n" +
 	"\x1arun_resumed_after_approval\x18\x10 \x01(\v2:.model_plane.v1.OrchestrationEvent.RunResumedAfterApprovalH\x00R\x17runResumedAfterApproval\x12x\n" +
 	"\x19browser_action_dispatched\x18\x11 \x01(\v2:.model_plane.v1.OrchestrationEvent.BrowserActionDispatchedH\x00R\x17browserActionDispatched\x12\x81\x01\n" +
-	"\x1cbrowser_observation_received\x18\x12 \x01(\v2=.model_plane.v1.OrchestrationEvent.BrowserObservationReceivedH\x00R\x1abrowserObservationReceived\x1a\x9c\x01\n" +
+	"\x1cbrowser_observation_received\x18\x12 \x01(\v2=.model_plane.v1.OrchestrationEvent.BrowserObservationReceivedH\x00R\x1abrowserObservationReceived\x12c\n" +
+	"\x12browser_run_paused\x18\x13 \x01(\v23.model_plane.v1.OrchestrationEvent.BrowserRunPausedH\x00R\x10browserRunPaused\x12f\n" +
+	"\x13browser_run_resumed\x18\x14 \x01(\v24.model_plane.v1.OrchestrationEvent.BrowserRunResumedH\x00R\x11browserRunResumed\x12\x8b\x01\n" +
+	" browser_action_approval_required\x18\x15 \x01(\v2@.model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequiredH\x00R\x1dbrowserActionApprovalRequired\x12o\n" +
+	"\x16browser_action_decided\x18\x16 \x01(\v27.model_plane.v1.OrchestrationEvent.BrowserActionDecidedH\x00R\x14browserActionDecided\x1a\x9c\x01\n" +
 	"\x10PlanTransitioned\x12\x17\n" +
 	"\aplan_id\x18\x01 \x01(\tR\x06planId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12-\n" +
@@ -3732,14 +4212,15 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x17RunResumedAfterApproval\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1f\n" +
 	"\vapproval_id\x18\x02 \x01(\tR\n" +
-	"approvalId\x1a\x99\x01\n" +
+	"approvalId\x1a\xb1\x01\n" +
 	"\x17BrowserActionDispatched\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +
 	"\taction_id\x18\x03 \x01(\tR\bactionId\x12\x1f\n" +
 	"\vaction_type\x18\x04 \x01(\tR\n" +
 	"actionType\x12\x10\n" +
-	"\x03url\x18\x05 \x01(\tR\x03url\x1a\xbb\x01\n" +
+	"\x03url\x18\x05 \x01(\tR\x03url\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\x1a\x8c\x02\n" +
 	"\x1aBrowserObservationReceived\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +
@@ -3747,7 +4228,36 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12\x19\n" +
 	"\bpage_url\x18\x05 \x01(\tR\apageUrl\x12\x1d\n" +
 	"\n" +
-	"page_title\x18\x06 \x01(\tR\tpageTitleB\a\n" +
+	"page_title\x18\x06 \x01(\tR\tpageTitle\x12%\n" +
+	"\x0escreenshot_ref\x18\a \x01(\tR\rscreenshotRef\x12(\n" +
+	"\x10dom_snapshot_ref\x18\b \x01(\tR\x0edomSnapshotRef\x1aB\n" +
+	"\x10BrowserRunPaused\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
+	"\aplan_id\x18\x02 \x01(\tR\x06planId\x1aC\n" +
+	"\x11BrowserRunResumed\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
+	"\aplan_id\x18\x02 \x01(\tR\x06planId\x1a\x99\x02\n" +
+	"\x1dBrowserActionApprovalRequired\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
+	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +
+	"\taction_id\x18\x03 \x01(\tR\bactionId\x12\x1f\n" +
+	"\vaction_type\x18\x04 \x01(\tR\n" +
+	"actionType\x12\x10\n" +
+	"\x03url\x18\x05 \x01(\tR\x03url\x12\x1a\n" +
+	"\bselector\x18\x06 \x01(\tR\bselector\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12#\n" +
+	"\rrisk_category\x18\b \x01(\tR\friskCategory\x12\x1f\n" +
+	"\vapproval_id\x18\t \x01(\tR\n" +
+	"approvalId\x1a\xbf\x01\n" +
+	"\x14BrowserActionDecided\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
+	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +
+	"\taction_id\x18\x03 \x01(\tR\bactionId\x12\x1f\n" +
+	"\vapproval_id\x18\x04 \x01(\tR\n" +
+	"approvalId\x12\x1a\n" +
+	"\bdecision\x18\x05 \x01(\tR\bdecision\x12\x1d\n" +
+	"\n" +
+	"decided_by\x18\x06 \x01(\tR\tdecidedByB\a\n" +
 	"\x05event\"[\n" +
 	"\x1fRecordOrchestrationEventRequest\x128\n" +
 	"\x05event\x18\x01 \x01(\v2\".model_plane.v1.OrchestrationEventR\x05event\"=\n" +
@@ -3835,86 +4345,90 @@ func file_model_plane_v1_orchestration_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_orchestration_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_model_plane_v1_orchestration_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
+var file_model_plane_v1_orchestration_proto_msgTypes = make([]protoimpl.MessageInfo, 49)
 var file_model_plane_v1_orchestration_proto_goTypes = []any{
-	(PlanState)(0),                                        // 0: model_plane.v1.PlanState
-	(PlanStepState)(0),                                    // 1: model_plane.v1.PlanStepState
-	(ApprovalKind)(0),                                     // 2: model_plane.v1.ApprovalKind
-	(ApprovalState)(0),                                    // 3: model_plane.v1.ApprovalState
-	(TodoState)(0),                                        // 4: model_plane.v1.TodoState
-	(TodoPriority)(0),                                     // 5: model_plane.v1.TodoPriority
-	(SubagentRole)(0),                                     // 6: model_plane.v1.SubagentRole
-	(*PlanStep)(nil),                                      // 7: model_plane.v1.PlanStep
-	(*Plan)(nil),                                          // 8: model_plane.v1.Plan
-	(*Approval)(nil),                                      // 9: model_plane.v1.Approval
-	(*Todo)(nil),                                          // 10: model_plane.v1.Todo
-	(*LineageEdge)(nil),                                   // 11: model_plane.v1.LineageEdge
-	(*SubagentLineage)(nil),                               // 12: model_plane.v1.SubagentLineage
-	(*ListPlansRequest)(nil),                              // 13: model_plane.v1.ListPlansRequest
-	(*ListPlansResponse)(nil),                             // 14: model_plane.v1.ListPlansResponse
-	(*GetPlanRequest)(nil),                                // 15: model_plane.v1.GetPlanRequest
-	(*GetPlanResponse)(nil),                               // 16: model_plane.v1.GetPlanResponse
-	(*TransitionPlanRequest)(nil),                         // 17: model_plane.v1.TransitionPlanRequest
-	(*TransitionPlanResponse)(nil),                        // 18: model_plane.v1.TransitionPlanResponse
-	(*ListTodosRequest)(nil),                              // 19: model_plane.v1.ListTodosRequest
-	(*ListTodosResponse)(nil),                             // 20: model_plane.v1.ListTodosResponse
-	(*GetTodoRequest)(nil),                                // 21: model_plane.v1.GetTodoRequest
-	(*GetTodoResponse)(nil),                               // 22: model_plane.v1.GetTodoResponse
-	(*TransitionTodoRequest)(nil),                         // 23: model_plane.v1.TransitionTodoRequest
-	(*TransitionTodoResponse)(nil),                        // 24: model_plane.v1.TransitionTodoResponse
-	(*CreateApprovalRequest)(nil),                         // 25: model_plane.v1.CreateApprovalRequest
-	(*CreateApprovalResponse)(nil),                        // 26: model_plane.v1.CreateApprovalResponse
-	(*ListApprovalsRequest)(nil),                          // 27: model_plane.v1.ListApprovalsRequest
-	(*ListApprovalsResponse)(nil),                         // 28: model_plane.v1.ListApprovalsResponse
-	(*OrgPendingApprovalsRequest)(nil),                    // 29: model_plane.v1.OrgPendingApprovalsRequest
-	(*OrgPendingApprovalsResponse)(nil),                   // 30: model_plane.v1.OrgPendingApprovalsResponse
-	(*GetApprovalRequest)(nil),                            // 31: model_plane.v1.GetApprovalRequest
-	(*GetApprovalResponse)(nil),                           // 32: model_plane.v1.GetApprovalResponse
-	(*DecideApprovalRequest)(nil),                         // 33: model_plane.v1.DecideApprovalRequest
-	(*DecideApprovalResponse)(nil),                        // 34: model_plane.v1.DecideApprovalResponse
-	(*GetSubagentLineageRequest)(nil),                     // 35: model_plane.v1.GetSubagentLineageRequest
-	(*GetSubagentLineageResponse)(nil),                    // 36: model_plane.v1.GetSubagentLineageResponse
-	(*AttachSubagentRequest)(nil),                         // 37: model_plane.v1.AttachSubagentRequest
-	(*AttachSubagentResponse)(nil),                        // 38: model_plane.v1.AttachSubagentResponse
-	(*StreamRunEventsRequest)(nil),                        // 39: model_plane.v1.StreamRunEventsRequest
-	(*OrchestrationEvent)(nil),                            // 40: model_plane.v1.OrchestrationEvent
-	(*RecordOrchestrationEventRequest)(nil),               // 41: model_plane.v1.RecordOrchestrationEventRequest
-	(*RecordOrchestrationEventResponse)(nil),              // 42: model_plane.v1.RecordOrchestrationEventResponse
-	(*OrchestrationEvent_PlanTransitioned)(nil),           // 43: model_plane.v1.OrchestrationEvent.PlanTransitioned
-	(*OrchestrationEvent_TodoTransitioned)(nil),           // 44: model_plane.v1.OrchestrationEvent.TodoTransitioned
-	(*OrchestrationEvent_ApprovalStateChanged)(nil),       // 45: model_plane.v1.OrchestrationEvent.ApprovalStateChanged
-	(*OrchestrationEvent_SubagentAttached)(nil),           // 46: model_plane.v1.OrchestrationEvent.SubagentAttached
-	(*OrchestrationEvent_SubagentStopped)(nil),            // 47: model_plane.v1.OrchestrationEvent.SubagentStopped
-	(*OrchestrationEvent_RunPausedForApproval)(nil),       // 48: model_plane.v1.OrchestrationEvent.RunPausedForApproval
-	(*OrchestrationEvent_RunResumedAfterApproval)(nil),    // 49: model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
-	(*OrchestrationEvent_BrowserActionDispatched)(nil),    // 50: model_plane.v1.OrchestrationEvent.BrowserActionDispatched
-	(*OrchestrationEvent_BrowserObservationReceived)(nil), // 51: model_plane.v1.OrchestrationEvent.BrowserObservationReceived
-	(*timestamppb.Timestamp)(nil),                         // 52: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                               // 53: google.protobuf.Struct
+	(PlanState)(0),                                           // 0: model_plane.v1.PlanState
+	(PlanStepState)(0),                                       // 1: model_plane.v1.PlanStepState
+	(ApprovalKind)(0),                                        // 2: model_plane.v1.ApprovalKind
+	(ApprovalState)(0),                                       // 3: model_plane.v1.ApprovalState
+	(TodoState)(0),                                           // 4: model_plane.v1.TodoState
+	(TodoPriority)(0),                                        // 5: model_plane.v1.TodoPriority
+	(SubagentRole)(0),                                        // 6: model_plane.v1.SubagentRole
+	(*PlanStep)(nil),                                         // 7: model_plane.v1.PlanStep
+	(*Plan)(nil),                                             // 8: model_plane.v1.Plan
+	(*Approval)(nil),                                         // 9: model_plane.v1.Approval
+	(*Todo)(nil),                                             // 10: model_plane.v1.Todo
+	(*LineageEdge)(nil),                                      // 11: model_plane.v1.LineageEdge
+	(*SubagentLineage)(nil),                                  // 12: model_plane.v1.SubagentLineage
+	(*ListPlansRequest)(nil),                                 // 13: model_plane.v1.ListPlansRequest
+	(*ListPlansResponse)(nil),                                // 14: model_plane.v1.ListPlansResponse
+	(*GetPlanRequest)(nil),                                   // 15: model_plane.v1.GetPlanRequest
+	(*GetPlanResponse)(nil),                                  // 16: model_plane.v1.GetPlanResponse
+	(*TransitionPlanRequest)(nil),                            // 17: model_plane.v1.TransitionPlanRequest
+	(*TransitionPlanResponse)(nil),                           // 18: model_plane.v1.TransitionPlanResponse
+	(*ListTodosRequest)(nil),                                 // 19: model_plane.v1.ListTodosRequest
+	(*ListTodosResponse)(nil),                                // 20: model_plane.v1.ListTodosResponse
+	(*GetTodoRequest)(nil),                                   // 21: model_plane.v1.GetTodoRequest
+	(*GetTodoResponse)(nil),                                  // 22: model_plane.v1.GetTodoResponse
+	(*TransitionTodoRequest)(nil),                            // 23: model_plane.v1.TransitionTodoRequest
+	(*TransitionTodoResponse)(nil),                           // 24: model_plane.v1.TransitionTodoResponse
+	(*CreateApprovalRequest)(nil),                            // 25: model_plane.v1.CreateApprovalRequest
+	(*CreateApprovalResponse)(nil),                           // 26: model_plane.v1.CreateApprovalResponse
+	(*ListApprovalsRequest)(nil),                             // 27: model_plane.v1.ListApprovalsRequest
+	(*ListApprovalsResponse)(nil),                            // 28: model_plane.v1.ListApprovalsResponse
+	(*OrgPendingApprovalsRequest)(nil),                       // 29: model_plane.v1.OrgPendingApprovalsRequest
+	(*OrgPendingApprovalsResponse)(nil),                      // 30: model_plane.v1.OrgPendingApprovalsResponse
+	(*GetApprovalRequest)(nil),                               // 31: model_plane.v1.GetApprovalRequest
+	(*GetApprovalResponse)(nil),                              // 32: model_plane.v1.GetApprovalResponse
+	(*DecideApprovalRequest)(nil),                            // 33: model_plane.v1.DecideApprovalRequest
+	(*DecideApprovalResponse)(nil),                           // 34: model_plane.v1.DecideApprovalResponse
+	(*GetSubagentLineageRequest)(nil),                        // 35: model_plane.v1.GetSubagentLineageRequest
+	(*GetSubagentLineageResponse)(nil),                       // 36: model_plane.v1.GetSubagentLineageResponse
+	(*AttachSubagentRequest)(nil),                            // 37: model_plane.v1.AttachSubagentRequest
+	(*AttachSubagentResponse)(nil),                           // 38: model_plane.v1.AttachSubagentResponse
+	(*StreamRunEventsRequest)(nil),                           // 39: model_plane.v1.StreamRunEventsRequest
+	(*OrchestrationEvent)(nil),                               // 40: model_plane.v1.OrchestrationEvent
+	(*RecordOrchestrationEventRequest)(nil),                  // 41: model_plane.v1.RecordOrchestrationEventRequest
+	(*RecordOrchestrationEventResponse)(nil),                 // 42: model_plane.v1.RecordOrchestrationEventResponse
+	(*OrchestrationEvent_PlanTransitioned)(nil),              // 43: model_plane.v1.OrchestrationEvent.PlanTransitioned
+	(*OrchestrationEvent_TodoTransitioned)(nil),              // 44: model_plane.v1.OrchestrationEvent.TodoTransitioned
+	(*OrchestrationEvent_ApprovalStateChanged)(nil),          // 45: model_plane.v1.OrchestrationEvent.ApprovalStateChanged
+	(*OrchestrationEvent_SubagentAttached)(nil),              // 46: model_plane.v1.OrchestrationEvent.SubagentAttached
+	(*OrchestrationEvent_SubagentStopped)(nil),               // 47: model_plane.v1.OrchestrationEvent.SubagentStopped
+	(*OrchestrationEvent_RunPausedForApproval)(nil),          // 48: model_plane.v1.OrchestrationEvent.RunPausedForApproval
+	(*OrchestrationEvent_RunResumedAfterApproval)(nil),       // 49: model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
+	(*OrchestrationEvent_BrowserActionDispatched)(nil),       // 50: model_plane.v1.OrchestrationEvent.BrowserActionDispatched
+	(*OrchestrationEvent_BrowserObservationReceived)(nil),    // 51: model_plane.v1.OrchestrationEvent.BrowserObservationReceived
+	(*OrchestrationEvent_BrowserRunPaused)(nil),              // 52: model_plane.v1.OrchestrationEvent.BrowserRunPaused
+	(*OrchestrationEvent_BrowserRunResumed)(nil),             // 53: model_plane.v1.OrchestrationEvent.BrowserRunResumed
+	(*OrchestrationEvent_BrowserActionApprovalRequired)(nil), // 54: model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
+	(*OrchestrationEvent_BrowserActionDecided)(nil),          // 55: model_plane.v1.OrchestrationEvent.BrowserActionDecided
+	(*timestamppb.Timestamp)(nil),                            // 56: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                                  // 57: google.protobuf.Struct
 }
 var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	1,  // 0: model_plane.v1.PlanStep.state:type_name -> model_plane.v1.PlanStepState
-	52, // 1: model_plane.v1.PlanStep.created_at:type_name -> google.protobuf.Timestamp
-	52, // 2: model_plane.v1.PlanStep.updated_at:type_name -> google.protobuf.Timestamp
+	56, // 1: model_plane.v1.PlanStep.created_at:type_name -> google.protobuf.Timestamp
+	56, // 2: model_plane.v1.PlanStep.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 3: model_plane.v1.Plan.state:type_name -> model_plane.v1.PlanState
 	7,  // 4: model_plane.v1.Plan.steps:type_name -> model_plane.v1.PlanStep
-	53, // 5: model_plane.v1.Plan.metadata:type_name -> google.protobuf.Struct
-	52, // 6: model_plane.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
-	52, // 7: model_plane.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
+	57, // 5: model_plane.v1.Plan.metadata:type_name -> google.protobuf.Struct
+	56, // 6: model_plane.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
+	56, // 7: model_plane.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
 	2,  // 8: model_plane.v1.Approval.kind:type_name -> model_plane.v1.ApprovalKind
 	3,  // 9: model_plane.v1.Approval.state:type_name -> model_plane.v1.ApprovalState
-	53, // 10: model_plane.v1.Approval.context:type_name -> google.protobuf.Struct
-	52, // 11: model_plane.v1.Approval.requested_at:type_name -> google.protobuf.Timestamp
-	52, // 12: model_plane.v1.Approval.decided_at:type_name -> google.protobuf.Timestamp
-	52, // 13: model_plane.v1.Approval.expires_at:type_name -> google.protobuf.Timestamp
+	57, // 10: model_plane.v1.Approval.context:type_name -> google.protobuf.Struct
+	56, // 11: model_plane.v1.Approval.requested_at:type_name -> google.protobuf.Timestamp
+	56, // 12: model_plane.v1.Approval.decided_at:type_name -> google.protobuf.Timestamp
+	56, // 13: model_plane.v1.Approval.expires_at:type_name -> google.protobuf.Timestamp
 	4,  // 14: model_plane.v1.Todo.state:type_name -> model_plane.v1.TodoState
 	5,  // 15: model_plane.v1.Todo.priority:type_name -> model_plane.v1.TodoPriority
-	53, // 16: model_plane.v1.Todo.metadata:type_name -> google.protobuf.Struct
-	52, // 17: model_plane.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
-	52, // 18: model_plane.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
-	52, // 19: model_plane.v1.Todo.completed_at:type_name -> google.protobuf.Timestamp
+	57, // 16: model_plane.v1.Todo.metadata:type_name -> google.protobuf.Struct
+	56, // 17: model_plane.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
+	56, // 18: model_plane.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
+	56, // 19: model_plane.v1.Todo.completed_at:type_name -> google.protobuf.Timestamp
 	6,  // 20: model_plane.v1.LineageEdge.role:type_name -> model_plane.v1.SubagentRole
-	52, // 21: model_plane.v1.LineageEdge.spawned_at:type_name -> google.protobuf.Timestamp
+	56, // 21: model_plane.v1.LineageEdge.spawned_at:type_name -> google.protobuf.Timestamp
 	11, // 22: model_plane.v1.SubagentLineage.edges:type_name -> model_plane.v1.LineageEdge
 	8,  // 23: model_plane.v1.ListPlansResponse.plans:type_name -> model_plane.v1.Plan
 	8,  // 24: model_plane.v1.GetPlanResponse.plan:type_name -> model_plane.v1.Plan
@@ -3935,7 +4449,7 @@ var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	6,  // 39: model_plane.v1.AttachSubagentRequest.role:type_name -> model_plane.v1.SubagentRole
 	11, // 40: model_plane.v1.AttachSubagentResponse.edge:type_name -> model_plane.v1.LineageEdge
 	12, // 41: model_plane.v1.AttachSubagentResponse.lineage:type_name -> model_plane.v1.SubagentLineage
-	52, // 42: model_plane.v1.OrchestrationEvent.at:type_name -> google.protobuf.Timestamp
+	56, // 42: model_plane.v1.OrchestrationEvent.at:type_name -> google.protobuf.Timestamp
 	43, // 43: model_plane.v1.OrchestrationEvent.plan_transitioned:type_name -> model_plane.v1.OrchestrationEvent.PlanTransitioned
 	44, // 44: model_plane.v1.OrchestrationEvent.todo_transitioned:type_name -> model_plane.v1.OrchestrationEvent.TodoTransitioned
 	45, // 45: model_plane.v1.OrchestrationEvent.approval_state_changed:type_name -> model_plane.v1.OrchestrationEvent.ApprovalStateChanged
@@ -3945,49 +4459,53 @@ var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	49, // 49: model_plane.v1.OrchestrationEvent.run_resumed_after_approval:type_name -> model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
 	50, // 50: model_plane.v1.OrchestrationEvent.browser_action_dispatched:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionDispatched
 	51, // 51: model_plane.v1.OrchestrationEvent.browser_observation_received:type_name -> model_plane.v1.OrchestrationEvent.BrowserObservationReceived
-	40, // 52: model_plane.v1.RecordOrchestrationEventRequest.event:type_name -> model_plane.v1.OrchestrationEvent
-	0,  // 53: model_plane.v1.OrchestrationEvent.PlanTransitioned.from:type_name -> model_plane.v1.PlanState
-	0,  // 54: model_plane.v1.OrchestrationEvent.PlanTransitioned.to:type_name -> model_plane.v1.PlanState
-	4,  // 55: model_plane.v1.OrchestrationEvent.TodoTransitioned.from:type_name -> model_plane.v1.TodoState
-	4,  // 56: model_plane.v1.OrchestrationEvent.TodoTransitioned.to:type_name -> model_plane.v1.TodoState
-	2,  // 57: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.approval_kind:type_name -> model_plane.v1.ApprovalKind
-	3,  // 58: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.to:type_name -> model_plane.v1.ApprovalState
-	6,  // 59: model_plane.v1.OrchestrationEvent.SubagentAttached.role:type_name -> model_plane.v1.SubagentRole
-	13, // 60: model_plane.v1.OrchestrationCoreService.ListPlans:input_type -> model_plane.v1.ListPlansRequest
-	15, // 61: model_plane.v1.OrchestrationCoreService.GetPlan:input_type -> model_plane.v1.GetPlanRequest
-	17, // 62: model_plane.v1.OrchestrationCoreService.TransitionPlan:input_type -> model_plane.v1.TransitionPlanRequest
-	19, // 63: model_plane.v1.OrchestrationCoreService.ListTodos:input_type -> model_plane.v1.ListTodosRequest
-	21, // 64: model_plane.v1.OrchestrationCoreService.GetTodo:input_type -> model_plane.v1.GetTodoRequest
-	23, // 65: model_plane.v1.OrchestrationCoreService.TransitionTodo:input_type -> model_plane.v1.TransitionTodoRequest
-	25, // 66: model_plane.v1.OrchestrationCoreService.CreateApproval:input_type -> model_plane.v1.CreateApprovalRequest
-	27, // 67: model_plane.v1.OrchestrationCoreService.ListApprovals:input_type -> model_plane.v1.ListApprovalsRequest
-	29, // 68: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:input_type -> model_plane.v1.OrgPendingApprovalsRequest
-	31, // 69: model_plane.v1.OrchestrationCoreService.GetApproval:input_type -> model_plane.v1.GetApprovalRequest
-	33, // 70: model_plane.v1.OrchestrationCoreService.DecideApproval:input_type -> model_plane.v1.DecideApprovalRequest
-	35, // 71: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:input_type -> model_plane.v1.GetSubagentLineageRequest
-	37, // 72: model_plane.v1.OrchestrationCoreService.AttachSubagent:input_type -> model_plane.v1.AttachSubagentRequest
-	39, // 73: model_plane.v1.OrchestrationCoreService.StreamRunEvents:input_type -> model_plane.v1.StreamRunEventsRequest
-	41, // 74: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:input_type -> model_plane.v1.RecordOrchestrationEventRequest
-	14, // 75: model_plane.v1.OrchestrationCoreService.ListPlans:output_type -> model_plane.v1.ListPlansResponse
-	16, // 76: model_plane.v1.OrchestrationCoreService.GetPlan:output_type -> model_plane.v1.GetPlanResponse
-	18, // 77: model_plane.v1.OrchestrationCoreService.TransitionPlan:output_type -> model_plane.v1.TransitionPlanResponse
-	20, // 78: model_plane.v1.OrchestrationCoreService.ListTodos:output_type -> model_plane.v1.ListTodosResponse
-	22, // 79: model_plane.v1.OrchestrationCoreService.GetTodo:output_type -> model_plane.v1.GetTodoResponse
-	24, // 80: model_plane.v1.OrchestrationCoreService.TransitionTodo:output_type -> model_plane.v1.TransitionTodoResponse
-	26, // 81: model_plane.v1.OrchestrationCoreService.CreateApproval:output_type -> model_plane.v1.CreateApprovalResponse
-	28, // 82: model_plane.v1.OrchestrationCoreService.ListApprovals:output_type -> model_plane.v1.ListApprovalsResponse
-	30, // 83: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:output_type -> model_plane.v1.OrgPendingApprovalsResponse
-	32, // 84: model_plane.v1.OrchestrationCoreService.GetApproval:output_type -> model_plane.v1.GetApprovalResponse
-	34, // 85: model_plane.v1.OrchestrationCoreService.DecideApproval:output_type -> model_plane.v1.DecideApprovalResponse
-	36, // 86: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:output_type -> model_plane.v1.GetSubagentLineageResponse
-	38, // 87: model_plane.v1.OrchestrationCoreService.AttachSubagent:output_type -> model_plane.v1.AttachSubagentResponse
-	40, // 88: model_plane.v1.OrchestrationCoreService.StreamRunEvents:output_type -> model_plane.v1.OrchestrationEvent
-	42, // 89: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:output_type -> model_plane.v1.RecordOrchestrationEventResponse
-	75, // [75:90] is the sub-list for method output_type
-	60, // [60:75] is the sub-list for method input_type
-	60, // [60:60] is the sub-list for extension type_name
-	60, // [60:60] is the sub-list for extension extendee
-	0,  // [0:60] is the sub-list for field type_name
+	52, // 52: model_plane.v1.OrchestrationEvent.browser_run_paused:type_name -> model_plane.v1.OrchestrationEvent.BrowserRunPaused
+	53, // 53: model_plane.v1.OrchestrationEvent.browser_run_resumed:type_name -> model_plane.v1.OrchestrationEvent.BrowserRunResumed
+	54, // 54: model_plane.v1.OrchestrationEvent.browser_action_approval_required:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
+	55, // 55: model_plane.v1.OrchestrationEvent.browser_action_decided:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionDecided
+	40, // 56: model_plane.v1.RecordOrchestrationEventRequest.event:type_name -> model_plane.v1.OrchestrationEvent
+	0,  // 57: model_plane.v1.OrchestrationEvent.PlanTransitioned.from:type_name -> model_plane.v1.PlanState
+	0,  // 58: model_plane.v1.OrchestrationEvent.PlanTransitioned.to:type_name -> model_plane.v1.PlanState
+	4,  // 59: model_plane.v1.OrchestrationEvent.TodoTransitioned.from:type_name -> model_plane.v1.TodoState
+	4,  // 60: model_plane.v1.OrchestrationEvent.TodoTransitioned.to:type_name -> model_plane.v1.TodoState
+	2,  // 61: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.approval_kind:type_name -> model_plane.v1.ApprovalKind
+	3,  // 62: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.to:type_name -> model_plane.v1.ApprovalState
+	6,  // 63: model_plane.v1.OrchestrationEvent.SubagentAttached.role:type_name -> model_plane.v1.SubagentRole
+	13, // 64: model_plane.v1.OrchestrationCoreService.ListPlans:input_type -> model_plane.v1.ListPlansRequest
+	15, // 65: model_plane.v1.OrchestrationCoreService.GetPlan:input_type -> model_plane.v1.GetPlanRequest
+	17, // 66: model_plane.v1.OrchestrationCoreService.TransitionPlan:input_type -> model_plane.v1.TransitionPlanRequest
+	19, // 67: model_plane.v1.OrchestrationCoreService.ListTodos:input_type -> model_plane.v1.ListTodosRequest
+	21, // 68: model_plane.v1.OrchestrationCoreService.GetTodo:input_type -> model_plane.v1.GetTodoRequest
+	23, // 69: model_plane.v1.OrchestrationCoreService.TransitionTodo:input_type -> model_plane.v1.TransitionTodoRequest
+	25, // 70: model_plane.v1.OrchestrationCoreService.CreateApproval:input_type -> model_plane.v1.CreateApprovalRequest
+	27, // 71: model_plane.v1.OrchestrationCoreService.ListApprovals:input_type -> model_plane.v1.ListApprovalsRequest
+	29, // 72: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:input_type -> model_plane.v1.OrgPendingApprovalsRequest
+	31, // 73: model_plane.v1.OrchestrationCoreService.GetApproval:input_type -> model_plane.v1.GetApprovalRequest
+	33, // 74: model_plane.v1.OrchestrationCoreService.DecideApproval:input_type -> model_plane.v1.DecideApprovalRequest
+	35, // 75: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:input_type -> model_plane.v1.GetSubagentLineageRequest
+	37, // 76: model_plane.v1.OrchestrationCoreService.AttachSubagent:input_type -> model_plane.v1.AttachSubagentRequest
+	39, // 77: model_plane.v1.OrchestrationCoreService.StreamRunEvents:input_type -> model_plane.v1.StreamRunEventsRequest
+	41, // 78: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:input_type -> model_plane.v1.RecordOrchestrationEventRequest
+	14, // 79: model_plane.v1.OrchestrationCoreService.ListPlans:output_type -> model_plane.v1.ListPlansResponse
+	16, // 80: model_plane.v1.OrchestrationCoreService.GetPlan:output_type -> model_plane.v1.GetPlanResponse
+	18, // 81: model_plane.v1.OrchestrationCoreService.TransitionPlan:output_type -> model_plane.v1.TransitionPlanResponse
+	20, // 82: model_plane.v1.OrchestrationCoreService.ListTodos:output_type -> model_plane.v1.ListTodosResponse
+	22, // 83: model_plane.v1.OrchestrationCoreService.GetTodo:output_type -> model_plane.v1.GetTodoResponse
+	24, // 84: model_plane.v1.OrchestrationCoreService.TransitionTodo:output_type -> model_plane.v1.TransitionTodoResponse
+	26, // 85: model_plane.v1.OrchestrationCoreService.CreateApproval:output_type -> model_plane.v1.CreateApprovalResponse
+	28, // 86: model_plane.v1.OrchestrationCoreService.ListApprovals:output_type -> model_plane.v1.ListApprovalsResponse
+	30, // 87: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:output_type -> model_plane.v1.OrgPendingApprovalsResponse
+	32, // 88: model_plane.v1.OrchestrationCoreService.GetApproval:output_type -> model_plane.v1.GetApprovalResponse
+	34, // 89: model_plane.v1.OrchestrationCoreService.DecideApproval:output_type -> model_plane.v1.DecideApprovalResponse
+	36, // 90: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:output_type -> model_plane.v1.GetSubagentLineageResponse
+	38, // 91: model_plane.v1.OrchestrationCoreService.AttachSubagent:output_type -> model_plane.v1.AttachSubagentResponse
+	40, // 92: model_plane.v1.OrchestrationCoreService.StreamRunEvents:output_type -> model_plane.v1.OrchestrationEvent
+	42, // 93: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:output_type -> model_plane.v1.RecordOrchestrationEventResponse
+	79, // [79:94] is the sub-list for method output_type
+	64, // [64:79] is the sub-list for method input_type
+	64, // [64:64] is the sub-list for extension type_name
+	64, // [64:64] is the sub-list for extension extendee
+	0,  // [0:64] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_orchestration_proto_init() }
@@ -4005,6 +4523,10 @@ func file_model_plane_v1_orchestration_proto_init() {
 		(*OrchestrationEvent_RunResumedAfterApproval_)(nil),
 		(*OrchestrationEvent_BrowserActionDispatched_)(nil),
 		(*OrchestrationEvent_BrowserObservationReceived_)(nil),
+		(*OrchestrationEvent_BrowserRunPaused_)(nil),
+		(*OrchestrationEvent_BrowserRunResumed_)(nil),
+		(*OrchestrationEvent_BrowserActionApprovalRequired_)(nil),
+		(*OrchestrationEvent_BrowserActionDecided_)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -4012,7 +4534,7 @@ func file_model_plane_v1_orchestration_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_orchestration_proto_rawDesc), len(file_model_plane_v1_orchestration_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   45,
+			NumMessages:   49,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

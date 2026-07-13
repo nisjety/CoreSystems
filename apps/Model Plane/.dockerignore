@@ -17,6 +17,7 @@ python/**/__pycache__/
 python/**/.pytest_cache/
 python/**/*.egg-info/
 **/.venv/
+**/venv/
 
 # Node
 **/node_modules/
@@ -31,6 +32,31 @@ python/**/*.egg-info/
 # Logs and runtime state
 *.log
 logs/
+coverage/
+**/coverage/
+**/.coverage
+**/.cache/
+
+# Root-context builds are Rust-only. Go, Python, deployment files, bridges,
+# documentation and local operator state use their own contexts (or are never
+# copied into an image), so do not send them to BuildKit.
+go/
+python/
+deploy/
+bridges/
+docs/
+scripts/
+*.md
+docker-compose*.yml
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/keys/
+.codegraph/
 
 # VCS
 .git/

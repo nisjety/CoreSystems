@@ -90,7 +90,9 @@ func (s *Store) Search(orgID, threadID, query string, topicFilter []string, upda
 				continue
 			}
 		}
-		if !updatedAfter.IsZero() && r.UpdatedAt.Before(updatedAfter) {
+		// "updated after" is a strict lower bound. Equal timestamps can occur on
+		// coarse clocks and must not leak into the next incremental page.
+		if !updatedAfter.IsZero() && !r.UpdatedAt.After(updatedAfter) {
 			continue
 		}
 		content := strings.ToLower(r.Content)

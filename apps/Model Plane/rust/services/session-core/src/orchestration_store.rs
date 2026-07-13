@@ -8,7 +8,7 @@
 
 #![allow(dead_code)] // store CRUD layer wired up incrementally as orchestration features land
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::Value as JsonValue;
 use sqlx::types::chrono::{DateTime, Utc};
 use tracing::info;
@@ -243,7 +243,7 @@ pub async fn request_approval(
         "INSERT INTO approvals (id, run_id, plan_id, kind, status, requested_by, \
          org_id, user_id, idempotency_key, metadata, expires_at) \
          VALUES ($1, $2, $3, $4, 'requested', $5, $6, $7, $8, $9, $10) \
-         ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING \
+         ON CONFLICT (org_id, user_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING \
          RETURNING id",
     )
     .bind(id)
@@ -263,6 +263,9 @@ pub async fn request_approval(
 }
 
 /// Decide an approval (granted/denied/expired). Stamps `decided_at = now()`.
+/// The tenant predicate and requested-state compare-and-set are deliberately
+/// part of the write itself so a read/check/write race cannot cross tenants or
+/// overwrite an already-recorded operator decision.
 ///
 /// # Errors
 ///
@@ -270,22 +273,36 @@ pub async fn request_approval(
 pub async fn decide_approval(
     pool: &Pool,
     id: &str,
+    org_id: &str,
+    user_id: Option<&str>,
     status: &str,
     decided_by: &str,
     decision_reason: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE approvals SET status = $2, decided_by = $3, decision_reason = $4, \
-         decided_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(status)
-    .bind(decided_by)
-    .bind(decision_reason)
-    .execute(pool)
-    .await?;
-    Ok(())
+) -> Result<bool> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    if decided_by.trim().is_empty() {
+        bail!("decided_by is required");
+    }
+
+    let updated = sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_SQL)
+        .bind(id)
+        .bind(org_id)
+        .bind(status)
+        .bind(decided_by)
+        .bind(decision_reason)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(updated.is_some())
 }
+
+const DECIDE_APPROVAL_SQL: &str =
+    "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
+     decided_at = now() WHERE id = $1 AND org_id = $2 AND status = 'requested' \
+     AND ($6::text IS NULL OR user_id = $6) \
+     RETURNING id";
 
 /// List approvals for a run.
 ///
@@ -517,6 +534,36 @@ pub async fn get_approval(pool: &Pool, id: &str) -> Result<Option<ApprovalRow>> 
     Ok(row)
 }
 
+/// Fetch a single approval only when it belongs to `org_id`.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn get_approval_for_org(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    user_id: Option<&str>,
+) -> Result<Option<ApprovalRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+
+    let row = sqlx::query_as::<_, ApprovalRow>(
+        "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
+                decision_reason, org_id, user_id, idempotency_key, metadata, \
+                requested_at, decided_at, expires_at \
+         FROM approvals WHERE id = $1 AND org_id = $2 \
+         AND ($3::text IS NULL OR user_id = $3)",
+    )
+    .bind(id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Fetch a single approval by its `(org_id, idempotency_key)` pair. Used to
 /// resolve the existing durable record when an idempotent re-request hit the
 /// `ON CONFLICT ... DO NOTHING` no-op path and so returned no new id. (D-1)
@@ -527,15 +574,17 @@ pub async fn get_approval(pool: &Pool, id: &str) -> Result<Option<ApprovalRow>> 
 pub async fn get_approval_by_idempotency_key(
     pool: &Pool,
     org_id: &str,
+    user_id: &str,
     idempotency_key: &str,
 ) -> Result<Option<ApprovalRow>> {
     let row = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
                 requested_at, decided_at, expires_at \
-         FROM approvals WHERE org_id = $1 AND idempotency_key = $2",
+         FROM approvals WHERE org_id = $1 AND user_id = $2 AND idempotency_key = $3",
     )
     .bind(org_id)
+    .bind(user_id)
     .bind(idempotency_key)
     .fetch_optional(pool)
     .await?;
@@ -630,28 +679,69 @@ pub async fn list_approvals_by_run_full(pool: &Pool, run_id: &str) -> Result<Vec
     Ok(rows)
 }
 
-/// List all PENDING (status = `'requested'`) approvals (full row), oldest
-/// first. When `org_id` is empty, returns every pending approval across all
-/// orgs — the internal-only boot-rehydrate path for model-gateway. A non-empty
-/// `org_id` scopes the result to that tenant (IDOR-safe read-through). (D-1)
+/// List approvals for a run, constrained at the database boundary to one
+/// tenant.
 ///
 /// # Errors
 ///
-/// Returns an error if the query fails.
-pub async fn list_pending_approvals(pool: &Pool, org_id: &str) -> Result<Vec<ApprovalRow>> {
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn list_approvals_by_run_full_for_org(
+    pool: &Pool,
+    run_id: &str,
+    org_id: &str,
+    user_id: Option<&str>,
+) -> Result<Vec<ApprovalRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+
     let rows = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
                 requested_at, decided_at, expires_at \
-         FROM approvals \
-         WHERE status = 'requested' AND ($1 = '' OR org_id = $1) \
-         ORDER BY requested_at ASC",
+         FROM approvals WHERE run_id = $1 AND org_id = $2 \
+         AND ($3::text IS NULL OR user_id = $3) \
+         ORDER BY requested_at DESC",
     )
+    .bind(run_id)
     .bind(org_id)
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)
 }
+
+/// List all PENDING (status = `'requested'`) approvals for one tenant, oldest
+/// first. Empty tenants are rejected rather than interpreted as a wildcard.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_pending_approvals(
+    pool: &Pool,
+    org_id: &str,
+    user_id: Option<&str>,
+) -> Result<Vec<ApprovalRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+
+    let rows = sqlx::query_as::<_, ApprovalRow>(LIST_PENDING_APPROVALS_SQL)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+const LIST_PENDING_APPROVALS_SQL: &str =
+    "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
+            decision_reason, org_id, user_id, idempotency_key, metadata, \
+            requested_at, decided_at, expires_at \
+     FROM approvals \
+     WHERE status = 'requested' AND org_id = $1 \
+     AND ($2::text IS NULL OR user_id = $2) \
+     ORDER BY requested_at ASC";
 
 /// Recursively walk subagent lineage for all runs on a thread.
 ///
@@ -684,4 +774,57 @@ pub async fn list_lineage_by_thread(pool: &Pool, thread_id: &str) -> Result<Vec<
     .await?;
     info!(thread_id, count = rows.len(), "list_lineage_by_thread");
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[test]
+    fn approval_decision_query_is_tenant_scoped_and_compare_and_set() {
+        assert!(DECIDE_APPROVAL_SQL.contains("id = $1 AND org_id = $2"));
+        assert!(DECIDE_APPROVAL_SQL.contains("($6::text IS NULL OR user_id = $6)"));
+        assert!(DECIDE_APPROVAL_SQL.contains("status = 'requested'"));
+        assert!(DECIDE_APPROVAL_SQL.contains("RETURNING id"));
+    }
+
+    #[test]
+    fn pending_approval_query_has_no_empty_org_wildcard() {
+        assert!(LIST_PENDING_APPROVALS_SQL.contains("org_id = $1"));
+        assert!(LIST_PENDING_APPROVALS_SQL.contains("($2::text IS NULL OR user_id = $2)"));
+        assert!(!LIST_PENDING_APPROVALS_SQL.contains("$1 = ''"));
+    }
+
+    #[test]
+    fn approval_idempotency_is_user_scoped() {
+        let migration = include_str!("../migrations/0011_identity_scoping.sql");
+        assert!(migration.contains("ON approvals (org_id, user_id, idempotency_key)"));
+    }
+
+    #[tokio::test]
+    async fn approval_store_rejects_empty_scope_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("syntactically valid test URL");
+
+        let org_error =
+            decide_approval(&pool, "appr_1", "", Some("user_1"), "granted", "user_1", "")
+                .await
+                .expect_err("empty org must fail before querying Postgres");
+        assert_eq!(org_error.to_string(), "org_id is required");
+
+        let actor_error = decide_approval(
+            &pool,
+            "appr_1",
+            "org_1",
+            Some("user_1"),
+            "granted",
+            "   ",
+            "",
+        )
+        .await
+        .expect_err("empty actor must fail before querying Postgres");
+        assert_eq!(actor_error.to_string(), "decided_by is required");
+    }
 }

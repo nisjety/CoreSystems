@@ -17,6 +17,7 @@ use mp_contracts::model_plane::v1::{
     orchestration_event,
 };
 use tonic::transport::Channel;
+use tonic::{Request, Status};
 use tracing::debug;
 
 use crate::browser_agent::{
@@ -38,6 +39,7 @@ pub struct OrchestrationEventSink {
     /// share (e.g. a unit test) — the poll then behaves exactly as before
     /// (grant/deny/timeout only).
     state: Option<StateStore>,
+    bearer: Option<std::sync::Arc<str>>,
 }
 
 impl OrchestrationEventSink {
@@ -46,7 +48,33 @@ impl OrchestrationEventSink {
     /// stop while it is polling (Phase 6).
     #[must_use]
     pub fn new(channel: Channel, state: Option<StateStore>) -> Self {
-        Self { channel, state }
+        Self {
+            channel,
+            state,
+            bearer: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_verified_bearer(mut self, bearer: &str) -> Self {
+        self.bearer = Some(std::sync::Arc::from(bearer));
+        self
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn request<T>(&self, value: T) -> Result<Request<T>, Status> {
+        let bearer = self
+            .bearer
+            .as_deref()
+            .ok_or_else(|| Status::unauthenticated("verified session credential required"))?;
+        let mut request = Request::new(value);
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {bearer}")
+                .parse()
+                .map_err(|_| Status::internal("verified session credential is not forwardable"))?,
+        );
+        Ok(request)
     }
 
     /// `true` when a user stopped `run_id` (via the normal pause/stop
@@ -76,7 +104,11 @@ impl OrchestrationEventSink {
                 event: Some(event),
             }),
         };
-        if let Err(error) = self.client().record_orchestration_event(request).await {
+        let result = match self.request(request) {
+            Ok(request) => self.client().record_orchestration_event(request).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
             // Best-effort: a missing/unavailable session-core (e.g. running the
             // browser agent in isolation) must not disturb the loop.
             debug!(
@@ -236,33 +268,34 @@ impl BrowserEventSink for OrchestrationEventSink {
 
         let mut orchestration = self.client();
         let expires_in = approval_timeout_seconds();
-        let created = orchestration
-            .create_approval(pb::CreateApprovalRequest {
-                run_id: config.run_id.clone(),
-                step_id: detail.action_id.clone(),
-                kind: pb::ApprovalKind::Destructive as i32,
-                requested_of: config.org_id.clone(),
-                org_id: config.org_id.clone(),
-                user_id: String::new(),
-                reason: format!(
-                    "browser action requires approval ({}): {}",
-                    detail.risk_category.as_str(),
-                    detail.reason
-                ),
-                expires_in_seconds: expires_in,
-                client_approval_id: String::new(),
-                // Stable per-(run, action, category) idempotency key so a
-                // retried gate (e.g. the same action re-planned) collapses
-                // onto the existing durable approval instead of duplicating
-                // it, mirroring `grpc.rs`'s own `{run_id}:{step_id}` pattern.
-                idempotency_key: format!(
-                    "{}:{}:{}",
-                    config.run_id,
-                    detail.action_id,
-                    detail.risk_category.as_str()
-                ),
-            })
-            .await;
+        let created = match self.request(pb::CreateApprovalRequest {
+            run_id: config.run_id.clone(),
+            step_id: detail.action_id.clone(),
+            kind: pb::ApprovalKind::Destructive as i32,
+            requested_of: config.org_id.clone(),
+            org_id: config.org_id.clone(),
+            user_id: String::new(),
+            reason: format!(
+                "browser action requires approval ({}): {}",
+                detail.risk_category.as_str(),
+                detail.reason
+            ),
+            expires_in_seconds: expires_in,
+            client_approval_id: String::new(),
+            // Stable per-(run, action, category) idempotency key so a
+            // retried gate (e.g. the same action re-planned) collapses
+            // onto the existing durable approval instead of duplicating
+            // it, mirroring `grpc.rs`'s own `{run_id}:{step_id}` pattern.
+            idempotency_key: format!(
+                "{}:{}:{}",
+                config.run_id,
+                detail.action_id,
+                detail.risk_category.as_str()
+            ),
+        }) {
+            Ok(request) => orchestration.create_approval(request).await,
+            Err(error) => Err(error),
+        };
 
         let approval_id = match created {
             Ok(response) => match response.into_inner().approval {
@@ -305,15 +338,15 @@ impl BrowserEventSink for OrchestrationEventSink {
             // Checked before polling `GetApproval` so a cancelled run never
             // issues another needless RPC.
             if self.was_cancelled(&config.run_id) {
-                let _ = orchestration
-                    .decide_approval(pb::DecideApprovalRequest {
-                        approval_id: approval_id.clone(),
-                        decision: pb::ApprovalState::Denied as i32,
-                        decided_by: "system:user-cancelled".to_owned(),
-                        decision_reason: "run cancelled by user while awaiting approval".to_owned(),
-                        org_id: config.org_id.clone(),
-                    })
-                    .await;
+                if let Ok(request) = self.request(pb::DecideApprovalRequest {
+                    approval_id: approval_id.clone(),
+                    decision: pb::ApprovalState::Denied as i32,
+                    decided_by: "system:user-cancelled".to_owned(),
+                    decision_reason: "run cancelled by user while awaiting approval".to_owned(),
+                    org_id: config.org_id.clone(),
+                }) {
+                    let _ = orchestration.decide_approval(request).await;
+                }
                 return self
                     .decided(
                         config,
@@ -325,16 +358,18 @@ impl BrowserEventSink for OrchestrationEventSink {
                     .await;
             }
 
-            match orchestration
-                .get_approval(pb::GetApprovalRequest {
-                    approval_id: approval_id.clone(),
-                    // Cross-org IDOR fix (Phase 6): this approval was just
-                    // created with this same org_id above, so asserting it
-                    // here is a real ownership check, not a no-op.
-                    org_id: config.org_id.clone(),
-                })
-                .await
-            {
+            let approval_request = self.request(pb::GetApprovalRequest {
+                approval_id: approval_id.clone(),
+                // Cross-org IDOR fix (Phase 6): this approval was just
+                // created with this same org_id above, so asserting it
+                // here is a real ownership check, not a no-op.
+                org_id: config.org_id.clone(),
+            });
+            let approval_result = match approval_request {
+                Ok(request) => orchestration.get_approval(request).await,
+                Err(error) => Err(error),
+            };
+            match approval_result {
                 Ok(response) => {
                     if let Some(approval) = response.into_inner().approval {
                         match pb::ApprovalState::try_from(approval.state) {
@@ -384,15 +419,15 @@ impl BrowserEventSink for OrchestrationEventSink {
                 // Fail closed AND make the durable record reflect it, so
                 // anyone inspecting the approval later sees the true state
                 // rather than a permanently "requested" row.
-                let _ = orchestration
-                    .decide_approval(pb::DecideApprovalRequest {
-                        approval_id: approval_id.clone(),
-                        decision: pb::ApprovalState::TimedOut as i32,
-                        decided_by: "system:approval-timeout".to_owned(),
-                        decision_reason: "browser action approval wait budget exceeded".to_owned(),
-                        org_id: config.org_id.clone(),
-                    })
-                    .await;
+                if let Ok(request) = self.request(pb::DecideApprovalRequest {
+                    approval_id: approval_id.clone(),
+                    decision: pb::ApprovalState::TimedOut as i32,
+                    decided_by: "system:approval-timeout".to_owned(),
+                    decision_reason: "browser action approval wait budget exceeded".to_owned(),
+                    org_id: config.org_id.clone(),
+                }) {
+                    let _ = orchestration.decide_approval(request).await;
+                }
                 return self
                     .decided(
                         config,
@@ -678,7 +713,8 @@ mod tests {
         // Stop while a run is already sitting at a pending approval.
         assert!(state.cancel("run_001", Some("user_stop".to_owned())));
 
-        let sink = OrchestrationEventSink::new(channel, Some(state));
+        let sink =
+            OrchestrationEventSink::new(channel, Some(state)).with_verified_bearer("test-bearer");
         let config = test_config();
         let detail = test_detail();
 
@@ -718,7 +754,7 @@ mod tests {
         })
         .await;
 
-        let sink = OrchestrationEventSink::new(channel, None);
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
         let config = test_config();
         let detail = test_detail();
 
@@ -748,7 +784,8 @@ mod tests {
         let state = StateStore::new();
         assert!(state.cancel("some_other_run", Some("user_stop".to_owned())));
 
-        let sink = OrchestrationEventSink::new(channel, Some(state));
+        let sink =
+            OrchestrationEventSink::new(channel, Some(state)).with_verified_bearer("test-bearer");
         let config = test_config();
         let detail = test_detail();
 

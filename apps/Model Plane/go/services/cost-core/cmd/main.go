@@ -6,22 +6,25 @@
 // the model-gateway budget guard, and subscribes to USAGE_ENVELOPE events on
 // the NATS bus to record costs as runs execute.
 //
-// Durability: when DATABASE_URL is set, the durable Postgres ledger is used;
-// otherwise cost-core falls back to an in-memory ledger (local dev / tests).
+// Durability: the service requires Postgres. Local tests may opt into the
+// in-memory ledger explicitly with COST_CORE_ALLOW_EPHEMERAL=true.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 	"github.com/triodelab/model-plane/services/cost-core/internal/postgres"
 	"github.com/triodelab/model-plane/services/cost-core/internal/pricing"
@@ -35,11 +38,17 @@ import (
 // publishes to: mp.v1.usage.{org_id}. See mp-events subjects::usage_subject.
 const usageSubjectWildcard = "mp.v1.usage.*"
 
+const (
+	usageEnvelopeProducer = "model-gateway"
+	maxUsageMessageBytes  = 64 << 10
+)
+
 // envelope is a minimal local view of the canonical Model Plane event envelope
 // (pkg/envelope.Envelope). cost-core decodes only the fields it needs so it
 // stays standalone-buildable (no workspace replace directives).
 type envelope struct {
 	EventType      string          `json:"event_type"`
+	Producer       string          `json:"producer"`
 	CorrelationID  string          `json:"correlation_id"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	OrgID          string          `json:"org_id"`
@@ -70,16 +79,31 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	store := buildLedger(ctx)
+	store, err := buildLedgerFromConfig(
+		ctx,
+		strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		strings.EqualFold(strings.TrimSpace(os.Getenv("COST_CORE_ALLOW_EPHEMERAL")), "true"),
+	)
+	if err != nil {
+		slog.Error("durable cost ledger unavailable", "error", err)
+		os.Exit(1)
+	}
 	srv := server.NewServer(store)
 	srv.SetPricing(buildPricing(ctx))
+	verifier, err := authctx.NewVerifier(authctx.Config{
+		Audiences: []string{requiredEnv("COST_CORE_AUTH_AUDIENCE")},
+		Issuer:    requiredEnv("AUTH_CORE_ISSUER"),
+		JWKSURL:   requiredEnv("AUTH_CORE_JWKS_URL"),
+	})
+	if err != nil {
+		slog.Error("cost-core authentication unavailable", "error", err)
+		os.Exit(1)
+	}
 
 	// HTTP server on :8089 (health + API)
-	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
 	httpServer := &http.Server{
 		Addr:              ":8089",
-		Handler:           mux,
+		Handler:           srv.Handler(verifier.HTTPMiddleware(server.CostAuthorizer)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -118,28 +142,38 @@ func main() {
 	_ = httpServer.Shutdown(context.Background())
 }
 
-// buildLedger selects the durable Postgres ledger when DATABASE_URL is set,
-// falling back to the in-memory ledger otherwise so the service runs cleanly
-// in local dev and tests without a database.
-func buildLedger(ctx context.Context) ledger.Ledger {
-	dsn := os.Getenv("DATABASE_URL")
+func requiredEnv(name string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		slog.Error("required environment variable is missing", "name", name)
+		os.Exit(1)
+	}
+	return value
+}
+
+// buildLedgerFromConfig selects the durable Postgres ledger. Ephemeral storage
+// is available only through an explicit local-test opt-in; connection or
+// migration failure otherwise prevents startup so accounting is never lost
+// silently.
+func buildLedgerFromConfig(ctx context.Context, dsn string, allowEphemeral bool) (ledger.Ledger, error) {
 	if dsn == "" {
-		slog.Warn("DATABASE_URL not set; using in-memory ledger (non-durable)")
-		return ledger.NewStore()
+		if allowEphemeral {
+			slog.Warn("using explicitly enabled in-memory cost ledger")
+			return ledger.NewStore(), nil
+		}
+		return nil, fmt.Errorf("DATABASE_URL is required unless COST_CORE_ALLOW_EPHEMERAL=true")
 	}
 	pool, err := postgres.Connect(ctx, dsn)
 	if err != nil {
-		slog.Error("postgres connect failed; falling back to in-memory ledger", "error", err)
-		return ledger.NewStore()
+		return nil, fmt.Errorf("connect postgres: %w", err)
 	}
 	pgStore, err := postgres.New(pool)
 	if err != nil {
-		slog.Error("postgres store init failed; falling back to in-memory ledger", "error", err)
 		pool.Close()
-		return ledger.NewStore()
+		return nil, fmt.Errorf("initialize postgres ledger: %w", err)
 	}
 	slog.Info("using durable Postgres ledger")
-	return pgStore
+	return pgStore, nil
 }
 
 // buildPricing loads the model price catalogue from Postgres when DATABASE_URL
@@ -178,20 +212,24 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 		return
 	}
 
-	nc, err := nats.Connect(natsURL,
+	options := []nats.Option{
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
-	)
+		nats.ReconnectWait(2 * time.Second),
+	}
+	if token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN")); token != "" {
+		options = append(options, nats.Token(token))
+	}
+	nc, err := nats.Connect(natsURL, options...)
 	if err != nil {
-		slog.Error("NATS connect failed; USAGE_ENVELOPE subscriber disabled", "error", err, "url", natsURL)
+		slog.Error("NATS connect failed; USAGE_ENVELOPE subscriber disabled", "error", err)
 		runFeedFallback(ctx, srv)
 		return
 	}
 	defer nc.Close()
 
 	sub, err := nc.Subscribe(usageSubjectWildcard, func(msg *nats.Msg) {
-		handleUsageMessage(ctx, srv, msg.Data)
+		handleUsageMessage(ctx, srv, msg.Subject, msg.Data)
 	})
 	if err != nil {
 		slog.Error("NATS subscribe failed; USAGE_ENVELOPE subscriber disabled", "error", err, "subject", usageSubjectWildcard)
@@ -200,39 +238,77 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	slog.Info("USAGE_ENVELOPE subscriber active", "url", natsURL, "subject", usageSubjectWildcard)
+	slog.Info("USAGE_ENVELOPE subscriber active", "subject", usageSubjectWildcard)
 	<-ctx.Done()
 }
 
 // handleUsageMessage decodes a usage envelope and records it in the ledger.
-func handleUsageMessage(ctx context.Context, srv *server.Server, data []byte) {
-	var env envelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		slog.Warn("failed to decode usage envelope", "error", err)
+func handleUsageMessage(ctx context.Context, srv *server.Server, subject string, data []byte) {
+	entry, err := decodeUsageMessage(subject, data, time.Now().UTC())
+	if err != nil {
+		slog.Warn("rejected usage envelope", "subject", subject, "error", err)
 		return
 	}
-	if env.EventType != "" && env.EventType != "USAGE_ENVELOPE" {
-		return // not a usage event
+	if err := srv.RecordUsage(ctx, entry); err != nil {
+		slog.Warn("failed to record usage envelope", "org_id", entry.OrgID, "error", err)
+	}
+}
+
+// decodeUsageMessage binds the tenant carried by the NATS subject to both the
+// canonical envelope and its payload before the event can affect accounting.
+// NATS credentials still need per-producer permissions: the producer field is
+// an allowlisted attribution value, not cryptographic workload identity. These
+// checks prevent malformed/confused-deputy events from changing tenant scope.
+func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledger.Entry, error) {
+	if len(data) == 0 || len(data) > maxUsageMessageBytes {
+		return ledger.Entry{}, fmt.Errorf("usage envelope size is outside the supported range")
+	}
+	parts := strings.Split(subject, ".")
+	if len(parts) != 4 || parts[0] != "mp" || parts[1] != "v1" || parts[2] != "usage" || strings.TrimSpace(parts[3]) == "" {
+		return ledger.Entry{}, fmt.Errorf("invalid usage subject")
+	}
+	subjectOrgID := parts[3]
+
+	var env envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return ledger.Entry{}, fmt.Errorf("decode envelope: %w", err)
+	}
+	if env.EventType != "USAGE_ENVELOPE" {
+		return ledger.Entry{}, fmt.Errorf("unexpected event type")
+	}
+	if env.Producer != usageEnvelopeProducer {
+		return ledger.Entry{}, fmt.Errorf("usage envelope producer is not allowed")
+	}
+	if strings.TrimSpace(env.IdempotencyKey) == "" {
+		return ledger.Entry{}, fmt.Errorf("idempotency_key is required")
+	}
+	if env.OrgID != subjectOrgID {
+		return ledger.Entry{}, fmt.Errorf("subject and envelope organization mismatch")
+	}
+	if strings.TrimSpace(env.UserID) == "" {
+		return ledger.Entry{}, fmt.Errorf("user attribution is required")
 	}
 
 	var p usagePayload
 	if len(env.Payload) > 0 {
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			slog.Warn("failed to decode usage payload", "error", err)
-			return
+			return ledger.Entry{}, fmt.Errorf("decode payload: %w", err)
 		}
 	}
-
-	orgID := firstNonEmpty(p.OrgID, env.OrgID)
-	userID := firstNonEmpty(p.UserID, env.UserID)
-	if orgID == "" {
-		slog.Warn("skipping usage envelope with empty org_id")
-		return
+	if p.OrgID != "" && p.OrgID != subjectOrgID {
+		return ledger.Entry{}, fmt.Errorf("payload organization mismatch")
+	}
+	if p.UserID != "" && env.UserID != "" && p.UserID != env.UserID {
+		return ledger.Entry{}, fmt.Errorf("payload user mismatch")
+	}
+	if p.RequestID != "" && env.CorrelationID != "" && p.RequestID != env.CorrelationID {
+		return ledger.Entry{}, fmt.Errorf("payload request mismatch")
 	}
 
 	entry := ledger.Entry{
-		OrgID:          orgID,
-		UserID:         userID,
+		OrgID:          subjectOrgID,
+		UserID:         firstNonEmpty(p.UserID, env.UserID),
+		ProducerID:     env.Producer,
 		RunID:          p.RunID,
 		RequestID:      firstNonEmpty(p.RequestID, env.CorrelationID),
 		Model:          p.Model,
@@ -240,11 +316,12 @@ func handleUsageMessage(ctx context.Context, srv *server.Server, data []byte) {
 		OutputTokens:   p.OutputTokens,
 		CostUSD:        p.CostUSD,
 		IdempotencyKey: env.IdempotencyKey,
-		CreatedAt:      time.Now().UTC(),
+		CreatedAt:      createdAt,
 	}
-	if err := srv.RecordUsage(ctx, entry); err != nil {
-		slog.Warn("failed to record usage envelope", "org_id", orgID, "error", err)
+	if err := ledger.ValidateEntry(entry); err != nil {
+		return ledger.Entry{}, err
 	}
+	return entry, nil
 }
 
 // runFeedFallback reads newline/array JSON usage payloads from NATS_FEED_PATH
@@ -284,16 +361,19 @@ func runFeedFallback(ctx context.Context, srv *server.Server) {
 			if p.OrgID == "" {
 				continue
 			}
-			_ = srv.RecordUsage(ctx, ledger.Entry{
+			if err := srv.RecordUsage(ctx, ledger.Entry{
 				OrgID:        p.OrgID,
 				UserID:       p.UserID,
+				ProducerID:   "feed:file",
 				RunID:        p.RunID,
 				RequestID:    p.RequestID,
 				Model:        p.Model,
 				InputTokens:  p.InputTokens,
 				OutputTokens: p.OutputTokens,
 				CostUSD:      p.CostUSD,
-			})
+			}); err != nil {
+				slog.Warn("rejected usage feed entry", "error", err)
+			}
 		}
 		sleepCtx(ctx, 2*time.Second)
 	}

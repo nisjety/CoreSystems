@@ -8,13 +8,15 @@
 //!
 //! ```bash
 //! # quarry-edge must be built WITH the chromiumoxide driver and reachable,
-//! # with a real Chrome/Chromium available to it. QUARRY_EDGE_TOKEN must be a
-//! # JWT whose `org_id` claim matches the run.
+//! # with a real Chrome/Chromium available to it. execution-core must have a
+//! # registered Auth Core service principal for the `quarry` audience.
 //! QUARRY_BROWSER_AGENT_ENABLED=1 \
 //! QUARRY_EDGE_URL=https://quarry-edge.internal \
-//! QUARRY_EDGE_TOKEN=<jwt> \
+//! AUTH_CORE_URL=http://auth-core:3011 \
+//! EXECUTION_CORE_SERVICE_API_KEY=<credential> \
 //! QUARRY_BROWSER_AGENT_LLM=1 \
 //! INFERENCE_CORE_URL=http://inference-core:9092 \
+//! E2E_INFERENCE_BEARER=<short-lived-aud-inference-core-user-token> \
 //! E2E_ORG_ID=org_real \
 //! cargo test -p execution-core --test browser_agent_e2e -- --ignored --nocapture
 //! ```
@@ -30,11 +32,13 @@ async fn browser_agent_drives_real_quarry_loop() {
     // QUARRY_BROWSER_AGENT_ENABLED=1 + QUARRY_EDGE_URL (the whole point of the
     // test is to exercise the real wire path).
     let client = QuarryAgentClient::from_env()
+        .expect("Auth Core service-principal configuration must be valid")
         .expect("set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL to run the E2E test");
 
     // Optional real LLM planner. When unset, the loop uses the deterministic
     // planner (repeated Observe) — still a real Quarry round-trip per step.
-    let planner = LlmPlanner::from_env();
+    let inference_bearer = std::env::var("E2E_INFERENCE_BEARER").ok();
+    let planner = LlmPlanner::from_env(inference_bearer.as_deref());
 
     let config = PlanConfig {
         plan_id: "e2e_plan".to_owned(),

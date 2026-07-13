@@ -1,17 +1,10 @@
 //! inference-core — provider routing execution for LLMs.
 //!
-//! gRPC on :9092, HTTP health/metrics on :8082.
-//! Stateless except in-memory prompt cache.
+//! Authenticated gRPC inference on :9092, HTTP health/metrics on :8082.
 
 use anyhow::Result;
+use inference_core::{auth::JwtVerifier, config, grpc, http_health, provider};
 use tracing::info;
-
-mod cache;
-mod config;
-mod grpc;
-mod http_health;
-mod provider;
-mod streaming;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,10 +18,6 @@ async fn main() -> Result<()> {
     );
 
     let chain = provider::fallback::FallbackChain::from_config(&cfg);
-    let policy_state = http_health::PolicyState {
-        policy: chain.policy_handle(),
-        client: chain.policy_client(),
-    };
     let speech = provider::speech::SpeechChain::from_env();
     info!(
         providers = speech.provider_count(),
@@ -65,16 +54,27 @@ async fn main() -> Result<()> {
         "video provider chain configured"
     );
 
-    let grpc_handle = tokio::spawn(grpc::serve_with_providers(grpc::ProviderChains {
-        chain: chain.clone(),
-        speech,
-        translation,
-        vision,
-        doc_intel,
-        language,
-        realtime,
-        video,
-    }));
+    // Eager JWKS loading is a readiness gate: missing/unavailable verification
+    // material prevents the listener and provider surface from starting.
+    let auth = JwtVerifier::from_env().await?;
+    let policy_state = http_health::PolicyState {
+        auth: auth.clone(),
+        policy: chain.policy_handle(),
+        client: chain.policy_client(),
+    };
+    let grpc_handle = tokio::spawn(grpc::serve_with_providers(
+        grpc::ProviderChains {
+            chain: chain.clone(),
+            speech,
+            translation,
+            vision,
+            doc_intel,
+            language,
+            realtime,
+            video,
+        },
+        auth,
+    ));
     let http_handle = tokio::spawn(http_health::serve(policy_state));
 
     let shutdown = async {

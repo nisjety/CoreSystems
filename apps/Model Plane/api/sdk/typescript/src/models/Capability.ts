@@ -67,7 +67,43 @@ export interface Capability {
      * @memberof Capability
      */
     scope?: string;
+    /** Fail-closed runtime availability. */
+    state?: CapabilityStateEnum;
+    /** Stable machine-readable availability reason. */
+    reasonCode?: string;
+    /** Human-readable availability explanation. */
+    reason?: string;
+    /** Whether execution must use the governed approval path. */
+    requiresApproval?: boolean;
+    executionMode?: CapabilityExecutionModeEnum;
+    costClass?: CapabilityCostClassEnum;
+    /** RFC3339 server-recorded health time; absent when unattested. */
+    healthCheckedAt?: string;
 }
+
+export const CapabilityStateEnum = {
+    Available: 'available',
+    Disabled: 'disabled',
+    Unhealthy: 'unhealthy',
+    ApprovalRequired: 'approval_required',
+    Unavailable: 'unavailable',
+    NotConfigured: 'not_configured'
+} as const;
+export type CapabilityStateEnum = typeof CapabilityStateEnum[keyof typeof CapabilityStateEnum];
+
+export const CapabilityExecutionModeEnum = {
+    DirectRead: 'direct_read',
+    Agentic: 'agentic',
+    Unavailable: 'unavailable'
+} as const;
+export type CapabilityExecutionModeEnum = typeof CapabilityExecutionModeEnum[keyof typeof CapabilityExecutionModeEnum];
+
+export const CapabilityCostClassEnum = {
+    Unknown: 'unknown',
+    Bounded: 'bounded',
+    Variable: 'variable'
+} as const;
+export type CapabilityCostClassEnum = typeof CapabilityCostClassEnum[keyof typeof CapabilityCostClassEnum];
 
 /**
  * Check if a given object implements the Capability interface.
@@ -94,6 +130,13 @@ export function CapabilityFromJSONTyped(json: any, ignoreDiscriminator: boolean)
         'riskLevel': json['risk_level'] == null ? undefined : json['risk_level'],
         'lazyLoad': json['lazy_load'] == null ? undefined : json['lazy_load'],
         'scope': json['scope'] == null ? undefined : json['scope'],
+        'state': json['state'] == null ? undefined : json['state'],
+        'reasonCode': json['reason_code'] == null ? undefined : json['reason_code'],
+        'reason': json['reason'] == null ? undefined : json['reason'],
+        'requiresApproval': json['requires_approval'] == null ? undefined : json['requires_approval'],
+        'executionMode': json['execution_mode'] == null ? undefined : json['execution_mode'],
+        'costClass': json['cost_class'] == null ? undefined : json['cost_class'],
+        'healthCheckedAt': json['health_checked_at'] == null ? undefined : json['health_checked_at'],
     };
 }
 
@@ -116,6 +159,12 @@ export function CapabilityToJSONTyped(value?: Capability | null, ignoreDiscrimin
         'risk_level': value['riskLevel'],
         'lazy_load': value['lazyLoad'],
         'scope': value['scope'],
+        'state': value['state'],
+        'reason_code': value['reasonCode'],
+        'reason': value['reason'],
+        'requires_approval': value['requiresApproval'],
+        'execution_mode': value['executionMode'],
+        'cost_class': value['costClass'],
+        'health_checked_at': value['healthCheckedAt'],
     };
 }
-

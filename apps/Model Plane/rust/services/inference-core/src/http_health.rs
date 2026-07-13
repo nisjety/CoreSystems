@@ -8,15 +8,25 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use tracing::info;
 
+use crate::auth::JwtVerifier;
 use crate::provider::policy_client::PolicyClient;
 use crate::provider::routing_policy::RoutingPolicy;
 
 /// Shared state for the routing-policy admin routes.
 #[derive(Clone)]
 pub struct PolicyState {
+    /// Auth Core verifier shared with the gRPC boundary. Policy routes require
+    /// a verified `inference-core` audience plus a dedicated admin scope.
+    pub auth: JwtVerifier,
     /// Live policy, hot-swapped by the refresh loop and the PUT write-through.
     pub policy: Arc<ArcSwap<RoutingPolicy>>,
     /// session-core client for the write path. `None` → PUT returns 503.
@@ -61,8 +71,11 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 /// Return the currently-loaded effective routing policy.
-async fn get_policy(State(state): State<PolicyState>) -> Json<RoutingPolicy> {
-    Json(RoutingPolicy::clone(&state.policy.load_full()))
+async fn get_policy(State(state): State<PolicyState>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize_policy_admin(&state.auth, &headers).await {
+        return response;
+    }
+    Json(RoutingPolicy::clone(&state.policy.load_full())).into_response()
 }
 
 /// Persist a new routing policy to session-core, then hot-swap the live copy.
@@ -70,8 +83,12 @@ async fn get_policy(State(state): State<PolicyState>) -> Json<RoutingPolicy> {
 /// session-core store is configured.
 async fn put_policy(
     State(state): State<PolicyState>,
+    headers: HeaderMap,
     Json(policy): Json<RoutingPolicy>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_policy_admin(&state.auth, &headers).await {
+        return response;
+    }
     let Some(client) = state.client else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -97,4 +114,45 @@ async fn put_policy(
         )
             .into_response(),
     }
+}
+
+async fn authorize_policy_admin(
+    verifier: &JwtVerifier,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| auth_error(StatusCode::UNAUTHORIZED, "verified credential required"))?;
+    let metadata = authorization
+        .parse()
+        .map_err(|_| auth_error(StatusCode::UNAUTHORIZED, "invalid credential"))?;
+    let mut request = tonic::Request::new(());
+    request.metadata_mut().insert("authorization", metadata);
+    let principal = verifier
+        .authenticate(&request)
+        .await
+        .map_err(|status| map_auth_status(&status))?;
+    principal
+        .authorize_policy_admin()
+        .map_err(|status| map_auth_status(&status))
+}
+
+fn map_auth_status(status: &tonic::Status) -> Response {
+    let http_status = match status.code() {
+        tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
+        tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    auth_error(http_status, status.message())
+}
+
+fn auth_error(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": { "code": "authorization_failed", "message": message }
+        })),
+    )
+        .into_response()
 }

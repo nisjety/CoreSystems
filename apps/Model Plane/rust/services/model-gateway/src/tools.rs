@@ -62,7 +62,7 @@ pub async fn handle_web_search(
     }
     let results = state
         .quarry
-        .search(&req.query, req.limit, &req.intent, &req.org_id)
+        .search(&req.query, req.limit, &req.intent, &req.org_id, req.zdr)
         .await
         .map_err(quarry_err_to_status)?;
 
@@ -362,6 +362,9 @@ fn quarry_err_to_status(err: QuarryError) -> Status {
         QuarryError::Transport(e) => Status::unavailable(format!("quarry transport: {e}")),
         QuarryError::EmptyEnvelope => Status::internal("quarry: empty envelope"),
         QuarryError::Decode(e) => Status::internal(format!("quarry decode: {e}")),
+        QuarryError::Authentication(_) => {
+            Status::unavailable("quarry authentication is unavailable")
+        }
         QuarryError::Typed { code, message, .. } => match code.as_str() {
             "BAD_REQUEST" | "INVALID_ARGUMENT" => Status::invalid_argument(message),
             "SECURITY_BLOCKED" | "FORBIDDEN" => {

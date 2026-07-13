@@ -9,6 +9,7 @@ use mp_contracts::model_plane::v1::{
 use tonic::{Request, Response, Status};
 use tracing::info;
 
+use crate::auth::{AuthenticatedPrincipal, JwtVerifier};
 use crate::provider;
 use crate::provider::doc_intel::{AnalyzeDocumentRequest, DocIntelChain};
 use crate::provider::fallback::FallbackChain;
@@ -66,7 +67,8 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
     }
 }
 
-pub struct InferenceService {
+pub(crate) struct InferenceService {
+    auth: JwtVerifier,
     chain: FallbackChain,
     speech: SpeechChain,
     translation: TranslationChain,
@@ -77,16 +79,92 @@ pub struct InferenceService {
     video: VideoChain,
 }
 
+trait TenantRequest {
+    fn org_id(&self) -> Option<&str>;
+    fn is_catalog(&self) -> bool;
+}
+
+macro_rules! tenant_requests {
+    ($($request:ty),+ $(,)?) => {
+        $(impl TenantRequest for $request {
+            fn org_id(&self) -> Option<&str> {
+                Some(&self.org_id)
+            }
+
+            fn is_catalog(&self) -> bool {
+                false
+            }
+        })+
+    };
+}
+
+tenant_requests!(
+    pb::InferRequest,
+    pb::CreateEmbeddingRequest,
+    pb::SynthesizeSpeechRequest,
+    pb::TranscribeSpeechRequest,
+    pb::TranslateTextRequest,
+    pb::BatchTranslateTextRequest,
+    pb::DetectTextLanguageRequest,
+    pb::GenerateImageRequest,
+    pb::AnalyzeImageRequest,
+    pb::ExtractImageTextRequest,
+    pb::AnalyzeDocumentRequest,
+    pb::AnalyzeLanguageRequest,
+    pb::CreateRealtimeSessionRequest,
+    pb::CreateVideoGenerationJobRequest,
+    pb::GetVideoGenerationJobRequest,
+    pb::StreamVideoGenerationContentRequest,
+);
+
+macro_rules! catalog_requests {
+    ($($request:ty),+ $(,)?) => {
+        $(impl TenantRequest for $request {
+            fn org_id(&self) -> Option<&str> {
+                None
+            }
+
+            fn is_catalog(&self) -> bool {
+                true
+            }
+        })+
+    };
+}
+
+catalog_requests!(
+    pb::ListModelsRequest,
+    pb::ListSpeechVoicesRequest,
+    pb::ListTranslationLanguagesRequest,
+);
+
+impl InferenceService {
+    async fn authorize<T: TenantRequest>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<AuthenticatedPrincipal, Status> {
+        let principal = self.auth.authenticate(request).await?;
+        if request.get_ref().is_catalog() {
+            principal.authorize_catalog()?;
+        } else {
+            principal.authorize_invoke()?;
+        }
+        if let Some(org_id) = request.get_ref().org_id() {
+            principal.authorize_org(org_id)?;
+        }
+        Ok(principal)
+    }
+}
+
 #[tonic::async_trait]
 impl InferenceCore for InferenceService {
     async fn infer(
         &self,
         request: Request<pb::InferRequest>,
     ) -> Result<Response<pb::InferResponse>, Status> {
-        let (org_id, user_id) = tenant_from_metadata(request.metadata());
+        let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, org_id, user_id);
+        let internal_req = to_internal_request(&req, &principal);
 
         let result = self
             .chain
@@ -122,10 +200,10 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::InferRequest>,
     ) -> Result<Response<Self::InferStreamStream>, Status> {
-        let (org_id, user_id) = tenant_from_metadata(request.metadata());
+        let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, org_id, user_id);
+        let internal_req = to_internal_request(&req, &principal);
 
         let rx = self
             .chain
@@ -144,6 +222,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::CreateEmbeddingRequest>,
     ) -> Result<Response<pb::CreateEmbeddingResponse>, Status> {
+        let principal = self.authorize(&request).await?;
         let req = request.into_inner();
         // Capture identifiers before they move into the internal request so a
         // failure is never silent (Phase 3 B-spike: the embedding error path had
@@ -160,7 +239,7 @@ impl InferenceCore for InferenceService {
             // Carry the ZDR signal through; inference-core's provider is Azure
             // today so residency enforcement is Phase-4 — this just threads it
             // so a future EU/ZDR provider can honor it.
-            zdr: req.zdr,
+            zdr: principal.effective_zdr(req.zdr),
             // Requested residency region. The fallback chain enforces the EU
             // residency gate (deny-by-default) before any network call.
             region: req.region,
@@ -201,6 +280,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::ListModelsRequest>,
     ) -> Result<Response<pb::ListModelsResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         let mut models: Vec<_> = self
             .chain
@@ -258,6 +338,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::SynthesizeSpeechRequest>,
     ) -> Result<Response<pb::SynthesizeSpeechResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         if req.text.trim().is_empty() {
             return Err(Status::invalid_argument("text is required"));
@@ -298,6 +379,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::TranscribeSpeechRequest>,
     ) -> Result<Response<pb::TranscribeSpeechResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         if req.audio.is_empty() {
             return Err(Status::invalid_argument("audio is required"));
@@ -338,6 +420,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::ListSpeechVoicesRequest>,
     ) -> Result<Response<pb::ListSpeechVoicesResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         let voices = self
             .speech
@@ -359,6 +442,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::TranslateTextRequest>,
     ) -> Result<Response<pb::TranslateTextResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_translate_text(&req.text)?;
         validate_target_language(&req.target_language)?;
@@ -390,6 +474,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::BatchTranslateTextRequest>,
     ) -> Result<Response<pb::BatchTranslateTextResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_target_language(&req.target_language)?;
         if req.items.is_empty() {
@@ -448,6 +533,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::DetectTextLanguageRequest>,
     ) -> Result<Response<pb::DetectTextLanguageResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         if req.text.trim().is_empty() {
             return Err(Status::invalid_argument("text is required"));
@@ -489,6 +575,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::ListTranslationLanguagesRequest>,
     ) -> Result<Response<pb::ListTranslationLanguagesResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         let languages = self
             .translation
@@ -512,6 +599,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::GenerateImageRequest>,
     ) -> Result<Response<pb::GenerateImageResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_image_prompt(&req.prompt)?;
         if req.n > MAX_GENERATED_IMAGES {
@@ -554,6 +642,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::AnalyzeImageRequest>,
     ) -> Result<Response<pb::AnalyzeImageResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_image_prompt(&req.prompt)?;
         validate_image_input(&req.image_url, req.image_data.len())?;
@@ -587,6 +676,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::ExtractImageTextRequest>,
     ) -> Result<Response<pb::ExtractImageTextResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_image_input(&req.image_url, req.image_data.len())?;
 
@@ -618,6 +708,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::AnalyzeDocumentRequest>,
     ) -> Result<Response<pb::AnalyzeDocumentResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_document_input(&req.document_url, req.document_data.len())?;
 
@@ -654,6 +745,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::AnalyzeLanguageRequest>,
     ) -> Result<Response<pb::AnalyzeLanguageResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_language_texts(&req.texts)?;
         let operation =
@@ -705,6 +797,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::CreateRealtimeSessionRequest>,
     ) -> Result<Response<pb::CreateRealtimeSessionResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_realtime_session(&req)?;
 
@@ -739,6 +832,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::CreateVideoGenerationJobRequest>,
     ) -> Result<Response<pb::CreateVideoGenerationJobResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         validate_video_generation(&req)?;
 
@@ -771,6 +865,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::GetVideoGenerationJobRequest>,
     ) -> Result<Response<pb::GetVideoGenerationJobResponse>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         if req.job_id.trim().is_empty() {
             return Err(Status::invalid_argument("job_id is required"));
@@ -804,6 +899,7 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::StreamVideoGenerationContentRequest>,
     ) -> Result<Response<Self::StreamVideoGenerationContentStream>, Status> {
+        self.authorize(&request).await?;
         let req = request.into_inner();
         if req.generation_id.trim().is_empty() {
             return Err(Status::invalid_argument("generation_id is required"));
@@ -847,33 +943,11 @@ impl InferenceCore for InferenceService {
     }
 }
 
-/// Extract the tenant scope (org id, user id) from gRPC request metadata for
-/// the Velion intent layer's budget check. The gateway forwards these as
-/// `x-org-id` / `x-user-id`; both default to empty when absent (the budget gate
-/// then degrades to an `Unknown` posture — see `provider::intent`).
-fn tenant_from_metadata(md: &tonic::metadata::MetadataMap) -> (String, String) {
-    let get = |keys: &[&str]| -> String {
-        for key in keys {
-            if let Some(value) = md.get(*key).and_then(|v| v.to_str().ok()) {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_owned();
-                }
-            }
-        }
-        String::new()
-    };
-    let org_id = get(&["x-org-id", "x-velion-org-id", "organization-id"]);
-    let user_id = get(&["x-user-id", "x-velion-user-id"]);
-    (org_id, user_id)
-}
-
-/// Convert a proto `InferRequest` to an internal `InferRequest`. `org_id`/
-/// `user_id` come from gRPC metadata (see `tenant_from_metadata`).
+/// Convert the public contract to the provider contract. Tenant, user, and
+/// issuer-enforced ZDR posture come only from the verified principal.
 fn to_internal_request(
     req: &pb::InferRequest,
-    org_id: String,
-    user_id: String,
+    principal: &AuthenticatedPrincipal,
 ) -> provider::InferRequest {
     let messages = req
         .messages
@@ -907,19 +981,11 @@ fn to_internal_request(
         } else {
             Some(req.structured_output_schema.clone())
         },
-        zdr: req.zdr,
+        zdr: principal.effective_zdr(req.zdr),
         tools,
         tool_choice: req.tool_choice.clone(),
-        // Prefer the gateway's JWT-derived body `org_id` (not client-spoofable);
-        // fall back to gRPC metadata for direct callers that don't set it. The
-        // proto carries no user_id, so the budget check's user scope comes from
-        // metadata only (empty → cost-core's org-wide "__org__" key).
-        org_id: if req.org_id.trim().is_empty() {
-            org_id
-        } else {
-            req.org_id.clone()
-        },
-        user_id,
+        org_id: principal.org_id.clone(),
+        user_id: principal.budget_user_id(),
     }
 }
 
@@ -935,15 +1001,20 @@ pub struct ProviderChains {
     pub video: VideoChain,
 }
 
-/// Start the gRPC server with explicit provider chains.
+/// Canonical service name for the standard gRPC health check. Both this name
+/// and the empty overall-server name are public transport probes; every
+/// inference RPC remains authenticated in the service implementation.
+pub const GRPC_HEALTH_SERVICE_NAME: &str = "model_plane.v1.InferenceCore";
+
+/// Start the authenticated gRPC server with an additive standard health
+/// service. Auth configuration and the initial JWKS have already succeeded
+/// before this function is called, so `SERVING` never masks an unverifiable
+/// listener.
 ///
 /// # Errors
-///
-/// Returns an error if the server fails to bind.
-pub async fn serve_with_providers(chains: ProviderChains) -> anyhow::Result<()> {
+/// Returns an error if the server address cannot be parsed or served.
+pub async fn serve_with_providers(chains: ProviderChains, auth: JwtVerifier) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9092".parse()?;
-    info!("gRPC listening on :9092");
-
     let ProviderChains {
         chain,
         speech,
@@ -954,21 +1025,33 @@ pub async fn serve_with_providers(chains: ProviderChains) -> anyhow::Result<()> 
         realtime,
         video,
     } = chains;
+    let service = InferenceService {
+        auth,
+        chain,
+        speech,
+        translation,
+        vision,
+        doc_intel,
+        language,
+        realtime,
+        video,
+    };
+    let grpc_service = InferenceCoreServer::new(service);
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<InferenceCoreServer<InferenceService>>()
+        .await;
 
+    info!(
+        address = %addr,
+        health_service = GRPC_HEALTH_SERVICE_NAME,
+        "authenticated gRPC listening"
+    );
     tonic::transport::Server::builder()
-        .add_service(InferenceCoreServer::new(InferenceService {
-            chain,
-            speech,
-            translation,
-            vision,
-            doc_intel,
-            language,
-            realtime,
-            video,
-        }))
+        .add_service(health_service)
+        .add_service(grpc_service)
         .serve(addr)
         .await?;
-
     Ok(())
 }
 
@@ -1123,5 +1206,46 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         provider::ProviderError::ResidencyViolation(message) => {
             Status::failed_precondition(message)
         }
+        provider::ProviderError::ZdrUnavailable(message) => Status::failed_precondition(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::server::NamedService;
+
+    #[test]
+    fn health_name_matches_generated_inference_contract() {
+        assert_eq!(
+            GRPC_HEALTH_SERVICE_NAME,
+            <InferenceCoreServer<InferenceService> as NamedService>::NAME
+        );
+    }
+
+    #[test]
+    fn internal_infer_scope_comes_only_from_verified_principal() {
+        let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), true);
+        let request = pb::InferRequest {
+            org_id: "org-signed".to_owned(),
+            zdr: false,
+            ..Default::default()
+        };
+
+        let internal = to_internal_request(&request, &principal);
+
+        assert_eq!(internal.org_id, "org-signed");
+        assert_eq!(internal.user_id, "user-signed");
+        assert!(internal.zdr, "issuer-enforced ZDR cannot be downgraded");
+    }
+
+    #[test]
+    fn rpc_contract_classifies_catalogs_separately_from_provider_operations() {
+        assert!(pb::ListModelsRequest::default().is_catalog());
+        assert!(pb::ListSpeechVoicesRequest::default().is_catalog());
+        assert!(pb::ListTranslationLanguagesRequest::default().is_catalog());
+        assert!(!pb::InferRequest::default().is_catalog());
+        assert!(!pb::CreateEmbeddingRequest::default().is_catalog());
+        assert!(!pb::CreateRealtimeSessionRequest::default().is_catalog());
     }
 }

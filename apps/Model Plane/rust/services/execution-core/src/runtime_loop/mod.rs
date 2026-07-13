@@ -125,7 +125,7 @@ impl StepOutcome {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn execute_step(
     tool_name: &str,
     tool_input: &str,
@@ -138,6 +138,10 @@ pub async fn execute_step(
     session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
+    zdr: bool,
+    data_plane_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
 ) -> StepOutcome {
     if hook::is_blocked(hook_context) {
         return StepOutcome::failed("blocked by pre-tool hook");
@@ -165,13 +169,21 @@ pub async fn execute_step(
     let exec = if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == BROWSER_AGENT_TOOL {
-        tool_bridge::execute_browser_agent(tool_input, browser_event_sink, state).await
+        tool_bridge::execute_browser_agent(
+            tool_input,
+            org_id,
+            zdr,
+            browser_event_sink,
+            state,
+            inference_bearer,
+        )
+        .await
     } else if tool_name == WEB_SEARCH_TOOL {
-        execute_web_search(tool_input).await
+        execute_web_search(tool_input, org_id).await
     } else if tool_name == WEB_FETCH_TOOL {
-        execute_web_fetch(tool_input).await
+        execute_web_fetch(tool_input, org_id).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
-        execute_knowledge_search(tool_input, org_id, user_id).await
+        execute_knowledge_search(tool_input, org_id, user_id, zdr, data_plane_bearer).await
     } else if tool_name == YR_WEATHER_TOOL {
         execute_yr_weather(tool_input).await
     } else if tool_name == TRAFFIC_TOOL {
@@ -183,11 +195,21 @@ pub async fn execute_step(
     } else if tool_name == COMPANY_LOOKUP_TOOL {
         execute_company_lookup(tool_input).await
     } else if tool_name == GET_SHIPPING_QUOTES_TOOL {
-        execute_get_shipping_quotes(tool_input).await
+        execute_get_shipping_quotes(tool_input, org_id).await
     } else if tool_name == SHIPPING_CARRIERS_TOOL {
-        execute_shipping_carriers().await
+        execute_shipping_carriers(org_id).await
     } else if tool_name == BOOK_SHIPMENT_TOOL {
-        execute_book_shipment(tool_input, user_id).await
+        execute_book_shipment(
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            permission_mode,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
     } else if tool_name == LIST_SOCIAL_ACCOUNTS_TOOL {
         execute_list_social_accounts(org_id).await
     } else if tool_name == PUBLISH_SOCIAL_POST_TOOL {
@@ -203,6 +225,7 @@ pub async fn execute_step(
             step_id,
             permission_mode,
             session_channel.clone(),
+            session_bearer,
         )
         .await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
@@ -286,7 +309,7 @@ async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
 
 /// `web_search` tool — input JSON `{"query": String, "limit"?: u32}`. Returns a
 /// ranked result list from the Quarry edge. Read-only (no approval gate).
-async fn execute_web_search(tool_input: &str) -> tool_bridge::ToolExecution {
+async fn execute_web_search(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct SearchInput {
         query: String,
@@ -297,10 +320,17 @@ async fn execute_web_search(tool_input: &str) -> tool_bridge::ToolExecution {
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid web_search input: {e}")),
     };
-    let Some(client) = crate::web_tools::WebToolsClient::from_env() else {
-        return tool_error("web_search unavailable: QUARRY_EDGE_URL not configured".to_owned());
+    let client = match crate::web_tools::WebToolsClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return tool_error("web_search unavailable: QUARRY_EDGE_URL not configured".to_owned())
+        }
+        Err(error) => return tool_error(format!("web_search unavailable: {error}")),
     };
-    match client.search(&input.query, input.limit.unwrap_or(8)).await {
+    match client
+        .search(&input.query, input.limit.unwrap_or(8), org_id)
+        .await
+    {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -341,7 +371,7 @@ async fn execute_mcp(
 
 /// `web_fetch` tool — input JSON `{"url": String}`. Returns the page's cleaned
 /// markdown from the Quarry edge. Read-only (no approval gate).
-async fn execute_web_fetch(tool_input: &str) -> tool_bridge::ToolExecution {
+async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct FetchInput {
         url: String,
@@ -350,10 +380,14 @@ async fn execute_web_fetch(tool_input: &str) -> tool_bridge::ToolExecution {
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid web_fetch input: {e}")),
     };
-    let Some(client) = crate::web_tools::WebToolsClient::from_env() else {
-        return tool_error("web_fetch unavailable: QUARRY_EDGE_URL not configured".to_owned());
+    let client = match crate::web_tools::WebToolsClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return tool_error("web_fetch unavailable: QUARRY_EDGE_URL not configured".to_owned())
+        }
+        Err(error) => return tool_error(format!("web_fetch unavailable: {error}")),
     };
-    match client.fetch(&input.url).await {
+    match client.fetch(&input.url, org_id).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -370,6 +404,8 @@ async fn execute_knowledge_search(
     tool_input: &str,
     org_id: &str,
     user_id: &str,
+    zdr: bool,
+    data_plane_bearer: Option<&str>,
 ) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct KnowledgeInput {
@@ -389,10 +425,22 @@ async fn execute_knowledge_search(
             "knowledge_search unavailable: DATAPLANE_RETRIEVAL_URL not configured".to_owned(),
         );
     };
+    let Some(data_plane_bearer) = data_plane_bearer.filter(|value| !value.trim().is_empty()) else {
+        return tool_error(
+            "knowledge_search requires the originating verified user credential".to_owned(),
+        );
+    };
     // Per-User Data Ownership: ground AS the run's verified user so the
     // retrieval post-filter hides documents this user cannot see.
     match client
-        .search(org_id, user_id, &input.query, input.top_k.unwrap_or(5))
+        .search(
+            org_id,
+            user_id,
+            &input.query,
+            input.top_k.unwrap_or(5),
+            zdr,
+            data_plane_bearer,
+        )
         .await
     {
         Ok(output) => tool_bridge::ToolExecution {
@@ -518,7 +566,7 @@ async fn execute_track_shipment(tool_input: &str) -> tool_bridge::ToolExecution 
 /// `get_shipping_quotes` tool — input mirrors shipping-core's `QuoteRequest`
 /// (from/to addresses + package dims + segment). Fans out to the carrier
 /// fleet via the Ingestion Plane aggregator; read-only (no booking exists).
-async fn execute_get_shipping_quotes(tool_input: &str) -> tool_bridge::ToolExecution {
+async fn execute_get_shipping_quotes(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
     let input: crate::shipping_tools::QuoteInput = match serde_json::from_str(tool_input) {
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid get_shipping_quotes input: {e}")),
@@ -528,7 +576,7 @@ async fn execute_get_shipping_quotes(tool_input: &str) -> tool_bridge::ToolExecu
             "get_shipping_quotes unavailable: shipping tools client could not be built".to_owned(),
         );
     };
-    match client.get_quotes(&input).await {
+    match client.get_quotes(&input, org_id).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -539,13 +587,13 @@ async fn execute_get_shipping_quotes(tool_input: &str) -> tool_bridge::ToolExecu
 
 /// `shipping_carriers` tool — no input. Lists the aggregator's registered
 /// carrier fleet (and whether each runs on demo or live agreement prices).
-async fn execute_shipping_carriers() -> tool_bridge::ToolExecution {
+async fn execute_shipping_carriers(org_id: &str) -> tool_bridge::ToolExecution {
     let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
         return tool_error(
             "shipping_carriers unavailable: shipping tools client could not be built".to_owned(),
         );
     };
-    match client.list_carriers().await {
+    match client.list_carriers(org_id).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -558,7 +606,17 @@ async fn execute_shipping_carriers() -> tool_bridge::ToolExecution {
 /// here only after the HITL approval gate (`permission::is_risky_tool`
 /// matches this name, so `ask` posture pauses the run for a human). The
 /// acting user id from the run context is recorded as the booking actor.
-async fn execute_book_shipment(tool_input: &str, user_id: &str) -> tool_bridge::ToolExecution {
+#[allow(clippy::too_many_arguments)]
+async fn execute_book_shipment(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    permission_mode: &str,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
     let mut input: crate::shipping_tools::BookInput = match serde_json::from_str(tool_input) {
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid book_shipment input: {e}")),
@@ -566,12 +624,31 @@ async fn execute_book_shipment(tool_input: &str, user_id: &str) -> tool_bridge::
     if input.booked_by.trim().is_empty() {
         input.booked_by = user_id.to_owned();
     }
+    let approval_id = match resolve_write_approval(
+        session_channel,
+        org_id,
+        user_id,
+        run_id,
+        step_id,
+        permission_mode,
+        "book_shipment",
+        session_bearer,
+    )
+    .await
+    {
+        Ok(approval_id) => approval_id,
+        Err(error) => return tool_error(error),
+    };
+    let idempotency_key = format!("{run_id}:{step_id}");
     let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
         return tool_error(
             "book_shipment unavailable: shipping tools client could not be built".to_owned(),
         );
     };
-    match client.book_shipment(&input).await {
+    match client
+        .book_shipment(&input, org_id, &approval_id, &idempotency_key)
+        .await
+    {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -698,6 +775,7 @@ async fn execute_list_provider_actions(org_id: &str) -> tool_bridge::ToolExecuti
 /// the durable approvals table and verify `state = granted` for this org/action
 /// to fully close the loop. That file is owned by another stream and is out of
 /// scope here.
+#[allow(clippy::too_many_arguments)]
 async fn execute_provider_action(
     tool_input: &str,
     org_id: &str,
@@ -706,6 +784,7 @@ async fn execute_provider_action(
     step_id: &str,
     permission_mode: &str,
     session_channel: Option<Channel>,
+    session_bearer: Option<&str>,
 ) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct ActionInput {
@@ -733,6 +812,7 @@ async fn execute_provider_action(
             step_id,
             permission_mode,
             &input.operation,
+            session_bearer,
         )
         .await
         {
@@ -778,6 +858,7 @@ async fn execute_provider_action(
 /// GRANTED; under `auto` the interactive user's live authorization is recorded
 /// durably and its id returned. Any failure to establish a verifiable record is
 /// an `Err`, so the caller blocks the write (fail closed).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_write_approval(
     session_channel: Option<&Channel>,
     org_id: &str,
@@ -786,6 +867,7 @@ async fn resolve_write_approval(
     step_id: &str,
     permission_mode: &str,
     operation: &str,
+    session_bearer: Option<&str>,
 ) -> Result<String, String> {
     let Some(channel) = session_channel else {
         return Err(
@@ -802,21 +884,27 @@ async fn resolve_write_approval(
     }
 
     let mut client = OrchestrationCoreServiceClient::new(channel.clone());
+    let bearer = session_bearer.ok_or_else(|| {
+        "provider write blocked: verified session credential is unavailable".to_owned()
+    })?;
     // Idempotent: returns the existing durable approval for this (org, run:step)
     // when the HITL pause path already minted one, else creates a fresh record.
     let created = client
-        .create_approval(pb::CreateApprovalRequest {
-            run_id: run_id.to_owned(),
-            step_id: step_id.to_owned(),
-            kind: pb::ApprovalKind::ToolCall as i32,
-            requested_of: org_id.to_owned(),
-            org_id: org_id.to_owned(),
-            user_id: user_id.to_owned(),
-            reason: format!("provider write '{operation}' requires approval"),
-            expires_in_seconds: 3600,
-            client_approval_id: String::new(),
-            idempotency_key: format!("{run_id}:{step_id}"),
-        })
+        .create_approval(authenticated_session_request(
+            pb::CreateApprovalRequest {
+                run_id: run_id.to_owned(),
+                step_id: step_id.to_owned(),
+                kind: pb::ApprovalKind::ToolCall as i32,
+                requested_of: org_id.to_owned(),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                reason: format!("provider write '{operation}' requires approval"),
+                expires_in_seconds: 3600,
+                client_approval_id: String::new(),
+                idempotency_key: format!("{run_id}:{step_id}"),
+            },
+            bearer,
+        )?)
         .await
         .map_err(|e| format!("provider write blocked: could not reach approval store: {e}"))?
         .into_inner();
@@ -848,17 +936,20 @@ async fn resolve_write_approval(
                 user_id.to_owned()
             };
             client
-                .decide_approval(pb::DecideApprovalRequest {
-                    approval_id: approval.id.clone(),
-                    decision: pb::ApprovalState::Granted as i32,
-                    decided_by,
-                    decision_reason: "auto (chat) posture: interactive user is the live approver"
-                        .to_owned(),
-                    // Cross-org IDOR fix (Phase 6): this approval was just
-                    // created with this same org_id above, so asserting it
-                    // here is a real ownership check, not a no-op.
-                    org_id: org_id.to_owned(),
-                })
+                .decide_approval(authenticated_session_request(
+                    pb::DecideApprovalRequest {
+                        approval_id: approval.id.clone(),
+                        decision: pb::ApprovalState::Granted as i32,
+                        decided_by,
+                        decision_reason:
+                            "auto (chat) posture: interactive user is the live approver".to_owned(),
+                        // Cross-org IDOR fix (Phase 6): this approval was just
+                        // created with this same org_id above, so asserting it
+                        // here is a real ownership check, not a no-op.
+                        org_id: org_id.to_owned(),
+                    },
+                    bearer,
+                )?)
                 .await
                 .map_err(|e| {
                     format!("provider write blocked: could not record interactive approval: {e}")
@@ -866,6 +957,17 @@ async fn resolve_write_approval(
         }
         Ok(approval.id)
     }
+}
+
+fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<tonic::Request<T>, String> {
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}")
+            .parse()
+            .map_err(|_| "verified session credential is not forwardable".to_owned())?,
+    );
+    Ok(request)
 }
 
 fn tool_error(message: String) -> tool_bridge::ToolExecution {
@@ -897,6 +999,10 @@ mod tests {
             None,
             None,
             None,
+            false,
+            None,
+            None,
+            None,
         )
         .await;
         assert_eq!(out.status, "completed", "outcome: {out:?}");
@@ -914,6 +1020,10 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            None,
+            None,
+            None,
+            false,
             None,
             None,
             None,
@@ -936,6 +1046,10 @@ mod tests {
             None,
             None,
             None,
+            false,
+            None,
+            None,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -952,6 +1066,10 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            None,
+            None,
+            None,
+            false,
             None,
             None,
             None,
@@ -975,6 +1093,10 @@ mod tests {
             None,
             None,
             None,
+            false,
+            None,
+            None,
+            None,
         )
         .await;
         assert_eq!(out.status, "permission_denied");
@@ -989,8 +1111,17 @@ mod tests {
 
     #[tokio::test]
     async fn provider_write_without_session_channel_is_blocked() {
-        let r =
-            resolve_write_approval(None, "org", "user", "run", "step", "auto", "pages.post").await;
+        let r = resolve_write_approval(
+            None,
+            "org",
+            "user",
+            "run",
+            "step",
+            "auto",
+            "pages.post",
+            Some("bearer"),
+        )
+        .await;
         assert!(r.is_err(), "a write with no approval store must be blocked");
         assert!(r.unwrap_err().contains("session-core"));
     }
@@ -999,8 +1130,17 @@ mod tests {
     async fn provider_write_without_run_context_is_blocked() {
         // Channel present (lazy — never dialed), but no run/step to bind to.
         let ch = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        let r =
-            resolve_write_approval(Some(&ch), "org", "user", "", "", "auto", "pages.post").await;
+        let r = resolve_write_approval(
+            Some(&ch),
+            "org",
+            "user",
+            "",
+            "",
+            "auto",
+            "pages.post",
+            Some("bearer"),
+        )
+        .await;
         assert!(
             r.is_err(),
             "a write with no run/step context must be blocked"

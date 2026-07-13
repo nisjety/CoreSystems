@@ -12,18 +12,20 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
 
 // CapabilitiesHandler provides REST endpoints for the capabilities table.
 type CapabilitiesHandler struct {
-	store  *registry.CapabilitiesStore
-	scopes *registry.ScopeStore // optional: enables scope grant/revoke/resolve
+	store             *registry.CapabilitiesStore
+	availabilityStore availabilityStoreBackend
+	scopes            *registry.ScopeStore // optional: enables scope grant/revoke/resolve
 }
 
 // NewCapabilitiesHandler constructs the handler.
 func NewCapabilitiesHandler(store *registry.CapabilitiesStore) *CapabilitiesHandler {
-	return &CapabilitiesHandler{store: store}
+	return &CapabilitiesHandler{store: store, availabilityStore: store}
 }
 
 // WithScopeStore attaches the durable scope-grant store, enabling the
@@ -37,6 +39,7 @@ func (h *CapabilitiesHandler) WithScopeStore(s *registry.ScopeStore) *Capabiliti
 // Register mounts routes on the provided mux under /api/v1/capabilities.
 func (h *CapabilitiesHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities", h.list)
+	mux.HandleFunc("/api/v1/capabilities/availability", h.attestAvailability)
 	mux.HandleFunc("/api/v1/capabilities/ranked", h.ranked)
 	mux.HandleFunc("/api/v1/capabilities/scopes", h.listScopes)
 	mux.HandleFunc("/api/v1/capabilities/scopes/grant", h.grantScope)
@@ -66,7 +69,7 @@ func (h *CapabilitiesHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	orgID := q.Get("org_id")
+	orgID := verifiedOrganizationID(r)
 	kind := q.Get("kind")
 	rollout := q.Get("rollout_state")
 	onlyEnabled := q.Get("enabled") == "true"
@@ -81,16 +84,20 @@ func (h *CapabilitiesHandler) list(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"capabilities": caps, "count": len(caps)})
+	views := make([]map[string]any, 0, len(caps))
+	for _, capability := range caps {
+		views = append(views, capabilityWireView(capability))
+	}
+	writeJSON(w, map[string]any{"capabilities": views, "count": len(views)})
 }
 
 func (h *CapabilitiesHandler) getByID(w http.ResponseWriter, r *http.Request, id string) {
-	cap, err := h.store.Get(r.Context(), id)
+	cap, err := h.store.GetForOrg(r.Context(), id, verifiedOrganizationID(r))
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, cap)
+	writeJSON(w, capabilityWireView(cap))
 }
 
 func (h *CapabilitiesHandler) upsert(w http.ResponseWriter, r *http.Request) {
@@ -103,13 +110,15 @@ func (h *CapabilitiesHandler) upsert(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !models.IsSupportedRiskLevel(row.RiskLevel) {
+		jsonErr(w, "risk_level must be one of: low, medium, high", http.StatusBadRequest)
+		return
+	}
 	if row.ID == "" {
 		row.ID = "cap_" + uuid.New().String()
 	}
-	actor := r.Header.Get("X-Actor")
-	if actor == "" {
-		actor = "api"
-	}
+	row.OrgID = verifiedOrganizationID(r)
+	actor := verifiedActorID(r)
 	row.CreatedBy = actor
 	if err := h.store.Upsert(r.Context(), &row); err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
@@ -125,15 +134,13 @@ func (h *CapabilitiesHandler) softDelete(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	actor := r.Header.Get("X-Actor")
-	if actor == "" {
-		actor = "api"
-	}
-	if err := h.store.SoftDelete(r.Context(), id); err != nil {
+	actor := verifiedActorID(r)
+	orgID := verifiedOrganizationID(r)
+	if err := h.store.SoftDeleteForOrg(r.Context(), id, orgID); err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = h.store.AppendAuditLog(r.Context(), "capability", id, "deleted", actor, "", nil)
+	_ = h.store.AppendAuditLog(r.Context(), "capability", id, "deleted", actor, orgID, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -152,12 +159,13 @@ func (h *CapabilitiesHandler) patch(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	if update.RolloutState != "" {
-		actor := r.Header.Get("X-Actor")
-		if err := h.store.SetRolloutState(r.Context(), id, update.RolloutState, actor); err != nil {
+		actor := verifiedActorID(r)
+		orgID := verifiedOrganizationID(r)
+		if err := h.store.SetRolloutStateForOrg(r.Context(), id, orgID, update.RolloutState, actor); err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		_ = h.store.AppendAuditLog(r.Context(), "capability", id, "rollout_changed", actor, "", nil)
+		_ = h.store.AppendAuditLog(r.Context(), "capability", id, "rollout_changed", actor, orgID, nil)
 	}
 	writeJSON(w, map[string]any{"id": id, "status": "updated"})
 }
@@ -177,12 +185,13 @@ func (h *CapabilitiesHandler) setRollout(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	actor := r.Header.Get("X-Actor")
-	if err := h.store.SetRolloutState(r.Context(), req.ID, req.State, actor); err != nil {
+	actor := verifiedActorID(r)
+	orgID := verifiedOrganizationID(r)
+	if err := h.store.SetRolloutStateForOrg(r.Context(), req.ID, orgID, req.State, actor); err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = h.store.AppendAuditLog(r.Context(), "capability", req.ID, req.State, actor, "", nil)
+	_ = h.store.AppendAuditLog(r.Context(), "capability", req.ID, req.State, actor, orgID, nil)
 	writeJSON(w, map[string]any{"id": req.ID, "rollout_state": req.State, "updated_at": time.Now().UTC()})
 }
 
@@ -201,7 +210,7 @@ func (h *CapabilitiesHandler) auditLog(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	entries, err := h.store.QueryAuditLog(r.Context(), q.Get("entity_kind"), q.Get("entity_id"), limit)
+	entries, err := h.store.QueryAuditLogForOrg(r.Context(), verifiedOrganizationID(r), q.Get("entity_kind"), q.Get("entity_id"), limit)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -219,12 +228,19 @@ func (h *CapabilitiesHandler) ranked(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	scored, err := h.store.RankedList(r.Context(), q.Get("org_id"), q.Get("kind"), nil, limit)
+	scored, err := h.store.RankedList(r.Context(), verifiedOrganizationID(r), q.Get("kind"), nil, limit)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"capabilities": scored, "count": len(scored)})
+	views := make([]map[string]any, 0, len(scored))
+	for _, item := range scored {
+		views = append(views, map[string]any{
+			"capability": capabilityWireView(item.Row),
+			"score":      item.Score,
+		})
+	}
+	writeJSON(w, map[string]any{"capabilities": views, "count": len(views)})
 }
 
 // listScopes handles GET /api/v1/capabilities/scopes?capability_id= — active
@@ -244,7 +260,11 @@ func (h *CapabilitiesHandler) listScopes(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, "capability_id is required", http.StatusBadRequest)
 		return
 	}
-	grants, err := h.scopes.ListForCapability(r.Context(), capID)
+	if _, err := h.store.GetForOrg(r.Context(), capID, verifiedOrganizationID(r)); err != nil {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return
+	}
+	grants, err := h.scopes.ListForCapabilityForOrg(r.Context(), capID, verifiedOrganizationID(r))
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -273,16 +293,23 @@ func (h *CapabilitiesHandler) grantScope(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	actor := r.Header.Get("X-Actor")
-	if actor == "" {
-		actor = "api"
+	orgID := verifiedOrganizationID(r)
+	if _, err := h.store.GetForOrg(r.Context(), req.CapabilityID, orgID); err != nil {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return
 	}
-	grant, err := h.scopes.Grant(r.Context(), "", req.CapabilityID, req.ScopeKind, req.ScopeValue, actor)
+	if req.ScopeKind != registry.ScopeKindOrg {
+		jsonErr(w, "only tenant-derived org grants are supported", http.StatusForbidden)
+		return
+	}
+	req.ScopeValue = orgID
+	actor := verifiedActorID(r)
+	grant, err := h.scopes.Grant(r.Context(), "", orgID, req.CapabilityID, req.ScopeKind, req.ScopeValue, actor)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = h.store.AppendAuditLog(r.Context(), "capability_scope", req.CapabilityID, "granted", actor, "", scopeDiff(grant.ScopeKind, grant.ScopeValue))
+	_ = h.store.AppendAuditLog(r.Context(), "capability_scope", req.CapabilityID, "granted", actor, orgID, scopeDiff(grant.ScopeKind, grant.ScopeValue))
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, grant)
 }
@@ -302,16 +329,23 @@ func (h *CapabilitiesHandler) revokeScope(w http.ResponseWriter, r *http.Request
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	actor := r.Header.Get("X-Actor")
-	if actor == "" {
-		actor = "api"
+	orgID := verifiedOrganizationID(r)
+	if _, err := h.store.GetForOrg(r.Context(), req.CapabilityID, orgID); err != nil {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return
 	}
-	n, err := h.scopes.Revoke(r.Context(), req.CapabilityID, req.ScopeKind, req.ScopeValue)
+	if req.ScopeKind != registry.ScopeKindOrg {
+		jsonErr(w, "only tenant-derived org grants are supported", http.StatusForbidden)
+		return
+	}
+	req.ScopeValue = orgID
+	actor := verifiedActorID(r)
+	n, err := h.scopes.Revoke(r.Context(), orgID, req.CapabilityID, req.ScopeKind, req.ScopeValue)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = h.store.AppendAuditLog(r.Context(), "capability_scope", req.CapabilityID, "revoked", actor, "", scopeDiff(req.ScopeKind, req.ScopeValue))
+	_ = h.store.AppendAuditLog(r.Context(), "capability_scope", req.CapabilityID, "revoked", actor, orgID, scopeDiff(req.ScopeKind, req.ScopeValue))
 	writeJSON(w, map[string]any{"capability_id": req.CapabilityID, "revoked": n})
 }
 
@@ -333,7 +367,12 @@ func (h *CapabilitiesHandler) resolveScope(w http.ResponseWriter, r *http.Reques
 		jsonErr(w, "scope_kind is required", http.StatusBadRequest)
 		return
 	}
-	ids, err := h.scopes.ResolveForScope(r.Context(), kind, q.Get("scope_value"))
+	if kind != registry.ScopeKindOrg {
+		jsonErr(w, "only tenant-derived org scope resolution is supported", http.StatusForbidden)
+		return
+	}
+	value := verifiedOrganizationID(r)
+	ids, err := h.scopes.ResolveForScopeForOrg(r.Context(), verifiedOrganizationID(r), kind, value)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return

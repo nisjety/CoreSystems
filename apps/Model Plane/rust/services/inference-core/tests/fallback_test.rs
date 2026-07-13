@@ -273,6 +273,7 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         session_core_url: None,
         router_policy_refresh_secs: 60,
         azure_openai_region: None,
+        azure_openai_zdr_confirmed: false,
         allow_non_eu_embedding: false,
     };
 
@@ -314,6 +315,7 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
         session_core_url: None,
         router_policy_refresh_secs: 60,
         azure_openai_region: None,
+        azure_openai_zdr_confirmed: false,
         allow_non_eu_embedding: false,
     };
 

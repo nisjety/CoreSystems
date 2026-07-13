@@ -3,11 +3,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,7 +20,7 @@ import (
 
 // MemoryHandler handles CRUD for agent_memory.
 type MemoryHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 }
 
 // NewMemoryHandler constructs the handler.
@@ -25,9 +28,65 @@ func NewMemoryHandler(pool *pgxpool.Pool) *MemoryHandler {
 	return &MemoryHandler{pool: pool}
 }
 
-// scopePrecedence defines the evaluation order for multiscope memory resolution.
-// Lower index = higher precedence (narrower scope wins).
-var scopePrecedence = []string{"run", "thread", "workspace", "user", "org", "global"}
+// memoryScopePrecedence returns only the scopes this endpoint can authorize
+// with the supplied resource context. Run/thread/workspace require ownership
+// contracts that capability-core does not have, so they are never implied.
+func memoryScopePrecedence(sessionID string) []string {
+	if sessionID != "" {
+		return []string{"session", "user", "org", "global"}
+	}
+	return []string{"user", "org", "global"}
+}
+
+// memoryVisibilitySQL is a defense-in-depth row filter applied to every read
+// and mutation. Tenant-shared org/global rows remain visible within the signed
+// organization. Every private scope requires a non-empty owner matching the
+// cryptographically verified actor, so legacy ownerless and unknown-scope rows
+// fail closed.
+func memoryVisibilitySQL(actorPlaceholder string) string {
+	return `(scope IN ('org','global') OR (` +
+		`scope IN ('run','thread','workspace','session','user') AND ` +
+		`owner=` + actorPlaceholder + ` AND owner <> ''))`
+}
+
+func validMemoryScope(scope string) bool {
+	switch scope {
+	case "run", "thread", "workspace", "session", "user", "org", "global":
+		return true
+	default:
+		return false
+	}
+}
+
+func memoryScopeRequiresResourceAuthorization(scope string) bool {
+	switch scope {
+	case "run", "thread", "workspace", "session":
+		return true
+	default:
+		return false
+	}
+}
+
+func memoryEntryMatchesResolution(entry memoryEntry, sessionID string) bool {
+	switch entry.Scope {
+	case "user", "org", "global":
+		return entry.SessionID == nil
+	case "session":
+		return sessionID != "" && entry.SessionID != nil && *entry.SessionID == sessionID
+	default:
+		return false
+	}
+}
+
+func verifiedMemoryIdentity(w http.ResponseWriter, request *http.Request) (string, string, bool) {
+	organizationID := verifiedOrganizationID(request)
+	actorID := verifiedActorID(request)
+	if organizationID == "" || actorID == "" {
+		jsonErr(w, "authentication required", http.StatusUnauthorized)
+		return "", "", false
+	}
+	return organizationID, actorID, true
+}
 
 // Register mounts routes.
 func (h *MemoryHandler) Register(mux *http.ServeMux) {
@@ -70,18 +129,28 @@ type memoryEntry struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
+const maxMemoryResolveRows = 200
+
 func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		q := r.URL.Query()
-		orgID := q.Get("org_id")
 		sessionID := q.Get("session_id")
 		scope := q.Get("scope")
 		limit, _ := strconv.Atoi(q.Get("limit"))
-		if limit == 0 {
+		if limit <= 0 || limit > 200 {
 			limit = 50
 		}
-		var rows interface{ Scan(...any) error }
+		var rows interface {
+			Next() bool
+			Scan(...any) error
+			Close()
+			Err() error
+		}
 		var err error
 		if sessionID != "" {
 			rows, err = h.pool.Query(r.Context(), `
@@ -89,55 +158,52 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				       owner, source_links, review_state, classification, expires_at,
 				       created_at, updated_at
 				FROM agent_memory
-				WHERE org_id=$1 AND (session_id IS NULL OR session_id=$2)
-				ORDER BY created_at LIMIT $3
-			`, orgID, sessionID, limit)
+				WHERE org_id=$1 AND `+memoryVisibilitySQL("$2")+`
+				  AND (session_id IS NULL OR session_id=$3)
+				ORDER BY created_at LIMIT $4
+			`, orgID, actorID, sessionID, limit)
 		} else if scope != "" {
+			if !validMemoryScope(scope) {
+				jsonErr(w, "invalid memory scope", http.StatusBadRequest)
+				return
+			}
 			rows, err = h.pool.Query(r.Context(), `
 				SELECT id, org_id, session_id, scope, key, content, kind, confidence,
 				       owner, source_links, review_state, classification, expires_at,
 				       created_at, updated_at
 				FROM agent_memory
-				WHERE org_id=$1 AND scope=$2
-				ORDER BY created_at LIMIT $3
-			`, orgID, scope, limit)
+				WHERE org_id=$1 AND `+memoryVisibilitySQL("$2")+` AND scope=$3
+				ORDER BY created_at LIMIT $4
+			`, orgID, actorID, scope, limit)
 		} else {
 			rows, err = h.pool.Query(r.Context(), `
 				SELECT id, org_id, session_id, scope, key, content, kind, confidence,
 				       owner, source_links, review_state, classification, expires_at,
 				       created_at, updated_at
 				FROM agent_memory
-				WHERE org_id=$1
-				ORDER BY created_at LIMIT $2
-			`, orgID, limit)
+				WHERE org_id=$1 AND `+memoryVisibilitySQL("$2")+`
+				ORDER BY created_at LIMIT $3
+			`, orgID, actorID, limit)
 		}
 		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		// rows is pgx.Rows; iterate
-		type pgxRows interface {
-			Next() bool
-			Scan(...any) error
-			Close()
-			Err() error
-		}
-		pgRows, ok := rows.(pgxRows)
-		if !ok {
-			jsonErr(w, "internal", http.StatusInternalServerError)
-			return
-		}
-		defer pgRows.Close()
+		defer rows.Close()
 		var entries []memoryEntry
-		for pgRows.Next() {
+		for rows.Next() {
 			var e memoryEntry
-			if err := pgRows.Scan(&e.ID, &e.OrgID, &e.SessionID, &e.Scope, &e.Key, &e.Content,
+			if err := rows.Scan(&e.ID, &e.OrgID, &e.SessionID, &e.Scope, &e.Key, &e.Content,
 				&e.Kind, &e.Confidence, &e.Owner, &e.SourceLinks, &e.ReviewState,
 				&e.Classification, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
-				jsonErr(w, err.Error(), http.StatusInternalServerError)
+				jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			entries = append(entries, e)
+		}
+		if rows.Err() != nil {
+			jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+			return
 		}
 		writeJSON(w, map[string]any{"entries": entries, "count": len(entries)})
 	case http.MethodPost:
@@ -146,9 +212,20 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		e.OrgID = orgID
+		e.Owner = actorID
 		e.ID = "mem_" + uuid.New().String()
+		e.Scope = strings.TrimSpace(e.Scope)
 		if e.Scope == "" {
 			e.Scope = "org"
+		}
+		if !validMemoryScope(e.Scope) {
+			jsonErr(w, "invalid memory scope", http.StatusBadRequest)
+			return
+		}
+		if e.SessionID != nil || memoryScopeRequiresResourceAuthorization(e.Scope) {
+			jsonErr(w, "resource-scoped memory writes require Session Core authorization", http.StatusServiceUnavailable)
+			return
 		}
 		if e.Kind == "" {
 			e.Kind = "fact"
@@ -172,7 +249,7 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			e.Confidence, e.Owner, e.SourceLinks, e.ReviewState, e.Classification,
 			e.ExpiresAt, now, now)
 		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -183,45 +260,89 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MemoryHandler) get(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
+	if !ok {
+		return
+	}
 	var e memoryEntry
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, session_id, scope, key, content, kind, confidence,
 		       owner, source_links, review_state, classification, expires_at,
 		       created_at, updated_at
-		FROM agent_memory WHERE id=$1
-	`, id).Scan(&e.ID, &e.OrgID, &e.SessionID, &e.Scope, &e.Key, &e.Content,
+		FROM agent_memory
+		WHERE id=$1 AND org_id=$2 AND `+memoryVisibilitySQL("$3")+`
+	`, id, orgID, actorID).Scan(&e.ID, &e.OrgID, &e.SessionID, &e.Scope, &e.Key, &e.Content,
 		&e.Kind, &e.Confidence, &e.Owner, &e.SourceLinks, &e.ReviewState,
 		&e.Classification, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
-		jsonErr(w, "not found", http.StatusNotFound)
+		if errors.Is(err, pgx.ErrNoRows) {
+			jsonErr(w, "not found", http.StatusNotFound)
+		} else {
+			jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	writeJSON(w, e)
 }
 
 func (h *MemoryHandler) update(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
+	if !ok {
+		return
+	}
 	var update struct {
-		Content     string `json:"content"`
-		ReviewState string `json:"review_state"`
+		Content     *string `json:"content"`
+		ReviewState *string `json:"review_state"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	now := time.Now().UTC()
-	if update.Content != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_memory SET content=$1, updated_at=$2 WHERE id=$3`, update.Content, now, id)
+	if update.Content == nil && update.ReviewState == nil {
+		jsonErr(w, "no supported fields", http.StatusBadRequest)
+		return
 	}
-	if update.ReviewState != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_memory SET review_state=$1, updated_at=$2 WHERE id=$3`, update.ReviewState, now, id)
+	content := ""
+	if update.Content != nil {
+		content = *update.Content
+	}
+	reviewState := ""
+	if update.ReviewState != nil {
+		reviewState = *update.ReviewState
+	}
+	tag, err := h.pool.Exec(r.Context(), `
+		UPDATE agent_memory
+		SET content=CASE WHEN $1 THEN $2 ELSE content END,
+		    review_state=CASE WHEN $3 THEN $4 ELSE review_state END,
+		    updated_at=$5
+		WHERE id=$6 AND org_id=$7 AND `+memoryVisibilitySQL("$8"),
+		update.Content != nil, content, update.ReviewState != nil, reviewState, now, id, orgID, actorID)
+	if err != nil {
+		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *MemoryHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
-	_, err := h.pool.Exec(r.Context(), `DELETE FROM agent_memory WHERE id=$1`, id)
+	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
+	if !ok {
+		return
+	}
+	tag, err := h.pool.Exec(r.Context(), `
+		DELETE FROM agent_memory
+		WHERE id=$1 AND org_id=$2 AND `+memoryVisibilitySQL("$3"), id, orgID, actorID)
 	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -233,29 +354,54 @@ func (h *MemoryHandler) delete(w http.ResponseWriter, r *http.Request, id string
 //
 // Query params: org_id (required), key (optional filter), session_id, run_id, thread_id, workspace_id, user_id.
 func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
+	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	q := r.URL.Query()
-	orgID := q.Get("org_id")
-	if orgID == "" {
-		jsonErr(w, "org_id is required", http.StatusBadRequest)
-		return
-	}
 	keyFilter := q.Get("key")
+	for _, unsupported := range []string{"run_id", "thread_id", "workspace_id"} {
+		if strings.TrimSpace(q.Get(unsupported)) != "" {
+			jsonErr(w, "resource-scoped memory resolution is not implemented", http.StatusNotImplemented)
+			return
+		}
+	}
+	sessionID := strings.TrimSpace(q.Get("session_id"))
 
 	query := `
 		SELECT id, org_id, session_id, scope, key, content, kind, confidence,
 		       owner, source_links, review_state, classification, expires_at,
 		       created_at, updated_at
 		FROM agent_memory
-		WHERE org_id=$1
+		WHERE org_id=$1 AND ` + memoryVisibilitySQL("$2") + `
+		  AND (scope IN ('user','org','global') AND session_id IS NULL)
+		  AND ($3='' OR key=$3)
 		ORDER BY created_at DESC
+		LIMIT $4
 	`
-	rows, err := h.pool.Query(r.Context(), query, orgID)
+	queryArgs := []any{orgID, actorID, keyFilter, maxMemoryResolveRows + 1}
+	if sessionID != "" {
+		query = `
+			SELECT id, org_id, session_id, scope, key, content, kind, confidence,
+			       owner, source_links, review_state, classification, expires_at,
+			       created_at, updated_at
+			FROM agent_memory
+			WHERE org_id=$1 AND ` + memoryVisibilitySQL("$2") + `
+			  AND ((scope IN ('user','org','global') AND session_id IS NULL)
+			       OR (scope='session' AND session_id=$3))
+			  AND ($4='' OR key=$4)
+			ORDER BY created_at DESC
+			LIMIT $5
+		`
+		queryArgs = []any{orgID, actorID, sessionID, keyFilter, maxMemoryResolveRows + 1}
+	}
+	rows, err := h.pool.Query(r.Context(), query, queryArgs...)
 	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer rows.Close()
@@ -270,24 +416,38 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 
 	// Collect all entries grouped by scope.
 	scopeEntries := make(map[string][]memoryEntry)
+	rowCount := 0
 	for pgRows.Next() {
+		rowCount++
+		if rowCount > maxMemoryResolveRows {
+			jsonErr(w, "memory resolution exceeds the bounded result limit", http.StatusUnprocessableEntity)
+			return
+		}
 		var e memoryEntry
 		if err := pgRows.Scan(&e.ID, &e.OrgID, &e.SessionID, &e.Scope, &e.Key, &e.Content,
 			&e.Kind, &e.Confidence, &e.Owner, &e.SourceLinks, &e.ReviewState,
 			&e.Classification, &e.ExpiresAt, &e.CreatedAt, &e.UpdatedAt); err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
+			jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		if keyFilter != "" && e.Key != keyFilter {
 			continue
 		}
+		if !memoryEntryMatchesResolution(e, sessionID) {
+			continue
+		}
 		scopeEntries[e.Scope] = append(scopeEntries[e.Scope], e)
+	}
+	if pgRows.Err() != nil {
+		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Merge with precedence: narrower scope wins when keys collide.
+	precedence := memoryScopePrecedence(sessionID)
 	seen := make(map[string]bool)
 	var resolved []memoryEntry
-	for _, scope := range scopePrecedence {
+	for _, scope := range precedence {
 		entries, ok := scopeEntries[scope]
 		if !ok {
 			continue
@@ -303,8 +463,8 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, map[string]any{
 		"entries":    resolved,
-		"count":     len(resolved),
-		"precedence": scopePrecedence,
+		"count":      len(resolved),
+		"precedence": precedence,
 	})
 }
 
@@ -369,7 +529,7 @@ func (h *TasksHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		q := r.URL.Query()
-		orgID := q.Get("org_id")
+		orgID := verifiedOrganizationID(r)
 		status := q.Get("status")
 		limit, _ := strconv.Atoi(q.Get("limit"))
 		if limit == 0 {
@@ -410,6 +570,7 @@ func (h *TasksHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		t.OrgID = verifiedOrganizationID(r)
 		if t.ID == "" {
 			t.ID = "task_" + uuid.New().String()
 		}
@@ -443,8 +604,8 @@ func (h *TasksHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 		SELECT id, org_id, run_id, kind, title, description, assignee, status,
 		       priority, idempotency_key, scheduled_at, started_at, completed_at,
 		       created_at, updated_at
-		FROM tasks WHERE id=$1 AND deleted_at IS NULL
-	`, id).Scan(&t.ID, &t.OrgID, &t.RunID, &t.Kind, &t.Title, &t.Description,
+		FROM tasks WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL
+	`, id, verifiedOrganizationID(r)).Scan(&t.ID, &t.OrgID, &t.RunID, &t.Kind, &t.Title, &t.Description,
 		&t.Assignee, &t.Status, &t.Priority, &t.IdempotencyKey,
 		&t.ScheduledAt, &t.StartedAt, &t.CompletedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
@@ -464,11 +625,12 @@ func (h *TasksHandler) patch(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	now := time.Now().UTC()
+	orgID := verifiedOrganizationID(r)
 	if update.Status != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE tasks SET status=$1, updated_at=$2 WHERE id=$3`, update.Status, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE tasks SET status=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Status, now, id, orgID)
 	}
 	if update.Assignee != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE tasks SET assignee=$1, updated_at=$2 WHERE id=$3`, update.Assignee, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE tasks SET assignee=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Assignee, now, id, orgID)
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
@@ -480,8 +642,8 @@ func (h *TasksHandler) cancel(w http.ResponseWriter, r *http.Request, id string)
 	}
 	now := time.Now().UTC()
 	_, err := h.pool.Exec(r.Context(),
-		`UPDATE tasks SET status='cancelled', completed_at=$1, updated_at=$1 WHERE id=$2 AND deleted_at IS NULL`,
-		now, id)
+		`UPDATE tasks SET status='cancelled', completed_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`,
+		now, id, verifiedOrganizationID(r))
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -539,7 +701,7 @@ type cronScheduleRow struct {
 func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		orgID := r.URL.Query().Get("org_id")
+		orgID := verifiedOrganizationID(r)
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
 			       enabled, last_fire_at, next_fire_at, created_at, updated_at
@@ -568,6 +730,7 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.OrgID = verifiedOrganizationID(r)
 		if s.ID == "" {
 			s.ID = "cron_" + uuid.New().String()
 		}
@@ -598,8 +761,8 @@ func (h *CronHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
 		       enabled, last_fire_at, next_fire_at, created_at, updated_at
-		FROM cron_schedules WHERE id=$1 AND deleted_at IS NULL
-	`, id).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.ScheduleExpr,
+		FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL
+	`, id, verifiedOrganizationID(r)).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.ScheduleExpr,
 		&s.Timezone, &s.TaskTemplate, &s.Enabled, &s.LastFireAt, &s.NextFireAt,
 		&s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
@@ -619,17 +782,18 @@ func (h *CronHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
+	orgID := verifiedOrganizationID(r)
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET enabled=$1, updated_at=$2 WHERE id=$3`, *update.Enabled, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
 	}
 	if update.ScheduleExpr != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET schedule_expr=$1, updated_at=$2 WHERE id=$3`, update.ScheduleExpr, now, id)
+		_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET schedule_expr=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.ScheduleExpr, now, id, orgID)
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *CronHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	now := time.Now().UTC()
-	_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET deleted_at=$1, updated_at=$1 WHERE id=$2`, now, id)
+	_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, verifiedOrganizationID(r))
 	w.WriteHeader(http.StatusNoContent)
 }

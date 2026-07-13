@@ -3,7 +3,8 @@
 //! These replace the deterministic echo fallback in `tool_bridge` for the two
 //! most useful read-only research tools, backed by the Quarry-v2 edge (the same
 //! service the browser agent drives). Reuses `QUARRY_EDGE_URL` /
-//! `QUARRY_EDGE_TOKEN`. Quarry's DTOs live in a separate cargo workspace, so —
+//! short-lived Auth Core service-principal tokens. Quarry's DTOs live in a
+//! separate cargo workspace, so —
 //! like `model-gateway`'s Fetch client — responses are parsed defensively as
 //! `serde_json::Value` rather than mirrored structs.
 //!
@@ -23,15 +24,19 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::quarry_auth::TokenSource;
+
 const MAX_SEARCH_RESULTS: usize = 8;
 const MAX_SNIPPET_CHARS: usize = 300;
 const MAX_FETCH_CHARS: usize = 8000;
+const SEARCH_SCOPES: &[&str] = &["search:read"];
+const EXTRACT_SCOPES: &[&str] = &["extract:read"];
 
 /// HTTP client for Quarry edge search/extract. Cheap to clone.
 #[derive(Clone)]
 pub struct WebToolsClient {
     base_url: String,
-    token: String,
+    auth: TokenSource,
     http: reqwest::Client,
 }
 
@@ -39,40 +44,60 @@ impl WebToolsClient {
     /// Build from the environment. Returns `None` when `QUARRY_EDGE_URL` /
     /// `QUARRY_EDGE_ADDR` is unset, so the caller can surface a clear
     /// "not configured" error instead of echoing.
-    #[must_use]
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env() -> Result<Option<Self>, String> {
         let base_url = std::env::var("QUARRY_EDGE_URL")
             .or_else(|_| std::env::var("QUARRY_EDGE_ADDR"))
             .ok()
-            .filter(|s| !s.trim().is_empty())?;
-        let token = std::env::var("QUARRY_EDGE_TOKEN").unwrap_or_default();
+            .filter(|s| !s.trim().is_empty());
+        let Some(base_url) = base_url else {
+            return Ok(None);
+        };
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
-            .ok()?;
-        Some(Self {
+            .map_err(|error| format!("failed to build Quarry HTTP client: {error}"))?;
+        let auth = TokenSource::from_env()
+            .map_err(|error| format!("quarry authentication is not configured: {error}"))?;
+        Ok(Some(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            token,
+            auth,
             http,
-        })
+        }))
     }
 
-    async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
-        // Always send a bearer: the edge's AUTH_DEV_BYPASS accepts any token but
-        // still requires the header; a real token is used when configured.
-        let bearer = if self.token.is_empty() {
-            "dev"
-        } else {
-            self.token.as_str()
+    async fn post(
+        &self,
+        path: &str,
+        body: &Value,
+        org_id: &str,
+        scopes: &[&str],
+    ) -> Result<Value, String> {
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let bearer = self
+                .auth
+                .token(org_id, scopes)
+                .await
+                .map_err(|error| format!("quarry authentication failed: {error}"))?;
+            let resp = self
+                .http
+                .post(format!("{}{path}", self.base_url))
+                .bearer_auth(&bearer)
+                .header("x-quarry-org", org_id)
+                .json(body)
+                .send()
+                .await
+                .map_err(|e| format!("quarry {path} request failed: {e}"))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.auth
+                    .invalidate_if_matches(org_id, scopes, &bearer)
+                    .await
+                    .map_err(|error| format!("quarry authentication failed: {error}"))?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
         };
-        let resp = self
-            .http
-            .post(format!("{}{path}", self.base_url))
-            .bearer_auth(bearer)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("quarry {path} request failed: {e}"))?;
         let status = resp.status();
         let value: Value = resp
             .json()
@@ -86,9 +111,10 @@ impl WebToolsClient {
 
     /// `web_search` → POST `/v1/search`. Returns a compact ranked list (title,
     /// url, snippet). Empty result set is a successful, informative response.
-    pub async fn search(&self, query: &str, limit: u32) -> Result<String, String> {
+    pub async fn search(&self, query: &str, limit: u32, org_id: &str) -> Result<String, String> {
+        let body = json!({ "query": query, "limit": limit });
         let value = self
-            .post("/v1/search", json!({ "query": query, "limit": limit }))
+            .post("/v1/search", &body, org_id, SEARCH_SCOPES)
             .await?;
         let results = value
             .get("results")
@@ -99,8 +125,11 @@ impl WebToolsClient {
     }
 
     /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
-    pub async fn fetch(&self, url: &str) -> Result<String, String> {
-        let value = self.post("/v1/extract", json!({ "urls": [url] })).await?;
+    pub async fn fetch(&self, url: &str, org_id: &str) -> Result<String, String> {
+        let body = json!({ "urls": [url] });
+        let value = self
+            .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
+            .await?;
         extract_markdown(url, &value)
     }
 }

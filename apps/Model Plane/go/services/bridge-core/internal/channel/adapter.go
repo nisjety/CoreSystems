@@ -5,11 +5,14 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 )
+
+var ErrWebSocketUnavailable = errors.New("websocket transport is not configured")
 
 // timeNow is a package-level variable for time.Now so tests can override it.
 var timeNow = time.Now
@@ -85,36 +88,24 @@ func (r *AdapterRegistry) Get(channel string) (Adapter, error) {
 	return a, nil
 }
 
-// WebSocketAdapter is a channel adapter for WebSocket connections. It
-// validates incoming tokens via JWTValidator and encodes/decodes wire frames
-// using a FrameCodec. This is a skeleton — the actual WebSocket upgrade and
-// read/write loop will be implemented in a future iteration.
+// WebSocketAdapter is a quarantined skeleton. No WebSocket upgrade protocol is
+// exposed until it can authenticate an Auth Core bearer before session access.
 type WebSocketAdapter struct {
-	jwt   *JWTValidator
 	codec FrameCodec
 }
 
-// NewWebSocketAdapter constructs a WebSocketAdapter with the given JWT
-// validator and frame codec.
-func NewWebSocketAdapter(jwt *JWTValidator, codec FrameCodec) *WebSocketAdapter {
-	return &WebSocketAdapter{jwt: jwt, codec: codec}
+// NewWebSocketAdapter constructs the fail-closed skeleton.
+func NewWebSocketAdapter(codec FrameCodec) *WebSocketAdapter {
+	return &WebSocketAdapter{codec: codec}
 }
 
-// Ingest validates the payload as a framed message, verifies the JWT token
-// embedded in the session, and returns the decoded payload. This is a
-// skeleton that decodes the frame and echoes the payload back.
-func (ws *WebSocketAdapter) Ingest(_ context.Context, sessionID string, payload []byte) ([]byte, error) {
-	frame, err := ws.codec.Decode(payload)
-	if err != nil {
-		return nil, fmt.Errorf("websocket ingest: %w", err)
-	}
-
-	if frame.SessionID != sessionID {
-		return nil, fmt.Errorf("websocket ingest: session ID mismatch: frame=%q expected=%q", frame.SessionID, sessionID)
-	}
-
-	slog.Debug("websocket ingest", "session_id", sessionID, "frame_type", frame.Type, "payload_len", len(frame.Payload))
-	return frame.Payload, nil
+// Ingest intentionally rejects every payload because the current frame
+// contract cannot carry a verifiable Auth Core identity.
+func (ws *WebSocketAdapter) Ingest(_ context.Context, _ string, _ []byte) ([]byte, error) {
+	// No HTTP upgrade path exists and MessageFrame has no bearer field. Keep the
+	// skeleton fail-closed until Auth Core identity can be verified before a
+	// connection is registered or a session is resolved.
+	return nil, ErrWebSocketUnavailable
 }
 
 // Deliver wraps the response bytes in a MessageFrame and encodes it for

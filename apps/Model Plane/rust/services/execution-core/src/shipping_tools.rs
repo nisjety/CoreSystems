@@ -35,6 +35,7 @@ use serde_json::Value;
 /// only, so cross-plane services are dialled via the host-published port
 /// (same pattern as `INFORMATION_CORE_URL`/`QUARRY_EDGE_URL`).
 const DEFAULT_SHIPPING_CORE_URL: &str = "http://host.docker.internal:3156";
+const DEFAULT_AUTH_CORE_URL: &str = "http://host.docker.internal:3011";
 
 /// Cap on quotes rendered to the model — the engine already sorts
 /// cheapest-first, so the head is the interesting part.
@@ -104,7 +105,16 @@ fn address_json(a: &AddressInput) -> Value {
 #[derive(Clone)]
 pub struct ShippingToolsClient {
     base_url: String,
+    auth_core_url: String,
+    service_id: String,
+    service_credential: String,
     http: reqwest::Client,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaneTokenResponse {
+    token: String,
 }
 
 impl ShippingToolsClient {
@@ -121,16 +131,49 @@ impl ShippingToolsClient {
             .timeout(Duration::from_secs(20))
             .build()
             .ok()?;
+        let auth_core_url = std::env::var("AUTH_CORE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_AUTH_CORE_URL.to_owned());
+        let service_id = std::env::var("INGESTION_SERVICE_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "model-execution".to_owned());
+        let service_credential = std::env::var("INGESTION_SERVICE_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())?;
         Some(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
+            auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
+            service_id,
+            service_credential,
             http,
         })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        base_url: String,
+        auth_core_url: String,
+        service_id: &str,
+        service_credential: &str,
+    ) -> Self {
+        Self {
+            base_url,
+            auth_core_url,
+            service_id: service_id.to_owned(),
+            service_credential: service_credential.to_owned(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("test HTTP client"),
+        }
     }
 
     /// POST /api/quotes and render the comparison compactly for the model:
     /// carrier, service, price, transit, plus any per-carrier errors (the
     /// engine reports failed carriers instead of silently dropping them).
-    pub async fn get_quotes(&self, input: &QuoteInput) -> Result<String, String> {
+    pub async fn get_quotes(&self, input: &QuoteInput, org_id: &str) -> Result<String, String> {
         let body = serde_json::json!({
             "from": {
                 "name": input.from.name,
@@ -158,9 +201,11 @@ impl ShippingToolsClient {
             "segment": input.segment,
         });
 
+        let token = self.mint_ingestion_token(org_id, "shipping:read").await?;
         let resp = self
             .http
             .post(format!("{}/api/quotes", self.base_url))
+            .bearer_auth(token)
             .json(&body)
             .send()
             .await
@@ -185,7 +230,18 @@ impl ShippingToolsClient {
     /// executes. shipping-core's own token gate is then satisfied by chaining
     /// the token from the create response into the confirm call; the audit
     /// log on shipping-core records both steps with the acting run id.
-    pub async fn book_shipment(&self, input: &BookInput) -> Result<String, String> {
+    pub async fn book_shipment(
+        &self,
+        input: &BookInput,
+        org_id: &str,
+        approval_id: &str,
+        idempotency_key: &str,
+    ) -> Result<String, String> {
+        if approval_id.trim().is_empty() || idempotency_key.trim().is_empty() {
+            return Err(
+                "booking blocked: durable approval and idempotency key are required".to_owned(),
+            );
+        }
         let create_body = serde_json::json!({
             "quote_ref": input.quote_ref,
             "carrier_code": input.carrier_code,
@@ -200,9 +256,11 @@ impl ShippingToolsClient {
             },
             "customs": input.customs,
             "booked_by": input.booked_by,
+            "approval_id": approval_id,
         });
+        let bearer = self.mint_ingestion_token(org_id, "shipping:write").await?;
         let created = self
-            .post_json("/api/bookings", &create_body)
+            .post_json("/api/bookings", &create_body, &bearer, idempotency_key)
             .await
             .map_err(|e| format!("booking create failed: {e}"))?;
         let booking_id = created
@@ -210,20 +268,22 @@ impl ShippingToolsClient {
             .and_then(Value::as_str)
             .ok_or_else(|| format!("booking create response missing booking_id: {created}"))?
             .to_owned();
-        let token = created
+        let confirmation_token = created
             .get("confirmation_token")
             .and_then(Value::as_str)
             .ok_or("booking create response missing confirmation token")?
             .to_owned();
 
         let confirm_body = serde_json::json!({
-            "confirmation_token": token,
+            "confirmation_token": confirmation_token,
             "actor": input.booked_by,
         });
         let booked = self
             .post_json(
                 &format!("/api/bookings/{booking_id}/confirm"),
                 &confirm_body,
+                &bearer,
+                idempotency_key,
             )
             .await
             .map_err(|e| {
@@ -248,11 +308,22 @@ impl ShippingToolsClient {
         ))
     }
 
-    async fn post_json(&self, path: &str, body: &Value) -> Result<Value, String> {
-        let resp = self
+    async fn post_json(
+        &self,
+        path: &str,
+        body: &Value,
+        token: &str,
+        idempotency_key: &str,
+    ) -> Result<Value, String> {
+        let mut request = self
             .http
             .post(format!("{}{path}", self.base_url))
-            .json(body)
+            .bearer_auth(token)
+            .json(body);
+        if !idempotency_key.trim().is_empty() {
+            request = request.header("idempotency-key", idempotency_key.trim());
+        }
+        let resp = request
             .send()
             .await
             .map_err(|e| format!("shipping-core {path} request failed: {e}"))?;
@@ -269,10 +340,12 @@ impl ShippingToolsClient {
 
     /// GET /api/carriers — the registered fleet (mock vs credentialed real
     /// adapters), so the model can answer "which carriers can Velion compare".
-    pub async fn list_carriers(&self) -> Result<String, String> {
+    pub async fn list_carriers(&self, org_id: &str) -> Result<String, String> {
+        let token = self.mint_ingestion_token(org_id, "shipping:read").await?;
         let resp = self
             .http
             .get(format!("{}/api/carriers", self.base_url))
+            .bearer_auth(token)
             .send()
             .await
             .map_err(|e| format!("shipping-core /api/carriers request failed: {e}"))?;
@@ -287,6 +360,49 @@ impl ShippingToolsClient {
             ));
         }
         Ok(render_carriers(&value))
+    }
+
+    async fn mint_ingestion_token(&self, org_id: &str, scope: &str) -> Result<String, String> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return Err("shipping request blocked: run organization is required".to_owned());
+        }
+        let reason = if scope == "shipping:write" {
+            "execution-core shipping write"
+        } else {
+            "execution-core shipping read"
+        };
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/ingestion/internal-token",
+                self.auth_core_url
+            ))
+            .header("x-service-id", &self.service_id)
+            .header("x-service-api-key", &self.service_credential)
+            .json(&serde_json::json!({
+                "orgId": org_id,
+                "scopes": [scope],
+                "reason": reason,
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("Auth Core token request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!(
+                "Auth Core refused the scoped shipping credential ({status})"
+            ));
+        }
+        let token = response
+            .json::<PlaneTokenResponse>()
+            .await
+            .map_err(|error| format!("Auth Core token response was invalid: {error}"))?
+            .token;
+        if token.trim().is_empty() {
+            return Err("Auth Core returned an empty shipping credential".to_owned());
+        }
+        Ok(token)
     }
 }
 
@@ -388,12 +504,32 @@ fn render_carriers(value: &Value) -> String {
         let name = c.get("name").and_then(Value::as_str).unwrap_or("unknown");
         let segment = c.get("segment").and_then(Value::as_str).unwrap_or("");
         let is_mock = c.get("is_mock").and_then(Value::as_bool).unwrap_or(false);
-        let mode = if is_mock {
-            "demo prices"
+        let provider_mode = c.get("mode").and_then(Value::as_str).unwrap_or(if is_mock {
+            "mock"
         } else {
-            "live agreement prices"
+            "unknown"
+        });
+        let mode = match provider_mode {
+            "mock" => "demo prices",
+            "production" => "production",
+            "sandbox" => "sandbox",
+            _ => "unknown mode",
         };
-        let _ = writeln!(s, "- {name} ({segment}, {mode})");
+        let verified_at = c.get("verified_at").and_then(Value::as_str);
+        let degraded_reason = c
+            .get("degraded_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if provider_mode != "mock" && verified_at.is_none() && !degraded_reason.is_empty() {
+            let _ = writeln!(
+                s,
+                "- {name} ({segment}, {mode}, unverified: {degraded_reason})"
+            );
+        } else if let Some(verified_at) = verified_at {
+            let _ = writeln!(s, "- {name} ({segment}, {mode}, verified {verified_at})");
+        } else {
+            let _ = writeln!(s, "- {name} ({segment}, {mode})");
+        }
     }
     s
 }
@@ -401,6 +537,10 @@ fn render_carriers(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::{
+        matchers::{body_json, header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     #[test]
     fn renders_quotes_compactly() {
@@ -426,11 +566,167 @@ mod tests {
     #[test]
     fn renders_carrier_fleet_with_mode() {
         let value: Value = serde_json::from_str(
-            r#"{"carriers":[{"code":"mock-bring","name":"Bring","segment":"both","is_mock":true},{"code":"ups","name":"UPS","segment":"b2b","is_mock":false}]}"#,
+            r#"{"carriers":[{"code":"mock-bring","name":"Bring","segment":"both","mode":"mock","is_mock":true},{"code":"ups","name":"UPS","segment":"b2b","mode":"sandbox","is_mock":false,"verified_at":null,"degraded_reason":"not verified"}]}"#,
         )
         .unwrap();
         let s = render_carriers(&value);
         assert!(s.contains("Bring (both, demo prices)"));
-        assert!(s.contains("UPS (b2b, live agreement prices)"));
+        assert!(s.contains("UPS (b2b, sandbox, unverified: not verified)"));
+    }
+
+    #[tokio::test]
+    async fn mints_scoped_ingestion_token_before_shipping_request() {
+        let auth = MockServer::start().await;
+        let shipping = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .and(header("x-service-id", "model-execution"))
+            .and(header("x-service-api-key", "synthetic-service-credential"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-test",
+                "scopes": ["shipping:read"],
+                "reason": "execution-core shipping read"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "signed-ingestion-token",
+                "expiresInSeconds": 300
+            })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/quotes"))
+            .and(header("authorization", "Bearer signed-ingestion-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "quotes": []
+            })))
+            .expect(1)
+            .mount(&shipping)
+            .await;
+
+        let client = ShippingToolsClient::new_for_test(
+            shipping.uri(),
+            auth.uri(),
+            "model-execution",
+            "synthetic-service-credential",
+        );
+        let input = QuoteInput {
+            from: AddressInput {
+                name: "Synthetic Sender".to_owned(),
+                street: "Testveien 1".to_owned(),
+                postal_code: "0001".to_owned(),
+                city: "Oslo".to_owned(),
+                country: "NO".to_owned(),
+                is_business: true,
+            },
+            to: AddressInput {
+                name: "Synthetic Recipient".to_owned(),
+                street: "Testgata 2".to_owned(),
+                postal_code: "7010".to_owned(),
+                city: "Trondheim".to_owned(),
+                country: "NO".to_owned(),
+                is_business: true,
+            },
+            weight_kg: 1.0,
+            length_cm: 10.0,
+            width_cm: 10.0,
+            height_cm: 10.0,
+            dangerous_good: false,
+            segment: "b2b".to_owned(),
+        };
+
+        let output = client.get_quotes(&input, "org-test").await.unwrap();
+        assert_eq!(output, "No carrier returned a quote for this shipment.");
+    }
+
+    #[tokio::test]
+    async fn booking_forwards_durable_approval_and_idempotency() {
+        let auth = MockServer::start().await;
+        let shipping = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "signed-write-token"
+            })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/bookings"))
+            .and(header("authorization", "Bearer signed-write-token"))
+            .and(header("idempotency-key", "run-test:step-test"))
+            .and(body_json(serde_json::json!({
+                "quote_ref": "quote-test",
+                "carrier_code": "mock-bring",
+                "service_name": "Synthetic Service",
+                "price": {"amount_cents": 1000, "currency": "NOK"},
+                "from": {"name":"Synthetic Sender","street":"Testveien 1","postal_code":"0001","city":"Oslo","country":"NO","is_business":true},
+                "to": {"name":"Synthetic Recipient","street":"Testgata 2","postal_code":"7010","city":"Trondheim","country":"NO","is_business":true},
+                "package": {"weight_kg":1.0,"length_cm":10.0,"width_cm":10.0,"height_cm":10.0,"dangerous_good":false},
+                "customs": null,
+                "booked_by": "user-test",
+                "approval_id": "approval-test"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "booking_id": "booking-test",
+                "confirmation_token": "confirmation-test"
+            })))
+            .expect(1)
+            .mount(&shipping)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/bookings/booking-test/confirm"))
+            .and(header("authorization", "Bearer signed-write-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "carrier_name": "Bring",
+                "booking_ref": "carrier-booking-test",
+                "tracking_no": "synthetic-tracking",
+                "has_label": false
+            })))
+            .expect(1)
+            .mount(&shipping)
+            .await;
+
+        let client = ShippingToolsClient::new_for_test(
+            shipping.uri(),
+            auth.uri(),
+            "model-execution",
+            "synthetic-service-credential",
+        );
+        let input = BookInput {
+            quote_ref: "quote-test".to_owned(),
+            carrier_code: "mock-bring".to_owned(),
+            service_name: "Synthetic Service".to_owned(),
+            price_amount_cents: 1000,
+            price_currency: "NOK".to_owned(),
+            from: AddressInput {
+                name: "Synthetic Sender".to_owned(),
+                street: "Testveien 1".to_owned(),
+                postal_code: "0001".to_owned(),
+                city: "Oslo".to_owned(),
+                country: "NO".to_owned(),
+                is_business: true,
+            },
+            to: AddressInput {
+                name: "Synthetic Recipient".to_owned(),
+                street: "Testgata 2".to_owned(),
+                postal_code: "7010".to_owned(),
+                city: "Trondheim".to_owned(),
+                country: "NO".to_owned(),
+                is_business: true,
+            },
+            weight_kg: 1.0,
+            length_cm: 10.0,
+            width_cm: 10.0,
+            height_cm: 10.0,
+            dangerous_good: false,
+            customs: None,
+            booked_by: "user-test".to_owned(),
+        };
+
+        let result = client
+            .book_shipment(&input, "org-test", "approval-test", "run-test:step-test")
+            .await;
+        assert!(result.is_ok(), "booking failed: {result:?}");
     }
 }

@@ -1,5 +1,6 @@
 //! inference-core library surface - exposes modules for integration tests.
 
+pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod grpc;

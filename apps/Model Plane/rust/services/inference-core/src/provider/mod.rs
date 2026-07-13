@@ -170,6 +170,11 @@ pub struct ProviderCapabilities {
     pub supports_thinking: bool,
     pub supports_streaming: bool,
     pub supports_embeddings: bool,
+    /// True only when the operator has independently verified that this exact
+    /// provider/deployment contract honors Zero Data Retention. This defaults
+    /// to false: geography, transport encryption, or a caller's `zdr` bit do
+    /// not prove the downstream provider's retention behavior.
+    pub supports_zdr: bool,
     /// Modality groups served, e.g. `["chat", "vision", "speech"]`.
     pub modalities: Vec<String>,
     pub max_context_tokens: u32,
@@ -187,6 +192,7 @@ impl Default for ProviderCapabilities {
             supports_thinking: false,
             supports_streaming: true,
             supports_embeddings: false,
+            supports_zdr: false,
             modalities: vec!["chat".to_owned()],
             max_context_tokens: 8_192,
             max_output_tokens: 4_096,
@@ -220,6 +226,9 @@ impl ProviderCapabilities {
         }
         if self.serves_modality("image") {
             out.push("image".to_owned());
+        }
+        if self.supports_zdr {
+            out.push("zdr".to_owned());
         }
         out
     }
@@ -269,6 +278,7 @@ mod capability_tests {
             supports_tools: true,
             supports_vision: true,
             supports_thinking: true,
+            supports_zdr: true,
             modalities: vec!["chat".to_owned(), "image".to_owned()],
             ..ProviderCapabilities::default()
         };
@@ -278,6 +288,7 @@ mod capability_tests {
         assert!(flags.contains(&"tools".to_owned()));
         assert!(flags.contains(&"vision".to_owned()));
         assert!(flags.contains(&"image".to_owned()));
+        assert!(flags.contains(&"zdr".to_owned()));
     }
 
     #[test]
@@ -314,6 +325,11 @@ pub enum ProviderError {
     /// residency boundary and `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` is off.
     #[error("residency violation: {0}")]
     ResidencyViolation(String),
+
+    /// A request required ZDR but no matching provider/deployment has an
+    /// independently verified ZDR contract. Rejected before any provider call.
+    #[error("zero data retention unavailable: {0}")]
+    ZdrUnavailable(String),
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU
@@ -404,6 +420,7 @@ mod tests {
         assert!(!caps.serves_modality("vision"));
         assert!(!caps.supports_vision);
         assert!(!caps.supports_tools);
+        assert!(!caps.supports_zdr);
         // streaming is the one safe-on default (virtually all chat providers).
         assert!(caps.supports_streaming);
     }

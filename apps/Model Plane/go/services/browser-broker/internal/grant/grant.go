@@ -22,12 +22,13 @@ var (
 
 // Grant is a trusted browser access grant.
 type Grant struct {
-	ID        string
-	OrgID     string
-	AgentID   string
-	ScopeURL  string
-	ExpiresAt time.Time
-	Revoked   bool
+	ID         string
+	OrgID      string
+	OwnerID    string
+	SessionKey string
+	ScopeURL   string
+	ExpiresAt  time.Time
+	Revoked    bool
 }
 
 // Store is a thread-safe in-memory grant store.
@@ -42,30 +43,32 @@ func NewStore() *Store {
 }
 
 // Create issues a new grant with the provided TTL.
-func (s *Store) Create(orgID, agentID, scopeURL string, ttl time.Duration) (*Grant, error) {
+func (s *Store) Create(orgID, ownerID, sessionKey, scopeURL string, ttl time.Duration) (*Grant, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	g := &Grant{
-		ID:        id,
-		OrgID:     orgID,
-		AgentID:   agentID,
-		ScopeURL:  scopeURL,
-		ExpiresAt: time.Now().Add(ttl),
+		ID:         id,
+		OrgID:      orgID,
+		OwnerID:    ownerID,
+		SessionKey: sessionKey,
+		ScopeURL:   scopeURL,
+		ExpiresAt:  time.Now().Add(ttl),
 	}
 	s.mu.Lock()
-	s.grants[id] = g
+	s.grants[id] = clone(g)
 	s.mu.Unlock()
-	return g, nil
+	return clone(g), nil
 }
 
-// Get returns a grant by ID, or an error if missing, expired, or revoked.
-func (s *Store) Get(id string) (*Grant, error) {
+// GetScoped returns a grant only within the verified organization. A non-empty
+// ownerID additionally restricts access to the owning user.
+func (s *Store) GetScoped(id, orgID, ownerID string) (*Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.grants[id]
-	if !ok {
+	if !ok || g.OrgID != orgID || (ownerID != "" && g.OwnerID != ownerID) {
 		return nil, ErrGrantNotFound
 	}
 	if g.Revoked {
@@ -74,19 +77,26 @@ func (s *Store) Get(id string) (*Grant, error) {
 	if time.Now().After(g.ExpiresAt) {
 		return nil, ErrGrantExpired
 	}
-	return g, nil
+	return clone(g), nil
 }
 
-// Revoke marks a grant as revoked. Returns ErrGrantNotFound if missing.
-func (s *Store) Revoke(id string) error {
+// RevokeScoped immutably revokes a grant inside the verified identity scope.
+func (s *Store) RevokeScoped(id, orgID, ownerID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.grants[id]
-	if !ok {
+	if !ok || g.OrgID != orgID || (ownerID != "" && g.OwnerID != ownerID) {
 		return ErrGrantNotFound
 	}
-	g.Revoked = true
+	revoked := *g
+	revoked.Revoked = true
+	s.grants[id] = &revoked
 	return nil
+}
+
+func clone(grant *Grant) *Grant {
+	copy := *grant
+	return &copy
 }
 
 func newID() (string, error) {

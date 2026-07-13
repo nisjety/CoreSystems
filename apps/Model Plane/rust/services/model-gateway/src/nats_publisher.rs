@@ -22,7 +22,7 @@ impl NatsPublisher {
     ///
     /// Returns an error if the connection cannot be established.
     pub async fn connect(url: &str) -> Result<Self, async_nats::ConnectError> {
-        let client = async_nats::connect(url).await?;
+        let client = crate::nats_connection::connect(url).await?;
         let mode = CompatMode::from_env();
         tracing::info!(url = %url, compat_mode = mode.as_str(), "connected to NATS");
         Ok(Self { client, mode })

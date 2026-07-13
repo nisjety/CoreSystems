@@ -1,10 +1,14 @@
 # Model Plane — Updated Gap Analysis and Target Architecture
 
+> **Release correction — 2026-07-13:** the checkmarks below classify implementation breadth and are not a production certificate. Live gateway/inference gRPC are absent; cost/session/capability auth, MCP, semantic memory, ZDR, and rollback gates remain. Budget fail-open and inline MCP are fixed in source only; current source restores authenticated inference gRPC. See [MODEL_PLANE_STATUS.md](../MODEL_PLANE_STATUS.md) and [plane-audit-2026-07-13.md](core-research/plane-audit-2026-07-13.md).
+
 > Generated: 2026-05-06  
 > Scope: Rust + Go Model Plane with cross-plane contracts to Quarry v2 and Data Plane.  
 > Rule: **Model Plane reasons; Data Plane knows; Quarry captures evidence.**
 >
 > **Implementation audit: 2026-05-07**
+>
+> **Verified 2026-07-11 (Phase 4 Model Plane audit).** Spot-checked against current source + host-curl live checks. Findings: (1) the §6 Gap Matrix and the §13 "all-green" build log are the accurate layers; (2) the original-body **§8 Implementation Plan and §10 Release Gates were never reconciled after the 2026-05-07 audit and now materially understate reality** — several ⬜/⚠️ lines there are flatly contradicted by this doc's own §6 and by live runtime (cost-core :8089, model-gateway :8080, and the 18081/18082/18083 Rust health ports all answer). Stale §10 lines corrected in place below. (3) MP-03's browser-agent evidence is understated: `execution-core/src/browser_agent.rs` is now ~1,350 LOC (not ~460) with a dedicated `browser_agent/browser_risk.rs` (~400 LOC), 30+ unit tests, and a `tests/browser_agent_e2e.rs`, including fail-closed risky-action gating. (4) HITL is **no longer decorative**: `execution-core/src/permission/mod.rs` (`is_risky_tool`/`is_risky_call`) drives an `AwaitApproval` path, and provider writes resolve a real durable session-core `appr_…` id (runtime_loop `resolve_write_approval`, "audit fix, Phase 2") rather than a shared constant. (5) ZDR is wired end-to-end in the gateway (`dataplane.rs` zdr_mode reject/ephemeral, verified-claim forces ephemeral retrieval; `models:invoke` service scope enforced). Current source-of-truth for runtime state is `apps/Model Plane/docs/core-research/` + `MODEL_PLANE_DEEP_DIVE.md`; this doc remains a target/gap plan. Note: "test the Visma MCP" is still **not a Model Plane capability** — `bridges/mcp-bridge` is a real reference bridge but ships only `fs`/`git`; no Visma wiring exists (see core-research/bridge-core.md).
 
 ### Implementation Scorecard
 
@@ -163,7 +167,7 @@ Autoresearch is a Model Plane feature: bounded autonomous loops, program artifac
 |---|---|---|---|---|---|---|---|
 | ✅ | MP-01 | Structured schema passthrough | Gateway forwards `structured_output_schema` from HTTP InvokeRequest through normalize to InferRequest in all 4 construction sites (ai_chat, invoke×2, SSE). Proto field 12 defined. End-to-end passthrough complete. | HTTP InvokeRequest -> InferRequest.structured_output_schema | Model | P0 | schema JSON fixture passes end-to-end |
 | ✅ | MP-02 | Cost ledger/budget abort | `cost-core` service (Go) with in-memory ledger, Record/GetUsage/CheckBudget, NATS subscriber, OTel metrics. Gateway `budget.rs` module does pre-flight HTTP check against cost-core with fail-open. `max_cost_usd`/`max_tokens` fields on InvokeRequest + NormalizedRequest + proto. | `cost-core-go` + max_cost_usd/max_tokens guard | Model | P0 | budget-abort typed error; usage event tests |
-| ✅ | MP-03 | Browser-agent protocol | BrowserBroker grants exist (proto + Go impl); execution-core `browser_agent` module (~460 LOC) implements full action/observation loop: PlanConfig → AgentPlan → plan_next_action() cycle with BrowserAction dispatch, ObservationStatus handling, max_steps/max_runtime_s limits, domain allowlists, stop criteria evaluation, approval gates. PlanStore for tracking active plans. Tool bridge dispatches `browser_agent` tool. 9 unit tests passing. | browser action/observation loop via NATS/gRPC | Model + Quarry | P0 | mock planner completes dynamic site task |
+| ✅ | MP-03 | Browser-agent protocol | BrowserBroker grants exist (proto + Go impl); execution-core `browser_agent` module (~1,350 LOC as of 2026-07-11; was ~460) implements full action/observation loop: PlanConfig → AgentPlan → plan_next_action() cycle with BrowserAction dispatch, ObservationStatus handling, max_steps/max_runtime_s limits, domain allowlists, stop criteria evaluation, approval gates. PlanStore for tracking active plans. Tool bridge dispatches `browser_agent` tool. 30+ unit tests + `tests/browser_agent_e2e.rs` passing (2026-07-11). | browser action/observation loop via NATS/gRPC | Model + Quarry | P0 | mock planner completes dynamic site task |
 | ✅ | MP-04 | Browser grants create/acquire hardening | **grant.Store implements Create/Get/Revoke with mutex-guarded in-memory store; proto defines AcquireGrant/RevokeGrant/ValidateGrant RPCs; server wires gRPC+HTTP; tests cover revocation** | full acquire/validate/revoke with Redis/Postgres backing | Model | P0 | revoked grant blocks Quarry execution |
 | ✅ | MP-05 | Multimodal provider breadth | Anthropic+OpenAI chat providers real; speech modality registered in capability-core. inference-core now has three multimodal provider trait skeletons: `SpeechProvider` (synthesize/transcribe with AudioFormat enum), `VisionProvider` (analyze_image), `DocIntelProvider` (extract_document). Each has a Noop implementation returning `ProviderError::Unavailable`. Provider module registered in mod.rs. | speech, translator, doc-intel, vision provider routing | Model | P2 | provider contract tests + artifact refs |
 | ✅ | MP-06 | Letta upstream validated with fixtures | letta-bridge service (470 LOC) with in-memory memstore (Put/Search); goroutine-safe; real search with topic/time filtering. Now has comprehensive memstore_test.go with table-driven tests: Put+Search round-trip (exact/case-insensitive/empty/no-match/missing-fields), topic filtering (single/multi/none/nonexistent), time-range filtering (zero/cutoff/future), concurrent access (50 goroutines × 20 ops, -race clean), result ordering/scoring (prefix=1.0, contains=0.5), thread scoping, overwrite, topK limits. All tests passing. | e2e Letta integration and conflict policy | Model | P1 | live Letta test or mocked protocol fixture |
@@ -263,11 +267,11 @@ Exit gate: Quarry `json`, `summary`, and `query` are schema-aware, auditable, bu
 
 ### Phase M2 — Browser-agent loop
 
-- ⚠️ Implement Model planner loop around Quarry BrowserObservation. — Proto contract defined; implementation in execution-core pending.
+- ✅ Implement Model planner loop around Quarry BrowserObservation. — _(corrected 2026-07-11)_ `execution-core/src/browser_agent.rs` implements the plan → next-action → observation cycle (~1,350 LOC + `browser_risk.rs`).
 - ✅ Use BrowserBroker only for grants/session lifecycle. — Grant store with Create/Get/Revoke implemented.
-- ⬜ Add max_steps, max_runtime_s, allowed domains, approval gates. — Not found.
+- ✅ Add max_steps, max_runtime_s, allowed domains, approval gates. — _(corrected 2026-07-11)_ all present in `browser_agent.rs`, with fail-closed risky-action gating when no approval sink is configured.
 
-Exit gate: dynamic site e2e succeeds; revoked grant and ZDR tests pass. — ⚠️ Grant revocation works; browser-agent proto defined; e2e loop pending.
+Exit gate: dynamic site e2e succeeds; revoked grant and ZDR tests pass. — ✅ _(corrected 2026-07-11)_ grant revocation works; `tests/browser_agent_e2e.rs` present; 30+ unit tests including risky-gate deny/grant/fail-closed paths.
 
 ### Phase M3 — Capability/shell parity
 
@@ -323,11 +327,11 @@ Exit gate: audio/vision/doc outputs have real artifacts and typed provider metad
 
 Model Plane cannot claim target parity until:
 
-- ⚠️ Structured JSON schema passes through HTTP -> inference-core. — inference-core handles it; gateway doesn't forward from HTTP.
-- ⬜ Cost budget abort works before model spend exceeds policy. — No cost-core service; no abort mechanism.
-- ⬜ Browser-agent loop uses Quarry action execution, not direct CDP. — Grant lifecycle exists; no action/observation loop.
-- ⬜ Data Plane graph/wiki context is consumed only via API. — No graph/wiki code.
-- ⬜ ZDR rejects or runs ephemeral-only across all content-storing enrichments. — No ZDR enforcement.
+- ✅ Structured JSON schema passes through HTTP -> inference-core. — _(corrected 2026-07-11)_ gateway forwards `structured_output_schema` through all InferRequest construction sites (see MP-01).
+- ✅ Cost budget abort works before model spend exceeds policy. — _(corrected 2026-07-11)_ `cost-core` (Go) live on :8089; gateway `budget.rs` pre-flight `POST /api/v1/budget/check` returns `budget_exceeded` (fail-open if cost-core unreachable). See MP-02.
+- ✅ Browser-agent loop uses Quarry action execution, not direct CDP. — _(corrected 2026-07-11)_ `execution-core/src/browser_agent.rs` (~1,350 LOC) runs the action/observation loop with max_steps/max_runtime/domain-allowlist + fail-closed risky-action gating; e2e test present. See MP-03.
+- ⬜ Data Plane graph/wiki context is consumed only via API. — No graph/wiki code. _(still open 2026-07-11: MP-07/MP-08 confirm absent.)_
+- ✅ ZDR rejects or runs ephemeral-only across all content-storing enrichments. — _(corrected 2026-07-11)_ gateway `dataplane.rs` enforces zdr_mode (reject/ephemeral), verified-claim forces ephemeral retrieval, and `models:invoke` service scope is enforced. See MP-15.
 - ✅ Capability registries are populated and permissioned. — 24+ capabilities, RBAC, scope enforcement, policy engine.
 - ⚠️ Letta bridge is validated or explicitly optional. — In-memory memstore implemented; real Letta upstream not wired.
 - ⚠️ Autoresearch/wide research workflows are budgeted and resumable. — WideResearch implemented; autoresearch not started.
@@ -424,4 +428,3 @@ Mined five reference agent stacks via `opensrc` (codex/hermes-agent/pi/daytona/c
 13. [ ] `capability-core` memory-adapter registry: hermes `MemoryProvider` ABC → Go `MemoryAdapter` interface; letta-bridge becomes one impl; Rust calls only `Prefetch`/`SyncTurn` (harvest §6).
 
 > Sequencing: Tier 1 first (unblocks everything, all Apache/low-risk), then Tier 2 (closes the `sandbox-manager` create-path stub — our largest infra gap), then Tier 3+ tracks the existing P2/P3/P7 phases. Each adopted item gets an ADR recording source + license.
-

@@ -21,7 +21,7 @@
 //!     approval reference is then forwarded as `approvalId` in the body to
 //!     satisfy integration-corev2's own write-approval check.
 //!
-//! Transport (internal-key auth, same pattern as info_tools/knowledge_tools):
+//! Transport (Auth Core `ingestion` audience service token):
 //!   GET  {INTEGRATION_COREV2_URL}/api/v1/connections?organizationId=<org>
 //!   POST {INTEGRATION_COREV2_URL}/api/v1/connections/{id}/actions
 //!
@@ -43,6 +43,7 @@ use serde_json::Value;
 /// host-published port (same pattern as `INFORMATION_CORE_URL`/
 /// `SHIPPING_CORE_URL`). Host port 3026 → container 3026.
 const DEFAULT_INTEGRATION_URL: &str = "http://host.docker.internal:3026";
+const DEFAULT_AUTH_CORE_URL: &str = "http://host.docker.internal:3011";
 
 /// Cap on the result JSON echoed back to the model — provider responses can be
 /// large; the head is enough for the model to reason about, and the full
@@ -146,8 +147,15 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
 #[derive(Clone)]
 pub struct IntegrationActionsClient {
     base_url: String,
-    api_key: String,
+    auth_core_url: String,
+    service_id: String,
+    service_credential: String,
     http: reqwest::Client,
+}
+
+#[derive(serde::Deserialize)]
+struct PlaneTokenResponse {
+    token: String,
 }
 
 /// A connection as surfaced to the model — the fields relevant to picking one
@@ -172,16 +180,26 @@ impl IntegrationActionsClient {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_INTEGRATION_URL.to_owned());
-        let api_key = std::env::var("INTEGRATION_COREV2_INTERNAL_KEY")
-            .or_else(|_| std::env::var("INTERNAL_API_KEY"))
-            .unwrap_or_default();
+        let auth_core_url = std::env::var("AUTH_CORE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_AUTH_CORE_URL.to_owned());
+        let service_id = std::env::var("INGESTION_SERVICE_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "model-execution".to_owned());
+        let service_credential = std::env::var("INGESTION_SERVICE_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(25))
             .build()
             .ok()?;
         Some(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            api_key,
+            auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
+            service_id,
+            service_credential,
             http,
         })
     }
@@ -193,12 +211,14 @@ impl IntegrationActionsClient {
         if org_id.trim().is_empty() {
             return Err("list_provider_actions requires a run org_id (tenant scope)".to_owned());
         }
+        let token = self
+            .mint_ingestion_token(org_id, "integration:read")
+            .await?;
         let resp = self
             .http
             .get(format!("{}/api/v1/connections", self.base_url))
             .query(&[("organizationId", org_id)])
-            .header("x-internal-api-key", self.api_key.as_str())
-            .header("x-org-id", org_id)
+            .bearer_auth(token)
             .header("accept", "application/json")
             .send()
             .await
@@ -251,16 +271,25 @@ impl IntegrationActionsClient {
             "params": params,
             "body": body,
         });
-        let resp = self
+        let scope = if approval_ref.is_some() {
+            "integration:write"
+        } else {
+            "integration:read"
+        };
+        let token = self.mint_ingestion_token(org_id, scope).await?;
+        let mut outbound = self
             .http
             .post(format!(
                 "{}/api/v1/connections/{}/actions",
                 self.base_url, connection_id
             ))
-            .header("x-internal-api-key", self.api_key.as_str())
-            .header("x-org-id", org_id)
+            .bearer_auth(token)
             .header("content-type", "application/json")
-            .json(&request)
+            .json(&request);
+        if let Some(approval) = approval_ref.filter(|value| !value.trim().is_empty()) {
+            outbound = outbound.header("idempotency-key", approval.trim());
+        }
+        let resp = outbound
             .send()
             .await
             .map_err(|e| format!("integration-corev2 action request failed: {e}"))?;
@@ -286,6 +315,44 @@ impl IntegrationActionsClient {
             ));
         }
         Ok(render_action_result(operation, &value))
+    }
+
+    async fn mint_ingestion_token(&self, org_id: &str, scope: &str) -> Result<String, String> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return Err("integration request blocked: run organization is required".to_owned());
+        }
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/ingestion/internal-token",
+                self.auth_core_url
+            ))
+            .header("x-service-id", &self.service_id)
+            .header("x-service-api-key", &self.service_credential)
+            .json(&serde_json::json!({
+                "orgId": org_id,
+                "scopes": [scope],
+                "reason": format!("execution-core {scope}"),
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("Auth Core token request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!(
+                "Auth Core refused the scoped integration credential ({status})"
+            ));
+        }
+        let token = response
+            .json::<PlaneTokenResponse>()
+            .await
+            .map_err(|error| format!("Auth Core token response was invalid: {error}"))?
+            .token;
+        if token.trim().is_empty() {
+            return Err("Auth Core returned an empty integration credential".to_owned());
+        }
+        Ok(token)
     }
 }
 

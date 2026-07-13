@@ -24,42 +24,42 @@ func TestEngine_Evaluate(t *testing.T) {
 	)
 
 	t.Run("empty capID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, "", validRun, validAgent, validOrg, "")
+		_, err := eng.Evaluate(ctx, "", validRun, validAgent, validOrg, "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("empty runID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, validCap, "", validAgent, validOrg, "")
+		_, err := eng.Evaluate(ctx, validCap, "", validAgent, validOrg, "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("empty agentID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, validCap, validRun, "", validOrg, "")
+		_, err := eng.Evaluate(ctx, validCap, validRun, "", validOrg, "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("empty orgID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, validCap, validRun, validAgent, "", "")
+		_, err := eng.Evaluate(ctx, validCap, validRun, validAgent, "", "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("unknown capability returns ErrCapabilityNotFound", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, "cap.does.not.exist", validRun, validAgent, validOrg, "")
+		_, err := eng.Evaluate(ctx, "cap.does.not.exist", validRun, validAgent, validOrg, "global")
 		if !errors.Is(err, domain.ErrCapabilityNotFound) {
 			t.Fatalf("expected ErrCapabilityNotFound, got %v", err)
 		}
 	})
 
 	t.Run("low-risk capability is allowed with default budget", func(t *testing.T) {
-		res, err := eng.Evaluate(ctx, "cap.memory.search", validRun, validAgent, validOrg, "")
+		res, err := eng.Evaluate(ctx, "cap.policy.round-robin", validRun, validAgent, validOrg, "global")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -75,7 +75,14 @@ func TestEngine_Evaluate(t *testing.T) {
 	})
 
 	t.Run("medium-risk capability is allowed with constrained budget", func(t *testing.T) {
-		res, err := eng.Evaluate(ctx, "cap.browser.open", validRun, validAgent, validOrg, "")
+		capability, err := reg.Get("cap.browser.open", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorized := *capability
+		authorized.Scope = "global"
+		authorized.EnabledForScopes = []string{"global"}
+		res, err := eng.EvaluateCapability(ctx, &authorized, validRun, validAgent, validOrg, "global")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -91,7 +98,14 @@ func TestEngine_Evaluate(t *testing.T) {
 	})
 
 	t.Run("high-risk capability is denied with empty budget", func(t *testing.T) {
-		res, err := eng.Evaluate(ctx, "cap.sandbox.exec", validRun, validAgent, validOrg, "")
+		capability, err := reg.Get("cap.sandbox.exec", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorized := *capability
+		authorized.Scope = "global"
+		authorized.EnabledForScopes = []string{"global"}
+		res, err := eng.EvaluateCapability(ctx, &authorized, validRun, validAgent, validOrg, "global")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -110,10 +124,34 @@ func TestEngine_Evaluate(t *testing.T) {
 	})
 }
 
+func TestEngineEvaluateCapabilityUsesAuthorizedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.NewRegistry()
+	engine := policy.New(reg)
+	authorized, err := reg.Get("cap.policy.round-robin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.EvaluateCapability(
+		context.Background(), authorized, "run-1", "agent-1", "triodelab", "global",
+	)
+	if err != nil {
+		t.Fatalf("EvaluateCapability: %v", err)
+	}
+	if result.Decision != policy.DecisionAllow {
+		t.Fatalf("decision = %+v", result)
+	}
+
+	if _, err := engine.EvaluateCapability(context.Background(), nil, "run-1", "agent-1", "triodelab", ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("nil authorized capability error = %v", err)
+	}
+}
+
 // TestEngine_ScopeEnforcement covers the Phase-3 scope gate: when the caller
-// supplies a non-empty scope, it must be present in the capability's
-// EnabledForScopes list (or the list must contain ScopeWildcard). Empty scope
-// preserves legacy behaviour.
+// supplies a canonical scope, it must be present in the capability's
+// EnabledForScopes list (or the list must contain ScopeWildcard).
 func TestEngine_ScopeEnforcement(t *testing.T) {
 	t.Parallel()
 	reg := registry.NewRegistry()
@@ -121,7 +159,7 @@ func TestEngine_ScopeEnforcement(t *testing.T) {
 	ctx := context.Background()
 
 	const (
-		lowRiskAllowedCap = "cap.memory.search" // seeded with EnabledForScopes=["workspace"]
+		lowRiskAllowedCap = "cap.policy.round-robin" // seeded with EnabledForScopes=["global"]
 	)
 
 	cases := []struct {
@@ -131,10 +169,8 @@ func TestEngine_ScopeEnforcement(t *testing.T) {
 		wantResult string
 		wantReason string
 	}{
-		{"empty scope preserves legacy allow", lowRiskAllowedCap, "", policy.DecisionAllow, "low-risk"},
-		{"matching scope allows", lowRiskAllowedCap, "workspace", policy.DecisionAllow, "low-risk"},
-		{"non-matching scope denies", lowRiskAllowedCap, "global", policy.DecisionDeny, "not enabled for scope"},
-		{"unknown scope denies", lowRiskAllowedCap, "something-random", policy.DecisionDeny, "not enabled for scope"},
+		{"matching scope allows", lowRiskAllowedCap, "global", policy.DecisionAllow, "low-risk"},
+		{"non-matching scope denies", lowRiskAllowedCap, "org", policy.DecisionDeny, "not enabled for scope"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -157,10 +193,10 @@ func TestEngine_ScopeEnforcement(t *testing.T) {
 	}
 }
 
-// TestEngine_ScopeWildcardAllowsAny proves that a capability with "*" in
-// EnabledForScopes accepts any non-empty scope. Registered via a bespoke
+// TestEngine_ScopeWildcardAllowsSupportedScope proves that a capability with
+// "*" in EnabledForScopes accepts a supported invocation scope. Registered via a bespoke
 // Registry instance to avoid coupling to seed data.
-func TestEngine_ScopeWildcardAllowsAny(t *testing.T) {
+func TestEngine_ScopeWildcardAllowsSupportedScope(t *testing.T) {
 	t.Parallel()
 	// cap.skill.summarize seed has EnabledForScopes=["*", "workspace"] if seeded
 	// that way; otherwise test asserts on an existing entry with "*" (none
@@ -184,7 +220,7 @@ func TestEngine_ScopeWildcardAllowsAny(t *testing.T) {
 	}
 	eng := policy.New(reg)
 	ctx := context.Background()
-	res, err := eng.Evaluate(ctx, wildcardCap, "run-1", "agent-1", "org-1", "run")
+	res, err := eng.Evaluate(ctx, wildcardCap, "run-1", "agent-1", "org-1", "global")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

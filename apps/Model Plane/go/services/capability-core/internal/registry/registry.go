@@ -95,6 +95,9 @@ func (r *Registry) Reload() error {
 	}
 	idx := make(map[string]*models.Capability, len(caps))
 	for _, c := range caps {
+		if c == nil || !models.IsSupportedRiskLevel(c.RiskLevel) {
+			return domain.ErrInvalidArgument
+		}
 		idx[c.ID] = c
 	}
 	r.mu.Lock()
@@ -173,6 +176,72 @@ func (r *Registry) List(kindFilter, query, afterID string, limit uint32) ([]*mod
 	return filtered[start:end], hasMore
 }
 
+// ListForOrg returns only capabilities owned by the verified tenant or the
+// explicit global catalog. Tenant entries override a global entry with the
+// same ID so a mixed process-wide registry cannot leak or ambiguously resolve
+// another tenant's capability.
+func (r *Registry) ListForOrg(orgID, kindFilter, query, afterID string, limit uint32) ([]*models.Capability, bool) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, false
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if limit == 0 || limit > 200 {
+		limit = 50
+	}
+
+	selected := make([]*models.Capability, 0, len(r.items))
+	positions := make(map[string]int, len(r.items))
+	for _, capability := range r.items {
+		if !capabilityVisibleToOrg(capability, orgID) {
+			continue
+		}
+		if position, exists := positions[capability.ID]; exists {
+			if capability.OrgID == orgID {
+				selected[position] = capability
+			}
+			continue
+		}
+		positions[capability.ID] = len(selected)
+		selected = append(selected, capability)
+	}
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	filtered := make([]*models.Capability, 0, len(selected))
+	for _, capability := range selected {
+		if !capability.Enabled || (kindFilter != "" && capability.Kind != kindFilter) {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(capability.Name), q) &&
+			!strings.Contains(strings.ToLower(capability.Description), q) {
+			continue
+		}
+		filtered = append(filtered, capability)
+	}
+
+	start := 0
+	if afterID != "" {
+		for index, capability := range filtered {
+			if capability.ID == afterID {
+				start = index + 1
+				break
+			}
+		}
+	}
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + int(limit)
+	hasMore := end < len(filtered)
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[start:end], hasMore
+}
+
 // Get returns a capability by ID, optionally enforcing a version constraint.
 // The constraint syntax is a simple exact match (e.g. "1.0.0").
 func (r *Registry) Get(id, versionConstraint string) (*models.Capability, error) {
@@ -189,6 +258,48 @@ func (r *Registry) Get(id, versionConstraint string) (*models.Capability, error)
 		return nil, domain.ErrVersionMismatch
 	}
 	return c, nil
+}
+
+// GetForOrg resolves a capability only when it belongs to the verified tenant
+// or the explicit global catalog. A tenant-owned entry wins over a global
+// entry with the same ID. Foreign and missing IDs are intentionally
+// indistinguishable.
+func (r *Registry) GetForOrg(id, versionConstraint, orgID string) (*models.Capability, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(orgID) == "" {
+		return nil, domain.ErrInvalidArgument
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.getForOrgLocked(id, versionConstraint, strings.TrimSpace(orgID))
+}
+
+func (r *Registry) getForOrgLocked(id, versionConstraint, orgID string) (*models.Capability, error) {
+	var global *models.Capability
+	for _, capability := range r.items {
+		if capability == nil || capability.ID != id {
+			continue
+		}
+		if capability.OrgID == orgID {
+			if versionConstraint != "" && versionConstraint != capability.Version {
+				return nil, domain.ErrVersionMismatch
+			}
+			return capability, nil
+		}
+		if capability.OrgID == "global" {
+			global = capability
+		}
+	}
+	if global == nil {
+		return nil, domain.ErrCapabilityNotFound
+	}
+	if versionConstraint != "" && versionConstraint != global.Version {
+		return nil, domain.ErrVersionMismatch
+	}
+	return global, nil
+}
+
+func capabilityVisibleToOrg(capability *models.Capability, orgID string) bool {
+	return capability != nil && (capability.OrgID == orgID || capability.OrgID == "global")
 }
 
 // ValidateSkill checks that the requested capability exists and is a skill.
@@ -214,6 +325,41 @@ func (r *Registry) ValidateSkill(id string) (*models.Capability, []string, error
 		errorsOut = append(errorsOut, "skill scope is required")
 	}
 
+	return capability, errorsOut, nil
+}
+
+// ValidateSkillForOrg is the tenant-pinned variant used at authenticated gRPC
+// boundaries.
+func (r *Registry) ValidateSkillForOrg(id, orgID string) (*models.Capability, []string, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(orgID) == "" {
+		return nil, nil, domain.ErrInvalidArgument
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	capability, err := r.getForOrgLocked(id, "", strings.TrimSpace(orgID))
+	if err != nil {
+		return nil, nil, err
+	}
+	return validateSkill(capability)
+}
+
+func validateSkill(capability *models.Capability) (*models.Capability, []string, error) {
+	if capability == nil {
+		return nil, nil, domain.ErrCapabilityNotFound
+	}
+	errorsOut := make([]string, 0)
+	if capability.Kind != models.KindSkill {
+		errorsOut = append(errorsOut, "capability is not a skill")
+	}
+	if capability.Name == "" {
+		errorsOut = append(errorsOut, "skill name is required")
+	}
+	if capability.Version == "" {
+		errorsOut = append(errorsOut, "skill version is required")
+	}
+	if capability.Scope == "" {
+		errorsOut = append(errorsOut, "skill scope is required")
+	}
 	return capability, errorsOut, nil
 }
 
@@ -258,6 +404,60 @@ func (r *Registry) CheckPromotion(id, fromScope, toScope string) (*models.Capabi
 	return capability, checks, nil
 }
 
+// CheckPromotionForOrg performs promotion validation only after tenant-pinned
+// lookup of the skill.
+func (r *Registry) CheckPromotionForOrg(id, fromScope, toScope, orgID string) (*models.Capability, []string, error) {
+	if fromScope == "" || toScope == "" || strings.TrimSpace(orgID) == "" {
+		return nil, nil, domain.ErrInvalidArgument
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	capability, err := r.getForOrgLocked(id, "", strings.TrimSpace(orgID))
+	if err != nil {
+		return nil, nil, err
+	}
+	return checkPromotion(capability, fromScope, toScope)
+}
+
+func checkPromotion(capability *models.Capability, fromScope, toScope string) (*models.Capability, []string, error) {
+	if fromScope == "" || toScope == "" {
+		return nil, nil, domain.ErrInvalidArgument
+	}
+	capability, validationErrors, err := validateSkill(capability)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	checks := make([]string, 0, 5)
+	checks = append(checks, "skill_exists")
+	if len(validationErrors) == 0 {
+		checks = append(checks, "skill_valid")
+	}
+	if capability.Scope == fromScope {
+		checks = append(checks, "source_scope_matches")
+	}
+	if _, ok := validScopes[toScope]; ok {
+		checks = append(checks, "target_scope_valid")
+	}
+	if fromScope != toScope {
+		checks = append(checks, "scope_changes")
+	}
+
+	if len(validationErrors) > 0 {
+		return capability, append(checks, validationErrors...), nil
+	}
+	if capability.Scope != fromScope {
+		return capability, append(checks, "source_scope_mismatch"), nil
+	}
+	if _, ok := validScopes[toScope]; !ok {
+		return capability, append(checks, "target_scope_invalid"), nil
+	}
+	if fromScope == toScope {
+		return capability, append(checks, "target_scope_unchanged"), nil
+	}
+	return capability, checks, nil
+}
+
 // PromoteSkill updates a skill's scope after promotion checks have passed.
 func (r *Registry) PromoteSkill(id, fromScope, toScope string) (*models.Capability, []string, error) {
 	capability, checks, err := r.CheckPromotion(id, fromScope, toScope)
@@ -291,6 +491,49 @@ func (r *Registry) PromoteSkill(id, fromScope, toScope string) (*models.Capabili
 		}
 	}
 
+	checks = append(checks, "registry_updated")
+	return &updated, checks, nil
+}
+
+// PromoteSkillForOrg atomically rechecks ownership and promotion invariants
+// under the registry lock before changing the tenant/global entry. A reload
+// cannot swap in a foreign entry between authorization and mutation.
+func (r *Registry) PromoteSkillForOrg(id, fromScope, toScope, orgID string) (*models.Capability, []string, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, nil, domain.ErrInvalidArgument
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	capability, err := r.getForOrgLocked(id, "", strings.TrimSpace(orgID))
+	if err != nil {
+		return nil, nil, err
+	}
+	capability, checks, err := checkPromotion(capability, fromScope, toScope)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !containsAll(checks,
+		"skill_exists",
+		"skill_valid",
+		"source_scope_matches",
+		"target_scope_valid",
+		"scope_changes",
+	) {
+		return capability, checks, nil
+	}
+
+	updated := *capability
+	updated.Scope = toScope
+	for index, entry := range r.items {
+		if entry == capability {
+			r.items[index] = &updated
+			break
+		}
+	}
+	if indexed := r.index[id]; indexed == capability {
+		r.index[id] = &updated
+	}
 	checks = append(checks, "registry_updated")
 	return &updated, checks, nil
 }

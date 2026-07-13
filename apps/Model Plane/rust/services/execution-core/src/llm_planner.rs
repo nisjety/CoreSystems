@@ -8,8 +8,9 @@
 //!
 //! Real integration: this is a live gRPC call to inference-core (no mock). It
 //! is gated by `QUARRY_BROWSER_AGENT_LLM=1`; when disabled the loop falls back
-//! to the deterministic planner. inference-core's gRPC hop is unauthenticated
-//! (provider API keys live inside that service); the address comes from
+//! to the deterministic planner. inference-core requires an independently
+//! verified, user-bound `aud=inference-core` bearer delegated from ingress;
+//! without it the LLM planner is disabled before any downstream RPC. The address comes from
 //! `INFERENCE_CORE_URL` / `INFERENCE_CORE_ADDR` (default `http://localhost:9092`).
 //!
 //! Cost governance (Phase 5): the planner does NOT pin a concrete model. It
@@ -25,6 +26,7 @@
 
 use mp_contracts::model_plane::v1::inference_core_client::InferenceCoreClient;
 use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+use std::sync::Arc;
 use tonic::transport::Channel;
 
 use crate::browser_agent::{
@@ -76,6 +78,7 @@ fn resolve_planner_model() -> String {
 pub struct LlmPlanner {
     client: InferenceCoreClient<Channel>,
     model: String,
+    inference_bearer: Arc<str>,
 }
 
 impl LlmPlanner {
@@ -83,13 +86,16 @@ impl LlmPlanner {
     /// `None` when disabled or the endpoint URL is unparseable, so the loop can
     /// fall back to the deterministic planner.
     #[must_use]
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env(inference_bearer: Option<&str>) -> Option<Self> {
         let enabled = std::env::var("QUARRY_BROWSER_AGENT_LLM")
             .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
             .unwrap_or(false);
         if !enabled {
             return None;
         }
+        let inference_bearer = inference_bearer
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))?;
         let url = std::env::var("INFERENCE_CORE_URL")
             .or_else(|_| std::env::var("INFERENCE_CORE_ADDR"))
             .unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
@@ -98,6 +104,7 @@ impl LlmPlanner {
         Some(Self {
             client: InferenceCoreClient::new(channel),
             model,
+            inference_bearer: Arc::from(inference_bearer),
         })
     }
 
@@ -147,16 +154,13 @@ impl LlmPlanner {
             ..Default::default()
         };
 
-        // Route through the intent layer's budget guard: inference-core reads
-        // the tenant scope for its cost-core budget check from gRPC metadata
-        // (`x-org-id`), not the request body — so forward the run's org here or
-        // the budget gate degrades to an unenforced "Unknown" posture.
         let mut grpc_request = tonic::Request::new(request);
-        if !config.org_id.trim().is_empty() {
-            if let Ok(value) = tonic::metadata::MetadataValue::try_from(config.org_id.as_str()) {
-                grpc_request.metadata_mut().insert("x-org-id", value);
-            }
-        }
+        grpc_request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", self.inference_bearer)
+                .parse()
+                .map_err(|_| "verified inference credential is not forwardable".to_owned())?,
+        );
         let response = self
             .client
             .clone()

@@ -4,19 +4,24 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/pkg/natsx"
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
+	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
@@ -36,6 +41,17 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	authConfig, err := authConfigFromEnv()
+	if err != nil {
+		slog.Error("capability-core authentication configuration unavailable", "error", err)
+		os.Exit(1)
+	}
+	verifier, err := authctx.NewVerifier(authConfig)
+	if err != nil {
+		slog.Error("capability-core authentication unavailable", "error", err)
+		os.Exit(1)
+	}
+
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		slog.Error("DATABASE_URL required")
@@ -52,18 +68,13 @@ func main() {
 	// Postgres-backed live source merged with static seed.
 	pgSource, err := registry.NewCapabilitiesSource(pool, "")
 	if err != nil {
-		slog.Warn("capabilities source unavailable, falling back to static seed", "error", err)
+		slog.Error("capabilities source unavailable", "error", err)
+		os.Exit(1)
 	}
-
-	var reg *registry.Registry
-	if pgSource != nil {
-		reg, err = registry.NewFromSource(pgSource)
-		if err != nil {
-			slog.Warn("postgres capabilities source load failed, falling back to static seed", "error", err)
-			reg = registry.NewRegistry()
-		}
-	} else {
-		reg = registry.NewRegistry()
+	reg, err := registry.NewFromSource(pgSource)
+	if err != nil {
+		slog.Error("postgres capabilities source load failed; migration 0006 and database health are required", "error", err)
+		os.Exit(1)
 	}
 
 	modelsReg, err := registry.NewModelsRegistry(pool)
@@ -74,21 +85,20 @@ func main() {
 
 	capStore, err := registry.NewCapabilitiesStore(pool)
 	if err != nil {
-		slog.Warn("capabilities store unavailable", "error", err)
+		slog.Error("capabilities store unavailable", "error", err)
+		os.Exit(1)
 	}
 
-	// Durable scope-grant store backs per-(org, agent) capability resolution in
-	// the policy engine. Nil-safe: if construction fails the engine keeps the
-	// static EnabledForScopes semantics.
+	// The durable scope-grant store is the required tenant-org invocation
+	// authority. Construction failure aborts startup above; policy must never
+	// fall back to static EnabledForScopes for an org-scoped decision.
 	scopeStore, err := registry.NewScopeStore(pool)
 	if err != nil {
-		slog.Warn("scope store unavailable; durable scope grants disabled", "error", err)
+		slog.Error("scope store unavailable", "error", err)
+		os.Exit(1)
 	}
 
-	pol := policy.New(reg)
-	if scopeStore != nil {
-		pol = pol.WithScopeResolver(scopeStore)
-	}
+	pol := policy.New(reg).WithScopeResolver(scopeStore)
 
 	// Dial session-core + inference-core ONCE (guarded on their addrs; lazy grpc
 	// clients). Shared by the /commands delegation (/models → inference
@@ -107,13 +117,13 @@ func main() {
 	// capability events are v1-native (no legacy mapping).
 	var recPub publisher.EventPublisher
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		nc, nerr := nats.Connect(natsURL)
+		nc, nerr := nats.Connect(natsURL, natsAuthOptions()...)
 		if nerr != nil {
 			slog.Warn("NATS connect failed; capability reconcile events disabled", "error", nerr)
 		} else {
 			defer nc.Close()
 			recPub = publisher.NewNATSPublisher(natsx.NewPublisher(nc, natsx.ModeV1Only))
-			slog.Info("capability reconcile events enabled", "nats_url", natsURL)
+			slog.Info("capability reconcile events enabled")
 
 			// G7 learning-review trigger: on RUN_COMPLETED, review the session
 			// and persist learned skills. Needs session-core + inference-core;
@@ -126,16 +136,23 @@ func main() {
 	}
 
 	// --- HTTP server on :8085 -----------------------------------------------
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	publicMux := http.NewServeMux()
+	publicMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+	publicMux.HandleFunc("/readyz", func(w http.ResponseWriter, request *http.Request) {
+		readyCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(readyCtx); err != nil {
+			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.Handle("/api/v1/model-plane/implementation-status", roadmap.NewHandler())
+	protectedMux := http.NewServeMux()
+	protectedMux.Handle("/api/v1/model-plane/implementation-status", roadmap.NewHandler())
 
 	// Capability-core product APIs. The scope store (when available) enables
 	// the durable grant/revoke/resolve endpoints and ranked listing.
@@ -144,22 +161,27 @@ func main() {
 		if scopeStore != nil {
 			ch = ch.WithScopeStore(scopeStore)
 		}
-		ch.Register(mux)
+		ch.Register(protectedMux)
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
-	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(mux)
-	api.NewMCPHandler(pool).WithPublisher(recPub).Register(mux)
-	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(mux)
-	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(mux)
-	api.NewMemoryHandler(pool).Register(mux)
-	api.NewTasksHandler(pool).Register(mux)
-	api.NewCronHandler(pool).Register(mux)
+	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewMCPHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewMemoryHandler(pool).Register(protectedMux)
+	api.NewTasksHandler(pool).Register(protectedMux)
+	api.NewCronHandler(pool).Register(protectedMux)
 	// /models delegates to inference-core ListModels, /compact to session-core
 	// CompactNow (nil-safe: unwired → honest "unavailable").
-	commands.NewHandler().WithModels(inferenceClient).WithCompactor(sessionClient).Register(mux)
+	commands.NewHandler().WithModels(inferenceClient).WithCompactor(sessionClient).Register(protectedMux)
+	publicMux.Handle("/", verifier.HTTPMiddleware(authz.AuthorizeHTTP)(protectedMux))
 
-	healthServer := &http.Server{Addr: ":8085", Handler: mux}
+	healthServer := &http.Server{
+		Addr:              ":8085",
+		Handler:           publicMux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		slog.Info("health server listening", "addr", ":8085")
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -174,7 +196,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPC)))
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsReg, pol).WithStore(capStore)
@@ -191,6 +213,30 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+func natsAuthOptions() []nats.Option {
+	token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN"))
+	if token == "" {
+		return nil
+	}
+	return []nats.Option{nats.Token(token)}
+}
+
+func authConfigFromEnv() (authctx.Config, error) {
+	audience := strings.TrimSpace(os.Getenv("CAPABILITY_CORE_AUTH_AUDIENCE"))
+	issuer := strings.TrimSpace(os.Getenv("AUTH_CORE_ISSUER"))
+	jwksURL := strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL"))
+	for name, value := range map[string]string{
+		"CAPABILITY_CORE_AUTH_AUDIENCE": audience,
+		"AUTH_CORE_ISSUER":              issuer,
+		"AUTH_CORE_JWKS_URL":            jwksURL,
+	} {
+		if value == "" {
+			return authctx.Config{}, fmt.Errorf("%s is required", name)
+		}
+	}
+	return authctx.Config{Audiences: []string{audience}, Issuer: issuer, JWKSURL: jwksURL}, nil
 }
 
 // startLearningConsumer wires the G7 learning-review trigger on the shared

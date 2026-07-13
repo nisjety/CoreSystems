@@ -161,7 +161,7 @@ impl NatsAuditPublisher {
     ///
     /// Returns an error if the connection cannot be established.
     pub async fn connect(url: &str) -> Result<Self, async_nats::ConnectError> {
-        let client = async_nats::connect(url).await?;
+        let client = crate::nats_connection::connect(url).await?;
         tracing::info!(url = %url, "session-core audit publisher connected to NATS");
         Ok(Self { client })
     }

@@ -23,7 +23,7 @@ func TestAcquireGrant_P95Latency(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		req := &AcquireGrantRequest{
-			OrgId:      fmt.Sprintf("org-lat-%d", i),
+			OrgId:      "org1",
 			SessionKey: fmt.Sprintf("session-lat-%d", i),
 			Mode:       "cloud",
 		}

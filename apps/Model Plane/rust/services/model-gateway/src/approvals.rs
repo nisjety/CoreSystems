@@ -23,7 +23,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use mp_events::publisher::EventPublisher;
 use mp_ids::new_ulid;
-use tonic::Status;
+use tonic::{Request, Status};
 use tracing::{info, warn};
 
 use mp_contracts::model_plane::v1::{
@@ -162,6 +162,40 @@ pub async fn persist_approval_request(
         })
 }
 
+/// Authenticated durable approval write. `bearer` must already have been
+/// independently verified and bound to the gateway caller as
+/// `aud=session-core`; session-core verifies it again.
+///
+/// # Errors
+/// Returns an authentication, transport, or durable-store status when the
+/// request cannot be recorded.
+pub async fn persist_approval_request_authenticated(
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    approval: &GatewayApproval,
+    bearer: &str,
+) -> Result<Approval, Status> {
+    let response = client
+        .create_approval(authenticated_session_request(
+            to_create_approval_request(approval),
+            bearer,
+        )?)
+        .await
+        .map_err(|error| {
+            warn!(%error, approval_id = %approval.approval_id, "authenticated durable approval persist failed");
+            Status::unavailable("durable approval store unavailable")
+        })?
+        .into_inner();
+    let durable = response
+        .approval
+        .ok_or_else(|| Status::data_loss("durable approval store returned no approval"))?;
+    if durable.id.trim().is_empty() {
+        return Err(Status::data_loss(
+            "durable approval store returned an empty approval id",
+        ));
+    }
+    Ok(durable)
+}
+
 /// Durable-FIRST persist of an approval decision (D-1). On failure this
 /// returns `Status::unavailable` so the decision is not reported as recorded.
 ///
@@ -182,39 +216,113 @@ pub async fn persist_approval_decision(
         })
 }
 
-/// Best-effort resume of the gated run once an approval is **granted**.
+/// Authenticated durable approval decision using a separately verified
+/// session-core audience credential.
+///
+/// # Errors
+/// Returns an authentication, transport, or durable-store status when the
+/// decision cannot be recorded.
+pub async fn persist_approval_decision_authenticated(
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    approval: &GatewayApproval,
+    bearer: &str,
+) -> Result<(), Status> {
+    client
+        .decide_approval(authenticated_session_request(
+            to_decide_approval_request(approval),
+            bearer,
+        )?)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            warn!(%error, approval_id = %approval.approval_id, "authenticated durable approval decision failed");
+            Status::unavailable("durable approval store unavailable")
+        })
+}
+
+fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<Request<T>, Status> {
+    let mut request = Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}")
+            .parse()
+            .map_err(|_| Status::internal("verified session credential is not forwardable"))?,
+    );
+    Ok(request)
+}
+
+fn authenticated_execution_request<T>(
+    value: T,
+    execution_bearer: &str,
+    session_bearer: &str,
+) -> Result<Request<T>, Status> {
+    let mut request = authenticated_session_request(value, execution_bearer)?;
+    request.metadata_mut().insert(
+        "x-session-authorization",
+        format!("Bearer {session_bearer}")
+            .parse()
+            .map_err(|_| Status::internal("verified session credential is not forwardable"))?,
+    );
+    Ok(request)
+}
+
+#[allow(clippy::result_large_err)]
+fn require_execution_resume_acknowledgement(resumed: bool) -> Result<(), Status> {
+    if resumed {
+        Ok(())
+    } else {
+        Err(Status::unavailable(
+            "execution-core did not acknowledge approval resume",
+        ))
+    }
+}
+
+/// Authenticated resume of the gated run once an approval is **granted**.
 ///
 /// The gateway is the approval decision point but does not drive the execution
 /// loop, so it signals execution-core directly to flip the run from
 /// `AwaitingApproval` back to `Running`. session-core separately broadcasts
 /// `RunResumedAfterApproval` for SSE consumers. Denials/timeouts never resume.
-/// Logged on failure, never blocks the caller — the in-memory decision already
-/// succeeded by the time this runs.
+/// A resume transport/authentication failure remains observable to the caller;
+/// an approval is never reported as fully applied while the run silently stays
+/// gated.
+///
+/// # Errors
+/// Returns an authentication, metadata, transport, or execution status when
+/// the authenticated redispatch cannot be completed.
 pub async fn resume_run_if_approved(
     client: &mut ExecutionCoreClient<Channel>,
     approval: &GatewayApproval,
-) {
+    execution_bearer: &str,
+    session_bearer: &str,
+) -> Result<(), Status> {
     if approval.status != STATUS_APPROVED {
-        return;
+        return Ok(());
     }
-    match client
-        .resume_run(ResumeRunRequest {
-            run_id: approval.run_id.clone(),
-            checkpoint_id: String::new(),
-            org_id: approval.org_id.clone(),
-        })
+    let response = client
+        .resume_run(authenticated_execution_request(
+            ResumeRunRequest {
+                run_id: approval.run_id.clone(),
+                checkpoint_id: String::new(),
+                org_id: approval.org_id.clone(),
+            },
+            execution_bearer,
+            session_bearer,
+        )?)
         .await
-    {
-        Ok(resp) => info!(
-            approval_id = %approval.approval_id,
-            run_id = %approval.run_id,
-            resumed = resp.into_inner().resumed,
-            "approval granted → execution-core resume_run"
-        ),
-        Err(e) => {
-            warn!(error = %e, approval_id = %approval.approval_id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)");
-        }
-    }
+        .map_err(|error| {
+            warn!(%error, approval_id = %approval.approval_id, run_id = %approval.run_id, "authenticated resume_run after approval failed");
+            error
+        })?
+        .into_inner();
+    require_execution_resume_acknowledgement(response.resumed)?;
+    info!(
+        approval_id = %approval.approval_id,
+        run_id = %approval.run_id,
+        resumed = response.resumed,
+        "approval granted → authenticated execution-core resume_run"
+    );
+    Ok(())
 }
 
 const STATUS_PENDING: &str = "pending";
@@ -223,10 +331,12 @@ const STATUS_DENIED: &str = "denied";
 const STATUS_EXPIRED: &str = "expired";
 
 const MAX_PENDING_LIST: usize = 500;
+const MAX_CACHED_APPROVALS: usize = 2_000;
 
 #[derive(Clone, Default, Debug)]
 pub struct ApprovalStore {
     inner: Arc<DashMap<String, GatewayApproval>>,
+    owners: Arc<DashMap<String, String>>,
 }
 
 impl ApprovalStore {
@@ -235,6 +345,7 @@ impl ApprovalStore {
         Self::default()
     }
 
+    #[cfg(test)]
     fn create(&self, mut approval: GatewayApproval) -> GatewayApproval {
         approval.approval_id = new_ulid();
         approval.status = STATUS_PENDING.to_string();
@@ -245,8 +356,150 @@ impl ApprovalStore {
         approval
     }
 
+    #[cfg(test)]
+    fn create_for_owner(&self, approval: GatewayApproval, owner_user_id: &str) -> GatewayApproval {
+        let approval = self.create(approval);
+        self.owners
+            .insert(approval.approval_id.clone(), owner_user_id.to_owned());
+        self.enforce_cache_bound();
+        approval
+    }
+
+    fn insert_bounded_for_owner(&self, approval: GatewayApproval, owner_user_id: &str) -> bool {
+        if approval.approval_id.is_empty() || owner_user_id.trim().is_empty() {
+            return false;
+        }
+        let approval_id = approval.approval_id.clone();
+        match self.inner.entry(approval_id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                // A legacy/restart-rehydrated entry has no trustworthy owner.
+                // Only a caller that has just received an authenticated,
+                // user-filtered session-core acknowledgement reaches this
+                // method, so it may bind that previously ownerless cache row.
+                self.owners
+                    .entry(approval_id)
+                    .or_insert_with(|| owner_user_id.to_owned());
+                return false;
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                self.owners.insert(approval_id, owner_user_id.to_owned());
+                entry.insert(approval);
+            }
+        }
+        self.enforce_cache_bound();
+        true
+    }
+
+    fn enforce_cache_bound(&self) {
+        while self.inner.len() > MAX_CACHED_APPROVALS {
+            let oldest = self
+                .inner
+                .iter()
+                .min_by(|left, right| {
+                    left.created_at_unix
+                        .cmp(&right.created_at_unix)
+                        .then(left.approval_id.cmp(&right.approval_id))
+                })
+                .map(|entry| entry.approval_id.clone());
+            let Some(approval_id) = oldest else {
+                break;
+            };
+            self.inner.remove(&approval_id);
+            self.owners.remove(&approval_id);
+        }
+    }
+
+    fn owner_matches(&self, approval_id: &str, owner_user_id: &str) -> bool {
+        !owner_user_id.trim().is_empty()
+            && self
+                .owners
+                .get(approval_id)
+                .is_some_and(|owner| owner.as_str() == owner_user_id)
+    }
+
     /// Resolve a pending approval. Returns the updated record or an
     /// error indicating why the transition was rejected.
+    pub(crate) fn preview_resolution(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<GatewayApproval, ResolveError> {
+        self.preview_resolution_with_transition(approval_id, org_id, approved, decided_by, comment)
+            .map(|outcome| outcome.approval)
+    }
+
+    fn preview_resolution_with_transition(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<ApprovalResolution, ResolveError> {
+        let current = self.inner.get(approval_id).ok_or(ResolveError::NotFound)?;
+        if current.org_id != org_id {
+            return Err(ResolveError::NotFound);
+        }
+        let target_status = if approved {
+            STATUS_APPROVED
+        } else {
+            STATUS_DENIED
+        };
+        if current.status != STATUS_PENDING {
+            if !decided_by.is_empty()
+                && current.status == target_status
+                && current.decided_by == decided_by
+                && current.comment == comment
+            {
+                return Ok(ApprovalResolution {
+                    approval: current.clone(),
+                    transitioned: false,
+                });
+            }
+            return Err(ResolveError::AlreadyResolved(current.status.clone()));
+        }
+        let mut updated = current.clone();
+        target_status.clone_into(&mut updated.status);
+        updated.decided_by = decided_by;
+        updated.comment = comment;
+        updated.resolved_at_unix = now_unix();
+        Ok(ApprovalResolution {
+            approval: updated,
+            transitioned: true,
+        })
+    }
+
+    pub(crate) fn preview_resolution_for_owner(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<GatewayApproval, ResolveError> {
+        if !self.owner_matches(approval_id, &decided_by) {
+            return Err(ResolveError::NotFound);
+        }
+        self.preview_resolution(approval_id, org_id, approved, decided_by, comment)
+    }
+
+    pub(crate) fn preview_resolution_for_owner_with_transition(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<ApprovalResolution, ResolveError> {
+        if !self.owner_matches(approval_id, &decided_by) {
+            return Err(ResolveError::NotFound);
+        }
+        self.preview_resolution_with_transition(approval_id, org_id, approved, decided_by, comment)
+    }
+
     fn resolve(
         &self,
         approval_id: &str,
@@ -255,27 +508,78 @@ impl ApprovalStore {
         decided_by: String,
         comment: String,
     ) -> Result<GatewayApproval, ResolveError> {
+        self.resolve_with_transition(approval_id, org_id, approved, decided_by, comment)
+            .map(|outcome| outcome.approval)
+    }
+
+    fn resolve_with_transition(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<ApprovalResolution, ResolveError> {
+        let updated = self.preview_resolution_with_transition(
+            approval_id,
+            org_id,
+            approved,
+            decided_by,
+            comment,
+        )?;
         let mut entry = self
             .inner
             .get_mut(approval_id)
             .ok_or(ResolveError::NotFound)?;
         if entry.org_id != org_id {
-            // Cross-org access → treat as not-found so we don't leak
-            // existence of foreign approvals.
             return Err(ResolveError::NotFound);
         }
         if entry.status != STATUS_PENDING {
+            if !updated.approval.decided_by.is_empty()
+                && entry.status == updated.approval.status
+                && entry.decided_by == updated.approval.decided_by
+                && entry.comment == updated.approval.comment
+            {
+                return Ok(ApprovalResolution {
+                    approval: entry.clone(),
+                    transitioned: false,
+                });
+            }
             return Err(ResolveError::AlreadyResolved(entry.status.clone()));
         }
-        entry.status = if approved {
-            STATUS_APPROVED.to_string()
-        } else {
-            STATUS_DENIED.to_string()
-        };
-        entry.decided_by = decided_by;
-        entry.comment = comment;
-        entry.resolved_at_unix = now_unix();
-        Ok(entry.clone())
+        *entry = updated.approval.clone();
+        Ok(ApprovalResolution {
+            approval: updated.approval,
+            transitioned: true,
+        })
+    }
+
+    fn resolve_for_owner(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<GatewayApproval, ResolveError> {
+        if !self.owner_matches(approval_id, &decided_by) {
+            return Err(ResolveError::NotFound);
+        }
+        self.resolve(approval_id, org_id, approved, decided_by, comment)
+    }
+
+    fn resolve_for_owner_with_transition(
+        &self,
+        approval_id: &str,
+        org_id: &str,
+        approved: bool,
+        decided_by: String,
+        comment: String,
+    ) -> Result<ApprovalResolution, ResolveError> {
+        if !self.owner_matches(approval_id, &decided_by) {
+            return Err(ResolveError::NotFound);
+        }
+        self.resolve_with_transition(approval_id, org_id, approved, decided_by, comment)
     }
 
     fn list_pending(&self, org_id: &str, run_id: &str) -> Vec<GatewayApproval> {
@@ -296,6 +600,18 @@ impl ApprovalStore {
         });
         out.truncate(MAX_PENDING_LIST);
         out
+    }
+
+    fn list_pending_for_owner(
+        &self,
+        org_id: &str,
+        owner_user_id: &str,
+        run_id: &str,
+    ) -> Vec<GatewayApproval> {
+        self.list_pending(org_id, run_id)
+            .into_iter()
+            .filter(|approval| self.owner_matches(&approval.approval_id, owner_user_id))
+            .collect()
     }
 
     /// Find an existing PENDING approval for the same `(org_id, run_id,
@@ -319,6 +635,17 @@ impl ApprovalStore {
             .map(|a| a.value().clone())
     }
 
+    fn find_pending_by_action_for_owner(
+        &self,
+        org_id: &str,
+        owner_user_id: &str,
+        run_id: &str,
+        action_id: &str,
+    ) -> Option<GatewayApproval> {
+        self.find_pending_by_action(org_id, run_id, action_id)
+            .filter(|approval| self.owner_matches(&approval.approval_id, owner_user_id))
+    }
+
     /// Insert a pre-built approval, preserving its existing `approval_id` and
     /// timestamps (does NOT mint a new id). Used by `rehydrate_pending` to warm
     /// the cache from the durable store on boot. An entry already present for
@@ -331,6 +658,11 @@ impl ApprovalStore {
         self.inner
             .entry(approval.approval_id.clone())
             .or_insert(approval);
+        self.enforce_cache_bound();
+    }
+
+    fn insert_existing_for_owner(&self, approval: GatewayApproval, owner_user_id: &str) {
+        let _ = self.insert_bounded_for_owner(approval, owner_user_id);
     }
 
     /// Number of cached approvals. Test/diagnostic helper.
@@ -341,36 +673,86 @@ impl ApprovalStore {
 }
 
 #[derive(Debug)]
-enum ResolveError {
+pub(crate) enum ResolveError {
     NotFound,
     AlreadyResolved(String),
 }
 
-/// Creates a pending approval for a gated action and emits a lifecycle event.
-///
-/// # Errors
-///
-/// Returns `Status::invalid_argument` if `req.run_id` or `req.action_id` is empty.
-pub async fn handle_request_approval<P: EventPublisher>(
+#[derive(Debug)]
+pub(crate) struct ApprovalResolution {
+    pub(crate) approval: GatewayApproval,
+    pub(crate) transitioned: bool,
+}
+
+/// Require proof that this request created the one local transition whose
+/// execution delivery is about to be attempted. An already-granted cache row
+/// has no durable delivery receipt, so treating it as success would hide a
+/// prior resume failure. It must remain explicitly retryable/unavailable until
+/// a durable outbox or delivery identifier exists.
+pub(crate) fn require_fresh_approval_delivery(transitioned: bool) -> Result<(), Status> {
+    if transitioned {
+        return Ok(());
+    }
+    Err(Status::unavailable(
+        "approval is granted but execution delivery is unknown",
+    ))
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedApproval {
+    request_id: String,
+    approval: GatewayApproval,
+}
+
+impl PreparedApproval {
+    pub(crate) fn approval(&self) -> &GatewayApproval {
+        &self.approval
+    }
+
+    pub(crate) fn align_with_durable(mut self, durable: &Approval) -> Result<Self, Status> {
+        if durable.id.trim().is_empty() || durable.run_id != self.approval.run_id {
+            return Err(Status::data_loss(
+                "durable approval identity did not match the prepared request",
+            ));
+        }
+        self.approval.approval_id.clone_from(&durable.id);
+        Ok(self)
+    }
+}
+
+/// Build a pending approval without mutating the cache or publishing an event.
+/// The caller must first persist it through session-core, which independently
+/// validates run ownership, and only then call `commit_persisted_approval`.
+pub(crate) fn prepare_request_approval(
     store: &ApprovalStore,
-    publisher: &P,
     req: RequestApprovalRequest,
-) -> Result<RequestApprovalResponse, Status> {
+    owner_user_id: &str,
+) -> Result<PreparedApproval, Status> {
     if req.run_id.is_empty() {
         return Err(Status::invalid_argument("run_id is required"));
     }
     if req.action_id.is_empty() {
         return Err(Status::invalid_argument("action_id is required"));
     }
+    if owner_user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a verified user must own an approval request",
+        ));
+    }
     // Idempotency (D-1): if a pending approval already exists for this exact
-    // (org, run, action), return it instead of minting a duplicate. The caller
+    // (org, user, run, action), return it instead of minting a duplicate. The caller
     // (grpc.rs) re-persists it durably; the durable store collapses the retry
-    // via its (org_id, idempotency_key) ON CONFLICT guard, so this stays a
+    // via its (org_id, user_id, idempotency_key) ON CONFLICT guard, so this stays a
     // no-op of record rather than a second gate.
-    if let Some(existing) = store.find_pending_by_action(&req.org_id, &req.run_id, &req.action_id) {
-        return Ok(RequestApprovalResponse {
+    if let Some(existing) = store.find_pending_by_action_for_owner(
+        &req.org_id,
+        owner_user_id,
+        &req.run_id,
+        &req.action_id,
+    ) {
+        return Ok(PreparedApproval {
             request_id: req.request_id,
-            approval: Some(existing),
+            approval: existing,
         });
     }
 
@@ -380,8 +762,8 @@ pub async fn handle_request_approval<P: EventPublisher>(
         req.kind.clone()
     };
 
-    let approval = store.create(GatewayApproval {
-        approval_id: String::new(), // assigned in `create`
+    let approval = GatewayApproval {
+        approval_id: new_ulid(),
         org_id: req.org_id.clone(),
         run_id: req.run_id.clone(),
         session_id: req.session_id.clone(),
@@ -392,41 +774,69 @@ pub async fn handle_request_approval<P: EventPublisher>(
         status: STATUS_PENDING.to_string(),
         decided_by: String::new(),
         comment: String::new(),
-        created_at_unix: 0,
+        created_at_unix: now_unix(),
         resolved_at_unix: 0,
-    });
+    };
 
+    Ok(PreparedApproval {
+        request_id: req.request_id,
+        approval,
+    })
+}
+
+/// Commit a session-core-validated approval into the bounded, owner-scoped
+/// cache and publish its lifecycle event. Duplicate durable retries converge
+/// on the same approval id and therefore do not publish twice.
+pub(crate) async fn commit_persisted_approval<P: EventPublisher>(
+    store: &ApprovalStore,
+    publisher: &P,
+    prepared: PreparedApproval,
+    owner_user_id: &str,
+) -> Result<RequestApprovalResponse, Status> {
+    if !store.insert_bounded_for_owner(prepared.approval.clone(), owner_user_id) {
+        return Ok(RequestApprovalResponse {
+            request_id: prepared.request_id,
+            approval: Some(prepared.approval),
+        });
+    }
     publish_event(
         publisher,
         "agents.approval.requested",
         "APPROVAL_REQUESTED",
-        &req.request_id,
-        &approval,
+        &prepared.request_id,
+        &prepared.approval,
     )
     .await;
 
     Ok(RequestApprovalResponse {
-        request_id: req.request_id,
-        approval: Some(approval),
+        request_id: prepared.request_id,
+        approval: Some(prepared.approval),
     })
 }
 
-/// Approves a pending approval and emits a lifecycle event.
+/// Result of a local approval resolution. `transitioned` is true exactly once
+/// and is the only signal that permits the caller to resume execution.
+pub(crate) struct ApprovalDecisionOutcome {
+    pub(crate) response: ApproveApprovalResponse,
+    pub(crate) transitioned: bool,
+}
+
+/// Approves a pending approval and emits a lifecycle event exactly once.
 ///
 /// # Errors
 ///
 /// Returns `Status::invalid_argument` if `req.approval_id` is empty, `Status::not_found`
 /// if it is unknown, or `Status::failed_precondition` if it was already resolved.
-pub async fn handle_approve_approval<P: EventPublisher>(
+pub(crate) async fn handle_approve_approval<P: EventPublisher>(
     store: &ApprovalStore,
     publisher: &P,
     req: ApproveApprovalRequest,
-) -> Result<ApproveApprovalResponse, Status> {
+) -> Result<ApprovalDecisionOutcome, Status> {
     if req.approval_id.is_empty() {
         return Err(Status::invalid_argument("approval_id is required"));
     }
-    let updated = store
-        .resolve(
+    let resolution = store
+        .resolve_for_owner_with_transition(
             &req.approval_id,
             &req.org_id,
             true,
@@ -434,17 +844,22 @@ pub async fn handle_approve_approval<P: EventPublisher>(
             req.comment,
         )
         .map_err(resolve_err_to_status)?;
-    publish_event(
-        publisher,
-        "agents.approval.resolved",
-        "APPROVAL_APPROVED",
-        &req.request_id,
-        &updated,
-    )
-    .await;
-    Ok(ApproveApprovalResponse {
-        request_id: req.request_id,
-        approval: Some(updated),
+    if resolution.transitioned {
+        publish_event(
+            publisher,
+            "agents.approval.resolved",
+            "APPROVAL_APPROVED",
+            &req.request_id,
+            &resolution.approval,
+        )
+        .await;
+    }
+    Ok(ApprovalDecisionOutcome {
+        response: ApproveApprovalResponse {
+            request_id: req.request_id,
+            approval: Some(resolution.approval),
+        },
+        transitioned: resolution.transitioned,
     })
 }
 
@@ -463,7 +878,7 @@ pub async fn handle_deny_approval<P: EventPublisher>(
         return Err(Status::invalid_argument("approval_id is required"));
     }
     let updated = store
-        .resolve(
+        .resolve_for_owner(
             &req.approval_id,
             &req.org_id,
             false,
@@ -502,13 +917,46 @@ pub async fn handle_list_pending_approvals(
     client: &mut OrchestrationCoreServiceClient<Channel>,
     req: ListPendingApprovalsRequest,
 ) -> Result<ListPendingApprovalsResponse, Status> {
+    handle_list_pending_approvals_inner(store, client, req, None).await
+}
+
+/// Authenticated durable read-through using a boundary-verified
+/// `aud=session-core` credential.
+///
+/// # Errors
+/// Returns an authentication, validation, or durable-store status when the
+/// scoped read cannot be completed.
+pub async fn handle_list_pending_approvals_authenticated(
+    store: &ApprovalStore,
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    req: ListPendingApprovalsRequest,
+    bearer: &str,
+    owner_user_id: &str,
+) -> Result<ListPendingApprovalsResponse, Status> {
+    if owner_user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a verified user must list pending approvals",
+        ));
+    }
+    handle_list_pending_approvals_inner(store, client, req, Some((bearer, owner_user_id))).await
+}
+
+async fn handle_list_pending_approvals_inner(
+    store: &ApprovalStore,
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    req: ListPendingApprovalsRequest,
+    authenticated: Option<(&str, &str)>,
+) -> Result<ListPendingApprovalsResponse, Status> {
     if req.org_id.is_empty() {
         return Err(Status::invalid_argument("org_id is required"));
     }
 
     // Start from the warm in-memory cache, keyed by approval_id for dedupe.
-    let mut by_id: std::collections::HashMap<String, GatewayApproval> = store
-        .list_pending(&req.org_id, &req.run_id)
+    let cached = authenticated.map_or_else(
+        || store.list_pending(&req.org_id, &req.run_id),
+        |(_, owner_user_id)| store.list_pending_for_owner(&req.org_id, owner_user_id, &req.run_id),
+    );
+    let mut by_id: std::collections::HashMap<String, GatewayApproval> = cached
         .into_iter()
         .map(|a| (a.approval_id.clone(), a))
         .collect();
@@ -516,12 +964,17 @@ pub async fn handle_list_pending_approvals(
     // Merge a fresh durable read-through, org-scoped (IDOR-clean). The in-memory
     // copy wins on conflict — it carries gateway-only fields (action_id,
     // session_id) the durable record does not.
-    match client
-        .list_pending_approvals(OrgPendingApprovalsRequest {
-            org_id: req.org_id.clone(),
-        })
-        .await
-    {
+    let durable_request = OrgPendingApprovalsRequest {
+        org_id: req.org_id.clone(),
+    };
+    let durable = if let Some((bearer, _)) = authenticated {
+        client
+            .list_pending_approvals(authenticated_session_request(durable_request, bearer)?)
+            .await
+    } else {
+        client.list_pending_approvals(durable_request).await
+    };
+    match durable {
         Ok(resp) => {
             for proto in resp.into_inner().approvals {
                 let gw = gateway_approval_from_proto(&proto);
@@ -535,6 +988,9 @@ pub async fn handle_list_pending_approvals(
                 }
                 if gw.status != STATUS_PENDING {
                     continue;
+                }
+                if let Some((_, owner_user_id)) = authenticated {
+                    store.insert_existing_for_owner(gw.clone(), owner_user_id);
                 }
                 by_id.entry(gw.approval_id.clone()).or_insert(gw);
             }
@@ -558,21 +1014,24 @@ pub async fn handle_list_pending_approvals(
     })
 }
 
-/// Rehydrate the in-memory `ApprovalStore` from session-core's durable store on
-/// boot (D-1). Calls `ListPendingApprovals{org_id:""}` once (the internal-only
-/// all-orgs variant) and inserts each pending durable approval into the cache
-/// so a process restart never silently drops a pending HITL gate. Best-effort:
-/// a session-core outage logs and leaves the cache empty rather than crashing
-/// boot — the durable store remains the path of record either way.
+/// Rehydrate one organization's in-memory approval view from session-core.
+/// This helper deliberately has no all-tenant mode; callers must supply a
+/// validated tenant and session-core must independently pin it to identity.
 ///
 /// Returns the number of approvals rehydrated (0 on any failure).
-pub async fn rehydrate_pending(
+pub async fn rehydrate_pending_for_org(
     store: &ApprovalStore,
     client: &mut OrchestrationCoreServiceClient<Channel>,
+    org_id: &str,
 ) -> usize {
+    let org_id = org_id.trim();
+    if org_id.is_empty() {
+        warn!("pending-approval rehydrate rejected without tenant scope");
+        return 0;
+    }
     match client
         .list_pending_approvals(OrgPendingApprovalsRequest {
-            org_id: String::new(), // internal-only: all orgs, for boot rehydrate
+            org_id: org_id.to_owned(),
         })
         .await
     {
@@ -580,7 +1039,8 @@ pub async fn rehydrate_pending(
             let mut n = 0usize;
             for proto in resp.into_inner().approvals {
                 let gw = gateway_approval_from_proto(&proto);
-                if gw.status == STATUS_PENDING && !gw.approval_id.is_empty() {
+                if gw.org_id == org_id && gw.status == STATUS_PENDING && !gw.approval_id.is_empty()
+                {
                     store.insert_existing(gw);
                     n += 1;
                 }
@@ -637,7 +1097,7 @@ async fn publish_event<P: EventPublisher>(
     }
 }
 
-fn resolve_err_to_status(err: ResolveError) -> Status {
+pub(crate) fn resolve_err_to_status(err: ResolveError) -> Status {
     match err {
         ResolveError::NotFound => Status::not_found("approval not found"),
         ResolveError::AlreadyResolved(s) => {
@@ -704,6 +1164,167 @@ mod tests {
         assert_eq!(r.decided_by, "alice");
         assert_eq!(r.comment, "looks good");
         assert!(r.resolved_at_unix > 0);
+    }
+
+    #[test]
+    fn identical_approval_replay_is_not_a_new_resume_transition() {
+        let store = ApprovalStore::new();
+        let pending = store.create_for_owner(
+            GatewayApproval {
+                org_id: "org1".into(),
+                run_id: "run1".into(),
+                ..Default::default()
+            },
+            "alice",
+        );
+
+        let first = store
+            .resolve_for_owner_with_transition(
+                &pending.approval_id,
+                "org1",
+                true,
+                "alice".into(),
+                "approved once".into(),
+            )
+            .expect("first approval decision");
+        assert!(
+            first.transitioned,
+            "the first decision must resume exactly once"
+        );
+
+        let replay = store
+            .resolve_for_owner_with_transition(
+                &pending.approval_id,
+                "org1",
+                true,
+                "alice".into(),
+                "approved once".into(),
+            )
+            .expect("identical retry is idempotent");
+        assert!(
+            !replay.transitioned,
+            "an identical retry must not resume again"
+        );
+        assert_eq!(replay.approval.status, STATUS_APPROVED);
+    }
+
+    #[tokio::test]
+    async fn identical_approval_replay_does_not_republish_resolution() {
+        let store = ApprovalStore::new();
+        let pending = store.create_for_owner(
+            GatewayApproval {
+                org_id: "org1".into(),
+                run_id: "run1".into(),
+                ..Default::default()
+            },
+            "alice",
+        );
+        let publisher = mp_events::publisher::InMemoryPublisher::new();
+        let request = || ApproveApprovalRequest {
+            request_id: "request1".into(),
+            approval_id: pending.approval_id.clone(),
+            org_id: "org1".into(),
+            decided_by: "alice".into(),
+            comment: "approved once".into(),
+        };
+
+        let first = handle_approve_approval(&store, &publisher, request())
+            .await
+            .expect("first approval decision");
+        assert!(first.transitioned);
+        assert_eq!(publisher.drain().len(), 1);
+
+        let replay = handle_approve_approval(&store, &publisher, request())
+            .await
+            .expect("identical retry");
+        assert!(!replay.transitioned);
+        assert!(publisher.drain().is_empty());
+    }
+
+    #[test]
+    fn granted_retry_after_unknown_resume_delivery_fails_closed() {
+        let store = ApprovalStore::new();
+        let pending = store.create_for_owner(
+            GatewayApproval {
+                org_id: "org1".into(),
+                run_id: "run1".into(),
+                ..Default::default()
+            },
+            "alice",
+        );
+        store
+            .resolve_for_owner_with_transition(
+                &pending.approval_id,
+                "org1",
+                true,
+                "alice".into(),
+                "approved once".into(),
+            )
+            .expect("durable decision succeeded before resume delivery failed");
+
+        let retry = store
+            .preview_resolution_for_owner_with_transition(
+                &pending.approval_id,
+                "org1",
+                true,
+                "alice".into(),
+                "approved once".into(),
+            )
+            .expect("identical retry is recognized");
+        let error = require_fresh_approval_delivery(retry.transitioned)
+            .expect_err("unknown execution delivery must not return success");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn preview_resolution_does_not_mutate_the_pending_store() {
+        let store = ApprovalStore::new();
+        let pending = store.create(GatewayApproval {
+            org_id: "org1".into(),
+            run_id: "run1".into(),
+            ..Default::default()
+        });
+
+        let preview = store
+            .preview_resolution(
+                &pending.approval_id,
+                "org1",
+                true,
+                "user1".into(),
+                "approved".into(),
+            )
+            .expect("preview pending decision");
+        assert_eq!(preview.status, STATUS_APPROVED);
+        assert_eq!(store.list_pending("org1", "run1").len(), 1);
+    }
+
+    #[test]
+    fn exact_authenticated_decision_retry_is_idempotent() {
+        let store = ApprovalStore::new();
+        let pending = store.create(GatewayApproval {
+            org_id: "org1".into(),
+            run_id: "run1".into(),
+            ..Default::default()
+        });
+        let first = store
+            .resolve(
+                &pending.approval_id,
+                "org1",
+                true,
+                "user1".into(),
+                "approved".into(),
+            )
+            .expect("first decision");
+        let retry = store
+            .preview_resolution(
+                &pending.approval_id,
+                "org1",
+                true,
+                "user1".into(),
+                "approved".into(),
+            )
+            .expect("same authenticated decision retry");
+        assert_eq!(retry, first);
     }
 
     #[test]
@@ -834,6 +1455,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resume_request_uses_execution_ingress_and_separate_session_delegation() {
+        let request = authenticated_execution_request(
+            ResumeRunRequest::default(),
+            "execution-core-token",
+            "session-core-token",
+        )
+        .expect("verified credentials must be forwardable");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer execution-core-token")
+        );
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-session-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer session-core-token")
+        );
+    }
+
+    #[test]
+    fn execution_resume_false_acknowledgement_fails_closed() {
+        let error = require_execution_resume_acknowledgement(false)
+            .expect_err("execution-core false acknowledgement must fail");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(require_execution_resume_acknowledgement(true).is_ok());
+    }
+
     // ---------------------------------------------------------------------
     // D-1 (Phase 3 PR-4) — durable-first + restart-survival.
     // ---------------------------------------------------------------------
@@ -889,15 +1543,14 @@ mod tests {
         assert_eq!(gateway_approval_from_proto(&timed).status, STATUS_EXPIRED);
     }
 
-    /// (3) RESTART-SURVIVAL: a pending approval persisted durably is recovered
-    /// by `rehydrate_pending`-equivalent insertion into a FRESH `ApprovalStore`
+    /// (3) RESTART-SURVIVAL: pending approvals persisted durably are recovered
+    /// by tenant-scoped read-through insertion into a FRESH `ApprovalStore`
     /// (the kill-mid-pending case). Proves the cache reconstructs from the
     /// durable path of record after a process restart — no in-memory state was
     /// carried across the "restart".
     #[test]
     fn rehydrate_recovers_pending_approval_into_fresh_store() {
-        // Durable store holds two pending approvals across two orgs (the
-        // all-orgs boot-rehydrate view ListPendingApprovals{org_id:""}).
+        // Simulate results from two independently authorized tenant reads.
         let durable = vec![
             durable_pending("appr_orgA_1", "orgA", "run_A"),
             durable_pending("appr_orgB_1", "orgB", "run_B"),
@@ -1015,18 +1668,134 @@ mod tests {
         let store = ApprovalStore::new();
         let publisher = mp_events::publisher::InMemoryPublisher::new();
 
-        let first = handle_request_approval(&store, &publisher, make_req("run_1", "act_1"))
-            .await
-            .unwrap()
-            .approval
-            .unwrap();
-        let second = handle_request_approval(&store, &publisher, make_req("run_1", "act_1"))
-            .await
-            .unwrap()
-            .approval
-            .unwrap();
+        let first = commit_persisted_approval(
+            &store,
+            &publisher,
+            prepare_request_approval(&store, make_req("run_1", "act_1"), "user-a").unwrap(),
+            "user-a",
+        )
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
+        let second = commit_persisted_approval(
+            &store,
+            &publisher,
+            prepare_request_approval(&store, make_req("run_1", "act_1"), "user-a").unwrap(),
+            "user-a",
+        )
+        .await
+        .unwrap()
+        .approval
+        .unwrap();
 
         assert_eq!(first.approval_id, second.approval_id, "no duplicate minted");
-        assert_eq!(store.list_pending("org1", "").len(), 1);
+        assert_eq!(store.list_pending_for_owner("org1", "user-a", "").len(), 1);
+    }
+
+    #[test]
+    fn same_org_cache_never_exposes_another_users_pending_approval() {
+        let store = ApprovalStore::new();
+        store.create_for_owner(
+            GatewayApproval {
+                org_id: "org1".into(),
+                run_id: "run_user_a".into(),
+                ..Default::default()
+            },
+            "user-a",
+        );
+
+        assert_eq!(store.list_pending_for_owner("org1", "user-a", "").len(), 1);
+        assert!(store
+            .list_pending_for_owner("org1", "user-b", "")
+            .is_empty());
+    }
+
+    #[test]
+    fn same_org_user_cannot_preview_another_users_decision() {
+        let store = ApprovalStore::new();
+        let approval = store.create_for_owner(
+            GatewayApproval {
+                org_id: "org1".into(),
+                run_id: "run_user_a".into(),
+                ..Default::default()
+            },
+            "user-a",
+        );
+        let error = store
+            .preview_resolution_for_owner(
+                &approval.approval_id,
+                "org1",
+                true,
+                "user-b".into(),
+                String::new(),
+            )
+            .expect_err("same-org non-owner must not decide");
+        assert!(matches!(error, ResolveError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn durable_read_failure_serves_only_the_authenticated_users_cache() {
+        let store = ApprovalStore::new();
+        for (owner, run_id) in [("user-a", "run-a"), ("user-b", "run-b")] {
+            store.create_for_owner(
+                GatewayApproval {
+                    org_id: "org1".into(),
+                    run_id: run_id.into(),
+                    ..Default::default()
+                },
+                owner,
+            );
+        }
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut client = OrchestrationCoreServiceClient::new(channel);
+        let response = handle_list_pending_approvals_authenticated(
+            &store,
+            &mut client,
+            ListPendingApprovalsRequest {
+                org_id: "org1".into(),
+                ..Default::default()
+            },
+            "signed-session-token",
+            "user-b",
+        )
+        .await
+        .expect("cache-only degradation remains available");
+        assert_eq!(response.approvals.len(), 1);
+        assert_eq!(response.approvals[0].run_id, "run-b");
+    }
+
+    #[test]
+    fn approval_cache_is_bounded_and_owner_index_is_evicted_with_entries() {
+        let store = ApprovalStore::new();
+        for index in 0..=MAX_CACHED_APPROVALS {
+            store.create_for_owner(
+                GatewayApproval {
+                    org_id: "org1".into(),
+                    run_id: format!("run_{index}"),
+                    ..Default::default()
+                },
+                "user-a",
+            );
+        }
+        assert_eq!(store.inner.len(), MAX_CACHED_APPROVALS);
+        assert_eq!(store.owners.len(), MAX_CACHED_APPROVALS);
+    }
+
+    #[tokio::test]
+    async fn prepared_request_does_not_touch_cache_or_publish_before_commit() {
+        let store = ApprovalStore::new();
+        let publisher = mp_events::publisher::InMemoryPublisher::new();
+        let prepared = prepare_request_approval(&store, make_req("run_1", "act_1"), "user-a")
+            .expect("valid request");
+
+        assert_eq!(store.len(), 0);
+        assert!(publisher.drain().is_empty());
+
+        commit_persisted_approval(&store, &publisher, prepared, "user-a")
+            .await
+            .expect("commit durable result into bounded cache");
+        assert_eq!(store.len(), 1);
+        assert_eq!(publisher.drain().len(), 1);
     }
 }

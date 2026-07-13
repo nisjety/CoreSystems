@@ -160,6 +160,12 @@ func (r *ModelsRegistry) GetByName(ctx context.Context, orgID uuid.UUID, provide
 // GetByCapabilityID parses a capability id of the form "cap.model.<provider>.<name>"
 // and returns the matching global (org_id IS NULL) model.
 func (r *ModelsRegistry) GetByCapabilityID(ctx context.Context, id string) (*Model, error) {
+	return r.GetByCapabilityIDForOrg(ctx, id, "")
+}
+
+// GetByCapabilityIDForOrg resolves a tenant-owned model first, then the global
+// fallback. An invalid or empty org identifier can only resolve global rows.
+func (r *ModelsRegistry) GetByCapabilityIDForOrg(ctx context.Context, id, orgID string) (*Model, error) {
 	const prefix = "cap.model."
 	if !strings.HasPrefix(id, prefix) {
 		return nil, domain.ErrCapabilityNotFound
@@ -169,7 +175,17 @@ func (r *ModelsRegistry) GetByCapabilityID(ctx context.Context, id string) (*Mod
 	if dot <= 0 || dot == len(rest)-1 {
 		return nil, domain.ErrInvalidArgument
 	}
-	return r.GetByName(ctx, uuid.Nil, rest[:dot], rest[dot+1:])
+	provider, name := rest[:dot], rest[dot+1:]
+	if parsedOrgID, err := uuid.Parse(orgID); err == nil && parsedOrgID != uuid.Nil {
+		model, getErr := r.GetByName(ctx, parsedOrgID, provider, name)
+		if getErr == nil {
+			return model, nil
+		}
+		if !errors.Is(getErr, domain.ErrCapabilityNotFound) {
+			return nil, getErr
+		}
+	}
+	return r.GetByName(ctx, uuid.Nil, provider, name)
 }
 
 // List returns all non-deleted models matching the filter. Sorted by
@@ -225,6 +241,31 @@ func (r *ModelsRegistry) ListAsCapabilities(ctx context.Context, f ModelsFilter)
 	return out, nil
 }
 
+// ListAsCapabilitiesForOrg returns only the verified tenant's models plus
+// global fallbacks. Invalid/empty tenant identifiers receive global models.
+func (r *ModelsRegistry) ListAsCapabilitiesForOrg(ctx context.Context, orgID string) ([]*models.Capability, error) {
+	query := `SELECT ` + modelColumns + ` FROM models WHERE deleted_at IS NULL AND enabled = TRUE AND org_id IS NULL ORDER BY provider, name`
+	args := []any{}
+	if parsedOrgID, err := uuid.Parse(orgID); err == nil && parsedOrgID != uuid.Nil {
+		query = `SELECT ` + modelColumns + ` FROM models WHERE deleted_at IS NULL AND enabled = TRUE AND (org_id IS NULL OR org_id = $1) ORDER BY provider, name`
+		args = append(args, parsedOrgID)
+	}
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*models.Capability, 0)
+	for rows.Next() {
+		model, scanErr := scanModel(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, ToCapability(model))
+	}
+	return out, rows.Err()
+}
+
 // Upsert inserts a new model or updates an existing one keyed by
 // (org_id, provider, name). config_json must be valid JSON; pass `nil` for an
 // empty object.
@@ -243,6 +284,9 @@ func (r *ModelsRegistry) Upsert(ctx context.Context, m *Model) (*Model, error) {
 	}
 	if m.RiskLevel == "" {
 		m.RiskLevel = models.RiskLow
+	}
+	if !models.IsSupportedRiskLevel(m.RiskLevel) {
+		return nil, domain.ErrInvalidArgument
 	}
 	cfg := m.ConfigJSON
 	if len(cfg) == 0 {

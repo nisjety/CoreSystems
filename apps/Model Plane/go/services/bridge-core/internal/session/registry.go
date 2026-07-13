@@ -89,33 +89,34 @@ func (r *Registry) Register(orgID, userID, channel string) (*Session, error) {
 	}
 
 	r.mu.Lock()
-	r.sessions[id] = s
+	r.sessions[id] = clone(s)
 	r.mu.Unlock()
 
-	return s, nil
+	return clone(s), nil
 }
 
-// Get retrieves a session by ID.
-func (r *Registry) Get(id string) (*Session, error) {
+// GetScoped retrieves a session only inside the verified organization and,
+// when ownerID is non-empty, only for the owning user.
+func (r *Registry) GetScoped(id, orgID, ownerID string) (*Session, error) {
 	r.mu.RLock()
 	s, ok := r.sessions[id]
 	r.mu.RUnlock()
-	if !ok {
+	if !ok || s.OrgID != orgID || (ownerID != "" && s.UserID != ownerID) {
 		return nil, ErrSessionNotFound
 	}
-	return s, nil
+	return clone(s), nil
 }
 
-// List returns all sessions belonging to the given org. Closed sessions are
-// included so callers can observe full lifecycle history.
-func (r *Registry) List(orgID string) []*Session {
+// ListScoped returns sessions inside the verified identity scope. Closed
+// sessions are included so callers can observe full lifecycle history.
+func (r *Registry) ListScoped(orgID, ownerID string) []*Session {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var result []*Session
 	for _, s := range r.sessions {
-		if s.OrgID == orgID {
-			result = append(result, s)
+		if s.OrgID == orgID && (ownerID == "" || s.UserID == ownerID) {
+			result = append(result, clone(s))
 		}
 	}
 	return result
@@ -123,38 +124,47 @@ func (r *Registry) List(orgID string) []*Session {
 
 // UpdateActivity bumps the session's LastActivityAt timestamp and resets its
 // status to active. Returns an error if the session is closed or not found.
-func (r *Registry) UpdateActivity(id string) error {
+func (r *Registry) UpdateActivityScoped(id, orgID, ownerID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	s, ok := r.sessions[id]
-	if !ok {
+	if !ok || s.OrgID != orgID || (ownerID != "" && s.UserID != ownerID) {
 		return ErrSessionNotFound
 	}
 	if s.Status == StatusClosed {
 		return ErrSessionClosed
 	}
-	s.LastActivityAt = time.Now().UTC()
-	s.Status = StatusActive
+	updated := clone(s)
+	updated.LastActivityAt = time.Now().UTC()
+	updated.Status = StatusActive
+	r.sessions[id] = updated
 	return nil
 }
 
 // Close marks a session as closed. Returns an error if the session does not
 // exist or is already closed.
-func (r *Registry) Close(id string) error {
+func (r *Registry) CloseScoped(id, orgID, ownerID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	s, ok := r.sessions[id]
-	if !ok {
+	if !ok || s.OrgID != orgID || (ownerID != "" && s.UserID != ownerID) {
 		return ErrSessionNotFound
 	}
 	if s.Status == StatusClosed {
 		return ErrSessionClosed
 	}
-	s.Status = StatusClosed
-	s.LastActivityAt = time.Now().UTC()
+	closed := clone(s)
+	closed.Status = StatusClosed
+	closed.LastActivityAt = time.Now().UTC()
+	r.sessions[id] = closed
 	return nil
+}
+
+func clone(session *Session) *Session {
+	copy := *session
+	return &copy
 }
 
 // generateID returns a 16-byte hex-encoded random identifier.

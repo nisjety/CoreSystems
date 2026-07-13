@@ -3,10 +3,14 @@ module github.com/triodelab/model-plane/services/bridge-core
 go 1.25.1
 
 require (
+	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/triodelab/model-plane/pkg/authctx v0.0.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	google.golang.org/grpc v1.80.0
 )
+
+replace github.com/triodelab/model-plane/pkg/authctx => ../../pkg/authctx
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

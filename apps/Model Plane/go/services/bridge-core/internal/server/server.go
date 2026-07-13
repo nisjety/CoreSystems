@@ -3,13 +3,14 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/bridge-core/internal/authz"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/channel"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/session"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/telemetry"
@@ -31,7 +32,8 @@ func NewServer(sessions *session.Registry, adapters *channel.AdapterRegistry) *S
 	return &Server{sessions: sessions, adapters: adapters}
 }
 
-// registerSessionRequest is the JSON body for POST /api/v1/sessions.
+// registerSessionRequest keeps legacy identity fields for compatibility, but
+// they may only match the verified claims and never define authority.
 type registerSessionRequest struct {
 	OrgID   string `json:"org_id"`
 	UserID  string `json:"user_id"`
@@ -44,16 +46,18 @@ type ingestRequest struct {
 }
 
 // Handler returns the top-level HTTP handler with all routes registered.
-func (s *Server) Handler() http.Handler {
+func (s *Server) Handler(verifier *authctx.Verifier) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("POST /api/v1/sessions", s.handleRegisterSession)
-	mux.HandleFunc("GET /api/v1/sessions", s.handleListSessions)
-	mux.HandleFunc("GET /api/v1/sessions/{id}", s.handleGetSession)
-	mux.HandleFunc("POST /api/v1/sessions/{id}/ingest", s.handleIngest)
-	mux.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleCloseSession)
+	protected := http.NewServeMux()
+	protected.HandleFunc("POST /api/v1/sessions", s.handleRegisterSession)
+	protected.HandleFunc("GET /api/v1/sessions", s.handleListSessions)
+	protected.HandleFunc("GET /api/v1/sessions/{id}", s.handleGetSession)
+	protected.HandleFunc("POST /api/v1/sessions/{id}/ingest", s.handleIngest)
+	protected.HandleFunc("DELETE /api/v1/sessions/{id}", s.handleCloseSession)
+	mux.Handle("/api/", verifier.HTTPMiddleware(authz.Authorize)(protected))
 
 	return mux
 }
@@ -79,8 +83,14 @@ func (s *Server) handleRegisterSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	principal, _ := authctx.PrincipalFromContext(r.Context())
+	if (strings.TrimSpace(req.OrgID) != "" && req.OrgID != principal.OrganizationID) ||
+		(strings.TrimSpace(req.UserID) != "" && req.UserID != principal.ActorID) {
+		writeError(w, http.StatusForbidden, "request identity does not match verified identity")
+		return
+	}
 
-	sess, err := s.sessions.Register(req.OrgID, req.UserID, req.Channel)
+	sess, err := s.sessions.Register(principal.OrganizationID, principal.ActorID, req.Channel)
 	if err != nil {
 		telemetry.SessionsCreatedTotal.Add(r.Context(), 1, metric.WithAttributes(
 			attribute.String("channel", req.Channel),
@@ -105,13 +115,9 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		attribute.String("path", "/api/v1/sessions"),
 	))
 
-	orgID := r.URL.Query().Get("org_id")
-	if orgID == "" {
-		writeError(w, http.StatusBadRequest, "org_id query parameter is required")
-		return
-	}
+	principal, _ := authctx.PrincipalFromContext(r.Context())
 
-	sessions := s.sessions.List(orgID)
+	sessions := s.sessions.ListScoped(principal.OrganizationID, authz.OwnerFilter(principal))
 	writeJSON(w, http.StatusOK, sessions)
 }
 
@@ -121,8 +127,9 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		attribute.String("path", "/api/v1/sessions/{id}"),
 	))
 
+	principal, _ := authctx.PrincipalFromContext(r.Context())
 	id := r.PathValue("id")
-	sess, err := s.sessions.Get(id)
+	sess, err := s.sessions.GetScoped(id, principal.OrganizationID, authz.OwnerFilter(principal))
 	if err != nil {
 		writeError(w, httpStatus(err), err.Error())
 		return
@@ -137,8 +144,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		attribute.String("path", "/api/v1/sessions/{id}/ingest"),
 	))
 
+	principal, _ := authctx.PrincipalFromContext(r.Context())
 	id := r.PathValue("id")
-	sess, err := s.sessions.Get(id)
+	sess, err := s.sessions.GetScoped(id, principal.OrganizationID, authz.OwnerFilter(principal))
 	if err != nil {
 		telemetry.IngestTotal.Add(r.Context(), 1, metric.WithAttributes(
 			attribute.String("channel", "unknown"),
@@ -168,7 +176,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sessions.UpdateActivity(id); err != nil {
+	if err := s.sessions.UpdateActivityScoped(id, principal.OrganizationID, authz.OwnerFilter(principal)); err != nil {
 		slog.Warn("failed to update session activity", "session_id", id, "error", err)
 	}
 
@@ -215,8 +223,9 @@ func (s *Server) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 		attribute.String("path", "/api/v1/sessions/{id}"),
 	))
 
+	principal, _ := authctx.PrincipalFromContext(r.Context())
 	id := r.PathValue("id")
-	if err := s.sessions.Close(id); err != nil {
+	if err := s.sessions.CloseScoped(id, principal.OrganizationID, authz.OwnerFilter(principal)); err != nil {
 		telemetry.SessionsClosedTotal.Add(r.Context(), 1, metric.WithAttributes(
 			attribute.String("outcome", errorOutcome(err)),
 		))
@@ -244,32 +253,4 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // writeError writes a standard JSON error response.
 func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, apiError{Code: code, Message: msg})
-}
-
-// extractSessionID parses the session ID from a path like
-// /api/v1/sessions/{id} or /api/v1/sessions/{id}/ingest. This is a fallback
-// helper for routers that do not support path parameters natively.
-func extractSessionID(path, prefix string) string {
-	rest := strings.TrimPrefix(path, prefix)
-	rest = strings.TrimPrefix(rest, "/")
-	if idx := strings.Index(rest, "/"); idx != -1 {
-		return rest[:idx]
-	}
-	return rest
-}
-
-// Register is a convenience wrapper that attaches the HTTP handler to the
-// given mux under the root path. It follows the same naming convention used
-// by the browser-broker gRPC Register function but works with net/http.
-func Register(mux *http.ServeMux, srv *Server) {
-	handler := srv.Handler()
-	mux.Handle("/", handler)
-}
-
-// GRPCPlaceholder is exported so the gRPC server import is justified in main.
-// bridge-core will expose gRPC endpoints in a future iteration; until then
-// the gRPC listener is kept alive for readiness probes and service mesh
-// integration.
-func GRPCPlaceholder(ctx context.Context) {
-	_ = ctx
 }

@@ -31,7 +31,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use crate::{auth::Claims, http_routes::grpc_status_to_http, state::AppState};
+use crate::{
+    auth::{
+        Claims, VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
+        VerifiedInferenceBearer, VerifiedSessionBearer,
+    },
+    http_routes::grpc_status_to_http,
+    state::AppState,
+};
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -116,8 +123,28 @@ struct BrowserRunStartRequest {
 async fn browser_run_start(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    execution_bearer: VerifiedExecutionBearer,
+    session_bearer: VerifiedSessionBearer,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    if browser_run_zdr_blocked(&claims, req.zdr) {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({
+                "error": "ZDR browser runs are disabled until the durable run lifecycle is bypassed"
+            })),
+        ));
+    }
+    let data_plane_bearer = data_plane_bearer
+        .map(|Extension(value)| value)
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "verified user credential required" })),
+            )
+        })?;
     if req.goal.trim().is_empty() {
         return Err(bad_request("goal must not be empty"));
     }
@@ -136,12 +163,15 @@ async fn browser_run_start(
         Some(thread_id) => thread_id.to_owned(),
         None => {
             session_client
-                .create_thread(CreateThreadRequest {
-                    session_key: new_ulid(),
-                    org_id: org_id.clone(),
-                    user_id: user_id.clone(),
-                    metadata: None,
-                })
+                .create_thread(authenticated_session_request(
+                    CreateThreadRequest {
+                        session_key: new_ulid(),
+                        org_id: org_id.clone(),
+                        user_id: user_id.clone(),
+                        metadata: None,
+                    },
+                    &session_bearer,
+                )?)
                 .await
                 .map_err(|e| grpc_status_to_http(&e))?
                 .into_inner()
@@ -150,15 +180,18 @@ async fn browser_run_start(
     };
 
     let run = session_client
-        .start_run(StartRunRequest {
-            thread_id: thread_id.clone(),
-            parent_run_id: String::new(),
-            agent_id: "browser-agent".to_owned(),
-            goal: req.goal.clone(),
-            mode: "execute".to_owned(),
-            org_id: org_id.clone(),
-            user_id: user_id.clone(),
-        })
+        .start_run(authenticated_session_request(
+            StartRunRequest {
+                thread_id: thread_id.clone(),
+                parent_run_id: String::new(),
+                agent_id: "browser-agent".to_owned(),
+                goal: req.goal.clone(),
+                mode: "execute".to_owned(),
+                org_id: org_id.clone(),
+                user_id: user_id.clone(),
+            },
+            &session_bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -192,19 +225,42 @@ async fn browser_run_start(
     let step_id = new_ulid();
     let dispatch_run_id = run_id.clone();
     tokio::spawn(async move {
-        match execution_client
-            .execute_step(ExecuteStepRequest {
-                run_id: dispatch_run_id.clone(),
-                step_id,
-                tool_name: "browser_agent".to_owned(),
-                tool_input,
-                permission_mode: "auto".to_owned(),
-                hook_context: String::new(),
-                org_id,
-                user_id,
-            })
-            .await
-        {
+        let mut execution_request = tonic::Request::new(ExecuteStepRequest {
+            run_id: dispatch_run_id.clone(),
+            step_id,
+            tool_name: "browser_agent".to_owned(),
+            tool_input,
+            permission_mode: "auto".to_owned(),
+            hook_context: String::new(),
+            org_id,
+            user_id,
+            zdr: false,
+        });
+        let authorization = format!("Bearer {}", execution_bearer.as_str())
+            .parse()
+            .expect("verified bearer is valid gRPC metadata");
+        execution_request
+            .metadata_mut()
+            .insert("authorization", authorization);
+        execution_request.metadata_mut().insert(
+            "x-data-plane-authorization",
+            format!("Bearer {}", data_plane_bearer.as_str())
+                .parse()
+                .expect("verified Data Plane bearer is valid gRPC metadata"),
+        );
+        execution_request.metadata_mut().insert(
+            "x-session-authorization",
+            format!("Bearer {}", session_bearer.as_str())
+                .parse()
+                .expect("verified Session Core bearer is valid gRPC metadata"),
+        );
+        execution_request.metadata_mut().insert(
+            "x-inference-authorization",
+            format!("Bearer {}", inference_bearer.as_str())
+                .parse()
+                .expect("verified Inference Core bearer is valid gRPC metadata"),
+        );
+        match execution_client.execute_step(execution_request).await {
             Ok(resp) => {
                 let resp = resp.into_inner();
                 if resp.status == "failed" || resp.status == "permission_denied" {
@@ -239,6 +295,10 @@ async fn browser_run_start(
     })))
 }
 
+fn browser_run_zdr_blocked(claims: &Claims, request_zdr: bool) -> bool {
+    claims.effective_zdr(request_zdr)
+}
+
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum BrowserRunControlAction {
@@ -258,6 +318,8 @@ struct BrowserRunControlRequest {
 async fn browser_run_control(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    execution_bearer: VerifiedExecutionBearer,
+    session_bearer: VerifiedSessionBearer,
     Path(run_id): Path<String>,
     Json(req): Json<BrowserRunControlRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -268,11 +330,16 @@ async fn browser_run_control(
     let mut execution_client = state.execution_client.clone();
     let status = match req.action {
         BrowserRunControlAction::Pause => {
-            let resp = execution_client
-                .pause_run(PauseRunRequest {
+            let request = authenticated_execution_request(
+                PauseRunRequest {
                     run_id: run_id.clone(),
                     org_id: claims.org_id.clone(),
-                })
+                },
+                &execution_bearer,
+                &session_bearer,
+            )?;
+            let resp = execution_client
+                .pause_run(request)
                 .await
                 .map_err(|e| grpc_status_to_http(&e))?
                 .into_inner();
@@ -283,12 +350,17 @@ async fn browser_run_control(
             }
         }
         BrowserRunControlAction::Resume => {
-            let resp = execution_client
-                .resume_run(ResumeRunRequest {
+            let request = authenticated_execution_request(
+                ResumeRunRequest {
                     run_id: run_id.clone(),
                     checkpoint_id: String::new(),
                     org_id: claims.org_id.clone(),
-                })
+                },
+                &execution_bearer,
+                &session_bearer,
+            )?;
+            let resp = execution_client
+                .resume_run(request)
                 .await
                 .map_err(|e| grpc_status_to_http(&e))?
                 .into_inner();
@@ -299,11 +371,16 @@ async fn browser_run_control(
             }
         }
         BrowserRunControlAction::Stop => {
-            let resp = execution_client
-                .cancel_run(CancelRunRequest {
+            let request = authenticated_execution_request(
+                CancelRunRequest {
                     run_id: run_id.clone(),
                     reason: "user_stop".to_owned(),
-                })
+                },
+                &execution_bearer,
+                &session_bearer,
+            )?;
+            let resp = execution_client
+                .cancel_run(request)
                 .await
                 .map_err(|e| grpc_status_to_http(&e))?
                 .into_inner();
@@ -316,6 +393,56 @@ async fn browser_run_control(
     };
 
     Ok(Json(json!({ "status": status })))
+}
+
+fn authenticated_session_request<T>(
+    message: T,
+    session_bearer: &VerifiedSessionBearer,
+) -> Result<tonic::Request<T>, ApiError> {
+    let authorization = format!("Bearer {}", session_bearer.as_str())
+        .parse()
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid session credential" })),
+            )
+        })?;
+    let mut request = tonic::Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
+fn authenticated_execution_request<T>(
+    message: T,
+    execution_bearer: &VerifiedExecutionBearer,
+    session_bearer: &VerifiedSessionBearer,
+) -> Result<tonic::Request<T>, ApiError> {
+    let authorization = format!("Bearer {}", execution_bearer.as_str())
+        .parse()
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid credential" })),
+            )
+        })?;
+    let mut request = tonic::Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    request.metadata_mut().insert(
+        "x-session-authorization",
+        format!("Bearer {}", session_bearer.as_str())
+            .parse()
+            .map_err(|_| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "invalid credential" })),
+                )
+            })?,
+    );
+    Ok(request)
 }
 
 #[cfg(test)]
@@ -375,5 +502,46 @@ mod tests {
         assert_eq!(non_empty(Some("  run_123  ")), Some("run_123"));
         assert_eq!(non_empty(Some("   ")), None);
         assert_eq!(non_empty(None), None);
+    }
+
+    #[test]
+    fn browser_session_writes_use_only_the_exact_session_audience_credential() {
+        let request = authenticated_session_request(
+            CreateThreadRequest::default(),
+            &VerifiedSessionBearer::for_test("session-core-token"),
+        )
+        .expect("verified session bearer must be forwardable");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer session-core-token")
+        );
+        assert!(request
+            .metadata()
+            .get("x-execution-authorization")
+            .is_none());
+    }
+
+    #[test]
+    fn issuer_zdr_cannot_be_downgraded_by_browser_run_body() {
+        let claims = Claims {
+            sub: "user-a".to_owned(),
+            iss: "auth-core".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: true,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        };
+
+        assert!(browser_run_zdr_blocked(&claims, false));
     }
 }

@@ -6,11 +6,15 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 	"github.com/triodelab/model-plane/services/cost-core/internal/pricing"
 	"github.com/triodelab/model-plane/services/cost-core/internal/telemetry"
@@ -22,8 +26,9 @@ import (
 // price catalogue (the resolver that turns tokens into a USD cost when a usage
 // event arrives without one).
 type Server struct {
-	ledger  ledger.Ledger
-	pricing *pricing.Resolver
+	ledger          ledger.Ledger
+	pricing         *pricing.Resolver
+	requireIdentity bool
 }
 
 // NewServer constructs a Server with the provided ledger and the built-in
@@ -68,6 +73,7 @@ type usageResponse struct {
 type entryResponse struct {
 	OrgID        string    `json:"org_id"`
 	UserID       string    `json:"user_id"`
+	ProducerID   string    `json:"producer_id,omitempty"`
 	RunID        string    `json:"run_id,omitempty"`
 	RequestID    string    `json:"request_id,omitempty"`
 	Model        string    `json:"model,omitempty"`
@@ -97,6 +103,10 @@ type budgetCheckResponse struct {
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	s.registerAPIRoutes(mux)
+}
+
+func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/cost/record", s.handleRecord)
 	mux.HandleFunc("GET /api/v1/usage", s.handleGetUsage)
 	mux.HandleFunc("GET /api/v1/cost/run", s.handleGetRunUsage)
@@ -104,6 +114,54 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/cost/entries", s.handleListEntries)
 	mux.HandleFunc("GET /api/v1/pricing", s.handleListPricing)
 	mux.HandleFunc("POST /api/v1/budget/check", s.handleBudgetCheck)
+}
+
+// Handler exposes public liveness and the global, non-tenant pricing catalogue.
+// Every tenant-bearing API is wrapped in the authentication middleware. A nil
+// middleware fails closed for those protected routes.
+func (s *Server) Handler(protect func(http.Handler) http.Handler) http.Handler {
+	root := http.NewServeMux()
+	root.HandleFunc("GET /healthz", s.handleHealthz)
+	root.HandleFunc("GET /readyz", s.handleReadyz)
+	root.HandleFunc("GET /api/v1/pricing", s.handleListPricing)
+	if protect == nil {
+		root.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			httpError(w, http.StatusServiceUnavailable, "authentication is unavailable")
+		}))
+		return root
+	}
+	protectedServer := *s
+	protectedServer.requireIdentity = true
+	api := http.NewServeMux()
+	protectedServer.registerAPIRoutes(api)
+	root.Handle("/api/", protect(api))
+	return root
+}
+
+// CostAuthorizer applies route-level authorization after token verification.
+// User principals may read data only within their signed organization and may
+// check their own budget. Ledger writes require cost:write; service org-wide
+// reads and budget checks require cost:read.
+func CostAuthorizer(principal authctx.Principal, r *http.Request) error {
+	if principal.PrincipalType == "user" {
+		if r.Method == http.MethodGet || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/budget/check") {
+			return nil
+		}
+		return errors.New("user principal is not authorized for this cost operation")
+	}
+	if principal.PrincipalType != "service" {
+		return errors.New("unsupported principal type")
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/v1/cost/record" {
+		if principal.HasScope("cost:write") {
+			return nil
+		}
+		return errors.New("cost:write scope is required")
+	}
+	if principal.HasScope("cost:read") {
+		return nil
+	}
+	return errors.New("cost:read scope is required")
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -132,16 +190,33 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 	))
 
 	var req recordRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeRequestJSON(w, r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 		return
+	}
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	if authenticated {
+		if !pinOrganization(w, req.OrgID, principal.OrganizationID) {
+			return
+		}
+		req.OrgID = principal.OrganizationID
+		if principal.PrincipalType == "user" {
+			if req.UserID != "" && req.UserID != principal.ActorID {
+				httpError(w, http.StatusForbidden, "user scope does not match verified token")
+				return
+			}
+			req.UserID = principal.ActorID
+		}
 	}
 	if req.OrgID == "" {
 		httpError(w, http.StatusBadRequest, "org_id is required")
 		return
 	}
 
-	if err := s.RecordUsage(r.Context(), ledger.Entry{
+	entry := ledger.Entry{
 		OrgID:          req.OrgID,
 		UserID:         req.UserID,
 		RunID:          req.RunID,
@@ -151,8 +226,12 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 		OutputTokens:   req.OutputTokens,
 		CostUSD:        req.CostUSD,
 		IdempotencyKey: req.IdempotencyKey,
-	}); err != nil {
-		httpError(w, http.StatusInternalServerError, fmt.Sprintf("record failed: %v", err))
+	}
+	if authenticated && principal.PrincipalType == "service" {
+		entry.ProducerID = principal.ActorID
+	}
+	if err := s.RecordUsage(r.Context(), entry); err != nil {
+		httpError(w, mapHTTPStatus(err), fmt.Sprintf("record failed: %v", err))
 		return
 	}
 
@@ -169,6 +248,20 @@ func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
 
 	orgID := r.URL.Query().Get("org_id")
 	userID := r.URL.Query().Get("user_id")
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	if authenticated {
+		if !pinOrganization(w, orgID, principal.OrganizationID) {
+			return
+		}
+		orgID = principal.OrganizationID
+		if principal.PrincipalType == "user" && userID != principal.ActorID {
+			httpError(w, http.StatusForbidden, "user scope does not match verified token")
+			return
+		}
+	}
 	if orgID == "" || userID == "" {
 		httpError(w, http.StatusBadRequest, "org_id and user_id query params are required")
 		return
@@ -190,12 +283,32 @@ func (s *Server) handleGetRunUsage(w http.ResponseWriter, r *http.Request) {
 	))
 
 	runID := r.URL.Query().Get("run_id")
+	orgID := r.URL.Query().Get("org_id")
 	if runID == "" {
 		httpError(w, http.StatusBadRequest, "run_id query param is required")
 		return
 	}
 
-	usage, err := s.ledger.GetRunUsage(r.Context(), runID)
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	var usage *ledger.Usage
+	var err error
+	if authenticated {
+		if !pinOrganization(w, orgID, principal.OrganizationID) {
+			return
+		}
+		usage, err = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{
+			OrgID: principal.OrganizationID,
+			RunID: runID,
+		})
+		if err == nil && usage.EntryCount == 0 {
+			err = ledger.ErrUsageNotFound
+		}
+	} else {
+		usage, err = s.ledger.GetRunUsage(r.Context(), runID)
+	}
 	if err != nil {
 		httpError(w, mapHTTPStatus(err), err.Error())
 		return
@@ -214,6 +327,16 @@ func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	if authenticated {
+		if !pinOrganization(w, f.OrgID, principal.OrganizationID) {
+			return
+		}
+		f.OrgID = principal.OrganizationID
 	}
 
 	usage, err := s.ledger.Aggregate(r.Context(), f)
@@ -236,6 +359,16 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	if authenticated {
+		if !pinOrganization(w, f.OrgID, principal.OrganizationID) {
+			return
+		}
+		f.OrgID = principal.OrganizationID
+	}
 	limit := parseLimit(r.URL.Query().Get("limit"))
 
 	entries, err := s.ledger.ListEntries(r.Context(), f, limit)
@@ -250,6 +383,7 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		out = append(out, entryResponse{
 			OrgID:        e.OrgID,
 			UserID:       e.UserID,
+			ProducerID:   e.ProducerID,
 			RunID:        e.RunID,
 			RequestID:    e.RequestID,
 			Model:        e.Model,
@@ -271,12 +405,37 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 	))
 
 	var req budgetCheckRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeRequestJSON(w, r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 		return
 	}
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	if authenticated {
+		if !pinOrganization(w, req.OrgID, principal.OrganizationID) {
+			return
+		}
+		req.OrgID = principal.OrganizationID
+		if principal.PrincipalType == "user" {
+			if req.UserID != "" && req.UserID != principal.ActorID {
+				httpError(w, http.StatusForbidden, "user scope does not match verified token")
+				return
+			}
+			req.UserID = principal.ActorID
+		}
+	}
 	if req.OrgID == "" {
 		httpError(w, http.StatusBadRequest, "org_id is required")
+		return
+	}
+	if err := ledger.ValidateScope(req.OrgID, req.UserID); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := ledger.ValidateBudget(req.MaxCostUSD, req.MaxTokens); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -296,6 +455,12 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 		usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID})
 	} else {
 		usage, usageErr = s.ledger.GetUsage(r.Context(), req.OrgID, req.UserID)
+	}
+
+	if usageErr != nil && !errors.Is(usageErr, ledger.ErrUsageNotFound) {
+		slog.Error("budget ledger read failed", "org_id", req.OrgID, "error", usageErr)
+		httpError(w, http.StatusServiceUnavailable, "budget state is unavailable")
+		return
 	}
 
 	var currentCost float64
@@ -319,6 +484,23 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 		))
 	}
 	writeJSON(w, resp)
+}
+
+func (s *Server) principal(w http.ResponseWriter, r *http.Request) (authctx.Principal, bool) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok && s.requireIdentity {
+		httpError(w, http.StatusUnauthorized, "verified identity is required")
+	}
+	return principal, ok
+}
+
+func pinOrganization(w http.ResponseWriter, requested, verified string) bool {
+	requested = strings.TrimSpace(requested)
+	if requested != "" && requested != verified {
+		httpError(w, http.StatusForbidden, "organization scope does not match verified token")
+		return false
+	}
+	return true
 }
 
 // handleListPricing returns the model price catalogue (USD per 1M tokens). The
@@ -355,8 +537,14 @@ func budgetDecision(maxCostUSD float64, maxTokens int64, cost float64, tokens in
 // publishes token counts only), cost-core prices it authoritatively from the
 // catalogue so the dollar ledger and the budget posture are real, never $0.
 func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
+	if err := ledger.ValidateEntry(e); err != nil {
+		return err
+	}
 	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil {
 		e.CostUSD = s.pricing.Cost(e.Model, e.InputTokens, e.OutputTokens)
+	}
+	if err := ledger.ValidateEntry(e); err != nil {
+		return err
 	}
 	if err := s.ledger.RecordEntry(ctx, e); err != nil {
 		slog.Error("failed to record usage", "org_id", e.OrgID, "error", err)
@@ -375,6 +563,24 @@ func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 		"output_tokens", e.OutputTokens,
 		"cost_usd", fmt.Sprintf("%.8f", e.CostUSD),
 	)
+	return nil
+}
+
+const maxRequestBodyBytes = 64 << 10
+
+func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain one JSON object")
+		}
+		return err
+	}
 	return nil
 }
 

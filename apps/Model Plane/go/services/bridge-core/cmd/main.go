@@ -11,12 +11,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/triodelab/model-plane/services/bridge-core/internal/authz"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/channel"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/config"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/delivery"
 	bcserver "github.com/triodelab/model-plane/services/bridge-core/internal/server"
 	"github.com/triodelab/model-plane/services/bridge-core/internal/session"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -25,6 +28,11 @@ func main() {
 
 	cfg := config.Load()
 	slog.Info("bridge-core starting", "http_addr", cfg.HTTPAddr, "grpc_addr", cfg.GRPCAddr)
+	verifier, err := authz.NewVerifierFromEnv()
+	if err != nil {
+		slog.Error("bridge-core authentication configuration is invalid", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -54,7 +62,9 @@ func main() {
 				continue
 			}
 			adapters.Register(ch, adapter)
-			slog.Info("webhook channel adapter registered", "channel", ch, "destination", cfg.WebhookURL)
+			// Webhook URLs commonly contain path/query credentials. Never emit the
+			// destination into process logs.
+			slog.Info("webhook channel adapter registered", "channel", ch)
 		}
 	} else {
 		slog.Info("no webhook URL configured; all channels using noop adapter (set BRIDGE_WEBHOOK_URL to enable real delivery)")
@@ -63,7 +73,7 @@ func main() {
 	srv := bcserver.NewServer(registry, adapters)
 
 	// HTTP server (sessions + health) on the configured address.
-	httpServer := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Handler()}
+	httpServer := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Handler(verifier)}
 	go func() {
 		slog.Info("HTTP server listening", "addr", cfg.HTTPAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -78,7 +88,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
+	healthServerGRPC := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
+	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	go func() {
 		slog.Info("gRPC listening", "addr", cfg.GRPCAddr)

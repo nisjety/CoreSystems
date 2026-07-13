@@ -374,6 +374,9 @@ message FetchRequest {
   // Opt in to HTTP/3 transport at Quarry. Forward-compatible — when
   // the edge is built without --features http3 the flag is ignored.
   bool prefer_http3 = 5;
+
+  // Zero Data Retention — disables Quarry cache/event persistence.
+  bool zdr = 6;
 }
 
 // FetchResponse — projected ScrapeResult from Quarry.
@@ -496,6 +499,8 @@ message WebSearchRequest {
   // Optional intent classifier hint: "factual" | "research" |
   // "navigational". Empty → auto-classify via rule-based router.
   string intent = 5;
+  // Zero Data Retention — disables Quarry cache/event persistence.
+  bool zdr = 6;
 }
 
 // WebSearchResult — single result row.
@@ -638,6 +643,9 @@ message ExitPlanModeResponse {
 message IsPlanModeRequest {
   string request_id = 1;
   string run_id = 2;
+  // Tenant identifier from the verified caller. Added wire-compatibly so the
+  // formerly global run-id lookup can be authorized and tenant-scoped.
+  string org_id = 3;
 }
 
 message IsPlanModeResponse {

@@ -98,7 +98,7 @@ pub async fn run(mcp: McpRegistry) {
         info!("NATS_URL unset; capability reconcile consumer disabled");
         return;
     };
-    let client = match async_nats::connect(&url).await {
+    let client = match crate::nats_connection::connect(&url).await {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "capability consumer: NATS connect failed; disabled");
@@ -205,10 +205,10 @@ mod tests {
             server: Some(McpServer {
                 server_id: "srv-1".to_owned(),
                 name: "fs".to_owned(),
-                url: "http://x".to_owned(),
+                url: "https://mcp.example.test".to_owned(),
                 transport: "http".to_owned(),
                 token: String::new(),
-                tool_allowlist: vec![],
+                tool_allowlist: vec!["read_file".to_owned()],
                 enabled: true,
             }),
         };

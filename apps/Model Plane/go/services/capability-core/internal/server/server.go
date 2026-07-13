@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
@@ -14,6 +16,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Server is the default CapabilityCore implementation backed by the registry,
@@ -24,7 +28,12 @@ type Server struct {
 	registry *registry.Registry
 	modelReg *registry.ModelsRegistry
 	policy   *policy.Engine
-	store    *registry.CapabilitiesStore // optional: enables score-ranked List
+	store    capabilityStore // optional: enables score-ranked List
+}
+
+type capabilityStore interface {
+	GetForOrg(context.Context, string, string) (*registry.CapabilityRow, error)
+	RankedList(context.Context, string, string, []string, int) ([]registry.ScoredCapability, error)
 }
 
 // toDetail converts a domain Capability into a wire CapabilityDetail.
@@ -32,15 +41,23 @@ func toDetail(c *models.Capability) *mpv1.CapabilityDetail {
 	if c == nil {
 		return nil
 	}
+	availability := models.DeriveAvailability(c)
 	return &mpv1.CapabilityDetail{
-		CapabilityId: c.ID,
-		Name:         c.Name,
-		Kind:         c.Kind,
-		Version:      c.Version,
-		Description:  c.Description,
-		RiskLevel:    c.RiskLevel,
-		LazyLoad:     c.LazyLoad,
-		Scope:        c.Scope,
+		CapabilityId:     c.ID,
+		Name:             c.Name,
+		Kind:             c.Kind,
+		Version:          c.Version,
+		Description:      c.Description,
+		RiskLevel:        c.RiskLevel,
+		LazyLoad:         c.LazyLoad,
+		Scope:            c.Scope,
+		State:            string(availability.State),
+		ReasonCode:       availability.ReasonCode,
+		Reason:           availability.Reason,
+		RequiresApproval: availability.RequiresApproval,
+		ExecutionMode:    availability.ExecutionMode,
+		CostClass:        availability.CostClass,
+		HealthCheckedAt:  availability.HealthCheckedAt,
 	}
 }
 
@@ -77,16 +94,20 @@ func (s *Server) WithStore(store *registry.CapabilitiesStore) *Server {
 // first; otherwise it falls back to the in-memory registry's kind/name order.
 func (s *Server) ListCapabilities(ctx context.Context, req *mpv1.ListCapabilitiesRequest) (*mpv1.ListCapabilitiesResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ListCapabilities")))
-	if s.store != nil {
-		return s.listRanked(ctx, req)
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
 	}
-	items, hasMore := s.registry.List(req.KindFilter, req.Query, req.AfterId, req.Limit)
+	if s.store != nil {
+		return s.listRanked(ctx, req, orgID)
+	}
+	items, hasMore := s.registry.ListForOrg(orgID, req.KindFilter, req.Query, req.AfterId, req.Limit)
 	details := make([]*mpv1.CapabilityDetail, 0, len(items))
 	for _, c := range items {
 		details = append(details, toDetail(c))
 	}
 	if s.modelReg != nil {
-		modelCaps, err := s.modelReg.ListAsCapabilities(ctx, registry.ModelsFilter{OnlyEnabled: true})
+		modelCaps, err := s.modelReg.ListAsCapabilitiesForOrg(ctx, orgID)
 		if err != nil {
 			return nil, mapErr(err)
 		}
@@ -100,15 +121,14 @@ func (s *Server) ListCapabilities(ctx context.Context, req *mpv1.ListCapabilitie
 // listRanked serves ListCapabilities from the durable store, ordered by
 // descending composite score. The text query filters by name/description; the
 // kind filter narrows by kind; AfterId is an id cursor over the ranked order.
-func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesRequest) (*mpv1.ListCapabilitiesResponse, error) {
+func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesRequest, orgID string) (*mpv1.ListCapabilitiesResponse, error) {
 	limit := int(req.Limit)
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	// Pull a generous ranked window (org-agnostic global view here; per-org
-	// scoping is enforced at EvaluatePolicy time). Over-fetch so the query
-	// filter + cursor can still fill a page.
-	scored, err := s.store.RankedList(ctx, "", req.KindFilter, nil, limit*4+200)
+	// Pull a generous tenant-filtered window (including global entries).
+	// Over-fetch so the query filter + cursor can still fill a page.
+	scored, err := s.store.RankedList(ctx, orgID, req.KindFilter, nil, limit*4+200)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -153,32 +173,61 @@ func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesReque
 
 // rowToDetail converts a durable CapabilityRow into a wire CapabilityDetail.
 func rowToDetail(r *registry.CapabilityRow) *mpv1.CapabilityDetail {
+	return toDetail(rowToCapability(r))
+}
+
+func rowToCapability(r *registry.CapabilityRow) *models.Capability {
 	if r == nil {
 		return nil
 	}
-	return &mpv1.CapabilityDetail{
-		CapabilityId: r.ID,
-		Name:         r.Name,
-		Kind:         r.Kind,
-		Version:      r.Version,
-		Description:  r.Description,
-		RiskLevel:    r.RiskLevel,
-		LazyLoad:     r.LazyLoad,
-		Scope:        r.Scope,
+	return &models.Capability{
+		ID:                r.ID,
+		Name:              r.Name,
+		Kind:              r.Kind,
+		Version:           r.Version,
+		Description:       r.Description,
+		RiskLevel:         r.RiskLevel,
+		LazyLoad:          r.LazyLoad,
+		Scope:             r.Scope,
+		Enabled:           r.Enabled,
+		IdempotencyKey:    r.IdempotencyKey,
+		OrgID:             r.OrgID,
+		EnabledForScopes:  append([]string(nil), r.EnabledForScopes...),
+		RolloutState:      r.RolloutState,
+		AvailabilityState: r.AvailabilityState,
+		ReasonCode:        r.ReasonCode,
+		Reason:            r.Reason,
+		ExecutionMode:     r.ExecutionMode,
+		CostClass:         r.CostClass,
+		HealthCheckedAt:   r.HealthCheckedAt,
 	}
 }
 
 // GetCapability returns a single capability by ID, honouring an optional version constraint.
 func (s *Server) GetCapability(ctx context.Context, req *mpv1.GetCapabilityRequest) (*mpv1.CapabilityDetail, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetCapability")))
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if s.modelReg != nil && strings.HasPrefix(req.CapabilityId, "cap.model.") {
-		m, err := s.modelReg.GetByCapabilityID(ctx, req.CapabilityId)
+		m, err := s.modelReg.GetByCapabilityIDForOrg(ctx, req.CapabilityId, orgID)
 		if err != nil {
 			return nil, mapErr(err)
 		}
 		return toDetail(registry.ToCapability(m)), nil
 	}
-	c, err := s.registry.Get(req.CapabilityId, req.VersionConstraint)
+	if s.store != nil {
+		row, err := s.store.GetForOrg(ctx, req.CapabilityId, orgID)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		if req.VersionConstraint != "" && row.Version != req.VersionConstraint {
+			return nil, mapErr(domain.ErrVersionMismatch)
+		}
+		return rowToDetail(row), nil
+	}
+	c, err := s.registry.GetForOrg(req.CapabilityId, req.VersionConstraint, orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -188,7 +237,37 @@ func (s *Server) GetCapability(ctx context.Context, req *mpv1.GetCapabilityReque
 // EvaluatePolicy produces an allow/deny/constrained decision for a capability invocation.
 func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyRequest) (*mpv1.EvaluatePolicyResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "EvaluatePolicy")))
-	result, err := s.policy.Evaluate(ctx, req.CapabilityId, req.RunId, req.AgentId, req.OrgId, req.Scope)
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req == nil || !policy.IsSupportedScope(req.Scope) {
+		return nil, mapErr(domain.ErrInvalidArgument)
+	}
+	var (
+		capability   *models.Capability
+		rolloutState string
+	)
+	if s.store != nil {
+		row, lookupErr := s.store.GetForOrg(ctx, req.CapabilityId, orgID)
+		if lookupErr != nil {
+			return nil, mapErr(lookupErr)
+		}
+		if row == nil || (row.OrgID != orgID && row.OrgID != "global") {
+			return nil, mapErr(domain.ErrCapabilityNotFound)
+		}
+		capability = rowToCapability(row)
+		rolloutState = row.RolloutState
+	} else {
+		capability, err = s.registry.GetForOrg(req.CapabilityId, "", orgID)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+	}
+	if reason := capabilityPolicyBlockReason(capability, rolloutState); reason != "" {
+		return &mpv1.EvaluatePolicyResponse{Decision: policy.DecisionDeny, Reason: reason}, nil
+	}
+	result, err := s.policy.EvaluateCapability(ctx, capability, req.RunId, req.AgentId, orgID, req.Scope)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -199,10 +278,38 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 	}, nil
 }
 
+func capabilityPolicyBlockReason(capability *models.Capability, rolloutState string) string {
+	switch strings.TrimSpace(rolloutState) {
+	case "", "stable", "canary":
+	case "quarantine":
+		return "rollout_quarantine"
+	case "deprecated":
+		return "rollout_deprecated"
+	default:
+		return "invalid_rollout_state"
+	}
+
+	availability := models.DeriveAvailability(capability)
+	if availability.State == models.AvailabilityAvailable {
+		return ""
+	}
+	if availability.State == models.AvailabilityApprovalRequired {
+		return "human_approval_required"
+	}
+	if availability.ReasonCode != "" {
+		return availability.ReasonCode
+	}
+	return "runtime_unavailable"
+}
+
 // ValidateSkillBundle validates that a skill exists and is structurally promotable.
 func (s *Server) ValidateSkillBundle(ctx context.Context, req *mpv1.ValidateSkillBundleRequest) (*mpv1.ValidateSkillBundleResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ValidateSkillBundle")))
-	capability, validationErrors, err := s.registry.ValidateSkill(req.SkillId)
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	capability, validationErrors, err := s.registry.ValidateSkillForOrg(req.SkillId, orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -213,7 +320,11 @@ func (s *Server) ValidateSkillBundle(ctx context.Context, req *mpv1.ValidateSkil
 // CheckSkillPromotion validates whether a skill may move between scopes.
 func (s *Server) CheckSkillPromotion(ctx context.Context, req *mpv1.CheckSkillPromotionRequest) (*mpv1.CheckSkillPromotionResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "CheckSkillPromotion")))
-	_, checks, err := s.registry.CheckPromotion(req.SkillId, req.FromScope, req.ToScope)
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, checks, err := s.registry.CheckPromotionForOrg(req.SkillId, req.FromScope, req.ToScope, orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -234,7 +345,14 @@ func (s *Server) CheckSkillPromotion(ctx context.Context, req *mpv1.CheckSkillPr
 // PromoteSkill updates the registry scope for a validated skill promotion.
 func (s *Server) PromoteSkill(ctx context.Context, req *mpv1.PromoteSkillRequest) (*mpv1.PromoteSkillResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "PromoteSkill")))
-	capability, checks, err := s.registry.PromoteSkill(req.SkillId, req.FromScope, req.ToScope)
+	orgID, err := verifiedOrganizationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.store != nil {
+		return nil, status.Error(codes.FailedPrecondition, "durable skill promotion is not configured")
+	}
+	capability, checks, err := s.registry.PromoteSkillForOrg(req.SkillId, req.FromScope, req.ToScope, orgID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -245,6 +363,14 @@ func (s *Server) PromoteSkill(ctx context.Context, req *mpv1.PromoteSkillRequest
 		reason = "promotion requirements not met"
 	}
 	return &mpv1.PromoteSkillResponse{Promoted: promoted, Checks: checks, Reason: reason, Capability: detail}, nil
+}
+
+func verifiedOrganizationID(ctx context.Context) (string, error) {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || strings.TrimSpace(principal.OrganizationID) == "" {
+		return "", status.Error(codes.Unauthenticated, "verified identity required")
+	}
+	return principal.OrganizationID, nil
 }
 
 // Register wires the CapabilityCore service onto the provided gRPC server.

@@ -3,8 +3,10 @@ use axum::{
     body::Body,
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
-        Request, StatusCode,
+        HeaderValue, Request, StatusCode,
     },
+    middleware::{self, Next},
+    Router,
 };
 use model_gateway::{
     http_routes::build_router,
@@ -60,28 +62,47 @@ type MockVideoContentStream = Pin<
 >;
 type MockReplayStream = Pin<Box<dyn futures::Stream<Item = Result<Event, Status>> + Send>>;
 type CapturedMessages = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+type CapturedZdrRequests = Arc<Mutex<Vec<(&'static str, bool)>>>;
+
+const TEST_AUTH_KID: &str = "model-gateway-zdr-route-test";
+const TEST_AUTH_ISSUER: &str = "https://auth.test/model";
 
 #[derive(Default)]
 struct MockOk {
     captured_messages: Option<CapturedMessages>,
+    captured_zdr_requests: Option<CapturedZdrRequests>,
 }
 
 impl MockOk {
     fn capturing(captured_messages: CapturedMessages) -> Self {
         Self {
             captured_messages: Some(captured_messages),
+            captured_zdr_requests: None,
         }
     }
 
-    fn capture(&self, request: InferRequest) {
+    fn capturing_zdr(captured_zdr_requests: CapturedZdrRequests) -> Self {
+        Self {
+            captured_messages: None,
+            captured_zdr_requests: Some(captured_zdr_requests),
+        }
+    }
+
+    fn capture(&self, request: &InferRequest) {
         if let Some(captured_messages) = &self.captured_messages {
             captured_messages.lock().unwrap().push(
                 request
                     .messages
-                    .into_iter()
-                    .map(|message| (message.role, message.content))
+                    .iter()
+                    .map(|message| (message.role.clone(), message.content.clone()))
                     .collect(),
             );
+        }
+        if let Some(captured_zdr_requests) = &self.captured_zdr_requests {
+            captured_zdr_requests
+                .lock()
+                .unwrap()
+                .push(("chat", request.zdr));
         }
     }
 }
@@ -91,7 +112,8 @@ impl InferenceCore for MockOk {
     type InferStreamStream = MockStream;
     type StreamVideoGenerationContentStream = MockVideoContentStream;
     async fn infer(&self, request: TReq<InferRequest>) -> Result<Response<InferResponse>, Status> {
-        self.capture(request.into_inner());
+        let request = request.into_inner();
+        self.capture(&request);
         Ok(Response::new(InferResponse {
             request_id: String::new(),
             content: "hello".into(),
@@ -106,7 +128,8 @@ impl InferenceCore for MockOk {
         &self,
         request: TReq<InferRequest>,
     ) -> Result<Response<Self::InferStreamStream>, Status> {
-        self.capture(request.into_inner());
+        let request = request.into_inner();
+        self.capture(&request);
         Ok(Response::new(Box::pin(futures::stream::iter(vec![
             Ok(InferChunk {
                 request_id: "req-stream-ok".into(),
@@ -129,8 +152,14 @@ impl InferenceCore for MockOk {
 
     async fn create_embedding(
         &self,
-        _: TReq<CreateEmbeddingRequest>,
+        request: TReq<CreateEmbeddingRequest>,
     ) -> Result<Response<CreateEmbeddingResponse>, Status> {
+        if let Some(captured_zdr_requests) = &self.captured_zdr_requests {
+            captured_zdr_requests
+                .lock()
+                .unwrap()
+                .push(("embedding", request.into_inner().zdr));
+        }
         Ok(Response::new(CreateEmbeddingResponse {
             request_id: "embed-ok".into(),
             vector: vec![0.1, 0.2],
@@ -953,6 +982,242 @@ async fn spawn_mock<S: InferenceCore>(svc: S) -> InferenceCoreClient<tonic::tran
     InferenceCoreClient::new(ch)
 }
 
+fn zdr_route_test_keypair() -> &'static (String, String) {
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+
+    static KEYPAIR: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    KEYPAIR.get_or_init(|| {
+        let mut rng = rand::thread_rng();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA key generation");
+        let public_key = rsa::RsaPublicKey::from(&private_key);
+        (
+            private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("private key PEM")
+                .to_string(),
+            public_key
+                .to_public_key_pem(LineEnding::LF)
+                .expect("public key PEM"),
+        )
+    })
+}
+
+async fn signed_claims_token(claims: serde_json::Value) -> (wiremock::MockServer, String) {
+    use base64::Engine as _;
+    use rsa::{pkcs8::DecodePublicKey, traits::PublicKeyParts};
+
+    const AUDIENCE: &str = "model-gateway";
+
+    let (private_pem, public_pem) = zdr_route_test_keypair();
+    let public_key = rsa::RsaPublicKey::from_public_key_pem(public_pem).expect("decode public key");
+    let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+    let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+    let jwks = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jwks.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": TEST_AUTH_KID,
+                "n": n,
+                "e": e
+            }]
+        })))
+        .mount(&jwks)
+        .await;
+
+    std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+    std::env::set_var(
+        "AUTH_CORE_JWKS_URL",
+        format!("{}/.well-known/jwks.json", jwks.uri()),
+    );
+    std::env::set_var("AUTH_CORE_ISSUER", TEST_AUTH_ISSUER);
+    std::env::set_var("AUTH_CORE_AUDIENCE", AUDIENCE);
+
+    let token = encode_test_token(&claims, private_pem);
+    (jwks, token)
+}
+
+fn encode_test_token(claims: &serde_json::Value, private_pem: &str) -> String {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(TEST_AUTH_KID.to_owned());
+    encode(
+        &header,
+        claims,
+        &EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key"),
+    )
+    .expect("signed JWT")
+}
+
+fn token_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_secs()
+}
+
+async fn signed_model_token(zdr: bool) -> (wiremock::MockServer, String) {
+    let now = token_now();
+    signed_claims_token(serde_json::json!({
+        "sub": "user-zdr",
+        "iss": "https://auth.test/model",
+        "aud": "model-gateway",
+        "exp": now + 300,
+        "nbf": now - 5,
+        "org_id": "org-zdr",
+        "user_id": "user-zdr",
+        "principal_type": "user",
+        "zdr": zdr
+    }))
+    .await
+}
+
+async fn signed_service_model_token(scopes: &[&str]) -> (wiremock::MockServer, String) {
+    let now = token_now();
+    signed_claims_token(serde_json::json!({
+        "sub": "service:model-worker",
+        "iss": "https://auth.test/model",
+        "aud": "model-gateway",
+        "exp": now + 300,
+        "nbf": now - 5,
+        "org_id": "org-zdr",
+        "principal_type": "service",
+        "service_id": "service:model-worker",
+        "reason": "invoke bounded model primitive",
+        "scopes": scopes,
+        "zdr": true
+    }))
+    .await
+}
+
+#[derive(Clone)]
+struct DelegatedUserTokens {
+    data_plane: String,
+    session: String,
+    inference: String,
+    execution: String,
+}
+
+async fn signed_delegated_user_tokens(
+    org_id: &str,
+    user_id: &str,
+) -> (wiremock::MockServer, DelegatedUserTokens) {
+    let dev_bypass = std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS").ok();
+    let now = token_now();
+    let claims = |audience: &str| {
+        serde_json::json!({
+            "sub": user_id,
+            "iss": TEST_AUTH_ISSUER,
+            "aud": audience,
+            "exp": now + 300,
+            "nbf": now - 5,
+            "org_id": org_id,
+            "user_id": user_id,
+            "principal_type": "user",
+            "zdr": true
+        })
+    };
+    let (jwks, inference) = signed_claims_token(claims("inference-core")).await;
+    if let Some(dev_bypass) = dev_bypass {
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", dev_bypass);
+    }
+    let (private_pem, _) = zdr_route_test_keypair();
+    std::env::set_var("DATA_PLANE_AUTH_AUDIENCE", "data-plane");
+    std::env::set_var("SESSION_CORE_AUTH_AUDIENCE", "session-core");
+    std::env::set_var("INFERENCE_CORE_AUTH_AUDIENCE", "inference-core");
+    std::env::set_var("EXECUTION_CORE_AUTH_AUDIENCE", "execution-core");
+    (
+        jwks,
+        DelegatedUserTokens {
+            data_plane: encode_test_token(&claims("data-plane"), private_pem),
+            session: encode_test_token(&claims("session-core"), private_pem),
+            inference,
+            execution: encode_test_token(&claims("execution-core"), private_pem),
+        },
+    )
+}
+
+fn with_delegated_user_tokens(app: Router, tokens: DelegatedUserTokens) -> Router {
+    app.layer(middleware::from_fn(
+        move |mut request: Request<Body>, next: Next| {
+            let tokens = tokens.clone();
+            async move {
+                let headers = request.headers_mut();
+                for (name, token) in [
+                    ("x-data-plane-authorization", tokens.data_plane),
+                    ("x-session-authorization", tokens.session),
+                    ("x-inference-authorization", tokens.inference),
+                    ("x-execution-authorization", tokens.execution),
+                ] {
+                    headers.insert(
+                        name,
+                        HeaderValue::from_str(&format!("Bearer {token}"))
+                            .expect("signed JWT is valid HTTP header content"),
+                    );
+                }
+                next.run(request).await
+            }
+        },
+    ))
+}
+
+async fn authenticated_user_router(
+    app: Router,
+    org_id: &str,
+    user_id: &str,
+) -> (Router, wiremock::MockServer) {
+    let (jwks, tokens) = signed_delegated_user_tokens(org_id, user_id).await;
+    (with_delegated_user_tokens(app, tokens), jwks)
+}
+
+async fn signed_delegated_service_inference_token(
+    scopes: &[&str],
+) -> (wiremock::MockServer, String) {
+    let now = token_now();
+    std::env::set_var("INFERENCE_CORE_AUTH_AUDIENCE", "inference-core");
+    signed_claims_token(serde_json::json!({
+        "sub": "service:model-worker",
+        "iss": TEST_AUTH_ISSUER,
+        "aud": "inference-core",
+        "exp": now + 300,
+        "nbf": now - 5,
+        "org_id": "org-zdr",
+        "principal_type": "service",
+        "service_id": "service:model-worker",
+        "reason": "invoke bounded model primitive",
+        "scopes": scopes,
+        "zdr": true
+    }))
+    .await
+}
+
+fn with_delegated_inference_token(app: Router, token: String) -> Router {
+    app.layer(middleware::from_fn(
+        move |mut request: Request<Body>, next: Next| {
+            let token = token.clone();
+            async move {
+                request.headers_mut().insert(
+                    "x-inference-authorization",
+                    HeaderValue::from_str(&format!("Bearer {token}"))
+                        .expect("signed JWT is valid HTTP header content"),
+                );
+                next.run(request).await
+            }
+        },
+    ))
+}
+
+fn clear_model_auth_env() {
+    std::env::remove_var("AUTH_CORE_JWKS_URL");
+    std::env::remove_var("AUTH_CORE_ISSUER");
+    std::env::remove_var("AUTH_CORE_AUDIENCE");
+    std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+}
+
 async fn spawn_session_mock<S: SessionCore>(
     svc: S,
 ) -> SessionCoreClient<tonic::transport::Channel> {
@@ -985,6 +1250,200 @@ fn make_state(
     (state, publisher)
 }
 
+async fn call_zdr_unary_routes(app: axum::Router, bearer: &str, request_zdr: bool) {
+    let chat_body = serde_json::json!({
+        "messages": [{"role": "user", "content": "ephemeral prompt"}],
+        "model": "mock",
+        "zdr": request_zdr
+    });
+    let chat_request = Request::builder()
+        .method("POST")
+        .uri("/v1/ai/chat")
+        .header(AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(chat_body.to_string()))
+        .unwrap();
+    let chat_response = app.clone().oneshot(chat_request).await.unwrap();
+    assert_eq!(chat_response.status(), StatusCode::OK);
+
+    let embedding_body = serde_json::json!({
+        "input": "ephemeral text",
+        "model": "mock-embedding",
+        "zdr": request_zdr
+    });
+    let embedding_request = Request::builder()
+        .method("POST")
+        .uri("/v1/ai/embeddings")
+        .header(AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(embedding_body.to_string()))
+        .unwrap();
+    let embedding_response = app.oneshot(embedding_request).await.unwrap();
+    assert_eq!(embedding_response.status(), StatusCode::OK);
+}
+
+async fn route_status(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    bearer: &str,
+    body: &str,
+    delegated_data_bearer: Option<&str>,
+) -> StatusCode {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(CONTENT_TYPE, "application/json");
+    if let Some(delegated_data_bearer) = delegated_data_bearer {
+        request = request.header(
+            "x-data-plane-authorization",
+            format!("Bearer {delegated_data_bearer}"),
+        );
+    }
+    app.oneshot(request.body(Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ai_unary_routes_forward_request_zdr_to_chat_and_embeddings() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let captured = CapturedZdrRequests::default();
+    let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
+    let (mock_session, _) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client);
+
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    call_zdr_unary_routes(app, "dev", true).await;
+
+    assert_eq!(
+        *captured.lock().unwrap(),
+        vec![("chat", true), ("embedding", true)]
+    );
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ai_unary_routes_cannot_downgrade_signed_zdr_posture() {
+    let (_jwks, token) = signed_model_token(true).await;
+    let captured = CapturedZdrRequests::default();
+    let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
+    let (mock_session, _) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client);
+
+    let (app, _delegated_jwks) =
+        authenticated_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
+    call_zdr_unary_routes(app, &token, false).await;
+
+    assert_eq!(
+        *captured.lock().unwrap(),
+        vec![("chat", true), ("embedding", true)]
+    );
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn scoped_service_token_reaches_only_chat_and_embeddings_with_monotonic_zdr() {
+    let (_jwks, token) = signed_service_model_token(&["models:invoke"]).await;
+    let captured = CapturedZdrRequests::default();
+    let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
+    let (mock_session, _) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client);
+
+    let (_inference_jwks, inference_token) =
+        signed_delegated_service_inference_token(&["models:invoke"]).await;
+    let app = with_delegated_inference_token(build_router(state, None), inference_token);
+    call_zdr_unary_routes(app, &token, false).await;
+
+    assert_eq!(
+        *captured.lock().unwrap(),
+        vec![("chat", true), ("embedding", true)]
+    );
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn service_machine_routes_require_their_exact_scope() {
+    let (_chat_jwks, chat_wrong_scope) = signed_service_model_token(&["runs:submit"]).await;
+    let (_embedding_jwks, embedding_wrong_scope) =
+        signed_service_model_token(&["runs:submit"]).await;
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client);
+    let app = build_router(state, None);
+
+    assert_eq!(
+        route_status(
+            app.clone(),
+            "POST",
+            "/v1/ai/chat",
+            &chat_wrong_scope,
+            r#"{"messages":[{"role":"user","content":"q"}],"model":"mock"}"#,
+            None,
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        route_status(
+            app,
+            "POST",
+            "/v1/ai/embeddings",
+            &embedding_wrong_scope,
+            r#"{"input":"q","model":"mock-embedding"}"#,
+            None,
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    clear_model_auth_env();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn service_token_is_denied_on_user_delegated_retrieval_and_session_routes() {
+    let (_jwks, token) = signed_service_model_token(&["models:invoke"]).await;
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _) = make_state(client, session_client);
+    let app = build_router(state, None);
+
+    for (method, uri, body, delegated) in [
+        ("POST", "/v1/invoke", r#"{"content":"q"}"#, None),
+        ("GET", "/v1/threads", "", None),
+        ("POST", "/v1/retrieval", r#"{"query":"q"}"#, None),
+        (
+            "POST",
+            "/v1/chat/documents",
+            r#"{"content":"q"}"#,
+            Some(token.as_str()),
+        ),
+    ] {
+        assert_eq!(
+            route_status(app.clone(), method, uri, &token, body, delegated).await,
+            StatusCode::FORBIDDEN,
+            "service route must be denied: {method} {uri}"
+        );
+    }
+    clear_model_auth_env();
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn ai_images_routes_forward_to_inference_core() {
@@ -993,7 +1452,12 @@ async fn ai_images_routes_forward_to_inference_core() {
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
 
     let generate_req = Request::builder()
         .method("POST")
@@ -1134,7 +1598,12 @@ async fn invoke_emits_ingress_and_usage_on_success() {
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke")
@@ -1171,7 +1640,12 @@ async fn invoke_returns_502_when_inference_unavailable() {
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke")
@@ -1204,7 +1678,12 @@ async fn invoke_stream_emits_stream_and_usage_on_success() {
     let (mock_session, _session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1239,7 +1718,12 @@ async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {
         Some("thread-client-provisional".to_owned());
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1312,7 +1796,12 @@ async fn invoke_stream_includes_thread_history_and_persists_assistant() {
     ]);
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1405,7 +1894,12 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
     ]);
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1495,7 +1989,12 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
         token: "test-token".to_owned(),
         timeout: Duration::from_secs(5),
     });
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
 
     let name_req = Request::builder()
         .method("POST")
@@ -1600,7 +2099,12 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
         token: "test-token".to_owned(),
         timeout: Duration::from_secs(5),
     });
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
 
     let req = Request::builder()
         .method("POST")
@@ -1637,7 +2141,12 @@ async fn invoke_stream_generate_image_emits_attachment_and_persists() {
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1703,7 +2212,12 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
         token: "test-token".to_owned(),
         timeout: Duration::from_secs(5),
     });
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
 
     let search_req = Request::builder()
         .method("POST")
@@ -1822,7 +2336,12 @@ async fn invoke_stream_falls_back_to_infer_when_stream_unavailable() {
     let (mock_session, _session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1860,7 +2379,12 @@ async fn invoke_stream_emits_error_when_inference_fully_unavailable() {
     let (mock_session, _session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
     let req = Request::builder()
         .method("POST")
         .uri("/v1/invoke/stream")
@@ -1895,7 +2419,12 @@ async fn invoke_replay_determinism() {
     let (state, _publisher) = make_state(client, session_client);
 
     for _ in 0..2 {
-        let app = build_router(state.clone(), None);
+        let (app, _delegated_jwks) = authenticated_user_router(
+            build_router(state.clone(), None),
+            "org_placeholder",
+            "user_placeholder",
+        )
+        .await;
         let req = Request::builder()
             .method("POST")
             .uri("/v1/invoke")
@@ -1929,7 +2458,12 @@ async fn invoke_propagates_thread_id() {
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
 
     let req = Request::builder()
         .method("POST")
@@ -1958,7 +2492,12 @@ async fn invoke_reuses_existing_thread() {
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (state, _publisher) = make_state(client, session_client);
-    let app = build_router(state, None);
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
 
     let req = Request::builder()
         .method("POST")

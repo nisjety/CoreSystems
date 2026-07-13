@@ -1,6 +1,7 @@
 //! execution-core — runtime loop ownership for agent execution.
 
 pub mod artifact;
+pub mod auth;
 pub mod browser_agent;
 pub mod browser_events;
 pub mod executor;
@@ -16,6 +17,7 @@ pub mod permission;
 pub mod policy;
 pub mod promote_on_use;
 pub mod quarry_agent;
+mod quarry_auth;
 pub mod runtime_loop;
 pub mod sandbox;
 pub mod scrub;

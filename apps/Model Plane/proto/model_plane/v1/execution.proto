@@ -107,6 +107,10 @@ message ExecuteStepRequest {
   // (and any other viewer-scoped tool) filters to the caller's visible set, not
   // the whole org. Empty = org-scoped only (legacy/unauthenticated primitive).
   string user_id = 8;
+
+  // Zero-Data-Retention posture. The executor must not create durable run,
+  // step, audit-content, cache, or tool-output state when true.
+  bool zdr = 9;
 }
 
 // ExecuteStepResponse — result of a single step execution.
@@ -162,4 +166,3 @@ message PauseRunResponse {
   // True if the run was successfully paused.
   bool paused = 1;
 }
-

@@ -43,8 +43,9 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	applyMigration(ctx, t, pool)
 
 	org := "itest-org-" + time.Now().Format("150405.000")
+	otherOrg := org + "-other"
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM cost_entries WHERE org_id = $1`, org)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cost_entries WHERE org_id IN ($1, $2)`, org, otherOrg)
 	})
 
 	store, err := New(pool)
@@ -61,6 +62,7 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	must(ledger.Entry{OrgID: org, UserID: "u1", RunID: "run1", Model: "gpt", InputTokens: 100, OutputTokens: 40, CostUSD: 0.25, IdempotencyKey: "itest-k1"})
 	must(ledger.Entry{OrgID: org, UserID: "u1", RunID: "run1", Model: "gpt", InputTokens: 100, OutputTokens: 40, CostUSD: 0.25, IdempotencyKey: "itest-k1"}) // dup
 	must(ledger.Entry{OrgID: org, UserID: "u2", RunID: "run1", Model: "claude", InputTokens: 10, CostUSD: 0.5})
+	must(ledger.Entry{OrgID: otherOrg, UserID: "u3", ProducerID: "service:model-gateway", InputTokens: 9, IdempotencyKey: "itest-k1"})
 
 	// Idempotent: the duplicate key must collapse to one row.
 	usage, err := store.GetUsage(ctx, org, "u1")
@@ -69,6 +71,10 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	}
 	if usage.EntryCount != 1 || usage.TotalInputTokens != 100 {
 		t.Fatalf("idempotency failed: %+v", usage)
+	}
+	otherUsage, err := store.GetUsage(ctx, otherOrg, "u3")
+	if err != nil || otherUsage.EntryCount != 1 || otherUsage.TotalInputTokens != 9 {
+		t.Fatalf("tenant-scoped idempotency failed: usage=%+v err=%v", otherUsage, err)
 	}
 
 	// Run rollup spans both users.
@@ -111,12 +117,17 @@ func TestPostgresLedger_Integration(t *testing.T) {
 // database.
 func applyMigration(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	path := filepath.Join("..", "..", "migrations", "0001_cost_ledger.up.sql")
-	sqlBytes, err := os.ReadFile(path)
+	paths, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, path := range paths {
+		sqlBytes, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read migration %s: %v", path, readErr)
+		}
+		if _, execErr := pool.Exec(ctx, string(sqlBytes)); execErr != nil {
+			t.Fatalf("apply migration %s: %v", path, execErr)
+		}
 	}
 }

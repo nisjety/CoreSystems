@@ -12,7 +12,7 @@ use super::routing_policy::RoutingPolicy;
 use super::{
     anthropic::AnthropicProvider, endpoint_region_is_non_eu, intent, is_eu_region,
     normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk,
-    InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter,
+    InferRequest, InferResponse, ModelInfo, ProviderCapabilities, ProviderError, ProviderRouter,
 };
 use crate::cache::PromptCache;
 use crate::config::InferenceConfig;
@@ -33,6 +33,9 @@ pub trait ProviderRouterDyn: Send + Sync {
         req: &EmbedRequest,
     ) -> Result<EmbedResponse, ProviderError>;
     fn list_models_dyn(&self) -> Vec<ModelInfo>;
+    fn capabilities_dyn(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 }
 
 #[async_trait::async_trait]
@@ -57,6 +60,10 @@ impl<T: ProviderRouter + 'static> ProviderRouterDyn for T {
 
     fn list_models_dyn(&self) -> Vec<ModelInfo> {
         self.list_models()
+    }
+
+    fn capabilities_dyn(&self) -> ProviderCapabilities {
+        self.capabilities()
     }
 }
 
@@ -181,10 +188,12 @@ impl FallbackChain {
                             endpoint.clone(),
                             cfg.azure_openai_api_version.clone(),
                         ) {
-                            let p = p.with_model_catalog(
-                                cfg.azure_openai_chat_deployments.clone(),
-                                cfg.azure_openai_embedding_deployments.clone(),
-                            );
+                            let p = p
+                                .with_zdr_confirmed(cfg.azure_openai_zdr_confirmed)
+                                .with_model_catalog(
+                                    cfg.azure_openai_chat_deployments.clone(),
+                                    cfg.azure_openai_embedding_deployments.clone(),
+                                );
                             providers.push(("azure-openai".to_owned(), Arc::new(p)));
                             info!(provider = "azure-openai", "provider registered");
                         }
@@ -231,10 +240,12 @@ impl FallbackChain {
                                 endpoint.clone(),
                                 cfg.azure_openai_api_version.clone(),
                             ) {
-                                let p = p.with_model_catalog(
-                                    cfg.azure_openai_chat_deployments.clone(),
-                                    cfg.azure_openai_embedding_deployments.clone(),
-                                );
+                                let p = p
+                                    .with_zdr_confirmed(cfg.azure_openai_zdr_confirmed)
+                                    .with_model_catalog(
+                                        cfg.azure_openai_chat_deployments.clone(),
+                                        cfg.azure_openai_embedding_deployments.clone(),
+                                    );
                                 providers.push(("azure-openai".to_owned(), Arc::new(p)));
                                 info!(provider = "azure-openai", "provider registered");
                                 registered_azure = true;
@@ -489,6 +500,14 @@ impl FallbackChain {
             if !provider_serves_model(name, &req.model) {
                 continue;
             }
+            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: ZDR was required but is not verified for this deployment"
+                );
+                continue;
+            }
             // "Velion Auto" / unspecified model → resolve to this provider's
             // default so an unpinned request works against whatever provider is
             // configured. Specified models pass through unchanged.
@@ -543,9 +562,15 @@ impl FallbackChain {
             }
         }
 
-        Err(ProviderError::AllExhausted {
-            attempts: total_attempts,
-        })
+        if req.zdr && total_attempts == 0 {
+            Err(ProviderError::ZdrUnavailable(
+                "no matching provider deployment has verified ZDR support".to_owned(),
+            ))
+        } else {
+            Err(ProviderError::AllExhausted {
+                attempts: total_attempts,
+            })
+        }
     }
 
     /// Perform streaming inference with fallback (no caching for streams).
@@ -568,6 +593,14 @@ impl FallbackChain {
                 continue;
             }
             if !provider_serves_model(name, &req.model) {
+                continue;
+            }
+            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "stream provider skipped: ZDR was required but is not verified for this deployment"
+                );
                 continue;
             }
             // "Velion Auto" / unspecified model → resolve to this provider's default.
@@ -620,9 +653,15 @@ impl FallbackChain {
             }
         }
 
-        Err(ProviderError::AllExhausted {
-            attempts: total_attempts,
-        })
+        if req.zdr && total_attempts == 0 {
+            Err(ProviderError::ZdrUnavailable(
+                "no matching streaming provider deployment has verified ZDR support".to_owned(),
+            ))
+        } else {
+            Err(ProviderError::AllExhausted {
+                attempts: total_attempts,
+            })
+        }
     }
 
     /// Create an embedding with provider fallback.
@@ -667,6 +706,14 @@ impl FallbackChain {
 
         for (name, provider) in &self.providers {
             if !Self::provider_matches(name, &req.provider_hint) {
+                continue;
+            }
+            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "embedding provider skipped: ZDR was required but is not verified for this deployment"
+                );
                 continue;
             }
             for attempt in 1..=self.max_retries {
@@ -726,9 +773,15 @@ impl FallbackChain {
             }
         }
 
-        Err(ProviderError::AllExhausted {
-            attempts: total_attempts,
-        })
+        if req.zdr && total_attempts == 0 {
+            Err(ProviderError::ZdrUnavailable(
+                "no matching embedding provider deployment has verified ZDR support".to_owned(),
+            ))
+        } else {
+            Err(ProviderError::AllExhausted {
+                attempts: total_attempts,
+            })
+        }
     }
 
     /// Return models from every registered provider, optionally filtered.
@@ -838,10 +891,18 @@ mod resolution_tests {
     /// Records the model it was invoked with so tests can assert resolution.
     struct RecordingProvider {
         seen_model: Arc<Mutex<Option<String>>>,
+        zdr_supported: bool,
     }
 
     #[async_trait::async_trait]
     impl ProviderRouter for RecordingProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                supports_zdr: self.zdr_supported,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             *self.seen_model.lock().unwrap() = Some(req.model.clone());
             Ok(InferResponse {
@@ -865,7 +926,10 @@ mod resolution_tests {
     }
 
     fn chain_with(seen: Arc<Mutex<Option<String>>>) -> FallbackChain {
-        let provider: BoxedProvider = Arc::new(RecordingProvider { seen_model: seen });
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen,
+            zdr_supported: false,
+        });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
     }
 
@@ -914,6 +978,7 @@ mod resolution_tests {
         let seen = Arc::new(Mutex::new(None));
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
+            zdr_supported: false,
         });
         let chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
@@ -941,6 +1006,7 @@ mod resolution_tests {
         let seen = Arc::new(Mutex::new(None));
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
+            zdr_supported: false,
         });
         // new_with_providers defaults intent_enabled = false.
         let chain =
@@ -954,14 +1020,65 @@ mod resolution_tests {
         assert_eq!(seen.lock().unwrap().as_deref(), Some(AZURE_MODEL_ROUTER));
     }
 
+    #[tokio::test]
+    async fn zdr_skips_unverified_provider_and_fails_closed_without_compliant_route() {
+        let unverified_seen = Arc::new(Mutex::new(None));
+        let verified_seen = Arc::new(Mutex::new(None));
+        let unverified: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: unverified_seen.clone(),
+            zdr_supported: false,
+        });
+        let verified: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: verified_seen.clone(),
+            zdr_supported: true,
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), unverified),
+                ("azure-openai".to_owned(), verified),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            request_id: "zdr-1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            zdr: true,
+            ..Default::default()
+        };
+
+        chain.infer(&req).await.expect("verified ZDR provider");
+        assert!(unverified_seen.lock().unwrap().is_none());
+        assert!(verified_seen.lock().unwrap().is_some());
+
+        let unavailable_seen = Arc::new(Mutex::new(None));
+        let unavailable: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: unavailable_seen.clone(),
+            zdr_supported: false,
+        });
+        let unavailable_chain =
+            FallbackChain::new_with_providers(vec![("openai".to_owned(), unavailable)], 1);
+        let error = unavailable_chain.infer(&req).await.unwrap_err();
+        assert!(matches!(error, ProviderError::ZdrUnavailable(_)));
+        assert!(unavailable_seen.lock().unwrap().is_none());
+    }
+
     /// An embedding provider that records whether it was reached. Used to prove
     /// the residency gate rejects BEFORE any provider (network) call.
     struct RecordingEmbedProvider {
         reached: Arc<Mutex<bool>>,
+        zdr_supported: bool,
     }
 
     #[async_trait::async_trait]
     impl ProviderRouter for RecordingEmbedProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                supports_embeddings: true,
+                supports_zdr: self.zdr_supported,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
         async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
             Err(ProviderError::UnsupportedModel(
                 "chat not supported".to_owned(),
@@ -991,7 +1108,10 @@ mod resolution_tests {
     }
 
     fn embed_chain(residency: EmbeddingResidency, reached: Arc<Mutex<bool>>) -> FallbackChain {
-        let provider: BoxedProvider = Arc::new(RecordingEmbedProvider { reached });
+        let provider: BoxedProvider = Arc::new(RecordingEmbedProvider {
+            reached,
+            zdr_supported: false,
+        });
         let mut chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
         chain.residency = residency;
@@ -1107,5 +1227,23 @@ mod resolution_tests {
         };
         chain.create_embedding(&req).await.unwrap();
         assert!(*reached.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn embedding_zdr_fails_before_unverified_provider_call() {
+        let reached = Arc::new(Mutex::new(false));
+        let chain = embed_chain(EmbeddingResidency::default(), reached.clone());
+        let req = EmbedRequest {
+            request_id: "e-zdr".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            zdr: true,
+            region: "swedencentral".to_owned(),
+        };
+
+        let error = chain.create_embedding(&req).await.unwrap_err();
+        assert!(matches!(error, ProviderError::ZdrUnavailable(_)));
+        assert!(!*reached.lock().unwrap());
     }
 }

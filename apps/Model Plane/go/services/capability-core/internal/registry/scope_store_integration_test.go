@@ -15,8 +15,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// setupRegistryDB spins a throwaway Postgres, applies migration 0003 (which
-// creates capabilities + capability_scopes), and returns a connected pool.
+// setupRegistryDB spins a throwaway Postgres and applies the schema migrations
+// required by the tenant-bound capability scope store.
 func setupRegistryDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -51,12 +51,19 @@ func setupRegistryDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	sqlBytes, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0003_capabilities_registry.up.sql"))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, migration := range []string{
+		"0001_models.up.sql",
+		"0003_capabilities_registry.up.sql",
+		"0006_capability_availability_contract.up.sql",
+		"0007_tenant_scopes_and_risk_constraints.up.sql",
+	} {
+		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
+		if readErr != nil {
+			t.Fatalf("read migration %s: %v", migration, readErr)
+		}
+		if _, applyErr := pool.Exec(ctx, string(sqlBytes)); applyErr != nil {
+			t.Fatalf("apply migration %s: %v", migration, applyErr)
+		}
 	}
 	return pool
 }
@@ -82,15 +89,15 @@ func TestScopeStore_GrantResolveRevoke(t *testing.T) {
 	seedCap(t, capStore, "cap.y", "Y", "tool")
 
 	// Grant cap.x to org "acme", cap.y to all orgs (wildcard).
-	if _, err := scopes.Grant(ctx, "", "cap.x", ScopeKindOrg, "acme", "tester"); err != nil {
+	if _, err := scopes.Grant(ctx, "", "acme", "cap.x", ScopeKindOrg, "acme", "tester"); err != nil {
 		t.Fatalf("grant cap.x: %v", err)
 	}
-	if _, err := scopes.Grant(ctx, "", "cap.y", ScopeKindOrg, "*", "tester"); err != nil {
+	if _, err := scopes.Grant(ctx, "", "acme", "cap.y", ScopeKindOrg, "acme", "tester"); err != nil {
 		t.Fatalf("grant cap.y: %v", err)
 	}
 
 	// Resolve for org "acme" → both cap.x (exact) and cap.y (wildcard).
-	ids, err := scopes.ResolveForScope(ctx, ScopeKindOrg, "acme")
+	ids, err := scopes.ResolveForScopeForOrg(ctx, "acme", ScopeKindOrg, "acme")
 	if err != nil {
 		t.Fatalf("resolve acme: %v", err)
 	}
@@ -99,44 +106,62 @@ func TestScopeStore_GrantResolveRevoke(t *testing.T) {
 	}
 
 	// Resolve for org "other" → only cap.y (wildcard); cap.x not granted.
-	ids, err = scopes.ResolveForScope(ctx, ScopeKindOrg, "other")
+	ids, err = scopes.ResolveForScopeForOrg(ctx, "other", ScopeKindOrg, "other")
 	if err != nil {
 		t.Fatalf("resolve other: %v", err)
 	}
-	if contains(ids, "cap.x") || !contains(ids, "cap.y") {
-		t.Fatalf("expected only [cap.y] for other, got %v", ids)
+	if contains(ids, "cap.x") || contains(ids, "cap.y") {
+		t.Fatalf("expected no acme grants for other tenant, got %v", ids)
 	}
 
 	// IsGrantedForScope honours wildcard + exact.
-	if ok, _ := scopes.IsGrantedForScope(ctx, "cap.x", ScopeKindOrg, "acme"); !ok {
+	if ok, _ := scopes.IsGrantedForScope(ctx, "cap.x", "acme", ScopeKindOrg, "acme"); !ok {
 		t.Fatalf("cap.x should be granted for acme")
 	}
-	if ok, _ := scopes.IsGrantedForScope(ctx, "cap.x", ScopeKindOrg, "other"); ok {
+	if ok, _ := scopes.IsGrantedForScope(ctx, "cap.x", "other", ScopeKindOrg, "other"); ok {
 		t.Fatalf("cap.x should NOT be granted for other")
 	}
-	if ok, _ := scopes.IsGrantedForScope(ctx, "cap.y", ScopeKindOrg, "anything"); !ok {
-		t.Fatalf("cap.y wildcard should cover any org")
+	if ok, _ := scopes.IsGrantedForScope(ctx, "cap.y", "other", ScopeKindOrg, "other"); ok {
+		t.Fatalf("cap.y must not cross tenant")
 	}
 
 	// HasAnyGrants distinguishes governed vs ungoverned.
-	if ok, _ := scopes.HasAnyGrants(ctx, "cap.x", ScopeKindOrg); !ok {
+	if ok, _ := scopes.HasAnyGrants(ctx, "cap.x", "acme", ScopeKindOrg); !ok {
 		t.Fatalf("cap.x should report org grants")
 	}
-	if ok, _ := scopes.HasAnyGrants(ctx, "cap.x", ScopeKindAgent); ok {
+	if ok, _ := scopes.HasAnyGrants(ctx, "cap.x", "acme", ScopeKindAgent); ok {
 		t.Fatalf("cap.x should report NO agent grants")
 	}
 
 	// Revoke cap.x for acme → resolution drops it.
-	n, err := scopes.Revoke(ctx, "cap.x", ScopeKindOrg, "acme")
+	n, err := scopes.Revoke(ctx, "acme", "cap.x", ScopeKindOrg, "acme")
 	if err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 grant revoked, got %d", n)
 	}
-	ids, _ = scopes.ResolveForScope(ctx, ScopeKindOrg, "acme")
+	ids, _ = scopes.ResolveForScopeForOrg(ctx, "acme", ScopeKindOrg, "acme")
 	if contains(ids, "cap.x") {
 		t.Fatalf("cap.x should be revoked for acme, got %v", ids)
+	}
+}
+
+func TestScopeStore_AgentGrantIsBoundToTenant(t *testing.T) {
+	pool := setupRegistryDB(t)
+	ctx := context.Background()
+	capStore, _ := NewCapabilitiesStore(pool)
+	scopes, _ := NewScopeStore(pool)
+	seedCap(t, capStore, "cap.agent", "Agent", "skill")
+
+	if _, err := scopes.Grant(ctx, "", "org-a", "cap.agent", ScopeKindAgent, "shared-agent", "tester"); err != nil {
+		t.Fatalf("grant agent: %v", err)
+	}
+	if granted, err := scopes.IsGrantedForScope(ctx, "cap.agent", "org-a", ScopeKindAgent, "shared-agent"); err != nil || !granted {
+		t.Fatalf("own tenant granted = %v, err = %v", granted, err)
+	}
+	if granted, err := scopes.IsGrantedForScope(ctx, "cap.agent", "org-b", ScopeKindAgent, "shared-agent"); err != nil || granted {
+		t.Fatalf("foreign tenant granted = %v, err = %v", granted, err)
 	}
 }
 

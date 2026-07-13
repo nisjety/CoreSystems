@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 
@@ -13,10 +16,435 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type capabilityStoreStub struct {
+	row        *registry.CapabilityRow
+	scored     []registry.ScoredCapability
+	err        error
+	gotID      string
+	gotOrg     string
+	gotRankOrg string
+}
+
+type capabilitySourceStub struct {
+	items []*models.Capability
+}
+
+func (source capabilitySourceStub) Load() ([]*models.Capability, error) {
+	items := make([]*models.Capability, len(source.items))
+	for index, capability := range source.items {
+		copy := *capability
+		items[index] = &copy
+	}
+	return items, nil
+}
+
+func (store *capabilityStoreStub) GetForOrg(_ context.Context, capabilityID, organizationID string) (*registry.CapabilityRow, error) {
+	store.gotID = capabilityID
+	store.gotOrg = organizationID
+	return store.row, store.err
+}
+
+func (store *capabilityStoreStub) RankedList(_ context.Context, organizationID, _ string, _ []string, _ int) ([]registry.ScoredCapability, error) {
+	store.gotRankOrg = organizationID
+	return store.scored, store.err
+}
+
+func TestCapabilityDetailMappersPreserveFailClosedAvailabilityContract(t *testing.T) {
+	t.Parallel()
+
+	if rowToDetail(nil) != nil || toDetail(nil) != nil {
+		t.Fatal("nil capability must remain nil")
+	}
+	checkedAt := time.Now().UTC()
+	detail := rowToDetail(&registry.CapabilityRow{
+		ID:                "cap.shipping.quote",
+		Name:              "Shipping quote",
+		Kind:              "tool",
+		Version:           "1",
+		Description:       "Read-only quote",
+		RiskLevel:         "high",
+		LazyLoad:          true,
+		Scope:             "tenant",
+		Enabled:           true,
+		AvailabilityState: "available",
+		ReasonCode:        "runtime_healthy",
+		Reason:            "probe succeeded",
+		ExecutionMode:     "agentic",
+		CostClass:         "variable",
+		HealthCheckedAt:   &checkedAt,
+	})
+
+	if detail.CapabilityId != "cap.shipping.quote" || detail.State != "approval_required" {
+		t.Fatalf("detail identity/state = %+v", detail)
+	}
+	if !detail.RequiresApproval || detail.ExecutionMode != "agentic" || detail.CostClass != "variable" {
+		t.Fatalf("detail policy = %+v", detail)
+	}
+	if detail.HealthCheckedAt == "" || detail.ReasonCode != "runtime_healthy" {
+		t.Fatalf("detail health = %+v", detail)
+	}
+}
+
+func TestCapabilityDetailMapperNeverAdvertisesQuarantinedRollout(t *testing.T) {
+	t.Parallel()
+	checkedAt := time.Now().UTC()
+	detail := rowToDetail(&registry.CapabilityRow{
+		ID: "cap.quarantined", Enabled: true, RiskLevel: models.RiskLow,
+		RolloutState: "quarantine", AvailabilityState: "available",
+		ExecutionMode: models.ExecutionDirectRead, HealthCheckedAt: &checkedAt,
+	})
+	if detail.State != string(models.AvailabilityUnavailable) || detail.ReasonCode != "rollout_quarantine" {
+		t.Fatalf("quarantined detail = %+v", detail)
+	}
+}
+
+func TestGetCapabilityUsesAuthoritativeDurableAvailabilityWhenStoreIsAttached(t *testing.T) {
+	t.Parallel()
+
+	checkedAt := time.Now().UTC()
+	server := newTestServer()
+	store := &capabilityStoreStub{row: &registry.CapabilityRow{
+		ID:                "cap.read",
+		Enabled:           true,
+		RiskLevel:         "low",
+		AvailabilityState: "available",
+		ReasonCode:        "runtime_healthy",
+		ExecutionMode:     "direct_read",
+		CostClass:         "bounded",
+		HealthCheckedAt:   &checkedAt,
+	}}
+	server.store = store
+
+	ctx := verifiedGRPCContext(t, "triodelab")
+	detail, err := server.GetCapability(ctx, &mpv1.GetCapabilityRequest{CapabilityId: "cap.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "available" || detail.ExecutionMode != "direct_read" || detail.HealthCheckedAt == "" {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if store.gotID != "cap.read" || store.gotOrg != "triodelab" {
+		t.Fatalf("durable lookup = id %q org %q", store.gotID, store.gotOrg)
+	}
+
+	_, err = server.GetCapability(ctx, &mpv1.GetCapabilityRequest{
+		CapabilityId: "cap.read", VersionConstraint: "2",
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("version mismatch status = %v", err)
+	}
+
+	server.store = &capabilityStoreStub{err: errors.New("database unavailable")}
+	_, err = server.GetCapability(ctx, &mpv1.GetCapabilityRequest{CapabilityId: "cap.read"})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("store error status = %v", err)
+	}
+}
+
+func TestListCapabilitiesPinsDurableRankingToVerifiedTenant(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	store := &capabilityStoreStub{scored: []registry.ScoredCapability{{
+		Row: &registry.CapabilityRow{
+			ID: "cap.owned", OrgID: "org-a", Name: "Owned", Kind: models.KindTool,
+			Version: "1", RiskLevel: models.RiskLow, Enabled: true,
+		},
+	}}}
+	server.store = store
+
+	response, err := server.ListCapabilities(
+		verifiedGRPCContext(t, "org-a"),
+		&mpv1.ListCapabilitiesRequest{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.gotRankOrg != "org-a" {
+		t.Fatalf("durable ranked tenant = %q", store.gotRankOrg)
+	}
+	if len(response.Capabilities) != 1 || response.Capabilities[0].CapabilityId != "cap.owned" {
+		t.Fatalf("ranked response = %+v", response)
+	}
+}
+
+func TestPromoteSkillIsQuarantinedWhenDurableStoreIsAttached(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	server.store = &capabilityStoreStub{}
+	ctx := verifiedGRPCContext(t, "triodelab")
+
+	_, err := server.PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
+		SkillId: "cap.skill.summarize", FromScope: "agent", ToScope: "workspace",
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("durable promotion status = %v", err)
+	}
+	capability, lookupErr := server.registry.GetForOrg("cap.skill.summarize", "", "triodelab")
+	if lookupErr != nil {
+		t.Fatal(lookupErr)
+	}
+	if capability.Scope != "agent" {
+		t.Fatalf("quarantined promotion mutated memory to scope %q", capability.Scope)
+	}
+}
+
+func TestEvaluatePolicyUsesDurableTenantAndFailsClosedRuntimeState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	base := registry.CapabilityRow{
+		ID: "cap.durable", OrgID: "org-a", Name: "Durable", Kind: models.KindTool,
+		Version: "1", RiskLevel: models.RiskLow, Scope: "global", Enabled: true,
+		EnabledForScopes: []string{"global"},
+		RolloutState:     "stable", AvailabilityState: string(models.AvailabilityAvailable),
+		ExecutionMode: models.ExecutionDirectRead, CostClass: models.CostBounded,
+		HealthCheckedAt: &now,
+	}
+
+	tests := []struct {
+		name         string
+		mutate       func(*registry.CapabilityRow)
+		wantDecision string
+		wantReason   string
+		wantCode     codes.Code
+	}{
+		{name: "current stable capability is evaluated", wantDecision: policy.DecisionAllow},
+		{name: "disabled capability is denied", mutate: func(row *registry.CapabilityRow) {
+			row.Enabled = false
+		}, wantDecision: policy.DecisionDeny, wantReason: "capability_disabled"},
+		{name: "unavailable capability is denied", mutate: func(row *registry.CapabilityRow) {
+			row.AvailabilityState = string(models.AvailabilityUnavailable)
+			row.ExecutionMode = models.ExecutionUnavailable
+		}, wantDecision: policy.DecisionDeny, wantReason: "runtime_unavailable"},
+		{name: "unhealthy capability is denied", mutate: func(row *registry.CapabilityRow) {
+			row.AvailabilityState = string(models.AvailabilityUnhealthy)
+			row.ExecutionMode = models.ExecutionUnavailable
+		}, wantDecision: policy.DecisionDeny, wantReason: "runtime_unhealthy"},
+		{name: "stale health attestation is denied", mutate: func(row *registry.CapabilityRow) {
+			stale := now.Add(-models.AvailabilityAttestationTTL - time.Second)
+			row.HealthCheckedAt = &stale
+		}, wantDecision: policy.DecisionDeny, wantReason: "health_attestation_stale"},
+		{name: "quarantined rollout is denied", mutate: func(row *registry.CapabilityRow) {
+			row.RolloutState = "quarantine"
+		}, wantDecision: policy.DecisionDeny, wantReason: "rollout_quarantine"},
+		{name: "deprecated rollout is denied", mutate: func(row *registry.CapabilityRow) {
+			row.RolloutState = "deprecated"
+		}, wantDecision: policy.DecisionDeny, wantReason: "rollout_deprecated"},
+		{name: "unknown risk is denied", mutate: func(row *registry.CapabilityRow) {
+			row.RiskLevel = "critical-ish"
+		}, wantDecision: policy.DecisionDeny, wantReason: "invalid_risk_level"},
+		{name: "foreign store result is denied", mutate: func(row *registry.CapabilityRow) {
+			row.OrgID = "org-b"
+		}, wantCode: codes.NotFound},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := base
+			if test.mutate != nil {
+				test.mutate(&row)
+			}
+			store := &capabilityStoreStub{row: &row}
+			server := newTestServer()
+			server.store = store
+
+			response, err := server.EvaluatePolicy(
+				verifiedGRPCContext(t, "org-a"),
+				&mpv1.EvaluatePolicyRequest{
+					CapabilityId: row.ID, RunId: "run-a", AgentId: "agent-a", Scope: "global",
+				},
+			)
+			if test.wantCode != codes.OK {
+				if status.Code(err) != test.wantCode {
+					t.Fatalf("EvaluatePolicy status = %v, want %v", status.Code(err), test.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EvaluatePolicy: %v", err)
+			}
+			if store.gotOrg != "org-a" {
+				t.Fatalf("durable lookup tenant = %q", store.gotOrg)
+			}
+			if response.Decision != test.wantDecision {
+				t.Fatalf("decision = %+v", response)
+			}
+			if test.wantReason != "" && response.Reason != test.wantReason {
+				t.Fatalf("reason = %q, want %q", response.Reason, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestEvaluatePolicyRejectsMissingScopeBeforeRuntimeStateEvaluation(t *testing.T) {
+	t.Parallel()
+	server := newTestServer()
+	server.store = &capabilityStoreStub{row: &registry.CapabilityRow{
+		ID: "cap.unavailable", OrgID: "org-a", Enabled: false, RiskLevel: models.RiskLow,
+	}}
+
+	_, err := server.EvaluatePolicy(
+		verifiedGRPCContext(t, "org-a"),
+		&mpv1.EvaluatePolicyRequest{
+			CapabilityId: "cap.unavailable", RunId: "run-a", AgentId: "agent-a",
+		},
+	)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("missing scope status = %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+func TestInMemoryGRPCMethodsRejectForeignTenantCapabilities(t *testing.T) {
+	t.Parallel()
+
+	owned := &models.Capability{
+		ID: "cap.owned", Name: "Owned", Kind: models.KindTool, Version: "1", RiskLevel: models.RiskLow,
+		Scope: "org", Enabled: true, OrgID: "org-a", EnabledForScopes: []string{"org"},
+	}
+	foreignSkill := &models.Capability{
+		ID: "cap.foreign-skill", Name: "Foreign", Kind: models.KindSkill, Version: "1", RiskLevel: models.RiskLow,
+		Scope: "agent", Enabled: true, OrgID: "org-b", EnabledForScopes: []string{"agent"},
+	}
+	global := &models.Capability{
+		ID: "cap.global", Name: "Global", Kind: models.KindTool, Version: "1", RiskLevel: models.RiskLow,
+		Scope: "global", Enabled: true, OrgID: "global", EnabledForScopes: []string{"global"},
+	}
+	reg, err := registry.NewFromSource(capabilitySourceStub{items: []*models.Capability{owned, foreignSkill, global}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(reg, nil, policy.New(reg))
+	ctx := verifiedGRPCContext(t, "org-a")
+
+	listed, err := server.ListCapabilities(ctx, &mpv1.ListCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("ListCapabilities: %v", err)
+	}
+	for _, capability := range listed.Capabilities {
+		if capability.CapabilityId == foreignSkill.ID {
+			t.Fatalf("foreign capability leaked in list: %+v", capability)
+		}
+	}
+
+	for name, invoke := range map[string]func() error{
+		"get": func() error {
+			_, invokeErr := server.GetCapability(ctx, &mpv1.GetCapabilityRequest{CapabilityId: foreignSkill.ID})
+			return invokeErr
+		},
+		"evaluate": func() error {
+			_, invokeErr := server.EvaluatePolicy(ctx, &mpv1.EvaluatePolicyRequest{
+				CapabilityId: foreignSkill.ID, RunId: "run-a", AgentId: "agent-a", Scope: "global",
+			})
+			return invokeErr
+		},
+		"validate": func() error {
+			_, invokeErr := server.ValidateSkillBundle(ctx, &mpv1.ValidateSkillBundleRequest{SkillId: foreignSkill.ID})
+			return invokeErr
+		},
+		"check promotion": func() error {
+			_, invokeErr := server.CheckSkillPromotion(ctx, &mpv1.CheckSkillPromotionRequest{
+				SkillId: foreignSkill.ID, FromScope: "agent", ToScope: "workspace",
+			})
+			return invokeErr
+		},
+		"promote": func() error {
+			_, invokeErr := server.PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
+				SkillId: foreignSkill.ID, FromScope: "agent", ToScope: "workspace",
+			})
+			return invokeErr
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if code := status.Code(invoke()); code != codes.NotFound {
+				t.Fatalf("foreign capability status = %v", code)
+			}
+		})
+	}
+
+	for capabilityID, invocationScope := range map[string]string{owned.ID: "org", global.ID: "global"} {
+		if _, err := server.EvaluatePolicy(ctx, &mpv1.EvaluatePolicyRequest{
+			CapabilityId: capabilityID, RunId: "run-a", AgentId: "agent-a", Scope: invocationScope,
+		}); err != nil {
+			t.Fatalf("authorized capability %q evaluation: %v", capabilityID, err)
+		}
+	}
+}
+
+func TestInMemoryGRPCMethodsRequireVerifiedIdentity(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	for name, invoke := range map[string]func() error{
+		"list": func() error {
+			_, err := server.ListCapabilities(context.Background(), &mpv1.ListCapabilitiesRequest{})
+			return err
+		},
+		"get": func() error {
+			_, err := server.GetCapability(context.Background(), &mpv1.GetCapabilityRequest{CapabilityId: "cap.memory.search"})
+			return err
+		},
+		"evaluate": func() error {
+			_, err := server.EvaluatePolicy(context.Background(), &mpv1.EvaluatePolicyRequest{
+				CapabilityId: "cap.memory.search", RunId: "run-a", AgentId: "agent-a", Scope: "workspace",
+			})
+			return err
+		},
+		"validate": func() error {
+			_, err := server.ValidateSkillBundle(context.Background(), &mpv1.ValidateSkillBundleRequest{SkillId: "cap.skill.summarize"})
+			return err
+		},
+		"check promotion": func() error {
+			_, err := server.CheckSkillPromotion(context.Background(), &mpv1.CheckSkillPromotionRequest{
+				SkillId: "cap.skill.summarize", FromScope: "agent", ToScope: "workspace",
+			})
+			return err
+		},
+		"promote": func() error {
+			_, err := server.PromoteSkill(context.Background(), &mpv1.PromoteSkillRequest{
+				SkillId: "cap.skill.summarize", FromScope: "agent", ToScope: "workspace",
+			})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if code := status.Code(invoke()); code != codes.Unauthenticated {
+				t.Fatalf("missing verified identity status = %v", code)
+			}
+		})
+	}
+}
+
 func newTestServer() *Server {
 	reg := registry.NewRegistry()
 	pol := policy.New(reg)
 	return NewServer(reg, nil, pol)
+}
+
+func newAvailablePolicyTestServer(t *testing.T) *Server {
+	t.Helper()
+	checkedAt := time.Now().UTC()
+	available := func(id, name, kind, version, risk string) *models.Capability {
+		return &models.Capability{
+			ID: id, Name: name, Kind: kind, Version: version, RiskLevel: risk,
+			Scope: "global", Enabled: true, OrgID: "triodelab",
+			EnabledForScopes:  []string{"global"},
+			AvailabilityState: string(models.AvailabilityAvailable),
+			ExecutionMode:     models.ExecutionDirectRead, CostClass: models.CostBounded,
+			HealthCheckedAt: &checkedAt,
+		}
+	}
+	capabilities := []*models.Capability{
+		available("cap.memory.search", "Search Memory", models.KindMemory, "1.1.0", models.RiskLow),
+		available("cap.tool.http", "HTTP Fetch", models.KindTool, "1.0.0", models.RiskMedium),
+		available("cap.sandbox.exec", "Execute In Sandbox", models.KindSandbox, "1.0.0", models.RiskHigh),
+	}
+	reg, err := registry.NewFromSource(capabilitySourceStub{items: capabilities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewServer(reg, nil, policy.New(reg))
 }
 
 func TestRegisterWiresServiceDescriptor(t *testing.T) {
@@ -31,7 +459,7 @@ func TestRegisterWiresServiceDescriptor(t *testing.T) {
 
 func TestListCapabilities(t *testing.T) {
 	s := newTestServer()
-	ctx := context.Background()
+	ctx := verifiedGRPCContext(t, "triodelab")
 
 	t.Run("no filter returns seeded set", func(t *testing.T) {
 		resp, err := s.ListCapabilities(ctx, &mpv1.ListCapabilitiesRequest{})
@@ -40,6 +468,17 @@ func TestListCapabilities(t *testing.T) {
 		}
 		if len(resp.Capabilities) == 0 {
 			t.Fatalf("expected seeded capabilities, got none")
+		}
+		for _, capability := range resp.Capabilities {
+			if capability.State != "unavailable" {
+				t.Fatalf("unattested capability %q state = %q", capability.CapabilityId, capability.State)
+			}
+			if capability.ReasonCode != "health_not_attested" {
+				t.Fatalf("unattested capability %q reason = %q", capability.CapabilityId, capability.ReasonCode)
+			}
+			if capability.ExecutionMode != "unavailable" {
+				t.Fatalf("unattested capability %q execution mode = %q", capability.CapabilityId, capability.ExecutionMode)
+			}
 		}
 	})
 
@@ -107,7 +546,7 @@ func TestListCapabilities(t *testing.T) {
 
 func TestGetCapability(t *testing.T) {
 	s := newTestServer()
-	ctx := context.Background()
+	ctx := verifiedGRPCContext(t, "triodelab")
 
 	t.Run("found", func(t *testing.T) {
 		detail, err := s.GetCapability(ctx, &mpv1.GetCapabilityRequest{CapabilityId: "cap.memory.search"})
@@ -142,8 +581,8 @@ func TestGetCapability(t *testing.T) {
 }
 
 func TestEvaluatePolicy(t *testing.T) {
-	s := newTestServer()
-	ctx := context.Background()
+	s := newAvailablePolicyTestServer(t)
+	ctx := verifiedGRPCContext(t, "triodelab")
 
 	baseReq := func(capID string) *mpv1.EvaluatePolicyRequest {
 		return &mpv1.EvaluatePolicyRequest{
@@ -151,6 +590,7 @@ func TestEvaluatePolicy(t *testing.T) {
 			RunId:        "run-1",
 			AgentId:      "agent-1",
 			OrgId:        "org-1",
+			Scope:        "global",
 		}
 	}
 
@@ -193,12 +633,23 @@ func TestEvaluatePolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("missing org -> InvalidArgument", func(t *testing.T) {
+	t.Run("missing caller org is replaced by verified tenant", func(t *testing.T) {
 		req := baseReq("cap.memory.search")
 		req.OrgId = ""
-		_, err := s.EvaluatePolicy(ctx, req)
-		if status.Code(err) != codes.InvalidArgument {
-			t.Errorf("expected InvalidArgument, got %v", err)
+		response, err := s.EvaluatePolicy(ctx, req)
+		if err != nil || response.Decision != policy.DecisionAllow {
+			t.Errorf("expected tenant-derived allow, got response=%+v error=%v", response, err)
+		}
+	})
+
+	t.Run("missing or unsupported scope is rejected", func(t *testing.T) {
+		for _, scope := range []string{"", "something-random", "agent", "run", "thread", "workspace", "user"} {
+			req := baseReq("cap.memory.search")
+			req.Scope = scope
+			_, err := s.EvaluatePolicy(ctx, req)
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("scope %q status = %v, want InvalidArgument", scope, status.Code(err))
+			}
 		}
 	})
 
@@ -212,7 +663,7 @@ func TestEvaluatePolicy(t *testing.T) {
 
 func TestSkillPromotionRPCs(t *testing.T) {
 	s := newTestServer()
-	ctx := context.Background()
+	ctx := verifiedGRPCContext(t, "triodelab")
 
 	validation, err := s.ValidateSkillBundle(ctx, &mpv1.ValidateSkillBundleRequest{SkillId: "cap.skill.summarize"})
 	if err != nil {

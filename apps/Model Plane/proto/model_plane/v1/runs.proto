@@ -18,6 +18,11 @@ service RunService {
 
   // Cancel a running or queued run.
   rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+
+  // ResolveRunOwner — authoritative tenant/user ownership check for internal
+  // execution mutations. Returns only a boolean to avoid disclosing another
+  // tenant's run metadata.
+  rpc ResolveRunOwner(ResolveRunOwnerRequest) returns (ResolveRunOwnerResponse);
 }
 
 message GetRunRequest {
@@ -58,6 +63,16 @@ message CancelRunRequest {
 message CancelRunResponse {
   // True if the run was successfully cancelled.
   bool cancelled = 1;
+}
+
+message ResolveRunOwnerRequest {
+  string run_id = 1;
+  string org_id = 2;
+  string user_id = 3;
+}
+
+message ResolveRunOwnerResponse {
+  bool authorized = 1;
 }
 
 // RunDetail — full run metadata.

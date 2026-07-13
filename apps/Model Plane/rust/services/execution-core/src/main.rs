@@ -3,7 +3,7 @@
 //! gRPC on :9093, HTTP health/metrics on :8083.
 
 use anyhow::Result;
-use execution_core::state::StateStore;
+use execution_core::{auth::JwtVerifier, http_health::Readiness, state::StateStore};
 use tracing::info;
 
 #[tokio::main]
@@ -11,10 +11,11 @@ async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("execution-core")?;
     info!("execution-core starting");
 
+    let readiness = Readiness::new();
     let state = StateStore::new();
-
-    let grpc_handle = tokio::spawn(execution_core::grpc::serve(state.clone()));
-    let http_handle = tokio::spawn(execution_core::http_health::serve());
+    let auth = JwtVerifier::from_env().await?;
+    let grpc_handle = tokio::spawn(execution_core::grpc::serve(state, readiness.clone(), auth));
+    let http_handle = tokio::spawn(execution_core::http_health::serve(readiness));
 
     let shutdown = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

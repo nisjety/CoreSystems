@@ -17,11 +17,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Scope kind constants (mirror the proto/EvaluatePolicy canonical values).
 const (
+	ScopeKindRun       = "run"
+	ScopeKindThread    = "thread"
 	ScopeKindOrg       = "org"
 	ScopeKindAgent     = "agent"
 	ScopeKindWorkspace = "workspace"
@@ -35,6 +39,7 @@ const (
 // ScopeGrant is a single capability_scopes row.
 type ScopeGrant struct {
 	ID           string     `json:"id"`
+	OrgID        string     `json:"org_id"`
 	CapabilityID string     `json:"capability_id"`
 	ScopeKind    string     `json:"scope_kind"`
 	ScopeValue   string     `json:"scope_value"`
@@ -45,7 +50,13 @@ type ScopeGrant struct {
 
 // ScopeStore provides CRUD + resolution over capability_scopes.
 type ScopeStore struct {
-	pool *pgxpool.Pool
+	pool scopeDatabase
+}
+
+type scopeDatabase interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 // NewScopeStore constructs a ScopeStore.
@@ -56,64 +67,73 @@ func NewScopeStore(pool *pgxpool.Pool) (*ScopeStore, error) {
 	return &ScopeStore{pool: pool}, nil
 }
 
-// Grant inserts an active scope grant for a capability. scopeValue "" is
-// normalised to the wildcard "*". The grant id is caller-supplied; pass "" to
-// have one generated. Returns the persisted grant.
-func (s *ScopeStore) Grant(ctx context.Context, id, capabilityID, scopeKind, scopeValue, grantedBy string) (*ScopeGrant, error) {
-	if capabilityID == "" || scopeKind == "" {
-		return nil, fmt.Errorf("capability_id and scope_kind are required")
-	}
-	if scopeValue == "" {
-		scopeValue = scopeValueAll
+// Grant inserts a tenant-bound active scope grant for a capability. The
+// verified org is mandatory even when agent IDs collide between tenants.
+func (s *ScopeStore) Grant(ctx context.Context, id, orgID, capabilityID, scopeKind, scopeValue, grantedBy string) (*ScopeGrant, error) {
+	if err := validateScopeTuple(orgID, capabilityID, scopeKind, scopeValue); err != nil {
+		return nil, err
 	}
 	if id == "" {
 		id = fmt.Sprintf("scope_%d", time.Now().UnixNano())
 	}
 	now := time.Now().UTC()
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO capability_scopes (id, capability_id, scope_kind, scope_value, granted_by, granted_at)
-		VALUES ($1,$2,$3,$4,$5,$6)
-	`, id, capabilityID, scopeKind, scopeValue, grantedBy, now)
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO capability_scopes (id, org_id, capability_id, scope_kind, scope_value, granted_by, granted_at)
+		SELECT $1,$2,$3,$4,$5,$6,$7
+		FROM capabilities c
+		WHERE c.id = $3
+		  AND c.deleted_at IS NULL
+		  AND (c.org_id = $2 OR c.org_id = 'global')
+	`, id, orgID, capabilityID, scopeKind, scopeValue, grantedBy, now)
 	if err != nil {
 		return nil, fmt.Errorf("grant scope: %w", err)
 	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("grant scope: capability not found for tenant")
+	}
 	return &ScopeGrant{
-		ID: id, CapabilityID: capabilityID, ScopeKind: scopeKind,
+		ID: id, OrgID: orgID, CapabilityID: capabilityID, ScopeKind: scopeKind,
 		ScopeValue: scopeValue, GrantedBy: grantedBy, GrantedAt: now,
 	}, nil
 }
 
-// Revoke marks all active grants for (capabilityID, scopeKind, scopeValue) as
-// revoked. scopeValue "" is normalised to the wildcard. Returns the number of
-// grants revoked.
-func (s *ScopeStore) Revoke(ctx context.Context, capabilityID, scopeKind, scopeValue string) (int64, error) {
-	if capabilityID == "" || scopeKind == "" {
-		return 0, fmt.Errorf("capability_id and scope_kind are required")
-	}
-	if scopeValue == "" {
-		scopeValue = scopeValueAll
+// Revoke marks the verified tenant's active grants for the exact capability,
+// scope kind, and scope value as revoked.
+func (s *ScopeStore) Revoke(ctx context.Context, orgID, capabilityID, scopeKind, scopeValue string) (int64, error) {
+	if err := validateScopeTuple(orgID, capabilityID, scopeKind, scopeValue); err != nil {
+		return 0, err
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE capability_scopes
 		SET revoked_at = now()
-		WHERE capability_id = $1 AND scope_kind = $2 AND scope_value = $3 AND revoked_at IS NULL
-	`, capabilityID, scopeKind, scopeValue)
+		WHERE org_id = $1 AND capability_id = $2 AND scope_kind = $3 AND scope_value = $4 AND revoked_at IS NULL
+	`, orgID, capabilityID, scopeKind, scopeValue)
 	if err != nil {
 		return 0, fmt.Errorf("revoke scope: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
 
-// ListForCapability returns active grants for a single capability.
-func (s *ScopeStore) ListForCapability(ctx context.Context, capabilityID string) ([]ScopeGrant, error) {
+// ListForCapabilityForOrg returns grants for a tenant-owned capability. For a
+// global capability it exposes only the verified tenant's explicitly bound
+// grants.
+func (s *ScopeStore) ListForCapabilityForOrg(ctx context.Context, capabilityID, orgID string) ([]ScopeGrant, error) {
+	if capabilityID == "" || orgID == "" {
+		return nil, fmt.Errorf("capability_id and org_id are required")
+	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, capability_id, scope_kind, scope_value, granted_by, granted_at, revoked_at
-		FROM capability_scopes
-		WHERE capability_id = $1 AND revoked_at IS NULL
-		ORDER BY granted_at DESC
-	`, capabilityID)
+		SELECT cs.id, cs.org_id, cs.capability_id, cs.scope_kind, cs.scope_value,
+		       cs.granted_by, cs.granted_at, cs.revoked_at
+		FROM capability_scopes cs
+		JOIN capabilities c ON c.id = cs.capability_id AND c.deleted_at IS NULL
+		WHERE cs.capability_id = $1
+		  AND cs.org_id = $2
+		  AND cs.revoked_at IS NULL
+		  AND (c.org_id = $2 OR c.org_id = 'global')
+		ORDER BY cs.granted_at DESC
+	`, capabilityID, orgID)
 	if err != nil {
-		return nil, fmt.Errorf("list scopes: %w", err)
+		return nil, fmt.Errorf("list tenant scopes: %w", err)
 	}
 	defer rows.Close()
 	return scanScopeGrants(rows)
@@ -123,8 +143,8 @@ func (s *ScopeStore) ListForCapability(ctx context.Context, capabilityID string)
 // the (scopeKind, scopeValue) request. A grant with scope_value '*' covers any
 // value of that kind; an exact scope_value match also covers it. Empty inputs
 // yield false (caller must supply both).
-func (s *ScopeStore) IsGrantedForScope(ctx context.Context, capabilityID, scopeKind, scopeValue string) (bool, error) {
-	if capabilityID == "" || scopeKind == "" || scopeValue == "" {
+func (s *ScopeStore) IsGrantedForScope(ctx context.Context, capabilityID, orgID, scopeKind, scopeValue string) (bool, error) {
+	if capabilityID == "" || orgID == "" || !IsSupportedScopeKind(scopeKind) || scopeValue == "" {
 		return false, nil
 	}
 	var exists bool
@@ -132,58 +152,58 @@ func (s *ScopeStore) IsGrantedForScope(ctx context.Context, capabilityID, scopeK
 		SELECT EXISTS (
 			SELECT 1 FROM capability_scopes
 			WHERE capability_id = $1
-			  AND scope_kind = $2
-			  AND (scope_value = $3 OR scope_value = '*')
+			  AND org_id = $2
+			  AND scope_kind = $3
+			  AND (scope_value = $4 OR scope_value = '*')
 			  AND revoked_at IS NULL
 		)
-	`, capabilityID, scopeKind, scopeValue).Scan(&exists)
+	`, capabilityID, orgID, scopeKind, scopeValue).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("is granted for scope: %w", err)
 	}
 	return exists, nil
 }
 
-// HasAnyGrants reports whether a capability has at least one active scope grant
-// of the given kind. Used by the policy engine to decide whether the durable
-// grant table governs this capability at all (no grants of a kind => the table
-// is not opted-in for that kind, fall back to static enabled_for_scopes).
-func (s *ScopeStore) HasAnyGrants(ctx context.Context, capabilityID, scopeKind string) (bool, error) {
-	if capabilityID == "" || scopeKind == "" {
+// HasAnyGrants reports whether a capability has at least one active grant of
+// the given kind for the verified tenant. Catalog consumers may use it for
+// observability; invocation policy requires an exact grant.
+func (s *ScopeStore) HasAnyGrants(ctx context.Context, capabilityID, orgID, scopeKind string) (bool, error) {
+	if capabilityID == "" || orgID == "" || !IsSupportedScopeKind(scopeKind) {
 		return false, nil
 	}
 	var exists bool
 	err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM capability_scopes
-			WHERE capability_id = $1 AND scope_kind = $2 AND revoked_at IS NULL
+			WHERE capability_id = $1 AND org_id = $2 AND scope_kind = $3 AND revoked_at IS NULL
 		)
-	`, capabilityID, scopeKind).Scan(&exists)
+	`, capabilityID, orgID, scopeKind).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("has any grants: %w", err)
 	}
 	return exists, nil
 }
 
-// ResolveForScope returns the set of capability IDs that have an active grant
-// covering (scopeKind, scopeValue) — exact value or wildcard. This is the
-// "which capabilities may (org/agent X) use?" query backing the agentic loop's
-// scoped catalog. Pass scopeValue '*' to enumerate all capabilities granted to
-// the kind at large.
-func (s *ScopeStore) ResolveForScope(ctx context.Context, scopeKind, scopeValue string) ([]string, error) {
-	if scopeKind == "" {
-		return nil, fmt.Errorf("scope_kind is required")
+// ResolveForScopeForOrg restricts resolved capabilities to the verified
+// tenant plus global catalog entries. The tenant is mandatory.
+func (s *ScopeStore) ResolveForScopeForOrg(ctx context.Context, orgID, scopeKind, scopeValue string) ([]string, error) {
+	if orgID == "" || !IsSupportedScopeKind(scopeKind) {
+		return nil, fmt.Errorf("valid org_id and scope_kind are required")
 	}
 	if scopeValue == "" {
 		scopeValue = scopeValueAll
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT capability_id
-		FROM capability_scopes
-		WHERE scope_kind = $1
-		  AND (scope_value = $2 OR scope_value = '*')
-		  AND revoked_at IS NULL
-		ORDER BY capability_id
-	`, scopeKind, scopeValue)
+		SELECT DISTINCT cs.capability_id
+		FROM capability_scopes cs
+		JOIN capabilities c ON c.id = cs.capability_id AND c.deleted_at IS NULL
+		WHERE cs.scope_kind = $1
+		  AND (cs.scope_value = $2 OR cs.scope_value = '*')
+		  AND cs.revoked_at IS NULL
+		  AND cs.org_id = $3
+		  AND (c.org_id = $3 OR c.org_id = 'global')
+		ORDER BY cs.capability_id
+	`, scopeKind, scopeValue, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve for scope: %w", err)
 	}
@@ -208,10 +228,32 @@ func scanScopeGrants(rows interface {
 	var out []ScopeGrant
 	for rows.Next() {
 		var g ScopeGrant
-		if err := rows.Scan(&g.ID, &g.CapabilityID, &g.ScopeKind, &g.ScopeValue, &g.GrantedBy, &g.GrantedAt, &g.RevokedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.OrgID, &g.CapabilityID, &g.ScopeKind, &g.ScopeValue, &g.GrantedBy, &g.GrantedAt, &g.RevokedAt); err != nil {
 			return nil, fmt.Errorf("scan scope grant: %w", err)
 		}
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// IsSupportedScopeKind is the closed set understood by policy evaluation and
+// persisted grants.
+func IsSupportedScopeKind(scopeKind string) bool {
+	switch scopeKind {
+	case ScopeKindRun, ScopeKindThread, ScopeKindOrg, ScopeKindAgent,
+		ScopeKindWorkspace, ScopeKindUser, ScopeKindGlobal:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateScopeTuple(orgID, capabilityID, scopeKind, scopeValue string) error {
+	if orgID == "" || capabilityID == "" || !IsSupportedScopeKind(scopeKind) || scopeValue == "" {
+		return fmt.Errorf("valid org_id, capability_id, scope_kind, and scope_value are required")
+	}
+	if scopeKind == ScopeKindOrg && scopeValue != orgID {
+		return fmt.Errorf("org scope value must match verified org_id")
+	}
+	return nil
 }

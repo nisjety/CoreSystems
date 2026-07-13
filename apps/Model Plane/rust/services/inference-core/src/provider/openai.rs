@@ -36,6 +36,7 @@ pub struct OpenAiProvider {
     flavor: OpenAiFlavor,
     chat_models: Vec<String>,
     embedding_models: Vec<String>,
+    zdr_confirmed: bool,
 }
 
 impl OpenAiProvider {
@@ -68,6 +69,7 @@ impl OpenAiProvider {
                 "text-embedding-3-small".to_owned(),
                 "text-embedding-3-large".to_owned(),
             ],
+            zdr_confirmed: false,
         })
     }
 
@@ -114,7 +116,17 @@ impl OpenAiProvider {
             },
             chat_models: Vec::new(),
             embedding_models: Vec::new(),
+            zdr_confirmed: false,
         })
+    }
+
+    /// Mark this exact deployment as covered by an independently verified ZDR
+    /// contract. The configuration default is false and direct `OpenAI` routes
+    /// are never promoted implicitly.
+    #[must_use]
+    pub fn with_zdr_confirmed(mut self, confirmed: bool) -> Self {
+        self.zdr_confirmed = confirmed;
+        self
     }
 
     /// Override the startup model/deployment catalogue returned by `ListModels`.
@@ -366,6 +378,7 @@ impl ProviderRouter for OpenAiProvider {
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings: true,
+            supports_zdr: self.zdr_confirmed,
             modalities: vec![
                 "chat".to_owned(),
                 "vision".to_owned(),

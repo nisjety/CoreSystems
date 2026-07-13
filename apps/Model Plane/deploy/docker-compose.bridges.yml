@@ -15,6 +15,9 @@ services:
     build:
       context: ../bridges/mcp-bridge
       dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: mp-mcp-bridge
     restart: unless-stopped
     environment:
@@ -26,7 +29,7 @@ services:
       # Host-side 9301; container-internal stays 9201 so the gateway's
       # registration URL (http://mcp-bridge:9201?server_id=...) is
       # unaffected. 9201 on the host is taken by dpv2-index-engine.
-      - "9301:9201"
+      - "127.0.0.1:9301:9201"
     networks:
       - default
     healthcheck:
@@ -39,6 +42,9 @@ services:
     build:
       context: ../bridges/lsp-bridge
       dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: mp-lsp-bridge
     restart: unless-stopped
     environment:
@@ -50,7 +56,7 @@ services:
     ports:
       # Host-side 9302; container-internal stays 9202. 9202 is taken
       # on the host by dpv2-embedding-engine.
-      - "9302:9202"
+      - "127.0.0.1:9302:9202"
     networks:
       - default
     healthcheck:

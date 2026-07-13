@@ -22,6 +22,7 @@ const (
 	ExecutionCore_ExecuteStep_FullMethodName = "/model_plane.v1.ExecutionCore/ExecuteStep"
 	ExecutionCore_ResumeRun_FullMethodName   = "/model_plane.v1.ExecutionCore/ResumeRun"
 	ExecutionCore_CancelRun_FullMethodName   = "/model_plane.v1.ExecutionCore/CancelRun"
+	ExecutionCore_PauseRun_FullMethodName    = "/model_plane.v1.ExecutionCore/PauseRun"
 	ExecutionCore_RunAgent_FullMethodName    = "/model_plane.v1.ExecutionCore/RunAgent"
 )
 
@@ -40,6 +41,11 @@ type ExecutionCoreClient interface {
 	ResumeRun(ctx context.Context, in *ResumeRunRequest, opts ...grpc.CallOption) (*ResumeRunResponse, error)
 	// Cancel an active run.
 	CancelRun(ctx context.Context, in *CancelRunRequest, opts ...grpc.CallOption) (*CancelRunResponse, error)
+	// Pause an active run (Phase 2 B5 — user-initiated browser-run control).
+	// Mirrors ResumeRun/CancelRun. A paused run's in-flight loop (e.g. the
+	// browser-agent loop) polls this state and blocks between steps until
+	// resumed or cancelled; it never aborts a step already in flight.
+	PauseRun(ctx context.Context, in *PauseRunRequest, opts ...grpc.CallOption) (*PauseRunResponse, error)
 	// Drive a whole agent run to completion: plan → infer → persist → finalize.
 	// MVP no-tool slice — a single InferenceCore.Infer round persisted to the
 	// run's thread, with the run flipped to a terminal status. Dispatched by the
@@ -86,6 +92,16 @@ func (c *executionCoreClient) CancelRun(ctx context.Context, in *CancelRunReques
 	return out, nil
 }
 
+func (c *executionCoreClient) PauseRun(ctx context.Context, in *PauseRunRequest, opts ...grpc.CallOption) (*PauseRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PauseRunResponse)
+	err := c.cc.Invoke(ctx, ExecutionCore_PauseRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executionCoreClient) RunAgent(ctx context.Context, in *RunAgentRequest, opts ...grpc.CallOption) (*RunAgentResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RunAgentResponse)
@@ -111,6 +127,11 @@ type ExecutionCoreServer interface {
 	ResumeRun(context.Context, *ResumeRunRequest) (*ResumeRunResponse, error)
 	// Cancel an active run.
 	CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error)
+	// Pause an active run (Phase 2 B5 — user-initiated browser-run control).
+	// Mirrors ResumeRun/CancelRun. A paused run's in-flight loop (e.g. the
+	// browser-agent loop) polls this state and blocks between steps until
+	// resumed or cancelled; it never aborts a step already in flight.
+	PauseRun(context.Context, *PauseRunRequest) (*PauseRunResponse, error)
 	// Drive a whole agent run to completion: plan → infer → persist → finalize.
 	// MVP no-tool slice — a single InferenceCore.Infer round persisted to the
 	// run's thread, with the run flipped to a terminal status. Dispatched by the
@@ -135,6 +156,9 @@ func (UnimplementedExecutionCoreServer) ResumeRun(context.Context, *ResumeRunReq
 }
 func (UnimplementedExecutionCoreServer) CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelRun not implemented")
+}
+func (UnimplementedExecutionCoreServer) PauseRun(context.Context, *PauseRunRequest) (*PauseRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PauseRun not implemented")
 }
 func (UnimplementedExecutionCoreServer) RunAgent(context.Context, *RunAgentRequest) (*RunAgentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunAgent not implemented")
@@ -214,6 +238,24 @@ func _ExecutionCore_CancelRun_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutionCore_PauseRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PauseRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionCoreServer).PauseRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutionCore_PauseRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionCoreServer).PauseRun(ctx, req.(*PauseRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutionCore_RunAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RunAgentRequest)
 	if err := dec(in); err != nil {
@@ -250,6 +292,10 @@ var ExecutionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelRun",
 			Handler:    _ExecutionCore_CancelRun_Handler,
+		},
+		{
+			MethodName: "PauseRun",
+			Handler:    _ExecutionCore_PauseRun_Handler,
 		},
 		{
 			MethodName: "RunAgent",

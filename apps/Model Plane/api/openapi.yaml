@@ -1556,6 +1556,29 @@ components:
           type: boolean
         scope:
           type: string
+        state:
+          type: string
+          enum: [available, disabled, unhealthy, approval_required, unavailable, not_configured]
+          description: Fail-closed runtime availability; registry presence alone never means available.
+        reason_code:
+          type: string
+          description: Stable machine-readable reason for the current state.
+        reason:
+          type: string
+          description: Human-readable availability explanation.
+        requires_approval:
+          type: boolean
+          description: Whether execution must use the governed approval path.
+        execution_mode:
+          type: string
+          enum: [direct_read, agentic, unavailable]
+        cost_class:
+          type: string
+          enum: [unknown, bounded, variable]
+        health_checked_at:
+          type: string
+          format: date-time
+          description: Server-recorded health-attestation time; empty when health is not attested.
 
     TaskInput:
       type: object

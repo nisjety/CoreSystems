@@ -8,6 +8,7 @@ import (
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/grant"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -51,7 +52,59 @@ func newTestClient(t *testing.T) mpv1.BrowserBrokerClient {
 }
 
 func newTestServer() *Server {
-	return NewServer(grant.NewStore())
+	return testServerFor(grant.NewStore(), authctx.Principal{
+		OrganizationID: "org1", ActorID: "user1", PrincipalType: "user",
+	})
+}
+
+func testServerFor(store *grant.Store, principal authctx.Principal) *Server {
+	srv := NewServer(store)
+	srv.principal = func(context.Context) (authctx.Principal, error) { return principal, nil }
+	return srv
+}
+
+func TestGrantAccessIsPinnedToVerifiedOrganizationAndUser(t *testing.T) {
+	store := grant.NewStore()
+	owner := testServerFor(store, authctx.Principal{OrganizationID: "org1", ActorID: "user1", PrincipalType: "user"})
+	acquired, err := owner.AcquireGrant(context.Background(), &AcquireGrantRequest{
+		OrgId: "org1", SessionKey: "session1", Mode: "cloud",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		principal authctx.Principal
+	}{
+		{name: "wrong tenant", principal: authctx.Principal{OrganizationID: "org2", ActorID: "user1", PrincipalType: "user"}},
+		{name: "wrong user", principal: authctx.Principal{OrganizationID: "org1", ActorID: "user2", PrincipalType: "user"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			other := testServerFor(store, tc.principal)
+			if _, err := other.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != codes.NotFound {
+				t.Fatalf("validate code = %v, want NotFound", status.Code(err))
+			}
+			if _, err := other.RevokeGrant(context.Background(), &RevokeGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != codes.NotFound {
+				t.Fatalf("revoke code = %v, want NotFound", status.Code(err))
+			}
+		})
+	}
+
+	service := testServerFor(store, authctx.Principal{OrganizationID: "org1", ActorID: "service:quarry", PrincipalType: "service", Scopes: []string{"browser:read"}})
+	if _, err := service.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()}); err != nil {
+		t.Fatalf("same-tenant scoped service validation: %v", err)
+	}
+}
+
+func TestAcquireGrantRejectsCallerSuppliedWrongOrganization(t *testing.T) {
+	_, err := newTestServer().AcquireGrant(context.Background(), &AcquireGrantRequest{
+		OrgId: "org2", SessionKey: "session1", Mode: "cloud",
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied", status.Code(err))
+	}
 }
 
 func TestHealth_ReturnsOK(t *testing.T) {
@@ -210,7 +263,7 @@ func TestAcquireGrant_TransportRoundTrip(t *testing.T) {
 	resp, err := client.AcquireGrant(context.Background(), &mpv1.AcquireGrantRequest{
 		SessionKey: "session-transport",
 		Mode:       "cloud",
-		OrgId:      "org-transport",
+		OrgId:      "org1",
 	})
 	if err != nil {
 		t.Fatalf("AcquireGrant transport: unexpected error: %v", err)

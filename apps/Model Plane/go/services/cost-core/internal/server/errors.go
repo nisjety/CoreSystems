@@ -30,6 +30,8 @@ func mapHTTPStatus(err error) int {
 	case errors.Is(err, ledger.ErrBudgetExceededCost),
 		errors.Is(err, ledger.ErrBudgetExceededTokens):
 		return http.StatusForbidden
+	case errors.Is(err, ledger.ErrInvalidEntry):
+		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
 	}

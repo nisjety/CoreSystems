@@ -92,23 +92,42 @@ pub async fn maybe_promote(org_id: &str, user_id: &str, url: &str) {
     }
 }
 
-/// Perform the promote via quarry's ingest primitive. NOTE ownership caveat in
-/// the module docs — until a per-user token is threaded, the Edge attributes the
-/// doc to the service principal. `x-user-id` is forwarded for forward-compat.
+/// Perform the promote via Quarry's ingest primitive with a tenant-bound
+/// execution-core service principal. `x-user-id` is advisory attribution only;
+/// Quarry derives authority and tenant from the signed bearer.
 async fn promote(org_id: &str, user_id: &str, url: &str) -> Result<(), String> {
     let base = std::env::var("QUARRY_EDGE_URL")
         .or_else(|_| std::env::var("QUARRY_EDGE_ADDR"))
         .map_err(|_| "QUARRY_EDGE_URL/ADDR unset".to_string())?;
-    let token = std::env::var("QUARRY_EDGE_TOKEN").unwrap_or_default();
     let endpoint = format!("{}/v1/scrape", base.trim_end_matches('/'));
-    let mut request = reqwest::Client::new()
-        .post(&endpoint)
-        .header("x-user-id", user_id)
-        .json(&serde_json::json!({ "url": url, "org_id": org_id, "ingest": true }));
-    if !token.is_empty() {
-        request = request.bearer_auth(token);
-    }
-    let resp = request.send().await.map_err(|e| e.to_string())?;
+    let http = reqwest::Client::new();
+    let auth = crate::quarry_auth::TokenSource::from_env()
+        .map_err(|error| format!("quarry authentication failed: {error}"))?;
+    let body = serde_json::json!({ "url": url, "org_id": org_id, "ingest": true });
+    let mut retried_unauthorized = false;
+    let resp = loop {
+        let token = auth
+            .token(org_id, &["scrape:write"])
+            .await
+            .map_err(|error| format!("quarry authentication failed: {error}"))?;
+        let resp = http
+            .post(&endpoint)
+            .bearer_auth(&token)
+            .header("x-quarry-org", org_id)
+            .header("x-user-id", user_id)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+            auth.invalidate_if_matches(org_id, &["scrape:write"], &token)
+                .await
+                .map_err(|error| format!("quarry authentication failed: {error}"))?;
+            retried_unauthorized = true;
+            continue;
+        }
+        break resp;
+    };
     if resp.status().is_success() {
         Ok(())
     } else {

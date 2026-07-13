@@ -11,9 +11,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/triodelab/model-plane/services/browser-broker/internal/authz"
 	"github.com/triodelab/model-plane/services/browser-broker/internal/grant"
 	bbserver "github.com/triodelab/model-plane/services/browser-broker/internal/server"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -21,6 +24,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("browser-broker starting")
+	verifier, err := authz.NewVerifierFromEnv()
+	if err != nil {
+		slog.Error("browser-broker authentication configuration is invalid", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -51,8 +59,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
 	bbserver.Register(grpcServer, bbserver.NewServer(grant.NewStore()))
+	healthServerGRPC := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
+	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	go func() {
 		slog.Info("gRPC listening", "addr", ":9095")

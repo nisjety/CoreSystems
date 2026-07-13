@@ -27,7 +27,7 @@ async fn client() -> Option<Arc<async_nats::Client>> {
     AUDIT_CLIENT
         .get_or_init(|| async {
             let url = std::env::var("NATS_URL").ok().filter(|s| !s.is_empty())?;
-            match async_nats::connect(&url).await {
+            match crate::nats_connection::connect(&url).await {
                 Ok(c) => {
                     tracing::info!(url = %url, "model-gateway inline-tool audit publisher connected");
                     Some(Arc::new(c))

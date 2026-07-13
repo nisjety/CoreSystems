@@ -81,6 +81,30 @@ message CapabilityDetail {
 
   // Registry scope: "agent", "workspace", "user", "global".
   string scope = 8;
+
+  // Runtime state: "available", "disabled", "unhealthy",
+  // "approval_required", "unavailable", or "not_configured". Registry
+  // presence/enabled alone never implies available.
+  string state = 9;
+
+  // Stable machine-readable explanation for state.
+  string reason_code = 10;
+
+  // Optional user-safe state explanation. Never contains secret/config data.
+  string reason = 11;
+
+  // True when execution must pause for durable human approval.
+  bool requires_approval = 12;
+
+  // Governed execution path: "direct_read", "agentic", or "unavailable".
+  string execution_mode = 13;
+
+  // Coarse price disclosure: "bounded", "variable", or "unknown".
+  string cost_class = 14;
+
+  // RFC3339 timestamp for the runtime health attestation; empty means no
+  // attestation and MUST derive to unavailable.
+  string health_checked_at = 15;
 }
 
 // EvaluatePolicy — check whether a tool invocation is allowed.
@@ -91,15 +115,19 @@ message EvaluatePolicyRequest {
   // Run requesting invocation.
   string run_id = 2;
 
-  // Agent making the request.
+  // Caller-supplied agent label for audit/context. This field is not a trusted
+  // agent identity and cannot currently authorize agent-scoped evaluation.
   string agent_id = 3;
 
   // Tenant context.
   string org_id = 4;
 
-  // Effective scope at invocation time. Must match one of the capability's
-  // EnabledForScopes entries. Canonical values: "run", "thread", "workspace",
-  // "user", "org", "global". Empty = backwards-compatible (scope check skipped).
+  // Effective scope at invocation time. Currently authorized values are
+  // "global" and "org"; org derives its concrete value from the verified
+  // tenant and requires a durable grant when the resolver is configured.
+  // "agent", "run", "thread", "workspace", and "user" are reserved but
+  // rejected until trusted identity/resource bindings are carried or resolved
+  // by this contract. Empty, reserved, and unknown values fail closed.
   string scope = 5;
 }
 

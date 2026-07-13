@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunService_GetRun_FullMethodName    = "/model_plane.v1.RunService/GetRun"
-	RunService_ListRuns_FullMethodName  = "/model_plane.v1.RunService/ListRuns"
-	RunService_CancelRun_FullMethodName = "/model_plane.v1.RunService/CancelRun"
+	RunService_GetRun_FullMethodName          = "/model_plane.v1.RunService/GetRun"
+	RunService_ListRuns_FullMethodName        = "/model_plane.v1.RunService/ListRuns"
+	RunService_CancelRun_FullMethodName       = "/model_plane.v1.RunService/CancelRun"
+	RunService_ResolveRunOwner_FullMethodName = "/model_plane.v1.RunService/ResolveRunOwner"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -37,6 +38,10 @@ type RunServiceClient interface {
 	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
 	// Cancel a running or queued run.
 	CancelRun(ctx context.Context, in *CancelRunRequest, opts ...grpc.CallOption) (*CancelRunResponse, error)
+	// ResolveRunOwner — authoritative tenant/user ownership check for internal
+	// execution mutations. Returns only a boolean to avoid disclosing another
+	// tenant's run metadata.
+	ResolveRunOwner(ctx context.Context, in *ResolveRunOwnerRequest, opts ...grpc.CallOption) (*ResolveRunOwnerResponse, error)
 }
 
 type runServiceClient struct {
@@ -77,6 +82,16 @@ func (c *runServiceClient) CancelRun(ctx context.Context, in *CancelRunRequest, 
 	return out, nil
 }
 
+func (c *runServiceClient) ResolveRunOwner(ctx context.Context, in *ResolveRunOwnerRequest, opts ...grpc.CallOption) (*ResolveRunOwnerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveRunOwnerResponse)
+	err := c.cc.Invoke(ctx, RunService_ResolveRunOwner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations must embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -90,6 +105,10 @@ type RunServiceServer interface {
 	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
 	// Cancel a running or queued run.
 	CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error)
+	// ResolveRunOwner — authoritative tenant/user ownership check for internal
+	// execution mutations. Returns only a boolean to avoid disclosing another
+	// tenant's run metadata.
+	ResolveRunOwner(context.Context, *ResolveRunOwnerRequest) (*ResolveRunOwnerResponse, error)
 	mustEmbedUnimplementedRunServiceServer()
 }
 
@@ -108,6 +127,9 @@ func (UnimplementedRunServiceServer) ListRuns(context.Context, *ListRunsRequest)
 }
 func (UnimplementedRunServiceServer) CancelRun(context.Context, *CancelRunRequest) (*CancelRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelRun not implemented")
+}
+func (UnimplementedRunServiceServer) ResolveRunOwner(context.Context, *ResolveRunOwnerRequest) (*ResolveRunOwnerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveRunOwner not implemented")
 }
 func (UnimplementedRunServiceServer) mustEmbedUnimplementedRunServiceServer() {}
 func (UnimplementedRunServiceServer) testEmbeddedByValue()                    {}
@@ -184,6 +206,24 @@ func _RunService_CancelRun_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_ResolveRunOwner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveRunOwnerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).ResolveRunOwner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_ResolveRunOwner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).ResolveRunOwner(ctx, req.(*ResolveRunOwnerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -202,6 +242,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelRun",
 			Handler:    _RunService_CancelRun_Handler,
+		},
+		{
+			MethodName: "ResolveRunOwner",
+			Handler:    _RunService_ResolveRunOwner_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

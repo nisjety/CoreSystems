@@ -44,12 +44,115 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::{
-    approvals, coordinator, lsp,
+    approvals, coordinator,
+    grpc_auth::{self, RpcAccess, VerifiedIdentity},
+    lsp,
     quarry::{QuarryError, RenderHints},
     runtime_registries, session_flow, skills,
     state::AppState,
     tools, trajectory,
 };
+
+trait TenantScopedRequest {
+    fn requested_org_id(&self) -> &str;
+}
+
+macro_rules! direct_tenant_requests {
+    ($($request:ty),+ $(,)?) => {
+        $(
+            impl TenantScopedRequest for $request {
+                fn requested_org_id(&self) -> &str {
+                    &self.org_id
+                }
+            }
+        )+
+    };
+}
+
+direct_tenant_requests!(
+    InvokeRequest,
+    WebSearchRequest,
+    SleepRequest,
+    RemoteTriggerRequest,
+    SendMessageRequest,
+    SyntheticOutputRequest,
+    EnterPlanModeRequest,
+    ExitPlanModeRequest,
+    IsPlanModeRequest,
+    TeamCreateRequest,
+    TeamDeleteRequest,
+    TeamListRequest,
+    LspQueryRequest,
+    RequestApprovalRequest,
+    ApproveApprovalRequest,
+    DenyApprovalRequest,
+    ListPendingApprovalsRequest,
+    ListTrajectoriesRequest,
+    ExportTrajectoriesRequest,
+    ListSkillsRequest,
+    GetSkillRequest,
+    MatchSkillsRequest,
+    RegisterMcpServerRequest,
+    ListMcpServersRequest,
+    ListMcpToolsRequest,
+    ProxyMcpToolRequest,
+    RegisterPluginRequest,
+    ListPluginsRequest,
+    SetPluginEnabledRequest,
+    ListCommandsRequest,
+    ExecuteCommandRequest,
+    RegisterHookRequest,
+    ListHooksRequest,
+    CheckPermissionRequest,
+    SetPermissionRequest,
+    GetPolicyRequest,
+    AppendThreadMessageRequest,
+    ListThreadMessagesRequest,
+    GetAnalyticsRequest,
+    TextToSpeechRequest,
+    SpeechToTextRequest,
+    CreateTaskRequest,
+    ListTasksRequest,
+    FetchRequest,
+    ExtractStructuredRequest,
+);
+
+impl TenantScopedRequest for RecordTrajectoryRequest {
+    fn requested_org_id(&self) -> &str {
+        self.trajectory
+            .as_ref()
+            .map_or("", |trajectory| trajectory.org_id.as_str())
+    }
+}
+
+impl TenantScopedRequest for SetPolicyRequest {
+    fn requested_org_id(&self) -> &str {
+        self.policy
+            .as_ref()
+            .map_or("", |policy| policy.org_id.as_str())
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_rpc<T: TenantScopedRequest>(
+    request: &Request<T>,
+    access: RpcAccess,
+) -> Result<VerifiedIdentity, Status> {
+    grpc_auth::authorize_request(request, request.get_ref().requested_org_id(), access)
+}
+
+#[allow(clippy::result_large_err)]
+fn require_explicit_zdr_contract(
+    identity: &VerifiedIdentity,
+    operation: &'static str,
+) -> Result<(), Status> {
+    if identity.effective_zdr(false) {
+        return Err(Status::failed_precondition(format!(
+            "{operation} is unavailable under zero-retention policy until its downstream contract carries ZDR"
+        )));
+    }
+    Ok(())
+}
 
 /// Maximum page content (markdown chars) forwarded to inference-core
 /// for `ExtractStructured`. Tuned to stay well below the 128k context
@@ -57,7 +160,7 @@ use crate::{
 /// system prompt + caller instructions.
 const MAX_EXTRACT_CONTENT_CHARS: usize = 80_000;
 
-pub struct GatewayService {
+pub(crate) struct GatewayService {
     state: AppState,
 }
 
@@ -78,20 +181,12 @@ fn model_or_default(model: &str) -> String {
     }
 }
 
-fn org_or_unknown(org_id: &str) -> String {
-    let trimmed = org_id.trim();
-    if trimmed.is_empty() {
-        "org_unknown".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
 /// Best-effort memory search. Returns the matched memory contents or an
 /// empty `Vec` on any error (memory is advisory context — inference still
 /// proceeds when the memory backend is unavailable).
 async fn fetch_memory_context(
     state: &AppState,
+    identity: &VerifiedIdentity,
     thread_id: &str,
     org_id: &str,
     query: &str,
@@ -104,6 +199,10 @@ async fn fetch_memory_context(
         limit: 5,
         org_id: org_id.to_owned(),
         updated_after: None,
+    };
+    let Ok(request) = identity.session_request(request) else {
+        warn!("session-core credential missing; continuing without memory context");
+        return Vec::new();
     };
     match client.search_memory(request).await {
         Ok(resp) => resp
@@ -166,7 +265,12 @@ async fn publish_ingress_accepted(
     org_id: &str,
     model: &str,
     content_length: usize,
+    user_id: &str,
+    zdr: bool,
 ) {
+    if zdr {
+        return;
+    }
     let envelope = Envelope {
         event_id: new_ulid(),
         event_type: "INGRESS_ACCEPTED".to_owned(),
@@ -177,14 +281,14 @@ async fn publish_ingress_accepted(
         causation_id: String::new(),
         idempotency_key: request_id.to_owned(),
         org_id: org_id.to_owned(),
-        user_id: "grpc_user".to_owned(),
+        user_id: user_id.to_owned(),
         resource_ref: format!("request/{request_id}"),
         payload: serde_json::json!({
             "content_length": content_length,
             "model": model,
             "transport": "grpc",
         }),
-        zdr: false,
+        zdr,
     };
 
     if let Err(error) = state
@@ -199,25 +303,35 @@ async fn publish_ingress_accepted(
 /// Semantic-cache lookup (best-effort). On a hit, records the assistant turn so
 /// thread history stays consistent and returns a zero-token `InvokeResponse`.
 /// Returns `Ok(None)` on a miss so the caller proceeds to inference-core.
+#[allow(clippy::too_many_arguments)]
 async fn try_serve_from_cache(
     state: &AppState,
+    identity: &VerifiedIdentity,
     thread_id: &str,
     request_id: &str,
     org_id: &str,
     model: &str,
     content: &str,
+    zdr: bool,
 ) -> Result<Option<InvokeResponse>, Status> {
     let Some(cache) = crate::langcache::global() else {
         return Ok(None);
     };
-    let Some(cached) = cache.lookup(content, org_id, model).await else {
+    let Some(cached) = cache.lookup(content, org_id, model, zdr).await else {
         return Ok(None);
     };
-    session_flow::append_assistant_message(state, thread_id, &cached)
+    if !zdr {
+        session_flow::append_assistant_message_with_token(
+            state,
+            thread_id,
+            &cached,
+            identity.session_bearer()?,
+        )
         .await
         .map_err(|error| {
             Status::internal(format!("session-core append assistant failed: {error}"))
         })?;
+    }
     info!(request_id = %request_id, "gateway invoke served from langcache");
     Ok(Some(InvokeResponse {
         request_id: request_id.to_owned(),
@@ -237,7 +351,12 @@ async fn publish_usage_envelope(
     org_id: &str,
     infer: &InferResponse,
     latency_ms: u64,
+    user_id: &str,
+    zdr: bool,
 ) {
+    if zdr {
+        return;
+    }
     let usage_envelope = Envelope {
         event_id: new_ulid(),
         event_type: "USAGE_ENVELOPE".to_owned(),
@@ -248,19 +367,19 @@ async fn publish_usage_envelope(
         causation_id: String::new(),
         idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
         org_id: org_id.to_owned(),
-        user_id: "grpc_user".to_owned(),
+        user_id: user_id.to_owned(),
         resource_ref: format!("request/{request_id}"),
         payload: serde_json::json!({
             "request_id": request_id,
             "org_id": org_id,
-            "user_id": "grpc_user",
+            "user_id": user_id,
             "model": infer.model_used.clone(),
             "input_tokens": infer.input_tokens,
             "output_tokens": infer.output_tokens,
             "latency_ms": latency_ms,
             "transport": "grpc",
         }),
-        zdr: false,
+        zdr,
     };
 
     if let Err(error) = state
@@ -283,7 +402,9 @@ impl ModelGateway for GatewayService {
         request: Request<InvokeRequest>,
     ) -> Result<Response<InvokeResponse>, Status> {
         let started = std::time::Instant::now();
-        let req = request.into_inner();
+        let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
+        let mut req = request.into_inner();
+        req.zdr = identity.effective_zdr(req.zdr);
         let content = req.content.trim().to_owned();
         if content.is_empty() {
             return Err(Status::invalid_argument("content must not be empty"));
@@ -291,33 +412,67 @@ impl ModelGateway for GatewayService {
 
         let request_id = request_id_or_new(&req.request_id);
         let model = model_or_default(&req.model);
-        let org_id = org_or_unknown(&req.org_id);
-        let session_run = session_flow::prepare_run(
+        let org_id = req.org_id.clone();
+        let user_id = identity
+            .user_id()
+            .unwrap_or_else(|| identity.principal_id());
+        let session_run = if req.zdr {
+            session_flow::SessionRun {
+                thread_id: String::new(),
+                run_id: request_id.clone(),
+            }
+        } else {
+            session_flow::prepare_run_with_token(
+                &self.state,
+                Some(&req.thread_id),
+                Some(&req.session_key),
+                &org_id,
+                user_id,
+                &content,
+                identity.session_bearer()?,
+            )
+            .await
+            .map_err(|error| {
+                Status::internal(format!("session-core prepare_run failed: {error}"))
+            })?
+        };
+
+        publish_ingress_accepted(
             &self.state,
-            Some(&req.thread_id),
-            Some(&req.session_key),
+            &request_id,
             &org_id,
-            "grpc_user",
-            &content,
+            &model,
+            content.len(),
+            user_id,
+            req.zdr,
         )
-        .await
-        .map_err(|error| Status::internal(format!("session-core prepare_run failed: {error}")))?;
+        .await;
 
-        publish_ingress_accepted(&self.state, &request_id, &org_id, &model, content.len()).await;
-
-        let memory_context =
-            fetch_memory_context(&self.state, &session_run.thread_id, &org_id, &content).await;
+        let memory_context = if req.zdr {
+            Vec::new()
+        } else {
+            fetch_memory_context(
+                &self.state,
+                &identity,
+                &session_run.thread_id,
+                &org_id,
+                &content,
+            )
+            .await
+        };
         let messages = build_messages(&memory_context, &content);
         let infer_req =
             build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
 
         if let Some(hit) = try_serve_from_cache(
             &self.state,
+            &identity,
             &session_run.thread_id,
             &request_id,
             &org_id,
             &model,
             &content,
+            req.zdr,
         )
         .await?
         {
@@ -325,26 +480,47 @@ impl ModelGateway for GatewayService {
         }
 
         let mut client = self.state.inference_client.clone();
-        let infer_resp = client.infer(infer_req).await.map_err(|status| {
-            warn!(%status, "inference-core Infer failed");
-            Status::internal(format!("inference failed: {}", status.message()))
-        })?;
+        let infer_resp = client
+            .infer(identity.inference_request(infer_req)?)
+            .await
+            .map_err(|status| {
+                warn!(%status, "inference-core Infer failed");
+                Status::internal(format!("inference failed: {}", status.message()))
+            })?;
         let infer = infer_resp.into_inner();
 
-        session_flow::append_assistant_message(&self.state, &session_run.thread_id, &infer.content)
+        if !req.zdr {
+            session_flow::append_assistant_message_with_token(
+                &self.state,
+                &session_run.thread_id,
+                &infer.content,
+                identity.session_bearer()?,
+            )
             .await
             .map_err(|error| {
                 Status::internal(format!("session-core append assistant failed: {error}"))
             })?;
+        }
 
         // Store the fresh response so future semantically-similar prompts hit
         // the cache. Best-effort: never fails the request.
         if let Some(cache) = crate::langcache::global() {
-            cache.store(&content, &org_id, &model, &infer.content).await;
+            cache
+                .store(&content, &org_id, &model, &infer.content, req.zdr)
+                .await;
         }
 
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        publish_usage_envelope(&self.state, &request_id, &org_id, &infer, latency_ms).await;
+        publish_usage_envelope(
+            &self.state,
+            &request_id,
+            &org_id,
+            &infer,
+            latency_ms,
+            user_id,
+            req.zdr,
+        )
+        .await;
 
         info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "gateway invoke completed");
 
@@ -373,7 +549,9 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<InvokeRequest>,
     ) -> Result<Response<Self::InvokeStreamStream>, Status> {
-        let req = request.into_inner();
+        let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
+        let mut req = request.into_inner();
+        req.zdr = identity.effective_zdr(req.zdr);
         let content = req.content.trim().to_owned();
         if content.is_empty() {
             return Err(Status::invalid_argument("content must not be empty"));
@@ -381,22 +559,54 @@ impl ModelGateway for GatewayService {
 
         let request_id = request_id_or_new(&req.request_id);
         let model = model_or_default(&req.model);
-        let org_id = org_or_unknown(&req.org_id);
-        let session_run = session_flow::prepare_run(
+        let org_id = req.org_id.clone();
+        let user_id = identity
+            .user_id()
+            .unwrap_or_else(|| identity.principal_id());
+        let session_run = if req.zdr {
+            session_flow::SessionRun {
+                thread_id: String::new(),
+                run_id: request_id.clone(),
+            }
+        } else {
+            session_flow::prepare_run_with_token(
+                &self.state,
+                Some(&req.thread_id),
+                Some(&req.session_key),
+                &org_id,
+                user_id,
+                &content,
+                identity.session_bearer()?,
+            )
+            .await
+            .map_err(|error| {
+                Status::internal(format!("session-core prepare_run failed: {error}"))
+            })?
+        };
+
+        publish_ingress_accepted(
             &self.state,
-            Some(&req.thread_id),
-            Some(&req.session_key),
+            &request_id,
             &org_id,
-            "grpc_user",
-            &content,
+            &model,
+            content.len(),
+            user_id,
+            req.zdr,
         )
-        .await
-        .map_err(|error| Status::internal(format!("session-core prepare_run failed: {error}")))?;
+        .await;
 
-        publish_ingress_accepted(&self.state, &request_id, &org_id, &model, content.len()).await;
-
-        let memory_context =
-            fetch_memory_context(&self.state, &session_run.thread_id, &org_id, &content).await;
+        let memory_context = if req.zdr {
+            Vec::new()
+        } else {
+            fetch_memory_context(
+                &self.state,
+                &identity,
+                &session_run.thread_id,
+                &org_id,
+                &content,
+            )
+            .await
+        };
         let messages = build_messages(&memory_context, &content);
         let infer_req =
             build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
@@ -405,16 +615,19 @@ impl ModelGateway for GatewayService {
         // response as a single terminal chunk, record the assistant turn, and
         // skip inference-core entirely.
         if let Some(cache) = crate::langcache::global() {
-            if let Some(cached) = cache.lookup(&content, &org_id, &model).await {
-                session_flow::append_assistant_message(
-                    &self.state,
-                    &session_run.thread_id,
-                    &cached,
-                )
-                .await
-                .map_err(|error| {
-                    Status::internal(format!("session-core append assistant failed: {error}"))
-                })?;
+            if let Some(cached) = cache.lookup(&content, &org_id, &model, req.zdr).await {
+                if !req.zdr {
+                    session_flow::append_assistant_message_with_token(
+                        &self.state,
+                        &session_run.thread_id,
+                        &cached,
+                        identity.session_bearer()?,
+                    )
+                    .await
+                    .map_err(|error| {
+                        Status::internal(format!("session-core append assistant failed: {error}"))
+                    })?;
+                }
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<InvokeChunk, Status>>(1);
                 let _ = tx
                     .send(Ok(InvokeChunk {
@@ -434,10 +647,13 @@ impl ModelGateway for GatewayService {
         }
 
         let mut client = self.state.inference_client.clone();
-        let upstream = client.infer_stream(infer_req).await.map_err(|status| {
-            warn!(%status, "inference-core InferStream failed");
-            Status::internal(format!("inference stream failed: {}", status.message()))
-        })?;
+        let upstream = client
+            .infer_stream(identity.inference_request(infer_req)?)
+            .await
+            .map_err(|status| {
+                warn!(%status, "inference-core InferStream failed");
+                Status::internal(format!("inference stream failed: {}", status.message()))
+            })?;
         let mut upstream_stream = upstream.into_inner();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<InvokeChunk, Status>>(32);
@@ -450,6 +666,8 @@ impl ModelGateway for GatewayService {
         let cache_content = content.clone();
         let cache_org = org_id.clone();
         let cache_model = model.clone();
+        let cache_zdr = req.zdr;
+        let session_bearer = identity.session_bearer().ok().map(str::to_owned);
 
         tokio::spawn(async move {
             let mut assistant_output = String::new();
@@ -500,16 +718,29 @@ impl ModelGateway for GatewayService {
                 }
             }
 
-            if let Err(error) =
-                session_flow::append_assistant_message(&state, &thread_id, &assistant_output).await
-            {
-                warn!(%error, %run_id, %thread_id, "failed to persist streamed assistant message");
+            if !cache_zdr {
+                if let Err(error) = session_flow::append_assistant_message_with_optional_token(
+                    &state,
+                    &thread_id,
+                    &assistant_output,
+                    session_bearer.as_deref(),
+                )
+                .await
+                {
+                    warn!(%error, %run_id, %thread_id, "failed to persist streamed assistant message");
+                }
             }
 
             // Store the fully-assembled streamed response for future cache hits.
             if let Some(cache) = crate::langcache::global() {
                 cache
-                    .store(&cache_content, &cache_org, &cache_model, &assistant_output)
+                    .store(
+                        &cache_content,
+                        &cache_org,
+                        &cache_model,
+                        &assistant_output,
+                        cache_zdr,
+                    )
                     .await;
             }
         });
@@ -538,7 +769,10 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<WebSearchRequest>,
     ) -> Result<Response<WebSearchResponse>, Status> {
-        tools::handle_web_search(&self.state, request.into_inner())
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        let mut req = request.into_inner();
+        req.zdr = identity.effective_zdr(req.zdr);
+        tools::handle_web_search(&self.state, req)
             .await
             .map(Response::new)
     }
@@ -547,6 +781,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<SleepRequest>,
     ) -> Result<Response<SleepResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Tool)?;
         tools::handle_sleep(request.into_inner())
             .await
             .map(Response::new)
@@ -556,15 +791,18 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RemoteTriggerRequest>,
     ) -> Result<Response<RemoteTriggerResponse>, Status> {
-        tools::handle_remote_trigger(request.into_inner())
-            .await
-            .map(Response::new)
+        authorize_rpc(&request, RpcAccess::Tool)?;
+        Err(Status::failed_precondition(
+            "remote_trigger is quarantined until hostname DNS rebinding defenses are enforced by Quarry",
+        ))
     }
 
     async fn send_message(
         &self,
         request: Request<SendMessageRequest>,
     ) -> Result<Response<SendMessageResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        require_explicit_zdr_contract(&identity, "send_message")?;
         tools::handle_send_message(&self.state, request.into_inner())
             .await
             .map(Response::new)
@@ -574,6 +812,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<SyntheticOutputRequest>,
     ) -> Result<Response<SyntheticOutputResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Tool)?;
         tools::handle_synthetic_output(request.into_inner())
             .await
             .map(Response::new)
@@ -589,6 +828,8 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<EnterPlanModeRequest>,
     ) -> Result<Response<EnterPlanModeResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Write)?;
+        let _session_bearer = identity.session_bearer()?;
         let req = request.into_inner();
         let run_id = req.run_id.clone();
         let org_id = req.org_id.clone();
@@ -602,11 +843,13 @@ impl ModelGateway for GatewayService {
         if !run_id.is_empty() && !org_id.is_empty() {
             let mut client = self.state.session_client.clone();
             if let Err(e) = client
-                .set_run_mode(mp_contracts::model_plane::v1::SetRunModeRequest {
-                    run_id,
-                    mode: "plan".to_owned(),
-                    org_id,
-                })
+                .set_run_mode(identity.session_request(
+                    mp_contracts::model_plane::v1::SetRunModeRequest {
+                        run_id,
+                        mode: "plan".to_owned(),
+                        org_id,
+                    },
+                )?)
                 .await
             {
                 tracing::warn!(error = %e, "durable run-mode persist (plan) failed (best-effort)");
@@ -619,6 +862,8 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ExitPlanModeRequest>,
     ) -> Result<Response<ExitPlanModeResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Write)?;
+        let _session_bearer = identity.session_bearer()?;
         let req = request.into_inner();
         let run_id = req.run_id.clone();
         let org_id = req.org_id.clone();
@@ -630,11 +875,13 @@ impl ModelGateway for GatewayService {
         if !run_id.is_empty() && !org_id.is_empty() {
             let mut client = self.state.session_client.clone();
             if let Err(e) = client
-                .set_run_mode(mp_contracts::model_plane::v1::SetRunModeRequest {
-                    run_id,
-                    mode: "execute".to_owned(),
-                    org_id,
-                })
+                .set_run_mode(identity.session_request(
+                    mp_contracts::model_plane::v1::SetRunModeRequest {
+                        run_id,
+                        mode: "execute".to_owned(),
+                        org_id,
+                    },
+                )?)
                 .await
             {
                 tracing::warn!(error = %e, "durable run-mode persist (execute) failed (best-effort)");
@@ -647,6 +894,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<IsPlanModeRequest>,
     ) -> Result<Response<IsPlanModeResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         coordinator::handle_is_plan_mode(&self.state.plan_mode, request.into_inner())
             .map(Response::new)
     }
@@ -655,6 +903,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<TeamCreateRequest>,
     ) -> Result<Response<TeamCreateResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         coordinator::handle_team_create(&self.state.team_workers, request.into_inner())
             .map(Response::new)
     }
@@ -663,6 +912,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<TeamDeleteRequest>,
     ) -> Result<Response<TeamDeleteResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         coordinator::handle_team_delete(&self.state.team_workers, request.into_inner())
             .map(Response::new)
     }
@@ -671,6 +921,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<TeamListRequest>,
     ) -> Result<Response<TeamListResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         coordinator::handle_team_list(&self.state.team_workers, request.into_inner())
             .map(Response::new)
     }
@@ -683,6 +934,8 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<LspQueryRequest>,
     ) -> Result<Response<LspQueryResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        require_explicit_zdr_contract(&identity, "lsp_query")?;
         lsp::handle_lsp_query(&self.state.lsp, request.into_inner())
             .await
             .map(Response::new)
@@ -696,24 +949,33 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RequestApprovalRequest>,
     ) -> Result<Response<RequestApprovalResponse>, Status> {
-        let resp = approvals::handle_request_approval(
+        let identity = authorize_rpc(&request, RpcAccess::Write)?;
+        let session_bearer = identity.session_bearer()?;
+        let actor = identity
+            .user_id()
+            .ok_or_else(|| Status::permission_denied("a verified user must request approval"))?;
+        // Prepare without any cache/event side effect. Session-core first
+        // validates the run's tenant+user ownership and durably records the
+        // gate; only that acknowledged record may enter the bounded cache or
+        // emit APPROVAL_REQUESTED.
+        let prepared = approvals::prepare_request_approval(
             &self.state.approvals,
-            &*self.state.publisher,
             request.into_inner(),
+            actor,
+        )?;
+        let durable = approvals::persist_approval_request_authenticated(
+            &mut self.state.orchestration_client.clone(),
+            prepared.approval(),
+            session_bearer,
         )
         .await?;
-        // Durable-FIRST write of record (D-1): persist to session-core's
-        // canonical store and PROPAGATE failure as Status::unavailable BEFORE
-        // returning OK. The in-memory store minted the id and serves reads, but
-        // it is never the path of record — if the durable write fails the RPC
-        // does not report the gate as created.
-        if let Some(approval) = &resp.approval {
-            approvals::persist_approval_request(
-                &mut self.state.orchestration_client.clone(),
-                approval,
-            )
-            .await?;
-        }
+        let resp = approvals::commit_persisted_approval(
+            &self.state.approvals,
+            &*self.state.publisher,
+            prepared.align_with_durable(&durable)?,
+            actor,
+        )
+        .await?;
         Ok(Response::new(resp))
     }
 
@@ -721,49 +983,91 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ApproveApprovalRequest>,
     ) -> Result<Response<ApproveApprovalResponse>, Status> {
-        let resp = approvals::handle_approve_approval(
-            &self.state.approvals,
-            &*self.state.publisher,
-            request.into_inner(),
-        )
-        .await?;
-        if let Some(approval) = &resp.approval {
-            // Durable-FIRST decision of record (D-1): propagate a session-core
-            // write failure before returning OK so a decision is never reported
-            // as recorded while only living in memory.
-            approvals::persist_approval_decision(
+        let identity = authorize_rpc(&request, RpcAccess::Approval)?;
+        let session_bearer = identity.session_bearer()?;
+        let execution_bearer = identity.execution_bearer()?;
+        let actor = identity
+            .user_id()
+            .ok_or_else(|| Status::permission_denied("a verified user must decide an approval"))?;
+        let mut req = request.into_inner();
+        req.decided_by = actor.to_owned();
+        let preview = self
+            .state
+            .approvals
+            .preview_resolution_for_owner_with_transition(
+                &req.approval_id,
+                &req.org_id,
+                true,
+                req.decided_by.clone(),
+                req.comment.clone(),
+            )
+            .map_err(approvals::resolve_err_to_status)?;
+        approvals::require_fresh_approval_delivery(preview.transitioned)?;
+        if preview.transitioned {
+            approvals::persist_approval_decision_authenticated(
                 &mut self.state.orchestration_client.clone(),
-                approval,
+                &preview.approval,
+                session_bearer,
             )
             .await?;
-            // Close the human-in-the-loop loop: a granted approval resumes the
-            // run on execution-core (flips AwaitingApproval → Running) so the
-            // agent proceeds without manual intervention. Best-effort — the
-            // decision is already durable by this point.
-            approvals::resume_run_if_approved(&mut self.state.execution_client.clone(), approval)
-                .await;
         }
-        Ok(Response::new(resp))
+        let outcome =
+            approvals::handle_approve_approval(&self.state.approvals, &*self.state.publisher, req)
+                .await?;
+        // A concurrent identical decision can win between preview and local
+        // commit. Without a durable delivery receipt that outcome is still
+        // unknown, so fail closed rather than returning a false success.
+        approvals::require_fresh_approval_delivery(outcome.transitioned)?;
+        let approval = outcome
+            .response
+            .approval
+            .as_ref()
+            .ok_or_else(|| Status::data_loss("resolved approval is missing"))?;
+        // Close the human-in-the-loop loop with independently verified
+        // execution ingress and session delegation credentials. Resume
+        // failures stay observable instead of silently stranding a
+        // durably-granted approval in AwaitingApproval.
+        approvals::resume_run_if_approved(
+            &mut self.state.execution_client.clone(),
+            approval,
+            execution_bearer,
+            session_bearer,
+        )
+        .await?;
+        Ok(Response::new(outcome.response))
     }
 
     async fn deny_approval(
         &self,
         request: Request<DenyApprovalRequest>,
     ) -> Result<Response<DenyApprovalResponse>, Status> {
-        let resp = approvals::handle_deny_approval(
-            &self.state.approvals,
-            &*self.state.publisher,
-            request.into_inner(),
+        let identity = authorize_rpc(&request, RpcAccess::Approval)?;
+        let session_bearer = identity.session_bearer()?;
+        let actor = identity
+            .user_id()
+            .ok_or_else(|| Status::permission_denied("a verified user must decide an approval"))?;
+        let mut req = request.into_inner();
+        req.decided_by = actor.to_owned();
+        let preview = self
+            .state
+            .approvals
+            .preview_resolution_for_owner(
+                &req.approval_id,
+                &req.org_id,
+                false,
+                req.decided_by.clone(),
+                req.comment.clone(),
+            )
+            .map_err(approvals::resolve_err_to_status)?;
+        approvals::persist_approval_decision_authenticated(
+            &mut self.state.orchestration_client.clone(),
+            &preview,
+            session_bearer,
         )
         .await?;
-        if let Some(approval) = &resp.approval {
-            // Durable-FIRST decision of record (D-1): propagate failure before OK.
-            approvals::persist_approval_decision(
-                &mut self.state.orchestration_client.clone(),
-                approval,
-            )
-            .await?;
-        }
+        let resp =
+            approvals::handle_deny_approval(&self.state.approvals, &*self.state.publisher, req)
+                .await?;
         Ok(Response::new(resp))
     }
 
@@ -771,10 +1075,16 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListPendingApprovalsRequest>,
     ) -> Result<Response<ListPendingApprovalsResponse>, Status> {
-        approvals::handle_list_pending_approvals(
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
+        let actor = identity.user_id().ok_or_else(|| {
+            Status::permission_denied("a verified user must list pending approvals")
+        })?;
+        approvals::handle_list_pending_approvals_authenticated(
             &self.state.approvals,
             &mut self.state.orchestration_client.clone(),
             request.into_inner(),
+            identity.session_bearer()?,
+            actor,
         )
         .await
         .map(Response::new)
@@ -788,6 +1098,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RecordTrajectoryRequest>,
     ) -> Result<Response<RecordTrajectoryResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         trajectory::handle_record_trajectory(
             &self.state.trajectories,
             &*self.state.publisher,
@@ -801,6 +1112,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListTrajectoriesRequest>,
     ) -> Result<Response<ListTrajectoriesResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         trajectory::handle_list_trajectories(&self.state.trajectories, request.into_inner())
             .await
             .map(Response::new)
@@ -810,6 +1122,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ExportTrajectoriesRequest>,
     ) -> Result<Response<ExportTrajectoriesResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         trajectory::handle_export_trajectories(&self.state.trajectories, request.into_inner())
             .await
             .map(Response::new)
@@ -823,6 +1136,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListSkillsRequest>,
     ) -> Result<Response<ListSkillsResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         skills::handle_list_skills(&self.state.skills, request.into_inner()).map(Response::new)
     }
 
@@ -830,6 +1144,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<GetSkillRequest>,
     ) -> Result<Response<GetSkillResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         skills::handle_get_skill(&self.state.skills, request.into_inner()).map(Response::new)
     }
 
@@ -837,6 +1152,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<MatchSkillsRequest>,
     ) -> Result<Response<MatchSkillsResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
         let req = request.into_inner();
         // §G7 read path (last mile): lazily pull this org's LEARNED skills from
         // session-core into the match cache — once per org — so learned skills
@@ -846,10 +1162,12 @@ impl ModelGateway for GatewayService {
         if !req.org_id.is_empty() && !self.state.skills.is_org_loaded(&req.org_id) {
             let mut client = self.state.session_client.clone();
             match client
-                .list_agent_skills(mp_contracts::model_plane::v1::ListAgentSkillsRequest {
-                    org_id: req.org_id.clone(),
-                    enabled_only: true,
-                })
+                .list_agent_skills(identity.session_request(
+                    mp_contracts::model_plane::v1::ListAgentSkillsRequest {
+                        org_id: req.org_id.clone(),
+                        enabled_only: true,
+                    },
+                )?)
                 .await
             {
                 Ok(resp) => {
@@ -876,57 +1194,17 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RegisterMcpServerRequest>,
     ) -> Result<Response<RegisterMcpServerResponse>, Status> {
-        let req = request.into_inner();
-        let org_id = req.org_id.clone();
-        let resp = runtime_registries::handle_register_mcp_server(&self.state.mcp, req)?;
-        // gRPC registrations carry no user context → org-scoped (visible to all
-        // org members). The user-private/share model is driven through the HTTP
-        // surface where the caller's identity + role are known.
-        if let Some(server) = resp.server.as_ref() {
-            self.state.ownership.set(
-                &org_id,
-                crate::ownership::KIND_MCP,
-                &server.server_id,
-                crate::ownership::Ownership::org(),
-            );
-        }
-        // Best-effort write-through to capability-core, the registry
-        // system-of-record (matrix §4.1/H.1): converge the gateway's in-memory
-        // store toward the SoR instead of shadowing it. In-memory stays
-        // authoritative for THIS response; a catalog write failure must never
-        // fail registration. Fire-and-forget so registration latency isn't
-        // coupled to the catalog. Skipped when the base URL is unset (tests).
-        if !self.state.capability_core_base_url.is_empty() {
-            if let Some(server) = resp.server.as_ref() {
-                if !org_id.is_empty() && !server.name.is_empty() {
-                    let payload = runtime_registries::mcp_capability_payload(
-                        &org_id,
-                        server,
-                        &crate::ownership::Ownership::org(),
-                    );
-                    let url = format!("{}/api/v1/mcp", self.state.capability_core_base_url);
-                    let client = self.state.http_client.clone();
-                    tokio::spawn(async move {
-                        match client.post(&url).json(&payload).send().await {
-                            Ok(r) if !r.status().is_success() => {
-                                tracing::warn!(status = %r.status(), "mcp catalog write-through non-2xx (best-effort)");
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "mcp catalog write-through failed (best-effort)");
-                            }
-                            _ => {}
-                        }
-                    });
-                }
-            }
-        }
-        Ok(Response::new(resp))
+        authorize_rpc(&request, RpcAccess::Write)?;
+        Err(Status::failed_precondition(
+            "MCP registration requires the authoritative capability credential; use the authenticated HTTP registration contract",
+        ))
     }
 
     async fn list_mcp_servers(
         &self,
         request: Request<ListMcpServersRequest>,
     ) -> Result<Response<ListMcpServersResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_list_mcp_servers(&self.state.mcp, request.into_inner())
             .map(Response::new)
     }
@@ -935,6 +1213,13 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ProxyMcpToolRequest>,
     ) -> Result<Response<ProxyMcpToolResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        require_explicit_zdr_contract(&identity, "MCP execution")?;
+        if !identity.is_service() {
+            return Err(Status::permission_denied(
+                "MCP execution is restricted to the governed execution service",
+            ));
+        }
         runtime_registries::handle_proxy_mcp_tool(&self.state.mcp, request.into_inner())
             .await
             .map(Response::new)
@@ -947,6 +1232,10 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListMcpToolsRequest>,
     ) -> Result<Response<ListMcpToolsResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
+        if !identity.is_service() {
+            identity.authorize_user(&request.get_ref().user_id)?;
+        }
         let req = request.into_inner();
         let tools = runtime_registries::mcp_tool_defs(
             &self.state.mcp,
@@ -969,6 +1258,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RegisterPluginRequest>,
     ) -> Result<Response<RegisterPluginResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_register_plugin(&self.state.plugins, request.into_inner())
             .map(Response::new)
     }
@@ -977,6 +1267,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListPluginsRequest>,
     ) -> Result<Response<ListPluginsResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_list_plugins(&self.state.plugins, request.into_inner())
             .map(Response::new)
     }
@@ -985,6 +1276,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<SetPluginEnabledRequest>,
     ) -> Result<Response<SetPluginEnabledResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_set_plugin_enabled(&self.state.plugins, request.into_inner())
             .map(Response::new)
     }
@@ -997,6 +1289,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListCommandsRequest>,
     ) -> Result<Response<ListCommandsResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_list_commands(&self.state.commands, request.into_inner())
             .map(Response::new)
     }
@@ -1005,6 +1298,8 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ExecuteCommandRequest>,
     ) -> Result<Response<ExecuteCommandResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        require_explicit_zdr_contract(&identity, "command execution")?;
         runtime_registries::handle_execute_command(&self.state.commands, request.into_inner())
             .map(Response::new)
     }
@@ -1013,6 +1308,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RegisterHookRequest>,
     ) -> Result<Response<RegisterHookResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_register_hook(&self.state.hooks, request.into_inner())
             .map(Response::new)
     }
@@ -1021,6 +1317,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListHooksRequest>,
     ) -> Result<Response<ListHooksResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_list_hooks(&self.state.hooks, request.into_inner())
             .map(Response::new)
     }
@@ -1029,6 +1326,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<CheckPermissionRequest>,
     ) -> Result<Response<CheckPermissionResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_check_permission(&self.state.permissions, request.into_inner())
             .map(Response::new)
     }
@@ -1037,6 +1335,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<SetPermissionRequest>,
     ) -> Result<Response<SetPermissionResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_set_permission(&self.state.permissions, request.into_inner())
             .map(Response::new)
     }
@@ -1045,6 +1344,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<GetPolicyRequest>,
     ) -> Result<Response<GetPolicyResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_get_policy(&self.state.policy, request.into_inner())
             .map(Response::new)
     }
@@ -1053,6 +1353,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<SetPolicyRequest>,
     ) -> Result<Response<SetPolicyResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_set_policy(&self.state.policy, request.into_inner())
             .map(Response::new)
     }
@@ -1065,6 +1366,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<AppendThreadMessageRequest>,
     ) -> Result<Response<AppendThreadMessageResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_append_thread_message(&self.state.messages, request.into_inner())
             .map(Response::new)
     }
@@ -1073,6 +1375,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListThreadMessagesRequest>,
     ) -> Result<Response<ListThreadMessagesResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_list_thread_messages(&self.state.messages, request.into_inner())
             .map(Response::new)
     }
@@ -1081,6 +1384,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<GetAnalyticsRequest>,
     ) -> Result<Response<GetAnalyticsResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_get_analytics(&self.state.analytics, request.into_inner())
             .map(Response::new)
     }
@@ -1089,13 +1393,15 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<TextToSpeechRequest>,
     ) -> Result<Response<TextToSpeechResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
+        require_explicit_zdr_contract(&identity, "speech synthesis")?;
         let req = request.into_inner();
         let request_id = request_id_or_new(&req.request_id);
         let resp = self
             .state
             .inference_client
             .clone()
-            .synthesize_speech(SynthesizeSpeechRequest {
+            .synthesize_speech(identity.inference_request(SynthesizeSpeechRequest {
                 request_id: request_id.clone(),
                 org_id: req.org_id,
                 text: req.text,
@@ -1104,7 +1410,7 @@ impl ModelGateway for GatewayService {
                 model: String::new(),
                 provider_hint: String::new(),
                 language: String::new(),
-            })
+            })?)
             .await?
             .into_inner();
 
@@ -1120,13 +1426,15 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<SpeechToTextRequest>,
     ) -> Result<Response<SpeechToTextResponse>, Status> {
+        let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
+        require_explicit_zdr_contract(&identity, "speech transcription")?;
         let req = request.into_inner();
         let request_id = request_id_or_new(&req.request_id);
         let resp = self
             .state
             .inference_client
             .clone()
-            .transcribe_speech(TranscribeSpeechRequest {
+            .transcribe_speech(identity.inference_request(TranscribeSpeechRequest {
                 request_id: request_id.clone(),
                 org_id: req.org_id,
                 audio: req.audio,
@@ -1134,7 +1442,7 @@ impl ModelGateway for GatewayService {
                 model: String::new(),
                 provider_hint: String::new(),
                 language: req.language,
-            })
+            })?)
             .await?
             .into_inner();
 
@@ -1150,6 +1458,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<CreateTaskRequest>,
     ) -> Result<Response<CreateTaskResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Write)?;
         runtime_registries::handle_create_task(&self.state.tasks, request.into_inner())
             .map(Response::new)
     }
@@ -1158,6 +1467,7 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListTasksRequest>,
     ) -> Result<Response<ListTasksResponse>, Status> {
+        authorize_rpc(&request, RpcAccess::Read)?;
         runtime_registries::handle_list_tasks(&self.state.tasks, request.into_inner())
             .map(Response::new)
     }
@@ -1177,7 +1487,9 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<FetchRequest>,
     ) -> Result<Response<FetchResponse>, Status> {
-        let req = request.into_inner();
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        let mut req = request.into_inner();
+        req.zdr = identity.effective_zdr(req.zdr);
         if !self.state.quarry.available() {
             return Err(Status::unimplemented("quarry edge not configured"));
         }
@@ -1189,7 +1501,13 @@ impl ModelGateway for GatewayService {
         let result = self
             .state
             .quarry
-            .scrape(&req.url, &req.org_id, render.as_ref(), req.prefer_http3)
+            .scrape(
+                &req.url,
+                &req.org_id,
+                render.as_ref(),
+                req.prefer_http3,
+                req.zdr,
+            )
             .await
             .map_err(quarry_err_to_status)?;
 
@@ -1211,7 +1529,9 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ExtractStructuredRequest>,
     ) -> Result<Response<ExtractStructuredResponse>, Status> {
-        let req = request.into_inner();
+        let identity = authorize_rpc(&request, RpcAccess::Invoke)?;
+        let mut req = request.into_inner();
+        req.zdr = identity.effective_zdr(req.zdr);
         if !self.state.quarry.available() {
             return Err(Status::unimplemented("quarry edge not configured"));
         }
@@ -1227,7 +1547,7 @@ impl ModelGateway for GatewayService {
         let scrape = self
             .state
             .quarry
-            .scrape(&req.url, &req.org_id, render.as_ref(), false)
+            .scrape(&req.url, &req.org_id, render.as_ref(), false, req.zdr)
             .await
             .map_err(quarry_err_to_status)?;
 
@@ -1306,7 +1626,7 @@ impl ModelGateway for GatewayService {
         };
 
         let mut client = self.state.inference_client.clone();
-        match client.infer(Request::new(infer_req)).await {
+        match client.infer(identity.inference_request(infer_req)?).await {
             Ok(resp) => {
                 let infer = resp.into_inner();
                 Ok(Response::new(ExtractStructuredResponse {
@@ -1365,6 +1685,9 @@ fn quarry_err_to_status(err: QuarryError) -> Status {
         QuarryError::Transport(e) => Status::unavailable(format!("quarry transport: {e}")),
         QuarryError::EmptyEnvelope => Status::internal("quarry: empty envelope"),
         QuarryError::Decode(e) => Status::internal(format!("quarry decode: {e}")),
+        QuarryError::Authentication(_) => {
+            Status::unavailable("quarry authentication is unavailable")
+        }
         QuarryError::Typed { code, message, .. } => match code.as_str() {
             "BAD_REQUEST" | "INVALID_ARGUMENT" => Status::invalid_argument(message),
             "SECURITY_BLOCKED" | "FORBIDDEN" => {
@@ -1392,17 +1715,27 @@ fn safe_char_boundary(s: &str, max: usize) -> usize {
     end
 }
 
-/// Start the gRPC server on :9090.
+/// Start the additive, authenticated gRPC compatibility listener on `:9090`.
+/// Auth Core verification material is fetched before bind, so a missing or
+/// malformed JWKS cannot leave a partially exposed listener.
 ///
 /// # Errors
-///
-/// Returns an error if the server fails to bind.
+/// Returns an error when authentication bootstrap or the server fails.
 pub async fn serve(state: AppState) -> anyhow::Result<()> {
+    let verifier = grpc_auth::JwtVerifier::from_env().await?;
     let addr = "0.0.0.0:9090".parse()?;
-    info!("gRPC listening on :9090");
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<ModelGatewayServer<GatewayService>>()
+        .await;
+    info!("authenticated gRPC listening on :9090");
 
     tonic::transport::Server::builder()
-        .add_service(ModelGatewayServer::new(GatewayService { state }))
+        .add_service(health_service)
+        .add_service(ModelGatewayServer::with_interceptor(
+            GatewayService { state },
+            verifier,
+        ))
         .serve(addr)
         .await?;
 
@@ -2128,12 +2461,23 @@ mod tests {
         }
     }
 
+    fn authenticated<T>(value: T) -> Request<T> {
+        let mut request = Request::new(value);
+        request.extensions_mut().insert(
+            crate::grpc_auth::VerifiedIdentity::user_with_downstream_for_test(
+                "org_test",
+                "user_test",
+            ),
+        );
+        request
+    }
+
     #[tokio::test]
     async fn invoke_rejects_empty_content() {
         let service = GatewayService {
             state: AppState::new(),
         };
-        let response = service.invoke(Request::new(make_request("   "))).await;
+        let response = service.invoke(authenticated(make_request("   "))).await;
         assert!(response.is_err());
         assert_eq!(
             response.expect_err("must fail").code(),
@@ -2146,7 +2490,7 @@ mod tests {
         let service = GatewayService {
             state: AppState::new(),
         };
-        let response = service.invoke_stream(Request::new(make_request(""))).await;
+        let response = service.invoke_stream(authenticated(make_request(""))).await;
         assert!(response.is_err());
         assert_eq!(
             response.expect_err("must fail").code(),
@@ -2172,7 +2516,7 @@ mod tests {
         let (service, publisher) = test_service(MockInferenceOk).await;
 
         let response = service
-            .invoke(Request::new(make_request("hello")))
+            .invoke(authenticated(make_request("hello")))
             .await
             .expect("invoke ok")
             .into_inner();
@@ -2190,11 +2534,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zdr_invoke_suppresses_gateway_events_and_durable_session_side_effects() {
+        let (service, publisher) = test_service(MockInferenceOk).await;
+        let mut request = make_request("ephemeral prompt");
+        request.zdr = true;
+
+        let response = service
+            .invoke(authenticated(request))
+            .await
+            .expect("ZDR invoke remains usable")
+            .into_inner();
+
+        assert_eq!(response.content, "hello");
+        assert!(publisher.drain().is_empty(), "ZDR must publish no events");
+    }
+
+    #[tokio::test]
     async fn invoke_returns_internal_when_inference_unavailable() {
         let (service, publisher) = test_service(MockInferenceDown).await;
 
         let error = service
-            .invoke(Request::new(make_request("hello")))
+            .invoke(authenticated(make_request("hello")))
             .await
             .expect_err("invoke should fail");
         assert_eq!(error.code(), tonic::Code::Internal);
@@ -2213,7 +2573,7 @@ mod tests {
         let (service, _) = test_service(MockInferenceOk).await;
 
         let response = service
-            .invoke_stream(Request::new(make_request("hello")))
+            .invoke_stream(authenticated(make_request("hello")))
             .await
             .expect("invoke_stream ok")
             .into_inner();
@@ -2235,9 +2595,23 @@ mod tests {
         let (service, _) = test_service(MockInferenceDown).await;
 
         let error = service
-            .invoke_stream(Request::new(make_request("hello")))
+            .invoke_stream(authenticated(make_request("hello")))
             .await
             .expect_err("invoke_stream should fail");
         assert_eq!(error.code(), tonic::Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_forged_tenant_before_downstream_work() {
+        let service = GatewayService {
+            state: AppState::new(),
+        };
+        let mut request = make_request("hello");
+        request.org_id = "org-other".to_owned();
+        let error = service
+            .invoke(authenticated(request))
+            .await
+            .expect_err("cross-tenant invoke must fail");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
     }
 }

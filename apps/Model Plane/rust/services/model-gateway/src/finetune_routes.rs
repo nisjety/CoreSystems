@@ -1337,6 +1337,10 @@ mod tests {
             nbf: None,
             aud: None,
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            zdr: false,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
         }
     }
 

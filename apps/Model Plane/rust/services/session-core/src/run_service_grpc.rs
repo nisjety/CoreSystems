@@ -27,7 +27,46 @@ use sqlx::PgPool;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
+use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::orchestration_grpc::json_to_struct;
+
+async fn authorize_run_owner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    run_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
+    caller.authorize_org(&org_id)?;
+    if !caller.is_service() {
+        caller.authorize_user(&user_id)?;
+    }
+    Ok(())
+}
+
+async fn authorize_thread_owner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    thread_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    caller.authorize_org(&org_id)?;
+    if !caller.is_service() {
+        caller.authorize_user(&user_id)?;
+    }
+    Ok(())
+}
 
 /// Hard cap on `ListRuns.limit` so a hostile or buggy caller cannot ask for an
 /// unbounded scan. Mirrors the bounded-page convention used across the cores.
@@ -153,6 +192,7 @@ impl RunServiceImpl {
     /// Convenience for `grpc.rs` so the wiring mirrors how the other services in
     /// this crate register their tonic servers.
     #[must_use]
+    #[allow(dead_code)] // direct constructor retained for isolated service tests
     pub fn into_server(self) -> RunServiceServer<Self> {
         RunServiceServer::new(self)
     }
@@ -166,10 +206,13 @@ impl RunService for RunServiceImpl {
     ) -> Result<Response<pb::RunDetail>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::RunDetail>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
             let req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
 
             let row: Option<RunRow> = sqlx::query_as(&format!("{RUN_SELECT} WHERE r.id = $1"))
                 .bind(&req.run_id)
@@ -192,10 +235,13 @@ impl RunService for RunServiceImpl {
     ) -> Result<Response<pb::ListRunsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::ListRunsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
             let req = request.into_inner();
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
 
             let limit = clamp_limit(req.limit);
             // Fetch one extra row to compute `has_more` without a second query.
@@ -238,10 +284,13 @@ impl RunService for RunServiceImpl {
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::CancelRunResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
 
             // Read the current status to reject a re-cancel of a terminal run
             // before flipping it. A missing run is a 404.
@@ -275,6 +324,46 @@ impl RunService for RunServiceImpl {
         }
         .await;
         record_metrics("cancel_run", started, result.is_ok());
+        result
+    }
+
+    async fn resolve_run_owner(
+        &self,
+        request: Request<pb::ResolveRunOwnerRequest>,
+    ) -> Result<Response<pb::ResolveRunOwnerResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveRunOwnerResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            if req.run_id.trim().is_empty()
+                || req.org_id.trim().is_empty()
+                || req.user_id.trim().is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "run_id, org_id, and user_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            if !caller.is_service() {
+                caller.authorize_user(&req.user_id)?;
+            }
+            let (authorized,): (bool,) = sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+            )
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .bind(&req.user_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "durable run ownership lookup failed");
+                Status::unavailable("run ownership unavailable")
+            })?;
+            Ok(Response::new(pb::ResolveRunOwnerResponse { authorized }))
+        }
+        .await;
+        record_metrics("resolve_run_owner", started, result.is_ok());
         result
     }
 }

@@ -23,6 +23,7 @@ type Lease struct {
 	ScopeID   string
 	ScopeType string
 	OrgID     string
+	OwnerID   string
 	Endpoint  string
 	ExpiresAt time.Time
 	CreatedAt time.Time
@@ -51,7 +52,7 @@ func NewStore() *Store {
 }
 
 // Create mints a new lease with the given scope and TTL.
-func (s *Store) Create(scopeID, scopeType, orgID string, ttl time.Duration) (*Lease, error) {
+func (s *Store) Create(scopeID, scopeType, orgID, ownerID string, ttl time.Duration) (*Lease, error) {
 	id, err := s.newID()
 	if err != nil {
 		return nil, err
@@ -62,41 +63,47 @@ func (s *Store) Create(scopeID, scopeType, orgID string, ttl time.Duration) (*Le
 		ScopeID:   scopeID,
 		ScopeType: scopeType,
 		OrgID:     orgID,
+		OwnerID:   ownerID,
 		Endpoint:  "sandbox://" + id,
 		ExpiresAt: now.Add(ttl),
 		CreatedAt: now,
 	}
 	s.mu.Lock()
-	s.byID[id] = l
+	s.byID[id] = clone(l)
 	s.mu.Unlock()
-	return l, nil
+	return clone(l), nil
 }
 
-// Get returns a lease by ID. Returns ErrLeaseNotFound if unknown, or
-// ErrLeaseExpired if the lease exists but is past its TTL.
-func (s *Store) Get(id string) (*Lease, error) {
+// GetScoped returns a lease by ID only within the verified organization and
+// optional user owner. It reports expiration without exposing other tenants.
+func (s *Store) GetScoped(id, orgID, ownerID string) (*Lease, error) {
 	s.mu.RLock()
 	l, ok := s.byID[id]
 	s.mu.RUnlock()
-	if !ok {
+	if !ok || l.OrgID != orgID || (ownerID != "" && l.OwnerID != ownerID) {
 		return nil, ErrLeaseNotFound
 	}
 	if l.IsExpired(s.nowFn()) {
 		return nil, ErrLeaseExpired
 	}
-	return l, nil
+	return clone(l), nil
 }
 
-// Release removes a lease by ID. Returns (true, nil) on success,
-// (false, ErrLeaseNotFound) if the lease was not present.
-func (s *Store) Release(id string) (bool, error) {
+// ReleaseScoped removes a lease only inside the verified identity scope.
+func (s *Store) ReleaseScoped(id, orgID, ownerID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.byID[id]; !ok {
+	l, ok := s.byID[id]
+	if !ok || l.OrgID != orgID || (ownerID != "" && l.OwnerID != ownerID) {
 		return false, ErrLeaseNotFound
 	}
 	delete(s.byID, id)
 	return true, nil
+}
+
+func clone(value *Lease) *Lease {
+	copy := *value
+	return &copy
 }
 
 func (s *Store) newID() (string, error) {

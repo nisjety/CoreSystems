@@ -135,9 +135,22 @@ pub async fn run_agent(
     session_channel: Channel,
     inference_channel: Channel,
     req: pb::RunAgentRequest,
+    data_plane_bearer: Option<String>,
+    session_bearer: Option<String>,
+    inference_bearer: String,
 ) -> pb::RunAgentResponse {
     let tools = merged_tool_defs(&req.org_id, &req.user_id).await;
-    run_agent_with_tools(state, session_channel, inference_channel, req, tools).await
+    run_agent_with_tools(
+        state,
+        session_channel,
+        inference_channel,
+        req,
+        tools,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+    )
+    .await
 }
 
 /// The built-in [`offered_tool_defs`] plus the org's registered MCP tools,
@@ -165,13 +178,16 @@ async fn merged_tool_defs(org_id: &str, user_id: &str) -> Vec<pb::ToolDefinition
 // One cohesive ReAct driver (setup → round loop → finalize); splitting it would
 // scatter the shared loop state across helpers for no clarity gain. Mirrors
 // model-gateway's `run_tool_rounds`.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_agent_with_tools(
     state: &crate::state::StateStore,
     session_channel: Channel,
     inference_channel: Channel,
     req: pb::RunAgentRequest,
     tools: Vec<pb::ToolDefinition>,
+    data_plane_bearer: Option<String>,
+    session_bearer: Option<String>,
+    inference_bearer: String,
 ) -> pb::RunAgentResponse {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -212,6 +228,7 @@ async fn run_agent_with_tools(
         &req.run_id,
         pb::PlanState::Draft,
         pb::PlanState::Executing,
+        session_bearer.as_deref(),
     )
     .await;
 
@@ -235,21 +252,26 @@ async fn run_agent_with_tools(
 
     for _round in 0..max_rounds {
         rounds_executed += 1;
-        let infer_result = inference
-            .infer(pb::InferRequest {
-                request_id: req.run_id.clone(),
-                org_id: req.org_id.clone(),
-                model: req.model.clone(),
-                provider_hint: String::new(),
-                messages: messages.clone(),
-                temperature: TEMPERATURE,
-                max_tokens: MAX_TOKENS,
-                structured_output_schema: String::new(),
-                zdr,
-                tools: tools.clone(),
-                tool_choice: "auto".to_owned(),
-            })
-            .await;
+        let mut infer_request = tonic::Request::new(pb::InferRequest {
+            request_id: req.run_id.clone(),
+            org_id: req.org_id.clone(),
+            model: req.model.clone(),
+            provider_hint: String::new(),
+            messages: messages.clone(),
+            temperature: TEMPERATURE,
+            max_tokens: MAX_TOKENS,
+            structured_output_schema: String::new(),
+            zdr,
+            tools: tools.clone(),
+            tool_choice: "auto".to_owned(),
+        });
+        infer_request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {inference_bearer}")
+                .parse()
+                .expect("verified compact JWT is valid gRPC metadata"),
+        );
+        let infer_result = inference.infer(infer_request).await;
 
         let response = match infer_result {
             Ok(r) => r.into_inner(),
@@ -267,6 +289,7 @@ async fn run_agent_with_tools(
                     GRACEFUL_FAILURE_REPLY,
                     false,
                     rounds_executed,
+                    session_bearer.as_deref(),
                 )
                 .await;
             }
@@ -317,6 +340,10 @@ async fn run_agent_with_tools(
                 Some(session_channel.clone()),
                 None,
                 None,
+                zdr,
+                data_plane_bearer.as_deref(),
+                session_bearer.as_deref(),
+                Some(inference_bearer.as_str()),
             )
             .await;
 
@@ -331,6 +358,7 @@ async fn run_agent_with_tools(
                     &step_id,
                     &call.name,
                     rounds_executed,
+                    session_bearer.as_deref(),
                 )
                 .await;
             }
@@ -344,6 +372,7 @@ async fn run_agent_with_tools(
                 &call.name,
                 &outcome,
                 zdr,
+                session_bearer.as_deref(),
             )
             .await;
 
@@ -393,6 +422,7 @@ async fn run_agent_with_tools(
         &final_answer,
         success,
         rounds_executed,
+        session_bearer.as_deref(),
     )
     .await
 }
@@ -552,6 +582,7 @@ async fn record_tool_step(
     tool_name: &str,
     outcome: &StepOutcome,
     zdr: bool,
+    bearer: Option<&str>,
 ) {
     // The prefix is the execution-core → session-core metadata side channel for
     // the tool_action audit row. `tool=<name>` carries the human-readable tool
@@ -570,8 +601,8 @@ async fn record_tool_step(
     } else {
         (detail.clone(), format!("{detail}{}", outcome.error))
     };
-    if let Err(rpc_error) = SessionCoreClient::new(session_channel.clone())
-        .complete_step(pb::CompleteStepRequest {
+    let request = authenticated_session_request(
+        pb::CompleteStepRequest {
             run_id: run_id.to_owned(),
             step_id: step_id.to_owned(),
             // NON-TERMINAL: must not be "completed"/"failed" or session-core
@@ -579,9 +610,18 @@ async fn record_tool_step(
             status: "running".to_owned(),
             output,
             error,
-        })
-        .await
-    {
+        },
+        bearer,
+    );
+    let result = match request {
+        Ok(request) => {
+            SessionCoreClient::new(session_channel.clone())
+                .complete_step(request)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(rpc_error) = result {
         warn!(
             run_id = %run_id,
             step_id = %step_id,
@@ -603,9 +643,10 @@ async fn pause_for_approval(
     step_id: &str,
     tool_name: &str,
     rounds_executed: u32,
+    bearer: Option<&str>,
 ) -> pb::RunAgentResponse {
-    if let Err(error) = OrchestrationCoreServiceClient::new(session_channel.clone())
-        .create_approval(pb::CreateApprovalRequest {
+    let request = authenticated_session_request(
+        pb::CreateApprovalRequest {
             run_id: req.run_id.clone(),
             step_id: step_id.to_owned(),
             kind: pb::ApprovalKind::Destructive as i32,
@@ -620,9 +661,18 @@ async fn pause_for_approval(
             // collapses onto the existing durable approval instead of creating
             // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
             idempotency_key: format!("{}:{step_id}", req.run_id),
-        })
-        .await
-    {
+        },
+        bearer,
+    );
+    let result = match request {
+        Ok(request) => {
+            OrchestrationCoreServiceClient::new(session_channel.clone())
+                .create_approval(request)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
         warn!(
             run_id = %req.run_id,
             error = %error,
@@ -651,6 +701,7 @@ async fn pause_for_approval(
 /// snapshot the in-memory state. `success` selects the completed vs failed
 /// terminal path. Emits the ONE terminal `CompleteStep` (`step_id="final"`).
 /// Always returns a [`pb::RunAgentResponse`].
+#[allow(clippy::too_many_arguments)]
 async fn finalize(
     state: &crate::state::StateStore,
     session_channel: &Channel,
@@ -659,19 +710,25 @@ async fn finalize(
     answer: &str,
     success: bool,
     rounds_executed: u32,
+    bearer: Option<&str>,
 ) -> pb::RunAgentResponse {
     let mut session = SessionCoreClient::new(session_channel.clone());
 
     // 3. Persist the assistant answer (what ListConversation reads back).
-    if let Err(error) = session
-        .append_message(pb::AppendMessageRequest {
+    let append_request = authenticated_session_request(
+        pb::AppendMessageRequest {
             thread_id: req.thread_id.clone(),
             role: "assistant".to_owned(),
             content: answer.to_owned(),
             metadata: None,
-        })
-        .await
-    {
+        },
+        bearer,
+    );
+    let append_result = match append_request {
+        Ok(request) => session.append_message(request).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = append_result {
         warn!(
             run_id = %req.run_id,
             error = %error,
@@ -693,16 +750,21 @@ async fn finalize(
         ("failed", String::new(), "agent inference failed".to_owned())
     };
 
-    if let Err(rpc_error) = session
-        .complete_step(pb::CompleteStepRequest {
+    let complete_request = authenticated_session_request(
+        pb::CompleteStepRequest {
             run_id: req.run_id.clone(),
             step_id: "final".to_owned(),
             status: status.to_owned(),
             output,
             error,
-        })
-        .await
-    {
+        },
+        bearer,
+    );
+    let complete_result = match complete_request {
+        Ok(request) => session.complete_step(request).await,
+        Err(error) => Err(error),
+    };
+    if let Err(rpc_error) = complete_result {
         warn!(
             run_id = %req.run_id,
             error = %rpc_error,
@@ -722,6 +784,7 @@ async fn finalize(
         &req.run_id,
         pb::PlanState::Executing,
         to,
+        bearer,
     )
     .await;
 
@@ -762,6 +825,7 @@ async fn publish_plan_transition(
     run_id: &str,
     from: pb::PlanState,
     to: pb::PlanState,
+    bearer: Option<&str>,
 ) {
     let event = pb::orchestration_event::Event::PlanTransitioned(
         pb::orchestration_event::PlanTransitioned {
@@ -779,16 +843,39 @@ async fn publish_plan_transition(
             event: Some(event),
         }),
     };
-    if let Err(error) = OrchestrationCoreServiceClient::new(session_channel.clone())
-        .record_orchestration_event(request)
-        .await
-    {
+    let request = authenticated_session_request(request, bearer);
+    let result = match request {
+        Ok(request) => {
+            OrchestrationCoreServiceClient::new(session_channel.clone())
+                .record_orchestration_event(request)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
         warn!(
             run_id = %run_id,
             error = %error,
             "run_agent: failed to publish PlanTransitioned (best-effort)"
         );
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn authenticated_session_request<T>(
+    value: T,
+    bearer: Option<&str>,
+) -> Result<tonic::Request<T>, tonic::Status> {
+    let bearer = bearer
+        .ok_or_else(|| tonic::Status::unauthenticated("verified session credential required"))?;
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}").parse().map_err(|_| {
+            tonic::Status::internal("verified session credential is not forwardable")
+        })?,
+    );
+    Ok(request)
 }
 
 /// Truncate to at most `max` chars on a char boundary.
@@ -1421,7 +1508,16 @@ mod tests {
             spawn_inference_channel(vec![Scripted::Answer("The answer is 4.".to_owned())]).await;
         let state = crate::state::StateStore::new();
 
-        let resp = run_agent(&state, session_channel, inference_channel, sample_request()).await;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+        )
+        .await;
 
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.final_output, "The answer is 4.");
@@ -1472,7 +1568,16 @@ mod tests {
 
         let mut req = sample_request();
         req.zdr = true;
-        let resp = run_agent(&state, session_channel, inference_channel, req).await;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+        )
+        .await;
 
         assert_eq!(resp.status, "completed");
         let observed = observed_zdr.lock().unwrap();
@@ -1490,7 +1595,16 @@ mod tests {
         let inference_channel = spawn_inference_channel(vec![Scripted::Error]).await; // infer errors
         let state = crate::state::StateStore::new();
 
-        let resp = run_agent(&state, session_channel, inference_channel, sample_request()).await;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+        )
+        .await;
 
         assert_eq!(resp.status, "failed");
         assert_eq!(resp.final_output, GRACEFUL_FAILURE_REPLY);
@@ -1545,7 +1659,16 @@ mod tests {
         .await;
         let state = crate::state::StateStore::new();
 
-        let resp = run_agent(&state, session_channel, inference_channel, sample_request()).await;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+        )
+        .await;
 
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.final_output, "Here is the weather summary.");
@@ -1620,9 +1743,17 @@ mod tests {
 
         let mut req = sample_request();
         req.mode = "ask".to_owned();
-        let resp =
-            run_agent_with_tools(&state, session_channel, inference_channel, req, gated_tools)
-                .await;
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            gated_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+        )
+        .await;
 
         assert_eq!(resp.status, "awaiting_approval");
         assert_eq!(resp.final_output, "");
@@ -1685,8 +1816,17 @@ mod tests {
 
         let mut req = sample_request();
         req.mode = "auto".to_owned();
-        let resp =
-            run_agent_with_tools(&state, session_channel, inference_channel, req, tools).await;
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+        )
+        .await;
         assert_eq!(resp.status, "completed");
 
         let r = rec.lock().unwrap();

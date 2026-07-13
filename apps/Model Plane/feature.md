@@ -2,6 +2,45 @@
 
 Last updated: 2026-04-30
 
+> **Verified 2026-07-11 (Phase 4 Model Plane audit).** The forward strategy in
+> this doc — own the contracts/state model, keep Temporal as the durable outer
+> orchestrator, keep Letta behind an adapter, build the capability registry and
+> policy engine ourselves, adopt external projects only behind Model Plane
+> contracts — still stands and is a target/roadmap, not a current-state
+> reference. What has gone stale is the **"Still Missing or Not Productized"**
+> snapshot below (and the matching per-feature "Current code" notes): several
+> lines were written when the runtime was less complete and now understate
+> reality. Corrections, verified against current source + host-curl:
+> - The `model-gateway → execution-core` agent/tool loop is **real and
+>   non-mocked**. `execution-core/src/runtime_loop/mod.rs` dispatches real tool
+>   clients — shipping, integration-actions, information-core, knowledge, social,
+>   web, browser, and MCP. `shipping_tools.rs` calls shipping-core
+>   (`SHIPPING_CORE_URL`, default `http://host.docker.internal:3156`) at
+>   `/api/quotes`, `/api/carriers`, `/api/bookings`. `[source-only]`
+>   `[live-curl]` model-gateway :8080 `/healthz` 200, `/health` 401 (JWT);
+>   Rust health :18081/:18082/:18083 all 200; Go services :8084/:8085/:8087/
+>   :8089/:8091 all 200; a server answers on shipping-core :3156.
+> - **MCP proxying is real** (contradicts the "tool execution bridge beyond
+>   deterministic bootstrap" line): the gateway owns the MCP registry
+>   (`ListMcpTools`/`ProxyMcpTool`), `execution-core/src/mcp_gateway.rs` routes
+>   `mcp__<server_id>__<tool>` calls through it, and `bridges/mcp-bridge/server.js`
+>   is a working STDIO+HTTP reference bridge with allowlist gating. The
+>   deterministic `tool_bridge/mod.rs` still exists but is no longer the tool
+>   path. `[source-only]`
+> - **HITL is enforced, not decorative.** `runtime_loop` calls
+>   `permission::evaluate_call` before every tool; `permission::is_risky_tool`/
+>   `is_risky_call` gate `book_shipment`, `execute_provider_action` (write ops),
+>   `publish_social_post`, `browser_agent`, and all `mcp__*` calls, returning
+>   `AwaitApproval` and resolving a durable session-core approval id. `[source-only]`
+> - **No Visma MCP exists in Model Plane source** — `grep -rni visma` across
+>   rust/go/bridges/python returns **0** matches (Visma appears only in prose
+>   docs). "Test the Visma MCP" is not a wired Model Plane capability; the
+>   generic MCP plumbing ships example configs only. `[source-only]`
+>
+> Sibling current-state docs carrying the same 2026-07-11 verification:
+> `README.md`, `MODEL_PLANE_DEEP_DIVE.md`, `docs/ARCHITECTURE.md`,
+> `docs/gap-model.md`, `docs/STUBS.md`, and `docs/core-research/*`.
+
 This analysis maps the requested capability expansion plan onto the current
 `apps/Model Plane` repository. The goal is to decide where each feature fits,
 which pieces are necessary, how to implement them without breaking the existing
@@ -80,8 +119,11 @@ The repo is not an empty scaffold.
 - Durable Redis/Postgres backing for rate limits, browser grants, sandbox
   leases, prompt cache, idempotency, and Letta bridge state.
 - Real Letta upstream integration.
-- Tool execution bridge beyond deterministic bootstrap behavior in
-  `execution-core/src/tool_bridge/mod.rs`.
+- ~~Tool execution bridge beyond deterministic bootstrap behavior in
+  `execution-core/src/tool_bridge/mod.rs`.~~ **Done (2026-07-11):** real tool
+  dispatch lives in `runtime_loop/mod.rs` (shipping/integration/info/knowledge/
+  social/web/browser/MCP); `tool_bridge/mod.rs` is no longer the tool path. Real
+  registry-backed capability resolution is still the open item.
 - Artifact object store provisioning and metadata persistence.
 - Multimodal provider traits beyond chat-style inference.
 - Context renderer layer for JSON, compact JSON, TOON, markdown tables,

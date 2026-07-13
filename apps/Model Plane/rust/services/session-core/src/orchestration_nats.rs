@@ -38,7 +38,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     info!(%nats_url, subject = ORCHESTRATION_WILDCARD, "orchestration NATS bridge connecting");
 
-    let client = async_nats::connect(&nats_url).await?;
+    let client = crate::nats_connection::connect(&nats_url).await?;
     let js = jetstream::new(client);
 
     js.get_or_create_stream(StreamConfig {

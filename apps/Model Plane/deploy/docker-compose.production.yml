@@ -1,0 +1,124 @@
+# Secure production override. Apply after docker-compose.yml.
+# Docker Compose v2.24.4+ is required for the !reset tag.
+x-build-metadata-required:
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+
+x-hardened-service: &hardened-service
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=128m
+
+services:
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}
+  nats:
+    ports: !reset []
+  minio:
+    ports: !reset []
+    environment:
+      MINIO_ROOT_USER: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+  dragonfly:
+    ports: !reset []
+  temporal:
+    ports: !reset []
+    environment:
+      POSTGRES_PWD: ${MODEL_TEMPORAL_POSTGRES_PASSWORD:?MODEL_TEMPORAL_POSTGRES_PASSWORD is required}
+  temporal-postgres:
+    environment:
+      POSTGRES_PASSWORD: ${MODEL_TEMPORAL_POSTGRES_PASSWORD:?MODEL_TEMPORAL_POSTGRES_PASSWORD is required}
+  temporal-ui:
+    ports: !reset []
+  otel-collector:
+    ports: !reset []
+  model-gateway:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      MODEL_GATEWAY_AUTH_DEV_BYPASS: ""
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}
+      MODEL_GATEWAY_SERVICE_API_KEY: ${MODEL_GATEWAY_SERVICE_API_KEY:?MODEL_GATEWAY_SERVICE_API_KEY is required}
+  session-core:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:?AUTH_CORE_URL is required}
+      SESSION_CORE_AUTH_AUDIENCE: ${SESSION_CORE_AUTH_AUDIENCE:?SESSION_CORE_AUTH_AUDIENCE is required}
+      SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:?SESSION_CORE_SERVICE_ID is required}
+      SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:?SESSION_CORE_SERVICE_API_KEY is required}
+  inference-core:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
+  execution-core:
+    <<: *hardened-service
+    ports: !reset []
+    # Governed code runs inside bubblewrap from a per-run temporary workspace;
+    # keep the host root filesystem read-only while allowing that scoped tmpfs
+    # to execute sandbox payloads.
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m
+    environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+      EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
+      INGESTION_SERVICE_API_KEY: ${MODEL_EXECUTION_SERVICE_API_KEY:?MODEL_EXECUTION_SERVICE_API_KEY is required}
+      INFORMATION_CORE_INTERNAL_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+  orchestrator-core:
+    <<: *hardened-service
+    ports: !reset []
+  capability-core:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+  sandbox-manager:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+  browser-broker:
+    <<: *hardened-service
+    ports: !reset []
+  letta-bridge:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+  agent-memory-server:
+    ports: !reset []
+    environment:
+      AUTH_MODE: token
+      DISABLE_AUTH: "false"
+      AGENT_MEMORY_TOKEN: ${AGENT_MEMORY_TOKEN:?AGENT_MEMORY_TOKEN is required}
+  cost-core:
+    <<: *hardened-service
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+  bridge-core:
+    <<: *hardened-service
+    ports: !reset []

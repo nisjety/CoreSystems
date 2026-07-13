@@ -9,6 +9,7 @@ use std::{future::Future, time::Duration};
 use tracing::{info, warn};
 
 mod audit_publisher;
+mod auth;
 mod compaction;
 mod dreaming;
 mod finetune_grpc;
@@ -17,6 +18,7 @@ mod http_health;
 mod letta_adapter;
 mod memory_grpc;
 mod nats;
+mod nats_connection;
 mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
@@ -29,11 +31,19 @@ async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("session-core")?;
     info!("session-core starting");
 
+    // Authentication configuration and JWKS are mandatory and loaded before
+    // any listener/background worker starts. A missing issuer/audience or an
+    // unavailable verification keyset therefore fails startup closed.
+    let grpc_auth = auth::JwtVerifier::from_env().await?;
     let prom_handle = PrometheusBuilder::new().install_recorder()?;
 
     let pool = store::connect_postgres().await?;
     store::run_migrations(&pool).await?;
-    let letta_memory = letta_adapter::LettaMemoryAdapter::from_env();
+    // The adapter is optional only when no Letta endpoint is configured. Once
+    // enabled, its dedicated Auth Core service-principal configuration is
+    // mandatory so background dreaming/search never falls back to anonymous
+    // cross-service calls.
+    let letta_memory = letta_adapter::LettaMemoryAdapter::from_env()?;
 
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
@@ -45,6 +55,7 @@ async fn main() -> Result<()> {
         pool.clone(),
         events_tx.clone(),
         letta_memory.clone(),
+        grpc_auth,
     ));
     let http_handle = tokio::spawn(http_health::serve(prom_handle));
     let nats_pool = pool.clone();

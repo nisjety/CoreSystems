@@ -2,7 +2,13 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunOwner {
+    org_id: String,
+    user_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
@@ -54,6 +60,7 @@ impl RunSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct StateStore {
     runs: Arc<DashMap<String, RunSnapshot>>,
+    owners: Arc<DashMap<String, RunOwner>>,
 }
 
 impl StateStore {
@@ -75,6 +82,63 @@ impl StateStore {
 
     pub fn update(&self, snapshot: RunSnapshot) {
         self.runs.insert(snapshot.run_id.clone(), snapshot);
+    }
+
+    /// Atomically resume only a genuinely gated run.
+    ///
+    /// Returning `None` for running, unknown, and terminal runs makes an
+    /// approval retry fail closed: a stale decision can never revive a run
+    /// that completed, failed, or was cancelled after its first resume.
+    #[must_use]
+    pub fn resume(&self, run_id: &str) -> Option<u32> {
+        let Entry::Occupied(mut entry) = self.runs.entry(run_id.to_owned()) else {
+            return None;
+        };
+        if !matches!(
+            entry.get().status,
+            RunStatus::AwaitingApproval | RunStatus::Paused
+        ) {
+            return None;
+        }
+        let step_index = entry.get().step_index;
+        entry.get_mut().status = RunStatus::Running;
+        Some(step_index)
+    }
+
+    #[must_use]
+    pub fn snapshot(&self, run_id: &str) -> Option<RunSnapshot> {
+        self.runs.get(run_id).map(|snapshot| snapshot.clone())
+    }
+
+    /// Cache an owner only after Session Core has verified it against the
+    /// durable runs table. Subsequent calls are idempotent only for that exact
+    /// owner; a run id can never be rebound by another principal.
+    #[must_use]
+    pub(crate) fn cache_verified_owner(&self, run_id: &str, org_id: &str, user_id: &str) -> bool {
+        if run_id.trim().is_empty() || org_id.trim().is_empty() || user_id.trim().is_empty() {
+            return false;
+        }
+        let requested = RunOwner {
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+        };
+        match self.owners.entry(run_id.to_owned()) {
+            Entry::Occupied(existing) => existing.get() == &requested,
+            Entry::Vacant(vacant) => {
+                vacant.insert(requested);
+                true
+            }
+        }
+    }
+
+    /// Return whether an already-bound run belongs to this exact verified
+    /// principal. Unknown runs fail closed so control RPCs cannot manufacture
+    /// state for guessed identifiers.
+    #[must_use]
+    pub fn authorizes(&self, run_id: &str, org_id: &str, user_id: &str) -> bool {
+        self.owners
+            .get(run_id)
+            .is_some_and(|owner| owner.org_id == org_id && owner.user_id == user_id)
     }
 
     #[must_use]
@@ -130,5 +194,38 @@ mod tests {
         let snapshot = store.get_or_create("run_1");
         assert_eq!(snapshot.status, RunStatus::Cancelled);
         assert_eq!(snapshot.last_error.as_deref(), Some("user_stop"));
+    }
+
+    #[test]
+    fn approval_resume_replay_cannot_revive_terminal_runs() {
+        for terminal in [RunStatus::Completed, RunStatus::Cancelled] {
+            let store = StateStore::new();
+            store.update(RunSnapshot {
+                run_id: "run_approval".to_owned(),
+                step_index: 4,
+                status: RunStatus::AwaitingApproval,
+                last_error: None,
+            });
+
+            assert_eq!(store.resume("run_approval"), Some(4));
+            let mut finished = store.get_or_create("run_approval");
+            finished.status = terminal.clone();
+            store.update(finished);
+
+            assert_eq!(store.resume("run_approval"), None);
+            assert_eq!(store.get_or_create("run_approval").status, terminal);
+        }
+    }
+
+    #[test]
+    fn run_ownership_is_immutable_and_cross_tenant_controls_fail_closed() {
+        let store = StateStore::new();
+        assert!(!store.authorizes("unknown", "org-a", "user-a"));
+        assert!(store.cache_verified_owner("run-1", "org-a", "user-a"));
+        assert!(store.authorizes("run-1", "org-a", "user-a"));
+        assert!(!store.authorizes("run-1", "org-b", "user-a"));
+        assert!(!store.authorizes("run-1", "org-a", "user-b"));
+        assert!(!store.cache_verified_owner("run-1", "org-b", "user-b"));
+        assert!(store.authorizes("run-1", "org-a", "user-a"));
     }
 }

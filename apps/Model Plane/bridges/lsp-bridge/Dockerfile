@@ -21,7 +21,11 @@
 #   FROM python:3.12-slim
 #   RUN apt-get update && apt-get install -y --no-install-recommends \
 #       rust-analyzer && rm -rf /var/lib/apt/lists/*
-FROM python:3.12-alpine
+FROM python:3.12.13-alpine3.24
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
+      org.opencontainers.image.created=$BUILD_DATE
 WORKDIR /app
 
 # Each step in its own RUN so a failure surfaces the actual culprit.
@@ -33,6 +37,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.npm \
     npm install -g typescript typescript-language-server
 
-COPY server.py ./
+RUN addgroup -S -g 10001 modelplane \
+    && adduser -S -D -h /home/modelplane -u 10001 -G modelplane modelplane
+COPY --chown=modelplane:modelplane server.py ./
+USER modelplane
 EXPOSE 9202
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9202/health', timeout=3).read()" || exit 1
 CMD ["python3", "server.py"]

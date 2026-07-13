@@ -1,5 +1,7 @@
 # Model Plane Deep Dive
 
+> **Current evidence correction — 2026-07-13:** the source architecture remains real, but the running gateway/inference gRPC path is broken while health stays green. Live session/cost/capability auth and semantic memory also fail MVP gates. Source contains substantial undeployed containment and authenticated compatibility work. Read [MODEL_PLANE_STATUS.md](MODEL_PLANE_STATUS.md) and [plane-audit-2026-07-13.md](docs/core-research/plane-audit-2026-07-13.md) before treating any historical “live” statement below as current.
+
 ## Executive Summary
 
 The Model Plane is the AI reasoning, agent execution, orchestration, and capability-routing layer of CoreSystem. It is the plane that accepts authenticated invoke/session/task traffic, assembles context, routes inference, executes tool or agent loops, manages approvals and subagent lineage, and exposes capability and work APIs outward to the rest of the system.
@@ -12,6 +14,13 @@ This plane has a real production-shaped core, but it also contains a visible mix
 4. A set of adjacent capabilities that remain in-memory, best-effort, noop, or placeholder-backed.
 
 The result is a plane that already has genuine agent support, but not a fully converged one. Core agent loop pieces are implemented; several surrounding durability, bridge, memory-adapter, and provider-completeness areas are still hybrid or partial.
+
+> **Verified 2026-07-11 (Phase 4 audit).** Re-checked against current source and live host-curl. Findings:
+> - **Topology/ports still accurate.** All 11 app services + `agent-memory-server` were up (containers report `(unhealthy)` only because the exec-based Docker healthcheck fails under a corrupted content store, not because the service is down). `docker ps` and host-curl confirm every published port in the tables below. `model-gateway` `/healthz`→200, `/health`→401. All Go/Rust health ports return 200. `[live-curl]`
+> - **Agent/tool loop is real and non-mocked.** `execution-core/src/runtime_loop/mod.rs::execute_step` dispatches a *broader* tool set than this doc originally listed — beyond `shell`/`browser_agent`/`subagent`, it now also routes `web_search`, `web_fetch`, `knowledge_search`, `get_shipping_quotes`/`shipping_carriers`/`book_shipment` (to `shipping-core` via `SHIPPING_CORE_URL`, default `http://host.docker.internal:3156`), social tools, `execute_provider_action` (integration-corev2), and `mcp__<server>__<tool>` proxying. `[source-only]`
+> - **HITL is enforced in the loop, not decorative.** `permission::evaluate_call` returns `AwaitApproval` for risky tools under `ask` posture (`is_risky_tool` + operation-aware provider-action/MCP gating), which yields `StepOutcome::awaiting_approval()` *before* the tool runs; `grpc.rs` then mints a durable `create_approval` in session-core and pauses the run. Under `auto` (default chat) posture nothing is gated by design. `[source-only]`
+> - **session-core orchestration RPCs are fully implemented.** `orchestration_grpc.rs` implements `list_plans`, `list_todos`, `list_approvals`, `create_approval`, `decide_approval`, `get_subagent_lineage`, `attach_subagent` with **zero** `Unimplemented`. `[source-only]`
+> - **MCP is real; Visma is not wired.** `bridges/mcp-bridge/server.js` is a working STDIO+HTTP MCP translator with allowlist gating, and the gateway `ProxyMcpTool` path is live. BUT `mcp-bridge` is **not in the main compose** (an un-deployed overlay) and a repo-wide `grep visma` across Model Plane source returns **zero** matches — no Visma MCP server is registered/seeded/defaulted. "Test the Visma MCP" is therefore not a wired Model Plane capability today; the only Visma MCP is an assistant-side claude.ai connector. `[source-only]` `[live-curl: registry]`
 
 ## Current Runtime Topology
 
@@ -240,6 +249,7 @@ This is the runtime loop and the clearest evidence that Model Plane does have ag
 2. `runtime_loop/mod.rs`
    - Explicitly handles `browser_agent` and `subagent.*` tools.
    - Routes `shell` through a real sandboxed executor path.
+   - _(Verified 2026-07-11)_ Also dispatches a real business-tool set: `web_search`/`web_fetch`/`knowledge_search`, `get_shipping_quotes`/`shipping_carriers`/`book_shipment` (shipping-core), social tools, `execute_provider_action` (integration-corev2), and `mcp__<server>__<tool>` proxied through the gateway's `ProxyMcpTool`. Risky names (`book_shipment`, write-classified provider actions, all MCP calls) gate behind the HITL approval path under `ask` posture.
 
 3. `grpc.rs`
    - Creates approvals when runtime outcome is `awaiting_approval`.

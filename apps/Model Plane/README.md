@@ -1,6 +1,10 @@
 # Model Plane
 
+> **Current release status — 2026-07-13:** not production-ready. The running `model-gateway` and `inference-core` have green HTTP health but no required gRPC listeners, so chat/inference/query embedding are down. Live cost/session/capability boundaries remain unauthenticated, semantic memory is degraded, and no Visma runtime integration exists. Authenticated/tenant-scoped source restoration, exact audience issuance/callers, terminal-safe approval replay, and the ordinary invoke graph pass source tests but are not deployed. Approval outbox/cache recovery, durable browser ownership, background callers, capability dispatch authority, release-database proof, a verified ZDR provider route, and rollback/live gates remain incomplete. Read [MODEL_PLANE_STATUS.md](MODEL_PLANE_STATUS.md), [plane-audit-2026-07-13.md](docs/core-research/plane-audit-2026-07-13.md), and [grpc-safe-rebuild-decision-2026-07-13.md](docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md) before using the historical 2026-07-11 claims below.
+
 Rust-first runtime and Go control shell for the CoreSystem AI reasoning layer (Layer 4). Replaces Model Plane v2 through incremental cutover.
+
+> **Verified 2026-07-11** — Live audit against running services and current source. All four Rust services healthy: `model-gateway` `/healthz` 200 (`/health` 401 = auth active) on host :8080; `session-core`/`inference-core`/`execution-core` `/healthz` 200 on host :18081/:18082/:18083 (host-published from container :8081/:8082/:8083 to dodge Ingestion-Plane/Expo collisions). The `model-gateway → execution-core` agent/tool loop is real and non-mocked: `execution-core` dispatches real tools (e.g. `shipping_tools.rs` → shipping-core `:3156`, live 200), and MCP tools are proxied through the gateway's registry (`ListMcpTools`/`ProxyMcpTool`). HITL is enforced server-side, not decorative (runtime_loop blocks provider writes without a durable approval reference; `book_shipment` is in `permission::is_risky_tool`). No Visma MCP is wired in source — see [MODEL_PLANE_DEEP_DIVE.md](MODEL_PLANE_DEEP_DIVE.md) and `docs/core-research/*` for the full MCP/Visma finding.
 
 ## Current Stack Status (2026-04-16)
 
@@ -34,7 +38,7 @@ Rust-first runtime and Go control shell for the CoreSystem AI reasoning layer (L
 
 ### Still using placeholder/stub behavior
 
-- Orchestrator memory consolidation and skill promotion activities still contain placeholder implementations in [go/services/orchestrator-core/cmd/activities/activities.go](go/services/orchestrator-core/cmd/activities/activities.go)
+- _(Verified 2026-07-11: none outstanding.)_ The orchestrator memory-consolidation and skill-promotion activities in [go/services/orchestrator-core/cmd/activities/activities.go](go/services/orchestrator-core/cmd/activities/activities.go) are now wired — `summarizeMemoryEntries` performs real per-thread consolidation, `QueryMemoryEntriesActivity`/`WriteConsolidatedMemoryActivity` call letta-bridge, and `RunPromotionGateActivity`/`UpdateRegistryActivity` make real gRPC calls into capability-core (`CheckSkillPromotion`/`PromoteSkill`). No `placeholder`/`TODO`/`stub` markers remain in that file.
 
 ## What Is Left In The Plan
 
@@ -139,6 +143,10 @@ for d in services/orchestrator-core services/capability-core; do (cd "$d" && go 
 | sandbox-manager | Go | :8086 | :9094 | Sandbox lifecycle — leases, TTL, snapshots, cleanup, quota |
 | browser-broker | Go | :8087 | :9095 | Browser grants — local/cloud mode, per-session revocation, action audit |
 | letta-bridge | Go | :8088 | :9096 | Memory bridge — block sync, retrieval tooling, graceful degradation |
+| cost-core | Go | :8089 | :9098 | Cost/budget authority — token pricing, per-org budgets, spend accounting (verified 2026-07-11) |
+| bridge-core | Go | :8091 | — | Client bridge — WebSocket transport for MCP/LSP bridge overlay (`MODEL_PLANE_BRIDGES=1`; see `bridges/mcp-bridge`, `bridges/lsp-bridge`) (verified 2026-07-11) |
+
+> Rust HTTP ports above are container-internal; the compose stack host-publishes their health endpoints at :18081/:18082/:18083 (`/healthz`). MCP server registration/discovery/proxy is owned by **model-gateway** (`ListMcpTools`/`ProxyMcpTool`); `execution-core` only proxies through it. `sandbox-manager` and `browser-broker` also run today.
 
 ## Authority Rules
 

@@ -84,6 +84,7 @@ impl RoutingPolicyService {
     /// `FinetuneJobsService` and `OrchestrationGrpc` register their tonic
     /// servers.
     #[must_use]
+    #[allow(dead_code)] // direct constructor retained for isolated service tests
     pub fn into_server(self) -> RoutingPolicyServer<Self> {
         RoutingPolicyServer::new(self)
     }

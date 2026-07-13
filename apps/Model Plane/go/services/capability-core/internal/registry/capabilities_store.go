@@ -11,45 +11,73 @@ import (
 	"sort"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/scoring"
 )
 
 // CapabilityRow is the full mutable row for the capabilities table.
 type CapabilityRow struct {
-	ID               string
-	OrgID            string
-	Kind             string
-	Name             string
-	Version          string
-	Description      string
-	RiskLevel        string
-	Scope            string
-	LazyLoad         bool
-	Enabled          bool
-	IdempotencyKey   string
-	SchemaInput      []byte
-	SchemaOutput     []byte
-	ConfigJSON       []byte
-	Tags             []string
-	EnabledForScopes []string
-	SuccessRate      float64
-	SchemaFailRate   float64
-	P95LatencyMS     float64
-	MeanCostUSD      float64
-	ApprovalRate     float64
-	IncidentCount    int
-	OperatorRating   float64
-	RolloutState     string
-	CreatedBy        string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                string
+	OrgID             string
+	Kind              string
+	Name              string
+	Version           string
+	Description       string
+	RiskLevel         string
+	Scope             string
+	LazyLoad          bool
+	Enabled           bool
+	IdempotencyKey    string
+	SchemaInput       []byte
+	SchemaOutput      []byte
+	ConfigJSON        []byte
+	Tags              []string
+	EnabledForScopes  []string
+	SuccessRate       float64
+	SchemaFailRate    float64
+	P95LatencyMS      float64
+	MeanCostUSD       float64
+	ApprovalRate      float64
+	IncidentCount     int
+	OperatorRating    float64
+	RolloutState      string
+	AvailabilityState string
+	ReasonCode        string
+	Reason            string
+	ExecutionMode     string
+	CostClass         string
+	HealthCheckedAt   *time.Time
+	CreatedBy         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // CapabilitiesStore provides CRUD access to the capabilities table.
 type CapabilitiesStore struct {
-	pool *pgxpool.Pool
+	pool capabilitiesDatabase
+}
+
+type capabilitiesDatabase interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// AvailabilityUpdate is a normalized runtime health attestation. Callers must
+// derive it from authenticated workload input and registry risk policy.
+type AvailabilityUpdate struct {
+	ExpectedVersion string
+	State           string
+	ReasonCode      string
+	Reason          string
+	ExecutionMode   string
+	CostClass       string
+	HealthCheckedAt time.Time
 }
 
 // NewCapabilitiesStore constructs a store.
@@ -62,6 +90,12 @@ func NewCapabilitiesStore(pool *pgxpool.Pool) (*CapabilitiesStore, error) {
 
 // Upsert inserts or updates a capability row using ON CONFLICT on (org_id,kind,name).
 func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow) error {
+	if r == nil {
+		return fmt.Errorf("capability is required")
+	}
+	if !models.IsSupportedRiskLevel(r.RiskLevel) {
+		return fmt.Errorf("unsupported capability risk level %q", r.RiskLevel)
+	}
 	if r.SchemaInput == nil {
 		r.SchemaInput = []byte("{}")
 	}
@@ -109,6 +143,30 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow) error 
 			tags             = EXCLUDED.tags,
 			enabled_for_scopes = EXCLUDED.enabled_for_scopes,
 			rollout_state    = EXCLUDED.rollout_state,
+			availability_state = CASE
+				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
+				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
+				THEN 'unavailable' ELSE capabilities.availability_state END,
+			availability_reason_code = CASE
+				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
+				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
+				THEN 'health_not_attested' ELSE capabilities.availability_reason_code END,
+			availability_reason = CASE
+				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
+				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
+				THEN 'Capability changed and requires a new health attestation.' ELSE capabilities.availability_reason END,
+			execution_mode = CASE
+				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
+				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
+				THEN 'unavailable' ELSE capabilities.execution_mode END,
+			cost_class = CASE
+				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
+				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
+				THEN 'unknown' ELSE capabilities.cost_class END,
+			health_checked_at = CASE
+				WHEN (capabilities.version, capabilities.risk_level, capabilities.schema_input, capabilities.schema_output, capabilities.config_json)
+				  IS DISTINCT FROM (EXCLUDED.version, EXCLUDED.risk_level, EXCLUDED.schema_input, EXCLUDED.schema_output, EXCLUDED.config_json)
+				THEN NULL ELSE capabilities.health_checked_at END,
 			updated_at       = EXCLUDED.updated_at
 	`,
 		r.ID, r.OrgID, r.Kind, r.Name, r.Version, r.Description,
@@ -127,10 +185,31 @@ func (s *CapabilitiesStore) Get(ctx context.Context, id string) (*CapabilityRow,
 		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
 		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
 		       approval_rate, incident_count, operator_rating, rollout_state,
+		       availability_state, availability_reason_code, availability_reason,
+		       execution_mode, cost_class, health_checked_at,
 		       created_by, created_at, updated_at
 		FROM capabilities
 		WHERE id = $1 AND deleted_at IS NULL
 	`, id)
+	return scanCapabilityRow(row)
+}
+
+// GetForOrg returns a tenant-owned or global capability by ID. A tenant may
+// read global catalog entries but may never use this method to read another
+// tenant's row.
+func (s *CapabilitiesStore) GetForOrg(ctx context.Context, id, orgID string) (*CapabilityRow, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, kind, name, version, description,
+		       risk_level, scope, lazy_load, enabled, idempotency_key,
+		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
+		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
+		       approval_rate, incident_count, operator_rating, rollout_state,
+		       availability_state, availability_reason_code, availability_reason,
+		       execution_mode, cost_class, health_checked_at,
+		       created_by, created_at, updated_at
+		FROM capabilities
+		WHERE id = $1 AND (org_id = $2 OR org_id = 'global') AND deleted_at IS NULL
+	`, id, orgID)
 	return scanCapabilityRow(row)
 }
 
@@ -169,6 +248,8 @@ func (s *CapabilitiesStore) List(ctx context.Context, orgID, kind, rollout strin
 		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
 		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
 		       approval_rate, incident_count, operator_rating, rollout_state,
+		       availability_state, availability_reason_code, availability_reason,
+		       execution_mode, cost_class, health_checked_at,
 		       created_by, created_at, updated_at
 		FROM capabilities
 		WHERE %s
@@ -217,12 +298,91 @@ func (s *CapabilitiesStore) SetRolloutState(ctx context.Context, id, state, acto
 	return err
 }
 
+// SetRolloutStateForOrg mutates only a capability owned by the verified tenant.
+func (s *CapabilitiesStore) SetRolloutStateForOrg(ctx context.Context, id, orgID, state, actor string) error {
+	now := time.Now().UTC()
+	column := ""
+	switch state {
+	case "quarantine":
+		column = ", quarantined_at = $5"
+	case "deprecated":
+		column = ", deprecated_at = $5"
+	case "stable":
+		column = ", pinned_at = $5"
+	}
+	query := fmt.Sprintf(
+		"UPDATE capabilities SET rollout_state=$1, updated_at=$2%s WHERE id=$3 AND org_id=$4 AND deleted_at IS NULL",
+		column,
+	)
+	if column != "" {
+		_, err := s.pool.Exec(ctx, query, state, now, id, orgID, now)
+		return err
+	}
+	_, err := s.pool.Exec(ctx, query, state, now, id, orgID)
+	return err
+}
+
+// AttestAvailabilityForOrg atomically records runtime health and its audit
+// event for a tenant-owned capability. Global rows require a separately
+// governed operator path and cannot be rewritten by tenant health reporters.
+func (s *CapabilitiesStore) AttestAvailabilityForOrg(ctx context.Context, id, orgID, actor string, update AvailabilityUpdate) (bool, error) {
+	if id == "" || orgID == "" || actor == "" || update.ExpectedVersion == "" {
+		return false, fmt.Errorf("capability, version, organization, and actor are required")
+	}
+	diffJSON, err := json.Marshal(map[string]any{
+		"state":             update.State,
+		"version":           update.ExpectedVersion,
+		"reason_code":       update.ReasonCode,
+		"execution_mode":    update.ExecutionMode,
+		"cost_class":        update.CostClass,
+		"health_checked_at": update.HealthCheckedAt.UTC(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal availability audit: %w", err)
+	}
+	auditID := "ral_" + uuid.NewString()
+	result, err := s.pool.Exec(ctx, `
+		WITH updated AS (
+		UPDATE capabilities
+		SET availability_state = $1,
+		    availability_reason_code = $2,
+		    availability_reason = $3,
+		    execution_mode = $4,
+		    cost_class = $5,
+		    health_checked_at = $6,
+		    updated_at = $6
+		WHERE id = $7 AND org_id = $8 AND version = $9 AND deleted_at IS NULL
+		  AND (health_checked_at IS NULL OR health_checked_at < $6)
+		RETURNING id, org_id
+		)
+		INSERT INTO registry_audit_log
+		    (id, entity_kind, entity_id, action, actor, org_id, diff_json)
+		SELECT $10, 'capability', updated.id, 'availability_attested', $11, updated.org_id, $12::jsonb
+		FROM updated
+	`, update.State, update.ReasonCode, update.Reason, update.ExecutionMode,
+		update.CostClass, update.HealthCheckedAt.UTC(), id, orgID, update.ExpectedVersion, auditID, actor, diffJSON)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
+}
+
 // SoftDelete marks a capability as deleted without removing it.
 func (s *CapabilitiesStore) SoftDelete(ctx context.Context, id string) error {
 	now := time.Now().UTC()
 	_, err := s.pool.Exec(ctx,
 		"UPDATE capabilities SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND deleted_at IS NULL",
 		now, id,
+	)
+	return err
+}
+
+// SoftDeleteForOrg marks only a verified tenant's capability as deleted.
+func (s *CapabilitiesStore) SoftDeleteForOrg(ctx context.Context, id, orgID string) error {
+	now := time.Now().UTC()
+	_, err := s.pool.Exec(ctx,
+		"UPDATE capabilities SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL",
+		now, id, orgID,
 	)
 	return err
 }
@@ -256,6 +416,12 @@ type AuditLogEntry struct {
 // entity_kind and entity_id (empty string = no filter on that field). `limit`
 // is clamped to [1, 500] (default 100). Parameterized — no SQL injection.
 func (s *CapabilitiesStore) QueryAuditLog(ctx context.Context, entityKind, entityID string, limit int) ([]AuditLogEntry, error) {
+	return s.QueryAuditLogForOrg(ctx, "", entityKind, entityID, limit)
+}
+
+// QueryAuditLogForOrg returns audit entries only for the verified tenant. An
+// empty orgID preserves the trusted internal behavior used by legacy tests.
+func (s *CapabilitiesStore) QueryAuditLogForOrg(ctx context.Context, orgID, entityKind, entityID string, limit int) ([]AuditLogEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -265,10 +431,12 @@ func (s *CapabilitiesStore) QueryAuditLog(ctx context.Context, entityKind, entit
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, entity_kind, entity_id, action, actor, org_id, diff_json, ts
 		FROM registry_audit_log
-		WHERE ($1 = '' OR entity_kind = $1) AND ($2 = '' OR entity_id = $2)
+		WHERE ($1 = '' OR org_id = $1)
+		  AND ($2 = '' OR entity_kind = $2)
+		  AND ($3 = '' OR entity_id = $3)
 		ORDER BY ts DESC
-		LIMIT $3
-	`, entityKind, entityID, limit)
+		LIMIT $4
+	`, orgID, entityKind, entityID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query audit log: %w", err)
 	}
@@ -308,18 +476,21 @@ func (r *CapabilityRow) Score() float64 {
 	}, scoring.DefaultWeights())
 }
 
-// RankedList returns enabled, non-deleted capabilities for the org (plus
+// RankedList returns non-deleted capabilities for the org (plus
 // 'global'), optionally filtered by kind, ordered by descending composite score
-// (ties broken by kind, then name for stable output). When ids is non-nil, only
+// with enabled entries first (ties broken by kind, then name for stable output).
+// Disabled entries remain discoverable with an explicit machine-readable state
+// instead of silently disappearing. When ids is non-nil, only
 // capabilities whose id is in the set are returned — this is how scope
-// resolution (ScopeStore.ResolveForScope) narrows the ranked catalog to what an
-// (org, agent) is actually granted. limit <= 0 defaults to 50.
+// resolution (ScopeStore.ResolveForScopeForOrg) narrows the ranked catalog to
+// what a verified tenant's agent/org is actually granted. limit <= 0 defaults
+// to 50.
 func (s *CapabilitiesStore) RankedList(ctx context.Context, orgID, kind string, ids []string, limit int) ([]ScoredCapability, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 
-	where := "deleted_at IS NULL AND enabled = TRUE"
+	where := "deleted_at IS NULL"
 	args := []any{}
 	n := 1
 	if orgID != "" {
@@ -344,6 +515,8 @@ func (s *CapabilitiesStore) RankedList(ctx context.Context, orgID, kind string, 
 		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
 		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
 		       approval_rate, incident_count, operator_rating, rollout_state,
+		       availability_state, availability_reason_code, availability_reason,
+		       execution_mode, cost_class, health_checked_at,
 		       created_by, created_at, updated_at
 		FROM capabilities
 		WHERE %s
@@ -366,6 +539,9 @@ func (s *CapabilitiesStore) RankedList(ctx context.Context, orgID, kind string, 
 	}
 
 	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].Row.Enabled != scored[j].Row.Enabled {
+			return scored[i].Row.Enabled
+		}
 		if scored[i].Score != scored[j].Score {
 			return scored[i].Score > scored[j].Score
 		}
@@ -395,6 +571,8 @@ func scanCapabilityRow(row pgxScanner) (*CapabilityRow, error) {
 		&r.SchemaInput, &r.SchemaOutput, &r.ConfigJSON, &r.Tags, &r.EnabledForScopes,
 		&r.SuccessRate, &r.SchemaFailRate, &r.P95LatencyMS, &r.MeanCostUSD,
 		&r.ApprovalRate, &r.IncidentCount, &r.OperatorRating, &r.RolloutState,
+		&r.AvailabilityState, &r.ReasonCode, &r.Reason,
+		&r.ExecutionMode, &r.CostClass, &r.HealthCheckedAt,
 		&r.CreatedBy, &r.CreatedAt, &r.UpdatedAt,
 	)
 	if err != nil {

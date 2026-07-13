@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/nats-io/nats.go"
@@ -115,9 +116,9 @@ func main() {
 	// Optional NATS compat adapter (skip cleanly if NATS_URL unset or dial fails)
 	var pub *natsx.Publisher
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		nc, nerr := nats.Connect(natsURL)
+		nc, nerr := nats.Connect(natsURL, natsAuthOptions()...)
 		if nerr != nil {
-			slog.Warn("NATS connect failed; continuing without compat adapter", "url", natsURL, "error", nerr)
+			slog.Warn("NATS connect failed; continuing without compat adapter", "error", nerr)
 		} else {
 			defer nc.Close()
 			adapter := natsadapter.New(nc)
@@ -143,7 +144,7 @@ func main() {
 					slog.Info("compat subscription active", "subject", subj, "mode", mode)
 				}
 			}
-			slog.Info("NATS compat adapter online", "url", natsURL, "mode", mode)
+			slog.Info("NATS compat adapter online", "mode", mode)
 
 			orchPersister := orchestration.NewLoggingPersister(logger)
 			orchSub := orchestration.NewSubscriber(orchPersister, logger)
@@ -209,4 +210,12 @@ func main() {
 	<-ctx.Done()
 	slog.Info("shutting down")
 	_ = server.Shutdown(context.Background())
+}
+
+func natsAuthOptions() []nats.Option {
+	token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN"))
+	if token == "" {
+		return nil
+	}
+	return []nats.Option{nats.Token(token)}
 }

@@ -47,7 +47,10 @@ func (s *CapabilitiesSource) Load() ([]*models.Capability, error) {
 		rows, err = s.pool.Query(ctx, `
 			SELECT id, org_id, kind, name, version, description,
 			       risk_level, scope, lazy_load, enabled,
-			       idempotency_key, enabled_for_scopes
+			       idempotency_key, enabled_for_scopes, rollout_state,
+			       availability_state, availability_reason_code,
+			       availability_reason, execution_mode, cost_class,
+			       health_checked_at
 			FROM capabilities
 			WHERE deleted_at IS NULL
 			ORDER BY kind, name
@@ -56,7 +59,10 @@ func (s *CapabilitiesSource) Load() ([]*models.Capability, error) {
 		rows, err = s.pool.Query(ctx, `
 			SELECT id, org_id, kind, name, version, description,
 			       risk_level, scope, lazy_load, enabled,
-			       idempotency_key, enabled_for_scopes
+			       idempotency_key, enabled_for_scopes, rollout_state,
+			       availability_state, availability_reason_code,
+			       availability_reason, execution_mode, cost_class,
+			       health_checked_at
 			FROM capabilities
 			WHERE deleted_at IS NULL
 			  AND (org_id = $1 OR org_id = 'global')
@@ -75,7 +81,9 @@ func (s *CapabilitiesSource) Load() ([]*models.Capability, error) {
 		if err := rows.Scan(
 			&c.ID, &c.OrgID, &c.Kind, &c.Name, &c.Version,
 			&c.Description, &c.RiskLevel, &c.Scope,
-			&c.LazyLoad, &c.Enabled, &c.IdempotencyKey, &scopes,
+			&c.LazyLoad, &c.Enabled, &c.IdempotencyKey, &scopes, &c.RolloutState,
+			&c.AvailabilityState, &c.ReasonCode, &c.Reason,
+			&c.ExecutionMode, &c.CostClass, &c.HealthCheckedAt,
 		); err != nil {
 			return nil, fmt.Errorf("capabilities source scan: %w", err)
 		}

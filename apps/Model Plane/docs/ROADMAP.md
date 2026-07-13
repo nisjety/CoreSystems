@@ -1,5 +1,7 @@
 # Model Plane — Roadmap
 
+> **Superseded for production sequencing — 2026-07-13:** use [MODEL_PLANE_ROADMAP.md](../MODEL_PLANE_ROADMAP.md). The running gateway/inference protocol outage, live authorization defects, source-only remediations, compatibility gates, and enterprise-next split are not represented by the older phase/checkmark scheme below.
+
 This roadmap tracks the path from the current Rust+Go foundation to product-surface parity with `apps/Model Plane v2` and `claude-code-fork`. Each phase carries an explicit **Current state** and a **Next deliverables** block so the gap is unambiguous.
 
 Sequencing recommendation: see `GOAL.md` § "Recommended sequencing". Phases are numbered for traceability, not strict execution order.
@@ -9,6 +11,8 @@ Sequencing recommendation: see `GOAL.md` § "Recommended sequencing". Phases are
 Status legend: ✅ done · 🟡 partial · ❌ missing
 
 > **⚠️ 2026-05-30 status reconciliation.** A code-grounded audit found this roadmap badly understated reality — most phases below were marked ❌ but are in fact LIVE (all 8 multimodal groups, orchestration shell, tasks/cron, TOON, graph/wiki routes, MCP/plugin registries). Building off the old ❌ flags is the root cause of duplicate systems. **The authoritative current-state + one-owner-per-capability map is [capability-ownership-matrix.md](capability-ownership-matrix.md).** Phase headers below are corrected; per-phase prose is being reconciled.
+
+> **✅ Verified 2026-07-11.** Spot-checked against current source + live host-curl (Docker exec/build/logs unavailable this pass; graded `[live-curl]`/`[source-only]`). Confirmed: `cost-core` exists and is healthy (`go/services/cost-core`, :8089 `/healthz` 200, in the main compose, consumed by `model-gateway` via `COST_CORE_URL`) `[live-curl]`; `capability-core` gRPC RPCs are implemented (not `Unimplemented`) with live HTTP registries `/api/v1/{skills,mcp,routing,safety}` `[source-only]`; `model-gateway` exposes far more than `/v1/invoke` (incl. `/v1/ai/chat`, `/v1/ai/embeddings`, `/v1/knowledge/*`, `/v1/graph/*`, `/v1/wiki/*`, `/v1/documents/*`, `/v1/retrieval/*`, `/v1/browser/runs*`, `/v1/finetune/*`) `[source-only]`; the `execution-core` runtime loop dispatches real tools (shipping → `shipping-core` :3156) and **enforces HITL** (a gated/risky tool mints a durable `CreateApproval`, flips the run `AwaitingApproval`, and returns early) `[source-only]`; `mcp-bridge` is a real STDIO+HTTP MCP translator but lives in `deploy/docker-compose.bridges.yml` (an overlay, **not** the main compose) and **no Visma MCP is wired anywhere in Model Plane source** — "test the Visma MCP" is not a Model Plane capability today. The most obviously stale ❌-era "Current state" prose is corrected inline below.
 
 ---
 
@@ -60,10 +64,10 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 **Current state**
 
-- `capability-core` returns gRPC `Unimplemented` for all RPCs.
-- Skill promotion **workflow** runs in `orchestrator-core`, but there is no skill registry to promote into.
+- **(corrected 2026-07-11)** `capability-core` gRPC RPCs are implemented (e.g. `ListCapabilities`, backed by registry + policy engine + optional durable store; it embeds `UnimplementedCapabilityCoreServer` only as the standard Go forward-compat shim). The original "Unimplemented for all RPCs" line was the ❌-era baseline.
+- **(corrected 2026-07-11)** Live HTTP registries exist under `capability-core`: `/api/v1/skills`, `/api/v1/mcp`, `/api/v1/routing`, `/api/v1/safety` (plus modalities/tasks/schedule/coordination/artifacts handlers). A skill registry (`/api/v1/skills` + `skillsink`) now receives `SkillPromotionWorkflow` output.
 - `letta-bridge` is a single memory-adapter proxy stub; not catalogued.
-- Inference router config is hardcoded; no model registry.
+- **(corrected 2026-07-11)** A model registry exists (`capability-core` `ModelsRegistry` + `/api/v1/routing`); inference routing is no longer purely hardcoded. Consolidation into the full eight-registry model is still pending.
 
 **Next deliverables — eight registries, all owned by `capability-core`**
 
@@ -131,8 +135,8 @@ Status legend: ✅ done · 🟡 partial · ❌ missing
 
 **Current state**
 
-- `model-gateway` exposes only `POST /v1/invoke` and `POST /v1/invoke/stream`.
-- `inference-core::provider::fallback` knows chat/completions; nothing else.
+- **(corrected 2026-07-11)** `model-gateway` exposes many `/v1/*` surfaces beyond `/v1/invoke` + `/v1/invoke/stream`: `/v1/ai/chat`, `/v1/ai/embeddings`, `/v1/documents/*`, `/v1/retrieval/*`, `/v1/knowledge/*`, `/v1/graph/*`, `/v1/wiki/*`, `/v1/browser/runs*`, `/v1/finetune/*`, plus run observation/cancel/resume. The "only `/v1/invoke`" line was the ❌-era baseline.
+- `inference-core` provider fallback routes chat/completions; per-modality routing is live per the matrix.
 
 **Next deliverables — eight modality groups under `/v1/ai/*`**
 
@@ -230,11 +234,11 @@ These gaps span phases and should be tracked at the top-level. The canonical stu
 
 - **In-memory backings that must move to durable stores.** `capability-core` registry + policy engine, `letta-bridge` `memstore`, `model-gateway` rate-limit + idempotency state, `inference-core` prompt cache. Phase 9 stub-replacement gates in `VERIFICATION.md` track each.
 - **12 orchestration RPC handlers Unimplemented.** `go/services/orchestrator-core/internal/orchestration/handlers.go` blocks Phase 1 cutover until replaced. See gap-analysis § 13.1.
-- **HTTP namespaces.** None of the planned `/v1/orchestration/*`, `/v1/capabilities/*`, `/v1/ai/*`, `/v1/tasks/*`, `/v1/cron/*`, `/v1/bridge/*`, `/v1/voice/*`, `/v1/channels/*`, `/v1/memory/*`, `/v1/knowledge/*` namespaces exist; only `/v1/invoke` + `/v1/invoke/stream` are live.
+- **HTTP namespaces.** **(corrected 2026-07-11)** Several planned namespaces are now live on `model-gateway`: `/v1/ai/*` (chat, embeddings), `/v1/knowledge/*`, `/v1/graph/*`, `/v1/wiki/*`, `/v1/documents/*`, `/v1/retrieval/*`, `/v1/browser/runs*`, `/v1/finetune/*`, plus run observe/cancel/resume. `bridge-core` exposes remote sessions under `/api/v1/sessions` (not the originally-envisioned `/v1/bridge/*`). Still absent as dedicated public gateway namespaces: `/v1/orchestration/*`, `/v1/tasks/*`, `/v1/cron/*`, `/v1/voice/*`, `/v1/channels/*`, `/v1/memory/*` (capability-core serves task/schedule/coordination surfaces under `/api/v1/model-plane/*` internally).
 - **Proto evolution.** `gateway.proto`, `sessions.proto`, `execution.proto`, `capabilities.proto` need additive evolution. New protos required for tasks, cron, plans-as-services, approvals-as-services, bridge, voice, channels, knowledge.
 - **Scope model propagation.** `run / thread / workspace / user / org / global` is documented but not propagated through capability and policy lookups.
 - **Event schema gaps.** Add named events for capability/task/cron/subagent/wiki/graph/experiment domains (see Phase 1 cross-cutting infra).
-- **Cost / analytics core.** `Model Plane v2` ships a dedicated `cost-core`; Model Plane has none. Add per-run cost tracking + `usage.{org}.llm` emission from `model-gateway`.
+- **Cost / analytics core.** **(corrected 2026-07-11)** ~~Model Plane has none.~~ `cost-core` now exists (`go/services/cost-core`, :8089, in the main compose with a durable cost ledger) and is consumed by `model-gateway` (price catalogue via `GET /api/v1/pricing`, wired through `COST_CORE_URL`; a disabled/unreachable cache emits a null cost, never a fake figure). Remaining: confirm `usage.{org}.llm` emission end-to-end, and that cost-core validates inbound callers (prior note: it validated nothing inbound despite being called with the shared key).
 - **Multi-scope memory.** Only `thread` scope exists today; `run`, `workspace`, `user`, `org`, `global` scopes are not materialised. (GOAL.md non-negotiable §6.)
 - **Python research/training plane.** Existing `python/` projects are off-hot-path labs (`eval-lab-py`, `graph-lab-py`, `provider-research-py`, `mp-events-py`); they are not the autoresearch + experiment-tracking workers PLAN Phase 5b describes.
 

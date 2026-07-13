@@ -7,6 +7,7 @@ import (
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -53,7 +54,59 @@ func newTestClient(t *testing.T) mpv1.SandboxManagerClient {
 }
 
 func newTestServer() *Server {
-	return NewServer(lease.NewStore(), snapshot.NewStore())
+	return testServerFor(lease.NewStore(), snapshot.NewStore(), authctx.Principal{
+		OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user",
+	})
+}
+
+func testServerFor(leases *lease.Store, snapshots *snapshot.Store, principal authctx.Principal) *Server {
+	srv := NewServer(leases, snapshots)
+	srv.principal = func(context.Context) (authctx.Principal, error) { return principal, nil }
+	return srv
+}
+
+func TestLeaseAccessIsPinnedToVerifiedOrganizationAndUser(t *testing.T) {
+	leases := lease.NewStore()
+	snapshots := snapshot.NewStore()
+	owner := testServerFor(leases, snapshots, authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"})
+	acquired, err := owner.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		principal authctx.Principal
+	}{
+		{name: "wrong tenant", principal: authctx.Principal{OrganizationID: "org-2", ActorID: "user-1", PrincipalType: "user"}},
+		{name: "wrong user", principal: authctx.Principal{OrganizationID: "org-1", ActorID: "user-2", PrincipalType: "user"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := testServerFor(leases, snapshots, tc.principal)
+			if _, err := other.SnapshotSandbox(context.Background(), &SnapshotRequest{LeaseId: acquired.GetLeaseId(), Label: "x"}); status.Code(err) != codes.NotFound {
+				t.Fatalf("snapshot code = %v, want NotFound", status.Code(err))
+			}
+			if _, err := other.ReleaseLease(context.Background(), &ReleaseLeaseRequest{LeaseId: acquired.GetLeaseId()}); status.Code(err) != codes.NotFound {
+				t.Fatalf("release code = %v, want NotFound", status.Code(err))
+			}
+		})
+	}
+
+	service := testServerFor(leases, snapshots, authctx.Principal{OrganizationID: "org-1", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{"sandbox:write"}})
+	if _, err := service.SnapshotSandbox(context.Background(), &SnapshotRequest{LeaseId: acquired.GetLeaseId(), Label: "service"}); err != nil {
+		t.Fatalf("same-tenant scoped service snapshot: %v", err)
+	}
+}
+
+func TestAcquireLeaseRejectsCallerSuppliedWrongOrganization(t *testing.T) {
+	_, err := newTestServer().AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-2", Ttl: durationpb.New(time.Minute),
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied", status.Code(err))
+	}
 }
 
 func TestHealth_ReturnsServing(t *testing.T) {
@@ -216,7 +269,7 @@ func TestAcquireLease_TransportRoundTrip(t *testing.T) {
 		ScopeId:   "scope-transport",
 		ScopeType: "agent",
 		Ttl:       durationpb.New(time.Minute),
-		OrgId:     "org-transport",
+		OrgId:     "org-1",
 	})
 	if err != nil {
 		t.Fatalf("AcquireLease transport: unexpected error: %v", err)

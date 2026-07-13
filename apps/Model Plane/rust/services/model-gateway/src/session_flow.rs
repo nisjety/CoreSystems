@@ -3,7 +3,20 @@ use mp_contracts::model_plane::v1::{AppendMessageRequest, CreateThreadRequest, S
 use mp_ids::new_ulid;
 use tonic::Code;
 
+use crate::auth::VerifiedSessionBearer;
 use crate::state::AppState;
+
+fn authenticated_request<T>(value: T, bearer: Option<&str>) -> Result<tonic::Request<T>> {
+    let bearer = bearer.context("verified session credential required")?;
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}")
+            .parse()
+            .context("verified session credential is not forwardable")?,
+    );
+    Ok(request)
+}
 
 pub struct SessionRun {
     pub thread_id: String,
@@ -21,17 +34,21 @@ async fn create_thread(
     requested_session_key: Option<&str>,
     org_id: &str,
     user_id: &str,
+    bearer: Option<&str>,
 ) -> Result<String> {
     let response = client
-        .create_thread(CreateThreadRequest {
-            session_key: non_empty(requested_session_key)
-                .unwrap_or("")
-                .to_owned()
-                .if_empty_then(new_ulid()),
-            org_id: org_id.to_owned(),
-            user_id: user_id.to_owned(),
-            metadata: None,
-        })
+        .create_thread(authenticated_request(
+            CreateThreadRequest {
+                session_key: non_empty(requested_session_key)
+                    .unwrap_or("")
+                    .to_owned()
+                    .if_empty_then(new_ulid()),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                metadata: None,
+            },
+            bearer,
+        )?)
         .await
         .context("session-core create_thread failed")?;
 
@@ -52,16 +69,19 @@ async fn append_user_message(
     >,
     thread_id: &str,
     goal: &str,
+    bearer: Option<&str>,
 ) -> Result<(), tonic::Status> {
-    client
-        .append_message(AppendMessageRequest {
+    let request = authenticated_request(
+        AppendMessageRequest {
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),
             content: goal.to_owned(),
             metadata: None,
-        })
-        .await
-        .map(|_| ())
+        },
+        bearer,
+    )
+    .map_err(|_| tonic::Status::unauthenticated("verified session credential required"))?;
+    client.append_message(request).await.map(|_| ())
 }
 
 /// Ensure the request has a thread, persist the user prompt, and create a run.
@@ -77,15 +97,90 @@ pub async fn prepare_run(
     user_id: &str,
     goal: &str,
 ) -> Result<SessionRun> {
+    prepare_run_with_bearer(
+        state,
+        requested_thread_id,
+        requested_session_key,
+        org_id,
+        user_id,
+        goal,
+        None,
+    )
+    .await
+}
+
+/// Authenticated HTTP/SSE path. The independently verified, dedicated
+/// `aud=session-core` bearer is forwarded to session-core; it is never accepted
+/// from a caller field.
+///
+/// # Errors
+/// Returns an error when Session Core rejects or cannot complete any run setup
+/// operation.
+pub async fn prepare_run_authenticated(
+    state: &AppState,
+    requested_thread_id: Option<&str>,
+    requested_session_key: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<SessionRun> {
+    prepare_run_with_bearer(
+        state,
+        requested_thread_id,
+        requested_session_key,
+        org_id,
+        user_id,
+        goal,
+        Some(bearer.as_str()),
+    )
+    .await
+}
+
+/// Crate-internal adapter for an ingress boundary that has already verified a
+/// dedicated `aud=session-core` bearer and bound it to the Model Plane caller.
+///
+/// Raw caller input must never be passed to this function without that boundary
+/// verification.
+pub(crate) async fn prepare_run_with_token(
+    state: &AppState,
+    requested_thread_id: Option<&str>,
+    requested_session_key: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    bearer: &str,
+) -> Result<SessionRun> {
+    prepare_run_with_bearer(
+        state,
+        requested_thread_id,
+        requested_session_key,
+        org_id,
+        user_id,
+        goal,
+        Some(bearer),
+    )
+    .await
+}
+
+async fn prepare_run_with_bearer(
+    state: &AppState,
+    requested_thread_id: Option<&str>,
+    requested_session_key: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    bearer: Option<&str>,
+) -> Result<SessionRun> {
     let mut client = state.session_client.clone();
 
     let mut thread_id = if let Some(thread_id) = non_empty(requested_thread_id) {
         thread_id.to_owned()
     } else {
-        create_thread(&mut client, requested_session_key, org_id, user_id).await?
+        create_thread(&mut client, requested_session_key, org_id, user_id, bearer).await?
     };
 
-    if let Err(error) = append_user_message(&mut client, &thread_id, goal).await {
+    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer).await {
         if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
             tracing::info!(
                 requested_thread_id = %thread_id,
@@ -96,9 +191,10 @@ pub async fn prepare_run(
                 requested_session_key.or(requested_thread_id),
                 org_id,
                 user_id,
+                bearer,
             )
             .await?;
-            append_user_message(&mut client, &thread_id, goal)
+            append_user_message(&mut client, &thread_id, goal, bearer)
                 .await
                 .context("session-core append_message(user) failed")?;
         } else {
@@ -107,15 +203,18 @@ pub async fn prepare_run(
     }
 
     let response = client
-        .start_run(StartRunRequest {
-            thread_id: thread_id.clone(),
-            parent_run_id: String::new(),
-            agent_id: "model-gateway".to_owned(),
-            goal: goal.to_owned(),
-            mode: "execute".to_owned(),
-            org_id: org_id.to_owned(),
-            user_id: user_id.to_owned(),
-        })
+        .start_run(authenticated_request(
+            StartRunRequest {
+                thread_id: thread_id.clone(),
+                parent_run_id: String::new(),
+                agent_id: "model-gateway".to_owned(),
+                goal: goal.to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+            },
+            bearer,
+        )?)
         .await
         .context("session-core start_run failed")?;
 
@@ -135,6 +234,52 @@ pub async fn append_assistant_message(
     thread_id: &str,
     content: &str,
 ) -> Result<()> {
+    append_assistant_message_with_bearer(state, thread_id, content, None).await
+}
+
+/// Persist an assistant message with an independently verified Session Core
+/// audience credential.
+///
+/// # Errors
+/// Returns an error when the credential cannot be forwarded or Session Core
+/// rejects or cannot complete the append.
+pub async fn append_assistant_message_authenticated(
+    state: &AppState,
+    thread_id: &str,
+    content: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<()> {
+    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer.as_str())).await
+}
+
+/// Crate-internal adapter for an ingress boundary that has already verified a
+/// dedicated `aud=session-core` bearer and bound it to the Model Plane caller.
+pub(crate) async fn append_assistant_message_with_token(
+    state: &AppState,
+    thread_id: &str,
+    content: &str,
+    bearer: &str,
+) -> Result<()> {
+    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer)).await
+}
+
+/// Optional-token variant used only by compatibility code that must fail
+/// closed when no independently verified session credential is available.
+pub(crate) async fn append_assistant_message_with_optional_token(
+    state: &AppState,
+    thread_id: &str,
+    content: &str,
+    bearer: Option<&str>,
+) -> Result<()> {
+    append_assistant_message_with_bearer(state, thread_id, content, bearer).await
+}
+
+async fn append_assistant_message_with_bearer(
+    state: &AppState,
+    thread_id: &str,
+    content: &str,
+    bearer: Option<&str>,
+) -> Result<()> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -142,12 +287,15 @@ pub async fn append_assistant_message(
 
     let mut client = state.session_client.clone();
     client
-        .append_message(AppendMessageRequest {
-            thread_id: thread_id.to_owned(),
-            role: "assistant".to_owned(),
-            content: trimmed.to_owned(),
-            metadata: None,
-        })
+        .append_message(authenticated_request(
+            AppendMessageRequest {
+                thread_id: thread_id.to_owned(),
+                role: "assistant".to_owned(),
+                content: trimmed.to_owned(),
+                metadata: None,
+            },
+            bearer,
+        )?)
         .await
         .context("session-core append_message(assistant) failed")?;
 

@@ -11,10 +11,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	sbxserver "github.com/triodelab/model-plane/services/sandbox-manager/internal/server"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -22,6 +25,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("sandbox-manager starting")
+	verifier, err := authz.NewVerifierFromEnv()
+	if err != nil {
+		slog.Error("sandbox-manager authentication configuration is invalid", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -45,7 +53,7 @@ func main() {
 		}
 	}()
 
-	// gRPC server on :9094 — sandbox manager stub returning Unimplemented.
+	// Authenticated gRPC application service on :9094.
 	lis, err := net.Listen("tcp", ":9094")
 	if err != nil {
 		slog.Error("failed to listen", "error", err)
@@ -55,8 +63,11 @@ func main() {
 	leaseStore := lease.NewStore()
 	snapStore := snapshot.NewStore()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
 	sbxserver.Register(grpcServer, sbxserver.NewServer(leaseStore, snapStore))
+	healthServerGRPC := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
+	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
 	go func() {
 		slog.Info("gRPC listening", "addr", ":9094")

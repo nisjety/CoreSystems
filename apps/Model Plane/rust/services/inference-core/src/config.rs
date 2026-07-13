@@ -91,6 +91,12 @@ pub struct InferenceConfig {
     /// "unspecified" — the endpoint-substring heuristic is then the only signal.
     pub azure_openai_region: Option<String>,
 
+    /// Explicit operator attestation that the configured Azure `OpenAI`
+    /// deployment is covered by an independently verified ZDR contract (from
+    /// `AZURE_OPENAI_ZDR_CONFIRMED`, default `false`). Region alone is not
+    /// evidence of provider retention behavior.
+    pub azure_openai_zdr_confirmed: bool,
+
     /// Deny-by-default override for the EU embedding residency gate (from
     /// `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING`, default `false`). When `false`, a
     /// non-EU embedding region/endpoint fails the service loud at startup and
@@ -162,6 +168,10 @@ impl InferenceConfig {
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty());
 
+        let azure_openai_zdr_confirmed = std::env::var("AZURE_OPENAI_ZDR_CONFIRMED")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+            .unwrap_or(false);
+
         // Deny-by-default: only an explicit truthy opt-in disables the EU
         // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
         // shape but the embedding gate REJECTS rather than warn-and-fallback.
@@ -210,6 +220,7 @@ impl InferenceConfig {
             session_core_url,
             router_policy_refresh_secs,
             azure_openai_region,
+            azure_openai_zdr_confirmed,
             allow_non_eu_embedding,
         })
     }

@@ -28,12 +28,132 @@ use tonic::{
     Request as TonicRequest, Response, Status,
 };
 use tower::ServiceExt;
+use wiremock::{
+    matchers::{method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 type MockEventStream =
     Pin<Box<dyn futures::Stream<Item = Result<OrchestrationEvent, Status>> + Send>>;
 
 /// Captured `(id, state_int, actor, comment)` tuple recorded by a transition/decide RPC.
 type CapturedTransition = Arc<Mutex<Option<(String, i32, String, String)>>>;
+
+const TEST_AUTH_KID: &str = "orchestration-http-test";
+const TEST_AUTH_ISSUER: &str = "https://auth.test/model";
+
+struct UserTokens {
+    model: String,
+    session: String,
+    execution: String,
+}
+
+struct AuthFixture {
+    _jwks: MockServer,
+}
+
+impl AuthFixture {
+    async fn start() -> Self {
+        use base64::Engine as _;
+        use rsa::{pkcs8::DecodePublicKey, traits::PublicKeyParts};
+
+        let (_, public_pem) = test_keypair();
+        let public_key =
+            rsa::RsaPublicKey::from_public_key_pem(public_pem).expect("decode test public key");
+        let n =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let e =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+        let jwks = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{
+                    "kty": "RSA",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "kid": TEST_AUTH_KID,
+                    "n": n,
+                    "e": e
+                }]
+            })))
+            .mount(&jwks)
+            .await;
+
+        std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", jwks.uri()),
+        );
+        std::env::set_var("AUTH_CORE_ISSUER", TEST_AUTH_ISSUER);
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("SESSION_CORE_AUTH_AUDIENCE", "session-core");
+        std::env::set_var("EXECUTION_CORE_AUTH_AUDIENCE", "execution-core");
+        Self { _jwks: jwks }
+    }
+
+    fn user_tokens(org_id: &str, user_id: &str) -> UserTokens {
+        let now = token_now();
+        let claims = |audience: &str| {
+            serde_json::json!({
+                "sub": user_id,
+                "iss": TEST_AUTH_ISSUER,
+                "aud": audience,
+                "exp": now + 300,
+                "nbf": now - 5,
+                "org_id": org_id,
+                "user_id": user_id,
+                "principal_type": "user",
+                "zdr": false
+            })
+        };
+        UserTokens {
+            model: encode_test_token(&claims("model-gateway")),
+            session: encode_test_token(&claims("session-core")),
+            execution: encode_test_token(&claims("execution-core")),
+        }
+    }
+}
+
+fn test_keypair() -> &'static (String, String) {
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+
+    static KEYPAIR: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    KEYPAIR.get_or_init(|| {
+        let mut rng = rand::thread_rng();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA key generation");
+        let public_key = rsa::RsaPublicKey::from(&private_key);
+        (
+            private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("private key PEM")
+                .to_string(),
+            public_key
+                .to_public_key_pem(LineEnding::LF)
+                .expect("public key PEM"),
+        )
+    })
+}
+
+fn encode_test_token(claims: &serde_json::Value) -> String {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(TEST_AUTH_KID.to_owned());
+    encode(
+        &header,
+        claims,
+        &EncodingKey::from_rsa_pem(test_keypair().0.as_bytes()).expect("encoding key"),
+    )
+    .expect("signed JWT")
+}
+
+fn token_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_secs()
+}
 
 #[derive(Clone, Default)]
 struct CaptureState {
@@ -453,7 +573,8 @@ fn make_state(
 #[tokio::test]
 #[serial_test::serial]
 async fn orchestration_http_routes_proxy_requests() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
     let (mock, capture) = MockOrchestration::new();
     let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
 
@@ -477,11 +598,22 @@ async fn orchestration_http_routes_proxy_requests() {
         let req = Request::builder()
             .method(method)
             .uri(uri)
-            .header(AUTHORIZATION, "Bearer dev")
+            .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+            .header(
+                "x-session-authorization",
+                format!("Bearer {}", tokens.session),
+            )
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "uri={uri}");
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "uri={uri}, body={}",
+            String::from_utf8_lossy(&body)
+        );
     }
 
     assert_eq!(
@@ -511,14 +643,19 @@ async fn orchestration_http_routes_proxy_requests() {
 #[tokio::test]
 #[serial_test::serial]
 async fn orchestration_run_events_route_relays_sse() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
     let (mock, capture) = MockOrchestration::new();
     let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
 
     let req = Request::builder()
         .method("GET")
         .uri("/v1/runs/run-33/events")
-        .header(AUTHORIZATION, "Bearer dev")
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
         .body(Body::empty())
         .unwrap();
 
@@ -725,7 +862,9 @@ async fn spawn_org_scoped_mock(
 #[tokio::test]
 #[serial_test::serial]
 async fn get_approval_is_scoped_to_the_callers_org() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let _auth = AuthFixture::start().await;
+    let owner_tokens = AuthFixture::user_tokens(OWNER_ORG, "owner-user");
+    let intruder_tokens = AuthFixture::user_tokens(OTHER_ORG, "intruder-user");
     let mock = OrgScopedMock::default();
     let app = build_router(make_state(spawn_org_scoped_mock(mock).await), None);
 
@@ -733,8 +872,11 @@ async fn get_approval_is_scoped_to_the_callers_org() {
     let owner_req = Request::builder()
         .method("GET")
         .uri("/v1/orchestration/approvals/appr-owned")
-        .header(AUTHORIZATION, "Bearer dev")
-        .header("x-org-id", OWNER_ORG)
+        .header(AUTHORIZATION, format!("Bearer {}", owner_tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", owner_tokens.session),
+        )
         .body(Body::empty())
         .unwrap();
     let owner_resp = app.clone().oneshot(owner_req).await.unwrap();
@@ -749,8 +891,11 @@ async fn get_approval_is_scoped_to_the_callers_org() {
     let intruder_req = Request::builder()
         .method("GET")
         .uri("/v1/orchestration/approvals/appr-owned")
-        .header(AUTHORIZATION, "Bearer dev")
-        .header("x-org-id", OTHER_ORG)
+        .header(AUTHORIZATION, format!("Bearer {}", intruder_tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", intruder_tokens.session),
+        )
         .body(Body::empty())
         .unwrap();
     let intruder_resp = app.oneshot(intruder_req).await.unwrap();
@@ -764,7 +909,9 @@ async fn get_approval_is_scoped_to_the_callers_org() {
 #[tokio::test]
 #[serial_test::serial]
 async fn decide_approval_is_scoped_to_the_callers_org() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let _auth = AuthFixture::start().await;
+    let owner_tokens = AuthFixture::user_tokens(OWNER_ORG, "owner-user");
+    let intruder_tokens = AuthFixture::user_tokens(OTHER_ORG, "intruder-user");
     let mock = OrgScopedMock::default();
     let (mock, last_decision) = (mock.clone(), mock.last_decision.clone());
     let app = build_router(make_state(spawn_org_scoped_mock(mock).await), None);
@@ -773,8 +920,15 @@ async fn decide_approval_is_scoped_to_the_callers_org() {
     let intruder_req = Request::builder()
         .method("POST")
         .uri("/v1/orchestration/approvals/appr-owned/decide")
-        .header(AUTHORIZATION, "Bearer dev")
-        .header("x-org-id", OTHER_ORG)
+        .header(AUTHORIZATION, format!("Bearer {}", intruder_tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", intruder_tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", intruder_tokens.execution),
+        )
         .header("content-type", "application/json")
         .body(Body::from(r#"{"decision":"approve"}"#))
         .unwrap();
@@ -789,14 +943,23 @@ async fn decide_approval_is_scoped_to_the_callers_org() {
         "the cross-org decide must never have reached the durable store"
     );
 
-    // The owning org can still decide its own approval.
+    // The owning org can still decide its own approval. Use denial here so
+    // this tenant-boundary test does not also depend on an execution-core
+    // resume mock; granted/resume behavior has its own contract tests.
     let owner_req = Request::builder()
         .method("POST")
         .uri("/v1/orchestration/approvals/appr-owned/decide")
-        .header(AUTHORIZATION, "Bearer dev")
-        .header("x-org-id", OWNER_ORG)
+        .header(AUTHORIZATION, format!("Bearer {}", owner_tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", owner_tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", owner_tokens.execution),
+        )
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"decision":"approve"}"#))
+        .body(Body::from(r#"{"decision":"reject"}"#))
         .unwrap();
     let owner_resp = app.oneshot(owner_req).await.unwrap();
     assert_eq!(
@@ -806,21 +969,26 @@ async fn decide_approval_is_scoped_to_the_callers_org() {
     );
     let (decided_org, decision) = last_decision.lock().unwrap().clone().unwrap();
     assert_eq!(decided_org, OWNER_ORG);
-    assert_eq!(decision, ApprovalState::Granted as i32);
+    assert_eq!(decision, ApprovalState::Denied as i32);
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn list_approvals_is_scoped_to_the_callers_org() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    let _auth = AuthFixture::start().await;
+    let owner_tokens = AuthFixture::user_tokens(OWNER_ORG, "owner-user");
+    let intruder_tokens = AuthFixture::user_tokens(OTHER_ORG, "intruder-user");
     let mock = OrgScopedMock::default();
     let app = build_router(make_state(spawn_org_scoped_mock(mock).await), None);
 
     let owner_req = Request::builder()
         .method("GET")
         .uri("/v1/orchestration/runs/run-owned/approvals")
-        .header(AUTHORIZATION, "Bearer dev")
-        .header("x-org-id", OWNER_ORG)
+        .header(AUTHORIZATION, format!("Bearer {}", owner_tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", owner_tokens.session),
+        )
         .body(Body::empty())
         .unwrap();
     let owner_resp = app.clone().oneshot(owner_req).await.unwrap();
@@ -832,8 +1000,11 @@ async fn list_approvals_is_scoped_to_the_callers_org() {
     let intruder_req = Request::builder()
         .method("GET")
         .uri("/v1/orchestration/runs/run-owned/approvals")
-        .header(AUTHORIZATION, "Bearer dev")
-        .header("x-org-id", OTHER_ORG)
+        .header(AUTHORIZATION, format!("Bearer {}", intruder_tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", intruder_tokens.session),
+        )
         .body(Body::empty())
         .unwrap();
     let intruder_resp = app.oneshot(intruder_req).await.unwrap();

@@ -1,16 +1,31 @@
 name: model-plane
 
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
+x-runtime-defaults: &runtime-defaults
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+
 services:
   # --- Infrastructure ---
 
   postgres:
-    image: postgres:16-alpine
+    <<: *runtime-defaults
+    image: postgres:16.14-alpine3.24
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}
       POSTGRES_DB: session_core
     ports:
-      - "55434:5432"
+      - "127.0.0.1:55434:5432"
     volumes:
       - mp-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -19,28 +34,35 @@ services:
       retries: 5
 
   nats:
-    image: nats:2.10-alpine
-    command: ["-js", "-m", "8222"]
+    <<: *runtime-defaults
+    image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
+    command: ["-js", "-m", "8222", "-sd", "/data", "--auth", "${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}"]
+    volumes:
+      - mp-nats-data:/data
     ports:
-      - "4228:4222"
-      - "8228:8222"
+      - "127.0.0.1:4228:4222"
+      - "127.0.0.1:8228:8222"
     networks:
       default:
       inter-plane-bus:
+        aliases:
+          - model-nats
     healthcheck:
-      test: ["CMD", "nats-server", "--help"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
       interval: 5s
-      retries: 3
+      timeout: 3s
+      retries: 10
 
   minio:
-    image: minio/minio:latest
+    <<: *runtime-defaults
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_ROOT_USER: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
     ports:
-      - "9002:9000"
-      - "9003:9001"
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:9003:9001"
     volumes:
       - mp-minio-data:/data
     healthcheck:
@@ -49,32 +71,34 @@ services:
       retries: 3
 
   dragonfly:
+    <<: *runtime-defaults
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
-    container_name: model-plane-dragonfly
     command:
       - "--cache_mode=true"
       - "--maxmemory=256mb"
       - "--proactor_threads=1"
       - "--dir=/data"
+      - "--requirepass=${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}"
     ports:
-      - "6391:6379"
+      - "127.0.0.1:6391:6379"
     volumes:
       - mp-dragonfly-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}", "ping"]
       interval: 5s
       retries: 3
 
   temporal:
-    image: temporalio/auto-setup:1.24
+    <<: *runtime-defaults
+    image: temporalio/auto-setup:1.27.2
     environment:
       DB: postgres12_pgx        # valid drivers: mysql8 / postgres12 / postgres12_pgx / cassandra
       DB_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PWD: postgres
+      POSTGRES_PWD: ${MODEL_TEMPORAL_POSTGRES_PASSWORD:?MODEL_TEMPORAL_POSTGRES_PASSWORD is required}
       POSTGRES_SEEDS: temporal-postgres
     ports:
-      - "7234:7233"
+      - "127.0.0.1:7234:7233"
     depends_on:
       temporal-postgres:
         condition: service_healthy
@@ -86,10 +110,11 @@ services:
       start_period: 20s
 
   temporal-postgres:
-    image: postgres:16-alpine
+    <<: *runtime-defaults
+    image: postgres:16.14-alpine3.24
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${MODEL_TEMPORAL_POSTGRES_PASSWORD:?MODEL_TEMPORAL_POSTGRES_PASSWORD is required}
       POSTGRES_DB: temporal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -99,38 +124,44 @@ services:
       - mp-temporal-postgres-data:/var/lib/postgresql/data
 
   temporal-ui:
+    <<: *runtime-defaults
     image: temporalio/ui:2.30.0
     environment:
       TEMPORAL_ADDRESS: temporal:7233
     ports:
-      - "8233:8080"
+      - "127.0.0.1:8233:8080"
     depends_on:
       temporal:
         condition: service_healthy
 
   # OTEL collector for distributed tracing
   otel-collector:
+    <<: *runtime-defaults
     image: otel/opentelemetry-collector-contrib:0.96.0
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "8889:8889"   # Prometheus exporter
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8889:8889"   # Prometheus exporter
 
   # --- Rust services ---
 
   model-gateway:
+    <<: *runtime-defaults
     build:
       context: ..
       dockerfile: rust/services/model-gateway/Dockerfile
+      args: *build-metadata
     ports:
-      - "8080:8080"   # HTTP
-      - "9090:9090"   # gRPC
+      - "127.0.0.1:8080:8080"   # HTTP
     environment:
       RUST_LOG: info
-      NATS_URL: nats://nats:4222
+      # This service also joins inter-plane-bus, where the generic `nats`
+      # hostname can resolve another plane's broker. Use the plane-unique alias.
+      NATS_URL: nats://model-nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
       # Empty by default = "Velion Auto": inference-core resolves an unpinned
@@ -143,10 +174,14 @@ services:
       # forwarding it, so Velion's `dev-bypass` bearer was rejected before
       # inference. Production should leave this empty and configure JWKS.
       MODEL_GATEWAY_AUTH_DEV_BYPASS: ${MODEL_GATEWAY_AUTH_DEV_BYPASS:-}
+      ALLOW_INSECURE_DEV_DEFAULTS: ${ALLOW_INSECURE_DEV_DEFAULTS:-}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-}
       AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-model-gateway}
-      AUTH_CORE_AUDIENCE_OPTIONAL: ${AUTH_CORE_AUDIENCE_OPTIONAL:-}
+      EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      MODEL_GATEWAY_SERVICE_ID: ${MODEL_GATEWAY_SERVICE_ID:-model-gateway}
+      MODEL_GATEWAY_SERVICE_API_KEY: ${MODEL_GATEWAY_SERVICE_API_KEY:?MODEL_GATEWAY_SERVICE_API_KEY is required}
       # Wave 7 — fine-tuning kill switch + budget guard (off by default in
       # production-style profile; dev override flips FINETUNE_ENABLED=1).
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
@@ -238,7 +273,6 @@ services:
       # in-network name removes the dependency on quarry-edge's
       # host-published port staying bound to 127.0.0.1).
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
-      QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-dev-token}
       QUARRY_EDGE_TIMEOUT_SECS: ${QUARRY_EDGE_TIMEOUT_SECS:-30}
       # Local semantic-response cache (Dragonfly exact-match). Default ON,
       # pointing at the Model Plane Dragonfly; set empty to disable. If the
@@ -246,7 +280,7 @@ services:
       # it takes precedence. Exact (org+model+prompt) match only — no embeddings
       # and no cross-plane calls; the vector-similarity tier is owned by Data
       # Plane v2 and layered on separately.
-      SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://dragonfly:6379}
+      SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379}
       SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
       # Semantic (vector) cache tier — owned by Data Plane v2 (embeddings +
       # Qdrant). With this AND SEMANTIC_CACHE_URL set (default), the gateway
@@ -257,10 +291,6 @@ services:
       # graph-grounding path already targets.
       SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
       DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
-    extra_hosts:
-      # Required so QUARRY_EDGE_URL=host.docker.internal resolves on
-      # Linux. No-op on Mac (Docker Desktop maps it automatically).
-      - "host.docker.internal:host-gateway"
     networks:
       default: {}
       inter-plane-bus:
@@ -278,18 +308,30 @@ services:
       retries: 3
 
   session-core:
+    <<: *runtime-defaults
     build:
       context: ..
       dockerfile: rust/services/session-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "18081:8081"  # HTTP health — host 18081 avoids collision with Ingestion Plane quarry-control (host 8081)
-      - "9091:9091"   # gRPC
+      - "127.0.0.1:18081:8081"  # HTTP health — host 18081 avoids collision with Ingestion Plane quarry-control (host 8081)
+      - "127.0.0.1:9091:9091"   # gRPC
     environment:
       RUST_LOG: info
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       NATS_URL: nats://nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: session-core
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      SESSION_CORE_AUTH_AUDIENCE: ${SESSION_CORE_AUTH_AUDIENCE:-session-core}
+      # Dedicated short-lived service-principal credentials for the optional
+      # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
+      # session-core fails startup closed unless all three are configured.
+      SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:-session-core}
+      SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:-}
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
       # P0.4 residency: region stamped onto every run record at StartRun.
@@ -307,15 +349,20 @@ services:
       retries: 3
 
   inference-core:
+    <<: *runtime-defaults
     build:
       context: ..
       dockerfile: rust/services/inference-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "18082:8082"  # HTTP health — host 18082 avoids collision with Ingestion Plane quarry-edge (host 8082)
-      - "9092:9092"   # gRPC
+      - "127.0.0.1:18082:8082"  # HTTP health — host 18082 avoids collision with Ingestion Plane quarry-edge (host 8082)
     environment:
       RUST_LOG: info
-      NATS_URL: nats://nats:4222
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
+      NATS_URL: nats://model-nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
@@ -334,7 +381,9 @@ services:
       # RoutingPolicy gRPC for the live intent-routing policy (the Velion
       # "model router" tuning), refreshing every ROUTER_POLICY_REFRESH_SECS.
       # Unset → the chain runs on the built-in RoutingPolicy::default.
-      SESSION_CORE_URL: ${SESSION_CORE_URL:-http://model-plane-session-core-1:9091}
+      # Both services join inter-plane-bus, where the generic `session-core`
+      # hostname belongs to Control Plane. Pin the plane-unique Model alias.
+      SESSION_CORE_URL: http://model-plane-session-core-1:9091
       ROUTER_POLICY_REFRESH_SECS: ${ROUTER_POLICY_REFRESH_SECS:-60}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Azure AI Foundry Claude (claude-ai project). When set, the `anthropic`
@@ -367,6 +416,11 @@ services:
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-01-01-preview}
+      AZURE_OPENAI_REGION: ${AZURE_OPENAI_REGION:-}
+      # Fail closed for ZDR requests unless an operator has evidence that this
+      # exact deployment is covered by a provider-side ZDR contract. Region is
+      # not sufficient evidence. Keep false until that contract is verified.
+      AZURE_OPENAI_ZDR_CONFIRMED: ${AZURE_OPENAI_ZDR_CONFIRMED:-false}
       AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
       AZURE_OPENAI_CHAT_DEPLOYMENTS: ${AZURE_OPENAI_CHAT_DEPLOYMENTS:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
@@ -421,6 +475,7 @@ services:
       retries: 3
 
   execution-core:
+    <<: *runtime-defaults
     # Sandbox (Tier-2): the image ships `bubblewrap` so code execution is
     # isolated (namespaces + filesystem). bwrap needs unprivileged user
     # namespaces (clone/unshare CLONE_NEWUSER) which Docker's default seccomp
@@ -434,23 +489,25 @@ services:
     build:
       context: ..
       dockerfile: rust/services/execution-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
-      - "9093:9093"   # gRPC
+      - "127.0.0.1:18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
     environment:
       RUST_LOG: info
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
-      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      NATS_URL: nats://model-nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
       MINIO_BUCKET: ${OBJECT_STORAGE_BUCKET:-model-plane-artifacts}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: execution-core
-      SESSION_CORE_ADDR: http://session-core:9091
-      # Social workspace tools (list_social_accounts / publish_social_post)
-      # dial the Application Plane social-core via its host-published port.
-      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://host.docker.internal:3162}
+      SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
+      # Cross-plane dependencies resolve on the private inter-plane bus; no
+      # host-published development ports are part of the service contract.
+      # Social workspace tools (list_social_accounts / publish_social_post).
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
       INFERENCE_CORE_ADDR: http://inference-core:9092
       # model-gateway gRPC — governed loop fetches/proxies an org's registered
       # MCP tools (ListMcpTools + ProxyMcpTool). Same model-plane-network, so the
@@ -460,40 +517,47 @@ services:
       INFERENCE_CORE_URL: http://inference-core:9092
       CAPABILITY_CORE_ADDR: http://capability-core:9097
       # Quarry-v2 edge (Ingestion Plane) — backs the real web_search / web_fetch
-      # agentic tools and the browser-agent loop. Cross-plane reach is via the
-      # host-published port (same convention model-gateway uses).
-      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://host.docker.internal:8082}
-      QUARRY_EDGE_TOKEN: ${QUARRY_EDGE_TOKEN:-}
+      # agentic tools and the browser-agent loop.
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      # Independently verify a dedicated Execution Core user bearer before any
+      # execution mutation. Data Plane credentials arrive separately through
+      # x-data-plane-authorization and are never accepted as local authority.
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
+      EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
+      EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
       # failed fast with "browser agent unavailable" until this was added).
       QUARRY_BROWSER_AGENT_ENABLED: ${QUARRY_BROWSER_AGENT_ENABLED:-1}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
-      # (RAG over the org's ingested docs). execution-core is not on the
-      # inter-plane bus, so it reaches the engine via the host-published gRPC
-      # port. DATAPLANE_INTERNAL_KEY is sent as the x-api-key credential.
-      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL_EXEC:-http://host.docker.internal:50062}
+      # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
+      # the x-api-key credential.
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL_EXEC:-http://retrieval-engine:50052}
       DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
       # Information-core (Application Plane) — backs the real news / traffic /
-      # yr_weather / track_shipment agentic tools. execution-core is not on the
-      # inter-plane bus, so (like retrieval above) it reaches information-core via
-      # its host-published port rather than the in-network name (which NXDOMAINs
-      # from this network and surfaced as the tools' "dns error").
-      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL_EXEC:-http://host.docker.internal:3190}
+      # yr_weather / track_shipment agentic tools.
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL_EXEC:-http://information-core:3190}
       # information-core gates /api/v1/* on x-internal-api-key (no-key → 401), so
       # the info tools must present the shared internal key.
       INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
       # shipping-core (Ingestion Plane) — backs get_shipping_quotes /
-      # shipping_carriers. Same host-published-port pattern as the URLs above
-      # (host port 3156 → container 8080).
-      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL_EXEC:-http://host.docker.internal:3156}
+      # shipping_carriers.
+      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL_EXEC:-http://shipping-core:8080}
       # integration-corev2 (Ingestion Plane) — backs list_provider_actions /
       # execute_provider_action (the agent's typed bridge to every
-      # OAuth-connected provider operation). Host-published port 3026, same
-      # cross-plane pattern. The gateway gates /api/v1/* on x-internal-api-key.
-      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL_EXEC:-http://host.docker.internal:3026}
+      # OAuth-connected provider operation). The gateway gates /api/v1/* on
+      # its service authentication contract.
+      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL_EXEC:-http://integration-api:3026}
       INTEGRATION_COREV2_INTERNAL_KEY: ${INTEGRATION_COREV2_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # Shipping and Integration accept short-lived Auth Core ingestion tokens.
+      # execution-core mints them with this registered service principal instead
+      # of forwarding a shared internal key or caller-selected tenant headers.
+      INGESTION_SERVICE_ID: ${INGESTION_SERVICE_ID:-model-execution}
+      INGESTION_SERVICE_API_KEY: ${MODEL_EXECUTION_SERVICE_API_KEY:?MODEL_EXECUTION_SERVICE_API_KEY is required}
     depends_on:
       postgres:
         condition: service_healthy
@@ -505,24 +569,32 @@ services:
         condition: service_healthy
       inference-core:
         condition: service_healthy
+    networks:
+      default: {}
+      inter-plane-bus: {}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8083/readyz"]
       interval: 10s
       retries: 3
 
   # --- Go services ---
 
   orchestrator-core:
+    <<: *runtime-defaults
     build:
       context: ../go
       dockerfile: services/orchestrator-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "8084:8084"
-    restart: unless-stopped
+      - "127.0.0.1:8084:8084"
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       NATS_URL: nats://nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       SESSION_CORE_ADDR: session-core:9091
+      LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       INFERENCE_CORE_ADDR: inference-core:9092
       EXECUTION_CORE_ADDR: execution-core:9093
       CAPABILITY_CORE_ADDR: capability-core:9097
@@ -539,16 +611,22 @@ services:
       retries: 3
 
   capability-core:
+    <<: *runtime-defaults
     build:
       context: ../go
       dockerfile: services/capability-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "8085:8085"   # HTTP health
-      - "9097:9097"   # gRPC
+      - "127.0.0.1:8085:8085"   # HTTP health
+      - "127.0.0.1:9097:9097"   # gRPC
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
-      REDIS_URL: redis://dragonfly:6379
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
       NATS_URL: nats://nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
       APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
@@ -563,17 +641,22 @@ services:
       retries: 3
 
   sandbox-manager:
+    <<: *runtime-defaults
     build:
       context: ../go
       dockerfile: services/sandbox-manager/Dockerfile
+      args: *build-metadata
     ports:
-      - "8086:8086"   # HTTP health
-      - "9094:9094"   # gRPC
+      - "127.0.0.1:8086:8086"   # HTTP health
+      - "127.0.0.1:9094:9094"   # gRPC
     environment:
-      REDIS_URL: redis://dragonfly:6379
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      SANDBOX_MANAGER_AUTH_AUDIENCE: ${SANDBOX_MANAGER_AUTH_AUDIENCE:-sandbox-manager}
+      REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-minioadmin}
+      MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
+      MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
     depends_on:
       dragonfly:
         condition: service_healthy
@@ -583,25 +666,36 @@ services:
       retries: 3
 
   browser-broker:
+    <<: *runtime-defaults
     build:
       context: ../go
       dockerfile: services/browser-broker/Dockerfile
+      args: *build-metadata
     ports:
-      - "8087:8087"   # HTTP health
-      - "9095:9095"   # gRPC
+      - "127.0.0.1:8087:8087"   # HTTP health
+      - "127.0.0.1:9095:9095"   # gRPC
+    environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      BROWSER_BROKER_AUTH_AUDIENCE: ${BROWSER_BROKER_AUTH_AUDIENCE:-browser-broker}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8087/healthz"]
       interval: 10s
       retries: 3
 
   letta-bridge:
+    <<: *runtime-defaults
     build:
       context: ../go
       dockerfile: services/letta-bridge/Dockerfile
+      args: *build-metadata
     ports:
-      - "8088:8088"   # HTTP health
-      - "9096:9096"   # gRPC
+      - "127.0.0.1:8088:8088"   # HTTP health
+      - "127.0.0.1:9096:9096"   # gRPC
     environment:
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       LETTA_URL: ${LETTA_URL:-${LETTA_SERVER_URL:-http://localhost:8283}}
       LETTA_SERVER_URL: ${LETTA_SERVER_URL:-${LETTA_URL:-http://localhost:8283}}
       SESSION_CORE_ADDR: session-core:9091
@@ -609,16 +703,15 @@ services:
       # backend). Unset AGENT_MEMORY_URL to fall back to the in-memory store.
       AGENT_MEMORY_URL: ${AGENT_MEMORY_URL:-http://agent-memory-server:8000}
       AGENT_MEMORY_TOKEN: ${AGENT_MEMORY_TOKEN:-}
-      # Durable Postgres memory backend (auto-creates schema on boot). NOTE:
-      # deploy routes orchestrator/gateway memory at session-core:9091, so
-      # letta-bridge is currently shadowed — this makes its own store durable
-      # should anything route to it.
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/session_core
+      # Durable Postgres memory fallback (auto-creates schema on boot).
+      # Gateway/orchestrator route through session-core:9091; session-core then
+      # calls this bridge with an aud=letta-bridge, org-scoped credential.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
     depends_on:
       agent-memory-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8088/readyz"]
       interval: 10s
       retries: 3
 
@@ -627,22 +720,22 @@ services:
   # AGENT_MEMORY_URL here. Fully local — no Redis Cloud. Embeddings + generation
   # via OpenAI by default (set OPENAI_API_KEY); LiteLLM also supports Azure et al.
   agent-memory-redis:
+    <<: *runtime-defaults
     image: redis/redis-stack-server:7.4.0-v3
-    container_name: model-plane-agent-memory-redis
-    command: ["redis-stack-server", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    command: ["redis-stack-server", "--requirepass", "${AGENT_MEMORY_REDIS_PASSWORD:?AGENT_MEMORY_REDIS_PASSWORD is required}", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - mp-agent-memory-redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${AGENT_MEMORY_REDIS_PASSWORD:?AGENT_MEMORY_REDIS_PASSWORD is required}", "ping"]
       interval: 5s
       retries: 5
 
   agent-memory-server:
-    image: redislabs/agent-memory-server:latest
-    container_name: model-plane-agent-memory-server
+    <<: *runtime-defaults
+    image: redislabs/agent-memory-server:0.15.1
     command: ["agent-memory", "api", "--host", "0.0.0.0", "--port", "8000", "--task-backend=asyncio"]
     environment:
-      REDIS_URL: redis://agent-memory-redis:6379
+      REDIS_URL: redis://:${AGENT_MEMORY_REDIS_PASSWORD:?AGENT_MEMORY_REDIS_PASSWORD is required}@agent-memory-redis:6379
       PORT: "8000"
       AUTH_MODE: ${AGENT_MEMORY_AUTH_MODE:-disabled}
       DISABLE_AUTH: ${AGENT_MEMORY_DISABLE_AUTH:-true}
@@ -668,7 +761,7 @@ services:
       ENABLE_TOPIC_EXTRACTION: ${AGENT_MEMORY_TOPIC_EXTRACTION:-true}
       LOG_LEVEL: ${AGENT_MEMORY_LOG_LEVEL:-INFO}
     ports:
-      - "8100:8000"   # REST (host-exposed for debugging)
+      - "127.0.0.1:8100:8000"   # REST (host-exposed for debugging)
     depends_on:
       agent-memory-redis:
         condition: service_healthy
@@ -679,25 +772,30 @@ services:
       retries: 5
 
   cost-core:
+    <<: *runtime-defaults
     build:
-      context: ../go/services/cost-core
-      dockerfile: Dockerfile
+      context: ../go
+      dockerfile: services/cost-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "8089:8089"   # HTTP health + API
-      - "9098:9098"   # gRPC
+      - "127.0.0.1:8089:8089"   # HTTP health + API
+      - "127.0.0.1:9098:9098"   # gRPC
     environment:
       LOG_LEVEL: info
-      # cost-core joins the inter-plane-bus (so the Velion gateway can reach its
-      # HTTP API), where the bare names `nats`/`postgres` are AMBIGUOUS (dpv2 +
-      # controlplane also publish them). Pin both to the Model-Plane container
-      # names so the USAGE_ENVELOPE subscriber binds the SAME bus model-gateway
-      # publishes to, and the ledger writes to the Model-Plane Postgres.
-      NATS_URL: nats://model-plane-nats-1:4222
+      # cost-core joins the inter-plane bus (so the Velion gateway can reach its
+      # HTTP API). `model-nats` is a plane-unique network alias; Postgres remains
+      # private to the default Model network. This avoids generated container
+      # names and prevents accidental resolution to another plane's NATS.
+      NATS_URL: nats://model-nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: cost-core
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      COST_CORE_AUTH_AUDIENCE: ${COST_CORE_AUTH_AUDIENCE:-cost-core}
       # Durable cost ledger (the migration entrypoint applies 0001_cost_ledger +
       # 0002_model_pricing on boot). Shares the Model Plane Postgres / session_core DB.
-      DATABASE_URL: postgresql://postgres:postgres@model-plane-postgres-1:5432/session_core
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
     depends_on:
       nats:
         condition: service_healthy
@@ -718,22 +816,25 @@ services:
       retries: 3
 
   bridge-core:
+    <<: *runtime-defaults
     build:
-      context: ../go/services/bridge-core
-      dockerfile: Dockerfile
+      context: ../go
+      dockerfile: services/bridge-core/Dockerfile
+      args: *build-metadata
     ports:
-      - "8091:8091"   # HTTP health + WebSocket bridge
-      - "9100:9100"   # gRPC
+      - "127.0.0.1:8091:8091"   # HTTP session API + public health
+      - "127.0.0.1:9100:9100"   # standard gRPC health only
     environment:
       LOG_LEVEL: info
       NATS_URL: nats://nats:4222
+      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: bridge-core
       SESSION_CORE_ADDR: session-core:9091
       MODEL_GATEWAY_ADDR: model-gateway:9090
-      JWT_AUDIENCE: ${JWT_AUDIENCE:-mp-bridge}
-      JWT_SECRET: ${JWT_SECRET:-dev-shared-secret}
-      BRIDGE_JWT_SECRET: ${BRIDGE_JWT_SECRET:-${INTERNAL_SERVICE_SECRET:-dev-shared-secret}}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      BRIDGE_CORE_AUTH_AUDIENCE: ${BRIDGE_CORE_AUTH_AUDIENCE:-bridge-core}
     depends_on:
       nats:
         condition: service_healthy
@@ -744,6 +845,7 @@ services:
 
 volumes:
   mp-postgres-data:
+  mp-nats-data:
   mp-minio-data:
   mp-temporal-postgres-data:
   mp-dragonfly-data:

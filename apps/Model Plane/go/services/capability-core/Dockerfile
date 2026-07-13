@@ -4,7 +4,7 @@
 #
 # Build context is the Go workspace root `apps/Model Plane/go/` because
 # `go.mod` carries a local `replace ../../gen` directive.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25.12-alpine3.24 AS builder
 RUN --mount=type=cache,target=/var/cache/apk \
     apk add git ca-certificates
 WORKDIR /workspace
@@ -25,9 +25,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     exit 1
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -o /service ./cmd/
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /service ./cmd/
 
-FROM alpine:3.20
+FROM alpine:3.24
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
+      org.opencontainers.image.created=$BUILD_DATE
 RUN --mount=type=cache,target=/var/cache/apk \
     set -e; \
     if ! apk add --quiet ca-certificates curl postgresql-client \
@@ -35,10 +39,15 @@ RUN --mount=type=cache,target=/var/cache/apk \
         cat /tmp/apk-add.log; \
         exit 1; \
     fi; \
-    rm -f /tmp/apk-add.log
+    rm -f /tmp/apk-add.log; \
+    addgroup -S -g 10001 modelplane; \
+    adduser -S -D -H -u 10001 -G modelplane modelplane; \
+    mkdir -p /var/lib/capability-core; \
+    chown modelplane:modelplane /var/lib/capability-core
 COPY --from=builder /service /usr/local/bin/service
 COPY services/capability-core/migrations /app/migrations
 COPY services/capability-core/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+USER modelplane
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["service"]

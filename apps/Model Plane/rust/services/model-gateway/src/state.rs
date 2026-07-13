@@ -34,12 +34,8 @@ pub enum DynPublisher {
 impl EventPublisher for DynPublisher {
     async fn publish(&self, subject: &str, envelope: &Envelope) -> Result<(), PublishError> {
         if envelope.zdr {
-            let zdr_subject = format!("mp.v1.zdr.{subject}");
-            tracing::debug!(subject = %subject, "ZDR envelope — routing to ephemeral subject");
-            return match self {
-                Self::Nats(p) => p.publish(&zdr_subject, envelope).await,
-                Self::InMemory(p) => p.publish(&zdr_subject, envelope).await,
-            };
+            tracing::debug!(subject = %subject, "ZDR envelope suppressed before publisher backend");
+            return Ok(());
         }
         match self {
             Self::Nats(p) => p.publish(subject, envelope).await,
@@ -59,6 +55,35 @@ impl DynPublisher {
             Self::InMemory(p) => p.drain(),
             Self::Nats(_) => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod zdr_publisher_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn zdr_envelopes_never_enter_any_publisher_backend() {
+        let publisher = DynPublisher::InMemory(InMemoryPublisher::new());
+        let envelope = Envelope {
+            event_id: "evt".into(),
+            event_type: "TEST".into(),
+            schema_version: 1,
+            ts: Utc::now(),
+            producer: "test".into(),
+            correlation_id: "corr".into(),
+            causation_id: String::new(),
+            idempotency_key: "idem".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            resource_ref: "request/test".into(),
+            payload: serde_json::json!({"content": "must-not-persist"}),
+            zdr: true,
+        };
+        publisher.publish("subject", &envelope).await.unwrap();
+        assert!(publisher.drain().is_empty());
     }
 }
 
@@ -379,16 +404,18 @@ impl AppState {
         // Wave 9 — Quarry edge for Fetch + ExtractStructured. Empty
         // QUARRY_EDGE_URL → client reports Available() == false and
         // the gRPC handlers return Unimplemented; safe in dev.
-        let quarry_client = crate::quarry::Client::new(crate::quarry::Config {
-            base_url: std::env::var("QUARRY_EDGE_URL").unwrap_or_default(),
-            token: std::env::var("QUARRY_EDGE_TOKEN").unwrap_or_default(),
-            timeout: std::time::Duration::from_secs(
-                std::env::var("QUARRY_EDGE_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(30),
-            ),
-        });
+        let quarry_base_url = std::env::var("QUARRY_EDGE_URL").unwrap_or_default();
+        let quarry_timeout = std::time::Duration::from_secs(
+            std::env::var("QUARRY_EDGE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+        );
+        let quarry_client = if quarry_base_url.trim().is_empty() {
+            crate::quarry::Client::new(crate::quarry::Config::default())
+        } else {
+            crate::quarry::Client::from_env(&quarry_base_url, quarry_timeout)?
+        };
         if quarry_client.available() {
             tracing::info!("quarry edge client configured");
         } else {

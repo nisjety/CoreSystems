@@ -263,15 +263,64 @@ fn format_traffic(lat: f64, lon: f64, value: &Value) -> String {
             i + 1,
             if name.is_empty() { "(unnamed)" } else { &name }
         );
-        if let Some(v) = volume {
-            let _ = write!(out, " — volume {v:.0}");
+        let mut metrics = Vec::new();
+        if let Some(observation) = s.get("trafficVolume") {
+            if let Some(formatted) = format_traffic_observation("volume", observation) {
+                metrics.push(formatted);
+            }
         }
-        if let Some(sp) = speed {
-            let _ = write!(out, ", avg speed {sp:.0} km/h");
+        if metrics.is_empty() {
+            if let Some(v) = volume {
+                metrics.push(format!("volume {v:.0} [unverified_legacy]"));
+            }
+        }
+        if let Some(observation) = s.get("averageSpeed") {
+            if let Some(formatted) = format_traffic_observation("avg speed", observation) {
+                metrics.push(formatted);
+            }
+        }
+        if !metrics.iter().any(|metric| metric.starts_with("avg speed")) {
+            if let Some(sp) = speed {
+                metrics.push(format!("avg speed {sp:.0} km/h [unverified_legacy]"));
+            }
+        }
+        if !metrics.is_empty() {
+            let _ = write!(out, " — {}", metrics.join(", "));
         }
         out.push('\n');
     }
     out
+}
+
+fn format_traffic_observation(label: &str, observation: &Value) -> Option<String> {
+    let object = observation.as_object()?;
+    let observation_type = object
+        .get("observationType")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    let provider = object
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown_provider");
+    let unit = object
+        .get("unit")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown_unit");
+
+    if let Some(value) = pick_number(observation, &["value"]) {
+        return Some(format!(
+            "{label} {value:.0} {unit} [{observation_type}; {provider}]"
+        ));
+    }
+
+    let reason = object
+        .get("unavailableReason")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("no_measurement");
+    Some(format!("{label} unavailable [{provider}: {reason}]"))
 }
 
 /// Format a `/news` response into agent-readable text (pure).
@@ -521,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn traffic_lists_stations_with_metrics() {
+    fn traffic_labels_legacy_metrics_as_unverified() {
         let v = json!({ "stations": [
             { "name": "E6 Klemetsrud", "volume": 42000, "speed": 78 },
             { "stationName": "Rv4 Nittedal" }
@@ -529,9 +578,52 @@ mod tests {
         let out = format_traffic(59.8, 10.9, &v);
         assert!(out.contains("2 found"));
         assert!(out.contains("1. E6 Klemetsrud"));
-        assert!(out.contains("volume 42000"));
-        assert!(out.contains("avg speed 78 km/h"));
+        assert!(out.contains("volume 42000 [unverified_legacy]"));
+        assert!(out.contains("avg speed 78 km/h [unverified_legacy]"));
         assert!(out.contains("2. Rv4 Nittedal"));
+    }
+
+    #[test]
+    fn traffic_preserves_measurement_provenance_and_unavailable_state() {
+        let v = json!({ "data": [{
+            "name": "E6 Oslo",
+            "averageSpeed": {
+                "value": null,
+                "unit": "km/h",
+                "observationType": "unavailable",
+                "provider": "statens_vegvesen_atlas",
+                "unavailableReason": "provider_response_has_no_measurement"
+            },
+            "trafficVolume": {
+                "value": 120,
+                "unit": "vehicles_per_hour",
+                "observationType": "estimated",
+                "provider": "statens_vegvesen_atlas"
+            }
+        }]});
+
+        let out = format_traffic(59.8, 10.9, &v);
+        assert!(out.contains("volume 120 vehicles_per_hour [estimated; statens_vegvesen_atlas]"));
+        assert!(out.contains(
+            "avg speed unavailable [statens_vegvesen_atlas: provider_response_has_no_measurement]"
+        ));
+        assert!(!out.contains("avg speed 0"));
+    }
+
+    #[test]
+    fn traffic_never_presents_synthetic_observations_as_measured() {
+        let v = json!({ "data": [{
+            "name": "Test station",
+            "averageSpeed": {
+                "value": 71,
+                "unit": "km/h",
+                "observationType": "synthetic",
+                "provider": "local_test_harness"
+            }
+        }]});
+
+        let out = format_traffic(59.8, 10.9, &v);
+        assert!(out.contains("avg speed 71 km/h [synthetic; local_test_harness]"));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+.git/
+.idea/
+.vscode/
+.DS_Store
+.env
+.env.*
+*.log
+*.out
+*.test
+coverage/
+Dockerfile
+.dockerignore
+README.md
+docs/

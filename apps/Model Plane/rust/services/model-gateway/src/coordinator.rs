@@ -59,6 +59,7 @@ const DEFAULT_TEAM_LIST_LIMIT: i32 = 100;
 
 #[derive(Debug, Clone)]
 struct PlanModeEntry {
+    org_id: String,
     rationale: String,
     expires_at_unix: i64,
 }
@@ -77,11 +78,12 @@ impl PlanModeStore {
 
     /// Set or refresh the plan-mode flag for `run_id`. Returns the new
     /// expiry as a unix epoch second.
-    fn enter(&self, run_id: &str, rationale: String, ttl_secs: i64) -> i64 {
+    fn enter(&self, org_id: &str, run_id: &str, rationale: String, ttl_secs: i64) -> i64 {
         let expires_at = now_unix() + ttl_secs.clamp(1, MAX_PLAN_TTL_SECS);
         self.inner.insert(
             run_id.to_owned(),
             PlanModeEntry {
+                org_id: org_id.to_owned(),
                 rationale,
                 expires_at_unix: expires_at,
             },
@@ -91,16 +93,23 @@ impl PlanModeStore {
 
     /// Clear the plan-mode flag. Returns true when there was an entry
     /// to clear; false when the run wasn't in plan mode.
-    fn exit(&self, run_id: &str) -> bool {
-        self.inner.remove(run_id).is_some()
+    fn exit(&self, org_id: &str, run_id: &str) -> bool {
+        let owned = self
+            .inner
+            .get(run_id)
+            .is_some_and(|entry| entry.org_id == org_id);
+        owned && self.inner.remove(run_id).is_some()
     }
 
     /// True when the run is currently in plan mode and the entry
     /// hasn't expired. Sweeps the entry if it has expired so the
     /// store doesn't accumulate dead state.
-    pub fn is_plan_mode(&self, run_id: &str) -> (bool, String, i64) {
+    pub fn is_plan_mode(&self, org_id: &str, run_id: &str) -> (bool, String, i64) {
         let now = now_unix();
         if let Some(entry) = self.inner.get(run_id) {
+            if entry.org_id != org_id {
+                return (false, String::new(), 0);
+            }
             if entry.expires_at_unix > now {
                 return (true, entry.rationale.clone(), entry.expires_at_unix);
             }
@@ -133,7 +142,7 @@ pub async fn handle_enter_plan_mode<P: EventPublisher>(
     } else {
         i64::from(req.ttl_seconds)
     };
-    let expires = store.enter(&req.run_id, req.rationale.clone(), ttl);
+    let expires = store.enter(&req.org_id, &req.run_id, req.rationale.clone(), ttl);
 
     // Best-effort lifecycle event so audit + observability sees the
     // mode transition. Publish failure is non-fatal — the in-memory
@@ -185,7 +194,7 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
     if req.run_id.is_empty() {
         return Err(Status::invalid_argument("run_id is required"));
     }
-    let was_active = store.exit(&req.run_id);
+    let was_active = store.exit(&req.org_id, &req.run_id);
     if was_active {
         let envelope = mp_events::envelope::Envelope {
             event_id: new_ulid(),
@@ -230,7 +239,7 @@ pub fn handle_is_plan_mode(
     if req.run_id.is_empty() {
         return Err(Status::invalid_argument("run_id is required"));
     }
-    let (in_plan_mode, rationale, expires_at_unix) = store.is_plan_mode(&req.run_id);
+    let (in_plan_mode, rationale, expires_at_unix) = store.is_plan_mode(&req.org_id, &req.run_id);
     Ok(IsPlanModeResponse {
         request_id: req.request_id,
         in_plan_mode,
@@ -458,8 +467,8 @@ mod tests {
     #[test]
     fn plan_mode_enter_and_check() {
         let s = PlanModeStore::new();
-        s.enter("run-1", "drafting".to_owned(), 60);
-        let (active, rationale, exp) = s.is_plan_mode("run-1");
+        s.enter("org-1", "run-1", "drafting".to_owned(), 60);
+        let (active, rationale, exp) = s.is_plan_mode("org-1", "run-1");
         assert!(active);
         assert_eq!(rationale, "drafting");
         assert!(exp > now_unix());
@@ -468,10 +477,12 @@ mod tests {
     #[test]
     fn plan_mode_exit_returns_was_active() {
         let s = PlanModeStore::new();
-        assert!(!s.exit("missing"));
-        s.enter("run-1", String::new(), 60);
-        assert!(s.exit("run-1"));
-        assert!(!s.is_plan_mode("run-1").0);
+        assert!(!s.exit("org-1", "missing"));
+        s.enter("org-1", "run-1", String::new(), 60);
+        assert!(!s.exit("org-other", "run-1"));
+        assert!(s.is_plan_mode("org-1", "run-1").0);
+        assert!(s.exit("org-1", "run-1"));
+        assert!(!s.is_plan_mode("org-1", "run-1").0);
     }
 
     #[test]
@@ -481,11 +492,12 @@ mod tests {
         s.inner.insert(
             "run-1".to_owned(),
             PlanModeEntry {
+                org_id: "org-1".to_owned(),
                 rationale: "old".to_owned(),
                 expires_at_unix: now_unix() - 10,
             },
         );
-        let (active, _, _) = s.is_plan_mode("run-1");
+        let (active, _, _) = s.is_plan_mode("org-1", "run-1");
         assert!(!active);
         // Sweep should have removed it.
         assert!(s.inner.get("run-1").is_none());
@@ -494,7 +506,7 @@ mod tests {
     #[test]
     fn plan_mode_ttl_capped_at_max() {
         let s = PlanModeStore::new();
-        let exp = s.enter("run-1", String::new(), 999_999_999);
+        let exp = s.enter("org-1", "run-1", String::new(), 999_999_999);
         // 999M secs → caps to MAX_PLAN_TTL_SECS=86_400.
         assert!(exp <= now_unix() + MAX_PLAN_TTL_SECS + 5);
     }

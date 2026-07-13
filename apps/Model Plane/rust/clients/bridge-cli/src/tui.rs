@@ -13,7 +13,7 @@ use anyhow::Result;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Layout},
-    style::{Style, Stylize},
+    style::Style,
     widgets::{Block, List, ListItem, Paragraph},
     DefaultTerminal, Frame,
 };

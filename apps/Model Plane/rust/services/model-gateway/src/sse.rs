@@ -24,7 +24,16 @@ use serde_json::{json, Value};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::info;
 
-use crate::{auth::Claims, gateway_metrics, http_routes::InvokeRequest, state::AppState};
+use crate::{
+    auth::{
+        Claims, VerifiedCostBearer, VerifiedDataPlaneBearer as VerifiedBearer,
+        VerifiedExecutionBearer, VerifiedInferenceBearer,
+        VerifiedSessionBearer as VerifiedModelBearer,
+    },
+    gateway_metrics,
+    http_routes::InvokeRequest,
+    state::AppState,
+};
 
 /// A single chunk in the SSE stream.
 #[derive(Debug, Serialize)]
@@ -35,6 +44,35 @@ pub struct SseChunk {
     pub model_used: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+}
+
+#[allow(clippy::result_large_err)]
+fn authenticated_session_request<T>(
+    value: T,
+    bearer: &VerifiedModelBearer,
+) -> Result<tonic::Request<T>, tonic::Status> {
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", bearer.as_str()).parse().map_err(|_| {
+            tonic::Status::internal("verified session credential is not forwardable")
+        })?,
+    );
+    Ok(request)
+}
+
+fn authenticated_inference_request<T>(
+    value: T,
+    bearer: &VerifiedInferenceBearer,
+) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", bearer.as_str())
+            .parse()
+            .expect("a verified compact JWT is valid gRPC metadata"),
+    );
+    request
 }
 
 type HttpJsonError = (StatusCode, Json<Value>);
@@ -104,10 +142,15 @@ fn replay_cached_stream(
 ///
 /// Emits `STREAM_OPENED` on start, streams gRPC inference chunks,
 /// a final `event: done` sentinel, and then `STREAM_CLOSED` + `USAGE_ENVELOPE`.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    cost_bearer: Option<Extension<VerifiedCostBearer>>,
     axum::Json(req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
@@ -122,6 +165,102 @@ pub async fn invoke_stream_sse(
         .unwrap_or_else(crate::normalize::load_default_model);
     let org_id = claims.org_id.clone();
     let user_id = claims.user_id.clone();
+    let data_plane_bearer = data_plane_bearer.map(|Extension(bearer)| bearer);
+    let execution_bearer = execution_bearer.map(|Extension(bearer)| bearer);
+    let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
+    let features = req.features.clone();
+    let effective_zdr = claims.effective_zdr(req.zdr);
+
+    // ZDR takes a deliberately narrow, persistence-free path: no session/run,
+    // event, stream-buffer, idempotency, memory, cache, artifact, or tool write.
+    // Plain inference and optional read-only Data grounding remain usable.
+    if effective_zdr {
+        if !req.attachments.is_empty()
+            || req.generate_image
+            || features.iter().any(|feature| feature == "agentic")
+        {
+            return error_stream(
+                &request_id,
+                "zdr_feature_not_supported",
+                "ZDR currently supports plain chat and read-only grounding only",
+                false,
+            );
+        }
+        let grounding = if crate::retrieval::wants_grounding(&features) {
+            let Some(bearer) = data_plane_bearer.as_ref() else {
+                return error_stream(
+                    &request_id,
+                    "data_plane_auth_required",
+                    "Grounding requires a cryptographically verified user credential",
+                    false,
+                );
+            };
+            crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, true).await
+        } else {
+            None
+        };
+        let user_content = if crate::moderation::wants_moderation(&features) {
+            crate::moderation::redact_pii(&req.content).0
+        } else {
+            req.content.clone()
+        };
+        let provider_content = grounding
+            .as_ref()
+            .map(|value| value.context_block.trim())
+            .filter(|value| !value.is_empty())
+            .map_or_else(
+                || user_content.clone(),
+                |context| {
+                    format!("Relevant organization context:\n{context}\n\nUser: {user_content}")
+                },
+            );
+        return zdr_direct_stream(
+            state,
+            request_id,
+            org_id,
+            model,
+            provider_content,
+            features,
+            grounding,
+            inference_bearer,
+        )
+        .await;
+    }
+
+    let normalized = match crate::normalize::normalize(&req) {
+        Ok(normalized) => normalized,
+        Err((_, Json(error))) => {
+            let message = error
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid invoke request");
+            return error_stream(&request_id, "invalid_request", message, false);
+        }
+    };
+    if let Err((status, Json(error))) = crate::budget::check_budget(
+        &state.http_client,
+        &org_id,
+        &user_id,
+        cost_bearer.as_ref().map_or("", VerifiedCostBearer::as_str),
+        &normalized,
+    )
+    .await
+    {
+        let code = error
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("budget_unavailable");
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Unable to verify the request budget.");
+        return error_stream(
+            &request_id,
+            code,
+            message,
+            status == StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
 
     // Resolve the harness profile → approval posture. Recorded on the opened
     // envelope so the run loop and operator surfaces agree (HARNESS_PHASE1 §1).
@@ -161,7 +300,6 @@ pub async fn invoke_stream_sse(
     let user_clone = user_id.clone();
     let model_clone = model.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
-    let features = req.features.clone();
 
     // chat-parity §1 — stream-path idempotency. A concurrent duplicate (same
     // client `idempotency_key` mid-flight) is rejected so a double-click /
@@ -191,13 +329,14 @@ pub async fn invoke_stream_sse(
         None => None,
     };
 
-    let session_run = match crate::session_flow::prepare_run(
+    let session_run = match crate::session_flow::prepare_run_authenticated(
         &state,
         req.thread_id.as_deref(),
         req.session_key.as_deref(),
         &org_id,
         &user_id,
         &req.content,
+        &model_bearer,
     )
     .await
     {
@@ -227,6 +366,8 @@ pub async fn invoke_stream_sse(
             image,
             req.content.clone(),
             idem_guard,
+            inference_bearer,
+            model_bearer.clone(),
         );
     }
 
@@ -242,6 +383,8 @@ pub async fn invoke_stream_sse(
             req.content.clone(),
             features,
             idem_guard,
+            inference_bearer,
+            model_bearer.clone(),
         );
     }
 
@@ -257,6 +400,22 @@ pub async fn invoke_stream_sse(
         // and onto each tool step's audit detail. No org-level ZDR default is
         // readily available in this scope, so this is the request flag only;
         // OR-in an org default here once one is plumbed to the gateway.
+        let Some(data_plane_bearer) = data_plane_bearer else {
+            return error_stream(
+                &request_id,
+                "data_plane_auth_required",
+                "Agentic knowledge access requires a cryptographically verified user credential",
+                false,
+            );
+        };
+        let Some(execution_bearer) = execution_bearer else {
+            return error_stream(
+                &request_id,
+                "execution_core_auth_required",
+                "Agentic execution requires a dedicated Execution Core credential",
+                false,
+            );
+        };
         return agentic_run_stream(
             state.clone(),
             request_id,
@@ -265,7 +424,11 @@ pub async fn invoke_stream_sse(
             model,
             req.content.clone(),
             features,
-            req.zdr,
+            effective_zdr,
+            execution_bearer,
+            data_plane_bearer,
+            model_bearer,
+            inference_bearer,
             idem_guard,
         );
     }
@@ -276,7 +439,15 @@ pub async fn invoke_stream_sse(
     // session-core context assembly; this direct block is prepended only when
     // assembly is unavailable.
     let grounding = if crate::retrieval::wants_grounding(&features) {
-        crate::retrieval::retrieve(&state, &org_id, &user_id, &req.content).await
+        let Some(bearer) = data_plane_bearer.as_ref() else {
+            return error_stream(
+                &request_id,
+                "data_plane_auth_required",
+                "Grounding requires a cryptographically verified user credential",
+                false,
+            );
+        };
+        crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr).await
     } else {
         None
     };
@@ -355,6 +526,7 @@ pub async fn invoke_stream_sse(
         let mut defs: Vec<ToolDefinition> = req
             .tools
             .iter()
+            .filter(|tool| crate::tool_loop::inline_tool_allowed(&tool.name))
             .map(|t| ToolDefinition {
                 name: t.name.clone(),
                 description: t.description.clone(),
@@ -372,24 +544,8 @@ pub async fn invoke_stream_sse(
                 defs.push(builtin);
             }
         }
-        // Expose the org's registered MCP servers' tools (matrix §G2) so newly
-        // added MCP tools reach the model without any code change — discovered
-        // via tools/list (cached, bounded), namespaced `mcp__<server>__<tool>`;
-        // `dispatch_tool` routes the call back through the registry. Existing
-        // client/builtin names win on collision (MCP names are namespaced, so a
-        // real collision is unlikely — this is purely defensive).
-        for mcp_def in crate::runtime_registries::mcp_tool_defs(
-            &state.mcp,
-            &state.ownership,
-            &org_id,
-            &user_id,
-        )
-        .await
-        {
-            if !defs.iter().any(|d| d.name == mcp_def.name) {
-                defs.push(mcp_def);
-            }
-        }
+        // MCP tools require the execution-core approval workflow and are never
+        // exposed on this inline chat loop.
         defs
     } else {
         Vec::new()
@@ -428,6 +584,8 @@ pub async fn invoke_stream_sse(
             &org_id,
             &user_id,
             &thread_scope,
+            data_plane_bearer.as_ref(),
+            effective_zdr,
             &model,
             messages,
             tool_defs,
@@ -461,7 +619,7 @@ pub async fn invoke_stream_sse(
                     id,
                     tool,
                     status,
-                    req.zdr,
+                    effective_zdr,
                 )
                 .await;
             }
@@ -477,7 +635,7 @@ pub async fn invoke_stream_sse(
         temperature: 0.7,
         max_tokens: 1024,
         structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
-        zdr: req.zdr,
+        zdr: effective_zdr,
         ..Default::default()
     };
 
@@ -487,7 +645,7 @@ pub async fn invoke_stream_sse(
     let grpc_response = state
         .inference_client
         .clone()
-        .infer_stream(tonic::Request::new(grpc_req))
+        .infer_stream(authenticated_inference_request(grpc_req, &inference_bearer))
         .await;
 
     let mut grpc_stream = match grpc_response {
@@ -517,6 +675,8 @@ pub async fn invoke_stream_sse(
                 tool_events,
                 session_run.thread_id,
                 idem_guard,
+                inference_bearer,
+                model_bearer,
             );
         }
     };
@@ -529,6 +689,7 @@ pub async fn invoke_stream_sse(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let session_state = state.clone();
     let session_thread_id = session_run.thread_id.clone();
+    let session_bearer = model_bearer.clone();
 
     tokio::spawn(async move {
         // chat-parity §1: hold the idempotency claim for the stream's lifetime.
@@ -708,10 +869,11 @@ pub async fn invoke_stream_sse(
                         )
                         .await;
 
-                    if let Err(error) = crate::session_flow::append_assistant_message(
+                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
                         &session_state,
                         &session_thread_id,
                         &assistant_output,
+                        &session_bearer,
                     )
                     .await
                     {
@@ -1000,6 +1162,8 @@ fn vision_stream(
     image: crate::vision::ImageInput,
     prompt: String,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+    inference_bearer: VerifiedInferenceBearer,
+    session_bearer: VerifiedModelBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -1008,17 +1172,20 @@ fn vision_stream(
         let result = state
             .inference_client
             .clone()
-            .analyze_image(tonic::Request::new(AnalyzeImageRequest {
-                request_id: request_id.clone(),
-                org_id,
-                image_url: image.url,
-                image_data: image.data,
-                mime_type: image.mime_type,
-                prompt,
-                model: model.clone(),
-                provider_hint: String::new(),
-                max_tokens: 1024,
-            }))
+            .analyze_image(authenticated_inference_request(
+                AnalyzeImageRequest {
+                    request_id: request_id.clone(),
+                    org_id,
+                    image_url: image.url,
+                    image_data: image.data,
+                    mime_type: image.mime_type,
+                    prompt,
+                    model: model.clone(),
+                    provider_hint: String::new(),
+                    max_tokens: 1024,
+                },
+                &inference_bearer,
+            ))
             .await;
 
         match result {
@@ -1052,9 +1219,13 @@ fn vision_stream(
                     }
                     seq += 1;
                 }
-                if let Err(error) =
-                    crate::session_flow::append_assistant_message(&state, &thread_id, &description)
-                        .await
+                if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                    &state,
+                    &thread_id,
+                    &description,
+                    &session_bearer,
+                )
+                .await
                 {
                     tracing::warn!(
                         %error,
@@ -1106,6 +1277,8 @@ fn image_gen_stream(
     prompt: String,
     features: Vec<String>,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+    inference_bearer: VerifiedInferenceBearer,
+    session_bearer: VerifiedModelBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -1114,16 +1287,19 @@ fn image_gen_stream(
         let result = state
             .inference_client
             .clone()
-            .generate_image(tonic::Request::new(GenerateImageRequest {
-                request_id: request_id.clone(),
-                org_id,
-                prompt: prompt.clone(),
-                model,
-                provider_hint: String::new(),
-                size: "1024x1024".to_owned(),
-                quality: "standard".to_owned(),
-                n: 1,
-            }))
+            .generate_image(authenticated_inference_request(
+                GenerateImageRequest {
+                    request_id: request_id.clone(),
+                    org_id,
+                    prompt: prompt.clone(),
+                    model,
+                    provider_hint: String::new(),
+                    size: "1024x1024".to_owned(),
+                    quality: "standard".to_owned(),
+                    n: 1,
+                },
+                &inference_bearer,
+            ))
             .await;
 
         match result {
@@ -1199,10 +1375,11 @@ fn image_gen_stream(
                 };
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(2),
-                    crate::session_flow::append_assistant_message(
+                    crate::session_flow::append_assistant_message_authenticated(
                         &state,
                         &thread_id,
                         &assistant_content,
+                        &session_bearer,
                     ),
                 )
                 .await
@@ -1328,6 +1505,8 @@ fn infer_fallback_stream(
     tool_events: Vec<crate::sse_events::ChatEvent>,
     thread_id: String,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+    inference_bearer: VerifiedInferenceBearer,
+    session_bearer: VerifiedModelBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -1372,7 +1551,7 @@ fn infer_fallback_stream(
         let result = state
             .inference_client
             .clone()
-            .infer(tonic::Request::new(grpc_req))
+            .infer(authenticated_inference_request(grpc_req, &inference_bearer))
             .await;
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -1411,9 +1590,13 @@ fn infer_fallback_stream(
                     }
                     seq += 1;
                 }
-                if let Err(error) =
-                    crate::session_flow::append_assistant_message(&state, &thread_id, &resp.content)
-                        .await
+                if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                    &state,
+                    &thread_id,
+                    &resp.content,
+                    &session_bearer,
+                )
+                .await
                 {
                     tracing::warn!(
                         %error,
@@ -1679,6 +1862,7 @@ pub async fn run_events_sse(
     Path(run_id): Path<String>,
     headers: HeaderMap,
     Extension(_claims): Extension<Claims>,
+    model_bearer: VerifiedModelBearer,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Resume cursor: the browser's EventSource auto-sends `Last-Event-Id` on
     // reconnect. Forward it so session-core replays buffered events after that
@@ -1698,10 +1882,23 @@ pub async fn run_events_sse(
         let response = match state
             .orchestration_client
             .clone()
-            .stream_run_events(StreamRunEventsRequest {
-                run_id: run_id.clone(),
-                after_event_id,
-            })
+            .stream_run_events(
+                match authenticated_session_request(
+                    StreamRunEventsRequest {
+                        run_id: run_id.clone(),
+                        after_event_id,
+                    },
+                    &model_bearer,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        let _ = tx.send(Ok(Event::default().event("error").data(json!({
+                        "code": "run_events_auth_unavailable", "message": error.message()
+                    }).to_string()))).await;
+                        return;
+                    }
+                },
+            )
             .await
         {
             Ok(response) => response,
@@ -1784,30 +1981,129 @@ async fn direct_infer(
     model: &str,
     content: &str,
     zdr: bool,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Option<String> {
     let mut client = state.inference_client.clone();
     client
-        .infer(tonic::Request::new(InferRequest {
-            request_id: request_id.to_owned(),
-            org_id: org_id.to_owned(),
-            model: model.to_owned(),
-            provider_hint: String::new(),
-            messages: vec![ChatMessage {
-                role: "user".to_owned(),
-                content: content.to_owned(),
-                name: String::new(),
-            }],
-            temperature: 0.7,
-            max_tokens: 1024,
-            structured_output_schema: String::new(),
-            // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
-            // fallback inference (was hardcoded false, ignoring the run's ZDR).
-            zdr,
-            ..Default::default()
-        }))
+        .infer(authenticated_inference_request(
+            InferRequest {
+                request_id: request_id.to_owned(),
+                org_id: org_id.to_owned(),
+                model: model.to_owned(),
+                provider_hint: String::new(),
+                messages: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: content.to_owned(),
+                    name: String::new(),
+                }],
+                temperature: 0.7,
+                max_tokens: 1024,
+                structured_output_schema: String::new(),
+                // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
+                // fallback inference (was hardcoded false, ignoring the run's ZDR).
+                zdr,
+                ..Default::default()
+            },
+            inference_bearer,
+        ))
         .await
         .ok()
         .map(|r| r.into_inner().content)
+}
+
+/// Persistence-free SSE response for Zero Data Retention requests. It emits
+/// only response bytes to the current client connection and never touches the
+/// durable stream/session/event/cache seams used by the normal chat path.
+#[allow(clippy::too_many_arguments)]
+async fn zdr_direct_stream(
+    state: AppState,
+    request_id: String,
+    org_id: String,
+    model: String,
+    content: String,
+    features: Vec<String>,
+    grounding: Option<crate::retrieval::Grounding>,
+    inference_bearer: VerifiedInferenceBearer,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let Some(answer) = direct_infer(
+        &state,
+        &request_id,
+        &org_id,
+        &model,
+        &content,
+        true,
+        &inference_bearer,
+    )
+    .await
+    else {
+        return error_stream(
+            &request_id,
+            "zdr_inference_failed",
+            "The ephemeral inference request failed",
+            true,
+        );
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    tokio::spawn(async move {
+        if let Some(payload) = grounding {
+            let event = crate::sse_events::ChatEvent::Grounding {
+                grounding: payload.clone(),
+            };
+            if event.should_emit(&features) {
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            }
+            for citation in payload.citations {
+                let event = crate::sse_events::ChatEvent::Citation {
+                    id: citation.id,
+                    title: citation.title,
+                    url: citation.url,
+                    snippet: citation.snippet,
+                };
+                if event.should_emit(&features) {
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                }
+            }
+        }
+
+        let mut sequence = 0_u64;
+        for piece in chunk_for_stream(&answer, 48) {
+            let chunk = SseChunk {
+                request_id: request_id.clone(),
+                delta: piece,
+                done: false,
+                model_used: model.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+            };
+            let data = serde_json::to_string(&chunk).unwrap_or_default();
+            if tx
+                .send(Ok(Event::default()
+                    .id(sequence.to_string())
+                    .event("chunk")
+                    .data(data)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            sequence += 1;
+        }
+        let done = SseChunk {
+            request_id: request_id.clone(),
+            delta: String::new(),
+            done: true,
+            model_used: model,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let _ = tx
+            .send(Ok(Event::default()
+                .id(sequence.to_string())
+                .event("done")
+                .data(serde_json::to_string(&done).unwrap_or_default())))
+            .await;
+    });
+    Sse::new(ReceiverStream::new(rx))
 }
 
 /// Dispatch a prepared run to execution-core's agent driver (`RunAgent`).
@@ -1855,6 +2151,49 @@ fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPostur
 
 /// `read_latest_assistant` / `direct_infer` fallback still returns a reply, so
 /// the stream is never failed.
+#[allow(clippy::result_large_err)]
+fn authenticated_run_agent_request(
+    request: RunAgentRequest,
+    execution_bearer: &VerifiedExecutionBearer,
+    data_plane_bearer: &VerifiedBearer,
+    session_bearer: &VerifiedModelBearer,
+    inference_bearer: &VerifiedInferenceBearer,
+) -> Result<tonic::Request<RunAgentRequest>, tonic::Status> {
+    let authorization = format!("Bearer {}", execution_bearer.as_str())
+        .parse()
+        .map_err(|_| tonic::Status::unauthenticated("malformed verified user credential"))?;
+    let mut request = tonic::Request::new(request);
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    request.metadata_mut().insert(
+        "x-data-plane-authorization",
+        format!("Bearer {}", data_plane_bearer.as_str())
+            .parse()
+            .map_err(|_| {
+                tonic::Status::unauthenticated("malformed verified Data Plane credential")
+            })?,
+    );
+    request.metadata_mut().insert(
+        "x-session-authorization",
+        format!("Bearer {}", session_bearer.as_str())
+            .parse()
+            .map_err(|_| tonic::Status::unauthenticated("malformed verified session credential"))?,
+    );
+    request.metadata_mut().insert(
+        "x-inference-authorization",
+        format!("Bearer {}", inference_bearer.as_str())
+            .parse()
+            .map_err(|_| {
+                tonic::Status::unauthenticated("malformed verified inference credential")
+            })?,
+    );
+    Ok(request)
+}
+
+// Dispatch requires both Model and Data authorization contexts plus the
+// immutable run/request fields; keep them explicit at this security boundary.
+#[allow(clippy::too_many_arguments)]
 fn spawn_run_dispatch(
     state: &AppState,
     run: &crate::session_flow::SessionRun,
@@ -1863,6 +2202,10 @@ fn spawn_run_dispatch(
     model: &str,
     content: &str,
     zdr: bool,
+    execution_bearer: &VerifiedExecutionBearer,
+    data_plane_bearer: &VerifiedBearer,
+    session_bearer: &VerifiedModelBearer,
+    inference_bearer: &VerifiedInferenceBearer,
 ) {
     let mut execution_client = state.execution_client.clone();
     let run_agent_req = RunAgentRequest {
@@ -1884,6 +2227,23 @@ fn spawn_run_dispatch(
         zdr,
     };
     let dispatch_run_id = run.run_id.clone();
+    let run_agent_req = match authenticated_run_agent_request(
+        run_agent_req,
+        execution_bearer,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                run_id = %dispatch_run_id,
+                "execution-core run_agent dispatch credential was malformed"
+            );
+            return;
+        }
+    };
     tokio::spawn(async move {
         if let Err(error) = execution_client.run_agent(run_agent_req).await {
             tracing::warn!(
@@ -1914,6 +2274,10 @@ fn agentic_run_stream(
     content: String,
     features: Vec<String>,
     zdr: bool,
+    execution_bearer: VerifiedExecutionBearer,
+    data_plane_bearer: VerifiedBearer,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -1922,21 +2286,28 @@ fn agentic_run_stream(
         let start = std::time::Instant::now();
 
         // 1. Spawn the run (session-core StartRun; also persists the user turn).
-        let run =
-            match crate::session_flow::prepare_run(&state, None, None, &org_id, &user_id, &content)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let err = crate::sse_events::ChatEvent::Error {
-                        code: "agentic_run_start_failed".to_owned(),
-                        message: e.to_string(),
-                        retryable: true,
-                    };
-                    let _ = tx.send(Ok(err.to_sse(&request_id))).await;
-                    return;
-                }
-            };
+        let run = match crate::session_flow::prepare_run_authenticated(
+            &state,
+            None,
+            None,
+            &org_id,
+            &user_id,
+            &content,
+            &model_bearer,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err = crate::sse_events::ChatEvent::Error {
+                    code: "agentic_run_start_failed".to_owned(),
+                    message: e.to_string(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(err.to_sse(&request_id))).await;
+                return;
+            }
+        };
 
         // The run exists — surface its ids so the SPA can drive durable
         // observation (GET /v1/runs/{run_id}/events) and approvals.
@@ -1967,17 +2338,37 @@ fn agentic_run_stream(
         // 1b. Dispatch the run to execution-core's agent driver (RunAgent) —
         //     the missing link that actually drives the queued run. The run's
         //     ZDR flag rides along so execution-core honors it durably.
-        spawn_run_dispatch(&state, &run, &org_id, &user_id, &model, &content, zdr);
+        spawn_run_dispatch(
+            &state,
+            &run,
+            &org_id,
+            &user_id,
+            &model,
+            &content,
+            zdr,
+            &execution_bearer,
+            &data_plane_bearer,
+            &model_bearer,
+            &inference_bearer,
+        );
 
         // 2. Stream the run's orchestration events as step_update, bounded by an
         //    idle timeout (stop once the run goes quiet / ends / errors).
         if let Ok(resp) = state
             .orchestration_client
             .clone()
-            .stream_run_events(StreamRunEventsRequest {
-                run_id: run.run_id.clone(),
-                after_event_id: String::new(),
-            })
+            .stream_run_events(
+                match authenticated_session_request(
+                    StreamRunEventsRequest {
+                        run_id: run.run_id.clone(),
+                        after_event_id: String::new(),
+                    },
+                    &model_bearer,
+                ) {
+                    Ok(request) => request,
+                    Err(_) => return,
+                },
+            )
             .await
         {
             let mut events = resp.into_inner();
@@ -2000,9 +2391,17 @@ fn agentic_run_stream(
             .filter(|a| !a.trim().is_empty());
         let final_text = match answer {
             Some(a) => a,
-            None => direct_infer(&state, &request_id, &org_id, &model, &content, zdr)
-                .await
-                .unwrap_or_else(|| "The agent run produced no output.".to_owned()),
+            None => direct_infer(
+                &state,
+                &request_id,
+                &org_id,
+                &model,
+                &content,
+                zdr,
+                &inference_bearer,
+            )
+            .await
+            .unwrap_or_else(|| "The agent run produced no output.".to_owned()),
         };
 
         // 4. Stream the answer as chunks + a terminal done.
@@ -2612,5 +3011,49 @@ mod tests {
         let usage = build_usage_envelope(request_id, "o", "u", "m", 1, 1, 1);
         assert_eq!(opened.correlation_id, usage.correlation_id);
         assert_eq!(opened.correlation_id, request_id);
+    }
+
+    #[test]
+    fn execution_dispatch_keeps_execution_data_session_and_inference_bearers_separate() {
+        let request = super::authenticated_run_agent_request(
+            super::RunAgentRequest::default(),
+            &super::VerifiedExecutionBearer::for_test("execution-token"),
+            &super::VerifiedBearer::for_test("data-token"),
+            &super::VerifiedModelBearer::for_test("session-token"),
+            &super::VerifiedInferenceBearer::for_test("inference-token"),
+        )
+        .expect("build execution request");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer execution-token")
+        );
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-data-plane-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer data-token")
+        );
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-session-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer session-token")
+        );
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-inference-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer inference-token")
+        );
+        assert!(request.metadata().get("x-api-key").is_none());
+        assert!(request.metadata().get("x-user-id").is_none());
+        assert!(request.metadata().get("x-org-id").is_none());
     }
 }

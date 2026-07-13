@@ -2,6 +2,11 @@
 
 Current `apps/Model Plane` is the target runtime. `apps/Model Plane v2` is a donor for capability contracts and behaviours only; do not reintroduce the old Python monolith.
 
+> **Verified 2026-07-11 (Phase 4 audit).** Spot-checked the parity table against current source and running services; the statuses below still hold. Confirmed:
+> - **Chat/embeddings/model-listing surfaces exist and are auth-gated.** `model-gateway/src/http_routes.rs` registers `/v1/ai/chat`, `/v1/ai/embeddings`, and `/v1/ai/models` (alongside the primary chat path `/v1/invoke` + SSE `/v1/invoke/stream`). Live host-curl: `/v1/ai/models` and `/v1/ai/embeddings` return **401** (route present, JWT required, not 404); `/healthz` 200. `[live-curl]` `[source-only]`
+> - **Embeddings = Complete is accurate.** `ai_embeddings` forwards to `inference-core` over gRPC `CreateEmbedding` (real, not a stub — the in-file "stub handlers" comment is stale) and propagates ZDR via `claims.effective_zdr(req.zdr)`. Data Plane callers target `MODEL_PLANE_AI_CORE_GRPC_URL=http://inference-core:9092` (`Data Plane v2/.env.example`, `docker-compose.yml`), matching the surface named below. `[source-only]`
+> - **Hooks/MCP/plugins = Partial is accurate.** `bridges/mcp-bridge/server.js` is a working reference bridge (stdio + http transports, JSON-RPC framing, allowlist gating) and the gateway `RegisterMcpServer`/`ListMcpServers`/`ProxyMcpTool` path is live, but the server registry is in-memory as stated. **No Visma MCP is wired in Model Plane source** (`grep -rni visma` on source = 0 matches); "test the Visma MCP" is not a wired capability today. `[source-only]`
+
 ## Ownership Boundary
 
 | Capability | Current owner | Notes |

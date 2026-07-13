@@ -13,9 +13,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var (
@@ -27,12 +31,27 @@ var (
 	ErrBudgetExceededTokens = errors.New("budget exceeded: max tokens")
 	// ErrUsageNotFound indicates no usage record exists for the given key.
 	ErrUsageNotFound = errors.New("usage not found")
+	// ErrInvalidEntry indicates a cost event cannot safely affect accounting.
+	ErrInvalidEntry = errors.New("invalid accounting entry")
+)
+
+const (
+	// MaxTokensPerEntry is deliberately far above current provider limits while
+	// bounding sums and rejecting accidental int overflows at the boundary.
+	MaxTokensPerEntry int64 = 1_000_000_000_000
+	// MaxCostUSD matches the integer capacity of numeric(20,10) in Postgres.
+	MaxCostUSD float64 = 9_999_999_999
+	// MaxDimensionBytes bounds tenant, actor, run, request, model, and producer IDs.
+	MaxDimensionBytes = 256
+	// MaxIdempotencyKeyBytes permits composite upstream keys without unbounded indexes.
+	MaxIdempotencyKeyBytes = 512
 )
 
 // Entry is a single cost-bearing event written to the ledger.
 type Entry struct {
 	OrgID          string
 	UserID         string
+	ProducerID     string
 	RunID          string
 	RequestID      string
 	Model          string
@@ -41,6 +60,82 @@ type Entry struct {
 	CostUSD        float64
 	IdempotencyKey string
 	CreatedAt      time.Time
+}
+
+// ValidateEntry rejects values that can poison aggregates, overflow durable
+// columns, or lose canonical attribution. At least one user or service
+// producer identity must be present; authentication happens at the transport
+// boundary before this storage-level validation.
+func ValidateEntry(e Entry) error {
+	if err := ValidateScope(e.OrgID, e.UserID); err != nil {
+		return err
+	}
+	for _, field := range []struct {
+		name     string
+		value    string
+		required bool
+		limit    int
+	}{
+		{name: "producer_id", value: e.ProducerID, limit: MaxDimensionBytes},
+		{name: "run_id", value: e.RunID, limit: MaxDimensionBytes},
+		{name: "request_id", value: e.RequestID, limit: MaxDimensionBytes},
+		{name: "model", value: e.Model, limit: MaxDimensionBytes},
+		{name: "idempotency_key", value: e.IdempotencyKey, limit: MaxIdempotencyKeyBytes},
+	} {
+		if err := validateString(field.name, field.value, field.required, field.limit); err != nil {
+			return err
+		}
+	}
+	if e.UserID == "" && e.ProducerID == "" {
+		return fmt.Errorf("%w: user_id or producer_id is required", ErrInvalidEntry)
+	}
+	if e.InputTokens < 0 || e.OutputTokens < 0 ||
+		e.InputTokens > MaxTokensPerEntry || e.OutputTokens > MaxTokensPerEntry ||
+		e.InputTokens > MaxTokensPerEntry-e.OutputTokens {
+		return fmt.Errorf("%w: token counts must be nonnegative and total at most %d", ErrInvalidEntry, MaxTokensPerEntry)
+	}
+	if math.IsNaN(e.CostUSD) || math.IsInf(e.CostUSD, 0) || e.CostUSD < 0 || e.CostUSD > MaxCostUSD {
+		return fmt.Errorf("%w: cost_usd must be finite and between 0 and %.0f", ErrInvalidEntry, MaxCostUSD)
+	}
+	return nil
+}
+
+// ValidateScope verifies canonical tenant and optional user identifiers.
+func ValidateScope(orgID, userID string) error {
+	if err := validateString("org_id", orgID, true, MaxDimensionBytes); err != nil {
+		return err
+	}
+	return validateString("user_id", userID, false, MaxDimensionBytes)
+}
+
+// ValidateBudget rejects malformed caps. Zero disables a cap; negative,
+// non-finite, or implausibly large caps are caller errors rather than opt-outs.
+func ValidateBudget(maxCostUSD float64, maxTokens int64) error {
+	if math.IsNaN(maxCostUSD) || math.IsInf(maxCostUSD, 0) || maxCostUSD < 0 || maxCostUSD > MaxCostUSD {
+		return fmt.Errorf("%w: max_cost_usd is outside the supported range", ErrInvalidEntry)
+	}
+	if maxTokens < 0 || maxTokens > MaxTokensPerEntry {
+		return fmt.Errorf("%w: max_tokens is outside the supported range", ErrInvalidEntry)
+	}
+	return nil
+}
+
+func validateString(name, value string, required bool, limit int) error {
+	if required && value == "" {
+		return fmt.Errorf("%w: %s is required", ErrInvalidEntry, name)
+	}
+	if value == "" {
+		return nil
+	}
+	if !utf8.ValidString(value) || value != strings.TrimSpace(value) || len(value) > limit {
+		return fmt.Errorf("%w: %s is not canonical or exceeds %d bytes", ErrInvalidEntry, name, limit)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: %s contains control characters", ErrInvalidEntry, name)
+		}
+	}
+	return nil
 }
 
 // Usage holds accumulated token and cost figures for a single aggregation key.
@@ -108,14 +203,19 @@ type Store struct {
 	mu      sync.Mutex
 	usage   map[key]*Usage
 	entries []Entry
-	seen    map[string]struct{} // idempotency keys already recorded
+	seen    map[idempotencyKey]struct{} // tenant-scoped idempotency keys already recorded
+}
+
+type idempotencyKey struct {
+	OrgID string
+	Key   string
 }
 
 // NewStore constructs an empty in-memory Store.
 func NewStore() *Store {
 	return &Store{
 		usage: make(map[key]*Usage),
-		seen:  make(map[string]struct{}),
+		seen:  make(map[idempotencyKey]struct{}),
 	}
 }
 
@@ -124,6 +224,9 @@ var _ Ledger = (*Store)(nil)
 
 // RecordEntry appends a cost event to the in-memory ledger.
 func (s *Store) RecordEntry(_ context.Context, e Entry) error {
+	if err := ValidateEntry(e); err != nil {
+		return err
+	}
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
 	}
@@ -132,24 +235,36 @@ func (s *Store) RecordEntry(_ context.Context, e Entry) error {
 	defer s.mu.Unlock()
 
 	if e.IdempotencyKey != "" {
-		if _, ok := s.seen[e.IdempotencyKey]; ok {
+		idempotency := idempotencyKey{OrgID: e.OrgID, Key: e.IdempotencyKey}
+		if _, ok := s.seen[idempotency]; ok {
 			return nil // duplicate — already recorded
 		}
-		s.seen[e.IdempotencyKey] = struct{}{}
 	}
-
-	s.entries = append(s.entries, e)
 
 	k := key{OrgID: e.OrgID, UserID: e.UserID}
 	u, ok := s.usage[k]
 	if !ok {
 		u = &Usage{OrgID: e.OrgID, UserID: e.UserID}
-		s.usage[k] = u
 	}
-	u.TotalInputTokens += e.InputTokens
-	u.TotalOutputTokens += e.OutputTokens
-	u.TotalCostUSD += e.CostUSD
-	u.EntryCount++
+	if e.InputTokens > math.MaxInt64-u.TotalInputTokens ||
+		e.OutputTokens > math.MaxInt64-u.TotalOutputTokens ||
+		u.EntryCount == math.MaxInt64 || math.IsInf(u.TotalCostUSD+e.CostUSD, 0) {
+		return fmt.Errorf("%w: aggregate would overflow", ErrInvalidEntry)
+	}
+	next := &Usage{
+		OrgID:             u.OrgID,
+		UserID:            u.UserID,
+		RunID:             u.RunID,
+		TotalInputTokens:  u.TotalInputTokens + e.InputTokens,
+		TotalOutputTokens: u.TotalOutputTokens + e.OutputTokens,
+		TotalCostUSD:      u.TotalCostUSD + e.CostUSD,
+		EntryCount:        u.EntryCount + 1,
+	}
+	s.usage[k] = next
+	s.entries = append(s.entries, e)
+	if e.IdempotencyKey != "" {
+		s.seen[idempotencyKey{OrgID: e.OrgID, Key: e.IdempotencyKey}] = struct{}{}
+	}
 	return nil
 }
 
@@ -242,6 +357,12 @@ func (s *Store) ListEntries(_ context.Context, f AggregateFilter, limit int) ([]
 
 // CheckBudget verifies the accumulated org+user usage against the caps.
 func (s *Store) CheckBudget(_ context.Context, orgID, userID string, maxCostUSD float64, maxTokens int64) error {
+	if err := ValidateScope(orgID, userID); err != nil {
+		return err
+	}
+	if err := ValidateBudget(maxCostUSD, maxTokens); err != nil {
+		return err
+	}
 	k := key{OrgID: orgID, UserID: userID}
 
 	s.mu.Lock()

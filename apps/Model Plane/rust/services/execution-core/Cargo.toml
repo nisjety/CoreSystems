@@ -24,10 +24,14 @@ metrics-exporter-prometheus = { workspace = true }
 dashmap = { workspace = true }
 regex = "1"
 reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+base64 = "0.22"
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tokio-stream = "0.1"
 futures = { workspace = true }
 mp-slo = { path = "../../crates/mp-slo" }
 wiremock = "0.6"
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"

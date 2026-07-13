@@ -263,6 +263,7 @@ impl ProviderRouter for AnthropicProvider {
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings: false,
+            supports_zdr: false,
             modalities: vec!["chat".to_owned(), "vision".to_owned()],
             max_context_tokens: 200_000,
             max_output_tokens: 8_192,

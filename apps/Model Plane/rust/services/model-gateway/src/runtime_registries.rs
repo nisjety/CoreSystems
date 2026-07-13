@@ -50,15 +50,17 @@ use crate::mcp_jsonrpc::McpToolDef;
 type McpCatalog = Arc<DashMap<(String, String), (Instant, Vec<McpToolDef>)>>;
 
 /// How long a discovered `tools/list` catalog is reused before the next
-/// discovery. Keeps the chat hot-path from spawning a subprocess (stdio) or an
-/// HTTP round-trip on every turn while staying fresh enough to pick up newly
-/// added tools within a minute.
+/// discovery. Keeps governed callers from making an HTTP round-trip on every
+/// invocation while staying fresh enough to pick up newly added tools within a
+/// minute. Process/stdio transports are not supported.
 const MCP_CATALOG_TTL: Duration = Duration::from_secs(60);
 
 /// Hard cap on how long tool discovery may block a turn. A registered-but-down
-/// server must not stall the user's chat — discovery fails fast and the caller
-/// falls back to the stored allowlist.
+/// server must not stall a caller. Discovery fails closed: the stored allowlist
+/// constrains discovered tools but never fabricates callable schemas.
 const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(6);
+const MCP_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const MCP_MAX_RESPONSE_BYTES: usize = 1_048_576;
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -78,7 +80,6 @@ pub struct McpRegistry {
     /// it was fetched — reused for [`MCP_CATALOG_TTL`] so the chat hot-path
     /// doesn't re-discover on every turn.
     catalog: McpCatalog,
-    http: reqwest::Client,
 }
 
 impl McpRegistry {
@@ -87,10 +88,6 @@ impl McpRegistry {
         Self {
             inner: Arc::new(DashMap::new()),
             catalog: Arc::new(DashMap::new()),
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -114,188 +111,21 @@ impl McpRegistry {
     }
 }
 
-/// Execute an MCP `tools/call` over the **stdio** transport (matrix §G2):
-/// spawn the server subprocess, perform the `initialize` handshake, then issue
-/// `tools/call` — all newline-delimited JSON-RPC 2.0 (framing lives in
-/// `crate::mcp_jsonrpc`, unit-tested). Bounded by a 30s timeout; the child is
-/// always killed before returning. Returns the serialized `result` JSON on
-/// success, or an error message.
-async fn stdio_tool_call(url: &str, tool_name: &str, input_json: &str) -> Result<String, String> {
-    use crate::mcp_jsonrpc::{
-        build_initialize_request, build_initialized_notification, build_tool_call_request,
-        parse_tool_call_response, McpCallOutcome,
-    };
-    use tokio::io::AsyncBufReadExt as _; // for BufReader::lines()
-
-    let (program, args) = crate::mcp_jsonrpc::parse_stdio_command(url)?;
-    // Empty input ⟺ no arguments; anything else must be valid JSON. Silently
-    // coercing malformed input to null hid client errors behind confusing
-    // server-side failures, so reject it with a clear message instead.
-    let arguments: serde_json::Value = if input_json.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_str(input_json).map_err(|e| format!("invalid tool input_json: {e}"))?
-    };
-
-    let mut child = tokio::process::Command::new(&program)
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("mcp stdio spawn {program}: {e}"))?;
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "mcp stdio: no child stdin".to_owned())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "mcp stdio: no child stdout".to_owned())?;
-    let mut reader = tokio::io::BufReader::new(stdout).lines();
-
-    let interaction = async {
-        send_jsonrpc(&mut stdin, &build_initialize_request(1)).await?;
-        await_response(&mut reader, 1).await?;
-        send_jsonrpc(&mut stdin, &build_initialized_notification()).await?;
-        send_jsonrpc(
-            &mut stdin,
-            &build_tool_call_request(2, tool_name, &arguments),
-        )
-        .await?;
-        await_response(&mut reader, 2).await
-    };
-
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), interaction).await;
-    let _ = child.kill().await;
-
-    let line = match outcome {
-        Ok(Ok(line)) => line,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err("mcp stdio call timed out".to_owned()),
-    };
-    match parse_tool_call_response(2, &line) {
-        McpCallOutcome::Ok(out) => Ok(out),
-        McpCallOutcome::Err(e) => Err(e),
-    }
-}
-
-async fn send_jsonrpc(
-    stdin: &mut tokio::process::ChildStdin,
-    msg: &serde_json::Value,
-) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt as _;
-    let mut line = msg.to_string();
-    line.push('\n');
-    stdin
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| format!("mcp stdio write: {e}"))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|e| format!("mcp stdio flush: {e}"))
-}
-
-async fn await_response(
-    reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    id: i64,
-) -> Result<String, String> {
-    // Bound how many non-matching lines we'll skip. The outer 30s timeout caps
-    // wall-clock, but a misbehaving/adversarial server could stream unbounded
-    // short notification lines within that window; this caps the work per call.
-    const MAX_SKIPPED: usize = 1024;
-    let mut skipped = 0usize;
-    loop {
-        match reader
-            .next_line()
-            .await
-            .map_err(|e| format!("mcp stdio read: {e}"))?
-        {
-            Some(line) => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
-                    if crate::mcp_jsonrpc::is_response_for(&v, id) {
-                        return Ok(line);
-                    }
-                }
-                // else: notification / log / other id — skip and keep reading.
-                skipped += 1;
-                if skipped >= MAX_SKIPPED {
-                    return Err(format!(
-                        "mcp server sent >{MAX_SKIPPED} non-response lines before id={id}"
-                    ));
-                }
-            }
-            None => return Err(format!("mcp server closed stream before response id={id}")),
-        }
-    }
-}
-
-/// Discover an MCP server's tools over the **stdio** transport: spawn,
-/// `initialize` handshake, then `tools/list`. Mirrors [`stdio_tool_call`] but
-/// returns the advertised tool defs. Bounded by the shared 30s child timeout;
-/// the caller additionally wraps this in the shorter [`MCP_DISCOVERY_TIMEOUT`].
-async fn stdio_list_tools(url: &str) -> Result<Vec<McpToolDef>, String> {
-    use crate::mcp_jsonrpc::{
-        build_initialize_request, build_initialized_notification, build_list_tools_request,
-        parse_list_tools_response,
-    };
-    use tokio::io::AsyncBufReadExt as _;
-
-    let (program, args) = crate::mcp_jsonrpc::parse_stdio_command(url)?;
-    let mut child = tokio::process::Command::new(&program)
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("mcp stdio spawn {program}: {e}"))?;
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "mcp stdio: no child stdin".to_owned())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "mcp stdio: no child stdout".to_owned())?;
-    let mut reader = tokio::io::BufReader::new(stdout).lines();
-
-    let interaction = async {
-        send_jsonrpc(&mut stdin, &build_initialize_request(1)).await?;
-        await_response(&mut reader, 1).await?;
-        send_jsonrpc(&mut stdin, &build_initialized_notification()).await?;
-        send_jsonrpc(&mut stdin, &build_list_tools_request(2)).await?;
-        await_response(&mut reader, 2).await
-    };
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), interaction).await;
-    let _ = child.kill().await;
-    let line = match outcome {
-        Ok(Ok(line)) => line,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err("mcp stdio tools/list timed out".to_owned()),
-    };
-    parse_list_tools_response(2, &line)
-}
-
 /// Discover an MCP server's tools over the **HTTP** bridge: `POST {url}/tools/list`.
 /// Accepts either a JSON-RPC envelope (`result.tools`) or a bare `{tools:[...]}`
 /// (the bridge may unwrap), mirroring the lenient `tools/call` bridge shape.
-async fn http_list_tools(
-    http: &reqwest::Client,
-    url: &str,
-    token: &str,
-) -> Result<Vec<McpToolDef>, String> {
-    let mut req = http
-        .post(format!("{url}/tools/list"))
-        .json(&serde_json::json!({}));
+async fn http_list_tools(url: &str, token: &str) -> Result<Vec<McpToolDef>, String> {
+    let (http, endpoint) = safe_mcp_http_client(url).await?;
+    let target = endpoint
+        .join("tools/list")
+        .map_err(|error| format!("invalid tools/list endpoint: {error}"))?;
+    let mut req = http.post(target).json(&serde_json::json!({}));
     if !token.is_empty() {
         req = req.bearer_auth(token);
     }
     let resp = req.send().await.map_err(|e| format!("transport: {e}"))?;
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = bounded_mcp_response(resp).await?;
     if !status.is_success() {
         return Err(format!("mcp HTTP {}: {}", status, truncate(&body, 200)));
     }
@@ -313,40 +143,78 @@ async fn http_list_tools(
         .collect())
 }
 
-/// Keep only discovered tools whose name starts with one of the allowlist
-/// prefixes — the same prefix semantics [`handle_proxy_mcp_tool`] enforces at
-/// call time. An empty allowlist means "all tools allowed".
+async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Url), String> {
+    let endpoint = reqwest::Url::parse(url).map_err(|_| "invalid MCP endpoint URL".to_owned())?;
+    if endpoint.scheme() != "https" || endpoint_host_is_forbidden(&endpoint) {
+        return Err("MCP endpoint must use public HTTPS".to_owned());
+    }
+    let host = endpoint
+        .host_str()
+        .ok_or_else(|| "MCP endpoint host is required".to_owned())?;
+    let port = endpoint
+        .port_or_known_default()
+        .ok_or_else(|| "MCP endpoint port is required".to_owned())?;
+    let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| format!("MCP endpoint DNS resolution failed: {error}"))?
+        .collect();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| ip_is_forbidden(address.ip()))
+    {
+        return Err("MCP endpoint DNS resolved to a forbidden address".to_owned());
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(MCP_HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|error| format!("MCP HTTP client unavailable: {error}"))?;
+    Ok((client, endpoint))
+}
+
+async fn bounded_mcp_response(mut response: reqwest::Response) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MCP_MAX_RESPONSE_BYTES as u64)
+    {
+        return Err("MCP response exceeds size limit".to_owned());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("MCP response read failed: {error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MCP_MAX_RESPONSE_BYTES {
+            return Err("MCP response exceeds size limit".to_owned());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|_| "MCP response is not valid UTF-8".to_owned())
+}
+
+/// Keep only discovered tools whose name exactly matches an allowlist entry.
+/// Empty allowlists fail closed and expose no tools.
 #[must_use]
 fn filter_allowlist(tools: Vec<McpToolDef>, allowlist: &[String]) -> Vec<McpToolDef> {
     if allowlist.is_empty() {
-        return tools;
+        return Vec::new();
     }
     tools
         .into_iter()
-        .filter(|t| allowlist.iter().any(|p| t.name.starts_with(p)))
-        .collect()
-}
-
-/// When discovery is unavailable, expose the allowlisted tool names with an
-/// open input schema so they stay callable (the server validates args at call
-/// time). An empty allowlist yields nothing — there is nothing to enumerate
-/// without discovery.
-#[must_use]
-fn allowlist_fallback(allowlist: &[String]) -> Vec<McpToolDef> {
-    allowlist
-        .iter()
-        .map(|name| McpToolDef {
-            name: name.clone(),
-            description: String::new(),
-            input_schema_json: "{\"type\":\"object\"}".to_owned(),
-        })
+        .filter(|tool| allowlist.contains(&tool.name))
         .collect()
 }
 
 /// Return `server`'s discovered tool catalog, served from the TTL cache when
 /// fresh. On a miss it discovers over the server's transport (bounded by
 /// [`MCP_DISCOVERY_TIMEOUT`]) and caches success. `None` means discovery is
-/// currently unavailable, so the caller falls back to the stored allowlist.
+/// currently unavailable. Callers fail closed rather than fabricating callable
+/// tool definitions with an open input schema.
 async fn mcp_discover_cached(
     reg: &McpRegistry,
     org_id: &str,
@@ -360,9 +228,8 @@ async fn mcp_discover_cached(
     }
     let discovery = async {
         match server.transport.as_str() {
-            "stdio" => stdio_list_tools(&server.url).await,
-            "http" => http_list_tools(&reg.http, &server.url, &server.token).await,
-            other => Err(format!("discovery unsupported for transport {other}")),
+            "http" => http_list_tools(&server.url, &server.token).await,
+            other => Err(format!("discovery quarantined for transport {other}")),
         }
     };
     match tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, discovery).await {
@@ -374,14 +241,14 @@ async fn mcp_discover_cached(
             tracing::debug!(
                 server = %server.server_id,
                 error = %e,
-                "mcp tools/list discovery failed; falling back to allowlist"
+                "mcp tools/list discovery failed; exposing no tools"
             );
             None
         }
         Err(_) => {
             tracing::debug!(
                 server = %server.server_id,
-                "mcp tools/list discovery timed out; falling back to allowlist"
+                "mcp tools/list discovery timed out; exposing no tools"
             );
             None
         }
@@ -391,14 +258,15 @@ async fn mcp_discover_cached(
 /// Build the agent-facing tool definitions for every **enabled** MCP server an
 /// org has registered, namespaced `mcp__<server_id>__<tool>` so the gateway's
 /// `dispatch_tool` (and the model) can route calls back to the right server.
-/// This is the exposure bridge: without it, registered MCP servers sit in the
-/// registry but their tools never reach the model.
+/// This is the governed exposure bridge: without it, registered MCP servers sit
+/// in the registry but their tools never reach an execution caller. Inline chat
+/// deliberately does not consume these definitions because it lacks the
+/// execution-core approval workflow.
 ///
 /// Discovery is best-effort and bounded (see [`mcp_discover_cached`]): each
-/// server's `tools/list` is fetched for real input schemas; if unreachable, it
-/// falls back to the stored `tool_allowlist` with an open schema so registered
-/// tools stay callable. A disabled server, or an unreachable one with an empty
-/// allowlist (nothing to enumerate), contributes nothing. Never panics.
+/// server's `tools/list` is fetched for real input schemas and then intersected
+/// with the exact stored allowlist. A disabled or unreachable server contributes
+/// nothing. Never panics.
 pub async fn mcp_tool_defs(
     reg: &McpRegistry,
     ownership: &crate::ownership::OwnershipStore,
@@ -422,7 +290,7 @@ pub async fn mcp_tool_defs(
     for server in servers {
         let tools = match mcp_discover_cached(reg, org_id, &server).await {
             Some(discovered) => filter_allowlist(discovered, &server.tool_allowlist),
-            None => allowlist_fallback(&server.tool_allowlist),
+            None => Vec::new(),
         };
         for t in tools {
             let description = if t.description.is_empty() {
@@ -440,11 +308,14 @@ pub async fn mcp_tool_defs(
     defs
 }
 
-/// Registers (or upserts) an MCP server in the gateway-scoped registry.
+/// Registers (or upserts) a validated MCP server in the gateway-scoped
+/// registry. Secure-MVP registration supports only public HTTPS bridges.
+/// Caller-selected stdio commands and raw bearer secrets are quarantined.
 ///
 /// # Errors
 ///
-/// Returns `Status::invalid_argument` if `req.server` is absent or its `name` is empty.
+/// Returns `Status::invalid_argument` for missing tenant/name, unsafe or
+/// mismatched transport, raw credentials, or a fail-open allowlist.
 pub fn handle_register_mcp_server(
     reg: &McpRegistry,
     req: RegisterMcpServerRequest,
@@ -452,9 +323,7 @@ pub fn handle_register_mcp_server(
     let mut server = req
         .server
         .ok_or_else(|| Status::invalid_argument("server is required"))?;
-    if server.name.is_empty() {
-        return Err(Status::invalid_argument("server.name is required"));
-    }
+    validate_mcp_server(&req.org_id, &mut server)?;
     if server.server_id.is_empty() {
         server.server_id = new_ulid();
     }
@@ -469,6 +338,116 @@ pub fn handle_register_mcp_server(
     })
 }
 
+#[allow(clippy::result_large_err)]
+fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Status> {
+    if org_id.trim().is_empty() {
+        return Err(Status::invalid_argument("org_id is required"));
+    }
+    server.name = server.name.trim().to_owned();
+    if server.name.is_empty() || server.name.len() > 128 {
+        return Err(Status::invalid_argument(
+            "server.name must contain 1 to 128 characters",
+        ));
+    }
+    if server.transport.trim() != "http" {
+        return Err(Status::invalid_argument(
+            "only the HTTPS MCP bridge transport is supported",
+        ));
+    }
+    "http".clone_into(&mut server.transport);
+    server.url = server.url.trim().trim_end_matches('/').to_owned();
+    if server.url.len() > 2_048 {
+        return Err(Status::invalid_argument("server.url is too long"));
+    }
+    let endpoint = reqwest::Url::parse(&server.url)
+        .map_err(|_| Status::invalid_argument("server.url must be a valid HTTPS URL"))?;
+    if endpoint.scheme() != "https"
+        || endpoint.host().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.port_or_known_default().is_none()
+        || endpoint_host_is_forbidden(&endpoint)
+    {
+        return Err(Status::invalid_argument(
+            "server.url must be a public HTTPS base URL without credentials, query, or fragment",
+        ));
+    }
+    if !server.token.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "raw MCP credentials are not accepted; configure a managed secret reference",
+        ));
+    }
+    server.token.clear();
+    if server.tool_allowlist.is_empty() || server.tool_allowlist.len() > 64 {
+        return Err(Status::invalid_argument(
+            "tool_allowlist must contain 1 to 64 exact tool names",
+        ));
+    }
+    let mut exact_names = Vec::with_capacity(server.tool_allowlist.len());
+    for raw in &server.tool_allowlist {
+        let name = raw.trim();
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
+        {
+            return Err(Status::invalid_argument(
+                "tool_allowlist contains an invalid exact tool name",
+            ));
+        }
+        if !exact_names.iter().any(|existing| existing == name) {
+            exact_names.push(name.to_owned());
+        }
+    }
+    server.tool_allowlist = exact_names;
+    Ok(())
+}
+
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn endpoint_host_is_forbidden(endpoint: &reqwest::Url) -> bool {
+    let Some(host) = endpoint.host_str() else {
+        return true;
+    };
+    if let Ok(address) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        return ip_is_forbidden(address);
+    }
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".internal")
+        || normalized == "metadata.google.internal"
+}
+
+fn ip_is_forbidden(address: std::net::IpAddr) -> bool {
+    fn ipv4_forbidden(address: std::net::Ipv4Addr) -> bool {
+        address.is_private()
+            || address.is_loopback()
+            || address.is_link_local()
+            || address.is_broadcast()
+            || address.is_documentation()
+            || address.is_unspecified()
+            || address.is_multicast()
+    }
+
+    fn ipv6_forbidden(address: std::net::Ipv6Addr) -> bool {
+        address.is_loopback()
+            || address.is_unspecified()
+            || address.is_multicast()
+            || address.to_ipv4_mapped().is_some_and(ipv4_forbidden)
+            || (address.segments()[0] & 0xfe00) == 0xfc00
+            || (address.segments()[0] & 0xffc0) == 0xfe80
+    }
+
+    match address {
+        std::net::IpAddr::V4(address) => ipv4_forbidden(address),
+        std::net::IpAddr::V6(address) => ipv6_forbidden(address),
+    }
+}
+
 /// Build the capability-core `POST /api/v1/mcp` JSON body from a gateway
 /// `McpServer` (matrix §4.1/H.1 write-through). capability-core is the registry
 /// **system-of-record**; the gateway's in-memory store is a cache that writes
@@ -477,10 +456,10 @@ pub fn handle_register_mcp_server(
 /// (so there is **no** id divergence, unlike the G8 approval crux) and upserts
 /// on `(org_id, name)`.
 ///
-/// SECURITY: the bearer `token` is an operational secret and is deliberately
-/// NOT sent to the catalog — only `auth_kind` ("bearer"/"none") records that
-/// auth is required. The token stays in the gateway cache, which is what
-/// actually proxies tool calls; the catalog holds metadata only.
+/// SECURITY: the legacy bearer `token` field is never serialized. Secure-MVP
+/// registration rejects raw credentials entirely; a future authenticated
+/// bridge must use a managed secret reference resolved outside catalog records
+/// and logs.
 #[must_use]
 pub fn mcp_capability_payload(
     org_id: &str,
@@ -569,6 +548,142 @@ mod mcp_writethrough_tests {
 }
 
 #[cfg(test)]
+mod mcp_secure_registration_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::McpServer;
+
+    fn request(server: McpServer) -> RegisterMcpServerRequest {
+        RegisterMcpServerRequest {
+            request_id: "req-security".to_owned(),
+            org_id: "org-security".to_owned(),
+            server: Some(server),
+        }
+    }
+
+    fn server() -> McpServer {
+        McpServer {
+            server_id: String::new(),
+            name: "safe connector".to_owned(),
+            url: "https://mcp.example.test".to_owned(),
+            transport: "http".to_owned(),
+            token: String::new(),
+            tool_allowlist: vec!["search_records".to_owned()],
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn registration_quarantines_user_supplied_process_execution() {
+        let registry = McpRegistry::new();
+        for (transport, url) in [
+            ("stdio", "stdio:///usr/bin/curl https://attacker.test"),
+            ("stdio", "https://mcp.example.test"),
+        ] {
+            let mut candidate = server();
+            candidate.transport = transport.to_owned();
+            candidate.url = url.to_owned();
+            let error = handle_register_mcp_server(&registry, request(candidate))
+                .expect_err("stdio registration must be quarantined");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn registration_rejects_insecure_hybrid_and_fail_open_records() {
+        let registry = McpRegistry::new();
+        let mut insecure = server();
+        insecure.url = "http://mcp.example.test".to_owned();
+        assert!(handle_register_mcp_server(&registry, request(insecure)).is_err());
+
+        let mut empty_allowlist = server();
+        empty_allowlist.tool_allowlist.clear();
+        assert!(handle_register_mcp_server(&registry, request(empty_allowlist)).is_err());
+
+        let mut raw_secret = server();
+        raw_secret.token = "caller-supplied-secret".to_owned();
+        assert!(handle_register_mcp_server(&registry, request(raw_secret)).is_err());
+
+        let mut missing_org = request(server());
+        missing_org.org_id.clear();
+        assert!(handle_register_mcp_server(&registry, missing_org).is_err());
+    }
+
+    #[test]
+    fn registration_accepts_https_with_an_exact_nonempty_allowlist() {
+        let registry = McpRegistry::new();
+        let response = handle_register_mcp_server(&registry, request(server()))
+            .expect("valid HTTPS connector");
+        assert!(response.server.is_some());
+    }
+
+    #[test]
+    fn registration_rejects_private_metadata_and_encoded_loopback_hosts() {
+        let registry = McpRegistry::new();
+        for url in [
+            "https://127.0.0.1",
+            "https://10.0.0.1",
+            "https://169.254.169.254",
+            "https://[::1]",
+            "https://2130706433",
+            "https://metadata.google.internal",
+            "https://service.local",
+        ] {
+            let mut candidate = server();
+            candidate.url = url.to_owned();
+            assert!(
+                handle_register_mcp_server(&registry, request(candidate)).is_err(),
+                "unsafe URL accepted: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_private_ranges_are_forbidden() {
+        for address in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "169.254.1.2",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                ip_is_forbidden(address.parse().expect("IP")),
+                "unsafe address accepted: {address}"
+            );
+        }
+        assert!(!ip_is_forbidden("93.184.216.34".parse().expect("IP")));
+    }
+
+    #[tokio::test]
+    async fn dispatch_resolution_revalidates_forbidden_hosts() {
+        assert!(safe_mcp_http_client("https://localhost").await.is_err());
+        assert!(safe_mcp_http_client("https://127.0.0.1").await.is_err());
+    }
+
+    #[test]
+    fn allowlist_matching_is_exact_not_prefix_based() {
+        let tools = vec![
+            McpToolDef {
+                name: "search".to_owned(),
+                description: String::new(),
+                input_schema_json: "{}".to_owned(),
+            },
+            McpToolDef {
+                name: "search_and_delete".to_owned(),
+                description: String::new(),
+                input_schema_json: "{}".to_owned(),
+            },
+        ];
+        let filtered = filter_allowlist(tools, &["search".to_owned()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "search");
+    }
+}
+
+#[cfg(test)]
 mod mcp_exposure_tests {
     use super::*;
     use mp_contracts::model_plane::v1::McpServer;
@@ -582,26 +697,17 @@ mod mcp_exposure_tests {
     }
 
     #[test]
-    fn filter_allowlist_empty_keeps_all() {
+    fn filter_allowlist_empty_fails_closed() {
         let tools = vec![tool("read"), tool("write")];
-        assert_eq!(filter_allowlist(tools, &[]).len(), 2);
+        assert!(filter_allowlist(tools, &[]).is_empty());
     }
 
     #[test]
-    fn filter_allowlist_prefix_matches() {
+    fn filter_allowlist_matches_exact_names_only() {
         let tools = vec![tool("read_file"), tool("write_file"), tool("list_dir")];
-        let kept = filter_allowlist(tools, &["read".to_owned(), "list".to_owned()]);
+        let kept = filter_allowlist(tools, &["read_file".to_owned(), "list_dir".to_owned()]);
         let names: Vec<&str> = kept.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["read_file", "list_dir"]);
-    }
-
-    #[test]
-    fn allowlist_fallback_yields_open_schema_named_tools() {
-        let defs = allowlist_fallback(&["search".to_owned()]);
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "search");
-        assert_eq!(defs[0].input_schema_json, "{\"type\":\"object\"}");
-        assert!(allowlist_fallback(&[]).is_empty());
     }
 
     fn register(reg: &McpRegistry, org: &str, server: McpServer) {
@@ -617,10 +723,7 @@ mod mcp_exposure_tests {
     }
 
     #[tokio::test]
-    async fn exposes_namespaced_allowlist_when_server_unreachable() {
-        // An unreachable stdio server (spawn fails fast) must still surface its
-        // allowlisted tools, namespaced — so registered tools stay callable
-        // even when discovery is down. This is the core exposure guarantee.
+    async fn exposes_only_successfully_discovered_exact_allowlist_tools() {
         let reg = McpRegistry::new();
         register(
             &reg,
@@ -628,20 +731,28 @@ mod mcp_exposure_tests {
             McpServer {
                 server_id: "fs".into(),
                 name: "Filesystem".into(),
-                url: "stdio:///nonexistent-mcp-binary-zzz".into(),
-                transport: "stdio".into(),
+                url: "https://mcp.example.test".into(),
+                transport: "http".into(),
                 token: String::new(),
                 tool_allowlist: vec!["read_file".into(), "list_dir".into()],
                 enabled: true,
             },
         );
-        let defs = mcp_tool_defs(
-            &reg,
-            &crate::ownership::OwnershipStore::new(),
+        reg.catalog.insert(
+            ("org-1".to_owned(), "fs".to_owned()),
+            (
+                Instant::now(),
+                vec![tool("read_file"), tool("list_dir"), tool("delete_all")],
+            ),
+        );
+        let ownership = crate::ownership::OwnershipStore::new();
+        ownership.set(
             "org-1",
-            "u1",
-        )
-        .await;
+            crate::ownership::KIND_MCP,
+            "fs",
+            crate::ownership::Ownership::org(),
+        );
+        let defs = mcp_tool_defs(&reg, &ownership, "org-1", "u1").await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mcp__fs__read_file"), "got {names:?}");
         assert!(names.contains(&"mcp__fs__list_dir"), "got {names:?}");
@@ -650,7 +761,7 @@ mod mcp_exposure_tests {
     }
 
     #[tokio::test]
-    async fn disabled_or_empty_allowlist_unreachable_contributes_nothing() {
+    async fn disabled_server_contributes_nothing() {
         let reg = McpRegistry::new();
         // Disabled server → skipped entirely.
         register(
@@ -659,25 +770,11 @@ mod mcp_exposure_tests {
             McpServer {
                 server_id: "off".into(),
                 name: "Off".into(),
-                url: "stdio:///nope".into(),
-                transport: "stdio".into(),
+                url: "https://mcp.example.test".into(),
+                transport: "http".into(),
                 token: String::new(),
                 tool_allowlist: vec!["x".into()],
                 enabled: false,
-            },
-        );
-        // Enabled but unreachable with an empty allowlist → nothing to enumerate.
-        register(
-            &reg,
-            "org-2",
-            McpServer {
-                server_id: "empty".into(),
-                name: "Empty".into(),
-                url: "stdio:///nope2".into(),
-                transport: "stdio".into(),
-                token: String::new(),
-                tool_allowlist: vec![],
-                enabled: true,
             },
         );
         assert!(mcp_tool_defs(
@@ -699,14 +796,24 @@ mod mcp_exposure_tests {
             McpServer {
                 server_id: "s".into(),
                 name: "S".into(),
-                url: "stdio:///nope".into(),
-                transport: "stdio".into(),
+                url: "https://mcp.example.test".into(),
+                transport: "http".into(),
                 token: String::new(),
                 tool_allowlist: vec!["t".into()],
                 enabled: true,
             },
         );
+        reg.catalog.insert(
+            ("org-a".to_owned(), "s".to_owned()),
+            (Instant::now(), vec![tool("t")]),
+        );
         let own = crate::ownership::OwnershipStore::new();
+        own.set(
+            "org-a",
+            crate::ownership::KIND_MCP,
+            "s",
+            crate::ownership::Ownership::org(),
+        );
         assert_eq!(mcp_tool_defs(&reg, &own, "org-a", "u1").await.len(), 1);
         assert!(mcp_tool_defs(&reg, &own, "org-b", "u1").await.is_empty());
     }
@@ -756,12 +863,7 @@ pub async fn handle_proxy_mcp_tool(
             error_message: "server disabled".into(),
         });
     }
-    if !server.tool_allowlist.is_empty()
-        && !server
-            .tool_allowlist
-            .iter()
-            .any(|p| req.tool_name.starts_with(p))
-    {
+    if !server.tool_allowlist.contains(&req.tool_name) {
         return Ok(ProxyMcpToolResponse {
             request_id: req.request_id,
             output_json: String::new(),
@@ -769,26 +871,14 @@ pub async fn handle_proxy_mcp_tool(
         });
     }
 
-    // Transport dispatch. HTTP falls through to the inline implementation
-    // below; stdio is handled here (matrix §G2) by spawning the server
-    // subprocess and speaking JSON-RPC over its stdio; sse is still pending.
+    // Secure-MVP dispatch permits only the validated HTTPS bridge transport.
+    // Legacy stdio records are quarantined even if they predate write-time
+    // validation; they can never reach the subprocess spawn path.
     match server.transport.as_str() {
         "http" => {}
-        "stdio" => {
-            let (output_json, error_message) =
-                match stdio_tool_call(&server.url, &req.tool_name, &req.input_json).await {
-                    Ok(out) => (out, String::new()),
-                    Err(e) => (String::new(), e),
-                };
-            return Ok(ProxyMcpToolResponse {
-                request_id: req.request_id,
-                output_json,
-                error_message,
-            });
-        }
         other => {
             return Err(Status::unimplemented(format!(
-                "mcp transport {other} not yet implemented (http, stdio supported)"
+                "mcp transport {other} is quarantined; only HTTPS bridge transport is supported"
             )));
         }
     }
@@ -796,16 +886,24 @@ pub async fn handle_proxy_mcp_tool(
     // MCP JSON-RPC over HTTP. Bridge expects POST {url}/tools/call with
     // `{name, arguments}`. The bridge is responsible for translating to
     // the actual MCP transport when multi-step.
+    let arguments = if req.input_json.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str::<serde_json::Value>(&req.input_json)
+            .map_err(|_| Status::invalid_argument("input_json must be valid JSON"))?
+    };
     let body = serde_json::json!({
         "name": req.tool_name,
-        "arguments": serde_json::from_str::<serde_json::Value>(&req.input_json)
-            .unwrap_or(serde_json::Value::Null),
+        "arguments": arguments,
     });
 
-    let mut http_req = reg
-        .http
-        .post(format!("{}/tools/call", server.url))
-        .json(&body);
+    let (http, endpoint) = safe_mcp_http_client(&server.url)
+        .await
+        .map_err(Status::failed_precondition)?;
+    let target = endpoint.join("tools/call").map_err(|error| {
+        Status::invalid_argument(format!("invalid tools/call endpoint: {error}"))
+    })?;
+    let mut http_req = http.post(target).json(&body);
     if !server.token.is_empty() {
         http_req = http_req.bearer_auth(&server.token);
     }
@@ -820,7 +918,16 @@ pub async fn handle_proxy_mcp_tool(
         }
     };
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = match bounded_mcp_response(resp).await {
+        Ok(body) => body,
+        Err(error) => {
+            return Ok(ProxyMcpToolResponse {
+                request_id: req.request_id,
+                output_json: String::new(),
+                error_message: error,
+            });
+        }
+    };
     if !status.is_success() {
         return Ok(ProxyMcpToolResponse {
             request_id: req.request_id,
@@ -1438,7 +1545,8 @@ mod tests {
                 server: Some(McpServer {
                     name: "test".into(),
                     transport: "http".into(),
-                    url: "http://localhost:9000".into(),
+                    url: "https://mcp.example.test".into(),
+                    tool_allowlist: vec!["read_file".into()],
                     enabled: true,
                     ..Default::default()
                 }),

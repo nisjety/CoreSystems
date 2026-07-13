@@ -5,6 +5,8 @@ import (
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
@@ -22,16 +24,21 @@ type Server struct {
 	mpv1.UnimplementedSandboxManagerServer
 	leases    *lease.Store
 	snapshots *snapshot.Store
+	principal func(context.Context) (authctx.Principal, error)
 }
 
 // NewServer constructs a Server with the given stores.
 func NewServer(leases *lease.Store, snaps *snapshot.Store) *Server {
-	return &Server{leases: leases, snapshots: snaps}
+	return &Server{leases: leases, snapshots: snaps, principal: authz.Principal}
 }
 
 // AcquireLease creates a new lease for the requested scope.
 func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*AcquireLeaseResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "AcquireLease")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if req.GetScopeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "scope_id is required")
 	}
@@ -44,6 +51,9 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	if req.GetOrgId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "org_id is required")
 	}
+	if req.GetOrgId() != principal.OrganizationID {
+		return nil, status.Error(codes.PermissionDenied, "organization does not match verified identity")
+	}
 	ttl := time.Duration(0)
 	if req.GetTtl() != nil {
 		ttl = req.GetTtl().AsDuration()
@@ -51,7 +61,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	if ttl <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl must be greater than zero")
 	}
-	l, err := s.leases.Create(req.GetScopeId(), req.GetScopeType(), req.GetOrgId(), ttl)
+	l, err := s.leases.Create(req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -67,10 +77,14 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 // ReleaseLease releases an existing lease.
 func (s *Server) ReleaseLease(ctx context.Context, req *ReleaseLeaseRequest) (*ReleaseLeaseResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ReleaseLease")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if req.GetLeaseId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
 	}
-	ok, err := s.leases.Release(req.GetLeaseId())
+	ok, err := s.leases.ReleaseScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal))
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -82,13 +96,17 @@ func (s *Server) ReleaseLease(ctx context.Context, req *ReleaseLeaseRequest) (*R
 // SnapshotSandbox persists a snapshot reference for the given lease.
 func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*SnapshotResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "SnapshotSandbox")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if req.GetLeaseId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
 	}
 	if req.GetLabel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "label is required")
 	}
-	l, err := s.leases.Get(req.GetLeaseId())
+	l, err := s.leases.GetScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal))
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotLeaseOutcome(err))))
 		return nil, mapErr(err)
@@ -108,6 +126,9 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 // Health reports serving status.
 func (s *Server) Health(ctx context.Context, _ *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "Health")))
+	if _, err := s.principal(ctx); err != nil {
+		return nil, err
+	}
 	return &SandboxHealthResponse{Status: "SERVING"}, nil
 }
 

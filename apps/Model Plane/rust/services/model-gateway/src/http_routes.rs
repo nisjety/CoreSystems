@@ -12,6 +12,7 @@ use axum::{
     routing::{delete, get, post},
     Extension, Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
@@ -23,9 +24,10 @@ use mp_contracts::model_plane::v1::{
     ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest, ListPlansRequest,
     ListRunsRequest, ListSpeechVoicesRequest, ListTodosRequest, ListTranslationLanguagesRequest,
     McpServer, Plan, PlanState, PlanStep, PlanStepState, RegisterMcpServerRequest,
-    ResumeRunRequest, RunDetail, StreamVideoGenerationContentRequest, SubagentLineage,
-    SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState, TranscribeSpeechRequest,
-    TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
+    ResumeRunRequest, ResumeRunResponse, RunDetail, StreamVideoGenerationContentRequest,
+    SubagentLineage, SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState,
+    TranscribeSpeechRequest, TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest,
+    TranslationInput,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -34,7 +36,11 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::{
-    auth::{self, Claims},
+    auth::{
+        self, Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
+        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
+        VerifiedInferenceBearer, VerifiedSessionBearer as VerifiedModelBearer,
+    },
     gateway_metrics, normalize, rate_limit, session_flow, sse,
     state::AppState,
 };
@@ -137,6 +143,7 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
             post(crate::finetune_routes::deploy_job),
         )
         .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn(auth::authorize_principal_route))
         .layer(middleware::from_fn(auth::require_auth))
         .layer(axum::Extension(rate_limiter));
 
@@ -386,6 +393,159 @@ async fn metrics_placeholder() -> impl IntoResponse {
 
 type HttpJsonError = (StatusCode, Json<Value>);
 
+/// Attach the separately verified `aud=inference-core` credential to one
+/// downstream RPC. A verified compact JWT uses only metadata-safe characters;
+/// validation happens in the auth middleware before this type can exist.
+fn authenticated_inference_request<T>(
+    value: T,
+    bearer: &VerifiedInferenceBearer,
+) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", bearer.as_str())
+            .parse()
+            .expect("a verified compact JWT is valid gRPC metadata"),
+    );
+    request
+}
+
+fn authenticated_session_request<T>(
+    value: T,
+    bearer: &VerifiedModelBearer,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    let mut request = tonic::Request::new(value);
+    let authorization = format!("Bearer {}", bearer.as_str()).parse().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "verified session credential is not forwardable"})),
+        )
+    })?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
+fn authenticated_execution_request<T>(
+    value: T,
+    execution_bearer: &VerifiedExecutionBearer,
+    session_bearer: &VerifiedModelBearer,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    let mut request = tonic::Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", execution_bearer.as_str())
+            .parse()
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "verified execution credential is not forwardable"})),
+                )
+            })?,
+    );
+    request.metadata_mut().insert(
+        "x-session-authorization",
+        format!("Bearer {}", session_bearer.as_str())
+            .parse()
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "verified session credential is not forwardable"})),
+                )
+            })?,
+    );
+    Ok(request)
+}
+
+fn require_execution_resume_ack(
+    response: ResumeRunResponse,
+) -> Result<ResumeRunResponse, HttpJsonError> {
+    if response.resumed {
+        return Ok(response);
+    }
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": {
+                "code": "execution_resume_unavailable",
+                "message": "Execution did not acknowledge the run resume"
+            }
+        })),
+    ))
+}
+
+fn should_resume_granted_approval(
+    prior: Option<&Approval>,
+    decided: &Approval,
+) -> Result<bool, HttpJsonError> {
+    let Some(prior) = prior else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "approval_delivery_unknown",
+                    "message": "Approval state is unavailable; execution was not resumed"
+                }
+            })),
+        ));
+    };
+    if prior.id.is_empty()
+        || prior.id != decided.id
+        || prior.run_id != decided.run_id
+        || prior.org_id != decided.org_id
+        || decided.state != ApprovalState::Granted as i32
+    {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": {
+                    "code": "approval_identity_mismatch",
+                    "message": "Approval identity changed during decision; execution was not resumed"
+                }
+            })),
+        ));
+    }
+    if prior.state == ApprovalState::Requested as i32 {
+        return Ok(true);
+    }
+    if prior.state == ApprovalState::Granted as i32 {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "approval_delivery_unknown",
+                    "message": "Approval is granted but execution delivery is unknown"
+                }
+            })),
+        ));
+    }
+    Err((
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": {
+                "code": "approval_not_resumable",
+                "message": "Approval is not in a resumable state"
+            }
+        })),
+    ))
+}
+
+fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
+    if !claims.zdr {
+        return Ok(());
+    }
+    Err((
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({
+            "error": {
+                "code": "zdr_durable_mutation_forbidden",
+                "message": "Zero Data Retention credentials cannot create durable run events"
+            }
+        })),
+    ))
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct TodosQuery {
     run_id: Option<String>,
@@ -408,12 +568,16 @@ struct RunsQuery {
 
 async fn list_plans(
     State(state): State<AppState>,
+    bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .list_plans(ListPlansRequest { run_id })
+        .list_plans(authenticated_session_request(
+            ListPlansRequest { run_id },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -425,12 +589,16 @@ async fn list_plans(
 
 async fn get_plan(
     State(state): State<AppState>,
+    bearer: VerifiedModelBearer,
     Path(plan_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .get_plan(GetPlanRequest { plan_id })
+        .get_plan(authenticated_session_request(
+            GetPlanRequest { plan_id },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -441,16 +609,20 @@ async fn get_plan(
 
 async fn list_todos(
     State(state): State<AppState>,
+    bearer: VerifiedModelBearer,
     Path(thread_id): Path<String>,
     Query(query): Query<TodosQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .list_todos(ListTodosRequest {
-            thread_id,
-            run_id: query.run_id.unwrap_or_default(),
-        })
+        .list_todos(authenticated_session_request(
+            ListTodosRequest {
+                thread_id,
+                run_id: query.run_id.unwrap_or_default(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -462,12 +634,16 @@ async fn list_todos(
 
 async fn get_todo(
     State(state): State<AppState>,
+    bearer: VerifiedModelBearer,
     Path(todo_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .get_todo(GetTodoRequest { todo_id })
+        .get_todo(authenticated_session_request(
+            GetTodoRequest { todo_id },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -479,19 +655,23 @@ async fn get_todo(
 async fn list_approvals(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
     Query(query): Query<ApprovalsQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .list_approvals(ListApprovalsRequest {
-            run_id,
-            step_id: query.step_id.unwrap_or_default(),
-            // Cross-org IDOR fix (Phase 6): scope to the caller's verified
-            // JWT org, never a client-suppliable value.
-            org_id: claims.org_id.clone(),
-        })
+        .list_approvals(authenticated_session_request(
+            ListApprovalsRequest {
+                run_id,
+                step_id: query.step_id.unwrap_or_default(),
+                // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+                // JWT org, never a client-suppliable value.
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -504,17 +684,21 @@ async fn list_approvals(
 async fn get_approval(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(approval_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .get_approval(GetApprovalRequest {
-            approval_id,
-            // Cross-org IDOR fix (Phase 6): scope to the caller's verified
-            // JWT org, never a client-suppliable value.
-            org_id: claims.org_id.clone(),
-        })
+        .get_approval(authenticated_session_request(
+            GetApprovalRequest {
+                approval_id,
+                // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+                // JWT org, never a client-suppliable value.
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -527,12 +711,16 @@ async fn get_approval(
 
 async fn get_subagent_lineage(
     State(state): State<AppState>,
+    bearer: VerifiedModelBearer,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
-        .get_subagent_lineage(GetSubagentLineageRequest { thread_id })
+        .get_subagent_lineage(authenticated_session_request(
+            GetSubagentLineageRequest { thread_id },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -554,6 +742,7 @@ async fn get_subagent_lineage(
 async fn list_runs(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Query(query): Query<RunsQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let thread_id = query.thread_id.unwrap_or_default();
@@ -567,12 +756,15 @@ async fn list_runs(
     let response = state
         .run_client
         .clone()
-        .list_runs(ListRunsRequest {
-            thread_id,
-            status_filter: query.status.unwrap_or_default(),
-            after_run_id: query.after.unwrap_or_default(),
-            limit: query.limit.unwrap_or(0),
-        })
+        .list_runs(authenticated_session_request(
+            ListRunsRequest {
+                thread_id,
+                status_filter: query.status.unwrap_or_default(),
+                after_run_id: query.after.unwrap_or_default(),
+                limit: query.limit.unwrap_or(0),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -587,12 +779,16 @@ async fn list_runs(
 async fn get_run(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let detail = state
         .run_client
         .clone()
-        .get_run(GetRunRequest { run_id })
+        .get_run(authenticated_session_request(
+            GetRunRequest { run_id },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -614,6 +810,7 @@ struct TransitionPlanBody {
 async fn approve_plan(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(plan_id): Path<String>,
     Json(body): Json<TransitionPlanBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -621,12 +818,15 @@ async fn approve_plan(
     let resp = state
         .orchestration_client
         .clone()
-        .transition_plan(TransitionPlanRequest {
-            plan_id,
-            target_state: target as i32,
-            actor: claims.user_id.clone(),
-            reason: body.reason,
-        })
+        .transition_plan(authenticated_session_request(
+            TransitionPlanRequest {
+                plan_id,
+                target_state: target as i32,
+                actor: claims.user_id.clone(),
+                reason: body.reason,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -637,18 +837,22 @@ async fn approve_plan(
 async fn reject_plan(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(plan_id): Path<String>,
     Json(body): Json<TransitionPlanBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .orchestration_client
         .clone()
-        .transition_plan(TransitionPlanRequest {
-            plan_id,
-            target_state: PlanState::Rejected as i32,
-            actor: claims.user_id.clone(),
-            reason: body.reason,
-        })
+        .transition_plan(authenticated_session_request(
+            TransitionPlanRequest {
+                plan_id,
+                target_state: PlanState::Rejected as i32,
+                actor: claims.user_id.clone(),
+                reason: body.reason,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -666,6 +870,7 @@ struct TransitionTodoBody {
 async fn update_todo_status(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(todo_id): Path<String>,
     Json(body): Json<TransitionTodoBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -673,12 +878,15 @@ async fn update_todo_status(
     let resp = state
         .orchestration_client
         .clone()
-        .transition_todo(TransitionTodoRequest {
-            todo_id,
-            target_state: target as i32,
-            actor: claims.user_id.clone(),
-            reason: body.reason,
-        })
+        .transition_todo(authenticated_session_request(
+            TransitionTodoRequest {
+                todo_id,
+                target_state: target as i32,
+                actor: claims.user_id.clone(),
+                reason: body.reason,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -696,9 +904,12 @@ struct DecideApprovalBody {
 async fn decide_approval(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    execution_bearer: VerifiedExecutionBearer,
+    session_bearer: VerifiedModelBearer,
     Path(approval_id): Path<String>,
     Json(body): Json<DecideApprovalBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
     let target_state: ApprovalState = match body.decision.as_str() {
         "approve" => ApprovalState::Granted,
         "reject" => ApprovalState::Denied,
@@ -709,18 +920,39 @@ async fn decide_approval(
             ))
         }
     };
+    let prior_approval = if matches!(target_state, ApprovalState::Granted) {
+        state
+            .orchestration_client
+            .clone()
+            .get_approval(authenticated_session_request(
+                GetApprovalRequest {
+                    approval_id: approval_id.clone(),
+                    org_id: claims.org_id.clone(),
+                },
+                &session_bearer,
+            )?)
+            .await
+            .map_err(|error| grpc_status_to_http(&error))?
+            .into_inner()
+            .approval
+    } else {
+        None
+    };
     let resp = state
         .orchestration_client
         .clone()
-        .decide_approval(DecideApprovalRequest {
-            approval_id,
-            decision: target_state as i32,
-            decided_by: claims.user_id.clone(),
-            decision_reason: body.reason,
-            // Cross-org IDOR fix (Phase 6): scope to the caller's verified
-            // JWT org, never a client-suppliable value.
-            org_id: claims.org_id.clone(),
-        })
+        .decide_approval(authenticated_session_request(
+            DecideApprovalRequest {
+                approval_id,
+                decision: target_state as i32,
+                decided_by: claims.user_id.clone(),
+                decision_reason: body.reason,
+                // Cross-org IDOR fix (Phase 6): scope to the caller's verified
+                // JWT org, never a client-suppliable value.
+                org_id: claims.org_id.clone(),
+            },
+            &session_bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -730,31 +962,34 @@ async fn decide_approval(
 
     // Close the human-in-the-loop loop: a granted approval resumes the gated
     // run on execution-core (flips AwaitingApproval → Running) so the agent
-    // proceeds without manual intervention. session-core's decide_approval has
-    // already broadcast RunResumedAfterApproval for SSE consumers. Best-effort:
-    // the durable decision above already succeeded, so a resume hiccup must not
-    // fail the request. Denials/timeouts leave the run paused.
-    if matches!(target_state, ApprovalState::Granted) {
-        match state
+    // proceeds without manual intervention. The durable decision above remains
+    // the record of authority, but an execution failure must remain observable
+    // instead of being reported as a fully applied approval.
+    if matches!(target_state, ApprovalState::Granted)
+        && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
+    {
+        let resume = state
             .execution_client
             .clone()
-            .resume_run(ResumeRunRequest {
-                run_id: approval.run_id.clone(),
-                checkpoint_id: String::new(),
-                org_id: claims.org_id.clone(),
-            })
+            .resume_run(authenticated_execution_request(
+                ResumeRunRequest {
+                    run_id: approval.run_id.clone(),
+                    checkpoint_id: String::new(),
+                    org_id: claims.org_id.clone(),
+                },
+                &execution_bearer,
+                &session_bearer,
+            )?)
             .await
-        {
-            Ok(resp) => info!(
-                approval_id = %approval.id,
-                run_id = %approval.run_id,
-                resumed = resp.into_inner().resumed,
-                "approval granted → execution-core resume_run"
-            ),
-            Err(e) => {
-                warn!(error = %e, approval_id = %approval.id, run_id = %approval.run_id, "resume_run after approval failed (best-effort)");
-            }
-        }
+            .map_err(|error| grpc_status_to_http(&error))?
+            .into_inner();
+        let resume = require_execution_resume_ack(resume)?;
+        info!(
+            approval_id = %approval.id,
+            run_id = %approval.run_id,
+            resumed = resume.resumed,
+            "approval granted → execution-core resume_run"
+        );
     }
 
     Ok(Json(json!({ "approval": approval_value(&approval) })))
@@ -766,6 +1001,7 @@ async fn cancel_run(
     Extension(claims): Extension<Claims>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
     let envelope = mp_events::envelope::Envelope {
         event_id: new_ulid(),
         event_type: "RUN_CANCEL_REQUESTED".to_owned(),
@@ -779,7 +1015,7 @@ async fn cancel_run(
         user_id: claims.user_id.clone(),
         resource_ref: format!("run/{run_id}"),
         payload: serde_json::json!({ "run_id": run_id }),
-        zdr: false,
+        zdr: claims.zdr,
     };
     state
         .publisher
@@ -798,28 +1034,35 @@ async fn cancel_run(
 
 /// Resume a cancelled/paused run — flips execution-core's run state back to
 /// Running and records a `RUN_RESUME_REQUESTED` event for any downstream
-/// consumers. The direct gRPC call is best-effort so a stopped execution-core
-/// never blocks the operator action.
+/// consumers. The direct execution acknowledgement is required so callers are
+/// never told a run resumed while it remains gated.
 async fn resume_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    execution_bearer: VerifiedExecutionBearer,
+    session_bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
     // Direct, immediate unblock: execution-core flips AwaitingApproval/paused
     // → Running. Without this the event below has no consumer and the run
     // stays stuck.
-    if let Err(e) = state
+    let resume = state
         .execution_client
         .clone()
-        .resume_run(ResumeRunRequest {
-            run_id: run_id.clone(),
-            checkpoint_id: String::new(),
-            org_id: claims.org_id.clone(),
-        })
+        .resume_run(authenticated_execution_request(
+            ResumeRunRequest {
+                run_id: run_id.clone(),
+                checkpoint_id: String::new(),
+                org_id: claims.org_id.clone(),
+            },
+            &execution_bearer,
+            &session_bearer,
+        )?)
         .await
-    {
-        warn!(error = %e, run_id = %run_id, "execution-core resume_run failed (best-effort)");
-    }
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner();
+    let resume = require_execution_resume_ack(resume)?;
 
     let envelope = mp_events::envelope::Envelope {
         event_id: new_ulid(),
@@ -834,7 +1077,7 @@ async fn resume_run(
         user_id: claims.user_id.clone(),
         resource_ref: format!("run/{run_id}"),
         payload: serde_json::json!({ "run_id": run_id }),
-        zdr: false,
+        zdr: claims.zdr,
     };
     state
         .publisher
@@ -847,7 +1090,7 @@ async fn resume_run(
             )
         })?;
     Ok(Json(
-        json!({ "run_id": run_id, "status": "resume_requested" }),
+        json!({ "run_id": run_id, "status": "resumed", "resumed": resume.resumed }),
     ))
 }
 
@@ -898,6 +1141,8 @@ struct AiChatRequest {
     stream: bool,
     #[serde(default)]
     structured_output_schema: Option<String>,
+    #[serde(default)]
+    zdr: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -905,6 +1150,8 @@ struct AiEmbeddingRequest {
     input: String,
     model: String,
     provider: Option<String>,
+    #[serde(default)]
+    zdr: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1089,40 +1336,45 @@ const BROWSER_SUGGEST_SYSTEM_PROMPT: &str = concat!(
 async fn browser_suggest_action(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<BrowserSuggestActionRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 
     let request_id = new_ulid();
-    let visual_summary = browser_visual_summary(&state, &claims, &req, &request_id).await?;
+    let visual_summary =
+        browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
     let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
 
     let resp = state
         .inference_client
         .clone()
-        .infer(InferRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id.clone(),
-            model: req.model.clone().unwrap_or_default(),
-            provider_hint: req.provider.clone().unwrap_or_default(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".to_owned(),
-                    content: BROWSER_SUGGEST_SYSTEM_PROMPT.to_owned(),
-                    name: String::new(),
-                },
-                ChatMessage {
-                    role: "user".to_owned(),
-                    content: evidence,
-                    name: String::new(),
-                },
-            ],
-            temperature: 0.2,
-            max_tokens: 700,
-            structured_output_schema: BROWSER_ACTION_SCHEMA.to_owned(),
-            zdr: true,
-            ..Default::default()
-        })
+        .infer(authenticated_inference_request(
+            InferRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id.clone(),
+                model: req.model.clone().unwrap_or_default(),
+                provider_hint: req.provider.clone().unwrap_or_default(),
+                messages: vec![
+                    ChatMessage {
+                        role: "system".to_owned(),
+                        content: BROWSER_SUGGEST_SYSTEM_PROMPT.to_owned(),
+                        name: String::new(),
+                    },
+                    ChatMessage {
+                        role: "user".to_owned(),
+                        content: evidence,
+                        name: String::new(),
+                    },
+                ],
+                temperature: 0.2,
+                max_tokens: 700,
+                structured_output_schema: BROWSER_ACTION_SCHEMA.to_owned(),
+                zdr: true,
+                ..Default::default()
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -1155,6 +1407,7 @@ async fn browser_visual_summary(
     claims: &Claims,
     req: &BrowserSuggestActionRequest,
     request_id: &str,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Option<String>, HttpJsonError> {
     let Some(raw_base64) = req
         .screenshot_base64
@@ -1164,8 +1417,6 @@ async fn browser_visual_summary(
     else {
         return Ok(None);
     };
-
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let encoded = raw_base64
         .split_once(',')
@@ -1192,20 +1443,23 @@ async fn browser_visual_summary(
     match state
         .inference_client
         .clone()
-        .analyze_image(AnalyzeImageRequest {
-            request_id: format!("{request_id}-vision"),
-            org_id: claims.org_id.clone(),
-            image_url: String::new(),
-            image_data,
-            mime_type: req
-                .screenshot_mime_type
-                .clone()
-                .unwrap_or_else(|| "image/png".to_owned()),
-            prompt: prompt.to_owned(),
-            model: req.model.clone().unwrap_or_default(),
-            provider_hint: req.provider.clone().unwrap_or_default(),
-            max_tokens: 700,
-        })
+        .analyze_image(authenticated_inference_request(
+            AnalyzeImageRequest {
+                request_id: format!("{request_id}-vision"),
+                org_id: claims.org_id.clone(),
+                image_url: String::new(),
+                image_data,
+                mime_type: req
+                    .screenshot_mime_type
+                    .clone()
+                    .unwrap_or_else(|| "image/png".to_owned()),
+                prompt: prompt.to_owned(),
+                model: req.model.clone().unwrap_or_default(),
+                provider_hint: req.provider.clone().unwrap_or_default(),
+                max_tokens: 700,
+            },
+            inference_bearer,
+        ))
         .await
     {
         Ok(resp) => Ok(Some(resp.into_inner().description)),
@@ -1231,9 +1485,10 @@ fn browser_suggestion_prompt(
     let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
     let visual_observation =
         compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
-    let visual_summary = visual_summary
-        .map(|summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS))
-        .unwrap_or_else(|| "not provided".to_owned());
+    let visual_summary = visual_summary.map_or_else(
+        || "not provided".to_owned(),
+        |summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS),
+    );
     let visual_artifact = req
         .visual_observation_artifact_id
         .as_deref()
@@ -1252,8 +1507,7 @@ fn browser_suggestion_value(parsed: &Value) -> Value {
     let action_kind = parsed
         .get("action")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("done");
+        .map_or("done", str::trim);
     let action = browser_action_value(action_kind, parsed);
     json!({
         "done": action_kind == "done",
@@ -1265,12 +1519,14 @@ fn browser_suggestion_value(parsed: &Value) -> Value {
 
 fn browser_action_value(action_kind: &str, parsed: &Value) -> Value {
     match action_kind {
-        "navigate" => string_value(parsed, "url", 2_000)
-            .is_empty()
-            .then_some(Value::Null)
-            .unwrap_or_else(
-                || json!({ "type": "navigate", "url": string_value(parsed, "url", 2_000) }),
-            ),
+        "navigate" => {
+            let url = string_value(parsed, "url", 2_000);
+            if url.is_empty() {
+                Value::Null
+            } else {
+                json!({ "type": "navigate", "url": url })
+            }
+        }
         "click" => selector_action(parsed, "click"),
         "type" => {
             let selector = string_value(parsed, "selector", 1_000);
@@ -1371,9 +1627,11 @@ fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
 async fn ai_chat(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiChatRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    let zdr = claims.effective_zdr(req.zdr);
     let messages: Vec<ChatMessage> = req
         .messages
         .iter()
@@ -1387,18 +1645,21 @@ async fn ai_chat(
     let resp = state
         .inference_client
         .clone()
-        .infer(InferRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id.clone(),
-            model: req.model,
-            provider_hint: String::new(),
-            messages,
-            temperature: 0.7,
-            max_tokens: 4096,
-            structured_output_schema: req.structured_output_schema.unwrap_or_default(),
-            zdr: false,
-            ..Default::default()
-        })
+        .infer(authenticated_inference_request(
+            InferRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id.clone(),
+                model: req.model,
+                provider_hint: String::new(),
+                messages,
+                temperature: 0.7,
+                max_tokens: 4096,
+                structured_output_schema: req.structured_output_schema.unwrap_or_default(),
+                zdr,
+                ..Default::default()
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -1501,6 +1762,7 @@ struct RecommendPlanRequest {
 async fn recommend_plan(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<RecommendPlanRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
@@ -1524,18 +1786,21 @@ async fn recommend_plan(
     let resp = state
         .inference_client
         .clone()
-        .infer(InferRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id.clone(),
-            model: String::new(),
-            provider_hint: String::new(),
-            messages,
-            temperature: 0.55,
-            max_tokens: 1100,
-            structured_output_schema: RECOMMEND_PLAN_SCHEMA.to_owned(),
-            zdr: true,
-            ..Default::default()
-        })
+        .infer(authenticated_inference_request(
+            InferRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id.clone(),
+                model: String::new(),
+                provider_hint: String::new(),
+                messages,
+                temperature: 0.55,
+                max_tokens: 1100,
+                structured_output_schema: RECOMMEND_PLAN_SCHEMA.to_owned(),
+                zdr: true,
+                ..Default::default()
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -1629,26 +1894,28 @@ fn expected_outcomes_field(parsed: &Value, limit: usize) -> Vec<Value> {
 async fn ai_embeddings(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiEmbeddingRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    let zdr = claims.effective_zdr(req.zdr);
     let request_id = new_ulid();
     let resp = state
         .inference_client
         .clone()
-        .create_embedding(CreateEmbeddingRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            text: req.input,
-            model: req.model,
-            provider_hint: req.provider.unwrap_or_default(),
-            // This gateway primitive carries no ZDR signal (AiEmbeddingRequest
-            // has no zdr field); the ZDR egress guard lives in the Data Plane.
-            // Phase 3 PR-3 added CreateEmbeddingRequest.zdr — false here is honest.
-            zdr: false,
-            // No region preference expressed at this primitive — inference-core
-            // uses its configured EU deployment (deny-by-default for non-EU).
-            region: String::new(),
-        })
+        .create_embedding(authenticated_inference_request(
+            CreateEmbeddingRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                text: req.input,
+                model: req.model,
+                provider_hint: req.provider.unwrap_or_default(),
+                zdr,
+                // No region preference expressed at this primitive — inference-core
+                // uses its configured EU deployment (deny-by-default for non-EU).
+                region: String::new(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -1663,7 +1930,7 @@ async fn ai_embeddings(
 }
 
 fn default_mcp_transport() -> String {
-    "stdio".to_owned()
+    "http".to_owned()
 }
 const fn default_true() -> bool {
     true
@@ -1680,13 +1947,14 @@ fn default_mcp_scope() -> String {
 #[derive(Debug, Deserialize)]
 struct McpRegisterBody {
     name: String,
-    /// `stdio:///path/to/exe --flags` or `http(s)://host` per transport.
+    /// Public HTTPS MCP bridge base URL. User-supplied process transports are
+    /// quarantined in the secure MVP.
     url: String,
     #[serde(default = "default_mcp_transport")]
     transport: String,
     #[serde(default)]
     token: String,
-    /// Tool-name prefixes the server may expose; empty = all (needs discovery).
+    /// Exact tool names the server may expose. Empty fails closed.
     #[serde(default)]
     tool_allowlist: Vec<String>,
     #[serde(default = "default_true")]
@@ -1707,16 +1975,17 @@ struct McpShareBody {
     user_ids: Vec<String>,
 }
 
-/// Admin = an `*:admin` scope in the verified token OR a BFF-forwarded
-/// `x-user-role: admin` (trusted on the internal bus, like `x-user-id`).
+/// Admin authority comes only from signed token scopes. Forwarded role headers
+/// are context hints and cannot grant access.
 fn req_is_admin(claims: &Claims, headers: &HeaderMap) -> bool {
-    let role = headers.get("x-user-role").and_then(|v| v.to_str().ok());
-    crate::ownership::is_admin_claim(&claims.scopes, role)
+    let _ = headers;
+    crate::ownership::is_admin_claim(&claims.scopes, None)
 }
 
 /// Project an [`McpServer`] + its ownership for an API response, deliberately
 /// omitting `token` (an operational secret — it never leaves the gateway). A
-/// server with no ownership record is reported as org-scoped (grandfathered).
+/// server without an ownership record is quarantined by list/use filters; the
+/// projection's empty owner is diagnostic only.
 fn mcp_server_json(s: &McpServer, ownership: Option<&crate::ownership::Ownership>) -> Value {
     let (scope, owner, shared) = ownership.map_or_else(
         || ("org", String::new(), Vec::new()),
@@ -1742,12 +2011,14 @@ fn mcp_server_json(s: &McpServer, ownership: Option<&crate::ownership::Ownership
 }
 
 /// `POST /v1/mcp/servers` — register (or upsert) an MCP server for the caller.
-/// Default scope is user-private; `scope:"org"` requires admin (defended here
-/// and authoritatively at the BFF). Records ownership and writes through to
-/// capability-core (best-effort: a catalog write failure never fails register).
+/// Default scope is user-private; `scope:"org"` requires an admin scope in the
+/// verified token (the BFF also checks for clearer UX). Records ownership and
+/// writes through to capability-core atomically from the caller's perspective:
+/// a catalog failure rolls back the provisional gateway entry.
 async fn mcp_register(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    capability_bearer: VerifiedCapabilityBearer,
     headers: HeaderMap,
     Json(body): Json<McpRegisterBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -1755,6 +2026,12 @@ async fn mcp_register(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "name and url are required" })),
+        ));
+    }
+    if !body.server_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "server_id is assigned by the gateway on create" })),
         ));
     }
     let org_id = claims.org_id.clone();
@@ -1799,28 +2076,52 @@ async fn mcp_register(
         );
     }
 
-    // Best-effort write-through to capability-core (matrix §4.1/H.1), mirroring
-    // the gRPC handler — fire-and-forget; a write failure never fails register.
-    if !state.capability_core_base_url.is_empty() {
-        if let Some(server) = resp.server.as_ref() {
-            if !org_id.is_empty() && !server.name.is_empty() {
-                let payload =
-                    crate::runtime_registries::mcp_capability_payload(&org_id, server, &ownership);
-                let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
-                let client = state.http_client.clone();
-                tokio::spawn(async move {
-                    match client.post(&url).json(&payload).send().await {
-                        Ok(r) if !r.status().is_success() => {
-                            warn!(status = %r.status(), "mcp catalog write-through non-2xx (best-effort)");
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "mcp catalog write-through failed (best-effort)");
-                        }
-                        _ => {}
-                    }
-                });
-            }
+    // capability-core is the registry system of record. A create is not
+    // successful until the authenticated catalog write succeeds; on failure we
+    // remove the provisional gateway cache entry so the two catalogs cannot
+    // silently diverge.
+    let Some(registered) = resp.server.as_ref() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "MCP registration returned no server"})),
+        ));
+    };
+    if state.capability_core_base_url.is_empty() {
+        state.mcp.remove(&org_id, &registered.server_id);
+        state
+            .ownership
+            .remove(&org_id, crate::ownership::KIND_MCP, &registered.server_id);
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "capability registry is unavailable"})),
+        ));
+    }
+    let payload =
+        crate::runtime_registries::mcp_capability_payload(&org_id, registered, &ownership);
+    let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
+    let catalog_result = state
+        .http_client
+        .post(url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&payload)
+        .send()
+        .await;
+    let catalog_ok = catalog_result
+        .as_ref()
+        .is_ok_and(|response| response.status().is_success());
+    if !catalog_ok {
+        state.mcp.remove(&org_id, &registered.server_id);
+        state
+            .ownership
+            .remove(&org_id, crate::ownership::KIND_MCP, &registered.server_id);
+        match catalog_result {
+            Ok(response) => warn!(status = %response.status(), "MCP catalog registration rejected"),
+            Err(error) => warn!(error = %error, "MCP catalog registration unavailable"),
         }
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "capability registry rejected MCP registration"})),
+        ));
     }
 
     let owned = resp
@@ -1875,6 +2176,7 @@ async fn mcp_list(
 async fn mcp_delete(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    capability_bearer: VerifiedCapabilityBearer,
     headers: HeaderMap,
     Path(server_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -1889,6 +2191,35 @@ async fn mcp_delete(
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "not allowed to remove this MCP server" })),
+        ));
+    }
+    if state.capability_core_base_url.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "capability registry is unavailable"})),
+        ));
+    }
+    let catalog_url = format!("{}/api/v1/mcp/{server_id}", state.capability_core_base_url);
+    let catalog_response = state
+        .http_client
+        .delete(catalog_url)
+        .bearer_auth(capability_bearer.as_str())
+        .send()
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "MCP catalog delete unavailable");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "capability registry is unavailable"})),
+            )
+        })?;
+    if !catalog_response.status().is_success()
+        && catalog_response.status() != reqwest::StatusCode::NOT_FOUND
+    {
+        warn!(status = %catalog_response.status(), "MCP catalog delete rejected");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "capability registry rejected MCP deletion"})),
         ));
     }
     let removed = state.mcp.remove(&claims.org_id, &server_id);
@@ -1930,15 +2261,19 @@ async fn mcp_share(
 /// Active inference model catalogue.
 async fn ai_models(
     State(state): State<AppState>,
+    inference_bearer: VerifiedInferenceBearer,
     Query(query): Query<AiModelsQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .inference_client
         .clone()
-        .list_models(ListModelsRequest {
-            modality: query.modality.unwrap_or_default(),
-            provider: query.provider.unwrap_or_default(),
-        })
+        .list_models(authenticated_inference_request(
+            ListModelsRequest {
+                modality: query.modality.unwrap_or_default(),
+                provider: query.provider.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -1963,6 +2298,7 @@ async fn ai_models(
 async fn ai_images(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiImagesRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let operation = req
@@ -1982,9 +2318,11 @@ async fn ai_images(
         .to_ascii_lowercase();
 
     match operation.as_str() {
-        "generate" | "image" | "text_to_image" => generate_image(state, claims, req).await,
-        "analyze" | "vision" => analyze_image(state, claims, req).await,
-        "ocr" | "extract_text" => extract_image_text(state, claims, req).await,
+        "generate" | "image" | "text_to_image" => {
+            generate_image(state, claims, req, &inference_bearer).await
+        }
+        "analyze" | "vision" => analyze_image(state, claims, req, &inference_bearer).await,
+        "ocr" | "extract_text" => extract_image_text(state, claims, req, &inference_bearer).await,
         _ => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -1997,23 +2335,26 @@ async fn ai_images(
 async fn ai_images_analyze(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiImagesRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_image(state, claims, req).await
+    analyze_image(state, claims, req, &inference_bearer).await
 }
 
 async fn ai_images_ocr(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiImagesRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    extract_image_text(state, claims, req).await
+    extract_image_text(state, claims, req, &inference_bearer).await
 }
 
 async fn generate_image(
     state: AppState,
     claims: Claims,
     req: AiImagesRequest,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let prompt = req.prompt.or(req.input).unwrap_or_default();
@@ -2027,16 +2368,19 @@ async fn generate_image(
     let resp = state
         .inference_client
         .clone()
-        .generate_image(GenerateImageRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            prompt,
-            model: req.model.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            size: req.size.unwrap_or_default(),
-            quality: req.quality.unwrap_or_default(),
-            n: req.n.unwrap_or(1),
-        })
+        .generate_image(authenticated_inference_request(
+            GenerateImageRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                prompt,
+                model: req.model.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                size: req.size.unwrap_or_default(),
+                quality: req.quality.unwrap_or_default(),
+                n: req.n.unwrap_or(1),
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2066,6 +2410,7 @@ async fn analyze_image(
     state: AppState,
     claims: Claims,
     req: AiImagesRequest,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let prompt = req
@@ -2078,17 +2423,20 @@ async fn analyze_image(
     let resp = state
         .inference_client
         .clone()
-        .analyze_image(AnalyzeImageRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            image_url,
-            image_data,
-            mime_type: req.mime_type.unwrap_or_default(),
-            prompt,
-            model: req.model.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            max_tokens: req.max_tokens.unwrap_or(1024),
-        })
+        .analyze_image(authenticated_inference_request(
+            AnalyzeImageRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                image_url,
+                image_data,
+                mime_type: req.mime_type.unwrap_or_default(),
+                prompt,
+                model: req.model.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                max_tokens: req.max_tokens.unwrap_or(1024),
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2108,6 +2456,7 @@ async fn extract_image_text(
     state: AppState,
     claims: Claims,
     req: AiImagesRequest,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let (image_url, image_data) =
@@ -2116,15 +2465,18 @@ async fn extract_image_text(
     let resp = state
         .inference_client
         .clone()
-        .extract_image_text(ExtractImageTextRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            image_url,
-            image_data,
-            mime_type: req.mime_type.unwrap_or_default(),
-            model: req.model.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-        })
+        .extract_image_text(authenticated_inference_request(
+            ExtractImageTextRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                image_url,
+                image_data,
+                mime_type: req.mime_type.unwrap_or_default(),
+                model: req.model.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2173,6 +2525,7 @@ fn image_input(
 async fn ai_speech(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiSpeechRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -2204,15 +2557,18 @@ async fn ai_speech(
         let resp = state
             .inference_client
             .clone()
-            .transcribe_speech(TranscribeSpeechRequest {
-                request_id: request_id.clone(),
-                org_id: claims.org_id,
-                audio,
-                format: req.format.unwrap_or_else(|| "mp3".to_owned()),
-                model: req.model.unwrap_or_default(),
-                provider_hint: req.provider.unwrap_or_default(),
-                language: req.language.unwrap_or_default(),
-            })
+            .transcribe_speech(authenticated_inference_request(
+                TranscribeSpeechRequest {
+                    request_id: request_id.clone(),
+                    org_id: claims.org_id,
+                    audio,
+                    format: req.format.unwrap_or_else(|| "mp3".to_owned()),
+                    model: req.model.unwrap_or_default(),
+                    provider_hint: req.provider.unwrap_or_default(),
+                    language: req.language.unwrap_or_default(),
+                },
+                &inference_bearer,
+            ))
             .await
             .map_err(|e| grpc_status_to_http(&e))?
             .into_inner();
@@ -2248,16 +2604,19 @@ async fn ai_speech(
     let resp = state
         .inference_client
         .clone()
-        .synthesize_speech(SynthesizeSpeechRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            text,
-            voice: req.voice.unwrap_or_default(),
-            format: req.format.unwrap_or_else(|| "mp3".to_owned()),
-            model: req.model.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            language: req.language.unwrap_or_default(),
-        })
+        .synthesize_speech(authenticated_inference_request(
+            SynthesizeSpeechRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                text,
+                voice: req.voice.unwrap_or_default(),
+                format: req.format.unwrap_or_else(|| "mp3".to_owned()),
+                model: req.model.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                language: req.language.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2276,15 +2635,19 @@ async fn ai_speech(
 /// Provider voice catalogue for speech clients.
 async fn ai_speech_voices(
     State(state): State<AppState>,
+    inference_bearer: VerifiedInferenceBearer,
     Query(query): Query<AiSpeechVoicesQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .inference_client
         .clone()
-        .list_speech_voices(ListSpeechVoicesRequest {
-            provider: query.provider.unwrap_or_default(),
-            language: query.language.unwrap_or_default(),
-        })
+        .list_speech_voices(authenticated_inference_request(
+            ListSpeechVoicesRequest {
+                provider: query.provider.unwrap_or_default(),
+                language: query.language.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2316,6 +2679,7 @@ async fn batch_translate(
     org_id: String,
     req: AiTranslateRequest,
     request_id: &str,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let Some(items) = req.items else {
         return Err((
@@ -2326,21 +2690,24 @@ async fn batch_translate(
     let resp = state
         .inference_client
         .clone()
-        .batch_translate_text(BatchTranslateTextRequest {
-            request_id: request_id.to_owned(),
-            org_id,
-            items: items
-                .into_iter()
-                .map(|item| TranslationInput {
-                    id: item.id.unwrap_or_default(),
-                    text: item.text,
-                })
-                .collect(),
-            source_language: req.source_language.unwrap_or_default(),
-            target_language: req.target_language.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            model: req.model.unwrap_or_default(),
-        })
+        .batch_translate_text(authenticated_inference_request(
+            BatchTranslateTextRequest {
+                request_id: request_id.to_owned(),
+                org_id,
+                items: items
+                    .into_iter()
+                    .map(|item| TranslationInput {
+                        id: item.id.unwrap_or_default(),
+                        text: item.text,
+                    })
+                    .collect(),
+                source_language: req.source_language.unwrap_or_default(),
+                target_language: req.target_language.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                model: req.model.unwrap_or_default(),
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2372,6 +2739,7 @@ async fn batch_translate(
 async fn ai_translate(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiTranslateRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let operation = req
@@ -2391,17 +2759,23 @@ async fn ai_translate(
             req.text.unwrap_or_default(),
             req.provider.unwrap_or_default(),
             req.model.unwrap_or_default(),
+            &inference_bearer,
         )
         .await;
     }
 
     if matches!(operation.as_str(), "languages" | "list_languages") {
-        return list_translation_languages(state, req.provider.unwrap_or_default()).await;
+        return list_translation_languages(
+            state,
+            req.provider.unwrap_or_default(),
+            &inference_bearer,
+        )
+        .await;
     }
 
     let request_id = new_ulid();
     if matches!(operation.as_str(), "batch" | "batch_translate") {
-        return batch_translate(&state, claims.org_id, req, &request_id).await;
+        return batch_translate(&state, claims.org_id, req, &request_id, &inference_bearer).await;
     }
 
     if !matches!(operation.as_str(), "translate" | "text") {
@@ -2414,15 +2788,18 @@ async fn ai_translate(
     let resp = state
         .inference_client
         .clone()
-        .translate_text(TranslateTextRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            text: req.text.unwrap_or_default(),
-            source_language: req.source_language.unwrap_or_default(),
-            target_language: req.target_language.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            model: req.model.unwrap_or_default(),
-        })
+        .translate_text(authenticated_inference_request(
+            TranslateTextRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                text: req.text.unwrap_or_default(),
+                source_language: req.source_language.unwrap_or_default(),
+                target_language: req.target_language.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                model: req.model.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2442,6 +2819,7 @@ async fn ai_translate(
 async fn ai_translate_detect(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiTranslateRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     detect_text_language(
@@ -2450,6 +2828,7 @@ async fn ai_translate_detect(
         req.text.unwrap_or_default(),
         req.provider.unwrap_or_default(),
         req.model.unwrap_or_default(),
+        &inference_bearer,
     )
     .await
 }
@@ -2457,9 +2836,10 @@ async fn ai_translate_detect(
 /// Supported translation languages.
 async fn ai_translate_languages(
     State(state): State<AppState>,
+    inference_bearer: VerifiedInferenceBearer,
     Query(query): Query<AiTranslateLanguagesQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    list_translation_languages(state, query.provider.unwrap_or_default()).await
+    list_translation_languages(state, query.provider.unwrap_or_default(), &inference_bearer).await
 }
 
 async fn detect_text_language(
@@ -2468,18 +2848,22 @@ async fn detect_text_language(
     text: String,
     provider_hint: String,
     model: String,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let resp = state
         .inference_client
         .clone()
-        .detect_text_language(DetectTextLanguageRequest {
-            request_id: request_id.clone(),
-            org_id,
-            text,
-            provider_hint,
-            model,
-        })
+        .detect_text_language(authenticated_inference_request(
+            DetectTextLanguageRequest {
+                request_id: request_id.clone(),
+                org_id,
+                text,
+                provider_hint,
+                model,
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2508,11 +2892,15 @@ async fn detect_text_language(
 async fn list_translation_languages(
     state: AppState,
     provider: String,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .inference_client
         .clone()
-        .list_translation_languages(ListTranslationLanguagesRequest { provider })
+        .list_translation_languages(authenticated_inference_request(
+            ListTranslationLanguagesRequest { provider },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2536,41 +2924,46 @@ async fn list_translation_languages(
 async fn ai_documents_analyze(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiDocumentIntelRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_document_with_model(state, claims, req, "prebuilt-document").await
+    analyze_document_with_model(state, claims, req, "prebuilt-document", &inference_bearer).await
 }
 
 async fn ai_documents_layout(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiDocumentIntelRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_document_with_model(state, claims, req, "prebuilt-layout").await
+    analyze_document_with_model(state, claims, req, "prebuilt-layout", &inference_bearer).await
 }
 
 async fn ai_documents_forms(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiDocumentIntelRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_document_with_model(state, claims, req, "prebuilt-document").await
+    analyze_document_with_model(state, claims, req, "prebuilt-document", &inference_bearer).await
 }
 
 async fn ai_documents_receipts(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiDocumentIntelRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_document_with_model(state, claims, req, "prebuilt-receipt").await
+    analyze_document_with_model(state, claims, req, "prebuilt-receipt", &inference_bearer).await
 }
 
 async fn ai_documents_invoices(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiDocumentIntelRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_document_with_model(state, claims, req, "prebuilt-invoice").await
+    analyze_document_with_model(state, claims, req, "prebuilt-invoice", &inference_bearer).await
 }
 
 async fn analyze_document_with_model(
@@ -2578,6 +2971,7 @@ async fn analyze_document_with_model(
     claims: Claims,
     req: AiDocumentIntelRequest,
     default_model: &str,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let (document_url, document_data) = document_input(
@@ -2589,17 +2983,20 @@ async fn analyze_document_with_model(
     let resp = state
         .inference_client
         .clone()
-        .analyze_document(AnalyzeDocumentRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            document_url,
-            document_data,
-            content_type: req.content_type.unwrap_or_default(),
-            model: req.model.unwrap_or_else(|| default_model.to_owned()),
-            provider_hint: req.provider.unwrap_or_default(),
-            pages: req.pages.unwrap_or_default(),
-            locale: req.locale.unwrap_or_default(),
-        })
+        .analyze_document(authenticated_inference_request(
+            AnalyzeDocumentRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                document_url,
+                document_data,
+                content_type: req.content_type.unwrap_or_default(),
+                model: req.model.unwrap_or_else(|| default_model.to_owned()),
+                provider_hint: req.provider.unwrap_or_default(),
+                pages: req.pages.unwrap_or_default(),
+                locale: req.locale.unwrap_or_default(),
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2657,61 +3054,68 @@ fn parse_json_value(raw: &str) -> Value {
 async fn ai_language(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let operation = req
         .operation
         .clone()
         .unwrap_or_else(|| "sentiment".to_owned());
-    analyze_language_with_operation(state, claims, req, &operation).await
+    analyze_language_with_operation(state, claims, req, &operation, &inference_bearer).await
 }
 
 async fn ai_language_sentiment(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_language_with_operation(state, claims, req, "sentiment").await
+    analyze_language_with_operation(state, claims, req, "sentiment", &inference_bearer).await
 }
 
 async fn ai_language_entities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_language_with_operation(state, claims, req, "entities").await
+    analyze_language_with_operation(state, claims, req, "entities", &inference_bearer).await
 }
 
 async fn ai_language_key_phrases(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_language_with_operation(state, claims, req, "key_phrases").await
+    analyze_language_with_operation(state, claims, req, "key_phrases", &inference_bearer).await
 }
 
 async fn ai_language_pii(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_language_with_operation(state, claims, req, "pii").await
+    analyze_language_with_operation(state, claims, req, "pii", &inference_bearer).await
 }
 
 async fn ai_language_detect(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_language_with_operation(state, claims, req, "detect").await
+    analyze_language_with_operation(state, claims, req, "detect", &inference_bearer).await
 }
 
 async fn ai_language_summary_text(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiLanguageRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_language_with_operation(state, claims, req, "summary").await
+    analyze_language_with_operation(state, claims, req, "summary", &inference_bearer).await
 }
 
 async fn analyze_language_with_operation(
@@ -2719,26 +3123,30 @@ async fn analyze_language_with_operation(
     claims: Claims,
     req: AiLanguageRequest,
     operation: &str,
+    inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let texts = language_texts(req.text, req.texts)?;
     let resp = state
         .inference_client
         .clone()
-        .analyze_language(AnalyzeLanguageRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            operation: operation.to_owned(),
-            texts,
-            language: req.language.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            model: req.model.unwrap_or_default(),
-            sentence_count: req.sentence_count.unwrap_or(3),
-            summary_kind: req
-                .summary_kind
-                .or(req.kind)
-                .unwrap_or_else(|| "AbstractiveSummarization".to_owned()),
-        })
+        .analyze_language(authenticated_inference_request(
+            AnalyzeLanguageRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                operation: operation.to_owned(),
+                texts,
+                language: req.language.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                model: req.model.unwrap_or_default(),
+                sentence_count: req.sentence_count.unwrap_or(3),
+                summary_kind: req
+                    .summary_kind
+                    .or(req.kind)
+                    .unwrap_or_else(|| "AbstractiveSummarization".to_owned()),
+            },
+            inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2791,13 +3199,23 @@ fn language_result_value(result: &mp_contracts::model_plane::v1::LanguageAnalysi
 async fn ai_documents(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(req): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::dataplane::documents_v2::CreateDocumentRequest;
-    let resp = state
-        .document_client
-        .clone()
-        .create_document(CreateDocumentRequest {
+    if claims.effective_zdr(req["zdr"].as_bool().unwrap_or(false))
+        || crate::dataplane::document_zdr_requested(
+            false,
+            req["zdr_classification"].as_str().unwrap_or(""),
+        )
+    {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": "durable document ingest is unavailable under ZDR" })),
+        ));
+    }
+    let request = crate::retrieval::authorize(
+        tonic::Request::new(CreateDocumentRequest {
             org_id: claims.org_id,
             source: req["url"].as_str().unwrap_or("").to_owned(),
             r#type: req["type"].as_str().unwrap_or("document").to_owned(),
@@ -2806,7 +3224,19 @@ async fn ai_documents(
             metadata: None,
             zdr_classification: req["zdr_classification"].as_str().unwrap_or("").to_owned(),
             ingest_policy: None,
-        })
+        }),
+        &bearer,
+    )
+    .map_err(|status| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": status.message() })),
+        )
+    })?;
+    let resp = state
+        .document_client
+        .clone()
+        .create_document(request)
         .await
         .map_err(|e| {
             let code = match e.code() {
@@ -2824,27 +3254,31 @@ async fn ai_documents(
 async fn ai_realtime(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiRealtimeSessionRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let resp = state
         .inference_client
         .clone()
-        .create_realtime_session(CreateRealtimeSessionRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            model: req.model.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-            voice: req.voice.unwrap_or_else(|| "alloy".to_owned()),
-            instructions: req.instructions.unwrap_or_default(),
-            input_audio_format: req.input_audio_format.unwrap_or_else(|| "pcm16".to_owned()),
-            output_audio_format: req
-                .output_audio_format
-                .unwrap_or_else(|| "pcm16".to_owned()),
-            turn_detection_type: req
-                .turn_detection_type
-                .unwrap_or_else(|| "server_vad".to_owned()),
-        })
+        .create_realtime_session(authenticated_inference_request(
+            CreateRealtimeSessionRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                model: req.model.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+                voice: req.voice.unwrap_or_else(|| "alloy".to_owned()),
+                instructions: req.instructions.unwrap_or_default(),
+                input_audio_format: req.input_audio_format.unwrap_or_else(|| "pcm16".to_owned()),
+                output_audio_format: req
+                    .output_audio_format
+                    .unwrap_or_else(|| "pcm16".to_owned()),
+                turn_detection_type: req
+                    .turn_detection_type
+                    .unwrap_or_else(|| "server_vad".to_owned()),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2862,14 +3296,20 @@ async fn ai_realtime(
     })))
 }
 
-async fn ai_realtime_models(State(state): State<AppState>) -> Result<Json<Value>, HttpJsonError> {
+async fn ai_realtime_models(
+    State(state): State<AppState>,
+    inference_bearer: VerifiedInferenceBearer,
+) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .inference_client
         .clone()
-        .list_models(ListModelsRequest {
-            modality: "realtime".to_owned(),
-            provider: String::new(),
-        })
+        .list_models(authenticated_inference_request(
+            ListModelsRequest {
+                modality: "realtime".to_owned(),
+                provider: String::new(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2893,23 +3333,27 @@ async fn ai_realtime_models(State(state): State<AppState>) -> Result<Json<Value>
 async fn ai_video_generate(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiVideoGenerateRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     let resp = state
         .inference_client
         .clone()
-        .create_video_generation_job(CreateVideoGenerationJobRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            prompt: req.prompt,
-            width: req.width.unwrap_or(1280),
-            height: req.height.unwrap_or(720),
-            duration_seconds: req.duration_seconds.unwrap_or(5),
-            n_variants: req.n_variants.unwrap_or(1),
-            model: req.model.unwrap_or_default(),
-            provider_hint: req.provider.unwrap_or_default(),
-        })
+        .create_video_generation_job(authenticated_inference_request(
+            CreateVideoGenerationJobRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                prompt: req.prompt,
+                width: req.width.unwrap_or(1280),
+                height: req.height.unwrap_or(720),
+                duration_seconds: req.duration_seconds.unwrap_or(5),
+                n_variants: req.n_variants.unwrap_or(1),
+                model: req.model.unwrap_or_default(),
+                provider_hint: req.provider.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2928,6 +3372,7 @@ async fn ai_video_generate(
 async fn ai_video_job(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Path(job_id): Path<String>,
     Query(query): Query<AiVideoJobQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
@@ -2935,13 +3380,16 @@ async fn ai_video_job(
     let resp = state
         .inference_client
         .clone()
-        .get_video_generation_job(GetVideoGenerationJobRequest {
-            request_id: request_id.clone(),
-            org_id: claims.org_id,
-            job_id,
-            provider_hint: query.provider.unwrap_or_default(),
-            model: query.model.unwrap_or_default(),
-        })
+        .get_video_generation_job(authenticated_inference_request(
+            GetVideoGenerationJobRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id,
+                job_id,
+                provider_hint: query.provider.unwrap_or_default(),
+                model: query.model.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2963,6 +3411,7 @@ async fn ai_video_job(
 async fn ai_video_content(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
     Path(generation_id): Path<String>,
     Query(query): Query<AiVideoJobQuery>,
 ) -> Result<Response, HttpJsonError> {
@@ -2970,13 +3419,16 @@ async fn ai_video_content(
     let stream = state
         .inference_client
         .clone()
-        .stream_video_generation_content(StreamVideoGenerationContentRequest {
-            request_id,
-            org_id: claims.org_id,
-            generation_id,
-            provider_hint: query.provider.unwrap_or_default(),
-            model: query.model.unwrap_or_default(),
-        })
+        .stream_video_generation_content(authenticated_inference_request(
+            StreamVideoGenerationContentRequest {
+                request_id,
+                org_id: claims.org_id,
+                generation_id,
+                provider_hint: query.provider.unwrap_or_default(),
+                model: query.model.unwrap_or_default(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -2997,14 +3449,20 @@ async fn ai_video_content(
     Ok(response)
 }
 
-async fn ai_video_models(State(state): State<AppState>) -> Result<Json<Value>, HttpJsonError> {
+async fn ai_video_models(
+    State(state): State<AppState>,
+    inference_bearer: VerifiedInferenceBearer,
+) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .inference_client
         .clone()
-        .list_models(ListModelsRequest {
-            modality: "video".to_owned(),
-            provider: String::new(),
-        })
+        .list_models(authenticated_inference_request(
+            ListModelsRequest {
+                modality: "video".to_owned(),
+                provider: String::new(),
+            },
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
@@ -3029,35 +3487,92 @@ async fn ai_video_models(State(state): State<AppState>) -> Result<Json<Value>, H
 // Capability proxy handlers  /v1/capabilities/*
 // ============================================================================
 
+fn capability_contract_value(
+    capability: &mp_contracts::model_plane::v1::CapabilityDetail,
+) -> Value {
+    let state = capability.state.as_str();
+    let execution_mode = capability.execution_mode.as_str();
+    let cost_class = capability.cost_class.as_str();
+    let complete = !capability.reason_code.is_empty()
+        && matches!(cost_class, "unknown" | "bounded" | "variable")
+        && match state {
+            "available" => {
+                matches!(execution_mode, "direct_read" | "agentic")
+                    && !capability.health_checked_at.is_empty()
+            }
+            "approval_required" => {
+                execution_mode == "agentic"
+                    && capability.requires_approval
+                    && !capability.health_checked_at.is_empty()
+            }
+            "disabled" | "unavailable" => execution_mode == "unavailable",
+            "unhealthy" | "not_configured" => {
+                execution_mode == "unavailable" && !capability.health_checked_at.is_empty()
+            }
+            _ => false,
+        };
+    let (state, reason_code, reason, execution_mode, cost_class, health_checked_at) = if complete {
+        (
+            capability.state.as_str(),
+            capability.reason_code.as_str(),
+            capability.reason.as_str(),
+            capability.execution_mode.as_str(),
+            capability.cost_class.as_str(),
+            capability.health_checked_at.as_str(),
+        )
+    } else {
+        (
+            "unavailable",
+            "availability_contract_missing",
+            "Capability source did not provide a complete availability contract.",
+            "unavailable",
+            "unknown",
+            "",
+        )
+    };
+    json!({
+        "id": capability.capability_id,
+        "name": capability.name,
+        "kind": capability.kind,
+        "version": capability.version,
+        "description": capability.description,
+        "risk_level": capability.risk_level,
+        "lazy_load": capability.lazy_load,
+        "scope": capability.scope,
+        "state": state,
+        "reason_code": reason_code,
+        "reason": reason,
+        "requires_approval": capability.requires_approval,
+        "execution_mode": execution_mode,
+        "cost_class": cost_class,
+        "health_checked_at": health_checked_at,
+    })
+}
+
 async fn list_capabilities_proxy(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::ListCapabilitiesRequest;
     let resp = state
         .capability_client
         .clone()
-        .list_capabilities(ListCapabilitiesRequest {
-            kind_filter: q.get("kind").cloned().unwrap_or_default(),
-            query: q.get("q").cloned().unwrap_or_default(),
-            after_id: q.get("after_id").cloned().unwrap_or_default(),
-            limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
-        })
+        .list_capabilities(capability_grpc_request(
+            ListCapabilitiesRequest {
+                kind_filter: q.get("kind").cloned().unwrap_or_default(),
+                query: q.get("q").cloned().unwrap_or_default(),
+                after_id: q.get("after_id").cloned().unwrap_or_default(),
+                limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     Ok(Json(json!({
-        "capabilities": resp.capabilities.iter().map(|c| json!({
-            "id": c.capability_id,
-            "name": c.name,
-            "kind": c.kind,
-            "version": c.version,
-            "description": c.description,
-            "risk_level": c.risk_level,
-            "lazy_load": c.lazy_load,
-            "scope": c.scope,
-        })).collect::<Vec<_>>(),
+        "capabilities": resp.capabilities.iter().map(capability_contract_value).collect::<Vec<_>>(),
         "has_more": resp.has_more,
     })))
 }
@@ -3065,29 +3580,24 @@ async fn list_capabilities_proxy(
 async fn get_capability_proxy(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::GetCapabilityRequest;
     let c = state
         .capability_client
         .clone()
-        .get_capability(GetCapabilityRequest {
-            capability_id: id,
-            version_constraint: String::new(),
-        })
+        .get_capability(capability_grpc_request(
+            GetCapabilityRequest {
+                capability_id: id,
+                version_constraint: String::new(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
-    Ok(Json(json!({
-        "id": c.capability_id,
-        "name": c.name,
-        "kind": c.kind,
-        "version": c.version,
-        "description": c.description,
-        "risk_level": c.risk_level,
-        "lazy_load": c.lazy_load,
-        "scope": c.scope,
-    })))
+    Ok(Json(capability_contract_value(&c)))
 }
 
 // ============================================================================
@@ -3099,6 +3609,7 @@ async fn get_capability_proxy(
 /// Proxy GET/POST to capability-core's /api/v1/{path}.
 async fn proxy_to_capability_core(
     state: &AppState,
+    bearer: &VerifiedCapabilityBearer,
     path: &str,
     method: &str,
     body: Option<&Value>,
@@ -3123,7 +3634,8 @@ async fn proxy_to_capability_core(
                 Json(json!({"error":"method not allowed"})),
             ))
         }
-    };
+    }
+    .bearer_auth(bearer.as_str());
     let resp = builder.send().await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -3140,9 +3652,27 @@ async fn proxy_to_capability_core(
     }
 }
 
+fn capability_grpc_request<T>(
+    value: T,
+    bearer: &VerifiedCapabilityBearer,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    let mut request = tonic::Request::new(value);
+    let authorization = format!("Bearer {}", bearer.as_str()).parse().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "verified capability credential is not forwardable"})),
+        )
+    })?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
 async fn list_tasks_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let path = format!(
@@ -3150,78 +3680,96 @@ async fn list_tasks_proxy(
         c.org_id,
         q.get("status").cloned().unwrap_or_default()
     );
-    proxy_to_capability_core(&s, &path, "GET", None).await
+    proxy_to_capability_core(&s, &bearer, &path, "GET", None).await
 }
 async fn create_task_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, "tasks", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, "tasks", "POST", Some(&b)).await
 }
 async fn get_task_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("tasks/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("tasks/{id}"), "GET", None).await
 }
 async fn patch_task_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("tasks/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, &format!("tasks/{id}"), "PATCH", Some(&b)).await
 }
 async fn cancel_task_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("tasks/{id}/cancel"), "POST", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("tasks/{id}/cancel"), "POST", None).await
 }
 
 async fn list_cron_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("cron?org_id={}", c.org_id), "GET", None).await
+    proxy_to_capability_core(
+        &s,
+        &bearer,
+        &format!("cron?org_id={}", c.org_id),
+        "GET",
+        None,
+    )
+    .await
 }
 async fn create_cron_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, "cron", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, "cron", "POST", Some(&b)).await
 }
 async fn get_cron_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("cron/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("cron/{id}"), "GET", None).await
 }
 async fn patch_cron_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("cron/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, &format!("cron/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_cron_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("cron/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("cron/{id}"), "DELETE", None).await
 }
 
 async fn list_memory_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let scope = q.get("scope").cloned().unwrap_or_default();
     proxy_to_capability_core(
         &s,
+        &bearer,
         &format!("memory?org_id={}&scope={scope}", c.org_id),
         "GET",
         None,
@@ -3231,63 +3779,79 @@ async fn list_memory_proxy(
 async fn create_memory_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, "memory", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, "memory", "POST", Some(&b)).await
 }
 async fn get_memory_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("memory/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("memory/{id}"), "GET", None).await
 }
 async fn patch_memory_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("memory/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, &format!("memory/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_memory_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("memory/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("memory/{id}"), "DELETE", None).await
 }
 
 async fn list_skills_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("skills?org_id={}", c.org_id), "GET", None).await
+    proxy_to_capability_core(
+        &s,
+        &bearer,
+        &format!("skills?org_id={}", c.org_id),
+        "GET",
+        None,
+    )
+    .await
 }
 async fn create_skill_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, "skills", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, "skills", "POST", Some(&b)).await
 }
 async fn get_skill_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("skills/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "GET", None).await
 }
 async fn patch_skill_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("skills/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_skill_proxy(
     State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &format!("skills/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "DELETE", None).await
 }
 
 pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
@@ -3668,12 +4232,16 @@ struct ListModelsHttpResponse {
 async fn list_models(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
 ) -> Result<Json<ListModelsHttpResponse>, (StatusCode, Json<serde_json::Value>)> {
     use mp_contracts::model_plane::v1::ListModelsRequest;
     let resp = state
         .inference_client
         .clone()
-        .list_models(ListModelsRequest::default())
+        .list_models(authenticated_inference_request(
+            ListModelsRequest::default(),
+            &inference_bearer,
+        ))
         .await
         .map_err(|e| {
             (
@@ -3708,6 +4276,8 @@ struct CreateDocumentHttpRequest {
     source: Option<String>,
     #[serde(default, rename = "type")]
     doc_type: Option<String>,
+    #[serde(default)]
+    zdr: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3722,6 +4292,7 @@ struct CreateDocumentHttpResponse {
 async fn create_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(req): Json<CreateDocumentHttpRequest>,
 ) -> Result<Json<CreateDocumentHttpResponse>, (StatusCode, Json<serde_json::Value>)> {
     use mp_contracts::dataplane::documents_v2::CreateDocumentRequest;
@@ -3732,20 +4303,34 @@ async fn create_document(
             Json(serde_json::json!({"error": "content is required"})),
         ));
     }
+    if claims.effective_zdr(req.zdr) {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({"error": "durable document ingest is unavailable under ZDR"})),
+        ));
+    }
 
+    let request = crate::retrieval::authorize(
+        tonic::Request::new(CreateDocumentRequest {
+            org_id: claims.org_id.clone(),
+            source: req.source.unwrap_or_else(|| "chat-upload".to_owned()),
+            r#type: req.doc_type.unwrap_or_else(|| "text".to_owned()),
+            title: req.title,
+            content: req.content,
+            ..Default::default()
+        }),
+        &bearer,
+    )
+    .map_err(|error| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": error.message() })),
+        )
+    })?;
     let resp = state
         .document_client
         .clone()
-        .create_document(crate::retrieval::authorize(tonic::Request::new(
-            CreateDocumentRequest {
-                org_id: claims.org_id.clone(),
-                source: req.source.unwrap_or_else(|| "chat-upload".to_owned()),
-                r#type: req.doc_type.unwrap_or_else(|| "text".to_owned()),
-                title: req.title,
-                content: req.content,
-                ..Default::default()
-            },
-        )))
+        .create_document(request)
         .await
         .map_err(|e| {
             (
@@ -3799,6 +4384,7 @@ struct ListThreadsResponse {
 async fn list_threads(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<ListThreadsResponse>, (StatusCode, Json<serde_json::Value>)> {
     use mp_contracts::model_plane::v1::ListThreadsRequest;
@@ -3806,11 +4392,14 @@ async fn list_threads(
     let response = state
         .session_client
         .clone()
-        .list_threads(ListThreadsRequest {
-            org_id: claims.org_id.clone(),
-            user_id: claims.user_id.clone(),
-            limit: query.limit.unwrap_or(80),
-        })
+        .list_threads(authenticated_session_request(
+            ListThreadsRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: query.limit.unwrap_or(80),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| {
             (
@@ -3855,6 +4444,7 @@ fn timestamp_to_rfc3339(value: Option<prost_types::Timestamp>) -> String {
 async fn list_thread_messages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
     Path(thread_id): Path<String>,
 ) -> Result<Json<ListThreadMessagesResponse>, (StatusCode, Json<serde_json::Value>)> {
     use mp_contracts::model_plane::v1::ListConversationRequest;
@@ -3870,10 +4460,13 @@ async fn list_thread_messages(
     let response = state
         .session_client
         .clone()
-        .list_conversation(ListConversationRequest {
-            org_id: claims.org_id.clone(),
-            thread_id: trimmed.to_owned(),
-        })
+        .list_conversation(authenticated_session_request(
+            ListConversationRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: trimmed.to_owned(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| {
             (
@@ -3904,12 +4497,68 @@ async fn list_thread_messages(
 async fn invoke(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    cost_bearer: Option<Extension<VerifiedCostBearer>>,
     Json(req): Json<InvokeRequest>,
 ) -> Result<Json<InvokeResponse>, (StatusCode, Json<serde_json::Value>)> {
     let start = std::time::Instant::now();
 
     // Normalize and validate the request
     let normalized = normalize::normalize(&req)?;
+    let effective_zdr = claims.effective_zdr(normalized.zdr);
+    let persistence = effective_invoke_persistence_plan(&claims, normalized.zdr);
+
+    // ZDR is a separate, deliberately narrow path. It must branch before the
+    // idempotency registry, budget/session clients, event publisher, and any
+    // response cache so request or response content cannot become durable.
+    if !persistence.all_durable_effects_allowed() {
+        let request_id = new_ulid();
+        let user_content = if crate::moderation::wants_moderation(&req.features) {
+            crate::moderation::redact_pii(&normalized.content).0
+        } else {
+            normalized.content.clone()
+        };
+        let infer_resp = state
+            .inference_client
+            .clone()
+            .infer(authenticated_inference_request(
+                mp_contracts::model_plane::v1::InferRequest {
+                    request_id: request_id.clone(),
+                    org_id: claims.org_id.clone(),
+                    model: normalized.model.clone(),
+                    provider_hint: String::new(),
+                    messages: vec![mp_contracts::model_plane::v1::ChatMessage {
+                        role: "user".to_owned(),
+                        content: user_content,
+                        name: String::new(),
+                    }],
+                    temperature: 0.7,
+                    max_tokens: 4096,
+                    structured_output_schema: normalized
+                        .structured_output_schema
+                        .clone()
+                        .unwrap_or_default(),
+                    zdr: true,
+                    ..Default::default()
+                },
+                &inference_bearer,
+            ))
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": error.to_string()})),
+                )
+            })?
+            .into_inner();
+
+        return Ok(Json(InvokeResponse {
+            request_id,
+            content: infer_resp.content,
+            model_used: infer_resp.model_used,
+        }));
+    }
 
     // chat-parity §1 — idempotent regenerate. A duplicate `/v1/invoke` carrying
     // the same `idempotency_key` returns the original response (no second
@@ -3944,16 +4593,27 @@ async fn invoke(
     };
 
     // Pre-flight budget check against cost-core
-    crate::budget::check_budget(&state.http_client, &claims.org_id, &normalized).await?;
+    let verified_bearer = cost_bearer
+        .as_ref()
+        .map_or("", |Extension(bearer)| bearer.as_str());
+    crate::budget::check_budget(
+        &state.http_client,
+        &claims.org_id,
+        &claims.user_id,
+        verified_bearer,
+        &normalized,
+    )
+    .await?;
 
     let request_id = new_ulid();
-    let session_run = session_flow::prepare_run(
+    let session_run = session_flow::prepare_run_authenticated(
         &state,
         normalized.thread_id.as_deref(),
         normalized.session_key.as_deref(),
         &claims.org_id,
         &claims.user_id,
         &normalized.content,
+        &model_bearer,
     )
     .await
     .map_err(|error| {
@@ -3980,7 +4640,7 @@ async fn invoke(
             "content_length": normalized.content.len(),
             "model": normalized.model,
         }),
-        zdr: normalized.zdr,
+        zdr: effective_zdr,
     };
 
     state
@@ -4009,25 +4669,28 @@ async fn invoke(
         state
             .inference_client
             .clone()
-            .infer(InferRequest {
-                request_id: request_id.clone(),
-                org_id: claims.org_id.clone(),
-                model: normalized.model.clone(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    role: "user".to_owned(),
-                    content: user_content,
-                    name: String::new(),
-                }],
-                temperature: 0.7,
-                max_tokens: 4096,
-                structured_output_schema: normalized
-                    .structured_output_schema
-                    .clone()
-                    .unwrap_or_default(),
-                zdr: normalized.zdr,
-                ..Default::default()
-            })
+            .infer(authenticated_inference_request(
+                InferRequest {
+                    request_id: request_id.clone(),
+                    org_id: claims.org_id.clone(),
+                    model: normalized.model.clone(),
+                    provider_hint: String::new(),
+                    messages: vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: user_content,
+                        name: String::new(),
+                    }],
+                    temperature: 0.7,
+                    max_tokens: 4096,
+                    structured_output_schema: normalized
+                        .structured_output_schema
+                        .clone()
+                        .unwrap_or_default(),
+                    zdr: effective_zdr,
+                    ..Default::default()
+                },
+                &inference_bearer,
+            ))
             .await
             .map_err(|e| {
                 (
@@ -4038,7 +4701,12 @@ async fn invoke(
             .into_inner()
     };
 
-    session_flow::append_assistant_message(&state, &session_run.thread_id, &infer_resp.content)
+    session_flow::append_assistant_message_authenticated(
+        &state,
+        &session_run.thread_id,
+        &infer_resp.content,
+        &model_bearer,
+    )
         .await
         .map_err(|error| {
             (
@@ -4073,7 +4741,7 @@ async fn invoke(
             "output_tokens": infer_resp.output_tokens,
             "latency_ms": latency_ms,
         }),
-        zdr: normalized.zdr,
+        zdr: effective_zdr,
     };
 
     if let Err(e) = state
@@ -4099,6 +4767,30 @@ async fn invoke(
         content: infer_resp.content,
         model_used: infer_resp.model_used,
     }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvokePersistencePlan {
+    Durable,
+    SuppressAllForZdr,
+}
+
+impl InvokePersistencePlan {
+    fn all_durable_effects_allowed(self) -> bool {
+        self == Self::Durable
+    }
+}
+
+fn invoke_persistence_plan(zdr: bool) -> InvokePersistencePlan {
+    if zdr {
+        InvokePersistencePlan::SuppressAllForZdr
+    } else {
+        InvokePersistencePlan::Durable
+    }
+}
+
+fn effective_invoke_persistence_plan(claims: &Claims, request_zdr: bool) -> InvokePersistencePlan {
+    invoke_persistence_plan(claims.effective_zdr(request_zdr))
 }
 
 #[derive(Deserialize)]
@@ -4185,7 +4877,7 @@ mod browser_suggestion_tests {
         let suggestion = browser_suggestion_value(&json!({
             "action": "wait_for",
             "selector": "#ready",
-            "timeout_ms": 120000,
+            "timeout_ms": 120_000,
             "reason": "Wait for dynamic content.",
             "confidence": 2.0
         }));
@@ -4213,5 +4905,189 @@ mod browser_suggestion_tests {
 
         assert!(prompt.contains("...[truncated]"));
         assert!(prompt.contains("Inspect page"));
+    }
+}
+
+#[cfg(test)]
+mod invoke_zdr_tests {
+    use super::*;
+
+    #[test]
+    fn zdr_invoke_plan_suppresses_every_durable_gateway_effect() {
+        let plan = invoke_persistence_plan(true);
+        assert_eq!(plan, InvokePersistencePlan::SuppressAllForZdr);
+        assert!(!plan.all_durable_effects_allowed());
+
+        let ordinary = invoke_persistence_plan(false);
+        assert_eq!(ordinary, InvokePersistencePlan::Durable);
+        assert!(ordinary.all_durable_effects_allowed());
+    }
+
+    #[test]
+    fn issuer_enforced_zdr_cannot_be_downgraded_by_the_request_body() {
+        let claims = Claims {
+            sub: "user-a".to_owned(),
+            iss: "issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: true,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        };
+
+        assert_eq!(
+            effective_invoke_persistence_plan(&claims, false),
+            InvokePersistencePlan::SuppressAllForZdr
+        );
+    }
+}
+
+#[cfg(test)]
+mod approval_resume_auth_tests {
+    use super::*;
+    use crate::auth::VerifiedExecutionBearer;
+
+    #[test]
+    fn approval_resume_uses_execution_ingress_and_separate_session_delegation() {
+        let request = authenticated_execution_request(
+            ResumeRunRequest::default(),
+            &VerifiedExecutionBearer::for_test("execution-core-token"),
+            &VerifiedModelBearer::for_test("session-core-token"),
+        )
+        .expect("verified downstream credentials must be forwardable");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer execution-core-token")
+        );
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-session-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer session-core-token")
+        );
+    }
+
+    #[test]
+    fn execution_resume_acknowledgement_fails_closed() {
+        let error = require_execution_resume_ack(ResumeRunResponse {
+            resumed: false,
+            step_index: 7,
+        })
+        .expect_err("a non-resume acknowledgement must not be reported as success");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let acknowledged = require_execution_resume_ack(ResumeRunResponse {
+            resumed: true,
+            step_index: 7,
+        })
+        .expect("execution acknowledgement");
+        assert!(acknowledged.resumed);
+    }
+
+    #[test]
+    fn identical_granted_decision_retry_does_not_request_another_resume() {
+        let mut prior = Approval {
+            id: "approval-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            state: ApprovalState::Requested as i32,
+            ..Default::default()
+        };
+        let decided = Approval {
+            state: ApprovalState::Granted as i32,
+            ..prior.clone()
+        };
+
+        assert!(should_resume_granted_approval(Some(&prior), &decided)
+            .expect("a fresh requested-to-granted transition is resumable"));
+        prior.state = ApprovalState::Granted as i32;
+        let retry_error = should_resume_granted_approval(Some(&prior), &decided)
+            .expect_err("granted retry has unknown execution delivery");
+        assert_eq!(retry_error.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        prior.state = ApprovalState::Requested as i32;
+        let wrong_run = Approval {
+            run_id: "run-other".to_owned(),
+            ..decided.clone()
+        };
+        assert!(should_resume_granted_approval(Some(&prior), &wrong_run).is_err());
+    }
+
+    #[test]
+    fn issuer_zdr_blocks_run_lifecycle_persistence() {
+        let claims = Claims {
+            sub: "user-a".to_owned(),
+            iss: "issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: true,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        };
+        let error = require_non_zdr_durable_mutation(&claims)
+            .expect_err("issuer ZDR must block cancellation/resume/approval events");
+        assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
+    }
+}
+
+#[cfg(test)]
+mod capability_contract_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::CapabilityDetail;
+
+    #[test]
+    fn gateway_preserves_authoritative_capability_availability_semantics() {
+        let value = capability_contract_value(&CapabilityDetail {
+            capability_id: "cap.shipping.quote".to_owned(),
+            name: "Shipping quote".to_owned(),
+            kind: "tool".to_owned(),
+            version: "1".to_owned(),
+            description: "Read-only quote".to_owned(),
+            risk_level: "medium".to_owned(),
+            lazy_load: true,
+            scope: "tenant".to_owned(),
+            state: "approval_required".to_owned(),
+            reason_code: "approval_required".to_owned(),
+            reason: "A governed run is required.".to_owned(),
+            requires_approval: true,
+            execution_mode: "agentic".to_owned(),
+            cost_class: "variable".to_owned(),
+            health_checked_at: "2026-07-13T15:00:00Z".to_owned(),
+        });
+
+        assert_eq!(value["state"], "approval_required");
+        assert_eq!(value["reason_code"], "approval_required");
+        assert_eq!(value["requires_approval"], true);
+        assert_eq!(value["execution_mode"], "agentic");
+        assert_eq!(value["cost_class"], "variable");
+        assert_eq!(value["health_checked_at"], "2026-07-13T15:00:00Z");
+    }
+
+    #[test]
+    fn mixed_version_capability_response_fails_closed() {
+        let value = capability_contract_value(&CapabilityDetail {
+            capability_id: "cap.legacy".to_owned(),
+            ..CapabilityDetail::default()
+        });
+
+        assert_eq!(value["state"], "unavailable");
+        assert_eq!(value["reason_code"], "availability_contract_missing");
+        assert_eq!(value["execution_mode"], "unavailable");
+        assert_eq!(value["cost_class"], "unknown");
     }
 }

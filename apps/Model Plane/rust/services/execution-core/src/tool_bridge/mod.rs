@@ -90,32 +90,34 @@ fn execute_wiki_lint(tool_input: &str) -> ToolExecution {
 
 pub(crate) async fn execute_browser_agent(
     tool_input: &str,
+    verified_org_id: &str,
+    verified_zdr: bool,
     sink: Option<&dyn browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
+    inference_bearer: Option<&str>,
 ) -> ToolExecution {
+    if verified_org_id.trim().is_empty() {
+        return ToolExecution {
+            output: String::new(),
+            error: Some("browser_agent requires the verified run organization".to_owned()),
+        };
+    }
     let config: Result<BrowserAgentInput, _> = serde_json::from_str(tool_input);
     match config {
         Ok(input) => {
-            let plan_config = browser_agent::PlanConfig {
-                plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
-                grant_id: input.grant_id,
-                run_id: input.run_id.unwrap_or_default(),
-                org_id: input.org_id.unwrap_or_default(),
-                system_prompt: input.system_prompt.unwrap_or_default(),
-                max_steps: input.max_steps.unwrap_or(20),
-                max_runtime_s: input.max_runtime_s.unwrap_or(120),
-                allowed_domains: input.allowed_domains.unwrap_or_default(),
-                stop_criteria: input.stop_criteria.unwrap_or_default(),
-                require_approval: input.require_approval.unwrap_or(false),
-                max_cost_usd: input.max_cost_usd,
-                zdr: input.zdr.unwrap_or(false),
-                profile_id: input.profile_id,
-                start_url: input.start_url,
-            };
+            let plan_config = browser_plan_config(input, verified_org_id, verified_zdr);
             // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
             // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
-            let client = crate::quarry_agent::QuarryAgentClient::from_env();
-            let planner = crate::llm_planner::LlmPlanner::from_env();
+            let client = match crate::quarry_agent::QuarryAgentClient::from_env() {
+                Ok(client) => client,
+                Err(error) => {
+                    return ToolExecution {
+                        output: String::new(),
+                        error: Some(format!("browser_agent unavailable: {error}")),
+                    };
+                }
+            };
+            let planner = crate::llm_planner::LlmPlanner::from_env(inference_bearer);
             let (status, _observations, summary) = browser_agent::run_browser_agent_loop(
                 plan_config,
                 client.as_ref(),
@@ -145,7 +147,6 @@ struct BrowserAgentInput {
     grant_id: String,
     plan_id: Option<String>,
     run_id: Option<String>,
-    org_id: Option<String>,
     system_prompt: Option<String>,
     max_steps: Option<i32>,
     max_runtime_s: Option<i32>,
@@ -153,10 +154,53 @@ struct BrowserAgentInput {
     stop_criteria: Option<String>,
     require_approval: Option<bool>,
     max_cost_usd: Option<f64>,
-    zdr: Option<bool>,
     /// Persistent Quarry browser profile to reuse cookie/session state from
     /// (Phase 2). `None` acquires a fresh, isolated Quarry session.
     profile_id: Option<String>,
     /// Where to navigate first (Phase 2) — see `PlanConfig::start_url`.
     start_url: Option<String>,
+}
+
+fn browser_plan_config(
+    input: BrowserAgentInput,
+    verified_org_id: &str,
+    verified_zdr: bool,
+) -> browser_agent::PlanConfig {
+    browser_agent::PlanConfig {
+        plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
+        grant_id: input.grant_id,
+        run_id: input.run_id.unwrap_or_default(),
+        org_id: verified_org_id.to_owned(),
+        system_prompt: input.system_prompt.unwrap_or_default(),
+        max_steps: input.max_steps.unwrap_or(20),
+        max_runtime_s: input.max_runtime_s.unwrap_or(120),
+        allowed_domains: input.allowed_domains.unwrap_or_default(),
+        stop_criteria: input.stop_criteria.unwrap_or_default(),
+        require_approval: input.require_approval.unwrap_or(false),
+        max_cost_usd: input.max_cost_usd,
+        zdr: verified_zdr,
+        profile_id: input.profile_id,
+        start_url: input.start_url,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_plan_uses_verified_org_not_model_input() {
+        let input: BrowserAgentInput = serde_json::from_str(
+            r#"{"grant_id":"grant-1","org_id":"attacker-org","zdr":false,"max_steps":3}"#,
+        )
+        .unwrap();
+
+        let plan = browser_plan_config(input, "verified-org", true);
+        assert_eq!(plan.org_id, "verified-org");
+        assert!(
+            plan.zdr,
+            "verified run ZDR cannot be downgraded by tool input"
+        );
+        assert_eq!(plan.max_steps, 3);
+    }
 }

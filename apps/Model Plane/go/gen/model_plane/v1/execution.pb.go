@@ -228,7 +228,10 @@ type ExecuteStepRequest struct {
 	// Acting user identifier (viewer). Threaded into the step so knowledge-search
 	// (and any other viewer-scoped tool) filters to the caller's visible set, not
 	// the whole org. Empty = org-scoped only (legacy/unauthenticated primitive).
-	UserId        string `protobuf:"bytes,8,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	UserId string `protobuf:"bytes,8,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Zero-Data-Retention posture. The executor must not create durable run,
+	// step, audit-content, cache, or tool-output state when true.
+	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -317,6 +320,13 @@ func (x *ExecuteStepRequest) GetUserId() string {
 		return x.UserId
 	}
 	return ""
+}
+
+func (x *ExecuteStepRequest) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
 }
 
 // ExecuteStepResponse — result of a single step execution.
@@ -520,6 +530,107 @@ func (x *ResumeRunResponse) GetStepIndex() uint32 {
 	return 0
 }
 
+// PauseRunRequest — pause an active run (Phase 2 B5).
+type PauseRunRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Run to pause.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Tenant identifier.
+	OrgId         string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PauseRunRequest) Reset() {
+	*x = PauseRunRequest{}
+	mi := &file_model_plane_v1_execution_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PauseRunRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PauseRunRequest) ProtoMessage() {}
+
+func (x *PauseRunRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_execution_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PauseRunRequest.ProtoReflect.Descriptor instead.
+func (*PauseRunRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_execution_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PauseRunRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *PauseRunRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+// PauseRunResponse — acknowledgement that the run has been paused.
+type PauseRunResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// True if the run was successfully paused.
+	Paused        bool `protobuf:"varint,1,opt,name=paused,proto3" json:"paused,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PauseRunResponse) Reset() {
+	*x = PauseRunResponse{}
+	mi := &file_model_plane_v1_execution_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PauseRunResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PauseRunResponse) ProtoMessage() {}
+
+func (x *PauseRunResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_execution_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PauseRunResponse.ProtoReflect.Descriptor instead.
+func (*PauseRunResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_execution_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PauseRunResponse) GetPaused() bool {
+	if x != nil {
+		return x.Paused
+	}
+	return false
+}
+
 var File_model_plane_v1_execution_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_execution_proto_rawDesc = "" +
@@ -539,7 +650,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
-	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\"\xfc\x01\n" +
+	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\"\x8e\x02\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -549,7 +660,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x0fpermission_mode\x18\x05 \x01(\tR\x0epermissionMode\x12!\n" +
 	"\fhook_context\x18\x06 \x01(\tR\vhookContext\x12\x15\n" +
 	"\x06org_id\x18\a \x01(\tR\x05orgId\x12\x17\n" +
-	"\auser_id\x18\b \x01(\tR\x06userId\"\xa7\x01\n" +
+	"\auser_id\x18\b \x01(\tR\x06userId\x12\x10\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\"\xa7\x01\n" +
 	"\x13ExecuteStepResponse\x12\x17\n" +
 	"\astep_id\x18\x01 \x01(\tR\x06stepId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n" +
@@ -563,11 +675,17 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x11ResumeRunResponse\x12\x18\n" +
 	"\aresumed\x18\x01 \x01(\bR\aresumed\x12\x1d\n" +
 	"\n" +
-	"step_index\x18\x02 \x01(\rR\tstepIndex2\xda\x02\n" +
+	"step_index\x18\x02 \x01(\rR\tstepIndex\"?\n" +
+	"\x0fPauseRunRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"*\n" +
+	"\x10PauseRunResponse\x12\x16\n" +
+	"\x06paused\x18\x01 \x01(\bR\x06paused2\xa9\x03\n" +
 	"\rExecutionCore\x12V\n" +
 	"\vExecuteStep\x12\".model_plane.v1.ExecuteStepRequest\x1a#.model_plane.v1.ExecuteStepResponse\x12P\n" +
 	"\tResumeRun\x12 .model_plane.v1.ResumeRunRequest\x1a!.model_plane.v1.ResumeRunResponse\x12P\n" +
 	"\tCancelRun\x12 .model_plane.v1.CancelRunRequest\x1a!.model_plane.v1.CancelRunResponse\x12M\n" +
+	"\bPauseRun\x12\x1f.model_plane.v1.PauseRunRequest\x1a .model_plane.v1.PauseRunResponse\x12M\n" +
 	"\bRunAgent\x12\x1f.model_plane.v1.RunAgentRequest\x1a .model_plane.v1.RunAgentResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eExecutionProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -583,7 +701,7 @@ func file_model_plane_v1_execution_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_execution_proto_rawDescData
 }
 
-var file_model_plane_v1_execution_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_model_plane_v1_execution_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_model_plane_v1_execution_proto_goTypes = []any{
 	(*RunAgentRequest)(nil),     // 0: model_plane.v1.RunAgentRequest
 	(*RunAgentResponse)(nil),    // 1: model_plane.v1.RunAgentResponse
@@ -591,20 +709,24 @@ var file_model_plane_v1_execution_proto_goTypes = []any{
 	(*ExecuteStepResponse)(nil), // 3: model_plane.v1.ExecuteStepResponse
 	(*ResumeRunRequest)(nil),    // 4: model_plane.v1.ResumeRunRequest
 	(*ResumeRunResponse)(nil),   // 5: model_plane.v1.ResumeRunResponse
-	(*CancelRunRequest)(nil),    // 6: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),   // 7: model_plane.v1.CancelRunResponse
+	(*PauseRunRequest)(nil),     // 6: model_plane.v1.PauseRunRequest
+	(*PauseRunResponse)(nil),    // 7: model_plane.v1.PauseRunResponse
+	(*CancelRunRequest)(nil),    // 8: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),   // 9: model_plane.v1.CancelRunResponse
 }
 var file_model_plane_v1_execution_proto_depIdxs = []int32{
 	2, // 0: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
 	4, // 1: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
-	6, // 2: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	0, // 3: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
-	3, // 4: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
-	5, // 5: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
-	7, // 6: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	1, // 7: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
+	8, // 2: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	6, // 3: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
+	0, // 4: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
+	3, // 5: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
+	5, // 6: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
+	9, // 7: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	7, // 8: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
+	1, // 9: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
+	5, // [5:10] is the sub-list for method output_type
+	0, // [0:5] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -622,7 +744,7 @@ func file_model_plane_v1_execution_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_execution_proto_rawDesc), len(file_model_plane_v1_execution_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

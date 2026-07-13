@@ -1,5 +1,7 @@
 # Model Plane — Stub & Degraded-Path Inventory
 
+> **2026-07-13 security correction:** “implemented” does not mean deployable. Current source disables caller-selected stdio MCP, rejects raw credentials/malformed/empty-allowlist records, denies inline MCP, and fails closed for missing ownership. Live gateway/inference gRPC are absent, cost/session/capability auth remains open, and Letta semantic search is unavailable. Use [plane-audit-2026-07-13.md](core-research/plane-audit-2026-07-13.md) for release truth; this inventory is retained for historical implementation classification.
+
 Audited 2026-06-03 by sweeping `rust/services`, `rust/clients`, `go/services`
 for `unimplemented!`/`Status::unimplemented`/`todo!`/`stub`/`placeholder`/
 "not implemented". This separates **genuine stubs** (non-functional code that
@@ -8,6 +10,28 @@ returns nothing real) from **correct config-gated degradation** (a clear
 
 The governing rule (per `/goal`): the right tool for the right job, no duplicate
 systems, and never a path that *masquerades as success while doing nothing*.
+
+> **Verified 2026-07-11.** Re-checked the four load-bearing claims below against
+> current source. All hold: (1) the Go `model-gateway` is **removed** — only
+> `rust/services/model-gateway` exists, no `go.work` entry (§4); (2) the
+> streaming fallback in `sse.rs` is present (`infer_fallback_stream` +
+> "do NOT emit a bare `done`" + honest `error` event, §1); (3) the tool executor
+> is wired — `execute_shell` → `execute_sandboxed` (`executor.rs`), and HITL is
+> **enforced, not decorative**: `runtime_loop` returns `awaiting_approval` on
+> `PermissionDecision::AwaitApproval` before any `permission::is_risky_tool`
+> call (`book_shipment`, social/integration writes) (§2); (4) both MCP
+> transports are implemented — `stdio_*`/`http_*` dispatch with a clear error
+> for anything else (§3). This doc does **not** overstate stub status; its
+> conclusions ("none were fake stubs; plane is functionally built") remain
+> correct. The current canonical sources are
+> `apps/Model Plane/docs/core-research/README.md` and
+> `apps/Model Plane/MODEL_PLANE_DEEP_DIVE.md` — prefer them for runtime truth.
+> One thing this doc predates: the **Visma MCP** question. There is **no Visma
+> MCP wiring in Model Plane source** (`grep -rni visma` on source = 0), but the
+> live registry holds one misconfigured `visma mcp` record (transport `stdio`
+> with an HTTPS URL) that fails discovery before any call — so "test the Visma
+> MCP" is not a working capability today. See `docs/core-research/bridge-core.md`
+> and `docs/core-research/model-gateway.md`.
 
 ---
 
@@ -53,10 +77,10 @@ absent. That is the right behavior (fail loud, not fake success):
 
 | Path | Location | Trigger |
 |---|---|---|
-| Go `model-gateway` proxy | `go/.../model-gateway` (`buildProxy`) | `Invoke`/`InvokeStream` → `Unimplemented` when `SESSION_CORE_ADDR`/`INFERENCE_CORE_ADDR` unset (cutover safety). Set both to enable. |
+| ~~Go `model-gateway` proxy~~ | *removed 2026-06-03 (§4)* | No longer applicable — the Go proxy shim was deleted; the Rust gateway is the only front door. |
 | Quarry edge tools | `model-gateway/tools.rs`, `grpc.rs` | `Unimplemented("quarry edge not configured")` when `QUARRY_*` unset. |
 | LSP bridge | `model-gateway/lsp.rs:162` | `Unimplemented` when `LSP_BRIDGE_URL` unset. |
-| MCP transport | `runtime_registries.rs:402` | `Unimplemented` for transports other than `http`/`stdio` (both implemented). |
+| MCP transport | `runtime_registries.rs` (dispatch ~L362 discovery, ~L775 call; verified 2026-07-11) | Clear error for transports other than `http`/`stdio` (both implemented). |
 | Run-events SSE | `go/.../internal/sse/sse.go` | `503` when orchestrator-core client is nil. |
 
 ## 4. Duplicate-system — RESOLVED (Go `model-gateway` removed, 2026-06-03)

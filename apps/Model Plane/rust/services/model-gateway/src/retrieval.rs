@@ -22,7 +22,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::state::AppState;
+use crate::{auth::VerifiedDataPlaneBearer as VerifiedBearer, state::AppState};
 
 /// Default number of chunks to retrieve for grounding.
 const DEFAULT_TOP_K: i32 = 6;
@@ -528,18 +528,28 @@ fn graph_only_grounding(query: &str, graph: GroundingGraph) -> Grounding {
     }
 }
 
-/// Attach the Data Plane v2 internal API key as `x-api-key` gRPC metadata so
-/// the retrieval-engine's `ApiKeyInterceptor` authorizes the call (it rejects
-/// missing creds with "invalid or missing credential"). Reads
-/// `DATAPLANE_INTERNAL_KEY`; no-op when unset (dev / no-auth deployments).
+/// Forward the user bearer only after Model Gateway authentication verified it.
+/// Decoded claims, caller-provided identity headers, and shared API keys are not
+/// valid substitutes for the user's credential.
+///
+/// # Errors
+///
+/// Returns `Unauthenticated` if the already-verified bearer cannot be encoded
+/// as gRPC metadata. Keeping `tonic::Status` here preserves the auth boundary.
+#[allow(clippy::result_large_err)]
+pub fn authorize<T>(
+    mut request: tonic::Request<T>,
+    bearer: &VerifiedBearer,
+) -> Result<tonic::Request<T>, tonic::Status> {
+    let value = tonic::metadata::MetadataValue::try_from(format!("Bearer {}", bearer.as_str()))
+        .map_err(|_| tonic::Status::unauthenticated("verified bearer cannot be forwarded"))?;
+    request.metadata_mut().insert("authorization", value);
+    Ok(request)
+}
+
 #[must_use]
-pub fn authorize<T>(mut req: tonic::Request<T>) -> tonic::Request<T> {
-    if let Ok(key) = std::env::var("DATAPLANE_INTERNAL_KEY") {
-        if let Ok(val) = tonic::metadata::MetadataValue::try_from(key.as_str()) {
-            req.metadata_mut().insert("x-api-key", val);
-        }
-    }
-    req
+pub fn data_plane_zdr_mode(zdr: bool) -> Option<String> {
+    zdr.then(|| "ephemeral".to_owned())
 }
 
 fn retrieval_http_base_url() -> String {
@@ -574,34 +584,52 @@ struct GraphRetrieveResponse {
     communities: Vec<GraphRetrieveCommunity>,
 }
 
-async fn load_graph_grounding(
-    state: &AppState,
+fn build_graph_grounding_request(
+    client: &reqwest::Client,
+    base_url: &str,
+    bearer: &VerifiedBearer,
     org_id: &str,
-    user_id: &str,
     query: &str,
-) -> Option<GroundingGraph> {
-    let url = format!("{}/v1/retrieve/graph", retrieval_http_base_url());
-    let mut request = state
-        .http_client
-        .post(url)
+    zdr: bool,
+) -> Result<reqwest::Request, reqwest::Error> {
+    client
+        .post(format!("{base_url}/v1/retrieve/graph"))
         .timeout(GRAPH_TIMEOUT)
+        .bearer_auth(bearer.as_str())
         .header("x-org-id", org_id)
         .json(&json!({
             "org_id": org_id,
             "query": query,
             "max_entities": i32::try_from(GRAPH_NODE_LIMIT).unwrap_or(i32::MAX),
             "include_communities": true,
-        }));
-    // Forward the viewer so the Data Plane gates graph nodes per-user (entities/
-    // claims/relationships derived from docs the viewer can't see are filtered out).
-    if !user_id.is_empty() {
-        request = request.header("x-user-id", user_id);
-    }
-    if let Ok(key) = std::env::var("DATAPLANE_INTERNAL_KEY") {
-        request = request.header("x-api-key", key);
-    }
+            "zdr_mode": data_plane_zdr_mode(zdr),
+        }))
+        .build()
+}
 
-    let response = match request.send().await {
+async fn load_graph_grounding(
+    state: &AppState,
+    bearer: &VerifiedBearer,
+    org_id: &str,
+    query: &str,
+    zdr: bool,
+) -> Option<GroundingGraph> {
+    let request = match build_graph_grounding_request(
+        &state.http_client,
+        &retrieval_http_base_url(),
+        bearer,
+        org_id,
+        query,
+        zdr,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(error = %error, org_id = %org_id, "graph grounding request could not be constructed");
+            return None;
+        }
+    };
+
+    let response = match state.http_client.execute(request).await {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(error = %error, org_id = %org_id, "graph grounding unavailable; proceeding without graph context");
@@ -663,9 +691,10 @@ async fn load_graph_grounding(
 /// proceed ungrounded.
 pub async fn retrieve(
     state: &AppState,
+    bearer: &VerifiedBearer,
     org_id: &str,
-    user_id: &str,
     query: &str,
+    zdr: bool,
 ) -> Option<Grounding> {
     let query = query.trim();
     if query.is_empty() {
@@ -676,23 +705,21 @@ pub async fn retrieve(
         org_id: org_id.to_owned(),
         query: query.to_owned(),
         top_k: DEFAULT_TOP_K,
-        user_id: Some(user_id.to_owned()),
+        user_id: None,
+        zdr_mode: data_plane_zdr_mode(zdr),
         ..Default::default()
     };
 
     let mut retrieval_client = state.retrieval_client.clone();
-    // Forward the viewer as `x-user-id` metadata so the Data Plane binds per-user
-    // ownership to the session user (the DP ignores the request-body user_id and
-    // trusts this gateway-internal, x-api-key-authed metadata). Empty → the DP
-    // stays org-scoped (legacy).
-    let mut grpc_req = authorize(tonic::Request::new(request));
-    if !user_id.is_empty() {
-        if let Ok(val) = tonic::metadata::AsciiMetadataValue::try_from(user_id) {
-            grpc_req.metadata_mut().insert("x-user-id", val);
+    let grpc_req = match authorize(tonic::Request::new(request), bearer) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(error = %error.message(), org_id = %org_id, "retrieval bearer could not be forwarded");
+            return None;
         }
-    }
+    };
     let retrieval_future = retrieval_client.retrieve(grpc_req);
-    let graph_future = load_graph_grounding(state, org_id, user_id, query);
+    let graph_future = load_graph_grounding(state, bearer, org_id, query, zdr);
     let (retrieval_result, graph) = tokio::join!(retrieval_future, graph_future);
 
     match retrieval_result {
@@ -719,6 +746,59 @@ pub async fn retrieve(
 mod tests {
     use super::*;
     use mp_contracts::dataplane::retrieval_v2::{Candidate, ContextFact, ContextPack};
+
+    #[test]
+    fn data_plane_grpc_authorization_uses_only_verified_bearer() {
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+        let request = authorize(tonic::Request::new(()), &bearer)
+            .expect("verified bearer should be valid gRPC metadata");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer signed-user-jwt")
+        );
+        assert!(request.metadata().get("x-api-key").is_none());
+        assert!(request.metadata().get("x-user-id").is_none());
+    }
+
+    #[test]
+    fn zdr_posture_maps_to_ephemeral_retrieval_mode() {
+        assert_eq!(data_plane_zdr_mode(true).as_deref(), Some("ephemeral"));
+        assert_eq!(data_plane_zdr_mode(false), None);
+    }
+
+    #[test]
+    fn graph_grounding_forwards_verified_bearer_and_zdr_without_identity_headers() {
+        let client = reqwest::Client::new();
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+        let request = build_graph_grounding_request(
+            &client,
+            "http://data-plane.test",
+            &bearer,
+            "org-from-claims",
+            "bounded query",
+            true,
+        )
+        .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer signed-user-jwt")
+        );
+        assert!(request.headers().get("x-api-key").is_none());
+        assert!(request.headers().get("x-user-id").is_none());
+
+        let body = request.body().and_then(reqwest::Body::as_bytes).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(payload["org_id"], "org-from-claims");
+        assert_eq!(payload["zdr_mode"], "ephemeral");
+    }
 
     fn candidate(doc: &str, text: &str, score: f32) -> Candidate {
         Candidate {

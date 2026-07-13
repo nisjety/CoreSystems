@@ -145,6 +145,7 @@ impl FinetuneJobsService {
     /// Convenience for `main.rs` so the wiring there mirrors how
     /// `SessionService` and `OrchestrationGrpc` register their tonic servers.
     #[must_use]
+    #[allow(dead_code)] // direct constructor retained for isolated service tests
     pub fn into_server(self) -> FinetuneJobsServer<Self> {
         FinetuneJobsServer::new(self)
     }

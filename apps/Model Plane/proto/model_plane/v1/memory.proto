@@ -43,6 +43,12 @@ message SearchMemoryRequest {
 message SearchMemoryResponse {
   // Matching memory entries ordered by relevance.
   repeated MemoryEntry entries = 1;
+
+  // True when local results are returned without verified semantic recall.
+  bool degraded = 2;
+
+  // Stable machine-readable reason, empty when semantic recall is ready.
+  string degradation_reason = 3;
 }
 
 message MemoryEntry {
@@ -82,11 +88,23 @@ message IndexMemoryRequest {
 message IndexMemoryResponse {
   // Assigned memory entry identifier.
   string memory_id = 1;
+
+  // True when local persistence succeeded but Letta synchronization did not.
+  bool degraded = 2;
+
+  // Stable machine-readable reason, empty when Letta synchronization is ready.
+  string degradation_reason = 3;
 }
 
 message MemoryHealthRequest {}
 
 message MemoryHealthResponse {
-  // "ok" when service is healthy.
+  // Legacy summary/status code. New callers should use ready + memory_status.
   string status = 1;
+
+  // Whether the configured semantic memory path has been verified ready.
+  bool ready = 2;
+
+  // Stable machine-readable semantic memory readiness state.
+  string memory_status = 3;
 }

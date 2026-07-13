@@ -70,11 +70,11 @@ func NewWebhookAdapter(cfg WebhookConfig, store delivery.Store) (*WebhookAdapter
 
 // inboundEvent is the normalised shape Ingest emits for an inbound payload.
 type inboundEvent struct {
-	Channel   string          `json:"channel"`
-	SessionID string          `json:"session_id"`
-	Payload   json.RawMessage `json:"payload"`
-	Text      string          `json:"text,omitempty"`
-	IngestedAt time.Time      `json:"ingested_at"`
+	Channel    string          `json:"channel"`
+	SessionID  string          `json:"session_id"`
+	Payload    json.RawMessage `json:"payload"`
+	Text       string          `json:"text,omitempty"`
+	IngestedAt time.Time       `json:"ingested_at"`
 }
 
 // Ingest normalises the raw payload into a structured inbound event. If the
@@ -147,14 +147,14 @@ func (s *HTTPSender) Send(ctx context.Context, rec delivery.Record) error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook POST %s: %w", rec.Destination, err)
+		return fmt.Errorf("webhook POST failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Drain the body so the connection can be reused.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook POST %s returned status %d", rec.Destination, resp.StatusCode)
+		return fmt.Errorf("webhook POST returned status %d", resp.StatusCode)
 	}
 	return nil
 }

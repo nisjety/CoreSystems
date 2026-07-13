@@ -13,13 +13,14 @@ use std::fmt::Write as _;
 
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, IndexMemoryRequest, InferRequest, ProxyMcpToolRequest, SearchMemoryRequest,
-    ToolCall, ToolDefinition, WebSearchRequest,
+    ChatMessage, IndexMemoryRequest, InferRequest, SearchMemoryRequest, ToolCall, ToolDefinition,
+    WebSearchRequest,
 };
 use serde_json::Value;
 
-use crate::sse_events::ChatEvent;
-use crate::state::AppState;
+use crate::{
+    auth::VerifiedDataPlaneBearer as VerifiedBearer, sse_events::ChatEvent, state::AppState,
+};
 
 /// Max tool rounds before forcing a final, tool-free answer.
 pub const MAX_TOOL_ROUNDS: usize = 3;
@@ -48,11 +49,12 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
         .and_then(|v| v.get(key).and_then(serde_json::Value::as_i64))
 }
 
-/// Parse an MCP tool name `mcp__<server_id>__<tool_name>` into its parts.
-/// Splits on the FIRST `__` after the prefix (tool names may contain `__`).
-fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
-    name.strip_prefix("mcp__")
-        .and_then(|rest| rest.split_once("__"))
+/// Inline chat tools execute without the execution-core approval workflow.
+/// MCP tools therefore remain agentic-only until the same signed approval
+/// contract is available on this path.
+#[must_use]
+pub(crate) fn inline_tool_allowed(name: &str) -> bool {
+    !name.starts_with("mcp__")
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -455,14 +457,36 @@ async fn dispatch_brreg_lookup_tool(state: &AppState, call: &ToolCall) -> ToolOu
 /// Execute a single model-requested tool call against the gateway's tool
 /// handlers. Unknown tools / bad args return an error outcome (the model is
 /// told, so it can recover). New tools plug in here (MCP proxy, etc.).
+fn knowledge_search_request(org_id: &str, query: &str, top_k: i32, zdr: bool) -> RetrieveRequest {
+    RetrieveRequest {
+        org_id: org_id.to_owned(),
+        query: query.to_owned(),
+        top_k,
+        // Data Plane derives the viewer from the verified bearer. Caller-supplied
+        // identity in the message is deliberately absent.
+        user_id: None,
+        zdr_mode: crate::retrieval::data_plane_zdr_mode(zdr),
+        ..Default::default()
+    }
+}
+
 #[allow(clippy::too_many_lines)] // cohesive tool dispatcher — one arm per tool
 pub async fn dispatch_tool(
     state: &AppState,
     org_id: &str,
-    user_id: &str,
+    _user_id: &str,
     thread_id: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    zdr: bool,
     call: &ToolCall,
 ) -> ToolOutcome {
+    if !inline_tool_allowed(&call.name) {
+        return err_outcome(
+            call,
+            "MCP tools require governed agentic execution and approval",
+        );
+    }
+
     match call.name.as_str() {
         "web_search" => {
             let query = arg_str(&call.arguments_json, "query");
@@ -481,6 +505,7 @@ pub async fn dispatch_tool(
                     query,
                     limit,
                     intent,
+                    zdr,
                 },
             )
             .await
@@ -510,7 +535,7 @@ pub async fn dispatch_tool(
             if url.trim().is_empty() {
                 return err_outcome(call, "fetch_url requires a 'url' argument");
             }
-            match state.quarry.scrape(&url, org_id, None, false).await {
+            match state.quarry.scrape(&url, org_id, None, false, zdr).await {
                 Ok(r) => {
                     let body = if r.markdown.trim().is_empty() {
                         r.text
@@ -639,6 +664,12 @@ pub async fn dispatch_tool(
             }
         }
         "save_memory" => {
+            if zdr {
+                return err_outcome(
+                    call,
+                    "save_memory is unavailable in Zero Data Retention mode",
+                );
+            }
             let content = arg_str(&call.arguments_json, "content");
             if content.trim().is_empty() {
                 return err_outcome(call, "save_memory requires a 'content' argument");
@@ -683,24 +714,25 @@ pub async fn dispatch_tool(
             if query.trim().is_empty() {
                 return err_outcome(call, "knowledge_search requires a 'query' argument");
             }
+            let Some(bearer) = data_plane_bearer else {
+                return err_outcome(call, "knowledge_search requires a verified user bearer");
+            };
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
-            // Per-User Data Ownership: the agent grounds AS the run's verified
-            // user — threading user_id makes the retrieval post-filter drop any
-            // document this user cannot see. Empty user_id (no run identity)
-            // falls back to org-scoped, never cross-user.
-            let request = crate::retrieval::authorize(tonic::Request::new(RetrieveRequest {
-                org_id: org_id.to_owned(),
-                query,
-                top_k,
-                user_id: if user_id.is_empty() {
-                    None
-                } else {
-                    Some(user_id.to_owned())
-                },
-                ..Default::default()
-            }));
+            let request = knowledge_search_request(org_id, &query, top_k, zdr);
+            let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
+                Ok(request) => request,
+                Err(error) => {
+                    return err_outcome(
+                        call,
+                        format!(
+                            "knowledge_search authentication failed: {}",
+                            error.message()
+                        ),
+                    );
+                }
+            };
             match state.retrieval_client.clone().retrieve(request).await {
                 Ok(resp) => {
                     let items: Vec<serde_json::Value> = resp
@@ -727,37 +759,6 @@ pub async fn dispatch_tool(
         }
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
             dispatch_brreg_lookup_tool(state, call).await
-        }
-        // MCP proxy: `mcp__<server_id>__<tool_name>` routes to a registered MCP
-        // server via the existing registry (matrix §G2) — no new transport.
-        mcp if mcp.starts_with("mcp__") => {
-            let Some((server_id, tool_name)) = parse_mcp_tool_name(mcp) else {
-                return err_outcome(
-                    call,
-                    format!("malformed MCP tool '{mcp}' (expected mcp__<server>__<tool>)"),
-                );
-            };
-            match crate::runtime_registries::handle_proxy_mcp_tool(
-                &state.mcp,
-                ProxyMcpToolRequest {
-                    request_id: String::new(),
-                    org_id: org_id.to_owned(),
-                    server_id: server_id.to_owned(),
-                    tool_name: tool_name.to_owned(),
-                    input_json: call.arguments_json.clone(),
-                },
-            )
-            .await
-            {
-                Ok(resp) if resp.error_message.is_empty() => ToolOutcome {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    output: resp.output_json,
-                    error: None,
-                },
-                Ok(resp) => err_outcome(call, resp.error_message),
-                Err(e) => err_outcome(call, format!("mcp proxy failed: {}", e.message())),
-            }
         }
         other => err_outcome(call, format!("unknown tool '{other}'")),
     }
@@ -860,7 +861,7 @@ pub async fn run_forced_web_search(
         name: "web_search".to_owned(),
         arguments_json: args.to_string(),
     };
-    let outcome = dispatch_tool(state, org_id, user_id, thread_id, &call).await;
+    let outcome = dispatch_tool(state, org_id, user_id, thread_id, None, false, &call).await;
     let mut events = vec![
         ChatEvent::ToolCall {
             id: call.id,
@@ -941,6 +942,8 @@ pub async fn run_tool_rounds(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    zdr: bool,
     model: &str,
     base_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
@@ -960,7 +963,7 @@ pub async fn run_tool_rounds(
             temperature: 0.7,
             max_tokens: 1024,
             structured_output_schema: String::new(),
-            zdr: false,
+            zdr,
             tools: tools.clone(),
             tool_choice: tool_choice.clone(),
         }));
@@ -985,7 +988,16 @@ pub async fn run_tool_rounds(
                 name: call.name.clone(),
                 args,
             });
-            let outcome = dispatch_tool(state, org_id, user_id, thread_id, call).await;
+            let outcome = dispatch_tool(
+                state,
+                org_id,
+                user_id,
+                thread_id,
+                data_plane_bearer,
+                zdr,
+                call,
+            )
+            .await;
             events.push(ChatEvent::ToolResult {
                 id: outcome.call_id.clone(),
                 status: if outcome.error.is_some() {
@@ -1021,6 +1033,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn knowledge_search_is_claim_scoped_and_zdr_aware() {
+        let request = knowledge_search_request("org-from-claims", "query", 7, true);
+
+        assert_eq!(request.org_id, "org-from-claims");
+        assert_eq!(request.query, "query");
+        assert_eq!(request.top_k, 7);
+        assert_eq!(request.user_id, None);
+        assert_eq!(request.zdr_mode.as_deref(), Some("ephemeral"));
+    }
+
+    #[test]
     fn arg_str_and_i64_parse_json_arguments() {
         let args = r#"{"query":"rust async","limit":3}"#;
         assert_eq!(arg_str(args, "query"), "rust async");
@@ -1039,15 +1062,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_mcp_tool_names() {
-        assert_eq!(
-            parse_mcp_tool_name("mcp__github__create_issue"),
-            Some(("github", "create_issue"))
-        );
-        // tool name may itself contain `__` — split on the FIRST separator only.
-        assert_eq!(parse_mcp_tool_name("mcp__srv__a__b"), Some(("srv", "a__b")));
-        assert_eq!(parse_mcp_tool_name("web_search"), None);
-        assert_eq!(parse_mcp_tool_name("mcp__noseparator"), None);
+    fn inline_loop_rejects_mcp_tools_that_require_governed_agentic_approval() {
+        assert!(!inline_tool_allowed("mcp__github__create_issue"));
+        assert!(!inline_tool_allowed("mcp__srv__a__b"));
+        assert!(inline_tool_allowed("web_search"));
+        assert!(inline_tool_allowed("knowledge_search"));
     }
 
     #[test]

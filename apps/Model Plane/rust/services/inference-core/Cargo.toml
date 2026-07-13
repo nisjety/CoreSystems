@@ -14,6 +14,7 @@ mp-telemetry = { path = "../../crates/mp-telemetry" }
 
 tokio = { workspace = true }
 tonic = { workspace = true }
+tonic-health = "0.12"
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,6 +32,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 async-trait = "0.1"
 futures-util = "0.3"
 base64 = "0.22"
+jsonwebtoken = { workspace = true }
 
 # Concurrent cache
 dashmap = "6"
@@ -40,6 +42,9 @@ arc-swap = "1.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
 
 [lib]
 name = "inference_core"

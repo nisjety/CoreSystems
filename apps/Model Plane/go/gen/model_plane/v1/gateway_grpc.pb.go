@@ -48,6 +48,7 @@ const (
 	ModelGateway_RegisterMcpServer_FullMethodName    = "/model_plane.v1.ModelGateway/RegisterMcpServer"
 	ModelGateway_ListMcpServers_FullMethodName       = "/model_plane.v1.ModelGateway/ListMcpServers"
 	ModelGateway_ProxyMcpTool_FullMethodName         = "/model_plane.v1.ModelGateway/ProxyMcpTool"
+	ModelGateway_ListMcpTools_FullMethodName         = "/model_plane.v1.ModelGateway/ListMcpTools"
 	ModelGateway_RegisterPlugin_FullMethodName       = "/model_plane.v1.ModelGateway/RegisterPlugin"
 	ModelGateway_ListPlugins_FullMethodName          = "/model_plane.v1.ModelGateway/ListPlugins"
 	ModelGateway_SetPluginEnabled_FullMethodName     = "/model_plane.v1.ModelGateway/SetPluginEnabled"
@@ -170,6 +171,11 @@ type ModelGatewayClient interface {
 	RegisterMcpServer(ctx context.Context, in *RegisterMcpServerRequest, opts ...grpc.CallOption) (*RegisterMcpServerResponse, error)
 	ListMcpServers(ctx context.Context, in *ListMcpServersRequest, opts ...grpc.CallOption) (*ListMcpServersResponse, error)
 	ProxyMcpTool(ctx context.Context, in *ProxyMcpToolRequest, opts ...grpc.CallOption) (*ProxyMcpToolResponse, error)
+	// ListMcpTools — the discovered, agent-facing tool definitions for an org's
+	// enabled MCP servers, namespaced `mcp__<server_id>__<tool>`. Lets the
+	// governed agent loop (execution-core) offer them, then route calls back
+	// through ProxyMcpTool. Mirrors the in-process exposure the chat path uses.
+	ListMcpTools(ctx context.Context, in *ListMcpToolsRequest, opts ...grpc.CallOption) (*ListMcpToolsResponse, error)
 	// ===== Wave 10h — plugins =====
 	RegisterPlugin(ctx context.Context, in *RegisterPluginRequest, opts ...grpc.CallOption) (*RegisterPluginResponse, error)
 	ListPlugins(ctx context.Context, in *ListPluginsRequest, opts ...grpc.CallOption) (*ListPluginsResponse, error)
@@ -502,6 +508,16 @@ func (c *modelGatewayClient) ProxyMcpTool(ctx context.Context, in *ProxyMcpToolR
 	return out, nil
 }
 
+func (c *modelGatewayClient) ListMcpTools(ctx context.Context, in *ListMcpToolsRequest, opts ...grpc.CallOption) (*ListMcpToolsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMcpToolsResponse)
+	err := c.cc.Invoke(ctx, ModelGateway_ListMcpTools_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *modelGatewayClient) RegisterPlugin(ctx context.Context, in *RegisterPluginRequest, opts ...grpc.CallOption) (*RegisterPluginResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RegisterPluginResponse)
@@ -793,6 +809,11 @@ type ModelGatewayServer interface {
 	RegisterMcpServer(context.Context, *RegisterMcpServerRequest) (*RegisterMcpServerResponse, error)
 	ListMcpServers(context.Context, *ListMcpServersRequest) (*ListMcpServersResponse, error)
 	ProxyMcpTool(context.Context, *ProxyMcpToolRequest) (*ProxyMcpToolResponse, error)
+	// ListMcpTools — the discovered, agent-facing tool definitions for an org's
+	// enabled MCP servers, namespaced `mcp__<server_id>__<tool>`. Lets the
+	// governed agent loop (execution-core) offer them, then route calls back
+	// through ProxyMcpTool. Mirrors the in-process exposure the chat path uses.
+	ListMcpTools(context.Context, *ListMcpToolsRequest) (*ListMcpToolsResponse, error)
 	// ===== Wave 10h — plugins =====
 	RegisterPlugin(context.Context, *RegisterPluginRequest) (*RegisterPluginResponse, error)
 	ListPlugins(context.Context, *ListPluginsRequest) (*ListPluginsResponse, error)
@@ -912,6 +933,9 @@ func (UnimplementedModelGatewayServer) ListMcpServers(context.Context, *ListMcpS
 }
 func (UnimplementedModelGatewayServer) ProxyMcpTool(context.Context, *ProxyMcpToolRequest) (*ProxyMcpToolResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProxyMcpTool not implemented")
+}
+func (UnimplementedModelGatewayServer) ListMcpTools(context.Context, *ListMcpToolsRequest) (*ListMcpToolsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMcpTools not implemented")
 }
 func (UnimplementedModelGatewayServer) RegisterPlugin(context.Context, *RegisterPluginRequest) (*RegisterPluginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterPlugin not implemented")
@@ -1506,6 +1530,24 @@ func _ModelGateway_ProxyMcpTool_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ModelGateway_ListMcpTools_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMcpToolsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModelGatewayServer).ListMcpTools(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModelGateway_ListMcpTools_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModelGatewayServer).ListMcpTools(ctx, req.(*ListMcpToolsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ModelGateway_RegisterPlugin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterPluginRequest)
 	if err := dec(in); err != nil {
@@ -1966,6 +2008,10 @@ var ModelGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ProxyMcpTool",
 			Handler:    _ModelGateway_ProxyMcpTool_Handler,
+		},
+		{
+			MethodName: "ListMcpTools",
+			Handler:    _ModelGateway_ListMcpTools_Handler,
 		},
 		{
 			MethodName: "RegisterPlugin",

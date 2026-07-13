@@ -27,6 +27,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::browser_agent::{ActionType, BrowserAction, BrowserObservation, ObservationStatus};
+use crate::quarry_auth::TokenSource;
+
+const AGENT_SCOPES: &[&str] = &["browser:execute"];
 
 // ---------------------------------------------------------------------------
 // Wire DTOs — mirror of quarry-core::contracts (JSON-compatible).
@@ -249,6 +252,8 @@ pub enum AgentClientError {
     Status { status: u16, body: String },
     #[error("quarry agent decode error: {0}")]
     Decode(String),
+    #[error("quarry agent authentication failed: {0}")]
+    Authentication(String),
 }
 
 /// HTTP client for Quarry's agent-browser endpoint. Mirrors the auth scheme of
@@ -257,7 +262,7 @@ pub enum AgentClientError {
 pub struct QuarryAgentClient {
     http: reqwest::Client,
     base_url: String,
-    token: String,
+    auth: TokenSource,
 }
 
 impl QuarryAgentClient {
@@ -268,12 +273,13 @@ impl QuarryAgentClient {
     ) -> Result<Self, AgentClientError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AgentClientError::Transport(e.to_string()))?;
         Ok(Self {
             http,
             base_url: base_url.into(),
-            token: token.into(),
+            auth: TokenSource::Static(token.into()),
         })
     }
 
@@ -281,38 +287,53 @@ impl QuarryAgentClient {
     /// (truthy) and `QUARRY_EDGE_URL` (non-empty) — analogous to how the Fetch
     /// tool gates on `QUARRY_EDGE_URL`. Returns `None` when the browser agent is
     /// disabled or unconfigured, so the loop can degrade gracefully.
-    #[must_use]
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env() -> Result<Option<Self>, AgentClientError> {
         let enabled = std::env::var("QUARRY_BROWSER_AGENT_ENABLED")
             .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
             .unwrap_or(false);
         if !enabled {
-            return None;
+            return Ok(None);
         }
         let base_url = std::env::var("QUARRY_EDGE_URL")
             .ok()
-            .filter(|s| !s.is_empty())?;
-        let token = std::env::var("QUARRY_EDGE_TOKEN").unwrap_or_default();
-        Self::new(base_url, token).ok()
+            .filter(|s| !s.is_empty());
+        let Some(base_url) = base_url else {
+            return Ok(None);
+        };
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| AgentClientError::Transport(error.to_string()))?;
+        let auth = TokenSource::from_env()
+            .map_err(|error| AgentClientError::Authentication(error.to_string()))?;
+        Ok(Some(Self {
+            http,
+            base_url,
+            auth,
+        }))
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
 
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        // Always send a bearer, matching `web_tools.rs`'s `WebToolsClient::post`
-        // (same edge, same env vars): quarry-edge's `AUTH_DEV_BYPASS` accepts
-        // any token but still requires the header to be present at all, so an
-        // empty `QUARRY_EDGE_TOKEN` (never populated with a real signed JWT
-        // anywhere in this stack today) must still fall back to a literal
-        // placeholder rather than omitting the header — otherwise every
-        // `/v1/agent/runs` call 401s before dev bypass is ever consulted.
-        if self.token.is_empty() {
-            req.bearer_auth("dev")
-        } else {
-            req.bearer_auth(&self.token)
-        }
+    async fn token(&self, org_id: &str) -> Result<String, AgentClientError> {
+        self.auth
+            .token(org_id, AGENT_SCOPES)
+            .await
+            .map_err(|error| AgentClientError::Authentication(error.to_string()))
+    }
+
+    async fn invalidate_if_matches(
+        &self,
+        org_id: &str,
+        rejected_token: &str,
+    ) -> Result<(), AgentClientError> {
+        self.auth
+            .invalidate_if_matches(org_id, AGENT_SCOPES, rejected_token)
+            .await
+            .map_err(|error| AgentClientError::Authentication(error.to_string()))
     }
 
     /// Start an agent run: Quarry acquires a browser lease/session and returns
@@ -330,14 +351,25 @@ impl QuarryAgentClient {
             profile_id,
             zdr,
         };
-        let req = self
-            .auth(self.http.post(self.url("/v1/agent/runs")))
-            .header("x-quarry-org", org_id)
-            .json(&body);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id).await?;
+            let resp = self
+                .http
+                .post(self.url("/v1/agent/runs"))
+                .bearer_auth(&token)
+                .header("x-quarry-org", org_id)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, &token).await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
         Self::decode(resp).await
     }
 
@@ -359,32 +391,50 @@ impl QuarryAgentClient {
             constraints: constraints.clone(),
             zdr,
         };
-        let req = self
-            .auth(
-                self.http
-                    .post(self.url(&format!("/v1/agent/runs/{run_id}/step"))),
-            )
-            .header("x-quarry-org", org_id)
-            .json(&body);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        let endpoint = self.url(&format!("/v1/agent/runs/{run_id}/step"));
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id).await?;
+            let resp = self
+                .http
+                .post(&endpoint)
+                .bearer_auth(&token)
+                .header("x-quarry-org", org_id)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, &token).await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
         Self::decode(resp).await
     }
 
     /// Release a run and its browser lease. Best-effort; non-2xx is surfaced.
     pub async fn close_run(&self, run_id: &str, org_id: &str) -> Result<(), AgentClientError> {
-        let req = self
-            .auth(
-                self.http
-                    .delete(self.url(&format!("/v1/agent/runs/{run_id}"))),
-            )
-            .header("x-quarry-org", org_id);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        let endpoint = self.url(&format!("/v1/agent/runs/{run_id}"));
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id).await?;
+            let resp = self
+                .http
+                .delete(&endpoint)
+                .bearer_auth(&token)
+                .header("x-quarry-org", org_id)
+                .send()
+                .await
+                .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, &token).await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
         let status = resp.status();
         if status.is_success() {
             Ok(())
@@ -620,5 +670,33 @@ mod tests {
             AgentClientError::Status { status, .. } => assert_eq!(status, 403),
             other => panic!("expected Status error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn step_retries_exactly_once_after_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_abc/step"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = QuarryAgentClient::new(server.uri(), "expired").unwrap();
+        let error = client
+            .step(
+                "run_abc",
+                "lease_xyz",
+                "org_1",
+                AgentAction::GetContent,
+                &AgentConstraints::default(),
+                false,
+            )
+            .await
+            .expect_err("second 401 must be surfaced");
+        assert!(matches!(
+            error,
+            AgentClientError::Status { status: 401, .. }
+        ));
     }
 }

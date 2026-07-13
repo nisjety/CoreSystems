@@ -3,6 +3,8 @@ package ledger
 import (
 	"context"
 	"errors"
+	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,6 +52,55 @@ func TestStore_Idempotency(t *testing.T) {
 	}
 	if u.EntryCount != 1 || u.TotalInputTokens != 7 {
 		t.Fatalf("dedupe failed: count=%d tokens=%d", u.EntryCount, u.TotalInputTokens)
+	}
+}
+
+func TestStore_IdempotencyIsTenantScoped(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", InputTokens: 7, IdempotencyKey: "shared-key"})
+	mustRecord(t, s, Entry{OrgID: "org2", UserID: "u2", InputTokens: 11, IdempotencyKey: "shared-key"})
+
+	for _, test := range []struct {
+		org, user string
+		want      int64
+	}{
+		{org: "org1", user: "u1", want: 7},
+		{org: "org2", user: "u2", want: 11},
+	} {
+		u, err := s.GetUsage(ctx, test.org, test.user)
+		if err != nil {
+			t.Fatalf("GetUsage(%s): %v", test.org, err)
+		}
+		if u.EntryCount != 1 || u.TotalInputTokens != test.want {
+			t.Fatalf("usage(%s)=%+v want one entry/%d tokens", test.org, u, test.want)
+		}
+	}
+}
+
+func TestStoreRejectsMalformedAccountingEntries(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		entry Entry
+	}{
+		{name: "missing attribution", entry: Entry{OrgID: "org1"}},
+		{name: "negative input", entry: Entry{OrgID: "org1", UserID: "u1", InputTokens: -1}},
+		{name: "negative output", entry: Entry{OrgID: "org1", UserID: "u1", OutputTokens: -1}},
+		{name: "excessive input", entry: Entry{OrgID: "org1", UserID: "u1", InputTokens: 1_000_000_000_001}},
+		{name: "negative cost", entry: Entry{OrgID: "org1", UserID: "u1", CostUSD: -0.01}},
+		{name: "nan cost", entry: Entry{OrgID: "org1", UserID: "u1", CostUSD: math.NaN()}},
+		{name: "infinite cost", entry: Entry{OrgID: "org1", UserID: "u1", CostUSD: math.Inf(1)}},
+		{name: "excessive cost", entry: Entry{OrgID: "org1", UserID: "u1", CostUSD: 10_000_000_000}},
+		{name: "non canonical organization", entry: Entry{OrgID: " org1", UserID: "u1"}},
+		{name: "control character", entry: Entry{OrgID: "org1", UserID: "u1\nforged"}},
+		{name: "oversized model", entry: Entry{OrgID: "org1", UserID: "u1", Model: strings.Repeat("m", 257)}},
+		{name: "oversized idempotency", entry: Entry{OrgID: "org1", UserID: "u1", IdempotencyKey: strings.Repeat("k", 513)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := NewStore().RecordEntry(context.Background(), test.entry); err == nil {
+				t.Fatal("expected invalid entry to be rejected")
+			}
+		})
 	}
 }
 

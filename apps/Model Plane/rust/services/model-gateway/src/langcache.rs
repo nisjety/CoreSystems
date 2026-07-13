@@ -36,6 +36,10 @@ const CACHE_KEY_PREFIX: &str = "mp:gw:cache:";
 
 static GLOBAL: OnceLock<Option<SemanticCache>> = OnceLock::new();
 
+fn cache_io_allowed(zdr: bool) -> bool {
+    !zdr
+}
+
 /// Returns the process-global semantic cache, lazily initialized from the
 /// environment. `None` means no cache is configured — callers proceed straight
 /// to inference.
@@ -80,7 +84,16 @@ impl SemanticCache {
 
     /// Look up a cached response for `prompt`, scoped to org + model. A miss or
     /// any error yields `None` so the caller falls through to inference.
-    pub async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+    pub async fn lookup(
+        &self,
+        prompt: &str,
+        org_id: &str,
+        model: &str,
+        zdr: bool,
+    ) -> Option<String> {
+        if !cache_io_allowed(zdr) {
+            return None;
+        }
         match self {
             Self::Managed(c) => c.lookup(prompt, org_id, model).await,
             Self::DataPlane(c) => c.lookup(prompt, org_id, model).await,
@@ -100,7 +113,10 @@ impl SemanticCache {
     }
 
     /// Store a prompt/response pair for future hits. Best-effort; never panics.
-    pub async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+    pub async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str, zdr: bool) {
+        if !cache_io_allowed(zdr) {
+            return;
+        }
         match self {
             Self::Managed(c) => c.store(prompt, org_id, model, response).await,
             Self::DataPlane(c) => c.store(prompt, org_id, model, response).await,
@@ -214,7 +230,6 @@ impl DragonflyCache {
 pub struct DataPlaneCache {
     http: reqwest::Client,
     base_url: String,
-    api_key: Option<String>,
 }
 
 impl DataPlaneCache {
@@ -225,36 +240,22 @@ impl DataPlaneCache {
         if !env_flag("SEMANTIC_CACHE_DATAPLANE_ENABLED") {
             return None;
         }
-        let base_url = std::env::var("DATAPLANE_RETRIEVAL_HTTP_URL")
-            .or_else(|_| std::env::var("DATA_PLANE_RETRIEVAL_URL"))
-            .unwrap_or_else(|_| "http://dpv2-retrieval-engine:8004".to_owned())
-            .trim_end_matches('/')
-            .to_owned();
-        let http = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .ok()?;
-        tracing::info!("semantic cache enabled (Data Plane v2 vector tier)");
-        Some(Self {
-            http,
-            base_url,
-            api_key: non_empty_env("DATAPLANE_INTERNAL_KEY"),
-        })
+        tracing::warn!(
+            "Data Plane semantic cache disabled: a request-bound verified bearer is required"
+        );
+        None
     }
 
     async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
         let url = format!("{}/v1/cache/semantic/search", self.base_url);
         let payload = serde_json::json!({ "org_id": org_id, "model": model, "prompt": prompt });
         let bytes = serde_json::to_vec(&payload).ok()?;
-        let mut request = self
+        let request = self
             .http
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(bytes);
-        if let Some(key) = &self.api_key {
-            request = request.header("x-api-key", key);
-        }
         let resp = request.send().await.ok()?;
         if !resp.status().is_success() {
             tracing::debug!(status = %resp.status(), "semantic cache (data plane) search non-success");
@@ -285,14 +286,11 @@ impl DataPlaneCache {
         let Ok(bytes) = serde_json::to_vec(&payload) else {
             return;
         };
-        let mut request = self
+        let request = self
             .http
             .post(&url)
             .header("Content-Type", "application/json")
             .body(bytes);
-        if let Some(key) = &self.api_key {
-            request = request.header("x-api-key", key);
-        }
         if let Err(error) = request.send().await {
             tracing::debug!(%error, "semantic cache (data plane) store failed");
         }
@@ -519,6 +517,12 @@ mod tests {
             "prompt is case-sensitive"
         );
         assert!(key.ends_with(":5"), "byte-length discriminator appended");
+    }
+
+    #[test]
+    fn zdr_disables_cache_reads_and_writes_before_backend_selection() {
+        assert!(!cache_io_allowed(true));
+        assert!(cache_io_allowed(false));
     }
 
     #[tokio::test]

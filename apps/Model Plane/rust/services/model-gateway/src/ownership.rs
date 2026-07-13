@@ -11,9 +11,9 @@
 //!     private (unshared) one.
 //!
 //! A user may share their own resources with specific users but can NEVER make
-//! one org-wide; only an admin creates org-scoped resources. The admin GATE on
-//! org-scope creation is enforced authoritatively at the BFF (which knows the
-//! session role); the gateway defends in depth via [`is_admin_claim`].
+//! one org-wide; only an admin creates org-scoped resources. The gateway is the
+//! authoritative gate via signed token scopes and [`is_admin_claim`]; the BFF
+//! check is user-facing defense in depth only.
 
 use std::sync::Arc;
 
@@ -164,18 +164,16 @@ impl OwnershipStore {
             .map(|e| e.value().clone())
     }
 
-    /// Can `user_id` USE the resource (agent tool exposure)? A resource with
-    /// **no** ownership record is grandfathered as org-usable (pre-ownership
-    /// resources are never suddenly hidden — matches the ownership-plan
-    /// grandfather rule).
+    /// Can `user_id` USE the resource (agent tool exposure)? Resources without
+    /// an ownership record fail closed until an explicit migration assigns one.
     #[must_use]
     pub fn usable(&self, org_id: &str, kind: &str, resource_id: &str, user_id: &str) -> bool {
         self.get(org_id, kind, resource_id)
-            .is_none_or(|o| o.usable_by(user_id))
+            .is_some_and(|o| o.usable_by(user_id))
     }
 
-    /// Is the resource visible to `(user_id, is_admin)` in a management view? A
-    /// resource with **no** ownership record is grandfathered as org-visible.
+    /// Is the resource visible to `(user_id, is_admin)` in a management view?
+    /// Unknown ownership fails closed.
     #[must_use]
     pub fn visible(
         &self,
@@ -186,11 +184,11 @@ impl OwnershipStore {
         is_admin: bool,
     ) -> bool {
         self.get(org_id, kind, resource_id)
-            .is_none_or(|o| o.visible_to(user_id, is_admin))
+            .is_some_and(|o| o.visible_to(user_id, is_admin))
     }
 
-    /// May `(user_id, is_admin)` mutate (share/delete/disable) the resource? A
-    /// resource with no ownership record is treated as org-managed → admin only.
+    /// May `(user_id, is_admin)` mutate (share/delete/disable) the resource?
+    /// Unknown ownership fails closed even for administrators.
     #[must_use]
     pub fn can_modify(
         &self,
@@ -201,7 +199,7 @@ impl OwnershipStore {
         is_admin: bool,
     ) -> bool {
         self.get(org_id, kind, resource_id)
-            .map_or(is_admin, |o| o.can_modify(user_id, is_admin))
+            .is_some_and(|o| o.can_modify(user_id, is_admin))
     }
 
     /// Replace the grantee list of a user-scoped resource (owner only).
@@ -241,18 +239,14 @@ impl OwnershipStore {
     }
 }
 
-/// Derive admin status for a request. Authoritative org-role lives in the
-/// Control Plane, so the gateway accepts either an admin marker in the verified
-/// token `scopes` (e.g. `org:admin`) or a BFF-forwarded `x-user-role: admin`
-/// header (trusted on the internal bus, same as the forwarded `x-user-id`).
+/// Derive admin status exclusively from signed token scopes. Caller-controlled
+/// role headers are never authorization authority.
 #[must_use]
-pub fn is_admin_claim(scopes: &[String], role_header: Option<&str>) -> bool {
-    let scope_admin = scopes.iter().any(|s| {
+pub fn is_admin_claim(scopes: &[String], _role_header: Option<&str>) -> bool {
+    scopes.iter().any(|s| {
         let s = s.as_str();
         s == "admin" || s == "org:admin" || s.ends_with(":admin")
-    });
-    let header_admin = role_header.is_some_and(|r| r.eq_ignore_ascii_case("admin"));
-    scope_admin || header_admin
+    })
 }
 
 #[cfg(test)]
@@ -302,10 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn store_grandfathers_unknown_as_org_visible() {
+    fn store_fails_closed_for_unknown_resources() {
         let store = OwnershipStore::new();
-        assert!(store.visible("o", "mcp", "legacy", "anyone", false));
-        assert!(store.can_modify("o", "mcp", "legacy", "anyone", true)); // admin
+        assert!(!store.usable("o", "mcp", "legacy", "anyone"));
+        assert!(!store.visible("o", "mcp", "legacy", "anyone", false));
+        assert!(!store.can_modify("o", "mcp", "legacy", "anyone", true));
     }
 
     #[test]
@@ -342,11 +337,11 @@ mod tests {
     }
 
     #[test]
-    fn is_admin_claim_reads_scopes_and_header() {
+    fn is_admin_claim_uses_only_signed_scopes() {
         assert!(is_admin_claim(&["org:admin".to_owned()], None));
         assert!(is_admin_claim(&["admin".to_owned()], None));
-        assert!(is_admin_claim(&[], Some("admin")));
-        assert!(is_admin_claim(&[], Some("Admin")));
+        assert!(!is_admin_claim(&[], Some("admin")));
+        assert!(!is_admin_claim(&[], Some("Admin")));
         assert!(!is_admin_claim(&["member".to_owned()], Some("member")));
         assert!(!is_admin_claim(&[], None));
     }

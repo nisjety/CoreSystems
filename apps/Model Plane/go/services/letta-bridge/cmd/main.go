@@ -4,19 +4,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/triodelab/model-plane/pkg/authctx"
 
 	"github.com/triodelab/model-plane/services/letta-bridge/internal/agentmemory"
 	"github.com/triodelab/model-plane/services/letta-bridge/internal/pgstore"
 	lbserver "github.com/triodelab/model-plane/services/letta-bridge/internal/server"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 func main() {
@@ -28,6 +33,18 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	memServer, closeStore := buildMemoryServer(ctx)
+	defer closeStore()
+	verifier, err := authctx.NewVerifier(authctx.Config{
+		Audiences: []string{requiredAuthEnv("LETTA_BRIDGE_AUTH_AUDIENCE")},
+		Issuer:    requiredAuthEnv("AUTH_CORE_ISSUER"),
+		JWKSURL:   requiredAuthEnv("AUTH_CORE_JWKS_URL"),
+	})
+	if err != nil {
+		slog.Error("letta-bridge authentication unavailable", "error", err)
+		os.Exit(1)
+	}
+
 	// Health server on :8088
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -35,8 +52,15 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		ready, memoryStatus := memServer.ReadyStatus()
+		w.Header().Set("Content-Type", "application/json")
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ready":         ready,
+			"memory_status": memoryStatus,
+		})
 	})
 
 	healthServer := &http.Server{Addr: ":8088", Handler: mux}
@@ -54,11 +78,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	memServer, closeStore := buildMemoryServer(ctx)
-	defer closeStore()
-
-	grpcServer := grpc.NewServer()
+	authenticate := verifier.UnaryServerInterceptor(lbserver.MemoryAuthorizer)
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(
+		func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			if strings.HasPrefix(info.FullMethod, "/grpc.health.v1.Health/") {
+				return handler(ctx, req)
+			}
+			return authenticate(ctx, req, info, handler)
+		},
+	))
 	lbserver.Register(grpcServer, memServer)
+	grpcHealth := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, grpcHealth)
+	grpcHealth.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	grpcHealth.SetServingStatus("model_plane.v1.MemoryService", healthpb.HealthCheckResponse_SERVING)
 
 	go func() {
 		slog.Info("gRPC listening", "addr", ":9096")
@@ -71,6 +104,15 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+func requiredAuthEnv(name string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		slog.Error("required authentication environment variable is missing", "name", name)
+		os.Exit(1)
+	}
+	return value
 }
 
 // buildMemoryServer selects the memory backend in priority order and returns
@@ -90,7 +132,7 @@ func buildMemoryServer(ctx context.Context) (*lbserver.Server, func()) {
 		APIKey:  os.Getenv("AGENT_MEMORY_TOKEN"),
 	}); ok {
 		slog.Info("agent memory backend enabled (redis agent-memory-server)")
-		return lbserver.NewServerWithStore(cli), noop
+		return lbserver.NewServerWithBackend(cli, "agent-memory", true), noop
 	}
 
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
@@ -106,7 +148,7 @@ func buildMemoryServer(ctx context.Context) (*lbserver.Server, func()) {
 			return lbserver.NewServer(), noop
 		}
 		slog.Info("postgres durable memory backend enabled (DATABASE_URL set)")
-		return lbserver.NewServerWithStore(store), pool.Close
+		return lbserver.NewServerWithBackend(store, "postgres-lexical", false), pool.Close
 	}
 
 	slog.Info("no durable memory backend configured (AGENT_MEMORY_URL and DATABASE_URL unset); using in-memory store")

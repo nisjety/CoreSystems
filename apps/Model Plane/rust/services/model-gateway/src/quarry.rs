@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::quarry_auth::TokenProvider;
+
+const SCRAPE_SCOPES: &[&str] = &["scrape:read"];
+const SEARCH_SCOPES: &[&str] = &["search:read"];
+
 /// Typed Quarry error envelope (HTTP 4xx / 5xx with structured body).
 #[derive(Debug, Error)]
 pub enum QuarryError {
@@ -40,6 +45,10 @@ pub enum QuarryError {
     /// Failed to parse the JSON envelope.
     #[error("quarry: decode envelope: {0}")]
     Decode(#[from] serde_json::Error),
+
+    /// Auth Core could not mint a bounded Quarry credential.
+    #[error("quarry: authentication failed: {0}")]
+    Authentication(String),
 }
 
 /// Browser-only render hints. Static / TLS-profile fetches ignore these.
@@ -102,8 +111,8 @@ pub struct Config {
     /// Empty / unset → [`Client`] returns [`QuarryError::Unavailable`]
     /// on every call.
     pub base_url: String,
-    /// Bearer token. Empty in dev (the edge's `AUTH_DEV_BYPASS` accepts
-    /// any non-empty value in non-prod). Production MUST set this.
+    /// Static bearer used only by isolated tests. Production constructs the
+    /// client with [`Client::from_env`] and never reads a static Quarry token.
     pub token: String,
     /// End-to-end timeout per Scrape call. Default 30s — generous so
     /// JS-rendered pages have headroom.
@@ -125,8 +134,26 @@ impl Default for Config {
 #[derive(Clone, Debug)]
 pub struct Client {
     base_url: String,
-    token: String,
+    auth: Auth,
     http: reqwest::Client,
+}
+
+#[derive(Clone)]
+enum Auth {
+    Static(String),
+    ServicePrincipal(TokenProvider),
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(_) => formatter.write_str("Static([REDACTED])"),
+            Self::ServicePrincipal(provider) => formatter
+                .debug_tuple("ServicePrincipal")
+                .field(provider)
+                .finish(),
+        }
+    }
 }
 
 impl Client {
@@ -136,6 +163,7 @@ impl Client {
     pub fn new(cfg: Config) -> Self {
         let http = reqwest::Client::builder()
             .timeout(cfg.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             // Practically unreachable for the trivial config above;
             // fall back to a default client so construction is
@@ -145,8 +173,55 @@ impl Client {
 
         Self {
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
-            token: cfg.token,
+            auth: Auth::Static(cfg.token),
             http,
+        }
+    }
+
+    /// Build the production client backed by Auth Core service-principal
+    /// token minting. No static Quarry bearer is read or retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication/configuration error when Auth Core or the
+    /// dedicated model-gateway service credential is unavailable.
+    pub fn from_env(base_url: &str, timeout: Duration) -> Result<Self, QuarryError> {
+        let http = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(QuarryError::Transport)?;
+        let provider = TokenProvider::from_env()
+            .map_err(|error| QuarryError::Authentication(error.to_string()))?;
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            auth: Auth::ServicePrincipal(provider),
+            http,
+        })
+    }
+
+    async fn token(&self, org_id: &str, scopes: &[&str]) -> Result<String, QuarryError> {
+        match &self.auth {
+            Auth::Static(token) => Ok(token.clone()),
+            Auth::ServicePrincipal(provider) => provider
+                .token(org_id, scopes)
+                .await
+                .map_err(|error| QuarryError::Authentication(error.to_string())),
+        }
+    }
+
+    async fn invalidate_if_matches(
+        &self,
+        org_id: &str,
+        scopes: &[&str],
+        rejected_token: &str,
+    ) -> Result<(), QuarryError> {
+        match &self.auth {
+            Auth::Static(_) => Ok(()),
+            Auth::ServicePrincipal(provider) => provider
+                .invalidate_if_matches(org_id, scopes, rejected_token)
+                .await
+                .map_err(|error| QuarryError::Authentication(error.to_string())),
         }
     }
 
@@ -168,6 +243,7 @@ impl Client {
         org_id: &str,
         render: Option<&RenderHints>,
         prefer_http3: bool,
+        zdr: bool,
     ) -> Result<ScrapeResult, QuarryError> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -176,6 +252,7 @@ impl Client {
             render: Option<&'a RenderHints>,
             #[serde(skip_serializing_if = "is_false", rename = "prefer_http3")]
             prefer_http3: bool,
+            zdr: bool,
         }
         // serde requires fn(&T)->bool for skip_serializing_if
         #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -198,18 +275,29 @@ impl Client {
             url,
             render: render.filter(|r| r.has_any()),
             prefer_http3,
+            zdr,
         };
 
         let endpoint = format!("{}/v1/scrape", self.base_url);
-        let mut req = self.http.post(&endpoint).json(&body);
-        if !self.token.is_empty() {
-            req = req.bearer_auth(&self.token);
-        }
-        if !org_id.is_empty() {
-            req = req.header("X-Quarry-Org", org_id);
-        }
-
-        let resp = req.send().await?;
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id, SCRAPE_SCOPES).await?;
+            let mut req = self.http.post(&endpoint).json(&body);
+            if !token.is_empty() {
+                req = req.bearer_auth(&token);
+            }
+            if !org_id.is_empty() {
+                req = req.header("X-Quarry-Org", org_id);
+            }
+            let resp = req.send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, SCRAPE_SCOPES, &token)
+                    .await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
         let status = resp.status().as_u16();
         let raw = resp.text().await?;
 
@@ -262,6 +350,7 @@ impl Client {
         limit: i32,
         intent: &str,
         org_id: &str,
+        zdr: bool,
     ) -> Result<Vec<SearchResult>, QuarryError> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -269,6 +358,7 @@ impl Client {
             limit: i32,
             #[serde(skip_serializing_if = "str::is_empty")]
             intent: &'a str,
+            zdr: bool,
         }
 
         if !self.available() {
@@ -288,18 +378,29 @@ impl Client {
             query,
             limit: effective_limit,
             intent,
+            zdr,
         };
 
         let endpoint = format!("{}/v1/search", self.base_url);
-        let mut req = self.http.post(&endpoint).json(&body);
-        if !self.token.is_empty() {
-            req = req.bearer_auth(&self.token);
-        }
-        if !org_id.is_empty() {
-            req = req.header("X-Quarry-Org", org_id);
-        }
-
-        let resp = req.send().await?;
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id, SEARCH_SCOPES).await?;
+            let mut req = self.http.post(&endpoint).json(&body);
+            if !token.is_empty() {
+                req = req.bearer_auth(&token);
+            }
+            if !org_id.is_empty() {
+                req = req.header("X-Quarry-Org", org_id);
+            }
+            let resp = req.send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, SEARCH_SCOPES, &token)
+                    .await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
         let status = resp.status().as_u16();
         let raw = resp.text().await?;
         if status >= 400 {
@@ -442,7 +543,30 @@ fn truncate(s: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Clone)]
+    struct RotatingTokenResponse(Arc<AtomicUsize>);
+
+    impl Respond for RotatingTokenResponse {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let token = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                "expired-token"
+            } else {
+                "fresh-token"
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": token,
+                "expiresInSeconds": 300,
+                "audience": "quarry"
+            }))
+        }
+    }
 
     #[test]
     fn empty_base_url_is_unavailable() {
@@ -454,10 +578,99 @@ mod tests {
     async fn unavailable_client_returns_unavailable_error() {
         let c = Client::new(Config::default());
         let err = c
-            .scrape("https://example.com", "", None, false)
+            .scrape("https://example.com", "", None, false, false)
             .await
             .expect_err("must error");
         assert!(matches!(err, QuarryError::Unavailable));
+    }
+
+    #[tokio::test]
+    async fn scrape_retries_exactly_once_after_unauthorized() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(2)
+            .mount(&quarry)
+            .await;
+        let client = Client::new(Config {
+            base_url: quarry.uri(),
+            token: "expired".to_owned(),
+            timeout: Duration::from_secs(5),
+        });
+
+        let error = client
+            .scrape("https://example.com", "org-a", None, false, false)
+            .await
+            .expect_err("second 401 must be surfaced");
+        assert!(matches!(error, QuarryError::Typed { status: 401, .. }));
+    }
+
+    #[tokio::test]
+    async fn scrape_forwards_zero_data_retention() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_json(serde_json::json!({
+                "url": "https://example.com",
+                "zdr": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "formats": {"text": "ok"}}
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let client = Client::new(Config {
+            base_url: quarry.uri(),
+            token: "test-token".to_owned(),
+            timeout: Duration::from_secs(5),
+        });
+
+        client
+            .scrape("https://example.com", "org-a", None, false, true)
+            .await
+            .expect("ZDR scrape succeeds");
+    }
+
+    #[tokio::test]
+    async fn unauthorized_dynamic_token_is_refreshed_before_retry() {
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/quarry/internal-token"))
+            .respond_with(RotatingTokenResponse(Arc::new(AtomicUsize::new(0))))
+            .expect(2)
+            .mount(&auth)
+            .await;
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(header("authorization", "Bearer expired-token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(header("authorization", "Bearer fresh-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "formats": {"text": "ok"}}
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let provider = TokenProvider::new_for_test(auth.uri(), "model-gateway", "secret");
+        let client = Client {
+            base_url: quarry.uri(),
+            auth: Auth::ServicePrincipal(provider),
+            http: reqwest::Client::new(),
+        };
+
+        let result = client
+            .scrape("https://example.com", "org-a", None, false, false)
+            .await
+            .expect("fresh token retry succeeds");
+        assert_eq!(result.text, "ok");
     }
 
     #[test]

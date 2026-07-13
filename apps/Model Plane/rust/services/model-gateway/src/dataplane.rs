@@ -22,10 +22,49 @@ use mp_contracts::dataplane::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::Claims;
+use crate::auth::{Claims, VerifiedDataPlaneBearer as VerifiedBearer};
 use crate::state::AppState;
 
 type HttpJsonError = (StatusCode, Json<Value>);
+
+pub(crate) fn document_zdr_requested(zdr: bool, classification: &str) -> bool {
+    zdr || matches!(
+        classification.trim().to_ascii_lowercase().as_str(),
+        "on" | "true" | "zdr" | "ephemeral" | "ephemeral-only" | "zero-retention"
+    )
+}
+
+#[must_use]
+const fn durable_mutation_blocked(claim_zdr: bool, request_zdr: bool) -> bool {
+    claim_zdr || request_zdr
+}
+
+fn effective_retrieval_zdr_mode(
+    claim_zdr: bool,
+    request_mode: Option<&str>,
+) -> Result<Option<String>, &'static str> {
+    let validated = match request_mode {
+        None => None,
+        Some("disabled" | "reject" | "ephemeral") => request_mode.map(str::to_owned),
+        Some(_) => return Err("zdr_mode must be one of: disabled, reject, ephemeral"),
+    };
+    Ok(if claim_zdr {
+        Some("ephemeral".to_owned())
+    } else {
+        validated
+    })
+}
+
+fn reject_zdr_durable_mutation(claims: &Claims, request_zdr: bool) -> Result<(), HttpJsonError> {
+    if durable_mutation_blocked(claims.zdr, request_zdr) {
+        Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": "durable mutation is unavailable under ZDR" })),
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 fn grpc_err(e: &tonic::Status) -> HttpJsonError {
     let code = match e.code() {
@@ -37,6 +76,14 @@ fn grpc_err(e: &tonic::Status) -> HttpJsonError {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, Json(json!({ "error": e.message() })))
+}
+
+fn user_data_request<T>(
+    message: T,
+    bearer: &VerifiedBearer,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    crate::retrieval::authorize(tonic::Request::new(message), bearer)
+        .map_err(|status| grpc_err(&status))
 }
 
 fn ts_to_str(ts: Option<&prost_types::Timestamp>) -> Value {
@@ -295,17 +342,21 @@ fn default_limit() -> i32 {
 pub async fn list_documents(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Query(q): Query<ListDocumentsQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .document_client
         .clone()
-        .list_documents(doc_pb::ListDocumentsRequest {
-            org_id: claims.org_id,
-            limit: q.limit,
-            offset: q.offset,
-            r#type: q.doc_type,
-        })
+        .list_documents(user_data_request(
+            doc_pb::ListDocumentsRequest {
+                org_id: claims.org_id,
+                limit: q.limit,
+                offset: q.offset,
+                r#type: q.doc_type,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -323,15 +374,19 @@ pub async fn list_documents(
 pub async fn get_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(document_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .document_client
         .clone()
-        .get_document(doc_pb::GetDocumentRequest {
-            document_id,
-            org_id: claims.org_id,
-        })
+        .get_document(user_data_request(
+            doc_pb::GetDocumentRequest {
+                document_id,
+                org_id: claims.org_id,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -348,6 +403,8 @@ pub struct CreateDocumentBody {
     pub content: String,
     #[serde(default)]
     pub zdr_classification: String,
+    #[serde(default)]
+    pub zdr: bool,
 }
 
 /// Creates a document via the Data Plane.
@@ -358,21 +415,29 @@ pub struct CreateDocumentBody {
 pub async fn create_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<CreateDocumentBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    reject_zdr_durable_mutation(
+        &claims,
+        document_zdr_requested(body.zdr, &body.zdr_classification),
+    )?;
     let resp = state
         .document_client
         .clone()
-        .create_document(doc_pb::CreateDocumentRequest {
-            org_id: claims.org_id,
-            source: body.source,
-            r#type: body.doc_type,
-            title: body.title,
-            content: body.content,
-            metadata: None,
-            zdr_classification: body.zdr_classification,
-            ingest_policy: None,
-        })
+        .create_document(user_data_request(
+            doc_pb::CreateDocumentRequest {
+                org_id: claims.org_id,
+                source: body.source,
+                r#type: body.doc_type,
+                title: body.title,
+                content: body.content,
+                metadata: None,
+                zdr_classification: body.zdr_classification,
+                ingest_policy: None,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -388,15 +453,19 @@ pub async fn create_document(
 pub async fn delete_document(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(document_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .document_client
         .clone()
-        .delete_document(doc_pb::DeleteDocumentRequest {
-            document_id,
-            org_id: claims.org_id,
-        })
+        .delete_document(user_data_request(
+            doc_pb::DeleteDocumentRequest {
+                document_id,
+                org_id: claims.org_id,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -411,9 +480,18 @@ pub async fn delete_document(
 pub async fn bulk_ingest(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let documents: Vec<Value> = body["documents"].as_array().cloned().unwrap_or_default();
+    let request_zdr = body["zdr"].as_bool().unwrap_or(false)
+        || documents.iter().any(|document| {
+            document_zdr_requested(
+                document["zdr"].as_bool().unwrap_or(false),
+                document["zdr_classification"].as_str().unwrap_or(""),
+            )
+        });
+    reject_zdr_durable_mutation(&claims, request_zdr)?;
     let create_reqs: Vec<doc_pb::CreateDocumentRequest> = documents
         .into_iter()
         .map(|d| doc_pb::CreateDocumentRequest {
@@ -430,11 +508,14 @@ pub async fn bulk_ingest(
     let resp = state
         .document_client
         .clone()
-        .bulk_ingest(doc_pb::BulkIngestRequest {
-            org_id: claims.org_id,
-            documents: create_reqs,
-            ingest_policy: None,
-        })
+        .bulk_ingest(user_data_request(
+            doc_pb::BulkIngestRequest {
+                org_id: claims.org_id,
+                documents: create_reqs,
+                ingest_policy: None,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -453,15 +534,19 @@ pub async fn bulk_ingest(
 pub async fn get_document_index_status(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(document_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .document_client
         .clone()
-        .get_document_index_status(doc_pb::GetDocumentIndexStatusRequest {
-            document_id,
-            org_id: claims.org_id,
-        })
+        .get_document_index_status(user_data_request(
+            doc_pb::GetDocumentIndexStatusRequest {
+                document_id,
+                org_id: claims.org_id,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -535,8 +620,11 @@ pub struct RetrieveFilters {
 pub async fn retrieve(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<RetrieveBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    let effective_zdr_mode = effective_retrieval_zdr_mode(claims.zdr, body.zdr_mode.as_deref())
+        .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
     let filters = body.filters.unwrap_or_default();
 
     // Phase 4: optionally give Data Plane v2's async index/embed pipeline a
@@ -552,13 +640,11 @@ pub async fn retrieve(
     let pending_documents = if filters.document_ids.is_empty() {
         Vec::new()
     } else {
-        check_pending_documents(&state, &claims.org_id, &filters.document_ids).await
+        check_pending_documents(&state, &claims.org_id, &filters.document_ids, &bearer).await?
     };
 
-    let resp = state
-        .retrieval_client
-        .clone()
-        .retrieve(ret_pb::RetrieveRequest {
+    let request = user_data_request(
+        ret_pb::RetrieveRequest {
             org_id: claims.org_id.clone(),
             query: body.query,
             filters: Some(ret_pb::Filters {
@@ -572,16 +658,22 @@ pub async fn retrieve(
                 collection_ids: filters.collection_ids,
             }),
             top_k: body.top_k,
-            user_id: Some(claims.user_id),
+            user_id: None,
             role: None,
             query_expansion: None,
             reranker_model: body.reranker_model,
             top_k_before_rerank: None,
-            zdr_mode: body.zdr_mode,
+            zdr_mode: effective_zdr_mode,
             context_budget_tokens: body.context_budget_tokens,
             context_format: body.context_format,
             agent_id: None,
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .retrieval_client
+        .clone()
+        .retrieve(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -632,14 +724,23 @@ async fn check_pending_documents(
     state: &AppState,
     org_id: &str,
     document_ids: &[String],
-) -> Vec<Value> {
-    let futures = document_ids.iter().map(|doc_id| {
+    bearer: &VerifiedBearer,
+) -> Result<Vec<Value>, HttpJsonError> {
+    let requests = document_ids
+        .iter()
+        .map(|doc_id| {
+            user_data_request(
+                doc_pb::GetDocumentIndexStatusRequest {
+                    document_id: doc_id.clone(),
+                    org_id: org_id.to_owned(),
+                },
+                bearer,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let futures = requests.into_iter().map(|request| {
         let mut client = state.document_client.clone();
-        let req = doc_pb::GetDocumentIndexStatusRequest {
-            document_id: doc_id.clone(),
-            org_id: org_id.to_owned(),
-        };
-        async move { client.get_document_index_status(req).await }
+        async move { client.get_document_index_status(request).await }
     });
     let results = futures::future::join_all(futures).await;
 
@@ -662,7 +763,7 @@ async fn check_pending_documents(
             }));
         }
     }
-    pending
+    Ok(pending)
 }
 
 /// Fetches a retrieval trace by id via the Data Plane.
@@ -673,15 +774,20 @@ async fn check_pending_documents(
 pub async fn get_retrieval_trace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(trace_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    let request = user_data_request(
+        ret_pb::GetTraceRequest {
+            trace_id,
+            org_id: claims.org_id,
+        },
+        &bearer,
+    )?;
     let resp = state
         .retrieval_client
         .clone()
-        .get_trace(ret_pb::GetTraceRequest {
-            trace_id,
-            org_id: claims.org_id,
-        })
+        .get_trace(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -697,6 +803,7 @@ pub async fn get_retrieval_trace(
 pub async fn get_sources(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let document_ids: Vec<String> = body["document_ids"]
@@ -707,13 +814,17 @@ pub async fn get_sources(
                 .collect()
         })
         .unwrap_or_default();
+    let request = user_data_request(
+        ret_pb::GetSourcesRequest {
+            org_id: claims.org_id,
+            document_ids,
+        },
+        &bearer,
+    )?;
     let resp = state
         .retrieval_client
         .clone()
-        .get_sources(ret_pb::GetSourcesRequest {
-            org_id: claims.org_id,
-            document_ids,
-        })
+        .get_sources(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -730,6 +841,7 @@ pub async fn get_sources(
 pub async fn get_chunks(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let knowledge_ids: Vec<String> = body["knowledge_ids"]
@@ -741,14 +853,18 @@ pub async fn get_chunks(
         })
         .unwrap_or_default();
     let document_id = body["document_id"].as_str().map(str::to_owned);
-    let resp = state
-        .retrieval_client
-        .clone()
-        .get_chunks(ret_pb::GetChunksRequest {
+    let request = user_data_request(
+        ret_pb::GetChunksRequest {
             org_id: claims.org_id,
             knowledge_ids,
             document_id,
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .retrieval_client
+        .clone()
+        .get_chunks(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -781,17 +897,22 @@ fn default_format() -> String {
 pub async fn pack_context(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<PackContextBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let resp = state
-        .retrieval_client
-        .clone()
-        .pack_context(ret_pb::PackContextRequest {
+    let request = user_data_request(
+        ret_pb::PackContextRequest {
             org_id: claims.org_id,
             knowledge_ids: body.knowledge_ids,
             budget_tokens: body.budget_tokens,
             format: body.format,
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .retrieval_client
+        .clone()
+        .pack_context(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -811,15 +932,19 @@ pub async fn pack_context(
 pub async fn get_knowledge_units(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(document_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .knowledge_client
         .clone()
-        .get_knowledge_units(know_pb::GetKnowledgeUnitsRequest {
-            document_id,
-            org_id: claims.org_id,
-        })
+        .get_knowledge_units(user_data_request(
+            know_pb::GetKnowledgeUnitsRequest {
+                document_id,
+                org_id: claims.org_id,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -836,16 +961,20 @@ pub async fn get_knowledge_units(
 pub async fn check_permissions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(document_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .knowledge_client
         .clone()
-        .check_permissions(know_pb::CheckPermissionsRequest {
-            org_id: claims.org_id.clone(),
-            document_id,
-            user_id: claims.user_id,
-        })
+        .check_permissions(user_data_request(
+            know_pb::CheckPermissionsRequest {
+                org_id: claims.org_id.clone(),
+                document_id,
+                user_id: claims.user_id,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -866,15 +995,20 @@ pub async fn check_permissions(
 pub async fn get_entity(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(entity_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    let request = user_data_request(
+        graph_pb::GetEntityRequest {
+            entity_id,
+            org_id: claims.org_id,
+        },
+        &bearer,
+    )?;
     let resp = state
         .graph_client
         .clone()
-        .get_entity(graph_pb::GetEntityRequest {
-            entity_id,
-            org_id: claims.org_id,
-        })
+        .get_entity(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -900,17 +1034,22 @@ pub struct ListEntitiesQuery {
 pub async fn list_entities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Query(q): Query<ListEntitiesQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let resp = state
-        .graph_client
-        .clone()
-        .list_entities_by_type(graph_pb::ListEntitiesByTypeRequest {
+    let request = user_data_request(
+        graph_pb::ListEntitiesByTypeRequest {
             org_id: claims.org_id,
             entity_type: q.entity_type,
             limit: q.limit,
             offset: q.offset,
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .graph_client
+        .clone()
+        .list_entities_by_type(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -930,17 +1069,22 @@ pub async fn list_entities(
 pub async fn get_relationships(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(entity_id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let resp = state
-        .graph_client
-        .clone()
-        .get_relationships(graph_pb::GetRelationshipsRequest {
+    let request = user_data_request(
+        graph_pb::GetRelationshipsRequest {
             org_id: claims.org_id,
             entity_id,
             relation_type: q.get("type").cloned().unwrap_or_default(),
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .graph_client
+        .clone()
+        .get_relationships(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -959,17 +1103,22 @@ pub async fn get_relationships(
 pub async fn get_claims(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(entity_id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let resp = state
-        .graph_client
-        .clone()
-        .get_claims(graph_pb::GetClaimsRequest {
+    let request = user_data_request(
+        graph_pb::GetClaimsRequest {
             org_id: claims.org_id,
             entity_id,
             status: q.get("status").cloned().unwrap_or_default(),
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .graph_client
+        .clone()
+        .get_claims(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1002,17 +1151,22 @@ fn default_max_entities() -> i32 {
 pub async fn expand_graph(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<ExpandGraphBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let resp = state
-        .graph_client
-        .clone()
-        .expand_graph(graph_pb::GraphExpansionRequest {
+    let request = user_data_request(
+        graph_pb::GraphExpansionRequest {
             org_id: claims.org_id,
             entity_ids: body.entity_ids,
             max_hops: body.max_hops,
             max_entities: body.max_entities,
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .graph_client
+        .clone()
+        .expand_graph(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1047,17 +1201,22 @@ pub async fn expand_graph(
 pub async fn get_contradictions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let resp = state
-        .graph_client
-        .clone()
-        .get_contradictions(graph_pb::GetContradictionsRequest {
+    let request = user_data_request(
+        graph_pb::GetContradictionsRequest {
             org_id: claims.org_id,
             entity_id: q.get("entity_id").cloned(),
             limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
             offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
-        })
+        },
+        &bearer,
+    )?;
+    let resp = state
+        .graph_client
+        .clone()
+        .get_contradictions(request)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1081,17 +1240,21 @@ pub async fn get_contradictions(
 pub async fn get_wiki_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(page_id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .wiki_client
         .clone()
-        .get_page(wiki_pb::GetPageRequest {
-            page_id,
-            org_id: claims.org_id,
-            version_id: q.get("version_id").cloned(),
-        })
+        .get_page(user_data_request(
+            wiki_pb::GetPageRequest {
+                page_id,
+                org_id: claims.org_id,
+                version_id: q.get("version_id").cloned(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1111,17 +1274,21 @@ pub async fn get_wiki_page(
 pub async fn get_wiki_page_by_path(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let path = q.get("path").cloned().unwrap_or_default();
     let resp = state
         .wiki_client
         .clone()
-        .get_page_by_path(wiki_pb::GetPageByPathRequest {
-            org_id: claims.org_id,
-            path,
-            version_id: q.get("version_id").cloned(),
-        })
+        .get_page_by_path(user_data_request(
+            wiki_pb::GetPageByPathRequest {
+                org_id: claims.org_id,
+                path,
+                version_id: q.get("version_id").cloned(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1141,18 +1308,22 @@ pub async fn get_wiki_page_by_path(
 pub async fn list_wiki_page_versions(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(page_id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .wiki_client
         .clone()
-        .list_page_versions(wiki_pb::ListPageVersionsRequest {
-            page_id,
-            org_id: claims.org_id,
-            limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
-            offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
-        })
+        .list_page_versions(user_data_request(
+            wiki_pb::ListPageVersionsRequest {
+                page_id,
+                org_id: claims.org_id,
+                limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
+                offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1172,17 +1343,21 @@ pub async fn list_wiki_page_versions(
 pub async fn get_wiki_page_sources(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(page_id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .wiki_client
         .clone()
-        .get_page_sources(wiki_pb::GetPageSourcesRequest {
-            page_id,
-            org_id: claims.org_id,
-            version_id: q.get("version_id").cloned(),
-        })
+        .get_page_sources(user_data_request(
+            wiki_pb::GetPageSourcesRequest {
+                page_id,
+                org_id: claims.org_id,
+                version_id: q.get("version_id").cloned(),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1201,18 +1376,22 @@ pub async fn get_wiki_page_sources(
 pub async fn list_wiki_maintenance_issues(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .wiki_client
         .clone()
-        .list_maintenance_issues(wiki_pb::ListMaintenanceIssuesRequest {
-            org_id: claims.org_id,
-            page_id: q.get("page_id").cloned(),
-            status: q.get("status").cloned().unwrap_or_default(),
-            limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
-            offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
-        })
+        .list_maintenance_issues(user_data_request(
+            wiki_pb::ListMaintenanceIssuesRequest {
+                org_id: claims.org_id,
+                page_id: q.get("page_id").cloned(),
+                status: q.get("status").cloned().unwrap_or_default(),
+                limit: q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50),
+                offset: q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1237,15 +1416,19 @@ pub async fn list_wiki_maintenance_issues(
 pub async fn get_wiki_backlinks(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(page_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let resp = state
         .wiki_client
         .clone()
-        .get_backlinks(wiki_pb::GetBacklinksRequest {
-            page_id,
-            org_id: claims.org_id,
-        })
+        .get_backlinks(user_data_request(
+            wiki_pb::GetBacklinksRequest {
+                page_id,
+                org_id: claims.org_id,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1270,18 +1453,23 @@ pub struct CreateWikiPageBody {
 pub async fn create_wiki_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<CreateWikiPageBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    reject_zdr_durable_mutation(&claims, false)?;
     let resp = state
         .wiki_client
         .clone()
-        .create_page(wiki_pb::CreatePageRequest {
-            org_id: claims.org_id,
-            workspace_id: body.workspace_id,
-            title: body.title,
-            path: body.path,
-            initial_content: body.initial_content,
-        })
+        .create_page(user_data_request(
+            wiki_pb::CreatePageRequest {
+                org_id: claims.org_id,
+                workspace_id: body.workspace_id,
+                title: body.title,
+                path: body.path,
+                initial_content: body.initial_content,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1305,19 +1493,24 @@ pub struct UpdateWikiPageBody {
 pub async fn update_wiki_page(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(page_id): Path<String>,
     Json(body): Json<UpdateWikiPageBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    reject_zdr_durable_mutation(&claims, false)?;
     let resp = state
         .wiki_client
         .clone()
-        .update_page_version(wiki_pb::UpdatePageVersionRequest {
-            page_id,
-            org_id: claims.org_id,
-            new_content: body.new_content,
-            edit_reason: body.edit_reason,
-            proposed_by_user: Some(claims.user_id),
-        })
+        .update_page_version(user_data_request(
+            wiki_pb::UpdatePageVersionRequest {
+                page_id,
+                org_id: claims.org_id,
+                new_content: body.new_content,
+                edit_reason: body.edit_reason,
+                proposed_by_user: Some(claims.user_id),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1345,19 +1538,24 @@ pub struct SubmitProposalBody {
 pub async fn submit_wiki_proposal(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Json(body): Json<SubmitProposalBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    reject_zdr_durable_mutation(&claims, false)?;
     let resp = state
         .wiki_client
         .clone()
-        .submit_proposal(wiki_pb::SubmitProposalRequest {
-            page_id: body.page_id,
-            org_id: claims.org_id,
-            proposed_content: body.proposed_content,
-            edit_reason: body.edit_reason,
-            proposed_by_agent: body.proposed_by_agent,
-            source_refs: body.source_refs,
-        })
+        .submit_proposal(user_data_request(
+            wiki_pb::SubmitProposalRequest {
+                page_id: body.page_id,
+                org_id: claims.org_id,
+                proposed_content: body.proposed_content,
+                edit_reason: body.edit_reason,
+                proposed_by_agent: body.proposed_by_agent,
+                source_refs: body.source_refs,
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1379,18 +1577,23 @@ pub struct ReviewProposalBody {
 pub async fn review_wiki_proposal(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    bearer: VerifiedBearer,
     Path(proposal_id): Path<String>,
     Json(body): Json<ReviewProposalBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    reject_zdr_durable_mutation(&claims, false)?;
     let resp = state
         .wiki_client
         .clone()
-        .review_proposal(wiki_pb::ReviewProposalRequest {
-            proposal_id,
-            org_id: claims.org_id,
-            decision: body.decision,
-            reviewed_by: Some(claims.user_id),
-        })
+        .review_proposal(user_data_request(
+            wiki_pb::ReviewProposalRequest {
+                proposal_id,
+                org_id: claims.org_id,
+                decision: body.decision,
+                reviewed_by: Some(claims.user_id),
+            },
+            &bearer,
+        )?)
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
@@ -1398,4 +1601,59 @@ pub async fn review_wiki_proposal(
         "proposal": resp.proposal.map(|p| wiki_proposal_value(&p)),
         "new_version": resp.new_version.map(|v| wiki_version_value(&v)),
     })))
+}
+
+#[cfg(test)]
+mod zdr_contract_tests {
+    use super::{document_zdr_requested, durable_mutation_blocked, effective_retrieval_zdr_mode};
+
+    #[test]
+    fn durable_document_proxy_rejects_every_restrictive_zdr_shape() {
+        assert!(document_zdr_requested(true, ""));
+        for value in [
+            "on",
+            "true",
+            "zdr",
+            "ephemeral",
+            "ephemeral-only",
+            "zero-retention",
+        ] {
+            assert!(document_zdr_requested(false, value), "{value}");
+        }
+        assert!(!document_zdr_requested(false, "internal"));
+    }
+
+    #[test]
+    fn verified_claim_zdr_cannot_be_downgraded_by_document_or_bulk_body() {
+        assert!(durable_mutation_blocked(true, false));
+        assert!(durable_mutation_blocked(false, true));
+        assert!(!durable_mutation_blocked(false, false));
+    }
+
+    #[test]
+    fn verified_claim_zdr_forces_ephemeral_retrieval_over_disabled_body() {
+        assert_eq!(
+            effective_retrieval_zdr_mode(true, Some("disabled"))
+                .expect("supported mode must resolve")
+                .as_deref(),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            effective_retrieval_zdr_mode(false, Some("reject"))
+                .expect("supported mode must pass through")
+                .as_deref(),
+            Some("reject")
+        );
+    }
+
+    #[test]
+    fn wiki_mutations_are_blocked_by_verified_claim_zdr() {
+        assert!(durable_mutation_blocked(true, false));
+    }
+
+    #[test]
+    fn invalid_retrieval_mode_is_rejected_instead_of_forwarded() {
+        assert!(effective_retrieval_zdr_mode(false, Some("Ephemeral")).is_err());
+        assert!(effective_retrieval_zdr_mode(false, Some("unknown")).is_err());
+    }
 }

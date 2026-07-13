@@ -12,6 +12,11 @@ use mp_contracts::dataplane::retrieval_v2::{
 };
 use mp_contracts::model_plane::v1::{
     self as pb,
+    finetune_jobs_server::FinetuneJobsServer,
+    memory_service_server::MemoryServiceServer,
+    orchestration_core_service_server::OrchestrationCoreServiceServer,
+    routing_policy_server::RoutingPolicyServer,
+    run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
 };
 use mp_events::idempotency::derive_idempotency_hash;
@@ -22,7 +27,19 @@ use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use crate::auth::{authorize_operation, identity, JwtVerifier, VerifiedIdentity};
 use crate::letta_adapter::LettaMemoryAdapter;
+
+/// Standard gRPC health names registered on the unauthenticated health-only
+/// surface. Business RPCs remain independently intercepted.
+pub const HEALTH_SERVICE_NAMES: [&str; 6] = [
+    "model_plane.v1.SessionCore",
+    "model_plane.v1.OrchestrationCoreService",
+    "model_plane.v1.FinetuneJobs",
+    "model_plane.v1.MemoryService",
+    "model_plane.v1.RoutingPolicy",
+    "model_plane.v1.RunService",
+];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
 const STEP_COMPLETED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.StepCompleted";
@@ -41,6 +58,28 @@ const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 /// is the explicit EU region; runs are stamped with this unless an operator
 /// overrides `MODEL_PLANE_RESIDENCY`.
 const DEFAULT_RESIDENCY: &str = "swedencentral";
+const MAX_USER_CHECKPOINT_ID_BYTES: usize = 200;
+const MAX_USER_CHECKPOINT_STATE_BYTES: usize = 4 * 1024 * 1024;
+
+#[allow(clippy::result_large_err)]
+fn validate_user_checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<(), Status> {
+    if checkpoint_id.is_empty()
+        || checkpoint_id != checkpoint_id.trim()
+        || checkpoint_id.len() > MAX_USER_CHECKPOINT_ID_BYTES
+        || checkpoint_id.chars().any(char::is_control)
+    {
+        return Err(Status::invalid_argument("invalid checkpoint_id"));
+    }
+    if checkpoint_id.starts_with(crate::compaction::AUTO_CHECKPOINT_PREFIX) {
+        return Err(Status::permission_denied(
+            "automatic checkpoint namespace is reserved",
+        ));
+    }
+    if state.is_empty() || state.len() > MAX_USER_CHECKPOINT_STATE_BYTES {
+        return Err(Status::invalid_argument("invalid checkpoint state size"));
+    }
+    Ok(())
+}
 
 /// The configured Model-Plane data-residency region, stamped onto each run at
 /// `StartRun`. Defaults to the EU region [`DEFAULT_RESIDENCY`].
@@ -145,6 +184,49 @@ pub struct SessionService {
     /// a tool `STEP_COMPLETED` is recorded. `None` when NATS is unreachable —
     /// the run still completes; only the audit fan-out is skipped.
     audit_publisher: Option<std::sync::Arc<crate::audit_publisher::NatsAuditPublisher>>,
+}
+
+#[allow(clippy::result_large_err)]
+fn authorize_owner_row(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), Status> {
+    caller.authorize_org(org_id)?;
+    if !caller.is_service() {
+        caller.authorize_user(user_id)?;
+    }
+    Ok(())
+}
+
+async fn authorize_thread_owner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    thread_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    authorize_owner_row(caller, &org_id, &user_id)
+}
+
+async fn authorize_run_owner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    run_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
+    authorize_owner_row(caller, &org_id, &user_id)
 }
 
 /// Insert the `THREAD_CREATED` event row for a freshly created thread, within
@@ -950,7 +1032,18 @@ impl SessionCore for SessionService {
         request: Request<pb::CreateThreadRequest>,
     ) -> Result<Response<pb::CreateThreadResponse>, Status> {
         let started = Instant::now();
-        let result = create_thread_inner(&self.pool, request.into_inner()).await;
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let mut req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller.user_id().ok_or_else(|| {
+                Status::permission_denied("user-bound thread credential required")
+            })?;
+            req.user_id = user_id.to_owned();
+            create_thread_inner(&self.pool, req).await
+        }
+        .await;
         record_metrics("create_thread", started, result.is_ok());
         result
     }
@@ -960,9 +1053,14 @@ impl SessionCore for SessionService {
         request: Request<pb::AppendMessageRequest>,
     ) -> Result<Response<pb::AppendMessageResponse>, Status> {
         let started = Instant::now();
-        let result =
-            append_message_inner(&self.pool, self.letta_memory.as_ref(), request.into_inner())
-                .await;
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let req = request.into_inner();
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            append_message_inner(&self.pool, self.letta_memory.as_ref(), req).await
+        }
+        .await;
         record_metrics("append_message", started, result.is_ok());
         result
     }
@@ -972,7 +1070,19 @@ impl SessionCore for SessionService {
         request: Request<pb::StartRunRequest>,
     ) -> Result<Response<pb::StartRunResponse>, Status> {
         let started = Instant::now();
-        let result = start_run_inner(&self.pool, request.into_inner()).await;
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let mut req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound run credential required"))?;
+            req.user_id = user_id.to_owned();
+            start_run_inner(&self.pool, req).await
+        }
+        .await;
         record_metrics("start_run", started, result.is_ok());
         result
     }
@@ -982,11 +1092,13 @@ impl SessionCore for SessionService {
         request: Request<pb::CompleteStepRequest>,
     ) -> Result<Response<pb::CompleteStepResponse>, Status> {
         let started = Instant::now();
-        let result = complete_step_inner(
-            &self.pool,
-            self.audit_publisher.as_deref(),
-            request.into_inner(),
-        )
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let req = request.into_inner();
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            complete_step_inner(&self.pool, self.audit_publisher.as_deref(), req).await
+        }
         .await;
         record_metrics("complete_step", started, result.is_ok());
         result
@@ -998,7 +1110,11 @@ impl SessionCore for SessionService {
     ) -> Result<Response<pb::SaveCheckpointResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::SaveCheckpointResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
+            validate_user_checkpoint(&req.checkpoint_id, &req.state)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
             let now = Utc::now();
 
             let mut tx = self
@@ -1073,7 +1189,10 @@ impl SessionCore for SessionService {
         request: Request<pb::ReplayThreadRequest>,
     ) -> Result<Response<Self::ReplayThreadStream>, Status> {
         let started = Instant::now();
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "session:read")?;
         let req = request.into_inner();
+        authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
         let pool = self.pool.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -1092,6 +1211,9 @@ impl SessionCore for SessionService {
     ) -> Result<Response<pb::CompactNowResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::CompactNowResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // This RPC compacts all tenants and is never valid user authority.
+            caller.require_service_scope("session:compact")?;
             let req = request.into_inner();
             let n = crate::compaction::compact_once(&self.pool)
                 .await
@@ -1129,10 +1251,13 @@ impl SessionCore for SessionService {
     ) -> Result<Response<pb::UpsertAgentSkillResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::UpsertAgentSkillResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:skills:write")?;
             let req = request.into_inner();
             if req.org_id.is_empty() || req.name.is_empty() {
                 return Err(Status::invalid_argument("org_id and name are required"));
             }
+            caller.authorize_org(&req.org_id)?;
             let origin = match req.origin.as_str() {
                 "" | "background_review" => "background_review",
                 "user" => "user",
@@ -1206,10 +1331,14 @@ impl SessionCore for SessionService {
     ) -> Result<Response<pb::SetRunModeResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::SetRunModeResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
             if req.run_id.is_empty() || req.org_id.is_empty() {
                 return Err(Status::invalid_argument("run_id and org_id are required"));
             }
+            caller.authorize_org(&req.org_id)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
             let mode = match req.mode.as_str() {
                 "execute" | "plan" | "reactive" | "research" => req.mode.as_str(),
                 other => {
@@ -1266,10 +1395,13 @@ impl SessionCore for SessionService {
 
         let started = Instant::now();
         let result: Result<Response<pb::ListAgentSkillsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
             let req = request.into_inner();
             if req.org_id.is_empty() {
                 return Err(Status::invalid_argument("org_id is required"));
             }
+            caller.authorize_org(&req.org_id)?;
             let rows: Vec<Row> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin
@@ -1319,12 +1451,16 @@ impl SessionCore for SessionService {
     ) -> Result<Response<pb::ListConversationResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::ListConversationResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
             let req = request.into_inner();
             if req.org_id.is_empty() || req.thread_id.is_empty() {
                 return Err(Status::invalid_argument(
                     "org_id and thread_id are required",
                 ));
             }
+            caller.authorize_org(&req.org_id)?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
             let rows: Vec<(String, String)> = sqlx::query_as(
                 "SELECT m.role, m.content
                  FROM messages m
@@ -1357,10 +1493,14 @@ impl SessionCore for SessionService {
     ) -> Result<Response<pb::ListThreadsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::ListThreadsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
             let req = request.into_inner();
             if req.org_id.is_empty() || req.user_id.is_empty() {
                 return Err(Status::invalid_argument("org_id and user_id are required"));
             }
+            caller.authorize_org(&req.org_id)?;
+            caller.authorize_user(&req.user_id)?;
             let limit = clamp_thread_limit(req.limit);
             let rows: Vec<(
                 String,
@@ -1443,7 +1583,15 @@ impl SessionCore for SessionService {
         request: Request<pb::GetContextAssemblyRequest>,
     ) -> Result<Response<pb::GetContextAssemblyResponse>, Status> {
         let started = Instant::now();
-        let result = get_context_assembly_inner(self, request.into_inner()).await;
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            get_context_assembly_inner(self, req).await
+        }
+        .await;
         record_metrics("get_context_assembly", started, result.is_ok());
         result
     }
@@ -1964,6 +2112,7 @@ pub async fn serve(
     pool: PgPool,
     events_tx: tokio::sync::broadcast::Sender<mp_contracts::model_plane::v1::OrchestrationEvent>,
     letta_memory: Option<LettaMemoryAdapter>,
+    auth: JwtVerifier,
 ) -> anyhow::Result<()> {
     let addr = "0.0.0.0:9091".parse()?;
     info!("gRPC listening on :9091");
@@ -2017,23 +2166,20 @@ pub async fn serve(
     };
 
     let orchestration =
-        crate::orchestration_grpc::OrchestrationGrpc::new_from_env(pool.clone(), events_tx)
-            .await
-            .into_server();
+        crate::orchestration_grpc::OrchestrationGrpc::new_from_env(pool.clone(), events_tx).await;
 
     // Wave 7 — fine-tuning job state machine. Owns the `finetune_jobs` table
     // in this same Postgres. Provider HTTP (Azure OpenAI) lives in the gateway.
-    let finetune = crate::finetune_grpc::FinetuneJobsService::new(pool.clone()).into_server();
-    let memory =
-        crate::memory_grpc::MemoryGrpc::new(pool.clone(), letta_memory.clone()).into_server();
+    let finetune = crate::finetune_grpc::FinetuneJobsService::new(pool.clone());
+    let memory = crate::memory_grpc::MemoryGrpc::new(pool.clone(), letta_memory.clone());
     // Velion intent layer ("model router") runtime policy. Owns the singleton
     // `routing_policy` JSONB row in this same Postgres; the BFF writes and
     // inference-core polls it.
-    let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone()).into_server();
+    let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone());
     // Run read model + cancel path for the runs-history UI. Owns the `runs` +
     // `events` tables in this same Postgres (read-only here, plus the cancel
     // status flip).
-    let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone()).into_server();
+    let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone());
 
     // Best-effort connect the audit publisher for `model.tool_action` events.
     // A NATS hiccup must not block serving; on failure the field is `None` and
@@ -2048,20 +2194,33 @@ pub async fn serve(
         }
     };
 
+    let session = SessionService {
+        pool,
+        retrieval_client,
+        graph_client,
+        knowledge_client,
+        letta_memory,
+        audit_publisher,
+    };
+
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    for service_name in HEALTH_SERVICE_NAMES {
+        health_reporter
+            .set_service_status(service_name, tonic_health::ServingStatus::Serving)
+            .await;
+    }
+
     tonic::transport::Server::builder()
-        .add_service(SessionCoreServer::new(SessionService {
-            pool,
-            retrieval_client,
-            graph_client,
-            knowledge_client,
-            letta_memory,
-            audit_publisher,
-        }))
-        .add_service(orchestration)
-        .add_service(finetune)
-        .add_service(memory)
-        .add_service(routing)
-        .add_service(runs)
+        .add_service(health_service)
+        .add_service(SessionCoreServer::with_interceptor(session, auth.clone()))
+        .add_service(OrchestrationCoreServiceServer::with_interceptor(
+            orchestration,
+            auth.clone(),
+        ))
+        .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))
+        .add_service(MemoryServiceServer::with_interceptor(memory, auth.clone()))
+        .add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))
+        .add_service(RunServiceServer::with_interceptor(runs, auth))
         .serve(addr)
         .await?;
 
@@ -2070,7 +2229,11 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble_segments, pb, resolve_residency, AssemblyInputs, DEFAULT_RESIDENCY};
+    use super::{
+        assemble_segments, pb, resolve_residency, validate_user_checkpoint, AssemblyInputs,
+        DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
+        MAX_USER_CHECKPOINT_STATE_BYTES,
+    };
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
     use tonic::Request;
 
@@ -2095,6 +2258,44 @@ mod tests {
             "northeurope",
             "explicit override wins"
         );
+    }
+
+    #[test]
+    fn standard_health_registers_every_business_service_name() {
+        assert_eq!(
+            HEALTH_SERVICE_NAMES,
+            [
+                "model_plane.v1.SessionCore",
+                "model_plane.v1.OrchestrationCoreService",
+                "model_plane.v1.FinetuneJobs",
+                "model_plane.v1.MemoryService",
+                "model_plane.v1.RoutingPolicy",
+                "model_plane.v1.RunService",
+            ]
+        );
+    }
+
+    #[test]
+    fn user_checkpoints_cannot_preclaim_compaction_or_exhaust_storage() {
+        let valid_state = vec![0_u8; MAX_USER_CHECKPOINT_STATE_BYTES];
+        validate_user_checkpoint("checkpoint-1", &valid_state).expect("bounded user checkpoint");
+
+        for (id, state) in [
+            ("", &b"state"[..]),
+            (" auto-compact-v1:forged", &b"state"[..]),
+            ("auto-compact-v1:forged", &b"state"[..]),
+            (&"x".repeat(MAX_USER_CHECKPOINT_ID_BYTES + 1), &b"state"[..]),
+            ("checkpoint-1", &[][..]),
+            (
+                "checkpoint-1",
+                &vec![0_u8; MAX_USER_CHECKPOINT_STATE_BYTES + 1],
+            ),
+        ] {
+            assert!(
+                validate_user_checkpoint(id, state).is_err(),
+                "invalid checkpoint id/state was accepted"
+            );
+        }
     }
 
     fn base() -> AssemblyInputs {

@@ -4,6 +4,34 @@ Audited 2026-06-04 against the real Model Plane code (not the brief's assumption
 Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
+> **Verified 2026-07-11 (Model Plane Phase-4 audit).** Re-checked this doc's core
+> structural claims against *current* `rust/services/model-gateway` source and live
+> host-curl. Findings:
+> - The gateway machinery this doc describes is still present and matches source:
+>   `sse.rs`, `sse_events.rs` (`ChatEvent`: `ReasoningDelta`/`StepUpdate`/`ToolCall`/
+>   `ToolResult`/`Citation`/`Artifact`/`Attachment`/`Usage`/`Stopped`/`Error`),
+>   `tool_loop.rs` (`run_tool_rounds`, `dispatch_tool` → `web_search`/`fetch_url` via
+>   Quarry, `recall_memory`/`save_memory`, and `mcp__<server>__<tool>` →
+>   `handle_proxy_mcp_tool`), `retrieval.rs` (Data Plane v2 `Retrieve` grounding +
+>   `citation` events, degrade-on-failure), `vision.rs` (`AnalyzeImage`/`select_image`),
+>   plus `state.rs` holding `retrieval_client`/`document_client`/`knowledge_client`/
+>   `graph_client`. The §1 baseline and §8 "landed" status are accurate — the tool loop
+>   is real and non-mocked. `[source-only]`
+> - Live: gateway `/healthz` 200, `/health` 401 (as documented); execution-core
+>   `/healthz` 200; shipping-core `/healthz` 200 + `/api/carriers` 200. `[live-curl]`
+> - **Scope caveat:** this is a point-in-time completion report for the **velionv2**
+>   chat (v2 is now deprecated; velionv3 is canonical). The gateway/BFF/SSE layer it
+>   documents is shared and still live under v3, but the commit hashes and dates here
+>   are historical. Treat the June-5 §0/§8 "DONE + LIVE" lines as point-in-time, not a
+>   fresh runtime attestation.
+> - **Newer source of truth:** `apps/Model Plane/MODEL_PLANE_DEEP_DIVE.md` and
+>   `docs/core-research/model-gateway.md` now cover the gateway more comprehensively and
+>   more recently — prefer those for current runtime status.
+> - **Out of scope here:** the user's "test the Visma MCP" ask. MCP proxying is real
+>   (`mcp__` dispatch above), but a repo-wide grep for `visma` returns **zero** Model
+>   Plane code matches — no Visma MCP server is registered/seeded/defaulted. See
+>   `docs/core-research/model-gateway.md` and `capability-core.md` for the full answer.
+
 ## 0e. Toxicity classifier + follow-ups — verified live (2026-06-05)
 
 - **Toxicity / content_safety classifier (the one genuine code gap) — DONE + LIVE.** Implemented

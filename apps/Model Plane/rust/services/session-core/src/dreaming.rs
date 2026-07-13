@@ -282,7 +282,7 @@ pub(crate) async fn load_agent_memory_context_rows(
            AND ( \
                 session_id = $2 \
                 OR (session_id IS NULL AND scope IN ('org', 'global')) \
-                OR (session_id IS NULL AND scope = 'user' AND (owner = $3 OR owner = '')) \
+                OR (session_id IS NULL AND scope = 'user' AND owner = $3) \
            ) \
          ORDER BY \
            CASE scope \
@@ -316,18 +316,23 @@ pub(crate) async fn load_agent_memory_context_rows(
         .collect())
 }
 
+pub(crate) struct AgentMemorySearch<'a> {
+    pub(crate) org_id: &'a str,
+    pub(crate) thread_id: &'a str,
+    pub(crate) owner_user_id: &'a str,
+    pub(crate) query: &'a str,
+    pub(crate) topic_filter: &'a [String],
+    pub(crate) limit: u32,
+    pub(crate) updated_after: Option<DateTime<Utc>>,
+}
+
 pub(crate) async fn search_agent_memory(
     pool: &PgPool,
-    org_id: &str,
-    thread_id: &str,
-    query: &str,
-    topic_filter: &[String],
-    limit: u32,
-    updated_after: Option<DateTime<Utc>>,
+    request: &AgentMemorySearch<'_>,
 ) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
-    let limit = i64::from(limit.clamp(1, 50));
-    let filters = normalize_topic_filters(topic_filter);
-    let query = query.trim();
+    let limit = i64::from(request.limit.clamp(1, 50));
+    let filters = normalize_topic_filters(request.topic_filter);
+    let query = request.query.trim();
 
     let rows = sqlx::query_as::<
         _,
@@ -347,30 +352,33 @@ pub(crate) async fn search_agent_memory(
          WHERE org_id = $1 \
            AND review_state = 'accepted' \
            AND (expires_at IS NULL OR expires_at > now()) \
-           AND (session_id = $2 OR session_id IS NULL) \
-           AND ($3::timestamptz IS NULL OR updated_at > $3) \
-           AND (cardinality($4::text[]) = 0 \
+           AND (session_id = $2 \
+                OR (session_id IS NULL AND scope <> 'user') \
+                OR (session_id IS NULL AND scope = 'user' AND owner = $3)) \
+           AND ($4::timestamptz IS NULL OR updated_at > $4) \
+           AND (cardinality($5::text[]) = 0 \
                 OR CASE \
                     WHEN scope = 'user' THEN 'USER' \
                     WHEN scope = 'agent' THEN 'AGENT' \
                     WHEN scope = 'workspace' THEN 'WORKSPACE' \
                     WHEN kind = 'policy' THEN 'POLICY' \
                     ELSE 'MEMORY' \
-                  END = ANY($4::text[])) \
+                  END = ANY($5::text[])) \
          ORDER BY \
            CASE \
-             WHEN $5 = '' THEN 0 \
-             WHEN lower(content) LIKE ('%' || lower($5) || '%') THEN 0 \
-             WHEN lower(key) LIKE ('%' || lower($5) || '%') THEN 1 \
+             WHEN $6 = '' THEN 0 \
+             WHEN lower(content) LIKE ('%' || lower($6) || '%') THEN 0 \
+             WHEN lower(key) LIKE ('%' || lower($6) || '%') THEN 1 \
              ELSE 2 \
            END, \
            confidence DESC, \
            updated_at DESC \
-         LIMIT $6",
+         LIMIT $7",
     )
-    .bind(org_id)
-    .bind(thread_id)
-    .bind(updated_after)
+    .bind(request.org_id)
+    .bind(request.thread_id)
+    .bind(request.owner_user_id)
+    .bind(request.updated_after)
     .bind(&filters)
     .bind(query)
     .bind(limit)
@@ -396,7 +404,7 @@ pub(crate) async fn search_agent_memory(
                 MemorySearchRow {
                     id,
                     thread_id: if session_id.is_empty() {
-                        thread_id.to_owned()
+                        request.thread_id.to_owned()
                     } else {
                         session_id
                     },
@@ -414,23 +422,25 @@ pub(crate) async fn index_agent_memory(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
+    owner_user_id: &str,
     topic: &str,
     content: &str,
 ) -> Result<String, sqlx::Error> {
     let topic = normalize_topic(topic);
-    let Some((_, user_id)) = sqlx::query_as::<_, (String, String)>(
-        "SELECT org_id, user_id FROM threads WHERE id = $1 AND org_id = $2",
+    let thread_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3)",
     )
     .bind(thread_id)
     .bind(org_id)
-    .fetch_optional(pool)
-    .await?
-    else {
+    .bind(owner_user_id)
+    .fetch_one(pool)
+    .await?;
+    if !thread_exists {
         return Ok(String::new());
-    };
+    }
 
     let (scope, session_id, kind, owner) = match topic.as_str() {
-        "USER" => ("user", None, "fact", user_id.as_str()),
+        "USER" => ("user", None, "fact", owner_user_id),
         "POLICY" => ("org", None, "policy", ""),
         "AGENT" | "WORKSPACE" => ("org", None, "fact", ""),
         _ => ("thread", Some(thread_id.to_owned()), "fact", ""),
@@ -503,7 +513,7 @@ async fn upsert_agent_memory(
         "INSERT INTO agent_memory \
          (id, org_id, session_id, scope, key, content, kind, confidence, owner, source_links, review_state) \
          VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, 'accepted') \
-         ON CONFLICT (org_id, scope, key) WHERE session_id IS NULL \
+         ON CONFLICT (org_id, scope, owner, key) WHERE session_id IS NULL \
          DO UPDATE SET \
            content = EXCLUDED.content, \
            kind = EXCLUDED.kind, \
@@ -748,6 +758,18 @@ fn memory_topic(scope: &str, kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_user_memory_is_owner_scoped_in_queries_and_uniqueness() {
+        let source = include_str!("dreaming.rs");
+        let unsafe_search = ["AND (session_id = $2 OR", " session_id IS NULL)"].concat();
+        let owner_search = ["scope = 'user' AND", " owner = $3"].concat();
+        assert!(!source.contains(&unsafe_search));
+        assert!(source.contains(&owner_search));
+
+        let migration = include_str!("../migrations/0011_identity_scoping.sql");
+        assert!(migration.contains("ON agent_memory (org_id, scope, owner, key)"));
+    }
 
     #[test]
     fn extracts_norwegian_user_name() {

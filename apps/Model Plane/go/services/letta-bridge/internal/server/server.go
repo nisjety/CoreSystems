@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -42,14 +43,54 @@ func (m *inMemoryStore) Search(_ context.Context, orgID, threadID, query string,
 // Memory).
 type Server struct {
 	mpv1.UnimplementedMemoryServiceServer
-	store Store
+	store              Store
+	backendKind        string
+	semantic           bool
+	semanticObserved   atomic.Bool
+	semanticSearchOkay atomic.Bool
 }
 
 // NewServer constructs a Server with a fresh in-memory store.
-func NewServer() *Server { return &Server{store: &inMemoryStore{s: memstore.NewStore()}} }
+func NewServer() *Server {
+	return NewServerWithBackend(&inMemoryStore{s: memstore.NewStore()}, "in-memory", false)
+}
 
-// NewServerWithStore constructs a Server backed by the provided Store.
-func NewServerWithStore(store Store) *Server { return &Server{store: store} }
+// NewServerWithStore constructs a Server backed by a conservative non-semantic
+// store. Call NewServerWithBackend when the backend provides semantic search.
+func NewServerWithStore(store Store) *Server {
+	return NewServerWithBackend(store, "configured", false)
+}
+
+// NewServerWithBackend constructs a server with explicit backend capability
+// metadata. A semantic backend does not report ready until an actual search has
+// succeeded, preventing a green process health check from masquerading as
+// working semantic retrieval.
+func NewServerWithBackend(store Store, backendKind string, semantic bool) *Server {
+	return &Server{store: store, backendKind: backendKind, semantic: semantic}
+}
+
+// ReadyStatus reports whether semantic retrieval has been observed working.
+// Lexical stores remain intentionally degraded even when they can return hits.
+func (s *Server) ReadyStatus() (bool, string) {
+	if !s.semantic {
+		return false, "DEGRADED_LEXICAL_FALLBACK"
+	}
+	if !s.semanticObserved.Load() {
+		return false, "DEGRADED_SEMANTIC_UNVERIFIED"
+	}
+	if !s.semanticSearchOkay.Load() {
+		return false, "DEGRADED_SEMANTIC_UNAVAILABLE"
+	}
+	return true, "OK"
+}
+
+func (s *Server) degradation() (bool, string) {
+	ready, memoryStatus := s.ReadyStatus()
+	if ready {
+		return false, ""
+	}
+	return true, memoryStatus
+}
 
 // SearchMemory returns hits from the in-memory store.
 func (s *Server) SearchMemory(ctx context.Context, req *mpv1.SearchMemoryRequest) (*mpv1.SearchMemoryResponse, error) {
@@ -59,6 +100,10 @@ func (s *Server) SearchMemory(ctx context.Context, req *mpv1.SearchMemoryRequest
 		updatedAfter = req.UpdatedAfter.AsTime()
 	}
 	raw, err := s.store.Search(ctx, req.OrgId, req.ThreadId, req.Query, req.TopicFilter, updatedAfter, int32(req.Limit))
+	if s.semantic {
+		s.semanticObserved.Store(true)
+		s.semanticSearchOkay.Store(err == nil)
+	}
 	if err != nil {
 		telemetry.MemorySearchesTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "error")))
 		return nil, mapErr(fmt.Errorf("search backend: %w", err))
@@ -75,7 +120,12 @@ func (s *Server) SearchMemory(ctx context.Context, req *mpv1.SearchMemoryRequest
 		}
 	}
 	telemetry.MemorySearchesTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "ok")))
-	return &mpv1.SearchMemoryResponse{Entries: entries}, nil
+	degraded, degradationReason := s.degradation()
+	return &mpv1.SearchMemoryResponse{
+		Entries:           entries,
+		Degraded:          degraded,
+		DegradationReason: degradationReason,
+	}, nil
 }
 
 // IndexMemory upserts a record into the in-memory store.
@@ -91,13 +141,23 @@ func (s *Server) IndexMemory(ctx context.Context, req *mpv1.IndexMemoryRequest) 
 		return nil, mapErr(wrapped)
 	}
 	telemetry.MemoryIndexedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "ok")))
-	return &mpv1.IndexMemoryResponse{MemoryId: rec.MemoryID}, nil
+	degraded, degradationReason := s.degradation()
+	return &mpv1.IndexMemoryResponse{
+		MemoryId:          rec.MemoryID,
+		Degraded:          degraded,
+		DegradationReason: degradationReason,
+	}, nil
 }
 
-// Health reports OK.
+// Health reports semantic capability rather than process liveness.
 func (s *Server) Health(ctx context.Context, _ *mpv1.MemoryHealthRequest) (*mpv1.MemoryHealthResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "Health")))
-	return &mpv1.MemoryHealthResponse{Status: "OK"}, nil
+	ready, readiness := s.ReadyStatus()
+	return &mpv1.MemoryHealthResponse{
+		Status:       readiness,
+		Ready:        ready,
+		MemoryStatus: readiness,
+	}, nil
 }
 
 // Register wires the MemoryService onto the provided gRPC server.

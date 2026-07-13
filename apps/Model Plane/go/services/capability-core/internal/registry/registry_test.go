@@ -372,6 +372,24 @@ func TestRegistry_Reload_AppliesModifiedFields(t *testing.T) {
 	}
 }
 
+func TestRegistry_ReloadRejectsUnknownRiskWithoutReplacingCurrentCatalog(t *testing.T) {
+	src := &fakeSource{caps: []*models.Capability{newCap("cap.test.safe", "Safe", models.KindTool)}}
+	registry, err := NewFromSource(src)
+	if err != nil {
+		t.Fatalf("NewFromSource: %v", err)
+	}
+	invalid := newCap("cap.test.invalid", "Invalid", models.KindTool)
+	invalid.RiskLevel = "critical-ish"
+	src.SetCaps([]*models.Capability{invalid})
+
+	if err := registry.Reload(); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("Reload error = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := registry.Get("cap.test.safe", ""); err != nil {
+		t.Fatalf("failed reload replaced prior safe catalog: %v", err)
+	}
+}
+
 func TestRegistry_Reload_ConcurrentReadsSafe(t *testing.T) {
 	src := &fakeSource{caps: []*models.Capability{
 		newCap("cap.test.a", "A", models.KindTool),
@@ -410,4 +428,121 @@ func TestRegistry_Reload_ConcurrentReadsSafe(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+func TestRegistryTenantViewsRejectForeignCapabilities(t *testing.T) {
+	t.Parallel()
+
+	global := newCap("cap.shared", "Global", models.KindTool)
+	global.OrgID = "global"
+	orgOverride := newCap("cap.shared", "Org A", models.KindTool)
+	orgOverride.OrgID = "org-a"
+	foreign := newCap("cap.foreign", "Org B", models.KindSkill)
+	foreign.OrgID = "org-b"
+	foreign.Scope = "agent"
+	ownedSkill := newCap("cap.owned-skill", "Org A Skill", models.KindSkill)
+	ownedSkill.OrgID = "org-a"
+	ownedSkill.Scope = "agent"
+	disabledGlobal := newCap("cap.disabled-override", "Global enabled", models.KindTool)
+	disabledGlobal.OrgID = "global"
+	disabledOverride := newCap("cap.disabled-override", "Org A disabled", models.KindTool)
+	disabledOverride.OrgID = "org-a"
+	disabledOverride.Enabled = false
+
+	r, err := NewFromSource(&fakeSource{caps: []*models.Capability{
+		global, foreign, orgOverride, ownedSkill, disabledGlobal, disabledOverride,
+	}})
+	if err != nil {
+		t.Fatalf("NewFromSource: %v", err)
+	}
+
+	got, err := r.GetForOrg("cap.shared", "", "org-a")
+	if err != nil {
+		t.Fatalf("GetForOrg tenant override: %v", err)
+	}
+	if got.OrgID != "org-a" || got.Name != "Org A" {
+		t.Fatalf("tenant override = %+v", got)
+	}
+
+	got, err = r.GetForOrg("cap.shared", "", "org-c")
+	if err != nil {
+		t.Fatalf("GetForOrg global fallback: %v", err)
+	}
+	if got.OrgID != "global" {
+		t.Fatalf("global fallback = %+v", got)
+	}
+
+	if _, err := r.GetForOrg("cap.foreign", "", "org-a"); !errors.Is(err, domain.ErrCapabilityNotFound) {
+		t.Fatalf("foreign GetForOrg error = %v", err)
+	}
+	if _, _, err := r.ValidateSkillForOrg("cap.foreign", "org-a"); !errors.Is(err, domain.ErrCapabilityNotFound) {
+		t.Fatalf("foreign ValidateSkillForOrg error = %v", err)
+	}
+	if _, _, err := r.CheckPromotionForOrg("cap.foreign", "agent", "workspace", "org-a"); !errors.Is(err, domain.ErrCapabilityNotFound) {
+		t.Fatalf("foreign CheckPromotionForOrg error = %v", err)
+	}
+	if _, _, err := r.PromoteSkillForOrg("cap.foreign", "agent", "workspace", "org-a"); !errors.Is(err, domain.ErrCapabilityNotFound) {
+		t.Fatalf("foreign PromoteSkillForOrg error = %v", err)
+	}
+	validated, validationErrors, err := r.ValidateSkillForOrg("cap.owned-skill", "org-a")
+	if err != nil || len(validationErrors) != 0 || validated.OrgID != "org-a" {
+		t.Fatalf("owned ValidateSkillForOrg = capability=%+v errors=%v err=%v", validated, validationErrors, err)
+	}
+	checked, checks, err := r.CheckPromotionForOrg("cap.owned-skill", "agent", "workspace", "org-a")
+	if err != nil || checked.OrgID != "org-a" || !containsAll(checks, "skill_valid", "source_scope_matches", "target_scope_valid") {
+		t.Fatalf("owned CheckPromotionForOrg = capability=%+v checks=%v err=%v", checked, checks, err)
+	}
+	if unchanged, failedChecks, err := r.PromoteSkillForOrg("cap.owned-skill", "workspace", "user", "org-a"); err != nil || unchanged.Scope != "agent" || !containsAll(failedChecks, "source_scope_mismatch") {
+		t.Fatalf("mismatched PromoteSkillForOrg = capability=%+v checks=%v err=%v", unchanged, failedChecks, err)
+	}
+	promoted, promotionChecks, err := r.PromoteSkillForOrg("cap.owned-skill", "agent", "workspace", "org-a")
+	if err != nil || promoted.Scope != "workspace" || !containsAll(promotionChecks, "registry_updated") {
+		t.Fatalf("owned PromoteSkillForOrg = capability=%+v checks=%v err=%v", promoted, promotionChecks, err)
+	}
+	reloaded, err := r.GetForOrg("cap.owned-skill", "", "org-a")
+	if err != nil || reloaded.Scope != "workspace" {
+		t.Fatalf("promoted tenant capability was not retained: capability=%+v err=%v", reloaded, err)
+	}
+
+	items, _ := r.ListForOrg("org-a", "", "", "", 200)
+	seen := map[string]*models.Capability{}
+	for _, item := range items {
+		if item.OrgID == "org-b" {
+			t.Fatalf("foreign capability leaked in tenant list: %+v", item)
+		}
+		if previous := seen[item.ID]; previous != nil {
+			t.Fatalf("duplicate capability id %q in tenant list: %+v and %+v", item.ID, previous, item)
+		}
+		seen[item.ID] = item
+	}
+	if seen["cap.shared"] == nil || seen["cap.shared"].OrgID != "org-a" {
+		t.Fatalf("tenant override missing from list: %+v", seen)
+	}
+	if seen["cap.owned-skill"] == nil || seen["cap.foreign"] != nil {
+		t.Fatalf("tenant list = %+v", seen)
+	}
+	if seen["cap.disabled-override"] != nil {
+		t.Fatalf("disabled tenant override fell back to global entry: %+v", seen["cap.disabled-override"])
+	}
+}
+
+func TestRegistryTenantViewsRequireOrganization(t *testing.T) {
+	t.Parallel()
+
+	r := newReg(t)
+	if _, err := r.GetForOrg("cap.memory.search", "", ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("GetForOrg missing org error = %v", err)
+	}
+	if items, more := r.ListForOrg("", "", "", "", 50); items != nil || more {
+		t.Fatalf("ListForOrg missing org = %+v, %v", items, more)
+	}
+	if _, _, err := r.ValidateSkillForOrg("cap.skill.summarize", ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("ValidateSkillForOrg missing org error = %v", err)
+	}
+	if _, _, err := r.CheckPromotionForOrg("cap.skill.summarize", "agent", "workspace", ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("CheckPromotionForOrg missing org error = %v", err)
+	}
+	if _, _, err := r.PromoteSkillForOrg("cap.skill.summarize", "agent", "workspace", ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("PromoteSkillForOrg missing org error = %v", err)
+	}
 }

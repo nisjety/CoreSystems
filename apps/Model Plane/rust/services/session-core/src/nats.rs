@@ -33,7 +33,7 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
     let subscribed_subjects = subscriber_subjects(SUBJECT_FILTER, compat_mode)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    let client = async_nats::connect(&nats_url).await?;
+    let client = crate::nats_connection::connect(&nats_url).await?;
     let js = jetstream::new(client);
 
     // Ensure stream exists (idempotent).
