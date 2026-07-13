@@ -1,0 +1,53 @@
+{
+  "description": "Public, non-production Conversation PrepareSend plus Ed25519 provider-write attestation v1 test vector.",
+  "private_key_seed_base64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "public_key_base64": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "jti_random_bytes_base64": "AAECAwQFBgcICQoLDA0ODw==",
+  "ttl_seconds": 30,
+  "canonicalization": "Go encoding/json over ordered fields org_id, connection_id, provider_key, operation, params, body; map keys are lexicographically sorted.",
+  "send_request": {
+    "org_id": "org-1",
+    "actor_user_id": "user-1",
+    "provider": "whatsapp",
+    "connection_id": "conn-1",
+    "provider_thread_id": "phone-1:15550001",
+    "body_text": "Approved reply",
+    "body_html": "",
+    "subject": "",
+    "to": [],
+    "authorization_kind": "human_approved_ai_action",
+    "authorization_id": "authorization-1",
+    "approval_id": "action-1",
+    "action_id": "action-1",
+    "idempotency_key": "conversation:org-1:action-1"
+  },
+  "header": {
+    "alg": "EdDSA",
+    "typ": "velion.provider-write-attestation+jwt",
+    "kid": "conversation-write-2026-07"
+  },
+  "claims": {
+    "v": 1,
+    "iss": "conversation-core",
+    "aud": "integration-corev2",
+    "presenter_service": "conversation-core",
+    "authorization_kind": "human_approved_ai_action",
+    "authorization_id": "authorization-1",
+    "approval_id": "action-1",
+    "action_id": "action-1",
+    "org_id": "org-1",
+    "connection_id": "conn-1",
+    "provider_key": "whatsapp",
+    "operation": "whatsapp.messages.send",
+    "actor_id": "user-1",
+    "payload_sha256": "99116abef35c712ba306b35113a4a27f0c6ff6d586ec15208de34ef388a8471b",
+    "idempotency_key": "conversation:org-1:action-1",
+    "jti": "AAECAwQFBgcICQoLDA0ODw",
+    "iat": 1783944000,
+    "nbf": 1783944000,
+    "exp": 1783944030
+  },
+  "canonical_payload_json": "{\"org_id\":\"org-1\",\"connection_id\":\"conn-1\",\"provider_key\":\"whatsapp\",\"operation\":\"whatsapp.messages.send\",\"params\":{\"phoneNumberId\":\"phone-1\"},\"body\":{\"text\":{\"body\":\"Approved reply\"},\"to\":\"15550001\",\"type\":\"text\"}}",
+  "payload_sha256": "99116abef35c712ba306b35113a4a27f0c6ff6d586ec15208de34ef388a8471b",
+  "compact_jws": "eyJhbGciOiJFZERTQSIsInR5cCI6InZlbGlvbi5wcm92aWRlci13cml0ZS1hdHRlc3RhdGlvbitqd3QiLCJraWQiOiJjb252ZXJzYXRpb24td3JpdGUtMjAyNi0wNyJ9.eyJ2IjoxLCJpc3MiOiJjb252ZXJzYXRpb24tY29yZSIsImF1ZCI6ImludGVncmF0aW9uLWNvcmV2MiIsInByZXNlbnRlcl9zZXJ2aWNlIjoiY29udmVyc2F0aW9uLWNvcmUiLCJhdXRob3JpemF0aW9uX2tpbmQiOiJodW1hbl9hcHByb3ZlZF9haV9hY3Rpb24iLCJhdXRob3JpemF0aW9uX2lkIjoiYXV0aG9yaXphdGlvbi0xIiwiYXBwcm92YWxfaWQiOiJhY3Rpb24tMSIsImFjdGlvbl9pZCI6ImFjdGlvbi0xIiwib3JnX2lkIjoib3JnLTEiLCJjb25uZWN0aW9uX2lkIjoiY29ubi0xIiwicHJvdmlkZXJfa2V5Ijoid2hhdHNhcHAiLCJvcGVyYXRpb24iOiJ3aGF0c2FwcC5tZXNzYWdlcy5zZW5kIiwiYWN0b3JfaWQiOiJ1c2VyLTEiLCJwYXlsb2FkX3NoYTI1NiI6Ijk5MTE2YWJlZjM1YzcxMmJhMzA2YjM1MTEzYTRhMjdmMGM2ZmY2ZDU4NmVjMTUyMDhkZTM0ZWYzODhhODQ3MWIiLCJpZGVtcG90ZW5jeV9rZXkiOiJjb252ZXJzYXRpb246b3JnLTE6YWN0aW9uLTEiLCJqdGkiOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R3IiwiaWF0IjoxNzgzOTQ0MDAwLCJuYmYiOjE3ODM5NDQwMDAsImV4cCI6MTc4Mzk0NDAzMH0.VtykDhj9sVHLCO5bqdY20cHY3yWIKH4q6c5F3wcKtqDDRWDFxkGeL_4tj2CsXpr_ctwIG6DYw-YAz8cnpieXDw"
+}

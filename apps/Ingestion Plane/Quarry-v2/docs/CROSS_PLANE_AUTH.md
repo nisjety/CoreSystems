@@ -8,8 +8,8 @@ D2 + D3 / cluster #14.
 | ------------------------------ | ----- | ---------------- | ------------------- |
 | **client → quarry-edge**       | JWT (auth-core JWKS, P0) | n/a (request-fresh) | not yet |
 | **quarry-edge → quarry-control** | **HMAC-SHA256** (this doc) | timestamp + nonce  | `Idempotency-Key` header |
-| **quarry-edge → data-plane** (HTTP / gRPC) | API key (TLS) | n/a | future cycle |
-| **quarry-edge → model-plane** | Bearer | n/a | future cycle |
+| **quarry-edge → data-plane** | Per-org Auth Core service JWT (`aud=data-plane`, route-minimal scopes) | cached until 30s before expiry; one 401 refresh | implemented over HTTP |
+| **quarry-edge → model-plane** | Per-org Auth Core service JWT (`aud=model-gateway`, `models:invoke`) | cached until 30s before expiry; one 401 refresh | implemented |
 
 ## Wire shape
 

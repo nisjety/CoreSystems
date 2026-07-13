@@ -8,17 +8,19 @@ import (
 )
 
 type MemoryRepository struct {
-	mu          sync.RWMutex
-	sessions    map[string]ConnectSession
-	stateIndex  map[string]string
-	connections map[string]Connection
-	consents    map[string]ConnectionConsent
-	syncJobs    map[string]SyncJob
-	syncEvents  map[string][]SyncEvent
-	webhooks    map[string]WebhookEvent
-	tokenLeases map[string]TokenLease
-	scimTokens  map[string]memorySCIMToken
-	audit       []AuditEvent
+	mu                          sync.RWMutex
+	sessions                    map[string]ConnectSession
+	stateIndex                  map[string]string
+	connections                 map[string]Connection
+	consents                    map[string]ConnectionConsent
+	syncJobs                    map[string]SyncJob
+	syncEvents                  map[string][]SyncEvent
+	webhooks                    map[string]WebhookEvent
+	tokenLeases                 map[string]TokenLease
+	scimTokens                  map[string]memorySCIMToken
+	audit                       []AuditEvent
+	actionReceipts              map[string]ActionReceipt
+	actionAuthorizationReceipts map[string]string
 
 	emailSyncStates map[string]EmailSyncState
 }
@@ -30,16 +32,18 @@ type memorySCIMToken struct {
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		sessions:    map[string]ConnectSession{},
-		stateIndex:  map[string]string{},
-		connections: map[string]Connection{},
-		consents:    map[string]ConnectionConsent{},
-		syncJobs:    map[string]SyncJob{},
-		syncEvents:  map[string][]SyncEvent{},
-		webhooks:    map[string]WebhookEvent{},
-		tokenLeases: map[string]TokenLease{},
-		scimTokens:  map[string]memorySCIMToken{},
-		audit:       []AuditEvent{},
+		sessions:                    map[string]ConnectSession{},
+		stateIndex:                  map[string]string{},
+		connections:                 map[string]Connection{},
+		consents:                    map[string]ConnectionConsent{},
+		syncJobs:                    map[string]SyncJob{},
+		syncEvents:                  map[string][]SyncEvent{},
+		webhooks:                    map[string]WebhookEvent{},
+		tokenLeases:                 map[string]TokenLease{},
+		scimTokens:                  map[string]memorySCIMToken{},
+		audit:                       []AuditEvent{},
+		actionReceipts:              map[string]ActionReceipt{},
+		actionAuthorizationReceipts: map[string]string{},
 
 		emailSyncStates: map[string]EmailSyncState{},
 	}
@@ -483,7 +487,113 @@ func (r *MemoryRepository) InsertAuditEvent(_ context.Context, event AuditEvent)
 	return nil
 }
 
+func actionReceiptKey(organizationID, idempotencyKey string) string {
+	return strings.TrimSpace(organizationID) + "\x00" + strings.TrimSpace(idempotencyKey)
+}
+
+func actionAuthorizationReceiptKey(receipt ActionReceipt) string {
+	return strings.TrimSpace(receipt.AttestationIssuer) + "\x00" +
+		strings.TrimSpace(receipt.OrganizationID) + "\x00" + strings.TrimSpace(receipt.AuthorizationID)
+}
+
+func (r *MemoryRepository) ClaimActionReceipt(_ context.Context, receipt ActionReceipt) (ActionReceipt, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := actionReceiptKey(receipt.OrganizationID, receipt.IdempotencyKey)
+	if existing, ok := r.actionReceipts[key]; ok {
+		if !sameActionReceiptBinding(existing, receipt) {
+			return ActionReceipt{}, false, ErrConflict
+		}
+		return existing, false, nil
+	}
+	authorizationKey := actionAuthorizationReceiptKey(receipt)
+	if existingKey, ok := r.actionAuthorizationReceipts[authorizationKey]; ok {
+		existing := r.actionReceipts[existingKey]
+		if !sameActionReceiptBinding(existing, receipt) {
+			return ActionReceipt{}, false, ErrConflict
+		}
+		return existing, false, nil
+	}
+	now := time.Now().UTC()
+	if receipt.CreatedAt.IsZero() {
+		receipt.CreatedAt = now
+	}
+	receipt.UpdatedAt = now
+	receipt.Status = "pending"
+	r.actionReceipts[key] = receipt
+	r.actionAuthorizationReceipts[authorizationKey] = key
+	return receipt, true, nil
+}
+
+func (r *MemoryRepository) BeginActionReceiptExecution(_ context.Context, organizationID, idempotencyKey string) (ActionReceipt, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := actionReceiptKey(organizationID, idempotencyKey)
+	receipt, ok := r.actionReceipts[key]
+	if !ok {
+		return ActionReceipt{}, ErrNotFound
+	}
+	if receipt.Status != "pending" {
+		return ActionReceipt{}, ErrConflict
+	}
+	receipt.Status = "executing"
+	receipt.UpdatedAt = time.Now().UTC()
+	r.actionReceipts[key] = receipt
+	return receipt, nil
+}
+
+func (r *MemoryRepository) CompleteActionReceipt(_ context.Context, organizationID, idempotencyKey, providerMessageID string) (ActionReceipt, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := actionReceiptKey(organizationID, idempotencyKey)
+	receipt, ok := r.actionReceipts[key]
+	if !ok {
+		return ActionReceipt{}, ErrNotFound
+	}
+	if receipt.Status != "executing" {
+		return ActionReceipt{}, ErrConflict
+	}
+	receipt.Status = "completed"
+	receipt.ProviderMessageID = strings.TrimSpace(providerMessageID)
+	receipt.UpdatedAt = time.Now().UTC()
+	r.actionReceipts[key] = receipt
+	return receipt, nil
+}
+
+func (r *MemoryRepository) MarkActionReceiptUnknown(_ context.Context, organizationID, idempotencyKey string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := actionReceiptKey(organizationID, idempotencyKey)
+	receipt, ok := r.actionReceipts[key]
+	if !ok {
+		return ErrNotFound
+	}
+	if receipt.Status != "executing" {
+		return ErrConflict
+	}
+	receipt.Status = "unknown"
+	receipt.UpdatedAt = time.Now().UTC()
+	r.actionReceipts[key] = receipt
+	return nil
+}
+
 func (r *MemoryRepository) Close() {}
+
+func sameActionReceiptBinding(left, right ActionReceipt) bool {
+	return left.OrganizationID == right.OrganizationID &&
+		left.IdempotencyKey == right.IdempotencyKey &&
+		left.RequestSHA256 == right.RequestSHA256 &&
+		left.ConnectionID == right.ConnectionID &&
+		left.ProviderKey == right.ProviderKey &&
+		left.Operation == right.Operation &&
+		left.AttestationIssuer == right.AttestationIssuer &&
+		left.AuthorizationKind == right.AuthorizationKind &&
+		left.AuthorizationID == right.AuthorizationID &&
+		left.ApprovalID == right.ApprovalID &&
+		left.ActionID == right.ActionID &&
+		left.ActorID == right.ActorID &&
+		left.PayloadSHA256 == right.PayloadSHA256
+}
 
 func cloneStringMap(input map[string]string) map[string]string {
 	if len(input) == 0 {

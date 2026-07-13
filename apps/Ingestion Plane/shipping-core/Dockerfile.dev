@@ -1,7 +1,9 @@
-FROM golang:1.26-alpine
+# Development-only image. Pin the toolchain and hot-reload helper so a fresh
+# checkout does not silently change behavior between builds.
+FROM golang:1.26.5-alpine3.24
 
 RUN apk add --no-cache git && \
-    go install github.com/air-verse/air@latest
+    go install github.com/air-verse/air@v1.65.3
 
 WORKDIR /app
 

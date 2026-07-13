@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 
 use crate::{
@@ -31,12 +32,22 @@ async fn health() -> Json<Envelope<HealthData>> {
     Json(Envelope::data(HealthData { status: "ok" }))
 }
 
-async fn ready(State(state): State<AppState>) -> Json<Envelope<ReadyData>> {
-    Json(Envelope::data(ReadyData {
-        status: "ready",
-        sonic_enabled: state.sonic.enabled(),
-        nats_enabled: state.settings.nats.enabled,
-    }))
+async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Envelope<ReadyData>>) {
+    let sonic_ready = state.sonic.ready().await;
+    let ready = sonic_ready;
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(Envelope::data(ReadyData {
+            status: if ready { "ready" } else { "not_ready" },
+            sonic_enabled: state.sonic.enabled(),
+            sonic_ready,
+            nats_enabled: state.settings.nats.enabled,
+        })),
+    )
 }
 
 async fn suggestions(
@@ -96,7 +107,13 @@ async fn push(
 
 fn authorize(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
     let Some(expected) = state.settings.internal_token.as_deref() else {
-        return Ok(());
+        return if std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").as_deref() == Ok("1")
+            && std::env::var("ISOLATED_E2E").as_deref() == Ok("1")
+        {
+            Ok(())
+        } else {
+            Err(AppError::Unauthorized)
+        };
     };
 
     let bearer = headers
@@ -104,7 +121,10 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
 
-    if bearer == Some(expected) {
+    if bearer
+        .filter(|value| value.len() == expected.len())
+        .is_some_and(|value| value.as_bytes().ct_eq(expected.as_bytes()).into())
+    {
         Ok(())
     } else {
         Err(AppError::Unauthorized)
@@ -175,6 +195,7 @@ struct HealthData {
 struct ReadyData {
     status: &'static str,
     sonic_enabled: bool,
+    sonic_ready: bool,
     nats_enabled: bool,
 }
 
@@ -219,6 +240,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/v1/internal/push")
+                    .header("authorization", "Bearer test-internal-token")
                     .header("x-org-id", "org_a")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -234,6 +256,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/v1/suggestions?org_id=org_a&q=Find%20me&scope=queries")
+                    .header("authorization", "Bearer test-internal-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -255,7 +278,7 @@ mod tests {
         Settings {
             http_addr: "127.0.0.1:0".parse().unwrap(),
             metadata_db_path: ":memory:".into(),
-            internal_token: None,
+            internal_token: Some("test-internal-token".to_string()),
             sonic: SonicSettings {
                 enabled: false,
                 addr: "127.0.0.1:1491".to_string(),

@@ -22,6 +22,10 @@ package emailsync
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,9 +125,11 @@ type rawEmailEvent struct {
 
 // IngestClient posts normalized messages to conversation-ingest-rs.
 type IngestClient struct {
-	BaseURL        string
-	InternalAPIKey string
-	HTTP           *http.Client
+	BaseURL      string
+	ServiceToken string
+	HTTP         *http.Client
+	Now          func() time.Time
+	Nonce        func() string
 }
 
 func (c *IngestClient) Ingest(ctx context.Context, conn store.Connection, msg EmailMessage) error {
@@ -158,23 +164,122 @@ func (c *IngestClient) Ingest(ctx context.Context, conn store.Connection, msg Em
 		return fmt.Errorf("build ingest request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.InternalAPIKey != "" {
-		req.Header.Set("x-internal-api-key", c.InternalAPIKey)
+	if !validServiceToken(c.ServiceToken) {
+		return fmt.Errorf("conversation ingest service token must be a non-placeholder secret of at least 32 bytes")
+	}
+	now := time.Now
+	if c.Now != nil {
+		now = c.Now
+	}
+	nonce := newDelegationNonce
+	if c.Nonce != nil {
+		nonce = c.Nonce
+	}
+	delegationNonce := strings.TrimSpace(nonce())
+	if delegationNonce == "" {
+		return fmt.Errorf("create conversation ingest delegation nonce")
+	}
+	for name, value := range conversationIngestDelegationHeaders(
+		c.ServiceToken,
+		req.Method,
+		req.URL.RequestURI(),
+		payload,
+		conn.OrganizationID,
+		now().UTC(),
+		delegationNonce,
+	) {
+		req.Header.Set(name, value)
 	}
 	client := c.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	resp, err := client.Do(req)
+	redirectSafeClient := *client
+	redirectSafeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := redirectSafeClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("post ingest bridge: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("ingest bridge returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if resp.StatusCode != http.StatusAccepted {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("ingest bridge returned unexpected status %d", resp.StatusCode)
+	}
+	var ack struct {
+		Data struct {
+			Detail struct {
+				ID string `json:"id"`
+			} `json:"detail"`
+			Message struct {
+				ID string `json:"id"`
+			} `json:"message"`
+			Created *bool `json:"created"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	if err := decoder.Decode(&ack); err != nil || strings.TrimSpace(ack.Data.Detail.ID) == "" || strings.TrimSpace(ack.Data.Message.ID) == "" || ack.Data.Created == nil {
+		return fmt.Errorf("ingest bridge returned an invalid persistence acknowledgement")
 	}
 	return nil
+}
+
+func bodyDigest(body []byte) string {
+	digest := sha256.Sum256(body)
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func conversationIngestDelegationHeaders(
+	serviceToken string,
+	method string,
+	requestURI string,
+	body []byte,
+	organizationID string,
+	timestamp time.Time,
+	nonce string,
+) map[string]string {
+	timestampText := timestamp.UTC().Format(time.RFC3339)
+	digest := bodyDigest(body)
+	canonical := strings.Join([]string{
+		"v2",
+		"integration-email-worker",
+		"conversation-ingest",
+		timestampText,
+		nonce,
+		method,
+		requestURI,
+		"",
+		strings.TrimSpace(organizationID),
+		"",
+		digest,
+	}, "\n")
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(serviceToken)))
+	_, _ = mac.Write([]byte(canonical))
+	return map[string]string{
+		"x-service-id":             "integration-email-worker",
+		"x-org-id":                 strings.TrimSpace(organizationID),
+		"x-delegation-timestamp":   timestampText,
+		"x-delegation-nonce":       nonce,
+		"x-delegation-body-sha256": digest,
+		"x-delegation-signature":   base64.RawURLEncoding.EncodeToString(mac.Sum(nil)),
+	}
+}
+
+func newDelegationNonce() string {
+	bytes := make([]byte, 18)
+	if _, err := rand.Read(bytes); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes)
+}
+
+func validServiceToken(token string) bool {
+	token = strings.TrimSpace(token)
+	lower := strings.ToLower(token)
+	return len(token) >= 32 &&
+		!strings.HasPrefix(lower, "change-me") &&
+		!strings.HasPrefix(lower, "replace-with")
 }
 
 // Worker drives one poll loop over all email-capable connections.

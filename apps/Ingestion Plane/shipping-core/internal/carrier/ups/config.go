@@ -18,18 +18,24 @@ type Config struct {
 	// in unit tests. Both the OAuth token endpoint and the Rating API
 	// hang off this same host.
 	BaseURL string
+	// LiveBooking must be explicitly true to allow Book/Label/Track against
+	// a non-CIE BaseURL. Like DHL, UPS has no per-request test flag — test
+	// vs production is purely which host you call.
+	LiveBooking bool
 }
 
 // NewConfigFromEnv reads UPS_CLIENT_ID and UPS_CLIENT_SECRET (both
-// required) plus optional UPS_ACCOUNT_NUMBER and UPS_API_BASE_URL.
-// Missing required vars are all named in one error, and main.go treats
-// that as "not configured" (skip adapter), never a startup failure.
+// required) plus optional UPS_ACCOUNT_NUMBER, UPS_API_BASE_URL, and
+// UPS_LIVE_BOOKING. Missing required vars are all named in one error, and
+// main.go treats that as "not configured" (skip adapter), never a startup
+// failure.
 func NewConfigFromEnv() (Config, error) {
 	cfg := Config{
 		ClientID:      os.Getenv("UPS_CLIENT_ID"),
 		ClientSecret:  os.Getenv("UPS_CLIENT_SECRET"),
 		AccountNumber: os.Getenv("UPS_ACCOUNT_NUMBER"),
 		BaseURL:       os.Getenv("UPS_API_BASE_URL"),
+		LiveBooking:   os.Getenv("UPS_LIVE_BOOKING") == "true",
 	}
 
 	var missing []string

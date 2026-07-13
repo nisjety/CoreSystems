@@ -157,11 +157,14 @@ pub async fn extract(
     // returning cleaned markdown (still useful), unless a schema was requested.
     let runner: Option<AiFormatRunner> = match state.model_plane_url.as_deref() {
         Some(url) if !url.is_empty() => match ModelPlaneClient::new(url) {
-            Ok(c) => {
-                let c = match state.model_plane_token.as_deref().filter(|t| !t.is_empty()) {
-                    Some(tok) => c.with_bearer_token(tok),
-                    None => c,
-                };
+            Ok(mut c) => {
+                if let Some(provider) = state.service_token_provider.clone() {
+                    c = c.with_token_provider(provider);
+                } else if let Some(tok) =
+                    state.model_plane_token.as_deref().filter(|t| !t.is_empty())
+                {
+                    c = c.with_bearer_token(tok);
+                }
                 Some(AiFormatRunner::new(Arc::new(c)))
             }
             Err(_) => None,
@@ -207,7 +210,10 @@ pub async fn extract(
                 error: Some(e),
             },
             Ok(md) => match (&req.schema, &runner) {
-                (Some(schema), Some(r)) => match r.json(&md, schema.clone(), ZdrMode::Off).await {
+                (Some(schema), Some(r)) => match r
+                    .json_for_org(&claims.org_id, &md, schema.clone(), ZdrMode::Off)
+                    .await
+                {
                     Ok(jr) => ExtractItem {
                         url: raw.clone(),
                         status: "ok".into(),

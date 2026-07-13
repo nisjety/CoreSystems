@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -14,6 +17,93 @@ func TestLoadRequiresEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestLoadAndValidateRuntimeRequireTrustedProviderWriteAttestationKeys(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	rawKeys, err := json.Marshal([]map[string]string{{
+		"issuer":     "conversation-core",
+		"kid":        "conversation-write-2026-07",
+		"public_key": base64.StdEncoding.EncodeToString(publicKey),
+	}})
+	if err != nil {
+		t.Fatalf("Marshal trusted keys error: %v", err)
+	}
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON", string(rawKeys))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.ProviderWriteAttestationKeysJSON != string(rawKeys) {
+		t.Fatal("Load did not preserve trusted public-key JSON")
+	}
+	cfg.InternalAPIKey = "internal"
+	cfg.AuthCoreURL = "http://auth-core:3011"
+	cfg.AuthCoreInternalAPIKey = "auth-core-key"
+	cfg.OrgCoreURL = "http://org-core:8080"
+	cfg.PublicBaseURL = "http://integration-corev2:3026"
+	cfg.DatabaseURL = "postgres://integration"
+	if err := cfg.ValidateRuntime(); err != nil {
+		t.Fatalf("ValidateRuntime error: %v", err)
+	}
+
+	for _, invalid := range []string{"", "[]", `[{"issuer":"conversation-core","kid":"change-me","public_key":"invalid"}]`} {
+		cfg.ProviderWriteAttestationKeysJSON = invalid
+		if err := cfg.ValidateRuntime(); err == nil || !strings.Contains(err.Error(), "INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON") {
+			t.Fatalf("ValidateRuntime error = %v for unsafe keys, want provider-write key error", err)
+		}
+	}
+}
+
+func TestValidateRuntimeFailsClosedForEveryRequiredBoundary(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	rawKeys, err := json.Marshal([]map[string]string{{
+		"issuer": "conversation-core", "kid": "conversation-write-2026-07", "public_key": base64.StdEncoding.EncodeToString(publicKey),
+	}})
+	if err != nil {
+		t.Fatalf("Marshal keys error: %v", err)
+	}
+	valid := Config{
+		InternalAPIKey: "internal", AuthCoreURL: "http://auth-core:3011", AuthCoreInternalAPIKey: "auth-key",
+		OrgCoreURL: "http://org-core:8080", PublicBaseURL: "http://integration-corev2:3026",
+		DatabaseURL: "postgres://integration", EncryptionKey: []byte("12345678901234567890123456789012"),
+		ProviderWriteAttestationKeysJSON: string(rawKeys),
+	}
+	tests := []struct {
+		name   string
+		update func(*Config)
+		want   string
+	}{
+		{name: "internal key", update: func(c *Config) { c.InternalAPIKey = "" }, want: "INTERNAL_API_KEY"},
+		{name: "auth url", update: func(c *Config) { c.AuthCoreURL = "" }, want: "AUTH_CORE_URL"},
+		{name: "control key", update: func(c *Config) { c.AuthCoreInternalAPIKey = ""; c.InternalAPIKey = "" }, want: "INTERNAL_API_KEY"},
+		{name: "org url", update: func(c *Config) { c.OrgCoreURL = "" }, want: "ORG_CORE_URL"},
+		{name: "public url", update: func(c *Config) { c.PublicBaseURL = "" }, want: "INTEGRATION_PUBLIC_BASE_URL"},
+		{name: "database", update: func(c *Config) { c.DatabaseURL = "" }, want: "DATABASE_URL"},
+		{name: "encryption", update: func(c *Config) { c.EncryptionKey = []byte("short") }, want: "INTEGRATION_CREDENTIALS_ENCRYPTION_KEY"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			tt.update(&cfg)
+			if err := cfg.ValidateRuntime(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateRuntime error = %v, want %s", err, tt.want)
+			}
+		})
+	}
+	allowMemory := valid
+	allowMemory.DatabaseURL = ""
+	allowMemory.AllowInMemoryStore = true
+	if err := allowMemory.ValidateRuntime(); err != nil {
+		t.Fatalf("ValidateRuntime in-memory opt-in error: %v", err)
+	}
+}
+
 func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
 	t.Setenv("INTERNAL_API_KEY", "dev")
@@ -23,8 +113,8 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	t.Setenv("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core, data-plane-v2, finspo-core")
 	t.Setenv("FINSPO_API_KEY", "finspo-key")
 	t.Setenv("FINSPO_API_KEY_HEADER", "X-Finspo-Key")
-	t.Setenv("DATA_PLANE_INTERNAL_API_KEY", "data-plane-key")
-	t.Setenv("DATA_PLANE_INTERNAL_API_KEY_HEADER", "X-Data-Plane-Key")
+	t.Setenv("INTEGRATION_SERVICE_ID", "integration-corev2-prod")
+	t.Setenv("INTEGRATION_SERVICE_API_KEY", "integration-service-key")
 	t.Setenv("INTEGRATION_CORE_URL", "http://integration-corev2:3026/")
 	t.Setenv("FACEBOOK_CLIENT_ID", "facebook-app-id")
 	t.Setenv("META_JS_SDK_API_VERSION", "23.0")
@@ -56,8 +146,8 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	if cfg.FinspoCoreAPIKey != "finspo-key" || cfg.FinspoCoreAPIKeyHeader != "X-Finspo-Key" {
 		t.Fatalf("Finspo auth = %q/%q, want configured key/header", cfg.FinspoCoreAPIKey, cfg.FinspoCoreAPIKeyHeader)
 	}
-	if cfg.DataPlaneInternalAPIKey != "data-plane-key" || cfg.DataPlaneInternalAPIHeader != "X-Data-Plane-Key" {
-		t.Fatalf("Data Plane auth = %q/%q, want configured key/header", cfg.DataPlaneInternalAPIKey, cfg.DataPlaneInternalAPIHeader)
+	if cfg.IntegrationServiceID != "integration-corev2-prod" || cfg.IntegrationServiceAPIKey != "integration-service-key" {
+		t.Fatalf("Data Plane service principal = %q/%q", cfg.IntegrationServiceID, cfg.IntegrationServiceAPIKey)
 	}
 	if cfg.IntegrationCoreURL != "http://integration-corev2:3026" {
 		t.Fatalf("IntegrationCoreURL = %q, want trimmed internal URL", cfg.IntegrationCoreURL)
@@ -172,6 +262,35 @@ func TestValidateFinspoWorkerRuntime(t *testing.T) {
 	err := cfg.ValidateFinspoWorkerRuntime()
 	if err == nil || !strings.Contains(err.Error(), "FINSPO_API_KEY") {
 		t.Fatalf("ValidateFinspoWorkerRuntime error = %v, want FINSPO_API_KEY", err)
+	}
+
+	cfg.FinspoCoreAPIKey = "finspo-key"
+	cfg.DataPlaneDocumentsURL = "http://dpv2-documents-api:8010"
+	cfg.AuthCoreURL = "http://auth-core:3011"
+	cfg.IntegrationServiceID = "integration-corev2"
+	cfg.IntegrationServiceAPIKey = ""
+	err = cfg.ValidateFinspoWorkerRuntime()
+	if err == nil || !strings.Contains(err.Error(), "INTEGRATION_SERVICE_API_KEY") {
+		t.Fatalf("ValidateFinspoWorkerRuntime error = %v, want INTEGRATION_SERVICE_API_KEY", err)
+	}
+}
+
+func TestValidateEmailWorkerRequiresDedicatedConversationIngestToken(t *testing.T) {
+	cfg := Config{
+		DatabaseURL:                    "postgres://test",
+		EncryptionKey:                  []byte("12345678901234567890123456789012"),
+		ConversationIngestURL:          "http://conversation-ingest-rs:3161",
+		ConversationIngestServiceToken: "integration-email-worker-test-secret-at-least-32-bytes",
+	}
+	if err := cfg.ValidateEmailWorkerRuntime(); err != nil {
+		t.Fatalf("ValidateEmailWorkerRuntime() error = %v", err)
+	}
+
+	for _, unsafe := range []string{"", "too-short", "change-me-email-worker-token-at-least-32-bytes"} {
+		cfg.ConversationIngestServiceToken = unsafe
+		if err := cfg.ValidateEmailWorkerRuntime(); err == nil {
+			t.Fatalf("ValidateEmailWorkerRuntime() error = nil for unsafe token %q", unsafe)
+		}
 	}
 }
 

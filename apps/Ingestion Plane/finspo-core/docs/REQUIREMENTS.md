@@ -122,7 +122,11 @@ Sites.Read.All, Team.ReadBasic.All, Channel.ReadBasic.All
   finspo still mirrors inventory locally and publishes events.
 - Set → on every item upsert/delete finspo POSTs a source-object record (with
   hashes, ACL tags, content hash) to the Data Plane for downstream document
-  ingest. `DATA_PLANE_INTERNAL_API_KEY` authenticates the call.
+  ingest. finspo exchanges `FINSPO_SERVICE_API_KEY` with Auth Core for a
+  short-lived `aud=data-plane`, `documents:write` token bound to the source's
+  verified organization. Tokens are cached per organization, refreshed before
+  expiry, and refreshed once if Data Plane returns 401. The durable credential
+  never crosses into Data Plane.
 
 ---
 
@@ -148,7 +152,9 @@ Sites.Read.All, Team.ReadBasic.All, Channel.ReadBasic.All
 | `NATS_SUBJECT_PREFIX` | `finspo` | Event subject prefix |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(empty)_ | OTEL collector (exporter wiring pending) |
 | `DATA_PLANE_DOCUMENTS_BASE_URL` | _(empty → no-op)_ | Data Plane document ingest target |
-| `DATA_PLANE_INTERNAL_API_KEY` | _(empty)_ | Auth to the Data Plane |
+| `AUTH_CORE_URL` | `http://auth-core:3011` | Auth Core issuer used when Data Plane forwarding is enabled |
+| `FINSPO_SERVICE_ID` | `finspo-core` | Registered Auth Core service-principal id |
+| `FINSPO_SERVICE_API_KEY` | _(empty)_ | Durable mint credential; required when `DATA_PLANE_DOCUMENTS_BASE_URL` is set |
 | `FINSPO_SYNC_INTERVAL` | `5m` | Scheduler fan-out interval (Go duration) |
 | `FINSPO_CAPTURE_PERMISSIONS` | `true` | Capture per-file ACLs during sync |
 

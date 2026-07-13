@@ -66,7 +66,11 @@ func run() error {
 	defer func() { _ = publisher.Drain() }()
 
 	st := store.New(pool)
-	sourceObjectSink := dataplane.NewSourceObjectClient(cfg.DataPlaneDocumentsURL, cfg.DataPlaneAPIKey)
+	dataPlaneTokens := dataplane.NewAuthCoreTokenProvider(dataplane.AuthCoreTokenConfig{
+		AuthCoreURL: cfg.AuthCoreURL, ServiceID: cfg.FinspoServiceID,
+		ServiceAPIKey: cfg.FinspoServiceAPIKey,
+	})
+	sourceObjectSink := dataplane.NewSourceObjectClient(cfg.DataPlaneDocumentsURL, dataPlaneTokens)
 	tokenProvider := sharepoint.NewHttpAccessTokenProvider(cfg.IntegrationCoreURL, cfg.InternalAPIKey)
 	deltaClient := sharepoint.NewDeltaClient(sharepoint.DeltaClientConfig{
 		BaseURL:       cfg.GraphBaseURL,
@@ -86,13 +90,13 @@ func run() error {
 	// content-bearing document to Data Plane v2. Left nil otherwise, so the
 	// engine keeps the metadata-only behavior.
 	var contentSink sync.ContentSink
-	if cfg.CaptureContent && cfg.DataPlaneDocumentsURL != "" && cfg.DataPlaneAPIKey != "" {
+	if cfg.CaptureContent && cfg.DataPlaneDocumentsURL != "" && dataPlaneTokens.Configured() {
 		contentClient := sharepoint.NewContentClient(sharepoint.ContentClientConfig{
 			BaseURL:       cfg.GraphBaseURL,
 			TokenProvider: tokenProvider,
 			MaxBytes:      cfg.ContentMaxBytes,
 		})
-		documentsClient := dataplane.NewDocumentsClient(cfg.DataPlaneDocumentsURL, cfg.DataPlaneAPIKey)
+		documentsClient := dataplane.NewDocumentsClient(cfg.DataPlaneDocumentsURL, dataPlaneTokens)
 		contentSink = content.NewIngestor(content.Config{
 			Fetcher:           contentClient,
 			Docs:              documentsClient,

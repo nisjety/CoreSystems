@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import text
@@ -16,14 +16,20 @@ from app.config import get_settings
 from app.control_plane_subscriber import ControlPlaneSubscriber
 from app.db import engine, run_sql_migrations
 from app.events import event_publisher
-from app.auth_middleware import require_internal_auth, AuthContext
+from app.auth_middleware import AuthContext, authentication_ready, require_internal_auth
 from app.knowledge_sync import KnowledgeSyncer
 from app.m365_provider_handler import get_m365_handler
 from app.orchestration import orchestrator
 from app.parsers import UnsupportedFileTypeError, parse_uploaded_file
 from app.progress import progress_hub
 from app.schemas import JobDetailResponse, JobItemResponse, JobResponse, SourceImportRequest
-from app.service import close_http_client, get_http_client, import_service, init_http_client
+from app.service import (
+    QuotaCheckUnavailable,
+    close_http_client,
+    get_http_client,
+    import_service,
+    init_http_client,
+)
 from app.shared_nats import SharedNatsPublisher
 
 
@@ -74,6 +80,9 @@ async def lifespan(_: FastAPI):
         logger.info("✅ Control Plane Event Subscriber initialized")
     else:
         logger.warning("⚠️  Control Plane Event Subscriber unavailable (graceful degradation)")
+
+    for job_id in await import_service.recoverable_job_ids():
+        await orchestrator.dispatch(job_id, import_service.run_job)
     
     yield
     
@@ -88,6 +97,22 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.import_service_name, lifespan=lifespan)
+
+
+@app.exception_handler(QuotaCheckUnavailable)
+async def quota_dependency_unavailable(
+    _request: Request, _exc: QuotaCheckUnavailable
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "code": "quota_dependency_unavailable",
+                "message": "Import quota could not be verified; retry later",
+                "details": {},
+            }
+        },
+    )
 
 
 def _job_to_response(job) -> JobResponse:
@@ -127,11 +152,55 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.import_service_name}
 
 
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    checks: dict[str, bool] = {"database": False, "auth_core": False, "data_plane": False}
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception:
+        logger.exception("Readiness database check failed")
+
+    checks["auth_core"] = await authentication_ready()
+    try:
+        response = await get_http_client().get(
+            f"{settings.document_service_url.rstrip('/')}/readyz", timeout=3.0
+        )
+        checks["data_plane"] = response.is_success
+    except Exception:
+        logger.exception("Readiness Data Plane check failed")
+
+    required_ready = all(checks.values())
+    optional = {
+        "local_nats": event_publisher.is_connected(),
+        "shared_nats": bool(shared_nats_publisher and shared_nats_publisher.nc),
+        "control_plane_events": bool(control_plane_subscriber and control_plane_subscriber.nc),
+    }
+    status_code = 200 if required_ready else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "data": {
+                "status": "ready" if required_ready else "not_ready",
+                "required": checks,
+                "optional": optional,
+            }
+        },
+    )
+
+
 @app.post("/api/v1/import/jobs/upload", response_model=JobResponse)
 async def create_upload_job(
     files: list[UploadFile] = File(...),
+    zdr: bool = Form(False),
     auth: AuthContext = Depends(require_internal_auth),
 ) -> JobResponse:
+    if zdr:
+        raise HTTPException(
+            status_code=409,
+            detail="zdr_persistence_forbidden: imports create durable Data Plane documents",
+        )
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     if len(files) > settings.max_upload_files:
@@ -170,7 +239,7 @@ async def create_upload_job(
         metadata={"upload_count": len(documents)},
     )
 
-    await orchestrator.dispatch(job_id, lambda current_job_id: import_service.run_job(current_job_id, documents))
+    await orchestrator.dispatch(job_id, import_service.run_job)
     job = await import_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create import job")
@@ -182,8 +251,13 @@ async def create_source_job(
     request: SourceImportRequest,
     auth: AuthContext = Depends(require_internal_auth),
 ) -> JobResponse:
+    if request.zdr:
+        raise HTTPException(
+            status_code=409,
+            detail="zdr_persistence_forbidden: imports create durable Data Plane documents",
+        )
     org_id = auth.org_id
-    user_id = auth.user_id or request.user_id
+    user_id = auth.user_id
 
     try:
         documents = await import_service.create_source_documents(
@@ -192,7 +266,13 @@ async def create_source_job(
             options=request.options,
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Source import failed: {exc}") from exc
+        logger.warning(
+            "Source import failed org=%s source_type=%s error_type=%s",
+            org_id,
+            request.source_type,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=400, detail="Source import failed") from exc
 
     allowed = await import_service.check_quota(org_id=org_id, items=len(documents))
     if not allowed:
@@ -206,7 +286,7 @@ async def create_source_job(
         metadata={"source": request.source_type, "count": len(documents)},
     )
 
-    await orchestrator.dispatch(job_id, lambda current_job_id: import_service.run_job(current_job_id, documents))
+    await orchestrator.dispatch(job_id, import_service.run_job)
     job = await import_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create import job")
@@ -225,20 +305,26 @@ class _NatsKnowledgeSyncAudit:
 @app.post("/api/v1/import/jobs/knowledge-sync")
 async def knowledge_sync(
     auth: AuthContext = Depends(require_internal_auth),
+    zdr: bool = Header(False, alias="X-ZDR"),
 ) -> JSONResponse:
     """Pull GitHub/Slack content for the caller's org through the integration
     actions gateway and forward it into the import pipeline (which persists to
     Data Plane v2). Honest 503 when the gateway is not configured."""
+    if zdr:
+        raise HTTPException(
+            status_code=409,
+            detail="zdr_persistence_forbidden: knowledge sync creates durable documents",
+        )
     org_id = auth.org_id
     gateway = ActionsGateway(
         settings.integration_core_url,
-        settings.internal_api_key,
+        auth.bearer_token or "",
         get_http_client(),
     )
     if not gateway.configured():
         raise HTTPException(
             status_code=503,
-            detail="knowledge-sync unavailable: INTEGRATION_CORE_URL/INTERNAL_API_KEY not configured",
+            detail="knowledge-sync unavailable: integration URL or caller credential missing",
         )
 
     syncer = KnowledgeSyncer(gateway, audit=_NatsKnowledgeSyncAudit())
@@ -257,9 +343,7 @@ async def knowledge_sync(
             documents=documents,
             metadata={"source": "knowledge-sync", "count": len(documents)},
         )
-        await orchestrator.dispatch(
-            job_id, lambda current_job_id: import_service.run_job(current_job_id, documents)
-        )
+        await orchestrator.dispatch(job_id, import_service.run_job)
 
     return JSONResponse(
         {
@@ -273,8 +357,11 @@ async def knowledge_sync(
 
 
 @app.get("/api/v1/import/jobs/{job_id}", response_model=JobDetailResponse)
-async def get_job(job_id: UUID) -> JobDetailResponse:
-    job, items = await import_service.get_job_with_items(job_id)
+async def get_job(
+    job_id: UUID,
+    auth: AuthContext = Depends(require_internal_auth),
+) -> JobDetailResponse:
+    job, items = await import_service.get_job_with_items(job_id, org_id=auth.org_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return JobDetailResponse(
@@ -284,8 +371,11 @@ async def get_job(job_id: UUID) -> JobDetailResponse:
 
 
 @app.get("/api/v1/import/jobs/{job_id}/events")
-async def stream_job_events(job_id: UUID) -> EventSourceResponse:
-    job = await import_service.get_job(job_id)
+async def stream_job_events(
+    job_id: UUID,
+    auth: AuthContext = Depends(require_internal_auth),
+) -> EventSourceResponse:
+    job = await import_service.get_job(job_id, org_id=auth.org_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 

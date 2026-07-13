@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/triodelab/integration-corev2/internal/actions"
+	"github.com/triodelab/integration-corev2/internal/attestation"
 	"github.com/triodelab/integration-corev2/internal/auth"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
@@ -35,17 +36,18 @@ import (
 )
 
 type ServerConfig struct {
-	Config    config.Config
-	Repo      store.Repository
-	OAuth     *oauth.Service
-	Auth      auth.TokenVerifier
-	Org       auth.OrgPlanClient
-	Billing   *controlplane.BillingClient
-	Audit     *controlplane.AuditClient
-	Events    events.Publisher
-	Discovery *discovery.Service
-	Actions   *actions.Service
-	HotPath   hotpath.WebhookNormalizer
+	Config            config.Config
+	Repo              store.Repository
+	OAuth             *oauth.Service
+	Auth              auth.TokenVerifier
+	Org               auth.OrgPlanClient
+	Billing           *controlplane.BillingClient
+	Audit             *controlplane.AuditClient
+	Events            events.Publisher
+	Discovery         *discovery.Service
+	Actions           *actions.Service
+	WriteAttestations *attestation.Verifier
+	HotPath           hotpath.WebhookNormalizer
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Velion org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
@@ -57,6 +59,11 @@ const requestIDHeader = "X-Request-ID"
 type requestIDContextKey struct{}
 
 func NewServer(cfg ServerConfig) *fiber.App {
+	if cfg.WriteAttestations == nil && strings.TrimSpace(cfg.Config.ProviderWriteAttestationKeysJSON) != "" {
+		if keys, err := attestation.ParseTrustedKeysJSON(cfg.Config.ProviderWriteAttestationKeysJSON); err == nil {
+			cfg.WriteAttestations = attestation.NewVerifier(keys, nil)
+		}
+	}
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		// OAuth callbacks arrive from a browser whose `localhost` cookie jar is
@@ -110,9 +117,10 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})
 	app.Get("/metrics", internalAuth, metrics.handler)
 	internalOrBearerAuth := auth.InternalOrBearer(auth.Config{
-		APIKey:        cfg.Config.InternalAPIKey,
-		APIKeyHeader:  cfg.Config.InternalAPIKeyHeader,
-		TokenVerifier: cfg.Auth,
+		APIKey:               cfg.Config.InternalAPIKey,
+		APIKeyHeader:         cfg.Config.InternalAPIKeyHeader,
+		TokenVerifier:        cfg.Auth,
+		AllowLegacyTenantKey: cfg.Config.AllowLegacyTenantKey,
 	})
 	proPlanAuth := []fiber.Handler{internalOrBearerAuth, auth.RequirePlan(cfg.Org, "pro")}
 	rateLimited := rateLimitHandlers(cfg.Config)
@@ -412,9 +420,11 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			return apiError(c, fiber.StatusBadRequest, "connection_required", "connectionId is required.")
 		}
 		result, err := executeConnectionAction(c, cfg, body.ConnectionID, actionBody{
-			Operation: body.Operation,
-			Params:    body.Params,
-			Body:      body.Body,
+			Operation:        body.Operation,
+			Params:           body.Params,
+			Body:             body.Body,
+			WriteAttestation: body.WriteAttestation,
+			IdempotencyKey:   body.IdempotencyKey,
 		})
 		if err != nil {
 			return actionError(c, err)
@@ -1089,16 +1099,20 @@ type scimTokenBody struct {
 }
 
 type actionBody struct {
-	Operation string         `json:"operation"`
-	Params    map[string]any `json:"params"`
-	Body      map[string]any `json:"body"`
+	Operation        string         `json:"operation"`
+	Params           map[string]any `json:"params"`
+	Body             map[string]any `json:"body"`
+	WriteAttestation string         `json:"writeAttestation"`
+	IdempotencyKey   string         `json:"idempotencyKey"`
 }
 
 type executeActionBody struct {
-	ConnectionID string         `json:"connectionId"`
-	Operation    string         `json:"operation"`
-	Params       map[string]any `json:"params"`
-	Body         map[string]any `json:"body"`
+	ConnectionID     string         `json:"connectionId"`
+	Operation        string         `json:"operation"`
+	Params           map[string]any `json:"params"`
+	Body             map[string]any `json:"body"`
+	WriteAttestation string         `json:"writeAttestation"`
+	IdempotencyKey   string         `json:"idempotencyKey"`
 }
 
 func scopedConnection(c *fiber.Ctx, cfg ServerConfig, connectionID string) (store.Connection, error) {
@@ -2359,12 +2373,85 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 		return actions.ExecuteResult{}, err
 	}
-	if err := requireActionCapability(connection, body); err != nil {
+	if err := requireActionCapability(c, connection, body); err != nil {
 		return actions.ExecuteResult{}, err
+	}
+	idempotencyKey := strings.TrimSpace(body.IdempotencyKey)
+	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation)
+	if writeAction {
+		if _, err := requireWritePresenter(c); err != nil {
+			return actions.ExecuteResult{}, err
+		}
+	}
+	if writeAction && !validActionIdempotencyKey(idempotencyKey) {
+		return actions.ExecuteResult{}, errActionIdempotencyRequired
+	}
+	requestSHA256 := ""
+	var verifiedAttestation attestation.Verified
+	if writeAction {
+		var err error
+		requestSHA256, err = actionRequestSHA256(connection, body)
+		if err != nil {
+			return actions.ExecuteResult{}, err
+		}
+		verifiedAttestation, err = verifyWriteAttestation(c, cfg, connection, body, requestSHA256)
+		if err != nil {
+			return actions.ExecuteResult{}, err
+		}
+		receipt, acquired, err := cfg.Repo.ClaimActionReceipt(ctx, store.ActionReceipt{
+			OrganizationID:    connection.OrganizationID,
+			IdempotencyKey:    idempotencyKey,
+			RequestSHA256:     requestSHA256,
+			ConnectionID:      connection.ID,
+			ProviderKey:       connection.ProviderKey,
+			Operation:         strings.TrimSpace(body.Operation),
+			AttestationIssuer: verifiedAttestation.Issuer,
+			AttestationKeyID:  verifiedAttestation.KeyID,
+			AuthorizationKind: verifiedAttestation.AuthorizationKind,
+			AuthorizationID:   verifiedAttestation.AuthorizationID,
+			ApprovalID:        verifiedAttestation.ApprovalID,
+			ActionID:          verifiedAttestation.ActionID,
+			ActorID:           verifiedAttestation.ActorID,
+			AttestationJTI:    verifiedAttestation.JWTID,
+			PayloadSHA256:     verifiedAttestation.PayloadSHA256,
+		})
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				return actions.ExecuteResult{}, errActionIdempotencyConflict
+			}
+			return actions.ExecuteResult{}, err
+		}
+		if !acquired {
+			if !actionReceiptMatchesAuthorization(receipt, connection, body, verifiedAttestation, requestSHA256) {
+				return actions.ExecuteResult{}, errActionIdempotencyConflict
+			}
+			if receipt.Status == "completed" {
+				result := map[string]any{}
+				if receipt.ProviderMessageID != "" {
+					result["provider_message_id"] = receipt.ProviderMessageID
+				}
+				return actions.ExecuteResult{
+					ProviderKey: receipt.ProviderKey,
+					Operation:   receipt.Operation,
+					Result:      result,
+				}, nil
+			}
+			if receipt.Status != "pending" {
+				return actions.ExecuteResult{}, errActionOutcomeUnknown
+			}
+		}
 	}
 	token, err := cfg.OAuth.AccessTokenForConnection(ctx, connection.ID)
 	if err != nil {
+		if writeAction {
+			return actions.ExecuteResult{}, errActionPreProviderRetryable
+		}
 		return actions.ExecuteResult{}, err
+	}
+	if writeAction {
+		if _, err := cfg.Repo.BeginActionReceiptExecution(ctx, connection.OrganizationID, idempotencyKey); err != nil {
+			return actions.ExecuteResult{}, errActionOutcomeUnknown
+		}
 	}
 	result, err := cfg.Actions.Execute(ctx, actions.ExecuteInput{
 		Connection:  connection,
@@ -2374,7 +2461,17 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		Body:        body.Body,
 	})
 	if err != nil {
+		if writeAction {
+			_ = cfg.Repo.MarkActionReceiptUnknown(ctx, connection.OrganizationID, idempotencyKey)
+		}
 		return actions.ExecuteResult{}, err
+	}
+	if writeAction {
+		if _, err := cfg.Repo.CompleteActionReceipt(ctx, connection.OrganizationID, idempotencyKey, actionProviderMessageID(result.Result)); err != nil {
+			// The provider may already have accepted the action. Never turn a
+			// receipt persistence failure into a blind retry.
+			return actions.ExecuteResult{}, errActionOutcomeUnknown
+		}
 	}
 	recordAuditEvent(ctx, cfg, store.AuditEvent{
 		OrganizationID: connection.OrganizationID,
@@ -2389,10 +2486,26 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	return result, nil
 }
 
-func requireActionCapability(connection store.Connection, body actionBody) error {
+func actionReceiptMatchesAuthorization(receipt store.ActionReceipt, connection store.Connection, body actionBody, verified attestation.Verified, payloadSHA256 string) bool {
+	return receipt.OrganizationID == connection.OrganizationID &&
+		receipt.IdempotencyKey == strings.TrimSpace(body.IdempotencyKey) &&
+		receipt.RequestSHA256 == payloadSHA256 &&
+		receipt.ConnectionID == connection.ID &&
+		receipt.ProviderKey == connection.ProviderKey &&
+		receipt.Operation == strings.TrimSpace(body.Operation) &&
+		receipt.AttestationIssuer == verified.Issuer &&
+		receipt.AuthorizationKind == verified.AuthorizationKind &&
+		receipt.AuthorizationID == verified.AuthorizationID &&
+		receipt.ApprovalID == verified.ApprovalID &&
+		receipt.ActionID == verified.ActionID &&
+		receipt.ActorID == verified.ActorID &&
+		receipt.PayloadSHA256 == verified.PayloadSHA256
+}
+
+func requireActionCapability(c *fiber.Ctx, connection store.Connection, body actionBody) error {
 	required, sensitive := requiredCapabilityForOperation(connection.ProviderKey, body.Operation)
 	if required == "" {
-		return nil
+		return errActionOperationUnsupported
 	}
 	hasRequiredCapability := hasCapability(connection.Capabilities, required) || (len(connection.Capabilities) == 0 && !sensitive)
 	if !hasRequiredCapability {
@@ -2402,30 +2515,98 @@ func requireActionCapability(connection store.Connection, body actionBody) error
 			"Connection does not grant the capability required for this provider action: "+required,
 		)
 	}
-	if actionRequiresApproval(connection.ProviderKey, body.Operation) && actionApprovalRef(body) == "" {
-		return auth.NewError(
-			fiber.StatusForbidden,
-			"approval_required",
-			"Write actions require human approval metadata.",
-		)
-	}
 	return nil
 }
 
-func actionApprovalRef(body actionBody) string {
-	return firstNonEmpty(
-		actionStringParam(body.Params, "approvalId"),
-		actionStringParam(body.Params, "approvalRef"),
-		actionStringParam(body.Body, "approvalId"),
-		actionStringParam(body.Body, "approvalRef"),
-	)
+func verifyWriteAttestation(c *fiber.Ctx, cfg ServerConfig, connection store.Connection, body actionBody, payloadSHA256 string) (attestation.Verified, error) {
+	principal, err := requireWritePresenter(c)
+	if err != nil {
+		return attestation.Verified{}, err
+	}
+	compact := body.WriteAttestation
+	if strings.TrimSpace(compact) == "" {
+		return attestation.Verified{}, errActionAttestationRequired
+	}
+	if cfg.WriteAttestations == nil {
+		return attestation.Verified{}, errActionAttestationUnconfigured
+	}
+	verified, err := cfg.WriteAttestations.Verify(compact, attestation.Binding{
+		PresenterService: strings.TrimSpace(principal.UserID),
+		OrganizationID:   strings.TrimSpace(connection.OrganizationID),
+		ConnectionID:     strings.TrimSpace(connection.ID),
+		ProviderKey:      strings.TrimSpace(connection.ProviderKey),
+		Operation:        strings.TrimSpace(body.Operation),
+		Params:           body.Params,
+		Body:             body.Body,
+		PayloadSHA256:    payloadSHA256,
+		IdempotencyKey:   strings.TrimSpace(body.IdempotencyKey),
+	})
+	if err != nil {
+		return attestation.Verified{}, errActionAttestationInvalid
+	}
+	return verified, nil
 }
 
-func actionStringParam(values map[string]any, key string) string {
-	if values == nil {
+func requireWritePresenter(c *fiber.Ctx) (auth.Principal, error) {
+	principal, ok := auth.PrincipalFromContext(c)
+	if !ok || auth.IsInternalCall(c) || principal.PrincipalType != "service" || !principal.HasScope("integration:write") {
+		return auth.Principal{}, errActionAttestationAuthority
+	}
+	return principal, nil
+}
+
+func validActionIdempotencyKey(value string) bool {
+	if len(value) < 16 || len(value) > 200 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '-' && char != '_' && char != ':' && char != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func actionRequestSHA256(connection store.Connection, body actionBody) (string, error) {
+	return attestation.PayloadSHA256(attestation.Binding{
+		OrganizationID: connection.OrganizationID,
+		ConnectionID:   connection.ID,
+		ProviderKey:    connection.ProviderKey,
+		Operation:      body.Operation,
+		Params:         body.Params,
+		Body:           body.Body,
+	})
+}
+
+func actionProviderMessageID(value any) string {
+	return actionProviderMessageIDAtDepth(value, 0)
+}
+
+func actionProviderMessageIDAtDepth(value any, depth int) string {
+	if depth > 4 {
 		return ""
 	}
-	return stringFromAny(values[key])
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"provider_message_id", "providerMessageId", "message_id", "messageId", "id", "ts"} {
+			if candidate, ok := typed[key].(string); ok && strings.TrimSpace(candidate) != "" {
+				return strings.TrimSpace(candidate)
+			}
+		}
+		for _, key := range []string{"message", "messages", "data", "result"} {
+			if candidate := actionProviderMessageIDAtDepth(typed[key], depth+1); candidate != "" {
+				return candidate
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if candidate := actionProviderMessageIDAtDepth(item, depth+1); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
 }
 
 func requiredCapabilityForOperation(providerKey, operation string) (string, bool) {
@@ -2572,6 +2753,8 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "social.catalog.manage", true
 		case "threads.profile", "threads.container.create", "threads.publish":
 			return "social.threads.manage", true
+		case "threads.container.status":
+			return "social.threads.manage", true
 		case "threads.insights":
 			return "social.analytics.read", true
 		case "oembed", "meta.oembed":
@@ -2694,7 +2877,18 @@ func hasCapability(capabilities []string, required string) bool {
 	return false
 }
 
-var errActionUnavailable = errors.New("provider actions are not configured")
+var (
+	errActionUnavailable             = errors.New("provider actions are not configured")
+	errActionOperationUnsupported    = errors.New("provider operation is not supported")
+	errActionIdempotencyRequired     = errors.New("provider writes require a valid idempotency key")
+	errActionIdempotencyConflict     = errors.New("idempotency key or authorization was already used for a different provider action")
+	errActionOutcomeUnknown          = errors.New("provider action outcome is unknown; reconciliation is required")
+	errActionPreProviderRetryable    = errors.New("provider action was not attempted; retry with a fresh attestation")
+	errActionAttestationAuthority    = errors.New("provider writes require a scoped service bearer")
+	errActionAttestationRequired     = errors.New("provider writes require a signed write attestation")
+	errActionAttestationInvalid      = errors.New("provider-write attestation is invalid")
+	errActionAttestationUnconfigured = errors.New("provider-write attestation verifier is not configured")
+)
 
 func actionError(c *fiber.Ctx, err error) error {
 	switch {
@@ -2702,6 +2896,24 @@ func actionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusNotFound, "connection_not_found", "No active connection exists for this action.")
 	case errors.Is(err, errActionUnavailable):
 		return apiError(c, fiber.StatusServiceUnavailable, "actions_unavailable", "Provider actions are not configured.")
+	case errors.Is(err, errActionOperationUnsupported):
+		return apiError(c, fiber.StatusBadRequest, "operation_not_supported", "The provider operation is not supported.")
+	case errors.Is(err, errActionIdempotencyRequired):
+		return apiError(c, fiber.StatusBadRequest, "idempotency_key_required", "Provider writes require a valid idempotencyKey.")
+	case errors.Is(err, errActionIdempotencyConflict):
+		return apiError(c, fiber.StatusConflict, "idempotency_conflict", "The idempotency key is already bound to a different action.")
+	case errors.Is(err, errActionOutcomeUnknown):
+		return apiError(c, fiber.StatusConflict, "action_outcome_unknown", "The provider action may already have been accepted; reconcile before retrying.")
+	case errors.Is(err, errActionPreProviderRetryable):
+		return apiError(c, fiber.StatusServiceUnavailable, "action_pre_provider_retryable", "The provider action was not attempted. Retry with a fresh signed attestation.")
+	case errors.Is(err, errActionAttestationAuthority):
+		return apiError(c, fiber.StatusForbidden, "write_attestation_authority_required", "Provider writes require a scoped service bearer.")
+	case errors.Is(err, errActionAttestationRequired):
+		return apiError(c, fiber.StatusForbidden, "write_attestation_required", "Provider writes require a signed write attestation.")
+	case errors.Is(err, errActionAttestationInvalid):
+		return apiError(c, fiber.StatusForbidden, "write_attestation_invalid", "Provider-write attestation is invalid.")
+	case errors.Is(err, errActionAttestationUnconfigured):
+		return apiError(c, fiber.StatusServiceUnavailable, "write_attestation_unconfigured", "Provider-write attestation verification is unavailable.")
 	default:
 		var authErr auth.Error
 		if errors.As(err, &authErr) {

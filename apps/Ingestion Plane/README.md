@@ -7,6 +7,19 @@
 
 ---
 
+> **Verified 2026-07-11 (audit note — read before trusting this file):**
+> This README is an accurate but **partial, Feb-19 snapshot**. The endpoint facts it states are correct and live: `GET :8082/health`, `GET :8081/health`, and `GET :3025/health` all return `200` today. **However, it describes only 2 of the ~6 services now in this plane.** The active `docker-compose.yml` (this same "Complete active stack") also builds and runs, and the following were confirmed live via host curl on 2026-07-11:
+> - **shipping-core** — freight/carrier aggregator, `GET :3156/healthz` → `200` (note: `/health` 404s; use `/healthz`). Not mentioned anywhere below.
+> - **integration-corev2** (`integration-api`) — provider/webhook surface incl. the Visma MCP path, `GET :3026/health` → `200`. Not mentioned below.
+> - **finspo-core** (`finspo-api`) — `GET :3130/health` → `200`. Not mentioned below.
+> - Plus `autocomplete-core`, `support-worker`, `integration-*-worker`, and `integration-webhook-normalizer`.
+>
+> The `Quarry/` legacy directory referenced in the Executive Summary and Project Structure **no longer exists on disk** — only `Quarry-v2/` remains. `Quarry-v2/crates` now holds 7 crates (not the 3 listed) and `Quarry-v2/services` holds 3 (adds `quarry-vision-sidecar`); `imports-core/migrations` has `002_performance_indexes.sql` in addition to `001_init.sql`, and `imports-core/app` has grown (adds `auth_middleware.py`, `actions_gateway.py`, `control_plane_subscriber.py`, `knowledge_sync.py`, `m365_provider_handler.py`, others). The "Testing: 🚧 Ready for Implementation" status is also stale — test suites and reports now exist.
+>
+> **Current source of truth:** `INGESTION_PLANE_DEEP_DIVE.md` and `docs/core-research/README.md`. Treat the sections below as accurate-where-present but incomplete.
+
+---
+
 ## Executive Summary
 
 The Ingestion Plane uses **Quarry-v2** for web/search ingestion. The older

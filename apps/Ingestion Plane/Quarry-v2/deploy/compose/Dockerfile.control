@@ -8,7 +8,7 @@
 # The build copies them all so `go mod tidy` resolves the `replace` directives
 # in services/quarry-control/go.mod.
 
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26.5-bookworm AS build
 WORKDIR /src
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
@@ -37,7 +37,12 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 # ---- Runtime image -----------------------------------------------------------
 # bookworm-slim with wget for Docker healthchecks; adds ~25 MB over distroless.
-FROM debian:bookworm-slim
+FROM debian:bookworm-20260623-slim
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry control" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -e; \
@@ -61,6 +66,5 @@ USER quarry
 WORKDIR /app
 EXPOSE 8081
 # /health is GET-only; use -O /dev/null instead of --spider (which sends HEAD).
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD wget --quiet --tries=1 -O /dev/null http://localhost:8081/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD wget --quiet --tries=1 -O /dev/null http://localhost:8081/health || exit 1
 ENTRYPOINT ["/app/control"]

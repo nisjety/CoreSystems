@@ -21,12 +21,24 @@ const (
 	SegmentBoth Segment = "both"
 )
 
+// Mode states which upstream environment produced a carrier capability.
+type Mode string
+
+const (
+	ModeProduction Mode = "production"
+	ModeSandbox    Mode = "sandbox"
+	ModeMock       Mode = "mock"
+)
+
 // Info describes a carrier integration itself, independent of any single
 // quote request.
 type Info struct {
-	Code    string // stable identifier, e.g. "bring", "postnord", "mock-dhl"
-	Name    string // display name, e.g. "Bring"
-	Segment Segment
+	Code           string // stable identifier, e.g. "bring", "postnord", "mock-dhl"
+	Name           string // display name, e.g. "Bring"
+	Segment        Segment
+	Mode           Mode
+	VerifiedAt     *time.Time
+	DegradedReason string
 }
 
 // Address is the minimal shape every carrier adapter needs to compute a
@@ -134,6 +146,13 @@ type BookingRequest struct {
 	Customs       *CustomsInfo `json:"customs,omitempty"` // required cross-border
 	BookedBy      string       `json:"booked_by"`         // user identifier, for the audit log
 	VismaOrderRef *string      `json:"visma_order_ref"`   // ERP seam (own ERP later)
+	// EstimatedDelivery is the quote's promised delivery date, snapshotted
+	// at booking time (not sent to any carrier — carriers compute their own
+	// ETA). Optional: callers that book without going through a quote first
+	// (or older callers not yet updated) simply leave this nil, and the
+	// booking never enters the F8 reliability-scoring population — no
+	// fabricated estimate is substituted.
+	EstimatedDelivery *time.Time `json:"estimated_delivery,omitempty"`
 }
 
 // Booking is the result of successfully placing a shipment with a carrier.

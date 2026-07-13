@@ -43,6 +43,13 @@ impl Settings {
         let internal_token = env::var("AUTOCOMPLETE_INTERNAL_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let isolated_insecure =
+            env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) && env_bool("ISOLATED_E2E", false);
+        if internal_token.is_none() && !isolated_insecure {
+            return Err(AppError::Config(
+                "AUTOCOMPLETE_INTERNAL_TOKEN is required outside isolated E2E".to_string(),
+            ));
+        }
 
         let sonic_addr = env::var("SONIC_ADDR").unwrap_or_else(|_| "127.0.0.1:1491".to_string());
         let sonic_password = env::var("SONIC_PASSWORD").unwrap_or_default();
@@ -55,12 +62,8 @@ impl Settings {
         // the same convention as SONIC_ENABLED (enabled iff credentials present).
         // Previously hard-coded to false, which silently disabled the consumer
         // and left the Sonic index permanently empty even when NATS_URL was set.
-        let nats_enabled = env_bool(
-            "NATS_ENABLED",
-            nats_url_explicit.is_some(),
-        );
-        let nats_url = nats_url_explicit
-            .unwrap_or_else(|| "nats://127.0.0.1:4222".to_string());
+        let nats_enabled = env_bool("NATS_ENABLED", nats_url_explicit.is_some());
+        let nats_url = nats_url_explicit.unwrap_or_else(|| "nats://127.0.0.1:4222".to_string());
 
         Ok(Self {
             http_addr,

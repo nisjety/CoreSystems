@@ -1,6 +1,16 @@
-.git
-bin
-dist
-coverage
-tmp
+.git/
+.github/
+.env
+.env.*
+!.env.example
+bin/
+dist/
+coverage/
+tmp/
 *.log
+**/*_test.go
+# Built by its own Compose service/context. Excluding it keeps the Go API
+# context below 2 MB instead of uploading the Rust target cache (~300 MB).
+services/
+README.md
+Dockerfile.dev

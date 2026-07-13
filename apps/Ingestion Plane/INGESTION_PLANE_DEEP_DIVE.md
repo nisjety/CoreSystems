@@ -1,5 +1,7 @@
 # Ingestion Plane Deep Dive
 
+> **Verified 2026-07-11** (host-curl + source + compose): All service ports below confirmed live (200) — quarry-edge `:8082`, quarry-control `:8081`, imports-api `:3025`, integration-api `:3026`, integration-webhook-normalizer `:3036`, finspo-api `:3130`, and shipping-core `:3156`. Quarry stub claims re-confirmed in source. Corrections applied this pass: **shipping-core** and **integration-email-worker** were missing from the topology and have been added; **support-worker** was wrongly described as "not part of the main compose path" — it is a default (non-profile-gated) compose service and is running. autocomplete-core correctly remains absent from the Ingestion compose (it is referenced by velionv3 on `:3219`). Containers report `(unhealthy)` only because their exec-based healthchecks fail against a corrupted containerd store; the processes serve traffic normally.
+
 ## Executive Summary
 
 The Ingestion Plane is the system's acquisition and normalization boundary. It accepts documents, pages, connectors, and support events from external systems, turns them into jobs and normalized records, and then hands durable content into the Data Plane and orchestration signals into the rest of CoreSystem.
@@ -10,9 +12,10 @@ The current plane is not a single stack. It is a layered mix of:
 2. `integration-corev2` as the first-party connector broker.
 3. `finspo-core` as the SharePoint and document-governance sync service.
 4. `imports-core` as the file/source import API.
-5. `autocomplete-core` as a tenant-scoped suggestion sidecar.
-6. `services/support-worker` as a support automation worker on Temporal + NATS.
-7. Legacy or historical code still present on disk: `Quarry`, `integration-core`, plus profile-gated legacy services in compose.
+5. `shipping-core` as the carrier quote/booking/tracking service (host-published `:3156`).
+6. `autocomplete-core` as a tenant-scoped suggestion sidecar.
+7. `services/support-worker` as a support automation worker on Temporal + NATS.
+8. Legacy or historical code still present on disk: `Quarry`, `integration-core`, plus profile-gated legacy services in compose.
 
 That mixed state matters. The plane is functional, but it is not fully converged. Several surfaces are intentionally forward-stubbed, some docs still describe superseded architecture, and compose still carries legacy or partially wired services alongside the current stack.
 
@@ -30,15 +33,17 @@ Active/default runtime services visible in compose:
 | `imports-api` | `3025` | File/source import API |
 | `integration-api` | `3026` | Connector API, OAuth broker, discovery/actions/hotpath runtime |
 | `integration-finspo-worker` | worker | Worker linking integration-corev2 and finspo flows |
+| `integration-email-worker` | worker | Email-sync worker; decrypts real provider OAuth tokens (vault key is load-bearing, no insecure default) and feeds conversation-ingest-rs |
 | `integration-webhook-normalizer` | `3036` | Webhook normalization microservice |
+| `shipping-core` | `3156`→`8080` | Carrier quotes/booking/labels/customs/tracking (Bring/DHL/UPS/FedEx + local mocks) |
 | `finspo-api` | `3130` | SharePoint/document-governance sync API |
+| `support-worker` | worker | Temporal worker + NATS bridge for support automation (triage/SLA/CSAT). Default compose service, not profile-gated |
 
-Additional runtime surface on disk but not clearly part of the default compose path:
+Additional runtime surface on disk but **not** part of the Ingestion compose path:
 
 | Service | Role |
 |---|---|
-| `autocomplete-core` | Tenant-scoped typeahead/suggestions API with optional NATS consumer |
-| `services/support-worker` | Temporal worker plus NATS bridge for support automation workflows |
+| `autocomplete-core` | Tenant-scoped typeahead/suggestions API with optional NATS consumer. Not launched by the Ingestion compose; velionv3 references it at `http://autocomplete-core:3219` |
 
 Legacy or profile-gated compose surfaces:
 
@@ -208,6 +213,16 @@ flowchart TD
 - Still described as active development in its README.
 - Functionally present in compose as `imports-api`.
 
+## shipping-core
+
+`shipping-core` is the carrier-integration service (quotes, booking, labels, customs, tracking). It is a Go service, host-published on `:3156` (container `:8080`), and is the intended Model Plane shipping tool behind operator/chat questions like "shipping time Oslo→Trondheim". Large uncommitted work has landed (booking service/store, per-carrier booking adapters, and new `internal/{dataplane,events,modelplane,recommend,reliability}` subdirs); that work is almost certainly NOT in the running image because image rebuild is currently Docker-blocked, so newer routes may 404 live even though they exist in source.
+
+### Observed 2026-07-11
+
+- `GET /api/carriers` returns `200` **without auth** [live-curl]; `POST /api/quotes` with an empty body returns `400` (validation, not authorization) [live-curl] — consistent with the prior finding that quote/carrier routes carry no auth/org gate.
+- Bring transit-time parsing reads `expectedDelivery.alternativeDeliveryDates[0].workingDays` / `formattedExpectedDeliveryDate` (`internal/carrier/bring/bring.go:175-181`, wire types in `wire.go:96-100`); a unit test fixture (`bring_test.go`) exercises this path and asserts `TransitDays == 2` [source-only]. Whether that field placement matches live Bring responses is a shipping-core correctness question tracked in that service's own audit, not this doc.
+- Carrier provenance: DHL/UPS/FedEx use vendor sandbox/test endpoints (not production); PostNord/DSV/Helthjem/Porterbuddy are explicit local mocks. Re-verify the `is_mock` vs real-provenance (`mode`/`environment`) fields against `/api/carriers` output before trusting the flag.
+
 ## autocomplete-core
 
 `autocomplete-core` is a small tenant-scoped suggestions service.
@@ -242,7 +257,7 @@ flowchart TD
 ### Current position
 
 - The code is real and not just build output.
-- It is not part of the main compose path audited here, so it currently reads as an adjacent operational worker inside the plane rather than a first-class core runtime in the documented topology.
+- **Correction (2026-07-11):** it **is** a default service in `docker-compose.yml` (no `legacy`/optional profile) and is running. It reads as an operational worker rather than a public-API core, but it is part of the default compose path.
 
 ## Storage and Messaging
 
@@ -414,7 +429,7 @@ These are candidates only. Do not delete until the cross-plane deletion register
 
 ## Recommended Follow-Up Checks
 
-1. Verify whether `services/support-worker` is deployed anywhere or is now orphaned.
+1. ~~Verify whether `services/support-worker` is deployed anywhere or is now orphaned.~~ Resolved 2026-07-11: it is a default (non-profile-gated) compose service and is running.
 2. Verify whether `integration-core` has any remaining runtime consumers.
 3. Trace actual Frontend/Application calls into `integration-api`, `imports-api`, `autocomplete-core`, and Quarry to identify dead public surfaces.
 4. Confirm whether Quarry schedule aliases are now backed by a real Temporal SDK client anywhere outside the sampled code.

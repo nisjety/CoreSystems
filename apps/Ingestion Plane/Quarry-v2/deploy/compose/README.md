@@ -15,25 +15,26 @@ plus a self-contained `docker-compose.yml` for running Quarry v2 standalone
 
 ## Production deployment (CoreSystem stack)
 
-The three services are also wired into `/Volumes/Lagring/Triodelab/CoreSystem/docker-compose.yml`
-which reuses the shared `aquatiq-postgres-local`, `aquatiq-redis-local`,
-`aquatiq-nats-local`, and `org-core-temporal` infrastructure.
+The canonical production wiring lives in
+`apps/Ingestion Plane/docker-compose.yml` plus
+`apps/Ingestion Plane/docker-compose.production.yml`. The repository-root
+Compose file is a quarantined legacy compatibility stack and must not be used
+for production.
 
 ### Bootstrap (first-time setup)
 
 ```bash
-# 1. Create the quarry_v2 database in the shared Postgres
-docker exec aquatiq-postgres-local psql -U "${DB_USER:-aquatiq}" \
-    -c "CREATE DATABASE quarry_v2 OWNER \"${DB_USER:-aquatiq}\";"
+# 1. Provision the required secrets and build metadata described in the
+#    Ingestion Plane `.env.example`.
 
-# 2. Build + start Quarry v2 services
-cd /Volumes/Lagring/Triodelab/CoreSystem
-docker compose up -d --build quarry-control quarry-edge quarry-orchestrator
+# 2. Render, build, migrate, and start from the owning plane directory.
+cd "/Volumes/Lagring/Triodelab/CoreSystem/apps/Ingestion Plane"
+docker compose -f docker-compose.yml -f docker-compose.production.yml config -q
+docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build \
+  postgres dragonfly temporal-postgres temporal quarry-control quarry-edge quarry-orchestrator
 
 # 3. Verify
-curl http://localhost:8082/health   # quarry-edge
-curl http://localhost:8081/health   # quarry-control
-docker logs quarry-orchestrator --tail 20
+docker compose ps quarry-edge quarry-control quarry-orchestrator
 ```
 
 ### Smoke test
@@ -50,7 +51,9 @@ For dev runs without the CoreSystem stack:
 
 ```bash
 cd /Volumes/Lagring/Triodelab/CoreSystem/apps/Ingestion\ Plane/Quarry-v2
-docker compose -f deploy/compose/docker-compose.yml up -d --build
+cp deploy/compose/.env.example deploy/compose/.env
+# Replace every placeholder, then:
+deploy/scripts/dev-up.sh -d
 ```
 
 This brings up its own Postgres, Redis, and Temporal containers in addition
@@ -59,19 +62,19 @@ to the three Quarry services.
 ## Build details
 
 ### `Dockerfile.edge` (Rust)
-- Base: `rust:1.85-slim-bookworm`
+- Base: `rust:1.91-slim-bookworm`
 - System deps: `pkg-config`, `libssl-dev`, `protobuf-compiler` (for `tonic-build`),
   `cmake`, `perl`, `clang`, `build-essential` (for `boring-sys2` in `wreq`)
 - Cargo workspace: builds `-p quarry-edge --bin quarry-edge-rs` only (other crates
   compile as transitive deps)
-- Runtime: `debian:bookworm-slim` with `wget` for healthcheck; non-root `quarry` user
+- Runtime: date-pinned Debian Bookworm slim with `wget`; non-root `quarry` user
 - Final image: ~120 MB
 
 ### `Dockerfile.control` (Go)
-- Base: `golang:1.25-bookworm` (workspace requires Go 1.25 for `quarry-control`)
+- Base: `golang:1.26.5-bookworm`
 - Local deps copied: `pkg/quarrycontracts`, `pkg/quarryotel`
 - Build: `CGO_ENABLED=0 -ldflags="-s -w -extldflags=-static"`
-- Runtime: `debian:bookworm-slim` with `wget` for healthcheck; non-root `quarry` user
+- Runtime: date-pinned Debian Bookworm slim with `wget`; non-root `quarry` user
 - Final image: ~50 MB
 
 ### `Dockerfile.orchestrator` (Go)
@@ -79,15 +82,16 @@ to the three Quarry services.
 - Runtime: `debian:bookworm-slim` with `procps` for `pgrep`-based healthcheck
 - Final image: ~55 MB
 
-## Environment variables (root compose)
+## Environment variables (Ingestion Plane compose)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `QUARRY_CONTROL_API_KEY` | `dev-quarry-control-key` | Internal token control accepts on event ingestion |
+| `QUARRY_CONTROL_API_KEY` | required | Internal token control accepts on event ingestion |
 | `DATA_PLANE_URL` | (unset) | Optional Data Plane v2 ingest endpoint |
-| `DATA_PLANE_API_KEY` | (unset) | Bearer token for Data Plane |
-| `MODEL_PLANE_URL` | `http://ai-core:8040` | Model Plane gateway URL (for /v1/audio + AI formats) |
-| `MODEL_PLANE_TOKEN` | (unset) | Bearer token for Model Plane |
+| `AUTH_CORE_URL` | `http://auth-core:3011` | Auth Core service-token issuer |
+| `QUARRY_SERVICE_API_KEY` | required with a plane URL | Durable credential registered as Auth Core service id `quarry-edge` |
+| `QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS` | `0` | Explicit local-only legacy static-token escape hatch; production refuses it |
+| `MODEL_PLANE_URL` | plane service DNS | Model Plane gateway URL (for /v1/audio + AI formats) |
 | `BROWSER_BROKER_GRPC` | (unset) | gRPC endpoint for grant validation |
 | `BROWSERLESS_URL` / `BROWSERLESS_TOKEN` | (unset) | Browserless cloud browser |
 | `BROWSERBASE_API_KEY` | (unset) | Browserbase cloud browser |

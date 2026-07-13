@@ -3,13 +3,22 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
+	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/triodelab/integration-corev2/internal/auth"
@@ -18,10 +27,19 @@ import (
 
 const defaultTimeout = 5 * time.Second
 
+var errUnknownSigningKey = errors.New("unknown signing key")
+
 type AuthClient struct {
 	baseURL        string
-	internalAPIKey string
+	jwksURL        string
+	issuer         string
+	audience       string
 	httpClient     *http.Client
+	keysMu         sync.RWMutex
+	keysRefreshMu  sync.Mutex
+	keys           map[string]*rsa.PublicKey
+	keysExpiry     time.Time
+	keysGeneration uint64
 }
 
 type OrgClient struct {
@@ -67,10 +85,22 @@ type AuditEvent struct {
 }
 
 func NewAuthClient(cfg config.Config, httpClient *http.Client) *AuthClient {
+	baseURL := strings.TrimRight(cfg.AuthCoreURL, "/")
+	jwksURL := strings.TrimSpace(cfg.AuthCoreJWKSURL)
+	if jwksURL == "" && baseURL != "" {
+		jwksURL = baseURL + "/api/convex-auth/jwks"
+	}
+	issuer := strings.TrimSpace(cfg.PlaneTokenIssuer)
+	if issuer == "" && baseURL != "" {
+		issuer = baseURL + "/api/convex-auth"
+	}
+	audience := strings.TrimSpace(cfg.IngestionAuthAudience)
+	if audience == "" {
+		audience = "ingestion"
+	}
 	return &AuthClient{
-		baseURL:        strings.TrimRight(cfg.AuthCoreURL, "/"),
-		internalAPIKey: cfg.ControlPlaneInternalAPIKey(),
-		httpClient:     withDefaultClient(httpClient),
+		baseURL: baseURL, jwksURL: jwksURL, issuer: issuer, audience: audience,
+		httpClient: withDefaultClient(httpClient),
 	}
 }
 
@@ -101,45 +131,174 @@ func NewAuditClient(cfg config.Config, httpClient *http.Client) *AuditClient {
 }
 
 func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Principal, error) {
-	if c.baseURL == "" {
+	if c.baseURL == "" || c.jwksURL == "" || c.issuer == "" || c.audience == "" {
 		return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unconfigured", "AUTH_CORE_URL is not configured")
 	}
-	body, err := json.Marshal(map[string]string{"token": token})
+	keys, generation, err := c.fetchJWKS(ctx, false, 0)
 	if err != nil {
-		return auth.Principal{}, err
+		return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unreachable", "Unable to load auth-core verification keys")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/sessions/verify", bytes.NewReader(body))
+	claims, parsed, err := c.parseToken(token, keys)
+	if errors.Is(err, errUnknownSigningKey) {
+		keys, _, err = c.fetchJWKS(ctx, true, generation)
+		if err != nil {
+			return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unreachable", "Unable to refresh auth-core verification keys")
+		}
+		claims, parsed, err = c.parseToken(token, keys)
+	}
 	if err != nil {
-		return auth.Principal{}, err
+		return auth.Principal{}, auth.NewError(http.StatusUnauthorized, "unauthorized", "Token verification failed")
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Api-Key", c.internalAPIKey)
+	if !parsed.Valid || numericClaim(claims, "iat") <= 0 || numericClaim(claims, "nbf") <= 0 {
+		return auth.Principal{}, auth.NewError(http.StatusUnauthorized, "unauthorized", "Token claims are invalid")
+	}
+	orgID := stringClaim(claims, "org_id")
+	principalType := stringClaim(claims, "principal_type")
+	userID := stringClaim(claims, "user_id")
+	if principalType == "service" {
+		userID = stringClaim(claims, "service_id")
+	}
+	if orgID == "" || userID == "" || stringClaim(claims, "sub") != userID || (principalType != "user" && principalType != "service") {
+		return auth.Principal{}, auth.NewError(http.StatusUnauthorized, "unauthorized", "Token identity claims are invalid")
+	}
+	scopes := stringSliceClaim(claims, "scopes")
+	role := "member"
+	if slices.Contains(scopes, "admin") {
+		role = "admin"
+	}
+	return auth.Principal{
+		UserID: userID, OrganizationID: orgID, Role: role, Email: stringClaim(claims, "email"),
+		PrincipalType: principalType, Scopes: scopes,
+	}, nil
+}
 
+func (c *AuthClient) parseToken(token string, keys map[string]*rsa.PublicKey) (jwt.MapClaims, *jwt.Token, error) {
+	claims := jwt.MapClaims{}
+	parsed, err := jwt.ParseWithClaims(token, claims, func(parsed *jwt.Token) (any, error) {
+		if parsed.Method.Alg() != jwt.SigningMethodRS256.Alg() {
+			return nil, fmt.Errorf("unexpected signing algorithm %q", parsed.Method.Alg())
+		}
+		keyID, _ := parsed.Header["kid"].(string)
+		key := keys[keyID]
+		if key == nil {
+			return nil, errUnknownSigningKey
+		}
+		return key, nil
+	},
+		jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
+		jwt.WithAudience(c.audience),
+		jwt.WithIssuer(c.issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(30*time.Second),
+	)
+	return claims, parsed, err
+}
+
+func (c *AuthClient) fetchJWKS(ctx context.Context, force bool, observedGeneration uint64) (map[string]*rsa.PublicKey, uint64, error) {
+	c.keysMu.RLock()
+	if len(c.keys) > 0 && ((!force && time.Now().Before(c.keysExpiry)) || (force && c.keysGeneration != observedGeneration)) {
+		keys := c.keys
+		generation := c.keysGeneration
+		c.keysMu.RUnlock()
+		return keys, generation, nil
+	}
+	c.keysMu.RUnlock()
+
+	c.keysRefreshMu.Lock()
+	defer c.keysRefreshMu.Unlock()
+	c.keysMu.RLock()
+	if len(c.keys) > 0 && ((!force && time.Now().Before(c.keysExpiry)) || (force && c.keysGeneration != observedGeneration)) {
+		keys := c.keys
+		generation := c.keysGeneration
+		c.keysMu.RUnlock()
+		return keys, generation, nil
+	}
+	c.keysMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.jwksURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unreachable", "Unable to reach auth-core for token verification")
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("JWKS returned HTTP %d", resp.StatusCode)
+	}
+	var document struct {
+		Keys []struct {
+			KeyID string `json:"kid"`
+			Type  string `json:"kty"`
+			Use   string `json:"use"`
+			Alg   string `json:"alg"`
+			N     string `json:"n"`
+			E     string `json:"e"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&document); err != nil {
+		return nil, 0, err
+	}
+	keys := make(map[string]*rsa.PublicKey, len(document.Keys))
+	for _, item := range document.Keys {
+		if item.KeyID == "" || item.Type != "RSA" || item.Alg != "RS256" || (item.Use != "" && item.Use != "sig") {
+			continue
+		}
+		n, nErr := base64.RawURLEncoding.DecodeString(item.N)
+		e, eErr := base64.RawURLEncoding.DecodeString(item.E)
+		if nErr != nil || eErr != nil || len(n) == 0 || len(e) == 0 {
+			continue
+		}
+		modulus := new(big.Int).SetBytes(n)
+		exponentValue := new(big.Int).SetBytes(e)
+		if modulus.BitLen() < 2048 || !exponentValue.IsInt64() {
+			continue
+		}
+		exponent := exponentValue.Int64()
+		if exponent >= 3 && exponent <= math.MaxInt32 && exponent%2 == 1 {
+			keys[item.KeyID] = &rsa.PublicKey{N: modulus, E: int(exponent)}
+		}
+	}
+	if len(keys) == 0 {
+		return nil, 0, fmt.Errorf("JWKS contains no usable RS256 keys")
+	}
+	c.keysMu.Lock()
+	c.keys = keys
+	c.keysExpiry = time.Now().Add(5 * time.Minute)
+	c.keysGeneration++
+	generation := c.keysGeneration
+	c.keysMu.Unlock()
+	return keys, generation, nil
+}
 
-	var decoded map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_bad_response", "auth-core returned a non-JSON response")
+func stringClaim(claims jwt.MapClaims, key string) string {
+	value, _ := claims[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func numericClaim(claims jwt.MapClaims, key string) int64 {
+	switch value := claims[key].(type) {
+	case float64:
+		return int64(value)
+	case json.Number:
+		number, _ := value.Int64()
+		return number
+	default:
+		return 0
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return auth.Principal{}, auth.NewError(http.StatusUnauthorized, "unauthorized", errorMessage(decoded, "Token verification failed"))
+}
+
+func stringSliceClaim(claims jwt.MapClaims, key string) []string {
+	values, _ := claims[key].([]any)
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok && text != "" {
+			out = append(out, text)
+		}
 	}
-	payload := unwrapData(decoded)
-	principal := auth.Principal{
-		UserID:         stringField(payload, "userId", "user_id", "id", "sub"),
-		OrganizationID: stringField(payload, "organizationId", "organization_id", "orgId", "org_id"),
-		WorkspaceID:    stringField(payload, "workspaceId", "workspace_id"),
-		Role:           stringField(payload, "role"),
-		Email:          stringField(payload, "email"),
-	}
-	if principal.Role == "" {
-		principal.Role = "member"
-	}
-	return principal, nil
+	return out
 }
 
 func (c *OrgClient) GetOrgPlan(ctx context.Context, orgID, userID string) (auth.OrgPlan, error) {

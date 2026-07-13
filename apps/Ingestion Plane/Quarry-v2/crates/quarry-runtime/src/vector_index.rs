@@ -47,6 +47,7 @@ pub struct DataPlaneVectorIndex {
     client: reqwest::Client,
     retrieve_url: String,
     api_key: Option<String>,
+    token_provider: Option<crate::service_tokens::SharedServiceTokenProvider>,
 }
 
 impl DataPlaneVectorIndex {
@@ -58,11 +59,20 @@ impl DataPlaneVectorIndex {
             client: reqwest::Client::new(),
             retrieve_url: format!("{base}/v1/retrieve"),
             api_key: None,
+            token_provider: None,
         }
     }
 
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());
+        self
+    }
+
+    pub fn with_token_provider(
+        mut self,
+        provider: crate::service_tokens::SharedServiceTokenProvider,
+    ) -> Self {
+        self.token_provider = Some(provider);
         self
     }
 
@@ -132,11 +142,37 @@ impl VectorIndex for DataPlaneVectorIndex {
             zdr_mode: "off",
             filters: serde_json::json!({}),
         };
-        let mut req = self.client.post(&self.retrieve_url).json(&body);
-        if let Some(key) = &self.api_key {
-            req = req.header("x-internal-key", key);
+        let token_request = crate::service_tokens::ServiceTokenRequest::data_plane(
+            ["data:read"],
+            "retrieve verified organization evidence",
+        );
+        let bearer = match &self.token_provider {
+            Some(provider) => Some(
+                provider
+                    .token_for_org(org_id, &token_request, false)
+                    .await?
+                    .expose()
+                    .to_owned(),
+            ),
+            None => self.api_key.clone(),
+        };
+        let send = |bearer: Option<&str>| {
+            let mut req = self.client.post(&self.retrieve_url).json(&body);
+            if let Some(token) = bearer {
+                req = req.bearer_auth(token);
+            }
+            req.send()
+        };
+        let mut response = send(bearer.as_deref()).await;
+        if matches!(&response, Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED) {
+            if let Some(provider) = &self.token_provider {
+                response = match provider.token_for_org(org_id, &token_request, true).await {
+                    Ok(token) => send(Some(token.expose())).await,
+                    Err(error) => return Err(error),
+                };
+            }
         }
-        let resp = req.send().await.map_err(|e| {
+        let resp = response.map_err(|e| {
             QuarryError::new(
                 ErrorCode::UpstreamBlocked,
                 format!("retrieve request failed: {e}"),

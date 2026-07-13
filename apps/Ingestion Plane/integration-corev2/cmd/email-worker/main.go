@@ -70,9 +70,9 @@ func main() {
 		Store:  repo,
 		Tokens: tokens,
 		Ingest: &emailsync.IngestClient{
-			BaseURL:        cfg.ConversationIngestURL,
-			InternalAPIKey: cfg.InternalAPIKey,
-			HTTP:           &http.Client{Timeout: 15 * time.Second},
+			BaseURL:      cfg.ConversationIngestURL,
+			ServiceToken: cfg.ConversationIngestServiceToken,
+			HTTP:         &http.Client{Timeout: 15 * time.Second},
 		},
 		Gmail:          &emailsync.GmailFetcher{HTTP: providerHTTP},
 		Graph:          &emailsync.GraphFetcher{BaseURL: strings.TrimRight(cfg.MicrosoftGraphBaseURL, "/") + "/v1.0", HTTP: providerHTTP},

@@ -1,3 +1,5 @@
+COMPOSE := docker compose --env-file ../../.env --env-file .env -f docker-compose.yml
+
 .PHONY: help
 help:
 	@echo "Ingestion Plane - Make Commands"
@@ -20,7 +22,6 @@ help:
 	@echo "Testing:"
 	@echo "  make test-imports       Run imports-core tests"
 	@echo "  make test-quarry        Run Quarry-v2 workspace tests"
-	@echo "  make test-quarry-legacy Run legacy Go Quarry tests (deprecated)"
 	@echo "  make test-endpoints     Test all endpoints"
 	@echo "  make test-load          Run load test"
 	@echo "  make smoke-integration  Run integration-api smoke tests (12 checks)"
@@ -33,7 +34,7 @@ help:
 	@echo "Monitoring:"
 	@echo "  make metrics            Show Prometheus metrics"
 	@echo "  make stats              Show Docker container stats"
-	@echo "  make temporal-ui        Open Temporal UI (http://localhost:8089)"
+	@echo "  make temporal-health    Check the Temporal cluster"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  make push-images        Push Docker images to registry"
@@ -59,35 +60,36 @@ setup:
 .PHONY: up
 up:
 	@echo "Starting Ingestion Plane services..."
-	docker-compose -f docker-compose.full.yml up -d
-	@echo "Waiting for services to be ready..."
-	sleep 10
+	$(COMPOSE) up -d --build --wait --wait-timeout 300
 	@echo ""
 	@echo "Services started:"
-	@echo "  Quarry API:     http://localhost:8090"
+	@echo "  Quarry Edge:    http://localhost:8082"
+	@echo "  Quarry Control: http://localhost:8081"
 	@echo "  Imports API:    http://localhost:3025"
-	@echo "  Temporal UI:    http://localhost:8089"
-	@echo "  PostgreSQL:     localhost:5434"
-	@echo "  Redis:          localhost:6380"
-	@echo "  NATS:           localhost:4223"
+	@echo "  Integration API:http://localhost:3026"
+	@echo "  Finspo API:     http://localhost:3130"
+	@echo "  Shipping Core:  http://localhost:3156"
+	@echo "  PostgreSQL:     localhost:5432"
+	@echo "  NATS:           localhost:4224"
+	@echo "  Temporal:       localhost:7233"
 	@echo ""
 	@echo "Run 'make test-endpoints' to verify all services are working"
 
 .PHONY: down
 down:
 	@echo "Stopping Ingestion Plane services..."
-	docker-compose -f docker-compose.full.yml down
+	$(COMPOSE) down
 
 .PHONY: clean
 clean:
 	@echo "Removing all containers and volumes..."
-	docker-compose -f docker-compose.full.yml down -v
+	$(COMPOSE) down -v
 	@echo "✓ Cleanup complete"
 
 .PHONY: build
 build:
 	@echo "Building Docker images..."
-	docker-compose -f docker-compose.full.yml build
+	$(COMPOSE) build
 	@echo "✓ Build complete"
 
 .PHONY: dev-imports
@@ -100,22 +102,17 @@ dev-quarry:
 	@echo "Starting Quarry-v2 edge in development mode..."
 	cd Quarry-v2 && cargo run -p quarry-edge
 
-.PHONY: dev-quarry-legacy
-dev-quarry-legacy:
-	@echo "Starting legacy Go Quarry (deprecated — use Quarry-v2)..."
-	cd Quarry && go run ./cmd/api/main.go
-
 .PHONY: logs
 logs:
-	docker-compose -f docker-compose.full.yml logs -f
+	$(COMPOSE) logs -f
 
 .PHONY: shell-imports
 shell-imports:
-	docker-compose -f docker-compose.full.yml exec imports-api /bin/bash
+	$(COMPOSE) exec imports-api /bin/sh
 
 .PHONY: shell-postgres
 shell-postgres:
-	docker-compose -f docker-compose.full.yml exec postgres psql -U root
+	$(COMPOSE) exec postgres sh -ec 'exec psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 .PHONY: test-imports
 test-imports:
@@ -125,31 +122,28 @@ test-imports:
 test-quarry:
 	cd Quarry-v2 && cargo test --workspace
 
-.PHONY: test-quarry-legacy
-test-quarry-legacy:
-	@echo "Legacy Go Quarry tests (deprecated — use 'make test-quarry' for Quarry-v2)"
-	cd Quarry && go test -v ./...
-
 .PHONY: test-endpoints
 test-endpoints:
-	@echo "Testing Ingestion Plane endpoints..."
-	@echo ""
-	@echo "1. Quarry Health Check"
-	@curl -s http://localhost:8090/health | jq . || echo "❌ Quarry not responding"
-	@echo ""
-	@echo "2. Imports Health Check"
-	@curl -s http://localhost:3025/health | jq . || echo "❌ Imports not responding"
-	@echo ""
-	@echo "3. Temporal UI"
-	@curl -s http://localhost:8089 > /dev/null && echo "✓ Temporal UI running" || echo "❌ Temporal UI not responding"
-	@echo ""
-	@echo "4. Database"
-	@docker-compose -f docker-compose.full.yml exec postgres pg_isready -U root > /dev/null && echo "✓ PostgreSQL ready" || echo "❌ PostgreSQL not ready"
-	@echo ""
-	@echo "5. Redis"
-	@docker-compose -f docker-compose.full.yml exec redis redis-cli ping > /dev/null 2>&1 && echo "✓ Redis ready" || echo "❌ Redis not ready"
-	@echo ""
-	@echo "✓ All endpoints operational!"
+	@set -eu; \
+	compose() { $(COMPOSE) "$$@"; }; \
+	check_http() { \
+		name="$$1"; url="$$2"; \
+		curl --fail --silent --show-error --max-time 10 --output /dev/null "$$url"; \
+		printf '✓ %s\n' "$$name"; \
+	}; \
+	printf 'Testing Ingestion Plane readiness...\n'; \
+	check_http 'Quarry Edge' 'http://127.0.0.1:8082/health'; \
+	check_http 'Imports API' 'http://127.0.0.1:3025/ready'; \
+	check_http 'Integration API' 'http://127.0.0.1:3026/health'; \
+	check_http 'Finspo API' 'http://127.0.0.1:3130/health'; \
+	check_http 'Shipping Core' 'http://127.0.0.1:3156/healthz'; \
+	compose exec -T postgres pg_isready -U "$${INGESTION_PG_USER:-ingestion_user}" -d "$${INGESTION_PG_DB:-ingestion_plane_db}" >/dev/null; \
+	printf '✓ PostgreSQL\n'; \
+	compose exec -T dragonfly sh -ec 'redis-cli -a "$$INGESTION_DRAGONFLY_PASSWORD" ping >/dev/null 2>&1'; \
+	printf '✓ Dragonfly\n'; \
+	compose exec -T temporal temporal operator cluster health --address temporal:7233 >/dev/null; \
+	printf '✓ Temporal\n'; \
+	printf '✓ All Ingestion Plane endpoints are operational\n'
 
 .PHONY: test-load
 test-load:
@@ -162,46 +156,46 @@ test-load:
 .PHONY: migrate
 migrate:
 	@echo "Running database migrations..."
-	docker-compose -f docker-compose.full.yml exec postgres psql -U root < imports-core/migrations/001_init.sql
+	$(COMPOSE) exec -T postgres sh -ec 'exec psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d imports' < imports-core/migrations/001_init.sql
 	@echo "✓ Migrations complete"
 
 .PHONY: seed
 seed:
 	@echo "Seeding test data..."
-	docker-compose -f docker-compose.full.yml exec -T postgres psql -U root << 'EOF'
-	\c imports
-	INSERT INTO import_jobs (org_id, user_id, source_type, status, total_items) 
-	VALUES ('test-org', 'test-user', 'upload', 'completed', 10);
-	EOF
+	@printf '%s\n' \
+		"INSERT INTO import_jobs (id, org_id, user_id, source_type, status, total_items)" \
+		"VALUES ('00000000-0000-0000-0000-000000000001', 'test-org', 'test-user', 'upload', 'completed', 10)" \
+		"ON CONFLICT (id) DO NOTHING;" | \
+		$(COMPOSE) exec -T postgres sh -ec 'exec psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d imports'
 	@echo "✓ Test data seeded"
 
 .PHONY: db-reset
-db-reset: down up migrate seed
+db-reset: clean up migrate seed
 	@echo "✓ Database reset complete"
 
 .PHONY: metrics
 metrics:
 	@echo "Quarry Metrics:"
-	@curl -s http://localhost:8090/metrics | grep -E "quarry_|go_" | head -20
+	@test -n "$(TOKEN)" || (echo "Error: TOKEN is required for the protected metrics endpoint" >&2; exit 1)
+	@curl --fail --silent --show-error --max-time 10 -H "Authorization: Bearer $(TOKEN)" http://127.0.0.1:8082/metrics | head -20
 	@echo ""
 
 .PHONY: stats
 stats:
-	docker stats --no-stream
+	@ids="$$($(COMPOSE) ps -q)"; test -n "$$ids" || (echo "No Ingestion Plane containers are running" >&2; exit 1); docker stats --no-stream $$ids
 
-.PHONY: temporal-ui
-temporal-ui:
-	@echo "Opening Temporal UI at http://localhost:8089"
-	@open http://localhost:8089 || xdg-open http://localhost:8089 || echo "Open http://localhost:8089 manually"
+.PHONY: temporal-health
+temporal-health:
+	@$(COMPOSE) exec -T temporal temporal operator cluster health --address temporal:7233
 
 .PHONY: push-images
 push-images:
 	@echo "Pushing Docker images to registry..."
 	@test -n "$(REGISTRY)" || (echo "Error: REGISTRY not set. Usage: make push-images REGISTRY=registry.example.com" && exit 1)
-	docker tag quarry:latest $(REGISTRY)/quarry:latest
-	docker tag imports-core:latest $(REGISTRY)/imports-core:latest
-	docker push $(REGISTRY)/quarry:latest
-	docker push $(REGISTRY)/imports-core:latest
+	docker tag ingestion-plane-quarry-edge:latest $(REGISTRY)/ingestion/quarry-edge:latest
+	docker tag ingestion-plane-imports-api:latest $(REGISTRY)/ingestion/imports-api:latest
+	docker push $(REGISTRY)/ingestion/quarry-edge:latest
+	docker push $(REGISTRY)/ingestion/imports-api:latest
 	@echo "✓ Images pushed to $(REGISTRY)"
 
 .PHONY: deploy-k8s
@@ -220,7 +214,6 @@ docs:
 	@echo "  - Quarry-v2:       Quarry-v2/docs/ARCHITECTURE.md"
 	@echo "  - Onboarding crawl: Quarry-v2/docs/ONBOARDING_LIVE_CRAWL.md"
 	@echo "  - Imports README:  imports-core/README.md"
-	@echo "  - Legacy Quarry (deprecated): Quarry/docs/API.md, Quarry/docs/DEPLOYMENT.md"
 	@echo ""
 	@echo "Open docs with: open INGESTION_PLANE_ARCHITECTURE.md"
 
@@ -228,9 +221,8 @@ docs:
 version:
 	@echo "Ingestion Plane Version Information:"
 	@echo "  Quarry-v2:      Rust workspace (active)"
-	@echo "  Quarry:         v0.1.0 (legacy Go service, deprecated)"
 	@echo "  Imports-Core:   v1.0.0 (Development)"
-	@echo "  Last Updated:   July 2, 2026"
+	@echo "  Last Updated:   July 12, 2026"
 
 # CI/CD targets
 .PHONY: ci-test
@@ -244,7 +236,7 @@ smoke-integration:
 
 .PHONY: ci-build
 ci-build:
-	docker-compose -f docker-compose.full.yml build --no-cache
+	$(COMPOSE) build --no-cache
 
 .PHONY: ci-push
 ci-push: ci-build push-images

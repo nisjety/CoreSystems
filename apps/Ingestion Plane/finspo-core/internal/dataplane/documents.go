@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -13,8 +14,9 @@ import (
 // DocumentsClient forwards content-bearing SharePoint files into Data Plane v2's
 // durable document store (POST /v1/documents). It is the content-carrying
 // counterpart to SourceObjectClient, which only ships metadata to the Quickwit
-// source-object index. Both share the same base URL + internal API key and the
-// same X-Org-ID / X-Internal-Api-Key auth headers.
+// source-object index. Both use a short-lived, org-constrained Control-issued
+// service JWT. Data Plane verifies and pins the tenant from that credential;
+// caller-selected identity headers are never sent.
 //
 // Data Plane v2 owns documents; Ingestion persists durable knowledge only
 // through this contract. This client never touches Data Plane's database
@@ -22,18 +24,23 @@ import (
 // enforces validation, ownership, and idempotency.
 type DocumentsClient struct {
 	baseURL    string
-	apiKey     string
+	tokens     OrgTokenProvider
 	httpClient *http.Client
 }
 
-func NewDocumentsClient(baseURL, apiKey string) *DocumentsClient {
+func NewDocumentsClient(baseURL string, tokens OrgTokenProvider) *DocumentsClient {
 	return &DocumentsClient{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		apiKey:  strings.TrimSpace(apiKey),
+		tokens:  tokens,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:       30 * time.Second,
+			CheckRedirect: noBearerRedirect,
 		},
 	}
+}
+
+func noBearerRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // CreateDocumentInput mirrors documents-api-go model.CreateDocumentInput for the
@@ -54,7 +61,7 @@ type CreateDocumentInput struct {
 // nil-safe optional-integration gating used across the ingestion plane: an
 // unconfigured client is a no-op, never an error.
 func (c *DocumentsClient) Configured() bool {
-	return c != nil && c.baseURL != "" && c.apiKey != ""
+	return c != nil && c.baseURL != "" && c.tokens != nil && c.tokens.Configured()
 }
 
 // CreateDocument POSTs one document to Data Plane v2. When the client is
@@ -64,7 +71,8 @@ func (c *DocumentsClient) CreateDocument(ctx context.Context, orgID string, inpu
 	if !c.Configured() {
 		return nil
 	}
-	if strings.TrimSpace(orgID) == "" {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
 		return fmt.Errorf("orgID is required")
 	}
 	if strings.TrimSpace(input.Content) == "" {
@@ -98,22 +106,33 @@ func (c *DocumentsClient) CreateDocument(ctx context.Context, orgID string, inpu
 		return fmt.Errorf("marshal document payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/documents", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build data plane document request: %w", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := c.tokens.Token(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/documents", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("build data plane document request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("data plane document request: %w", err)
+		}
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			c.tokens.Invalidate(orgID, token)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("data plane document request returned %s", resp.Status)
+		}
+		return nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Org-ID", orgID)
-	req.Header.Set("X-Internal-Api-Key", c.apiKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("data plane document request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("data plane document request returned %s", resp.Status)
-	}
-	return nil
+	return fmt.Errorf("data plane document authentication failed after refresh")
 }

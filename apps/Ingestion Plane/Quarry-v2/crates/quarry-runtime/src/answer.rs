@@ -250,10 +250,18 @@ impl AnswerPipeline {
             });
         }
         let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
-        let query_result = self
-            .formats
-            .query(&prepared.combined, &req.query, zdr)
-            .await?;
+        let query_result = match req.org_id.as_deref() {
+            Some(org_id) => {
+                self.formats
+                    .query_for_org(org_id, &prepared.combined, &req.query, zdr)
+                    .await?
+            }
+            None => {
+                self.formats
+                    .query(&prepared.combined, &req.query, zdr)
+                    .await?
+            }
+        };
         Ok(AnswerResult {
             query: req.query,
             answer: query_result.answer,

@@ -1,3 +1,5 @@
+import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -6,7 +8,36 @@ from odoorpc import ODOO
 from simple_salesforce import Salesforce
 
 from app.notion_import import import_from_notion
+from app.network_policy import UnsafeOutboundTarget, validate_public_http_url
 from app.schemas import ImportDocument
+
+
+_MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
+_MAX_HTTP_RECORDS = 1_000
+_FORBIDDEN_FORWARD_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+
+def _connector_headers(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("connector headers must be an object")
+    headers: dict[str, str] = {}
+    for name, raw_value in value.items():
+        normalized = str(name).strip().lower()
+        if not normalized or normalized in _FORBIDDEN_FORWARD_HEADERS:
+            raise ValueError(f"connector header is not permitted: {name}")
+        if not isinstance(raw_value, str):
+            raise ValueError(f"connector header value must be a string: {name}")
+        headers[str(name)] = raw_value
+    return headers
 
 __all__ = [
     "import_from_notion",
@@ -21,8 +52,10 @@ __all__ = [
 async def import_from_hubspot(connection: dict[str, Any], options: dict[str, Any]) -> list[ImportDocument]:
     client = HubSpot(access_token=connection.get("access_token"))
     object_type = options.get("object_type", "contacts")
-    limit = int(options.get("limit", 100))
-    response = client.crm.objects.basic_api.get_page(object_type=object_type, limit=limit)
+    limit = max(1, min(int(options.get("limit", 100)), 1_000))
+    response = await asyncio.to_thread(
+        client.crm.objects.basic_api.get_page, object_type=object_type, limit=limit
+    )
     documents: list[ImportDocument] = []
     for item in response.results:
         item_dict = item.to_dict()
@@ -46,7 +79,7 @@ async def import_from_salesforce(connection: dict[str, Any], options: dict[str, 
         domain=connection.get("domain", "login"),
     )
     query = options.get("query", "SELECT Id, Name FROM Account LIMIT 100")
-    result = sf.query_all(query)
+    result = await asyncio.to_thread(sf.query_all, query)
     documents: list[ImportDocument] = []
     for record in result.get("records", []):
         source_id = record.get("Id")
@@ -64,13 +97,28 @@ async def import_from_salesforce(connection: dict[str, Any], options: dict[str, 
 
 
 async def import_from_odoo(connection: dict[str, Any], options: dict[str, Any]) -> list[ImportDocument]:
-    odoo = ODOO(connection.get("host"), port=int(connection.get("port", 8069)))
-    odoo.login(connection.get("database"), connection.get("username"), connection.get("password"))
+    host = connection.get("host")
+    port = int(connection.get("port", 8069))
+    if not isinstance(host, str) or not host:
+        raise ValueError("Odoo host is required")
+    if port < 1 or port > 65535:
+        raise ValueError("Odoo port is invalid")
+    host_url = host if "://" in host else f"http://{host}:{port}"
+    validated = await validate_public_http_url(host_url)
+    validated_host = httpx.URL(validated).host
     model = options.get("model", "product.template")
     fields = options.get("fields", ["id", "name", "description"])
     domain = options.get("domain", [])
-    limit = int(options.get("limit", 100))
-    records = odoo.env[model].search_read(domain, fields, limit=limit)
+    limit = max(1, min(int(options.get("limit", 100)), 1_000))
+
+    def fetch_records() -> list[dict[str, Any]]:
+        odoo = ODOO(validated_host, port=port)
+        odoo.login(
+            connection.get("database"), connection.get("username"), connection.get("password")
+        )
+        return odoo.env[model].search_read(domain, fields, limit=limit)
+
+    records = await asyncio.to_thread(fetch_records)
     documents: list[ImportDocument] = []
     for record in records:
         source_id = str(record.get("id"))
@@ -92,16 +140,39 @@ async def import_from_http_system(
     connection: dict[str, Any],
     options: dict[str, Any],
 ) -> list[ImportDocument]:
-    url = connection.get("url")
-    headers = connection.get("headers", {})
+    url = await validate_public_http_url(connection.get("url"))
+    headers = _connector_headers(connection.get("headers", {}))
     params = options.get("params", {})
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(url, headers=headers, params=params)
-        response.raise_for_status()
-    payload = response.json()
-    items = payload if isinstance(payload, list) else payload.get("items", [payload])
+    if not isinstance(params, dict):
+        raise ValueError("connector params must be an object")
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        async with client.stream("GET", url, headers=headers, params=params) as response:
+            if response.is_redirect:
+                raise UnsafeOutboundTarget("connector redirects are not permitted")
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > _MAX_HTTP_RESPONSE_BYTES:
+                    raise ValueError("connector response exceeds 10 MiB")
+                chunks.append(chunk)
+    try:
+        payload = json.loads(b"".join(chunks))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("connector response must be valid JSON") from exc
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = payload.get("items", [payload])
+    else:
+        raise ValueError("connector response must be an object or an array")
+    if not isinstance(items, list) or len(items) > _MAX_HTTP_RECORDS:
+        raise ValueError("connector response contains an invalid number of items")
     documents: list[ImportDocument] = []
     for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("connector response items must be objects")
         source_id = str(item.get("id") or item.get("uuid") or "")
         title = str(item.get("name") or item.get("title") or source_id or "record")
         documents.append(

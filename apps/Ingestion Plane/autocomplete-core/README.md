@@ -22,7 +22,7 @@ Implemented:
 
 Still pending:
 
-- Velion server-side proxy route
+- Live Velion suggestion E2E after the Docker recovery/redeploy
 - Title ingestion once Quarry emits title-bearing metadata events
 - Optional correction endpoint after enough query corpus exists
 
@@ -53,11 +53,11 @@ authoritative hydration store while Sonic stays the low-latency index.
 |---|---:|---|
 | `AUTOCOMPLETE_HTTP_ADDR` | `0.0.0.0:3219` | HTTP listen address |
 | `AUTOCOMPLETE_METADATA_DB` | `./data/autocomplete-core.sqlite3` | SQLite metadata path |
-| `AUTOCOMPLETE_INTERNAL_TOKEN` | unset | Optional bearer token for non-health routes |
+| `AUTOCOMPLETE_INTERNAL_TOKEN` | required | Bearer token for non-health routes; unset only behind both isolated-E2E gates |
 | `SONIC_ENABLED` | inferred from password | Enables Sonic adapter |
 | `SONIC_ADDR` | `127.0.0.1:1491` | Sonic TCP channel address |
 | `SONIC_PASSWORD` | unset | Sonic channel password |
-| `NATS_ENABLED` | `false` | Enables Quarry event consumer |
+| `NATS_ENABLED` | inferred from explicit URL | Enables Quarry event consumer |
 | `NATS_URL` | `nats://127.0.0.1:4222` | NATS broker URL |
 | `NATS_STREAM` | `QUARRY_EVENTS` | JetStream stream |
 | `NATS_DURABLE` | `autocomplete-core` | Durable consumer name |
@@ -114,6 +114,8 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The root `docker-compose.yml` includes `quarry-sonic` and
-`autocomplete-core`. Set `SONIC_PASSWORD` and `AUTOCOMPLETE_INTERNAL_TOKEN`
-before starting those services.
+The canonical Ingestion Plane Compose includes `autocomplete-sonic` and
+`autocomplete-core` on the private plane/inter-plane networks. Set
+`SONIC_PASSWORD`, `AUTOCOMPLETE_INTERNAL_TOKEN`, and `INGESTION_NATS_TOKEN`
+before starting them. The repository-root Compose is legacy and no longer owns
+this capability.

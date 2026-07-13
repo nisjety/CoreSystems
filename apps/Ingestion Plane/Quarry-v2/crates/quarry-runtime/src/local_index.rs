@@ -277,7 +277,10 @@ impl TantivyLocalIndex {
             .saturating_mul(RECENCY_OVERFETCH)
             .clamp(limit, RECENCY_MAX_CANDIDATES);
         let top_docs = searcher
-            .search(&*final_query, &TopDocs::with_limit(candidate_limit))
+            .search(
+                &*final_query,
+                &TopDocs::with_limit(candidate_limit).order_by_score(),
+            )
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,

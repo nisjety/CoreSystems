@@ -95,7 +95,8 @@ impl ObservationRunner {
 
         if let Some(events) = &self.events {
             events
-                .emit(
+                .emit_for_zdr(
+                    request.zdr,
                     run_id.clone(),
                     EventType::ActionStarted,
                     json!({ "step": ctx.step, "action": serde_json::to_value(&request.action).ok() }),
@@ -432,7 +433,8 @@ impl ObservationRunner {
 
         if let Some(events) = &self.events {
             events
-                .emit(
+                .emit_for_zdr(
+                    request.zdr,
                     run_id.clone(),
                     EventType::ObservationReady,
                     json!({

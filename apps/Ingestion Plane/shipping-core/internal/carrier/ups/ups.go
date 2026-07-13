@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -57,7 +58,11 @@ func New(config Config) *Adapter {
 }
 
 func (a *Adapter) Info() carrier.Info {
-	return carrier.Info{Code: "ups", Name: "UPS", Segment: carrier.SegmentB2B}
+	mode := carrier.ModeProduction
+	if strings.Contains(strings.ToLower(a.config.BaseURL), "wwwcie") || a.config.BaseURL != defaultBaseURL {
+		mode = carrier.ModeSandbox
+	}
+	return carrier.Info{Code: "ups", Name: "UPS", Segment: carrier.SegmentB2B, Mode: mode}
 }
 
 // Quote calls UPS's Rating API with requestoption=Shop, returning one
@@ -181,14 +186,4 @@ func serviceName(code string) string {
 	return "UPS " + code
 }
 
-func (a *Adapter) Book(ctx context.Context, req carrier.BookingRequest) (carrier.Booking, error) {
-	return carrier.Booking{}, fmt.Errorf("ups: booking not implemented yet — see docs/TASKS.md Fase 3")
-}
-
-func (a *Adapter) Label(ctx context.Context, bookingRef string) (carrier.Label, error) {
-	return carrier.Label{}, fmt.Errorf("ups: label retrieval not implemented yet — see docs/TASKS.md Fase 3")
-}
-
-func (a *Adapter) Track(ctx context.Context, trackingNo string) (carrier.TrackingStatus, error) {
-	return carrier.TrackingStatus{}, fmt.Errorf("ups: tracking not implemented yet — see docs/TASKS.md Fase 3")
-}
+// Book, Label, and Track are implemented in booking.go.

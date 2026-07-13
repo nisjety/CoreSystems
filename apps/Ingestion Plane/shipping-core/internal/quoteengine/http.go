@@ -1,10 +1,11 @@
 package quoteengine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sort"
-	"strings"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 
@@ -12,6 +13,13 @@ import (
 )
 
 var validate = validator.New()
+
+// ReliabilityScorer is the subset of internal/reliability's Store this
+// package depends on — defined at the consumer so quoteengine never
+// couples to the DB pool or the reliability package's internals directly.
+type ReliabilityScorer interface {
+	ScoreMap(ctx context.Context) (map[string]float64, error)
+}
 
 // quoteRequestDTO is the wire shape for POST /api/quotes. Validation tags
 // enforce the PRD's "validate every API boundary" NFR before any carrier
@@ -75,10 +83,13 @@ type quoteResponse struct {
 // Consumers: the Velion integration catalog (shipping provider readiness),
 // the Model Plane shipping tools, and the future shipping page.
 type carrierDTO struct {
-	Code    string `json:"code"`
-	Name    string `json:"name"`
-	Segment string `json:"segment"`
-	IsMock  bool   `json:"is_mock"`
+	Code           string     `json:"code"`
+	Name           string     `json:"name"`
+	Segment        string     `json:"segment"`
+	Mode           string     `json:"mode"`
+	IsMock         bool       `json:"is_mock"`
+	VerifiedAt     *time.Time `json:"verified_at"`
+	DegradedReason string     `json:"degraded_reason,omitempty"`
 }
 
 type carriersResponse struct {
@@ -91,10 +102,13 @@ func CarriersHandler(engine *Engine) http.HandlerFunc {
 		resp := carriersResponse{Carriers: []carrierDTO{}}
 		for _, info := range engine.Carriers() {
 			resp.Carriers = append(resp.Carriers, carrierDTO{
-				Code:    info.Code,
-				Name:    info.Name,
-				Segment: string(info.Segment),
-				IsMock:  strings.HasPrefix(info.Code, "mock-"),
+				Code:           info.Code,
+				Name:           info.Name,
+				Segment:        string(info.Segment),
+				Mode:           string(info.Mode),
+				IsMock:         info.Mode == carrier.ModeMock,
+				VerifiedAt:     info.VerifiedAt,
+				DegradedReason: info.DegradedReason,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -105,8 +119,11 @@ func CarriersHandler(engine *Engine) http.HandlerFunc {
 // Handler returns an http.HandlerFunc that validates the request body,
 // fans it out via engine, and responds with quotes sorted cheapest-first
 // plus any per-carrier errors — a timed-out or failing carrier is reported,
-// never silently dropped.
-func Handler(engine *Engine) http.HandlerFunc {
+// never silently dropped. When scorer is non-nil, each quote's
+// ReliabilityScore (F8) is populated from real booking/tracking history;
+// a nil scorer (or a carrier below the minimum sample size) leaves it nil
+// rather than fabricating a number.
+func Handler(engine *Engine, scorer ReliabilityScorer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dto quoteRequestDTO
 		if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
@@ -130,7 +147,71 @@ func Handler(engine *Engine) http.HandlerFunc {
 		sort.Slice(resp.Quotes, func(i, j int) bool {
 			return resp.Quotes[i].Price.AmountCents < resp.Quotes[j].Price.AmountCents
 		})
+		AnnotateReliability(r.Context(), scorer, resp.Quotes)
 
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// AnnotateReliability sets ReliabilityScore on each quote from scorer's
+// per-carrier map. Best-effort: a scorer error just leaves every quote's
+// score nil. Exported so the recommend package (F5) can annotate the same
+// quotes it hands to the model, not just the plain /api/quotes response.
+func AnnotateReliability(ctx context.Context, scorer ReliabilityScorer, quotes []carrier.Quote) {
+	if scorer == nil {
+		return
+	}
+	scores, err := scorer.ScoreMap(ctx)
+	if err != nil || len(scores) == 0 {
+		return
+	}
+	for i := range quotes {
+		if score, ok := scores[quotes[i].CarrierCode]; ok {
+			s := score
+			quotes[i].ReliabilityScore = &s
+		}
+	}
+}
+
+// reliabilityResponse is GET /api/carriers/reliability's body — every
+// carrier with enough data to score, for transparency/debugging and the
+// future shipping page (not just the opaque per-quote annotation above).
+type reliabilityResponse struct {
+	Carriers []reliabilityEntry `json:"carriers"`
+}
+
+type reliabilityEntry struct {
+	CarrierCode string  `json:"carrier_code"`
+	OnTimeRate  float64 `json:"on_time_rate"`
+	SampleSize  int     `json:"sample_size"`
+}
+
+// ScoreEntry mirrors internal/reliability.CarrierScore's fields.
+// quoteengine defines its own copy (rather than importing the reliability
+// package) so it keeps depending only on the minimal shape it needs; main.go
+// (which already imports both) adapts between them via ScoresFunc.
+type ScoreEntry struct {
+	CarrierCode string
+	OnTimeRate  float64
+	SampleSize  int
+}
+
+// ScoresFunc adapts a concrete scores provider (internal/reliability.Store)
+// to what ReliabilityHandler needs, without quoteengine importing it.
+type ScoresFunc func(ctx context.Context) ([]ScoreEntry, error)
+
+// ReliabilityHandler serves GET /api/carriers/reliability.
+func ReliabilityHandler(scores ScoresFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := reliabilityResponse{Carriers: []reliabilityEntry{}}
+		if entries, err := scores(r.Context()); err == nil {
+			for _, sc := range entries {
+				resp.Carriers = append(resp.Carriers, reliabilityEntry{
+					CarrierCode: sc.CarrierCode, OnTimeRate: sc.OnTimeRate, SampleSize: sc.SampleSize,
+				})
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}

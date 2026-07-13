@@ -28,6 +28,32 @@ impl SonicClient {
         self.enabled
     }
 
+    pub async fn ready(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let addr = self.addr.clone();
+        let password = self.password.clone();
+        match self.run_blocking(move || {
+            let channel = SearchChannel::start(addr.as_str(), password.as_str())
+                .map_err(|error| error.to_string())?;
+            // sonic-channel 1.1.0 defines a PONG response but omits the PONG
+            // parser branch, so `ping()` always reports WrongResponse against
+            // Sonic 1.4.9. A successful authenticated START followed by QUIT
+            // verifies DNS, TCP, protocol negotiation, and the credential.
+            channel.quit().map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(error = %error, "Sonic readiness probe failed");
+                false
+            }
+        }
+    }
+
     pub async fn push(
         &self,
         collection: String,

@@ -1,21 +1,21 @@
 # syntax=docker/dockerfile:1.7
 # quarry-edge-rs (Rust hot path: REST/SSE/cache/transform)
 #
-# Workspace declares rust-version = 1.85 but transitive deps (aws-smithy-*,
-# serde_with, time, icu_*) have bumped MSRV to 1.91+ in Cargo.lock. Use
-# `rust:1-slim-bookworm` (latest stable, currently 1.91+) so the dep graph
-# stays buildable without pinning every transitive crate.
+# Workspace declares rust-version = 1.85 but locked AWS SDK/Smithy packages
+# require Rust 1.94.1+. Use the same pinned 1.97 toolchain as Model Plane so a
+# future stable release cannot silently alter the build or invalidate caches.
 #
 # Native deps:
 # - protobuf-compiler: tonic-build (gRPC clients, gated behind `grpc`)
 # - cmake/perl/clang/build-essential: boring-sys2 (BoringSSL via wreq)
 
 # ---- Base toolchain stage ----------------------------------------------------
-# Shared base for the cargo-chef planner/cooker/builder stages so the apt
-# layer and cargo-chef install are computed once and reused.
-FROM rust:1-slim-bookworm AS chef-base
+# Use the maintained cargo-chef toolchain image and pin its multi-platform
+# digest. This removes a network-dependent `cargo install` from every clean
+# build while retaining a toolchain compatible with the locked AWS SDK graph.
+FROM lukemathwalker/cargo-chef:latest-rust-1.97-bookworm@sha256:974d873357408b6ececac8729285204664e23f5aab21a34e353ae5bf9bb899a2 AS chef-base
 WORKDIR /src
-ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120 \
     CARGO_HTTP_MULTIPLEXING=false
@@ -48,19 +48,9 @@ RUN --mount=type=cache,id=quarry-edge-apt-cache,target=/var/cache/apt,sharing=lo
     fi; \
     rm -f /tmp/apt-install.log
 
-# cargo-chef computes a dependency-only "recipe" so the heavy dependency
-# compile is cached independently of first-party source churn.
-RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    set -e; \
-    for i in 1 2 3 4 5; do \
-        if cargo install cargo-chef --locked --version 0.1.77; then \
-            exit 0; \
-        fi; \
-        echo "cargo-chef install retry $i"; \
-        sleep 8; \
-    done; \
-    exit 1
+# cargo-chef computes a dependency-only recipe so the heavy dependency compile
+# is cached independently of first-party source churn. The binary is already
+# present in the pinned base image above.
 
 # ---- Planner stage -----------------------------------------------------------
 # Reads the full workspace and emits recipe.json (the dependency graph only).
@@ -117,8 +107,8 @@ ARG QUARRY_EDGE_FEATURES=grpc,http3,postgres-queue
 # the cooked dependency artifacts are reused. The cooked artifacts land in
 # /src/target, which is the shared target cache mount reused by the build below.
 COPY --from=planner /src/recipe.json recipe.json
-RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=quarry-edge-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \
     if [ -n "${QUARRY_EDGE_FEATURES}" ]; then \
         cargo chef cook --release --recipe-path recipe.json -p quarry-edge --features "${QUARRY_EDGE_FEATURES}"; \
@@ -133,8 +123,8 @@ COPY .cargo ./.cargo
 COPY crates ./crates
 COPY lab ./lab
 
-RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=quarry-edge-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=quarry-edge-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=quarry-edge-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=quarry-edge-target,target=/src/target,sharing=locked \
     if [ -n "${QUARRY_EDGE_FEATURES}" ]; then \
         cargo build --release -p quarry-edge --bin quarry-edge-rs --features "${QUARRY_EDGE_FEATURES}"; \
@@ -160,9 +150,14 @@ RUN --mount=type=cache,id=quarry-edge-cargo-registry,target=/usr/local/cargo/reg
 # is confirmed working (headless --dump-dom exits 0 with real output) and is
 # the newest release with an arm64 build below the broken one. Pinning here
 # means a future forced cache-clear can no longer silently regress this.
-FROM debian:bookworm-slim
+FROM debian:bookworm-20260623-slim
 ARG CHROMIUM_VERSION=149.0.7827.102-1~deb12u1
 ARG CHROMIUM_SNAPSHOT=20260610T215132Z
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry edge" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 RUN set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \
@@ -193,6 +188,5 @@ USER quarry
 EXPOSE 8082
 # Use -O /dev/null instead of --spider — /health responds to GET only,
 # --spider sends HEAD which the axum router rejects with 405.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD wget --quiet --tries=1 -O /dev/null http://localhost:8082/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD wget --quiet --tries=1 -O /dev/null http://localhost:8082/health || exit 1
 ENTRYPOINT ["/usr/local/bin/quarry-edge-rs"]

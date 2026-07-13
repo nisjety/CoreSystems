@@ -1,8 +1,7 @@
 //! HTTP/3 (QUIC) driver. Wave 7.
 //!
-//! Built on `reqwest 0.13` aliased as `reqwest_http3` so it sits
-//! alongside the workspace's 0.12 reqwest without forcing a global
-//! bump. The `http3` Cargo feature on `quarry-runtime` enables this
+//! Built on the workspace Reqwest client. The `http3` Cargo feature on
+//! `quarry-runtime` enables this
 //! module; the matching `.cargo/config.toml` sets
 //! `--cfg=reqwest_unstable` so reqwest's http3 surface is visible.
 //!
@@ -46,7 +45,7 @@ use crate::fetch::FetchResponse;
 /// HTTP/3 driver backed by reqwest 0.13 + h3 + h3-quinn + quinn.
 #[derive(Debug)]
 pub struct Http3Driver {
-    client: reqwest_http3::Client,
+    client: reqwest::Client,
 }
 
 impl Http3Driver {
@@ -54,10 +53,10 @@ impl Http3Driver {
     /// don't advertise QUIC via Alt-Svc — that's reqwest's own
     /// negotiation, not ours.
     pub fn new(timeout: Duration, user_agent: &str) -> QuarryResult<Self> {
-        let client = reqwest_http3::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(timeout)
             .user_agent(user_agent)
-            .redirect(reqwest_http3::redirect::Policy::limited(5))
+            .redirect(reqwest::redirect::Policy::limited(5))
             .cookie_store(true)
             // Prefer h3 when the server advertises it; reqwest still
             // races h2 to hide the cold-start cost on first request
@@ -81,11 +80,11 @@ impl Http3Driver {
         let mut req = self
             .client
             .get(url.clone())
-            .version(reqwest_http3::Version::HTTP_3);
+            .version(reqwest::Version::HTTP_3);
         if let Some(etag) = hints.if_none_match.as_deref() {
-            req = req.header(reqwest_http3::header::IF_NONE_MATCH, etag);
+            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
         } else if let Some(lm) = hints.if_modified_since.as_deref() {
-            req = req.header(reqwest_http3::header::IF_MODIFIED_SINCE, lm);
+            req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
         }
         let resp = req.send().await.map_err(|e| {
             let code = if e.is_timeout() {

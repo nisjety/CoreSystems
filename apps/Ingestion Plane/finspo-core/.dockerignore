@@ -1,3 +1,13 @@
-.git
+.git/
+.github/
 .gitignore
-bin
+.env
+.env.*
+!.env.example
+bin/
+dist/
+coverage/
+tmp/
+*.log
+**/*_test.go
+README.md

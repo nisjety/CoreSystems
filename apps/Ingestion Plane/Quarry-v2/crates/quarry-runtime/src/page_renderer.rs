@@ -19,11 +19,16 @@ use quarry_browser::BrowserDriver;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds;
 use quarry_core::lease::{BrowserLease, ProxyAffinity};
-use quarry_core::zdr::ZdrMode;
+use quarry_core::zdr::{self, WriteKind, ZdrMode};
 
 use crate::cas_store::CasStore;
 use crate::page_image::{emit_page_image_created, PageImageCreated};
 use crate::vision::{VisualObservationProcessor, VisualPreprocessInput};
+
+fn page_image_persistence_allowed(zdr_mode: ZdrMode) -> bool {
+    zdr::guard(zdr_mode, WriteKind::Artifact).is_ok()
+        && zdr::guard(zdr_mode, WriteKind::Event).is_ok()
+}
 
 /// Web-page → page-image producer.
 #[derive(Clone)]
@@ -100,7 +105,7 @@ impl PageRenderer {
         zdr: ZdrMode,
     ) -> QuarryResult<()> {
         // ZDR-before-CAS: restricted content is never rasterized/stored/emitted.
-        if !matches!(zdr, ZdrMode::Off) {
+        if !page_image_persistence_allowed(zdr) {
             tracing::debug!(document_id, "zdr on — skipping page-image render");
             return Ok(());
         }
@@ -185,5 +190,16 @@ impl PageRenderer {
         emit_page_image_created(&self.js, &evt).await?;
         tracing::info!(document_id, org_id, "page image rendered → CAS → emitted");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zdr_disables_page_image_cas_and_event_persistence() {
+        assert!(!page_image_persistence_allowed(ZdrMode::On));
+        assert!(page_image_persistence_allowed(ZdrMode::Off));
     }
 }

@@ -169,6 +169,32 @@ type AuditEvent struct {
 	CreatedAt      time.Time
 }
 
+// ActionReceipt is the durable, content-free idempotency record for a
+// provider write. It deliberately stores only the request fingerprint and the
+// provider message identifier: message bodies and provider response payloads
+// must not be copied into the receipt table (ZDR/PII boundary).
+type ActionReceipt struct {
+	OrganizationID    string
+	IdempotencyKey    string
+	RequestSHA256     string
+	ConnectionID      string
+	ProviderKey       string
+	Operation         string
+	AttestationIssuer string
+	AttestationKeyID  string
+	AuthorizationKind string
+	AuthorizationID   string
+	ApprovalID        string
+	ActionID          string
+	ActorID           string
+	AttestationJTI    string
+	PayloadSHA256     string
+	Status            string
+	ProviderMessageID string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
 type Repository interface {
 	CreateConnectSession(ctx context.Context, session ConnectSession) error
 	GetConnectSessionByStateHash(ctx context.Context, stateHash string) (ConnectSession, error)
@@ -203,6 +229,15 @@ type Repository interface {
 	MarkSCIMTokenUsed(ctx context.Context, id string, usedAt time.Time) error
 	RevokeSCIMToken(ctx context.Context, organizationID, id string, revokedAt time.Time) (SCIMToken, error)
 	InsertAuditEvent(ctx context.Context, event AuditEvent) error
+	// ClaimActionReceipt inserts an executing receipt exactly once. acquired is
+	// false when the key already exists, in which case the existing receipt is
+	// returned for fingerprint/status evaluation without calling the provider.
+	ClaimActionReceipt(ctx context.Context, receipt ActionReceipt) (existing ActionReceipt, acquired bool, err error)
+	// BeginActionReceiptExecution is the atomic boundary immediately before a
+	// provider call. Only pending receipts may transition to executing.
+	BeginActionReceiptExecution(ctx context.Context, organizationID, idempotencyKey string) (ActionReceipt, error)
+	CompleteActionReceipt(ctx context.Context, organizationID, idempotencyKey, providerMessageID string) (ActionReceipt, error)
+	MarkActionReceiptUnknown(ctx context.Context, organizationID, idempotencyKey string) error
 	// Email inbound sync cursors (Gmail historyId / Graph deltaLink) — one row
 	// per connection, read + advanced by the email sync worker each cycle.
 	GetEmailSyncState(ctx context.Context, connectionID string) (EmailSyncState, error)

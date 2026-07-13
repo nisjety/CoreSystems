@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/triodelab/integration-corev2/internal/actions"
+	"github.com/triodelab/integration-corev2/internal/attestation"
 	"github.com/triodelab/integration-corev2/internal/auth"
 	"github.com/triodelab/integration-corev2/internal/config"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
@@ -588,9 +592,12 @@ func TestWriteActionRequiresApprovalBeforeTokenLookup(t *testing.T) {
 		AccessTokenExpiresAt: time.Now().Add(time.Hour),
 	})
 	app := NewServer(ServerConfig{
-		Config:  cfg,
-		Repo:    repo,
-		OAuth:   service,
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "conversation-core", OrganizationID: "org-1", PrincipalType: "service", Scopes: []string{"integration:write"},
+		}},
 		Actions: actions.NewService(cfg, providerServer.Client()),
 	})
 
@@ -606,6 +613,417 @@ func TestWriteActionRequiresApprovalBeforeTokenLookup(t *testing.T) {
 	}
 	if called {
 		t.Fatal("provider was called before approval denial")
+	}
+}
+
+func TestWriteActionIdempotencyReceiptPreventsDuplicateProviderSend(t *testing.T) {
+	providerCalls := 0
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	cfg.ProviderWriteAttestationKeysJSON = apiTrustedKeysJSON(t, publicKey)
+	cfg.AllowLegacyTenantKey = false
+	cfg.MicrosoftGraphBaseURL = providerServer.URL
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	encryptedToken, err := vault.Encrypt("access-token", []byte("conn-ms-idempotent"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-ms-idempotent",
+		ProviderKey:          "microsoft",
+		ConnectorType:        "microsoft-graph",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		Capabilities:         []string{"mail.send"},
+		EncryptedAccessToken: encryptedToken,
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "conversation-core", OrganizationID: "org-1", PrincipalType: "service", Scopes: []string{"integration:write"},
+		}},
+		Actions: actions.NewService(cfg, providerServer.Client()),
+	})
+
+	call := func(payload string) *http.Response {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-idempotent/actions", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer conversation-service-token")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test error: %v", err)
+		}
+		return resp
+	}
+
+	idempotencyKey := "conversation:org-1:human-reply-1"
+	body := map[string]any{"message": map[string]any{"subject": "hello"}}
+	binding := attestation.Binding{
+		PresenterService: "conversation-core", OrganizationID: "org-1", ConnectionID: "conn-ms-idempotent",
+		ProviderKey: "microsoft", Operation: "mail.send", Body: body, IdempotencyKey: idempotencyKey,
+	}
+	claims := apiHumanIntentClaims(t, binding)
+	claims.AuthorizationID = "human-reply-1"
+	claims.ActionID = claims.AuthorizationID
+	claims.JWTID = "attestation-human-reply-1"
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"operation": "mail.send", "writeAttestation": signAPIWriteAttestation(t, privateKey, claims),
+		"idempotencyKey": idempotencyKey, "body": body,
+	})
+	payload := string(payloadBytes)
+	for attempt := 1; attempt <= 2; attempt++ {
+		resp := call(payload)
+		if resp.StatusCode != fiber.StatusOK {
+			responseBody, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			t.Fatalf("attempt %d status = %d body=%s, want 200", attempt, resp.StatusCode, responseBody)
+		}
+		_ = resp.Body.Close()
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want exactly 1 across an idempotent retry", providerCalls)
+	}
+
+	changedBody := map[string]any{"message": map[string]any{"subject": "changed"}}
+	changedBinding := binding
+	changedBinding.Body = changedBody
+	changedClaims := claims
+	changedClaims.PayloadSHA256, err = attestation.PayloadSHA256(changedBinding)
+	if err != nil {
+		t.Fatalf("PayloadSHA256 changed error: %v", err)
+	}
+	changedPayload, _ := json.Marshal(map[string]any{
+		"operation": "mail.send", "writeAttestation": signAPIWriteAttestation(t, privateKey, changedClaims),
+		"idempotencyKey": idempotencyKey, "body": changedBody,
+	})
+	changed := call(string(changedPayload))
+	if changed.StatusCode != fiber.StatusConflict {
+		defer changed.Body.Close()
+		t.Fatalf("changed-payload status = %d, want 409 idempotency conflict", changed.StatusCode)
+	}
+	if code := readAPIErrorCode(t, changed); code != "idempotency_conflict" {
+		t.Fatalf("changed-payload error code = %q, want idempotency_conflict", code)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls after changed payload = %d, want 1", providerCalls)
+	}
+}
+
+func TestWriteActionProviderFailureBecomesUnknownAndBlocksBlindRetry(t *testing.T) {
+	providerCalls := 0
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	cfg.ProviderWriteAttestationKeysJSON = apiTrustedKeysJSON(t, publicKey)
+	cfg.AllowLegacyTenantKey = false
+	cfg.MicrosoftGraphBaseURL = providerServer.URL
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	encryptedToken, err := vault.Encrypt("access-token", []byte("conn-ms-unknown"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-ms-unknown",
+		ProviderKey:          "microsoft",
+		ConnectorType:        "microsoft-graph",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		Capabilities:         []string{"mail.send"},
+		EncryptedAccessToken: encryptedToken,
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "conversation-core", OrganizationID: "org-1", PrincipalType: "service", Scopes: []string{"integration:write"},
+		}},
+		Actions: actions.NewService(cfg, providerServer.Client()),
+	})
+	idempotencyKey := "conversation:org-1:human-reply-unknown"
+	body := map[string]any{"message": map[string]any{"subject": "hello"}}
+	binding := attestation.Binding{
+		PresenterService: "conversation-core", OrganizationID: "org-1", ConnectionID: "conn-ms-unknown",
+		ProviderKey: "microsoft", Operation: "mail.send", Body: body, IdempotencyKey: idempotencyKey,
+	}
+	claims := apiHumanIntentClaims(t, binding)
+	claims.AuthorizationID = "human-reply-unknown"
+	claims.ActionID = claims.AuthorizationID
+	claims.JWTID = "attestation-human-reply-unknown"
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"operation": "mail.send", "writeAttestation": signAPIWriteAttestation(t, privateKey, claims),
+		"idempotencyKey": idempotencyKey, "body": body,
+	})
+	payload := string(payloadBytes)
+
+	call := func() *http.Response {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-unknown/actions", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer conversation-service-token")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test error: %v", err)
+		}
+		return resp
+	}
+
+	first := call()
+	if first.StatusCode != fiber.StatusBadGateway {
+		defer first.Body.Close()
+		t.Fatalf("first status = %d, want 502 provider failure", first.StatusCode)
+	}
+	if code := readAPIErrorCode(t, first); code != "action_failed" {
+		t.Fatalf("first error code = %q, want action_failed", code)
+	}
+
+	retry := call()
+	if retry.StatusCode != fiber.StatusConflict {
+		defer retry.Body.Close()
+		t.Fatalf("retry status = %d, want 409 unknown outcome", retry.StatusCode)
+	}
+	if code := readAPIErrorCode(t, retry); code != "action_outcome_unknown" {
+		t.Fatalf("retry error code = %q, want action_outcome_unknown", code)
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want exactly 1 after ambiguous failure and retry", providerCalls)
+	}
+}
+
+func TestWriteActionRequiresValidIdempotencyKeyBeforeTokenOrProvider(t *testing.T) {
+	providerCalled := false
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MicrosoftGraphBaseURL = providerServer.URL
+	_, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID:             "conn-ms-missing-idempotency",
+		ProviderKey:    "microsoft",
+		ConnectorType:  "microsoft-graph",
+		OrganizationID: "org-1",
+		UserID:         "user-1",
+		Status:         "active",
+		Capabilities:   []string{"mail.send"},
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "conversation-core", OrganizationID: "org-1", PrincipalType: "service", Scopes: []string{"integration:write"},
+		}},
+		Actions: actions.NewService(cfg, providerServer.Client()),
+	})
+	req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-missing-idempotency/actions", strings.NewReader(
+		`{"operation":"mail.send","approvalId":"human-reply-1","body":{"message":{"subject":"hello"}}}`,
+	))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer conversation-service-token")
+	response, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if response.StatusCode != fiber.StatusBadRequest {
+		defer response.Body.Close()
+		t.Fatalf("status = %d, want 400", response.StatusCode)
+	}
+	if code := readAPIErrorCode(t, response); code != "idempotency_key_required" {
+		t.Fatalf("error code = %q, want idempotency_key_required", code)
+	}
+	if providerCalled {
+		t.Fatal("provider was called without an idempotency key")
+	}
+}
+
+type completeFailureRepository struct {
+	store.Repository
+}
+
+func (completeFailureRepository) CompleteActionReceipt(context.Context, string, string, string) (store.ActionReceipt, error) {
+	return store.ActionReceipt{}, errors.New("receipt finalize unavailable")
+}
+
+func TestWriteActionReceiptFinalizeFailureBlocksBlindRetry(t *testing.T) {
+	providerCalls := 0
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"provider-message-1"}`))
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	cfg.ProviderWriteAttestationKeysJSON = apiTrustedKeysJSON(t, publicKey)
+	cfg.AllowLegacyTenantKey = false
+	cfg.MicrosoftGraphBaseURL = providerServer.URL
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	encryptedToken, err := vault.Encrypt("access-token", []byte("conn-ms-finalize-failure"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-ms-finalize-failure",
+		ProviderKey:          "microsoft",
+		ConnectorType:        "microsoft-graph",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		Capabilities:         []string{"mail.send"},
+		EncryptedAccessToken: encryptedToken,
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   completeFailureRepository{Repository: repo},
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "conversation-core", OrganizationID: "org-1", PrincipalType: "service", Scopes: []string{"integration:write"},
+		}},
+		Actions: actions.NewService(cfg, providerServer.Client()),
+	})
+	idempotencyKey := "conversation:org-1:human-reply-finalize"
+	body := map[string]any{"message": map[string]any{"subject": "hello"}}
+	binding := attestation.Binding{
+		PresenterService: "conversation-core", OrganizationID: "org-1", ConnectionID: "conn-ms-finalize-failure",
+		ProviderKey: "microsoft", Operation: "mail.send", Body: body, IdempotencyKey: idempotencyKey,
+	}
+	claims := apiHumanIntentClaims(t, binding)
+	claims.AuthorizationID = "human-reply-finalize"
+	claims.ActionID = claims.AuthorizationID
+	claims.JWTID = "attestation-human-reply-finalize"
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"operation": "mail.send", "writeAttestation": signAPIWriteAttestation(t, privateKey, claims),
+		"idempotencyKey": idempotencyKey, "body": body,
+	})
+	payload := string(payloadBytes)
+	for attempt := 1; attempt <= 2; attempt++ {
+		req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-finalize-failure/actions", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer conversation-service-token")
+		response, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("attempt %d app.Test error: %v", attempt, err)
+		}
+		if response.StatusCode != fiber.StatusConflict {
+			defer response.Body.Close()
+			t.Fatalf("attempt %d status = %d, want 409", attempt, response.StatusCode)
+		}
+		if code := readAPIErrorCode(t, response); code != "action_outcome_unknown" {
+			t.Fatalf("attempt %d error code = %q, want action_outcome_unknown", attempt, code)
+		}
+	}
+	if providerCalls != 1 {
+		t.Fatalf("provider calls = %d, want exactly 1 after receipt finalize failure and retry", providerCalls)
+	}
+}
+
+func readAPIErrorCode(t *testing.T, response *http.Response) string {
+	t.Helper()
+	defer response.Body.Close()
+	var decoded struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode API error: %v", err)
+	}
+	return decoded.Error.Code
+}
+
+func TestUserBearerCannotSelfAssertProviderWriteApproval(t *testing.T) {
+	called := false
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	cfg.AllowLegacyTenantKey = false
+	cfg.MicrosoftGraphBaseURL = providerServer.URL
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-ms-user-write",
+		ProviderKey:          "microsoft",
+		ConnectorType:        "microsoft-graph",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		Capabilities:         []string{"mail.send"},
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "user-1", OrganizationID: "org-1", Role: "member",
+		}},
+		Actions: actions.NewService(cfg, providerServer.Client()),
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-user-write/actions", strings.NewReader(`{"operation":"mail.send","body":{"approvalId":"caller-made-up"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer verified-user-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if called {
+		t.Fatal("provider was called for a user-supplied approval marker")
 	}
 }
 
@@ -2000,6 +2418,7 @@ func testConfig() config.Config {
 		ServiceName:               "integration-corev2",
 		InternalAPIKey:            "dev-key",
 		InternalAPIKeyHeader:      "X-Internal-API-Key",
+		AllowLegacyTenantKey:      true,
 		PublicBaseURL:             "http://localhost:3026",
 		MicrosoftClientID:         "client",
 		MicrosoftClientSecret:     "secret",

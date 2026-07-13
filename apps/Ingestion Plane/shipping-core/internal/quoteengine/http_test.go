@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"shipping-core/internal/carrier"
 )
 
 func validBody() []byte {
@@ -34,7 +36,7 @@ func TestHandler_ValidRequest_ReturnsSortedQuotes(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/quotes", bytes.NewReader(validBody()))
 	rec := httptest.NewRecorder()
 
-	Handler(engine)(rec, req)
+	Handler(engine, nil)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got status %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -61,7 +63,7 @@ func TestHandler_PartialCarrierFailure_StillReturnsSuccessfulQuotes(t *testing.T
 	req := httptest.NewRequest(http.MethodPost, "/api/quotes", bytes.NewReader(validBody()))
 	rec := httptest.NewRecorder()
 
-	Handler(engine)(rec, req)
+	Handler(engine, nil)(rec, req)
 
 	var resp quoteResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -79,7 +81,7 @@ func TestHandler_InvalidJSON_Returns400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/quotes", bytes.NewReader([]byte("not json")))
 	rec := httptest.NewRecorder()
 
-	Handler(New(nil, time.Second))(rec, req)
+	Handler(New(nil, time.Second), nil)(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got status %d, want 400", rec.Code)
@@ -91,7 +93,7 @@ func TestHandler_MissingRequiredField_Returns400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/quotes", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
-	Handler(New(nil, time.Second))(rec, req)
+	Handler(New(nil, time.Second), nil)(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got status %d, want 400", rec.Code)
@@ -108,10 +110,38 @@ func TestHandler_InvalidSegment_Returns400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/quotes", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
-	Handler(New(nil, time.Second))(rec, req)
+	Handler(New(nil, time.Second), nil)(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got status %d, want 400", rec.Code)
+	}
+}
+
+func TestCarriersHandlerReportsExplicitProviderMode(t *testing.T) {
+	engine := New([]Quoter{
+		&mockQuoter{code: "dhl", mode: carrier.ModeSandbox},
+		&mockQuoter{code: "mock-bring", mode: carrier.ModeMock},
+	}, time.Second)
+	request := httptest.NewRequest(http.MethodGet, "/api/carriers", nil)
+	response := httptest.NewRecorder()
+
+	CarriersHandler(engine)(response, request)
+
+	var body carriersResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Carriers) != 2 {
+		t.Fatalf("carriers = %d, want 2", len(body.Carriers))
+	}
+	if body.Carriers[0].Mode != "sandbox" || body.Carriers[0].IsMock {
+		t.Fatalf("DHL provenance = %#v, want sandbox/non-mock", body.Carriers[0])
+	}
+	if body.Carriers[0].VerifiedAt != nil || body.Carriers[0].DegradedReason == "" {
+		t.Fatalf("unverified carrier must be typed honestly: %#v", body.Carriers[0])
+	}
+	if body.Carriers[1].Mode != "mock" || !body.Carriers[1].IsMock {
+		t.Fatalf("mock provenance = %#v, want mock", body.Carriers[1])
 	}
 }
 

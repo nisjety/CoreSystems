@@ -81,7 +81,9 @@ func TestLoadRespectsExplicitValues(t *testing.T) {
 	t.Setenv("NATS_SUBJECT_PREFIX", "finspo-prod")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel:4318")
 	t.Setenv("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")
-	t.Setenv("DATA_PLANE_INTERNAL_API_KEY", "dpkey")
+	t.Setenv("AUTH_CORE_URL", "http://auth-core:3011")
+	t.Setenv("FINSPO_SERVICE_ID", "finspo-core-prod")
+	t.Setenv("FINSPO_SERVICE_API_KEY", "finspo-service-key")
 	t.Setenv("FINSPO_SYNC_INTERVAL", "30s")
 	t.Setenv("FINSPO_CAPTURE_PERMISSIONS", "false")
 	t.Setenv("FINSPO_ALLOW_EXECUTION", "true")
@@ -113,8 +115,8 @@ func TestLoadRespectsExplicitValues(t *testing.T) {
 	if cfg.DataPlaneDocumentsURL != "http://dpv2-documents-api:8010" {
 		t.Fatalf("DataPlaneDocumentsURL = %q", cfg.DataPlaneDocumentsURL)
 	}
-	if cfg.DataPlaneAPIKey != "dpkey" {
-		t.Fatalf("DataPlaneAPIKey = %q", cfg.DataPlaneAPIKey)
+	if cfg.AuthCoreURL != "http://auth-core:3011" || cfg.FinspoServiceID != "finspo-core-prod" || cfg.FinspoServiceAPIKey != "finspo-service-key" {
+		t.Fatalf("Data Plane service principal = %q/%q/%q", cfg.AuthCoreURL, cfg.FinspoServiceID, cfg.FinspoServiceAPIKey)
 	}
 	if cfg.SyncInterval.String() != "30s" {
 		t.Fatalf("SyncInterval = %s, want 30s", cfg.SyncInterval)
@@ -127,5 +129,16 @@ func TestLoadRespectsExplicitValues(t *testing.T) {
 	}
 	if cfg.ArchiveFolderID != "archive-123" {
 		t.Fatalf("ArchiveFolderID = %q", cfg.ArchiveFolderID)
+	}
+}
+
+func TestLoadFailsClosedWhenDataPlaneURLHasNoServicePrincipal(t *testing.T) {
+	setBaseEnv(t)
+	t.Setenv("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")
+	t.Setenv("AUTH_CORE_URL", "http://auth-core:3011")
+	t.Setenv("FINSPO_SERVICE_API_KEY", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted a Data Plane URL without FINSPO_SERVICE_API_KEY")
 	}
 }

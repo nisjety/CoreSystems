@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"shipping-core/internal/carrier"
@@ -38,7 +39,11 @@ func New(config Config) *Adapter {
 }
 
 func (a *Adapter) Info() carrier.Info {
-	return carrier.Info{Code: "dhl", Name: "DHL Express", Segment: carrier.SegmentB2B}
+	mode := carrier.ModeProduction
+	if strings.Contains(strings.ToLower(a.config.BaseURL), "/test") || a.config.BaseURL != defaultBaseURL {
+		mode = carrier.ModeSandbox
+	}
+	return carrier.Info{Code: "dhl", Name: "DHL Express", Segment: carrier.SegmentB2B, Mode: mode}
 }
 
 // Quote calls MyDHL API's Rating service. MyDHL API uses HTTP Basic Auth —
@@ -167,23 +172,4 @@ func toDomainQuote(p product) carrier.Quote {
 	return quote
 }
 
-// Book, Label, Track, and pickup ordering are NOT implemented yet: unlike
-// Bring (where the Booking/Tracking API shapes are cross-verified against
-// published examples), MyDHL API's shipment-creation payload has enough
-// additional required fields (content type, customs line items, account
-// type codes for the shipper vs payer, dangerous-goods declarations) that a
-// reconstruction here would be materially less confident than the rating
-// shape above — matching the current honest scope of the UPS/FedEx
-// adapters. Extend once a live sandbox call has validated the Rating
-// integration and the Shipment request shape is confirmed the same way.
-func (a *Adapter) Book(_ context.Context, _ carrier.BookingRequest) (carrier.Booking, error) {
-	return carrier.Booking{}, fmt.Errorf("dhl: booking not implemented yet")
-}
-
-func (a *Adapter) Label(_ context.Context, _ string) (carrier.Label, error) {
-	return carrier.Label{}, fmt.Errorf("dhl: label retrieval not implemented yet")
-}
-
-func (a *Adapter) Track(_ context.Context, _ string) (carrier.TrackingStatus, error) {
-	return carrier.TrackingStatus{}, fmt.Errorf("dhl: tracking not implemented yet")
-}
+// Book, Label, and Track are implemented in booking.go.

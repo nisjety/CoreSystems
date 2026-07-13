@@ -18,18 +18,15 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 # Wave 7 — real HTTP/3.
 #
-# Aliased dep so the http3-capable reqwest sits alongside the workspace
-# 0.12 reqwest without forcing a workspace-wide bump (axum + several
-# AWS SDK crates still pin 0.12-compatible hyper). Optional + feature-
-# gated so the default build stays QUIC-free; opt in with the `http3`
-# Cargo feature.
+# The workspace Reqwest client is shared by the HTTP/1.1, HTTP/2, and
+# optional HTTP/3 paths. The `http3` feature below enables its QUIC
+# support only for builds that opt in.
 #
 # IMPORTANT — `--cfg reqwest_unstable`:
 #   reqwest gates its http3 API behind `--cfg reqwest_unstable` at
 #   compile time. The crate-level `.cargo/config.toml` sets this flag
 #   for the `http3` feature so consumers don't have to thread RUSTFLAGS
 #   through their build. The flag only affects this crate.
-reqwest_http3 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls", "gzip", "brotli", "deflate", "stream", "cookies", "http3"], optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
@@ -40,8 +37,8 @@ futures = { workspace = true }
 async-stream = { workspace = true }
 blake3 = { workspace = true }
 tempfile = "3"
-aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
-aws-config = { version = "1", default-features = false, features = ["rt-tokio", "rustls", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 dashmap = "6"
 async-nats = { workspace = true }
 bytes = { workspace = true }
@@ -68,7 +65,7 @@ postgres-queue = ["dep:sqlx", "dep:uuid"]
 # fast; opt in with `--features http3`. See `Http3Driver` docs and
 # `.cargo/config.toml` (`reqwest_unstable` cfg) for the build-time
 # story.
-http3 = ["dep:reqwest_http3"]
+http3 = ["reqwest/http3"]
 
 [build-dependencies]
 tonic-build = { workspace = true, optional = false }

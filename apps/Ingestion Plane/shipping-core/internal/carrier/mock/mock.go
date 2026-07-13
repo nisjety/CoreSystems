@@ -210,42 +210,42 @@ func parseMockTrackingTime(trackingNo string) (time.Time, error) {
 func DefaultCarriers() []carrier.Adapter {
 	return []carrier.Adapter{
 		&Adapter{
-			info:            carrier.Info{Code: "mock-bring", Name: "Bring", Segment: carrier.SegmentBoth},
+			info:            carrier.Info{Code: "mock-bring", Name: "Bring", Segment: carrier.SegmentBoth, Mode: carrier.ModeMock},
 			basePriceCents:  8900,
 			pricePerKgCents: 1200,
 			transitDays:     2,
 			features:        []string{"tracking", "pickup_point"},
 		},
 		&Adapter{
-			info:            carrier.Info{Code: "mock-postnord", Name: "PostNord", Segment: carrier.SegmentBoth},
+			info:            carrier.Info{Code: "mock-postnord", Name: "PostNord", Segment: carrier.SegmentBoth, Mode: carrier.ModeMock},
 			basePriceCents:  8200,
 			pricePerKgCents: 1100,
 			transitDays:     3,
 			features:        []string{"tracking", "pickup_point"},
 		},
 		&Adapter{
-			info:            carrier.Info{Code: "mock-dhl", Name: "DHL Express", Segment: carrier.SegmentB2B},
+			info:            carrier.Info{Code: "mock-dhl", Name: "DHL Express", Segment: carrier.SegmentB2B, Mode: carrier.ModeMock},
 			basePriceCents:  16500,
 			pricePerKgCents: 2100,
 			transitDays:     1,
 			features:        []string{"tracking", "express", "international"},
 		},
 		&Adapter{
-			info:            carrier.Info{Code: "mock-dsv", Name: "DSV", Segment: carrier.SegmentB2B},
+			info:            carrier.Info{Code: "mock-dsv", Name: "DSV", Segment: carrier.SegmentB2B, Mode: carrier.ModeMock},
 			basePriceCents:  7500,
 			pricePerKgCents: 900,
 			transitDays:     4,
 			features:        []string{"tracking", "pallet_freight"},
 		},
 		&Adapter{
-			info:            carrier.Info{Code: "mock-helthjem", Name: "Helthjem", Segment: carrier.SegmentB2C},
+			info:            carrier.Info{Code: "mock-helthjem", Name: "Helthjem", Segment: carrier.SegmentB2C, Mode: carrier.ModeMock},
 			basePriceCents:  6900,
 			pricePerKgCents: 800,
 			transitDays:     2,
 			features:        []string{"tracking", "home_delivery"},
 		},
 		&Adapter{
-			info:            carrier.Info{Code: "mock-porterbuddy", Name: "Porterbuddy", Segment: carrier.SegmentB2C},
+			info:            carrier.Info{Code: "mock-porterbuddy", Name: "Porterbuddy", Segment: carrier.SegmentB2C, Mode: carrier.ModeMock},
 			basePriceCents:  12900,
 			pricePerKgCents: 500,
 			transitDays:     0,

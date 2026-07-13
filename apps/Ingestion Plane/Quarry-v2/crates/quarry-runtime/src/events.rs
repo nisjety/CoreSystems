@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use quarry_core::event::{Event, EventType};
 use quarry_core::ids::kinds::{EventKind, RunKind};
+use quarry_core::zdr::ZdrMode;
 
 use crate::event_bus::EventBus;
 
@@ -102,6 +103,52 @@ impl EventSink {
             });
         }
         let _ = self.tx.send(evt).await;
+    }
+
+    /// Emit only to in-process live subscribers. ZDR callers use this path so
+    /// page content and provenance never enter the durable HTTP publisher or
+    /// NATS JetStream while connected SSE/WebSocket clients still see progress.
+    pub async fn emit_ephemeral(
+        &self,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+    ) {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        let evt = Event {
+            event_id: EventKind::new(),
+            run_id: Some(run_id.clone()),
+            job_id: None,
+            event_type,
+            ts: Utc::now(),
+            seq,
+            payload,
+            idempotency_key,
+        };
+        if let Some(tx) = self.subscribers.get(&run_id) {
+            let _ = tx.send(evt);
+        }
+    }
+
+    /// Route an event according to the request's effective ZDR posture.
+    /// Restrictive events remain available to already-connected live clients,
+    /// but never enter the durable HTTP publisher or NATS JetStream.
+    pub async fn emit_for_zdr(
+        &self,
+        zdr: ZdrMode,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+    ) {
+        if zdr.is_active() {
+            self.emit_ephemeral(run_id, event_type, payload, idempotency_key)
+                .await;
+        } else {
+            self.emit(run_id, event_type, payload, idempotency_key)
+                .await;
+        }
     }
 }
 
@@ -201,6 +248,69 @@ mod tests {
         );
         assert_eq!(recorded[0].1, EventType::HostDiscovered);
         assert_eq!(recorded[0].2, "idem-host");
+    }
+
+    #[tokio::test]
+    async fn emit_ephemeral_reaches_subscriber_without_durable_channels() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let bus = Arc::new(RecordingBus::default());
+        let bus_handle: Arc<dyn EventBus> = bus.clone();
+        let sink = EventSink::new(tx).with_nats(bus_handle);
+        let run_id: RunKind = Id::new();
+        let mut subscriber = sink.subscribe(&run_id);
+
+        sink.emit_ephemeral(
+            run_id,
+            EventType::PageFetched,
+            json!({"url": "https://example.invalid"}),
+            "zdr-ephemeral".into(),
+        )
+        .await;
+
+        let evt = subscriber
+            .recv()
+            .await
+            .expect("ephemeral subscriber must receive the live event");
+        assert_eq!(evt.event_type, EventType::PageFetched);
+        assert!(
+            rx.try_recv().is_err(),
+            "ZDR event must not enter HTTP publisher"
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            bus.published.lock().unwrap().is_empty(),
+            "ZDR event must not enter NATS JetStream"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_for_zdr_routes_restrictive_events_only_to_live_subscribers() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let bus = Arc::new(RecordingBus::default());
+        let bus_handle: Arc<dyn EventBus> = bus.clone();
+        let sink = EventSink::new(tx).with_nats(bus_handle);
+        let run_id: RunKind = Id::new();
+        let mut subscriber = sink.subscribe(&run_id);
+
+        sink.emit_for_zdr(
+            quarry_core::zdr::ZdrMode::On,
+            run_id,
+            EventType::AgentStarted,
+            json!({"sensitive": "must-stay-ephemeral"}),
+            "zdr-agent-start".into(),
+        )
+        .await;
+
+        assert!(subscriber.recv().await.is_ok());
+        assert!(
+            rx.try_recv().is_err(),
+            "ZDR event entered durable HTTP path"
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            bus.published.lock().unwrap().is_empty(),
+            "ZDR event entered NATS JetStream"
+        );
     }
 
     /// If the NATS bus errors, the mpsc path must still succeed — NATS

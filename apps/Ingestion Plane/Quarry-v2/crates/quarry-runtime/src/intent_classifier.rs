@@ -45,6 +45,10 @@ use crate::smart_router::{classify_intent, QueryIntent};
 #[async_trait]
 pub trait IntentClassifier: Send + Sync {
     async fn classify(&self, query: &str) -> QueryIntent;
+
+    async fn classify_for_org(&self, query: &str, _org_id: Option<&str>) -> QueryIntent {
+        self.classify(query).await
+    }
 }
 
 // =============================================================================
@@ -133,6 +137,16 @@ impl MpIntentClassifier {
 #[async_trait]
 impl IntentClassifier for MpIntentClassifier {
     async fn classify(&self, query: &str) -> QueryIntent {
+        self.classify_inner(query, None).await
+    }
+
+    async fn classify_for_org(&self, query: &str, org_id: Option<&str>) -> QueryIntent {
+        self.classify_inner(query, org_id).await
+    }
+}
+
+impl MpIntentClassifier {
+    async fn classify_inner(&self, query: &str, org_id: Option<&str>) -> QueryIntent {
         // Strict input length cap. A pathological 100KB query would
         // serialize a huge prompt — bail and pass through.
         if query.len() > 4_096 {
@@ -145,7 +159,13 @@ impl IntentClassifier for MpIntentClassifier {
             session_key: None,
             thread_id: None,
         };
-        match tokio::time::timeout(self.timeout, self.client.invoke(&req)).await {
+        let invocation = async {
+            match org_id {
+                Some(org_id) => self.client.invoke_for_org(org_id, &req).await,
+                None => self.client.invoke(&req).await,
+            }
+        };
+        match tokio::time::timeout(self.timeout, invocation).await {
             Ok(Ok(resp)) => Self::parse(&resp.content),
             Ok(Err(e)) => {
                 tracing::debug!(error = %e, "MP intent classify failed; defaulting");
@@ -191,6 +211,14 @@ impl IntentClassifier for HybridClassifier {
         }
         self.inner.classify(query).await
     }
+
+    async fn classify_for_org(&self, query: &str, org_id: Option<&str>) -> QueryIntent {
+        let rule = classify_intent(query);
+        if rule != QueryIntent::Default {
+            return rule;
+        }
+        self.inner.classify_for_org(query, org_id).await
+    }
 }
 
 // =============================================================================
@@ -232,6 +260,22 @@ impl CachedClassifier {
         let normalized = query.trim().to_lowercase();
         blake3::hash(normalized.as_bytes()).to_hex().to_string()
     }
+
+    fn key_for_org(query: &str, org_id: Option<&str>) -> String {
+        let mut material = org_id.unwrap_or("").trim().to_owned();
+        material.push('\0');
+        material.push_str(query.trim().to_lowercase().as_str());
+        blake3::hash(material.as_bytes()).to_hex().to_string()
+    }
+
+    fn evict_if_full(map: &mut HashMap<String, CacheEntry>) {
+        if map.len() >= MAX_ENTRIES {
+            let to_drop: Vec<String> = map.keys().take(MAX_ENTRIES / 2).cloned().collect();
+            for key in to_drop {
+                map.remove(&key);
+            }
+        }
+    }
 }
 
 const MAX_ENTRIES: usize = 10_000;
@@ -255,15 +299,31 @@ impl IntentClassifier for CachedClassifier {
         let intent = self.inner.classify(query).await;
 
         let mut map = self.cache.write().await;
-        if map.len() >= MAX_ENTRIES {
-            // Cheap bulk eviction. Worst-case latency hit lives on a cold
-            // write path, not in the hot read path.
-            let to_drop: Vec<String> = map.keys().take(MAX_ENTRIES / 2).cloned().collect();
-            for k in to_drop {
-                map.remove(&k);
+        Self::evict_if_full(&mut map);
+        map.insert(
+            key,
+            CacheEntry {
+                intent,
+                cached_at: Instant::now(),
+            },
+        );
+        intent
+    }
+
+    async fn classify_for_org(&self, query: &str, org_id: Option<&str>) -> QueryIntent {
+        let key = Self::key_for_org(query, org_id);
+        {
+            let cache = self.cache.read().await;
+            if let Some(entry) = cache.get(&key) {
+                if entry.cached_at.elapsed() < self.ttl {
+                    return entry.intent;
+                }
             }
         }
-        map.insert(
+        let intent = self.inner.classify_for_org(query, org_id).await;
+        let mut cache = self.cache.write().await;
+        Self::evict_if_full(&mut cache);
+        cache.insert(
             key,
             CacheEntry {
                 intent,

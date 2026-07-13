@@ -59,31 +59,28 @@ pub fn resolve_srcset(srcset: &str, base: &Url) -> String {
 pub fn resolve_lazy_images(html: &str) -> String {
     rewrite_str(
         html,
-        RewriteStrSettings {
-            element_content_handlers: vec![element!("img", |el| {
-                let current = el.get_attribute("src").unwrap_or_default();
-                if is_placeholder(&current) {
-                    for attr in LAZY_ATTRS {
-                        if let Some(val) = el.get_attribute(attr) {
-                            if !val.trim().is_empty() {
-                                let _ = el.set_attribute("src", &val);
-                                break;
-                            }
-                        }
-                    }
-                }
-                let current_set = el.get_attribute("srcset").unwrap_or_default();
-                if current_set.trim().is_empty() {
-                    if let Some(val) = el.get_attribute("data-srcset") {
+        RewriteStrSettings::new().append_element_content_handler(element!("img", |el| {
+            let current = el.get_attribute("src").unwrap_or_default();
+            if is_placeholder(&current) {
+                for attr in LAZY_ATTRS {
+                    if let Some(val) = el.get_attribute(attr) {
                         if !val.trim().is_empty() {
-                            let _ = el.set_attribute("srcset", &val);
+                            let _ = el.set_attribute("src", &val);
+                            break;
                         }
                     }
                 }
-                Ok(())
-            })],
-            ..RewriteStrSettings::default()
-        },
+            }
+            let current_set = el.get_attribute("srcset").unwrap_or_default();
+            if current_set.trim().is_empty() {
+                if let Some(val) = el.get_attribute("data-srcset") {
+                    if !val.trim().is_empty() {
+                        let _ = el.set_attribute("srcset", &val);
+                    }
+                }
+            }
+            Ok(())
+        })),
     )
     .unwrap_or_else(|_| html.to_string())
 }
@@ -99,8 +96,9 @@ pub fn resolve_image_links(html: &str, base: &Url) -> String {
     let base_for_set = base.clone();
     rewrite_str(
         html,
-        RewriteStrSettings {
-            element_content_handlers: vec![element!("img, source", move |el| {
+        RewriteStrSettings::new().append_element_content_handler(element!(
+            "img, source",
+            move |el| {
                 if let Some(src) = el.get_attribute("src") {
                     if !src.is_empty() {
                         let _ = el.set_attribute("src", &resolve_one(&src));
@@ -113,9 +111,8 @@ pub fn resolve_image_links(html: &str, base: &Url) -> String {
                 }
                 let _ = &base_for_src;
                 Ok(())
-            })],
-            ..RewriteStrSettings::default()
-        },
+            }
+        )),
     )
     .unwrap_or_else(|_| html.to_string())
 }
@@ -125,8 +122,9 @@ pub fn strip_base64_images(html: &str) -> String {
     let is_b64 = |v: &str| v.trim_start().to_ascii_lowercase().starts_with("data:");
     rewrite_str(
         html,
-        RewriteStrSettings {
-            element_content_handlers: vec![element!("img, source", |el| {
+        RewriteStrSettings::new().append_element_content_handler(element!(
+            "img, source",
+            move |el| {
                 let src = el.get_attribute("src").unwrap_or_default();
                 let set = el.get_attribute("srcset").unwrap_or_default();
                 let data_src = el.get_attribute("data-src").unwrap_or_default();
@@ -134,9 +132,8 @@ pub fn strip_base64_images(html: &str) -> String {
                     el.replace("", ContentType::Html);
                 }
                 Ok(())
-            })],
-            ..RewriteStrSettings::default()
-        },
+            }
+        )),
     )
     .unwrap_or_else(|_| html.to_string())
 }

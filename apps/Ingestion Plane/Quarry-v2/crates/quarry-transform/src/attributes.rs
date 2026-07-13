@@ -61,14 +61,11 @@ pub fn strip_scripts(html: &str) -> String {
         }),
     ];
 
-    rewrite_str(
-        html,
-        RewriteStrSettings {
-            element_content_handlers,
-            ..RewriteStrSettings::default()
-        },
-    )
-    .unwrap_or_else(|_| html.to_string())
+    let settings = element_content_handlers.into_iter().fold(
+        RewriteStrSettings::new(),
+        RewriteStrSettings::append_element_content_handler,
+    );
+    rewrite_str(html, settings).unwrap_or_else(|_| html.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +331,7 @@ pub fn resolve_anchor_hrefs(html: &str, base: &str) -> String {
         return html.to_string();
     };
 
-    let element_content_handlers = vec![element!("a[href]", |el| {
+    let element_content_handlers = vec![element!("a[href]", move |el| {
         if let Some(href) = el.get_attribute("href") {
             let trimmed = href.trim();
             if trimmed.is_empty() {
@@ -358,14 +355,11 @@ pub fn resolve_anchor_hrefs(html: &str, base: &str) -> String {
         Ok(())
     })];
 
-    rewrite_str(
-        html,
-        RewriteStrSettings {
-            element_content_handlers,
-            ..RewriteStrSettings::default()
-        },
-    )
-    .unwrap_or_else(|_| html.to_string())
+    let settings = element_content_handlers.into_iter().fold(
+        RewriteStrSettings::new(),
+        RewriteStrSettings::append_element_content_handler,
+    );
+    rewrite_str(html, settings).unwrap_or_else(|_| html.to_string())
 }
 
 // Suppress unused-import lint if a future refactor drops one of the usages.

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     document_service_url: str = Field(alias="DOCUMENT_SERVICE_URL")
     document_service_import_path: str = Field(
-        default="/internal/v1/documents", alias="DOCUMENT_SERVICE_IMPORT_PATH"
+        default="/v1/documents/", alias="DOCUMENT_SERVICE_IMPORT_PATH"
     )
     org_service_url: str = Field(alias="ORG_SERVICE_URL")
     org_service_quota_path: str = Field(
@@ -46,6 +46,20 @@ class Settings(BaseSettings):
         default="http://auth-core:3011",
         alias="AUTH_CORE_URL",
     )
+    auth_core_jwks_url: str = Field(
+        default="http://auth-core:3011/api/convex-auth/jwks",
+        alias="AUTH_CORE_JWKS_URL",
+    )
+    plane_token_issuer: str = Field(
+        default="http://auth-core:3011/api/convex-auth",
+        alias="PLANE_TOKEN_ISSUER",
+    )
+    ingestion_auth_audience: str = Field(default="ingestion", alias="INGESTION_AUTH_AUDIENCE")
+    ingestion_service_id: str = Field(default="imports-core", alias="INGESTION_SERVICE_ID")
+    ingestion_service_api_key: str = Field(default="", alias="INGESTION_SERVICE_API_KEY")
+    allow_legacy_tenant_key: bool = Field(default=False, alias="ALLOW_LEGACY_TENANT_KEY")
+    allow_insecure_dev_defaults: bool = Field(default=False, alias="ALLOW_INSECURE_DEV_DEFAULTS")
+    isolated_e2e: bool = Field(default=False, alias="ISOLATED_E2E")
 
     # integration-corev2 base URL for the GitHub/Slack knowledge content-sync
     # worker (connections + actions surface). Empty disables the worker (the

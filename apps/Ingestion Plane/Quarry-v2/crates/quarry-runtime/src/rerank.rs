@@ -31,6 +31,16 @@ pub trait SearchReranker: Send + Sync {
         results: Vec<SearchResult>,
         top_n: usize,
     ) -> Vec<SearchResult>;
+
+    async fn rerank_for_org(
+        &self,
+        query: &str,
+        results: Vec<SearchResult>,
+        top_n: usize,
+        _org_id: Option<&str>,
+    ) -> Vec<SearchResult> {
+        self.rerank(query, results, top_n).await
+    }
 }
 
 /// Production reranker backed by the Model Plane. Falls back to the original
@@ -71,6 +81,28 @@ impl SearchReranker for ModelPlaneSearchReranker {
         results: Vec<SearchResult>,
         top_n: usize,
     ) -> Vec<SearchResult> {
+        self.rerank_inner(query, results, top_n, None).await
+    }
+
+    async fn rerank_for_org(
+        &self,
+        query: &str,
+        results: Vec<SearchResult>,
+        top_n: usize,
+        org_id: Option<&str>,
+    ) -> Vec<SearchResult> {
+        self.rerank_inner(query, results, top_n, org_id).await
+    }
+}
+
+impl ModelPlaneSearchReranker {
+    async fn rerank_inner(
+        &self,
+        query: &str,
+        results: Vec<SearchResult>,
+        top_n: usize,
+        org_id: Option<&str>,
+    ) -> Vec<SearchResult> {
         let n = top_n.min(results.len());
         if n == 0 || query.trim().is_empty() {
             return results;
@@ -82,7 +114,11 @@ impl SearchReranker for ModelPlaneSearchReranker {
             session_key: None,
             thread_id: None,
         };
-        let body = match self.client.invoke(&req).await {
+        let response = match org_id {
+            Some(org_id) => self.client.invoke_for_org(org_id, &req).await,
+            None => self.client.invoke(&req).await,
+        };
+        let body = match response {
             Ok(resp) => resp.content,
             Err(e) => {
                 tracing::warn!(error = %e, "rerank: model plane failed; keeping original order");
@@ -228,7 +264,10 @@ impl SearchProvider for RerankingSearchProvider {
         if self.top_n == 0 || results.len() < 2 {
             return Ok(results);
         }
-        Ok(self.reranker.rerank(query, results, self.top_n).await)
+        Ok(self
+            .reranker
+            .rerank_for_org(query, results, self.top_n, opts.org_id.as_deref())
+            .await)
     }
 
     fn name(&self) -> &str {

@@ -47,9 +47,10 @@ Set the following environment variables:
 | `QUARRY_EDGE_ADDR` | `:8082` | HTTP listen address |
 | `QUARRY_EDGE_REDIS_URL` | — | Redis cache; disable cache when unset |
 | `DATA_PLANE_URL` | — | `http://documents-api-go:9001` for ingest path |
-| `DATA_PLANE_API_KEY` | — | Bearer token Data Plane validates |
+| `QUARRY_EDGE__AUTH_CORE_URL` | `http://auth-core:3011` | Auth Core service-token issuer |
+| `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` | — | Durable credential registered under fixed service id `quarry-edge`; required when a plane URL is set |
+| `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS` | `false` | Local-only static-token compatibility; refused in production |
 | `MODEL_PLANE_URL` | — | `http://model-gateway:8080` for AI formats + planner |
-| `MODEL_PLANE_TOKEN` | — | Bearer token for Model Plane gateway |
 | `BROWSER_BROKER_GRPC` | — | `model-plane-broker:9090` for grant validation |
 | `NATS_URL` | — | `nats://nats:4222` for cross-plane events |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector for traces |

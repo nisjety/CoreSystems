@@ -47,6 +47,9 @@ pub struct AppState {
     pub model_plane_url: Option<String>,
     /// Bearer token for the Model Plane gateway.
     pub model_plane_token: Option<String>,
+    /// Production Auth Core token minter. Routes use the verified JWT org to
+    /// obtain bounded Model/Data Plane service tokens.
+    pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
     /// Cycle 19 / cluster #18: Tavily-replacement answer pipeline.
     /// Wired only when both a SearchProvider AND model_plane_url are
     /// configured. `/v1/answer` returns 501 Unsupported otherwise.

@@ -24,7 +24,7 @@ use quarry_core::error::QuarryResult;
 use quarry_core::ids::Id;
 use quarry_core::zdr::ZdrMode;
 
-use crate::ingest_client::DataPlaneIngest;
+use crate::ingest_client::{ensure_durable_ingest_allowed, DataPlaneIngest};
 
 use super::data_plane_client::{DataPlaneIngestPolicy, GrpcDataPlaneClient};
 
@@ -72,10 +72,8 @@ impl DataPlaneIngest for GrpcIngestAdapter {
         &self,
         request: &DataPlaneIngestRequest,
     ) -> QuarryResult<DataPlaneIngestResponse> {
-        // Same ZDR gate as the HTTP path. Reusing the existing
-        // free function would require pub-exposing it; cheaper to
-        // re-state the deny semantics here than weaken visibility.
         let zdr = request.zdr;
+        ensure_durable_ingest_allowed(zdr)?;
         let classification = Self::zdr_classification(zdr);
 
         // Map `DataPlaneIngestRequest` → `CreateDocumentRequest` args.
@@ -155,5 +153,11 @@ mod tests {
         let policy = GrpcIngestAdapter::ingest_policy_for(ZdrMode::Off).unwrap();
         assert!(!policy.ephemeral_only);
         assert_eq!(policy.zdr_mode, "off");
+    }
+
+    #[test]
+    fn zdr_on_is_rejected_before_durable_grpc_ingest() {
+        let err = crate::ingest_client::ensure_durable_ingest_allowed(ZdrMode::On).unwrap_err();
+        assert_eq!(err.code, quarry_core::error::ErrorCode::Forbidden);
     }
 }

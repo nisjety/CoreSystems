@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
 
+	shippingauth "shipping-core/internal/auth"
 	"shipping-core/internal/carrier"
 )
 
@@ -63,8 +65,15 @@ type createBookingDTO struct {
 		HeightCm      float64 `json:"height_cm" validate:"required,gt=0"`
 		DangerousGood bool    `json:"dangerous_good"`
 	} `json:"package" validate:"required"`
-	Customs  *customsDTO `json:"customs"`
-	BookedBy string      `json:"booked_by" validate:"required"`
+	Customs        *customsDTO `json:"customs"`
+	BookedBy       string      `json:"booked_by"` // deprecated: verified token actor is authoritative
+	ApprovalID     string      `json:"approval_id"`
+	ZDR            bool        `json:"zdr"`
+	RetentionUntil string      `json:"retention_until" validate:"omitempty,datetime=2006-01-02T15:04:05Z07:00"`
+	// EstimatedDelivery is optional: the quote's promised delivery date,
+	// so this booking can later be scored for F8 reliability. Omit it and
+	// the booking is simply excluded from scoring — never defaulted.
+	EstimatedDelivery string `json:"estimated_delivery" validate:"omitempty,datetime=2006-01-02"`
 }
 
 type confirmDTO struct {
@@ -103,6 +112,10 @@ func Routes(r chi.Router, svc *Service, store *Store) {
 
 func createHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
 		var dto createBookingDTO
 		if !decodeAndValidate(w, r, &dto) {
 			return
@@ -118,21 +131,44 @@ func createHandler(svc *Service) http.HandlerFunc {
 			}
 			customs = &carrier.CustomsInfo{ContentsType: dto.Customs.ContentsType, Items: items, Incoterms: dto.Customs.Incoterms, InvoiceNo: dto.Customs.InvoiceNo}
 		}
+		var estimatedDelivery *time.Time
+		if dto.EstimatedDelivery != "" {
+			if parsed, perr := time.Parse("2006-01-02", dto.EstimatedDelivery); perr == nil {
+				estimatedDelivery = &parsed
+			}
+		}
+		var retentionUntil *time.Time
+		if dto.RetentionUntil != "" {
+			parsed, _ := time.Parse(time.RFC3339, dto.RetentionUntil)
+			retentionUntil = &parsed
+		}
+		idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if idempotencyKey != "" && (len(idempotencyKey) < 8 || len(idempotencyKey) > 128) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Idempotency-Key must be 8-128 characters"})
+			return
+		}
 		result, err := svc.Create(r.Context(), CreateInput{
-			QuoteRef:    dto.QuoteRef,
-			CarrierCode: dto.CarrierCode,
-			CarrierName: dto.CarrierName,
-			ServiceName: dto.ServiceName,
-			Price:       carrier.Money{AmountCents: dto.Price.AmountCents, Currency: dto.Price.Currency},
-			From:        dto.From.toDomain(),
-			To:          dto.To.toDomain(),
+			OrgID:              principal.OrganizationID,
+			BookedBy:           principal.ActorID,
+			ActorPrincipalType: principal.PrincipalType,
+			QuoteRef:           dto.QuoteRef,
+			CarrierCode:        dto.CarrierCode,
+			CarrierName:        dto.CarrierName,
+			ServiceName:        dto.ServiceName,
+			Price:              carrier.Money{AmountCents: dto.Price.AmountCents, Currency: dto.Price.Currency},
+			From:               dto.From.toDomain(),
+			To:                 dto.To.toDomain(),
 			Package: carrier.Package{
 				WeightKg: dto.Package.WeightKg, LengthCm: dto.Package.LengthCm,
 				WidthCm: dto.Package.WidthCm, HeightCm: dto.Package.HeightCm,
 				DangerousGood: dto.Package.DangerousGood,
 			},
-			Customs:  customs,
-			BookedBy: dto.BookedBy,
+			Customs:           customs,
+			ApprovalID:        strings.TrimSpace(dto.ApprovalID),
+			IdempotencyKey:    idempotencyKey,
+			ZDR:               dto.ZDR,
+			RetentionUntil:    retentionUntil,
+			EstimatedDelivery: estimatedDelivery,
 		})
 		if err != nil {
 			writeErr(w, err)
@@ -144,15 +180,15 @@ func createHandler(svc *Service) http.HandlerFunc {
 
 func confirmHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
 		var dto confirmDTO
 		if !decodeAndValidate(w, r, &dto) {
 			return
 		}
-		actor := dto.Actor
-		if actor == "" {
-			actor = "api"
-		}
-		rec, err := svc.Confirm(r.Context(), chi.URLParam(r, "id"), dto.ConfirmationToken, actor)
+		rec, err := svc.Confirm(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"), dto.ConfirmationToken, principal.ActorID)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -163,7 +199,11 @@ func confirmHandler(svc *Service) http.HandlerFunc {
 
 func cancelHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := svc.Cancel(r.Context(), chi.URLParam(r, "id"), "api"); err != nil {
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		if err := svc.Cancel(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"), principal.ActorID); err != nil {
 			writeErr(w, err)
 			return
 		}
@@ -173,7 +213,11 @@ func cancelHandler(svc *Service) http.HandlerFunc {
 
 func getHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rec, err := store.GetBooking(r.Context(), chi.URLParam(r, "id"))
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		rec, err := store.GetBooking(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -184,7 +228,11 @@ func getHandler(store *Store) http.HandlerFunc {
 
 func listHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		recs, err := store.ListBookings(r.Context(), r.URL.Query().Get("status"), 50)
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		recs, err := store.ListBookings(r.Context(), principal.OrganizationID, r.URL.Query().Get("status"), 50)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -198,7 +246,11 @@ func listHandler(store *Store) http.HandlerFunc {
 // Velion gateway proxies, since its JSON pipe cannot carry raw PDF bytes).
 func labelHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rec, err := store.GetBooking(r.Context(), chi.URLParam(r, "id"))
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		rec, err := store.GetBooking(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -236,7 +288,11 @@ func labelHandler(store *Store) http.HandlerFunc {
 
 func customsDocHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rec, err := store.GetBooking(r.Context(), chi.URLParam(r, "id"))
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		rec, err := store.GetBooking(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -261,16 +317,16 @@ func customsDocHandler(store *Store) http.HandlerFunc {
 
 func pickupHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
 		var dto pickupDTO
 		if !decodeAndValidate(w, r, &dto) {
 			return
 		}
 		date, _ := time.Parse("2006-01-02", dto.Date)
-		actor := dto.Actor
-		if actor == "" {
-			actor = "api"
-		}
-		pickup, err := svc.SchedulePickup(r.Context(), chi.URLParam(r, "id"), actor, carrier.PickupRequest{
+		pickup, err := svc.SchedulePickup(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"), principal.ActorID, carrier.PickupRequest{
 			Date: date, TimeFrom: dto.TimeFrom, TimeTo: dto.TimeTo, Note: dto.Note,
 		})
 		if err != nil {
@@ -283,7 +339,11 @@ func pickupHandler(svc *Service) http.HandlerFunc {
 
 func trackingHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tracking, err := svc.Tracking(r.Context(), chi.URLParam(r, "id"))
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		tracking, err := svc.Tracking(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -294,7 +354,11 @@ func trackingHandler(svc *Service) http.HandlerFunc {
 
 func auditHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		trail, err := store.AuditTrail(r.Context(), chi.URLParam(r, "id"))
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		trail, err := store.AuditTrail(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -305,15 +369,15 @@ func auditHandler(store *Store) http.HandlerFunc {
 
 func manifestHandler(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
 		var dto manifestDTO
 		if !decodeAndValidate(w, r, &dto) {
 			return
 		}
-		actor := dto.Actor
-		if actor == "" {
-			actor = "api"
-		}
-		id, count, err := svc.BuildManifest(r.Context(), dto.CarrierCode, actor)
+		id, count, err := svc.BuildManifest(r.Context(), principal.OrganizationID, dto.CarrierCode, principal.ActorID)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -324,7 +388,11 @@ func manifestHandler(svc *Service) http.HandlerFunc {
 
 func manifestDocHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		doc, err := store.GetManifestDocument(r.Context(), chi.URLParam(r, "id"))
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		doc, err := store.GetManifestDocument(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -336,6 +404,15 @@ func manifestDocHandler(store *Store) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/pdf")
 		_, _ = w.Write(doc)
 	}
+}
+
+func verifiedPrincipal(w http.ResponseWriter, r *http.Request) (shippingauth.Principal, bool) {
+	principal, ok := shippingauth.PrincipalFromContext(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "verified identity is required"})
+		return shippingauth.Principal{}, false
+	}
+	return principal, true
 }
 
 func decodeAndValidate(w http.ResponseWriter, r *http.Request, dto any) bool {
@@ -358,6 +435,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		// 409: the gate rejected the transition (bad token, replay, or a
 		// state that no longer permits it).
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "confirmation rejected: invalid token or booking is not awaiting confirmation"})
+	case errors.Is(err, ErrIdempotencyConflict):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "idempotency key was already used for a different booking request"})
 	case errors.Is(err, ErrValidation):
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 	default:

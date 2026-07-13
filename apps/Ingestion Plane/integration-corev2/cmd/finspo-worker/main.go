@@ -30,10 +30,9 @@ func main() {
 	}
 
 	httpClient := &http.Client{Timeout: 20 * time.Second}
-	// DataPlane is optional: NewDataPlaneDocumentsClientFromConfig always
-	// returns a non-nil client, but its Configured() reports false when
-	// DATA_PLANE_DOCUMENTS_URL / DATA_PLANE_INTERNAL_API_KEY are unset, in
-	// which case the worker skips Data Plane forwarding silently.
+	// DataPlane is optional when its URL is absent. When enabled it mints a
+	// short-lived, org-scoped bearer from Auth Core with this service's durable
+	// credential; the durable credential is never forwarded to Data Plane.
 	worker := workers.FinspoWorker{
 		Integration:  handoff.NewIntegrationClientFromConfig(cfg, httpClient),
 		Finspo:       handoff.NewFinspoClientFromConfig(cfg, httpClient),

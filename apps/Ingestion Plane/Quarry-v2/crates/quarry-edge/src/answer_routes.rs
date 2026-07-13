@@ -239,7 +239,11 @@ pub async fn answer_stream(
         // `invoke_stream` stay wired and switch on to TRUE token streaming once
         // the gateway implements it (swap `query` → `query_stream` here).
         let full: String;
-        match pipeline.formats().query(&prepared.combined, &query, zdr).await {
+        match pipeline
+            .formats()
+            .query_for_org(&org_id, &prepared.combined, &query, zdr)
+            .await
+        {
             Ok(qr) => {
                 full = qr.answer;
                 // Emit ~4-word delta frames (whitespace preserved) for a smooth

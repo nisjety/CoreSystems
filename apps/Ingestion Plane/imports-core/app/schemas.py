@@ -14,11 +14,13 @@ class ImportDocument(BaseModel):
 
 
 class SourceImportRequest(BaseModel):
-    org_id: str
+    # Deprecated compatibility fields. Authorization always uses signed claims.
+    org_id: str | None = None
     user_id: str | None = None
     source_type: Literal["notion", "crm", "erp", "cms", "pim", "hubspot", "salesforce", "odoo"]
     connection: dict[str, Any] = Field(default_factory=dict)
     options: dict[str, Any] = Field(default_factory=dict)
+    zdr: bool = False
 
 
 class JobResponse(BaseModel):

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -15,16 +16,17 @@ import (
 
 type SourceObjectClient struct {
 	baseURL    string
-	apiKey     string
+	tokens     OrgTokenProvider
 	httpClient *http.Client
 }
 
-func NewSourceObjectClient(baseURL, apiKey string) *SourceObjectClient {
+func NewSourceObjectClient(baseURL string, tokens OrgTokenProvider) *SourceObjectClient {
 	return &SourceObjectClient{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		apiKey:  strings.TrimSpace(apiKey),
+		tokens:  tokens,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:       10 * time.Second,
+			CheckRedirect: noBearerRedirect,
 		},
 	}
 }
@@ -34,7 +36,7 @@ func (c *SourceObjectClient) UpsertSourceObject(ctx context.Context, source stor
 }
 
 func (c *SourceObjectClient) UpsertSourceObjectWithPermissions(ctx context.Context, source store.Source, item store.Item, permissions []store.Permission) error {
-	if c == nil || c.baseURL == "" {
+	if !c.configured() {
 		return nil
 	}
 
@@ -43,7 +45,7 @@ func (c *SourceObjectClient) UpsertSourceObjectWithPermissions(ctx context.Conte
 }
 
 func (c *SourceObjectClient) DeleteSourceObject(ctx context.Context, source store.Source, item store.Item) error {
-	if c == nil || c.baseURL == "" {
+	if !c.configured() {
 		return nil
 	}
 
@@ -55,31 +57,48 @@ func (c *SourceObjectClient) DeleteSourceObject(ctx context.Context, source stor
 }
 
 func (c *SourceObjectClient) post(ctx context.Context, orgID, path string, payload any) error {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return fmt.Errorf("verified organization is required")
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal source object payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build data plane request: %w", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := c.tokens.Token(ctx, orgID)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("build data plane request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("data plane source object request: %w", err)
+		}
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			c.tokens.Invalidate(orgID, token)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("data plane source object request returned %s", resp.Status)
+		}
+		return nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Org-ID", orgID)
-	if c.apiKey != "" {
-		req.Header.Set("X-Internal-Api-Key", c.apiKey)
-	}
+	return fmt.Errorf("data plane source object authentication failed after refresh")
+}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("data plane source object request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("data plane source object request returned %s", resp.Status)
-	}
-	return nil
+func (c *SourceObjectClient) configured() bool {
+	return c != nil && c.baseURL != "" && c.tokens != nil && c.tokens.Configured()
 }
 
 func sourceObjectPayload(source store.Source, item store.Item, permissions []store.Permission) map[string]any {

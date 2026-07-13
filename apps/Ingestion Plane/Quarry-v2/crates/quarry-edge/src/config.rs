@@ -38,7 +38,20 @@ pub struct EdgeConfig {
     #[serde(default)]
     pub data_plane_ingest_url: Option<String>,
     #[serde(default)]
-    pub data_plane_api_key: Option<String>,
+    /// Development-only static Data Plane bearer. Production mints per-org
+    /// tokens from Auth Core using `quarry_service_api_key`.
+    pub data_plane_service_token: Option<String>,
+    /// Auth Core base URL used for service-principal token minting.
+    #[serde(default = "default_auth_core_url")]
+    pub auth_core_url: String,
+    /// Durable service-principal credential registered under the fixed
+    /// `quarry-edge` identity in Auth Core.
+    #[serde(default)]
+    pub quarry_service_api_key: Option<String>,
+    /// Explicit local-development escape hatch for legacy static plane tokens.
+    /// Refused when ENVIRONMENT is prod/production.
+    #[serde(default)]
+    pub cross_plane_auth_dev_bypass: bool,
     #[serde(default)]
     pub browserbase_api_key: Option<String>,
     #[serde(default)]
@@ -69,7 +82,7 @@ pub struct EdgeConfig {
     /// /v1/ai/speech + /v1/ai/transcribe via this URL.
     #[serde(default)]
     pub model_plane_url: Option<String>,
-    /// Bearer token for Model Plane gateway authentication.
+    /// Development-only static Model Plane bearer. Production uses Auth Core.
     #[serde(default)]
     pub model_plane_token: Option<String>,
     /// Enable LLM-backed intent classification on the search router.
@@ -216,6 +229,9 @@ fn default_timeout() -> u64 {
 fn default_control_url() -> String {
     "http://quarry-control:8081".into()
 }
+fn default_auth_core_url() -> String {
+    "http://auth-core:3011".into()
+}
 fn default_artifact_backend() -> String {
     "memory".into()
 }
@@ -254,7 +270,10 @@ impl EdgeConfig {
             security_snapshot_path: None,
             data_plane_url: None,
             data_plane_ingest_url: None,
-            data_plane_api_key: None,
+            data_plane_service_token: None,
+            auth_core_url: default_auth_core_url(),
+            quarry_service_api_key: None,
+            cross_plane_auth_dev_bypass: false,
             browserbase_api_key: None,
             browserbase_project_id: None,
             browserbase_url: None,

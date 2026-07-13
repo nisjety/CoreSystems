@@ -1,0 +1,14 @@
+.git/
+.github/
+.env
+.env.*
+!.env.example
+.DS_Store
+bin/
+dist/
+coverage/
+tmp/
+*.log
+Dockerfile.dev
+README.md
+**/*_test.go

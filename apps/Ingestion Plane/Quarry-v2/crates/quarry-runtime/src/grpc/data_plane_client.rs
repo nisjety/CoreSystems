@@ -15,6 +15,9 @@ use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use quarry_core::zdr::ZdrMode;
+
+use crate::ingest_client::{ensure_durable_ingest_allowed, validate_data_plane_bearer};
 
 use super::browser_broker::grpc_status_to_error;
 use super::dataplane::documents::v2::document_service_client::DocumentServiceClient;
@@ -53,6 +56,17 @@ impl DataPlaneIngestPolicy {
             zdr_mode: self.zdr_mode,
             index_schedule: self.index_schedule,
             ephemeral_only: self.ephemeral_only,
+        }
+    }
+
+    fn ensure_durable(&self) -> QuarryResult<()> {
+        match (self.zdr_mode.as_str(), self.ephemeral_only) {
+            ("off", false) => ensure_durable_ingest_allowed(ZdrMode::Off),
+            ("on", _) => ensure_durable_ingest_allowed(ZdrMode::On),
+            _ => Err(QuarryError::new(
+                ErrorCode::Forbidden,
+                "ambiguous Data Plane ingest policy rejected",
+            )),
         }
     }
 }
@@ -99,24 +113,33 @@ impl GrpcDataPlaneClient {
         })
     }
 
-    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.auth_token = Some(token.into());
-        self
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> QuarryResult<Self> {
+        let token = token.into();
+        validate_data_plane_bearer(&token)?;
+        self.auth_token = Some(token);
+        Ok(self)
     }
 
     fn client(&self) -> DocumentServiceClient<Channel> {
         DocumentServiceClient::new(self.channel.clone())
     }
 
-    fn apply_auth<T>(&self, mut req: tonic::Request<T>) -> tonic::Request<T> {
-        if let Some(token) = &self.auth_token {
-            if let Ok(value) = format!("Bearer {token}").parse() {
-                req.metadata_mut().insert("authorization", value);
-            }
-        }
-        req
+    fn apply_auth<T>(&self, mut req: tonic::Request<T>) -> QuarryResult<tonic::Request<T>> {
+        let token = self.auth_token.as_deref().ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::Forbidden,
+                "data plane gRPC requires a signed bearer token",
+            )
+        })?;
+        validate_data_plane_bearer(token)?;
+        let value = format!("Bearer {token}").parse().map_err(|_| {
+            QuarryError::new(ErrorCode::Forbidden, "invalid data plane bearer metadata")
+        })?;
+        req.metadata_mut().insert("authorization", value);
+        Ok(req)
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the generated CreateDocument RPC fields.
     pub async fn create_document(
         &self,
         org_id: &str,
@@ -130,6 +153,13 @@ impl GrpcDataPlaneClient {
         if org_id.is_empty() {
             return Err(QuarryError::new(ErrorCode::BadRequest, "org_id required"));
         }
+        let ingest_policy = ingest_policy.ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::Forbidden,
+                "explicit standard ingest policy required for durable create",
+            )
+        })?;
+        ingest_policy.ensure_durable()?;
         let mut client = self.client();
         let request = self.apply_auth(tonic::Request::new(CreateDocumentRequest {
             org_id: org_id.to_string(),
@@ -139,8 +169,8 @@ impl GrpcDataPlaneClient {
             content: content.to_string(),
             metadata: None,
             zdr_classification: zdr_classification.to_string(),
-            ingest_policy: ingest_policy.map(|p| p.into_proto()),
-        }));
+            ingest_policy: Some(ingest_policy.into_proto()),
+        }))?;
         let resp: CreateDocumentResponse = client
             .create_document(request)
             .await
@@ -166,12 +196,23 @@ impl GrpcDataPlaneClient {
         documents: Vec<CreateDocumentRequest>,
         ingest_policy: Option<DataPlaneIngestPolicy>,
     ) -> QuarryResult<BulkIngestResult> {
+        if org_id.is_empty() {
+            return Err(QuarryError::new(ErrorCode::BadRequest, "org_id required"));
+        }
+        let ingest_policy = ingest_policy.ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::Forbidden,
+                "explicit standard ingest policy required for durable bulk ingest",
+            )
+        })?;
+        ingest_policy.ensure_durable()?;
+        validate_bulk_scope(org_id, &documents)?;
         let mut client = self.client();
         let request = self.apply_auth(tonic::Request::new(BulkIngestRequest {
             org_id: org_id.to_string(),
             documents,
-            ingest_policy: ingest_policy.map(|p| p.into_proto()),
-        }));
+            ingest_policy: Some(ingest_policy.into_proto()),
+        }))?;
         let resp = client
             .bulk_ingest(request)
             .await
@@ -193,7 +234,7 @@ impl GrpcDataPlaneClient {
         let request = self.apply_auth(tonic::Request::new(GetDocumentIndexStatusRequest {
             document_id: document_id.to_string(),
             org_id: org_id.to_string(),
-        }));
+        }))?;
         let resp: GetDocumentIndexStatusResponse = client
             .get_document_index_status(request)
             .await
@@ -220,7 +261,7 @@ impl GrpcDataPlaneClient {
         let mut client = self.client();
         let request = self.apply_auth(tonic::Request::new(IngestStatusRequest {
             org_id: org_id.to_string(),
-        }));
+        }))?;
         let resp: IngestStatusResponse = client
             .get_ingest_status(request)
             .await
@@ -241,6 +282,26 @@ impl GrpcDataPlaneClient {
             is_active: resp.is_active,
         })
     }
+}
+
+fn validate_bulk_scope(org_id: &str, documents: &[CreateDocumentRequest]) -> QuarryResult<()> {
+    for document in documents {
+        if document.org_id != org_id {
+            return Err(QuarryError::new(
+                ErrorCode::Forbidden,
+                "bulk document tenant must match the outer tenant",
+            ));
+        }
+        if let Some(policy) = &document.ingest_policy {
+            DataPlaneIngestPolicy {
+                zdr_mode: policy.zdr_mode.clone(),
+                index_schedule: policy.index_schedule.clone(),
+                ephemeral_only: policy.ephemeral_only,
+            }
+            .ensure_durable()?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -291,5 +352,63 @@ mod tests {
         let p = DataPlaneIngestPolicy::standard();
         assert_eq!(p.zdr_mode, "off");
         assert!(!p.ephemeral_only);
+    }
+
+    #[test]
+    fn durable_rpc_rejects_ephemeral_and_ambiguous_policy() {
+        assert!(DataPlaneIngestPolicy::ephemeral().ensure_durable().is_err());
+        assert!(DataPlaneIngestPolicy {
+            zdr_mode: "off".into(),
+            index_schedule: "default".into(),
+            ephemeral_only: true,
+        }
+        .ensure_durable()
+        .is_err());
+        assert!(DataPlaneIngestPolicy::standard().ensure_durable().is_ok());
+    }
+
+    #[test]
+    fn grpc_auth_rejects_missing_or_shared_key_bearer() {
+        assert!(validate_data_plane_bearer("").is_err());
+        assert!(validate_data_plane_bearer("shared-key").is_err());
+        assert!(validate_data_plane_bearer(
+            "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzZXJ2aWNlOnF1YXJyeSJ9.c2lnbmF0dXJl"
+        )
+        .is_ok());
+        assert!(validate_data_plane_bearer("eyJhbGciOiJub25lIn0.e30.signature").is_err());
+    }
+
+    #[test]
+    fn bulk_scope_rejects_cross_tenant_and_zdr_child() {
+        let standard = IngestPolicy {
+            zdr_mode: "off".into(),
+            index_schedule: "default".into(),
+            ephemeral_only: false,
+        };
+        let make_document = |org_id: &str, policy: IngestPolicy| CreateDocumentRequest {
+            org_id: org_id.into(),
+            source: "quarry".into(),
+            r#type: "web".into(),
+            title: "title".into(),
+            content: "content".into(),
+            metadata: None,
+            zdr_classification: "internal".into(),
+            ingest_policy: Some(policy),
+        };
+
+        assert!(validate_bulk_scope("org-a", &[make_document("org-b", standard.clone())]).is_err());
+        assert!(validate_bulk_scope(
+            "org-a",
+            &[make_document(
+                "org-a",
+                IngestPolicy {
+                    zdr_mode: "on".into(),
+                    index_schedule: "ephemeral".into(),
+                    ephemeral_only: true,
+                }
+            )]
+        )
+        .is_err());
+        assert!(validate_bulk_scope("org-a", &[make_document("org-a", standard)]).is_ok());
     }
 }

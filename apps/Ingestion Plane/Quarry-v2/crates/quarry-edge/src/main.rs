@@ -88,6 +88,50 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = config::EdgeConfig::from_env()?;
+    let environment = std::env::var("ENVIRONMENT")
+        .or_else(|_| std::env::var("APP_ENV"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(environment.as_str(), "prod" | "production") {
+        let secret = cfg
+            .internal_secret
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("QUARRY_EDGE__INTERNAL_SECRET is required in production")
+            })?;
+        internal_auth::InternalSigner::new(secret).map_err(|error| {
+            anyhow::anyhow!("invalid QUARRY_EDGE__INTERNAL_SECRET in production: {error}")
+        })?;
+    }
+
+    if cfg.cross_plane_auth_dev_bypass && matches!(environment.as_str(), "prod" | "production") {
+        anyhow::bail!(
+            "QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS must never be enabled in production"
+        );
+    }
+    let cross_plane_tokens: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider> =
+        match cfg
+            .quarry_service_api_key
+            .as_deref()
+            .filter(|credential| !credential.trim().is_empty())
+        {
+            Some(credential) => Some(Arc::new(
+                quarry_runtime::service_tokens::AuthCoreServiceTokenProvider::new(
+                    &cfg.auth_core_url,
+                    credential,
+                )?,
+            )),
+            None => None,
+        };
+    let cross_plane_configured = cfg.data_plane_url.is_some()
+        || cfg.data_plane_ingest_url.is_some()
+        || cfg.model_plane_url.is_some();
+    if cross_plane_configured && cross_plane_tokens.is_none() && !cfg.cross_plane_auth_dev_bypass {
+        anyhow::bail!(
+            "QUARRY_EDGE__QUARRY_SERVICE_API_KEY is required when Data or Model Plane is configured"
+        );
+    }
 
     let redis = if let Some(url) = &cfg.redis_url {
         let client = redis::Client::open(url.as_str())?;
@@ -304,9 +348,27 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .filter(|s| !s.is_empty())
         .or(cfg.data_plane_url.as_ref());
-    let ingest: Option<Arc<dyn quarry_runtime::ingest_client::DataPlaneIngest>> =
-        match (ingest_url, &cfg.data_plane_api_key) {
-            (Some(url), Some(key)) => {
+    let ingest: Option<Arc<dyn quarry_runtime::ingest_client::DataPlaneIngest>> = match ingest_url {
+        Some(url) => {
+            if let Some(provider) = cross_plane_tokens.clone() {
+                if cfg.data_plane_transport.as_deref() == Some("grpc") {
+                    tracing::warn!(
+                        "dynamic per-org auth currently selects HTTP ingest; gRPC static bearer reuse is disabled"
+                    );
+                }
+                tracing::info!(%url, "data plane ingest: HTTP/JSON with per-org Auth Core tokens");
+                Some(Arc::new(IngestClient::with_token_provider(url, provider)?)
+                    as Arc<dyn quarry_runtime::ingest_client::DataPlaneIngest>)
+            } else if cfg.cross_plane_auth_dev_bypass {
+                let key = cfg
+                    .data_plane_service_token
+                    .as_deref()
+                    .filter(|token| !token.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "QUARRY_EDGE__DATA_PLANE_SERVICE_TOKEN is required by the explicit development bypass"
+                        )
+                    })?;
                 let transport = cfg
                     .data_plane_transport
                     .as_deref()
@@ -316,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
                     #[cfg(feature = "grpc")]
                     "grpc" => match quarry_runtime::grpc::GrpcDataPlaneClient::connect(url).await {
                         Ok(mut grpc) => {
-                            grpc = grpc.with_bearer_token(key);
+                            grpc = grpc.with_bearer_token(key)?;
                             tracing::info!(%url, "data plane ingest: gRPC (HTTP/2 + protobuf)");
                             Some(quarry_runtime::grpc::ingest_adapter_into_dyn(
                                 quarry_runtime::grpc::GrpcIngestAdapter::new(Arc::new(grpc)),
@@ -346,12 +408,15 @@ async fn main() -> anyhow::Result<()> {
                             as Arc<dyn quarry_runtime::ingest_client::DataPlaneIngest>)
                     }
                 }
+            } else {
+                unreachable!("cross-plane auth preflight rejects this configuration")
             }
-            _ => {
-                tracing::info!("data plane ingest client not configured (no DATA_PLANE_URL)");
-                None
-            }
-        };
+        }
+        None => {
+            tracing::info!("data plane ingest client not configured (no DATA_PLANE_URL)");
+            None
+        }
+    };
 
     // C30.1 / cluster #6 — pick ProfileStore backend. When
     // `profile_store_kind == "postgres"` AND the binary was compiled
@@ -585,6 +650,24 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let build_model_client = |url: &str| -> quarry_core::error::QuarryResult<
+        quarry_runtime::mp_client::ModelPlaneClient,
+    > {
+        let mut client = quarry_runtime::mp_client::ModelPlaneClient::new(url)?;
+        if let Some(provider) = cross_plane_tokens.clone() {
+            client = client.with_token_provider(provider);
+        } else if cfg.cross_plane_auth_dev_bypass {
+            if let Some(token) = cfg
+                .model_plane_token
+                .as_deref()
+                .filter(|token| !token.is_empty())
+            {
+                client = client.with_bearer_token(token);
+            }
+        }
+        Ok(client)
+    };
+
     // Cycle 19 / cluster #20: optional LLM-backed intent classifier.
     // When `llm_classify_intent` is on AND a Model Plane URL is set, we
     // build a `CachedClassifier(HybridClassifier(MpIntentClassifier))`
@@ -596,11 +679,8 @@ async fn main() -> anyhow::Result<()> {
     // path is never blocked by the Model Plane.
     if cfg.llm_classify_intent {
         if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
-            match quarry_runtime::mp_client::ModelPlaneClient::new(mp_url) {
-                Ok(mut mp) => {
-                    if let Some(tok) = cfg.model_plane_token.as_deref().filter(|s| !s.is_empty()) {
-                        mp = mp.with_bearer_token(tok);
-                    }
+            match build_model_client(mp_url) {
+                Ok(mp) => {
                     let mp_arc = Arc::new(mp);
                     let mut llm = quarry_runtime::MpIntentClassifier::new(mp_arc);
                     if let Some(m) = cfg.llm_classify_model.as_deref().filter(|s| !s.is_empty()) {
@@ -637,11 +717,8 @@ async fn main() -> anyhow::Result<()> {
     // failure), so this never blocks search.
     if cfg.autoprompt {
         if let Some(mp_url) = cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
-            match quarry_runtime::mp_client::ModelPlaneClient::new(mp_url) {
-                Ok(mut mp) => {
-                    if let Some(tok) = cfg.model_plane_token.as_deref().filter(|s| !s.is_empty()) {
-                        mp = mp.with_bearer_token(tok);
-                    }
+            match build_model_client(mp_url) {
+                Ok(mp) => {
                     let mut rewriter = quarry_runtime::ModelPlaneQueryRewriter::new(Arc::new(mp));
                     if let Some(m) = cfg.autoprompt_model.as_deref().filter(|s| !s.is_empty()) {
                         rewriter = rewriter.with_model(m);
@@ -687,8 +764,16 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .map(|dp_url| {
             let mut vidx = quarry_runtime::DataPlaneVectorIndex::new(dp_url);
-            if let Some(key) = cfg.data_plane_api_key.as_deref().filter(|s| !s.is_empty()) {
-                vidx = vidx.with_api_key(key);
+            if let Some(provider) = cross_plane_tokens.clone() {
+                vidx = vidx.with_token_provider(provider);
+            } else if cfg.cross_plane_auth_dev_bypass {
+                if let Some(key) = cfg
+                    .data_plane_service_token
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    vidx = vidx.with_api_key(key);
+                }
             }
             Arc::new(vidx) as Arc<dyn quarry_runtime::vector_index::VectorIndex>
         });
@@ -721,35 +806,30 @@ async fn main() -> anyhow::Result<()> {
         cfg.semantic_rerank,
         cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
-        (Some(inner), true, Some(mp_url)) => {
-            match quarry_runtime::mp_client::ModelPlaneClient::new(mp_url) {
-                Ok(mut mp) => {
-                    if let Some(tok) = cfg.model_plane_token.as_deref().filter(|s| !s.is_empty()) {
-                        mp = mp.with_bearer_token(tok);
-                    }
-                    let mut reranker = quarry_runtime::ModelPlaneSearchReranker::new(Arc::new(mp));
-                    if let Some(m) = cfg
-                        .semantic_rerank_model
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                    {
-                        reranker = reranker.with_model(m);
-                    }
-                    let top_n = cfg.semantic_rerank_top_n.unwrap_or(10);
-                    tracing::info!(top_n, "semantic rerank: enabled");
-                    Some(Arc::new(quarry_runtime::RerankingSearchProvider::new(
-                        inner,
-                        Arc::new(reranker),
-                        top_n,
-                    ))
-                        as Arc<dyn quarry_runtime::serp::SearchProvider>)
+        (Some(inner), true, Some(mp_url)) => match build_model_client(mp_url) {
+            Ok(mp) => {
+                let mut reranker = quarry_runtime::ModelPlaneSearchReranker::new(Arc::new(mp));
+                if let Some(m) = cfg
+                    .semantic_rerank_model
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    reranker = reranker.with_model(m);
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "semantic rerank: MP client init failed; disabled");
-                    Some(inner)
-                }
+                let top_n = cfg.semantic_rerank_top_n.unwrap_or(10);
+                tracing::info!(top_n, "semantic rerank: enabled");
+                Some(Arc::new(quarry_runtime::RerankingSearchProvider::new(
+                    inner,
+                    Arc::new(reranker),
+                    top_n,
+                ))
+                    as Arc<dyn quarry_runtime::serp::SearchProvider>)
             }
-        }
+            Err(e) => {
+                tracing::warn!(error = %e, "semantic rerank: MP client init failed; disabled");
+                Some(inner)
+            }
+        },
         (other, _, _) => other,
     };
 
@@ -761,12 +841,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
     ) {
         (Some(search_arc), Some(mp_url)) => {
-            match quarry_runtime::mp_client::ModelPlaneClient::new(mp_url) {
-                Ok(mut mp_client) => {
-                    if let Some(token) = cfg.model_plane_token.as_deref().filter(|s| !s.is_empty())
-                    {
-                        mp_client = mp_client.with_bearer_token(token);
-                    }
+            match build_model_client(mp_url) {
+                Ok(mp_client) => {
                     let mp_arc = Arc::new(mp_client);
                     let formats = quarry_runtime::ai_formats::AiFormatRunner::new(mp_arc);
                     // Real HTTP markdown fetcher: GET → readability → markdown.
@@ -959,7 +1035,11 @@ async fn main() -> anyhow::Result<()> {
         vector_index,
         searxng_url: cfg.searxng_url.clone().filter(|s| !s.is_empty()),
         model_plane_url: cfg.model_plane_url.clone(),
-        model_plane_token: cfg.model_plane_token.clone(),
+        model_plane_token: cfg
+            .cross_plane_auth_dev_bypass
+            .then(|| cfg.model_plane_token.clone())
+            .flatten(),
+        service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
         local_index,
         usage,

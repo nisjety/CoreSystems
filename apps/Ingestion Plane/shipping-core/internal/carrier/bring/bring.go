@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"shipping-core/internal/carrier"
@@ -73,7 +74,11 @@ func (a *Adapter) setAuthHeaders(req *http.Request) {
 }
 
 func (a *Adapter) Info() carrier.Info {
-	return carrier.Info{Code: "bring", Name: "Bring", Segment: carrier.SegmentBoth}
+	mode := carrier.ModeProduction
+	if !strings.HasPrefix(strings.ToLower(a.config.BaseURL), "https://api.bring.com/") {
+		mode = carrier.ModeSandbox
+	}
+	return carrier.Info{Code: "bring", Name: "Bring", Segment: carrier.SegmentBoth, Mode: mode}
 }
 
 // Quote calls Bring's Shipping Guide API. Respects ctx's deadline —
@@ -172,17 +177,46 @@ func toDomainQuote(p productResponse) carrier.Quote {
 		}
 	}
 
-	if p.ExpectedDelivery != nil && len(p.ExpectedDelivery.AlternativeDeliveryDates) > 0 {
-		first := p.ExpectedDelivery.AlternativeDeliveryDates[0]
-		if days, err := strconv.Atoi(first.WorkingDays); err == nil {
+	if p.ExpectedDelivery != nil {
+		ed := p.ExpectedDelivery
+		// Prefer Bring's top-level promise (workingDays /
+		// formattedExpectedDeliveryDate / expectedDeliveryDate); fall back to
+		// the first alternative window only when the top level is absent.
+		workingDays := ed.WorkingDays
+		formatted := ed.FormattedExpectedDeliveryDate
+		structured := ed.ExpectedDeliveryDate
+		if workingDays == "" && formatted == "" && len(ed.AlternativeDeliveryDates) > 0 {
+			workingDays = ed.AlternativeDeliveryDates[0].WorkingDays
+			formatted = ed.AlternativeDeliveryDates[0].FormattedExpectedDeliveryDate
+		}
+		if days, err := strconv.Atoi(strings.TrimSpace(workingDays)); err == nil {
 			quote.TransitDays = days
 		}
-		if t, err := time.Parse("02.01.2006", first.FormattedExpectedDeliveryDate); err == nil {
+		if t, ok := parseBringDeliveryDate(formatted, structured); ok {
 			quote.EstimatedDelivery = t
 		}
 	}
 
 	return quote
+}
+
+// parseBringDeliveryDate resolves Bring's expected-delivery date, preferring
+// the formatted "dd.MM.yyyy" string and falling back to the structured
+// year/month/day object when the formatted value is localized or absent.
+func parseBringDeliveryDate(formatted string, structured *bringStructuredDate) (time.Time, bool) {
+	if t, err := time.Parse("02.01.2006", strings.TrimSpace(formatted)); err == nil {
+		return t, true
+	}
+	if structured != nil {
+		y, errY := strconv.Atoi(strings.TrimSpace(structured.Year))
+		m, errM := strconv.Atoi(strings.TrimSpace(structured.Month))
+		d, errD := strconv.Atoi(strings.TrimSpace(structured.Day))
+		if errY == nil && errM == nil && errD == nil &&
+			y > 0 && m >= 1 && m <= 12 && d >= 1 && d <= 31 {
+			return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // Book, Label, and Track live in booking.go (Bring Booking + Tracking APIs).

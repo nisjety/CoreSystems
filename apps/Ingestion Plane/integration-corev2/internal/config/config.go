@@ -8,96 +8,104 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/triodelab/integration-corev2/internal/attestation"
 )
 
 type Config struct {
-	Port                       string
-	ServiceName                string
-	Environment                string
-	DatabaseURL                string
-	InternalAPIKey             string
-	InternalAPIKeyHeader       string
-	AuthCoreURL                string
-	AuthCoreInternalAPIKey     string
-	UserCoreURL                string
-	OrgCoreURL                 string
-	SessionCoreURL             string
-	BillingCoreURL             string
-	AuditCoreURL               string
-	FinspoCoreURL              string
-	FinspoCoreAPIKey           string
-	FinspoCoreAPIKeyHeader     string
-	ConversationIngestURL      string
-	EmailSyncInterval          time.Duration
-	EmailSyncBackfillWindow    time.Duration
-	EmailSyncMaxPerCycle       int
-	DataPlaneDocumentsURL      string
-	DataPlaneInternalAPIKey    string
-	DataPlaneInternalAPIHeader string
-	DataPlaneGraphIndexURL     string
-	WebhookHotPathURL          string
-	IntegrationCoreURL         string
-	PublicBaseURL              string
-	MetaJSSDKAppID             string
-	MetaJSSDKAPIVersion        string
-	MetaJSSDKLocale            string
-	MetaBusinessLoginConfigID  string
-	MetaBusinessLoginConfigIDs map[string]string
-	MetaWebhookVerifyToken     string
-	MetaWebhookSecret          string
-	MetaThreadsAPIBaseURL      string
-	EncryptionKey              []byte
-	AllowInMemoryStore         bool
-	NATSEnabled                bool
-	NATSURL                    string
-	NATSUsername               string
-	NATSPassword               string
-	NATSToken                  string
-	NATSSubjectPrefix          string
-	RateLimitEnabled           bool
-	RateLimitMax               int
-	RateLimitWindow            time.Duration
-	TokenLeaseConsumers        []string
-	MicrosoftTenantID          string
-	MicrosoftClientID          string
-	MicrosoftClientSecret      string
-	MicrosoftClientAuthMode    string
-	MicrosoftTokenOrigin       string
-	MicrosoftAuthorizationURL  string
-	MicrosoftTokenURL          string
-	MicrosoftGraphBaseURL      string
-	SlackClientID              string
-	SlackClientSecret          string
-	SlackSigningSecret         string
-	SlackAuthorizationURL      string
-	SlackTokenURL              string
-	SlackAPIBaseURL            string
-	GoogleClientID             string
-	GoogleClientSecret         string
-	GoogleAuthorizationURL     string
-	GoogleTokenURL             string
-	GoogleAPIBaseURL           string
-	NotionClientID             string
-	NotionClientSecret         string
-	NotionAuthorizationURL     string
-	NotionTokenURL             string
-	NotionAPIBaseURL           string
-	GitHubClientID             string
-	GitHubClientSecret         string
-	GitHubWebhookSecret        string
-	GitHubAuthorizationURL     string
-	GitHubTokenURL             string
-	GitHubAPIBaseURL           string
-	ShopifyClientID            string
-	ShopifyClientSecret        string
-	ShopifyWebhookSecret       string
-	ShopifyAPIBaseURL          string
-	StripeClientID             string
-	StripeClientSecret         string
-	StripeAuthorizationURL     string
-	StripeTokenURL             string
-	StripeAPIBaseURL           string
-	StripeWebhookSecret        string
+	Port                             string
+	ServiceName                      string
+	Environment                      string
+	DatabaseURL                      string
+	InternalAPIKey                   string
+	InternalAPIKeyHeader             string
+	AllowLegacyTenantKey             bool
+	AuthCoreURL                      string
+	AuthCoreInternalAPIKey           string
+	AuthCoreJWKSURL                  string
+	PlaneTokenIssuer                 string
+	IngestionAuthAudience            string
+	ProviderWriteAttestationKeysJSON string
+	UserCoreURL                      string
+	OrgCoreURL                       string
+	SessionCoreURL                   string
+	BillingCoreURL                   string
+	AuditCoreURL                     string
+	FinspoCoreURL                    string
+	FinspoCoreAPIKey                 string
+	FinspoCoreAPIKeyHeader           string
+	ConversationIngestURL            string
+	ConversationIngestServiceToken   string
+	EmailSyncInterval                time.Duration
+	EmailSyncBackfillWindow          time.Duration
+	EmailSyncMaxPerCycle             int
+	DataPlaneDocumentsURL            string
+	IntegrationServiceID             string
+	IntegrationServiceAPIKey         string
+	DataPlaneGraphIndexURL           string
+	WebhookHotPathURL                string
+	IntegrationCoreURL               string
+	PublicBaseURL                    string
+	MetaJSSDKAppID                   string
+	MetaJSSDKAPIVersion              string
+	MetaJSSDKLocale                  string
+	MetaBusinessLoginConfigID        string
+	MetaBusinessLoginConfigIDs       map[string]string
+	MetaWebhookVerifyToken           string
+	MetaWebhookSecret                string
+	MetaThreadsAPIBaseURL            string
+	EncryptionKey                    []byte
+	AllowInMemoryStore               bool
+	NATSEnabled                      bool
+	NATSURL                          string
+	NATSUsername                     string
+	NATSPassword                     string
+	NATSToken                        string
+	NATSSubjectPrefix                string
+	RateLimitEnabled                 bool
+	RateLimitMax                     int
+	RateLimitWindow                  time.Duration
+	TokenLeaseConsumers              []string
+	MicrosoftTenantID                string
+	MicrosoftClientID                string
+	MicrosoftClientSecret            string
+	MicrosoftClientAuthMode          string
+	MicrosoftTokenOrigin             string
+	MicrosoftAuthorizationURL        string
+	MicrosoftTokenURL                string
+	MicrosoftGraphBaseURL            string
+	SlackClientID                    string
+	SlackClientSecret                string
+	SlackSigningSecret               string
+	SlackAuthorizationURL            string
+	SlackTokenURL                    string
+	SlackAPIBaseURL                  string
+	GoogleClientID                   string
+	GoogleClientSecret               string
+	GoogleAuthorizationURL           string
+	GoogleTokenURL                   string
+	GoogleAPIBaseURL                 string
+	NotionClientID                   string
+	NotionClientSecret               string
+	NotionAuthorizationURL           string
+	NotionTokenURL                   string
+	NotionAPIBaseURL                 string
+	GitHubClientID                   string
+	GitHubClientSecret               string
+	GitHubWebhookSecret              string
+	GitHubAuthorizationURL           string
+	GitHubTokenURL                   string
+	GitHubAPIBaseURL                 string
+	ShopifyClientID                  string
+	ShopifyClientSecret              string
+	ShopifyWebhookSecret             string
+	ShopifyAPIBaseURL                string
+	StripeClientID                   string
+	StripeClientSecret               string
+	StripeAuthorizationURL           string
+	StripeTokenURL                   string
+	StripeAPIBaseURL                 string
+	StripeWebhookSecret              string
 	// AllowUnverifiedWebhooks is a dev-only escape hatch: provider webhooks
 	// are rejected fail-closed when their signature scheme is unconfigured
 	// or unimplemented, unless this is explicitly true (never in production).
@@ -181,47 +189,53 @@ func Load() (Config, error) {
 	instagramClientSecret := firstNonEmpty(rawInstagramClientSecret, facebookClientSecret)
 
 	return Config{
-		Port:                       envOr("PORT", "3026"),
-		ServiceName:                envOr("SERVICE_NAME", "integration-corev2"),
-		Environment:                envOr("ENVIRONMENT", "dev"),
-		DatabaseURL:                strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		InternalAPIKey:             strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		InternalAPIKeyHeader:       envOr("INTERNAL_API_KEY_HEADER", "X-Internal-API-Key"),
-		AuthCoreURL:                envOr("AUTH_CORE_URL", "http://auth-core:3011"),
-		AuthCoreInternalAPIKey:     strings.TrimSpace(envOr("AUTH_CORE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
-		UserCoreURL:                envOr("USER_CORE_URL", "http://user-core:3012"),
-		OrgCoreURL:                 envOr("ORG_CORE_URL", "http://org-core:8080"),
-		SessionCoreURL:             envOr("SESSION_CORE_URL", "http://session-core:9091"),
-		BillingCoreURL:             envOr("BILLING_CORE_URL", "http://billing-core:3014"),
-		AuditCoreURL:               envOr("AUDIT_CORE_URL", "http://audit-core:3015"),
-		FinspoCoreURL:              envOr("FINSPO_CORE_URL", envOr("FINSPO_API_URL", "http://finspo-api:3130")),
-		FinspoCoreAPIKey:           strings.TrimSpace(os.Getenv("FINSPO_API_KEY")),
-		FinspoCoreAPIKeyHeader:     envOr("FINSPO_API_KEY_HEADER", "X-API-Key"),
-		ConversationIngestURL:      strings.TrimRight(envOr("CONVERSATION_INGEST_URL", "http://conversation-ingest-rs:3161"), "/"),
-		EmailSyncInterval:          envDuration("EMAIL_SYNC_INTERVAL", 60*time.Second),
-		EmailSyncBackfillWindow:    envDuration("EMAIL_SYNC_BACKFILL_WINDOW", 24*time.Hour),
-		EmailSyncMaxPerCycle:       envInt("EMAIL_SYNC_MAX_PER_CYCLE", 25),
-		DataPlaneDocumentsURL:      envOr("DATA_PLANE_DOCUMENTS_URL", envOr("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")),
-		DataPlaneInternalAPIKey:    strings.TrimSpace(envOr("DATA_PLANE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
-		DataPlaneInternalAPIHeader: envOr("DATA_PLANE_INTERNAL_API_KEY_HEADER", "X-Internal-Api-Key"),
-		DataPlaneGraphIndexURL:     envOr("DATA_PLANE_GRAPH_INDEX_URL", envOr("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203")),
-		WebhookHotPathURL:          strings.TrimRight(strings.TrimSpace(envOr("INTEGRATION_WEBHOOK_HOTPATH_URL", "")), "/"),
-		IntegrationCoreURL:         strings.TrimRight(envOr("INTEGRATION_CORE_URL", publicBaseURL), "/"),
-		PublicBaseURL:              publicBaseURL,
-		MetaJSSDKAppID:             strings.TrimSpace(envOr("META_JS_SDK_APP_ID", facebookClientID)),
-		MetaJSSDKAPIVersion:        normalizeGraphAPIVersion(envOr("META_JS_SDK_API_VERSION", "v25.0")),
-		MetaJSSDKLocale:            envOr("META_JS_SDK_LOCALE", "en_US"),
-		MetaBusinessLoginConfigID:  strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONFIG_ID")),
-		MetaBusinessLoginConfigIDs: metaBusinessLoginConfigIDs(),
-		MetaWebhookVerifyToken:     strings.TrimSpace(os.Getenv("META_WEBHOOK_VERIFY_TOKEN")),
-		MetaWebhookSecret:          strings.TrimSpace(envOr("META_WEBHOOK_SECRET", facebookClientSecret)),
-		MetaThreadsAPIBaseURL:      strings.TrimRight(envOr("THREADS_API_BASE_URL", "https://graph.threads.net/v1.0"), "/"),
-		EncryptionKey:              encryptionKey,
-		AllowInMemoryStore:         envBool("INTEGRATION_ALLOW_IN_MEMORY_STORE", false),
-		NATSEnabled:                envBool("NATS_ENABLED", false),
-		NATSURL:                    envOr("NATS_URL", "nats://localhost:4222"),
-		NATSUsername:               strings.TrimSpace(os.Getenv("NATS_USERNAME")),
-		NATSPassword:               strings.TrimSpace(os.Getenv("NATS_PASSWORD")),
+		Port:                             envOr("PORT", "3026"),
+		ServiceName:                      envOr("SERVICE_NAME", "integration-corev2"),
+		Environment:                      envOr("ENVIRONMENT", "dev"),
+		DatabaseURL:                      strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		InternalAPIKey:                   strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
+		InternalAPIKeyHeader:             envOr("INTERNAL_API_KEY_HEADER", "X-Internal-API-Key"),
+		AllowLegacyTenantKey:             os.Getenv("ALLOW_LEGACY_TENANT_KEY") == "1" && os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" && os.Getenv("ISOLATED_E2E") == "1",
+		AuthCoreURL:                      envOr("AUTH_CORE_URL", "http://auth-core:3011"),
+		AuthCoreInternalAPIKey:           strings.TrimSpace(envOr("AUTH_CORE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
+		AuthCoreJWKSURL:                  strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL")),
+		PlaneTokenIssuer:                 strings.TrimSpace(os.Getenv("PLANE_TOKEN_ISSUER")),
+		IngestionAuthAudience:            envOr("INGESTION_AUTH_AUDIENCE", "ingestion"),
+		ProviderWriteAttestationKeysJSON: strings.TrimSpace(os.Getenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON")),
+		UserCoreURL:                      envOr("USER_CORE_URL", "http://user-core:3012"),
+		OrgCoreURL:                       envOr("ORG_CORE_URL", "http://org-core:8080"),
+		SessionCoreURL:                   envOr("SESSION_CORE_URL", "http://session-core:9091"),
+		BillingCoreURL:                   envOr("BILLING_CORE_URL", "http://billing-core:3014"),
+		AuditCoreURL:                     envOr("AUDIT_CORE_URL", "http://audit-core:8187"),
+		FinspoCoreURL:                    envOr("FINSPO_CORE_URL", envOr("FINSPO_API_URL", "http://finspo-api:3130")),
+		FinspoCoreAPIKey:                 strings.TrimSpace(os.Getenv("FINSPO_API_KEY")),
+		FinspoCoreAPIKeyHeader:           envOr("FINSPO_API_KEY_HEADER", "X-API-Key"),
+		ConversationIngestURL:            strings.TrimRight(envOr("CONVERSATION_INGEST_URL", "http://conversation-ingest-rs:3161"), "/"),
+		ConversationIngestServiceToken:   strings.TrimSpace(os.Getenv("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN")),
+		EmailSyncInterval:                envDuration("EMAIL_SYNC_INTERVAL", 60*time.Second),
+		EmailSyncBackfillWindow:          envDuration("EMAIL_SYNC_BACKFILL_WINDOW", 24*time.Hour),
+		EmailSyncMaxPerCycle:             envInt("EMAIL_SYNC_MAX_PER_CYCLE", 25),
+		DataPlaneDocumentsURL:            envOr("DATA_PLANE_DOCUMENTS_URL", envOr("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")),
+		IntegrationServiceID:             envOr("INTEGRATION_SERVICE_ID", "integration-corev2"),
+		IntegrationServiceAPIKey:         strings.TrimSpace(os.Getenv("INTEGRATION_SERVICE_API_KEY")),
+		DataPlaneGraphIndexURL:           envOr("DATA_PLANE_GRAPH_INDEX_URL", envOr("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203")),
+		WebhookHotPathURL:                strings.TrimRight(strings.TrimSpace(envOr("INTEGRATION_WEBHOOK_HOTPATH_URL", "")), "/"),
+		IntegrationCoreURL:               strings.TrimRight(envOr("INTEGRATION_CORE_URL", publicBaseURL), "/"),
+		PublicBaseURL:                    publicBaseURL,
+		MetaJSSDKAppID:                   strings.TrimSpace(envOr("META_JS_SDK_APP_ID", facebookClientID)),
+		MetaJSSDKAPIVersion:              normalizeGraphAPIVersion(envOr("META_JS_SDK_API_VERSION", "v25.0")),
+		MetaJSSDKLocale:                  envOr("META_JS_SDK_LOCALE", "en_US"),
+		MetaBusinessLoginConfigID:        strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONFIG_ID")),
+		MetaBusinessLoginConfigIDs:       metaBusinessLoginConfigIDs(),
+		MetaWebhookVerifyToken:           strings.TrimSpace(os.Getenv("META_WEBHOOK_VERIFY_TOKEN")),
+		MetaWebhookSecret:                strings.TrimSpace(envOr("META_WEBHOOK_SECRET", facebookClientSecret)),
+		MetaThreadsAPIBaseURL:            strings.TrimRight(envOr("THREADS_API_BASE_URL", "https://graph.threads.net/v1.0"), "/"),
+		EncryptionKey:                    encryptionKey,
+		AllowInMemoryStore:               envBool("INTEGRATION_ALLOW_IN_MEMORY_STORE", false),
+		NATSEnabled:                      envBool("NATS_ENABLED", false),
+		NATSURL:                          envOr("NATS_URL", "nats://localhost:4222"),
+		NATSUsername:                     strings.TrimSpace(os.Getenv("NATS_USERNAME")),
+		NATSPassword:                     strings.TrimSpace(os.Getenv("NATS_PASSWORD")),
 		// NATS_TOKEN authenticates against the shared cross-plane velion-nats
 		// broker, which enforces `authorization { token: $VELION_NATS_TOKEN }`
 		// (see nats-shared.conf) rather than username/password.
@@ -351,6 +365,9 @@ func (c Config) ValidateRuntime() error {
 	if len(c.EncryptionKey) != 32 {
 		return fmt.Errorf("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY must decode to 32 bytes")
 	}
+	if _, err := attestation.ParseTrustedKeysJSON(c.ProviderWriteAttestationKeysJSON); err != nil {
+		return fmt.Errorf("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON must contain trusted conversation-core Ed25519 public keys: %w", err)
+	}
 	return nil
 }
 
@@ -366,6 +383,17 @@ func (c Config) ValidateFinspoWorkerRuntime() error {
 	}
 	if c.FinspoCoreAPIKey == "" {
 		return fmt.Errorf("FINSPO_API_KEY is required")
+	}
+	if c.DataPlaneDocumentsURL != "" {
+		if c.AuthCoreURL == "" {
+			return fmt.Errorf("AUTH_CORE_URL is required for Data Plane token minting")
+		}
+		if c.IntegrationServiceID == "" {
+			return fmt.Errorf("INTEGRATION_SERVICE_ID is required for Data Plane token minting")
+		}
+		if c.IntegrationServiceAPIKey == "" {
+			return fmt.Errorf("INTEGRATION_SERVICE_API_KEY is required for Data Plane token minting")
+		}
 	}
 	return nil
 }
@@ -384,10 +412,18 @@ func (c Config) ValidateEmailWorkerRuntime() error {
 	if c.ConversationIngestURL == "" {
 		return fmt.Errorf("CONVERSATION_INGEST_URL is required")
 	}
-	if c.InternalAPIKey == "" {
-		return fmt.Errorf("INTERNAL_API_KEY is required")
+	if !validDedicatedServiceToken(c.ConversationIngestServiceToken) {
+		return fmt.Errorf("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
 	}
 	return nil
+}
+
+func validDedicatedServiceToken(token string) bool {
+	token = strings.TrimSpace(token)
+	lower := strings.ToLower(token)
+	return len(token) >= 32 &&
+		!strings.HasPrefix(lower, "change-me") &&
+		!strings.HasPrefix(lower, "replace-with")
 }
 
 func (c Config) ControlPlaneInternalAPIKey() string {

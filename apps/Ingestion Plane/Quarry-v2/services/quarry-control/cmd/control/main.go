@@ -93,7 +93,7 @@ func main() {
 	// QUARRY_INTERNAL_HMAC_REQUIRED=1 to switch to enforce mode after
 	// every edge instance is signing.
 	internalSecret := os.Getenv("QUARRY_INTERNAL_SECRET")
-	internalRequire := os.Getenv("QUARRY_INTERNAL_HMAC_REQUIRED") == "1"
+	internalRequire := isProd || os.Getenv("QUARRY_INTERNAL_HMAC_REQUIRED") == "1"
 	// In production we must not run in "rollout / trust-the-network"
 	// mode. If the secret is missing, the HMAC verifier degrades to a
 	// no-op and any unauthenticated caller on the internal network can

@@ -24,21 +24,27 @@ type Config struct {
 	// scoped to — e.g. an app named "...-sandbox-..." in the portal), or a
 	// test server URL in unit tests.
 	BaseURL string
+	// LiveBooking must be explicitly true to allow Book/Label/Track against
+	// a non-sandbox BaseURL. MyDHL API has no per-request test flag (unlike
+	// Bring's TestIndicator) — sandbox vs production is purely which host
+	// you call — so this is the safe-by-default gate for booking real
+	// shipments. Quote/rating is unaffected; it is read-only.
+	LiveBooking bool
 }
 
 // NewConfigFromEnv reads DHL_API_KEY and DHL_API_SECRET (both required)
-// plus optional DHL_ACCOUNT_NUMBER and DHL_API_BASE_URL. Missing required
-// vars are all named in one error; main.go treats that as "not configured"
-// (skip the real adapter, keep the mock) rather than a startup failure —
-// DHL Express access arrives piecemeal as the customer account is approved
-// (docs/TASKS.md Fase 0; DHL was previously blocked on account approval,
-// not code).
+// plus optional DHL_ACCOUNT_NUMBER, DHL_API_BASE_URL, and DHL_LIVE_BOOKING.
+// Missing required vars are all named in one error; main.go treats that as
+// "not configured" (skip the real adapter, keep the mock) rather than a
+// startup failure — DHL Express access arrives piecemeal as the customer
+// account is approved.
 func NewConfigFromEnv() (Config, error) {
 	cfg := Config{
 		APIKey:        os.Getenv("DHL_API_KEY"),
 		APISecret:     os.Getenv("DHL_API_SECRET"),
 		AccountNumber: os.Getenv("DHL_ACCOUNT_NUMBER"),
 		BaseURL:       os.Getenv("DHL_API_BASE_URL"),
+		LiveBooking:   os.Getenv("DHL_LIVE_BOOKING") == "true",
 	}
 
 	var missing []string

@@ -155,6 +155,112 @@ func TestAdapter_Quote_ParsesResponseIntoDomainQuote(t *testing.T) {
 	}
 }
 
+// productionShapedResponse mirrors the delivery-time shape Bring's live
+// Shipping Guide 2.0 actually returns (captured 2026-07-10, Oslo 0150 ->
+// Trondheim 7010): the promise sits at the TOP level of expectedDelivery
+// (workingDays + formattedExpectedDeliveryDate + structured
+// expectedDeliveryDate) with an EMPTY alternativeDeliveryDates array. The
+// older fixture above nested everything under alternativeDeliveryDates, which
+// is why the parse test passed green while live quotes silently returned
+// TransitDays:0 / 0001-01-01. This test guards the regression.
+const productionShapedResponse = `{
+  "consignments": [
+    {
+      "consignmentId": "1",
+      "products": [
+        {
+          "id": "9300",
+          "productionCode": "9300",
+          "price": {
+            "listPrice": {
+              "currencyCode": "NOK",
+              "priceWithAdditionalServices": {
+                "amountWithVAT": "272.73"
+              }
+            }
+          },
+          "expectedDelivery": {
+            "workingDays": "2",
+            "formattedExpectedDeliveryDate": "14.07.2026",
+            "expectedDeliveryDate": {"year": "2026", "month": "7", "day": "14"},
+            "alternativeDeliveryDates": []
+          }
+        }
+      ]
+    }
+  ],
+  "uniqueId": "b0f4b0a2-0000-4000-8000-000000000000"
+}`
+
+func TestAdapter_Quote_ParsesTopLevelExpectedDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(productionShapedResponse))
+	}))
+	defer server.Close()
+
+	a := New(Config{BaseURL: server.URL})
+	quotes, err := a.Quote(context.Background(), testRequest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("got %d quotes, want 1", len(quotes))
+	}
+
+	q := quotes[0]
+	// The whole point of the fix: a top-level promise must NOT be dropped.
+	if q.TransitDays != 2 {
+		t.Errorf("TransitDays = %d, want 2 (top-level workingDays must not be dropped)", q.TransitDays)
+	}
+	wantDate := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	if !q.EstimatedDelivery.Equal(wantDate) {
+		t.Errorf("EstimatedDelivery = %v, want %v (top-level date must not be dropped)", q.EstimatedDelivery, wantDate)
+	}
+}
+
+// TestAdapter_Quote_FallsBackToStructuredDate proves the structured
+// expectedDeliveryDate object is used when the formatted string is localized
+// (Bring sometimes returns e.g. "tirsdag 14. juli") and thus unparseable by
+// the "02.01.2006" layout.
+func TestAdapter_Quote_FallsBackToStructuredDate(t *testing.T) {
+	const localizedResponse = `{
+  "consignments": [{"consignmentId": "1", "products": [{
+    "id": "9300", "productionCode": "9300",
+    "price": {"listPrice": {"currencyCode": "NOK", "priceWithAdditionalServices": {"amountWithVAT": "272.73"}}},
+    "expectedDelivery": {
+      "workingDays": "2",
+      "formattedExpectedDeliveryDate": "tirsdag 14. juli 2026",
+      "expectedDeliveryDate": {"year": "2026", "month": "7", "day": "14"},
+      "alternativeDeliveryDates": []
+    }
+  }]}],
+  "uniqueId": "b0f4b0a2-0000-4000-8000-000000000001"
+}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(localizedResponse))
+	}))
+	defer server.Close()
+
+	a := New(Config{BaseURL: server.URL})
+	quotes, err := a.Quote(context.Background(), testRequest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("got %d quotes, want 1", len(quotes))
+	}
+	q := quotes[0]
+	if q.TransitDays != 2 {
+		t.Errorf("TransitDays = %d, want 2", q.TransitDays)
+	}
+	wantDate := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	if !q.EstimatedDelivery.Equal(wantDate) {
+		t.Errorf("EstimatedDelivery = %v, want %v (structured date fallback)", q.EstimatedDelivery, wantDate)
+	}
+}
+
 func TestAdapter_Quote_RateLimited(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

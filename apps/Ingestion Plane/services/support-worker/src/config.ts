@@ -9,7 +9,19 @@ const ConfigSchema = z.object({
   ZAMMAD_API_TOKEN: z.string().optional().default(''),
   AI_CORE_URL: z.string().url(),
   NOTIFICATION_CORE_URL: z.string().url(),
-  INTERNAL_API_KEY: z.string().min(1),
+  SUPPORT_NOTIFICATION_MODE: z.enum(['disabled', 'user_resolved']).default('disabled'),
+  NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: z.string().default(''),
+}).superRefine((value, ctx) => {
+  if (
+    value.SUPPORT_NOTIFICATION_MODE === 'user_resolved' &&
+    value.NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN.trim().length < 32
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN'],
+      message: 'must be at least 32 bytes when support notifications are enabled',
+    });
+  }
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

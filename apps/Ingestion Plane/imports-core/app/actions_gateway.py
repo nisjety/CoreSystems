@@ -10,11 +10,12 @@ connections-list and per-connection actions HTTP contract:
        body {"operation","params","body"}
        -> {"success": true, "data": {"action": {"providerKey","operation","result"}}}
 
-Auth is the shared internal API key (default header X-Internal-Api-Key), matching
-integration-corev2's INTERNAL_API_KEY_HEADER, plus x-org-id for scoping/audit.
+Auth is the caller's verified ingestion-audience Bearer token. Provider secrets
+remain inside integration-corev2.
 """
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -27,20 +28,21 @@ class ActionsGateway:
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        bearer_token: str,
         http_client: httpx.AsyncClient,
-        api_key_header: str = "X-Internal-Api-Key",
     ) -> None:
         self._base = (base_url or "").rstrip("/")
-        self._api_key = api_key or ""
+        self._bearer_token = bearer_token or ""
         self._client = http_client
-        self._api_key_header = api_key_header or "X-Internal-Api-Key"
 
     def configured(self) -> bool:
-        return bool(self._base and self._api_key)
+        return bool(self._base and self._bearer_token)
 
     def _headers(self, org_id: str | None) -> dict[str, str]:
-        headers = {self._api_key_header: self._api_key, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self._bearer_token}",
+            "Content-Type": "application/json",
+        }
         if org_id:
             headers["x-org-id"] = org_id
         return headers
@@ -87,7 +89,7 @@ class ActionsGateway:
         if body:
             payload["body"] = body
         resp = await self._client.post(
-            f"{self._base}/api/v1/connections/{connection_id}/actions",
+            f"{self._base}/api/v1/connections/{quote(connection_id, safe='')}/actions",
             json=payload,
             headers=self._headers(org_id),
             timeout=30.0,

@@ -1,0 +1,160 @@
+# Secure production override. Apply after docker-compose.yml.
+# Docker Compose v2.24.4+ is required for the !reset tag.
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+x-hardened-runtime: &hardened-runtime
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+
+services:
+  quarry-edge:
+    build:
+      args: *build-metadata
+    init: true
+    # Chromium keeps its own sandbox enabled, which is incompatible with
+    # no-new-privileges. The container still gets an immutable root filesystem
+    # and no ambient Linux capabilities; only bounded scratch space is writable.
+    read_only: true
+    cap_drop: ["ALL"]
+    tmpfs:
+      - /tmp:rw,nosuid,size=1g
+      - /dev/shm:rw,noexec,nosuid,size=512m
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      QUARRY_EDGE_AUTH_DEV_BYPASS: "0"
+      QUARRY_BROWSER_NO_SANDBOX: "0"
+      QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:?AUTH_CORE_URL is required}
+      QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:?QUARRY_SERVICE_API_KEY is required}
+      QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: "0"
+      QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/quarry_edge?sslmode=disable
+      QUARRY_EDGE__DRAGONFLY_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
+      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
+  quarry-control:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
+      QUARRY_INTERNAL_HMAC_REQUIRED: "1"
+  quarry-orchestrator:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    environment:
+      RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
+  imports-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/imports
+      INGESTION_SERVICE_API_KEY: ${IMPORTS_SERVICE_API_KEY:?IMPORTS_SERVICE_API_KEY is required}
+  integration-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  shipping-core:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      SHIPPING_SERVICE_API_KEY: ${SHIPPING_SERVICE_API_KEY:?SHIPPING_SERVICE_API_KEY is required}
+  integration-finspo-worker:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    stop_grace_period: 30s
+    environment:
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  integration-email-worker:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    stop_grace_period: 30s
+    environment:
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  integration-webhook-normalizer:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  finspo-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      FINSPO_SERVICE_API_KEY: ${FINSPO_SERVICE_API_KEY:?FINSPO_SERVICE_API_KEY is required}
+  autocomplete-core:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+  connector-runtime-engine:
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}
+  dragonfly:
+    command:
+      - --requirepass=${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}
+      - --cache_mode=true
+      - --maxmemory=256mb
+      - --proactor_threads=1
+      - --dir=/data
+  temporal:
+    ports: !reset []
+  nats:
+    ports: !reset []
+  qdrant:
+    ports: !reset []
+  searxng:
+    ports: !reset []

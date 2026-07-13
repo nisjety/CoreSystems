@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -248,18 +249,32 @@ func TestRunOnce_TokenFailureIsRecordedAndIsolated(t *testing.T) {
 
 func TestIngestClient_PostsBridgeShape(t *testing.T) {
 	var got map[string]any
-	var gotKey string
+	var gotHeaders http.Header
+	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKey = r.Header.Get("x-internal-api-key")
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+		gotHeaders = r.Header.Clone()
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		if err := json.Unmarshal(gotBody, &got); err != nil {
 			t.Errorf("decode body: %v", err)
 		}
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+		_, _ = w.Write([]byte(`{"data":{"detail":{"id":"conv-1"},"message":{"id":"msg-1"},"created":true}}`))
 	}))
 	defer server.Close()
 
-	client := &IngestClient{BaseURL: server.URL, InternalAPIKey: "secret-key", HTTP: server.Client()}
+	client := &IngestClient{
+		BaseURL:      server.URL,
+		ServiceToken: "0123456789abcdef0123456789abcdef",
+		HTTP:         server.Client(),
+		Now: func() time.Time {
+			return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+		},
+		Nonce: func() string { return "fixed-nonce-1234567890" },
+	}
 	conn := googleConnection("conn_9")
 	msg := EmailMessage{
 		ProviderEventID:   "evt-1",
@@ -275,8 +290,20 @@ func TestIngestClient_PostsBridgeShape(t *testing.T) {
 	if err := client.Ingest(context.Background(), conn, msg); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
-	if gotKey != "secret-key" {
-		t.Errorf("internal key header = %q", gotKey)
+	if gotHeaders.Get("x-internal-api-key") != "" {
+		t.Fatal("legacy internal key must not be sent")
+	}
+	if gotHeaders.Get("x-service-id") != "integration-email-worker" || gotHeaders.Get("x-org-id") != "org_1" {
+		t.Fatalf("delegated service/org headers = %q/%q", gotHeaders.Get("x-service-id"), gotHeaders.Get("x-org-id"))
+	}
+	if gotHeaders.Get("x-delegation-timestamp") != "2026-07-13T12:00:00Z" || gotHeaders.Get("x-delegation-nonce") != "fixed-nonce-1234567890" {
+		t.Fatalf("delegation time/nonce = %q/%q", gotHeaders.Get("x-delegation-timestamp"), gotHeaders.Get("x-delegation-nonce"))
+	}
+	if gotHeaders.Get("x-delegation-body-sha256") != bodyDigest(gotBody) {
+		t.Fatal("delegation digest does not bind transmitted bytes")
+	}
+	if gotHeaders.Get("x-delegation-signature") == "" {
+		t.Fatal("delegation signature is required")
 	}
 	for key, want := range map[string]string{
 		"org_id":              "org_1",
@@ -295,15 +322,59 @@ func TestIngestClient_PostsBridgeShape(t *testing.T) {
 	}
 }
 
+func TestConversationIngestDelegationMatchesRustFixture(t *testing.T) {
+	body := []byte(`{"org_id":"org-1"}`)
+	headers := conversationIngestDelegationHeaders(
+		"0123456789abcdef0123456789abcdef",
+		http.MethodPost,
+		"/internal/ingest/email",
+		body,
+		"org-1",
+		time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC),
+		"fixed-nonce-1234567890",
+	)
+	if headers["x-delegation-body-sha256"] != "YqOazKjaPktfdxVznPrrhX7qEbel9X3ciCClxMerpjg" {
+		t.Fatalf("body digest = %q, want fixed cross-language fixture", headers["x-delegation-body-sha256"])
+	}
+	if headers["x-delegation-signature"] != "y4DwDDy0g0WbPNWH49I5lOiUQkKZbFOIci0B28Bt2BI" {
+		t.Fatalf("signature = %q, want Rust-compatible fixed fixture", headers["x-delegation-signature"])
+	}
+}
+
 func TestIngestClient_Non2xxIsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error":{"code":"validation_error"}}`, http.StatusUnprocessableEntity)
 	}))
 	defer server.Close()
 
-	client := &IngestClient{BaseURL: server.URL, HTTP: server.Client()}
+	client := &IngestClient{BaseURL: server.URL, ServiceToken: "0123456789abcdef0123456789abcdef", HTTP: server.Client()}
 	err := client.Ingest(context.Background(), googleConnection("c"), EmailMessage{ProviderEventID: "e"})
 	if err == nil {
 		t.Fatal("expected non-2xx to be an error")
+	}
+}
+
+func TestIngestClient_RejectsNonContractSuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "wrong status", status: http.StatusOK, body: `{"data":{"detail":{"id":"conv-1"},"message":{"id":"msg-1"},"created":true}}`},
+		{name: "empty accepted", status: http.StatusAccepted},
+		{name: "fabricated ok", status: http.StatusAccepted, body: `{"data":{"ok":true}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client := &IngestClient{BaseURL: server.URL, ServiceToken: "0123456789abcdef0123456789abcdef", HTTP: server.Client()}
+			if err := client.Ingest(t.Context(), googleConnection("c"), EmailMessage{ProviderEventID: "e"}); err == nil {
+				t.Fatal("Ingest() error = nil, want strict acknowledgement rejection")
+			}
+		})
 	}
 }

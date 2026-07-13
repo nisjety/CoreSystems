@@ -1,4 +1,8 @@
 import { config } from '../config';
+import {
+  buildNotificationIdempotencyKey,
+  postNotification,
+} from './notification-client';
 
 export interface NotifyAgentInput {
   /** Notification event type, e.g. 'ticket.triaged', 'sla.warning', 'sla.breach'. */
@@ -6,6 +10,9 @@ export interface NotifyAgentInput {
   ticketId: number;
   /** Zammad owner user ID, or 'broadcast' for un-assigned tickets. */
   recipientId: number | 'broadcast';
+  /** Control Plane scope resolved by an authoritative Zammad→Control mapping. */
+  organizationId?: string;
+  controlUserId?: string;
   payload: {
     ticketId: number;
     message: string;
@@ -18,27 +25,27 @@ export interface NotifyAgentInput {
 export async function notifyAgentActivity(
   input: NotifyAgentInput,
 ): Promise<void> {
-  const url = `${config.NOTIFICATION_CORE_URL}/v1/notifications`;
-
-  const body = {
-    recipient_id: input.recipientId,
-    type: input.type,
-    payload: input.payload,
-  };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Internal-Api-Key': config.INTERNAL_API_KEY,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(
-      `notification-core POST /v1/notifications failed: ${response.status} ${response.statusText} — ${text}`,
-    );
+  if (config.SUPPORT_NOTIFICATION_MODE === 'disabled') {
+    console.warn('[support-worker] agent notification skipped: integration intentionally disabled');
+    return;
   }
+  if (!input.organizationId?.trim() || !input.controlUserId?.trim()) {
+    throw new Error('support notification requires authoritative organizationId and controlUserId');
+  }
+  await postNotification({
+    baseUrl: config.NOTIFICATION_CORE_URL,
+    serviceToken: config.NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN,
+    request: {
+      organization_id: input.organizationId,
+      idempotency_key: buildNotificationIdempotencyKey({
+        type: input.type,
+        ticketId: input.ticketId,
+        controlUserId: input.controlUserId,
+      }),
+      retention_mode: 'zdr',
+      recipient: { kind: 'user', id: input.controlUserId },
+      type: input.type,
+      payload: input.payload,
+    },
+  });
 }

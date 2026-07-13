@@ -6,10 +6,11 @@
 //!   Data Plane v2 (gated behind the `grpc` feature)
 //!
 //! ZDR enforcement happens *before* the network call: when the request
-//! declares `zdr: ZdrMode::On`, the client refuses to send `markdown` or
-//! `html_ref`/`raw_ref` payloads (only refs to ephemeral artifacts are
-//! permissible). This is belt-and-braces alongside the route-level guard.
+//! declares `zdr: ZdrMode::On`, the client refuses the durable endpoint before
+//! wire I/O. Content-shaped fields receive a more specific rejection first.
+//! This is belt-and-braces alongside the route-level guard.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,9 +19,13 @@ use quarry_core::contracts::{
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::privacy::{PrivacyClassification, PrivacyPolicy};
-use quarry_core::zdr::ZdrMode;
+use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+
+use crate::service_tokens::{
+    ServiceTokenProvider, ServiceTokenRequest, SharedServiceTokenProvider,
+};
 
 /// Transport-agnostic Data Plane ingest interface. P2 / cluster #grpc.
 ///
@@ -41,19 +46,48 @@ pub trait DataPlaneIngest: Send + Sync {
 pub struct IngestClient {
     http: Client,
     base_url: String,
-    api_key: String,
+    auth: IngestAuth,
+}
+
+enum IngestAuth {
+    StaticDev(String),
+    Dynamic(SharedServiceTokenProvider),
 }
 
 impl IngestClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> QuarryResult<Self> {
+    pub fn new(base_url: impl Into<String>, bearer_token: impl Into<String>) -> QuarryResult<Self> {
+        let bearer_token = bearer_token.into();
+        validate_data_plane_bearer(&bearer_token)?;
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("ingest client: {e}")))?;
         Ok(Self {
             http,
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            auth: IngestAuth::StaticDev(bearer_token),
+        })
+    }
+
+    /// Production constructor. The provider mints an `aud=data-plane` token
+    /// for the request's already-verified `org_id`; no bearer is retained in
+    /// configuration or shared across tenants.
+    pub fn with_token_provider(
+        base_url: impl Into<String>,
+        provider: Arc<dyn ServiceTokenProvider>,
+    ) -> QuarryResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                QuarryError::new(ErrorCode::Internal, format!("ingest client: {error}"))
+            })?;
+        Ok(Self {
+            http,
+            base_url: base_url.into(),
+            auth: IngestAuth::Dynamic(provider),
         })
     }
 
@@ -62,42 +96,47 @@ impl IngestClient {
         request: &DataPlaneIngestRequest,
     ) -> QuarryResult<DataPlaneIngestResponse> {
         Self::pre_check_zdr(request)?;
+        ensure_durable_ingest_allowed(request.zdr)?;
 
-        // ZDR=on means zero durable retention. The canonical durable-write
-        // route (`POST /v1/documents`) mandates a non-empty content body and
-        // persists it, so a ZDR run MUST NOT write there. Skip the durable
-        // write; upstream still hands the agent the live scrape result as
-        // short-lived context. Nothing persisted → Skipped.
-        if request.zdr == ZdrMode::On {
-            return Ok(DataPlaneIngestResponse {
-                document_id: String::new(),
-                index_status: IndexStatus::Skipped,
-                knowledge_unit_count: 0,
-                embedding_status: EmbeddingStatus::Skipped,
-                retrievable_after: None,
-                trace_id: "zdr-ephemeral-skip".to_string(),
-            });
+        let token_request = ServiceTokenRequest::data_plane(
+            ["documents:write"],
+            "persist verified Quarry evidence",
+        );
+        let bearer = match &self.auth {
+            IngestAuth::StaticDev(token) => token.clone(),
+            IngestAuth::Dynamic(provider) => provider
+                .token_for_org(&request.org_id, &token_request, false)
+                .await?
+                .expose()
+                .to_owned(),
+        };
+        let mut resp = self.send(request, &bearer).await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let IngestAuth::Dynamic(provider) = &self.auth {
+                let refreshed = provider
+                    .token_for_org(&request.org_id, &token_request, true)
+                    .await?;
+                resp = self.send(request, refreshed.expose()).await?;
+            }
         }
 
+        self.decode_response(resp).await
+    }
+
+    async fn send(
+        &self,
+        request: &DataPlaneIngestRequest,
+        bearer: &str,
+    ) -> QuarryResult<reqwest::Response> {
         let body = CreateDocumentBody::from_request(request);
         let url = format!("{}/v1/documents", self.base_url.trim_end_matches('/'));
 
-        let mut req_builder = self
+        let req_builder = self
             .http
             .post(&url)
-            .header("authorization", format!("Bearer {}", self.api_key))
-            .header("x-internal-api-key", &self.api_key)
-            .header("x-org-id", &request.org_id)
+            .bearer_auth(bearer)
             .header("content-type", "application/json");
-        // Private-by-default ownership: forward the initiating user so
-        // documents-api stamps owner=user + visibility=private. Absent →
-        // system/connector ingest → org-visible (legacy behavior preserved).
-        if let Some(uid) = request.initiator_user_id.as_deref() {
-            if !uid.is_empty() {
-                req_builder = req_builder.header("x-user-id", uid);
-            }
-        }
-        let resp = req_builder.json(&body).send().await.map_err(|e| {
+        req_builder.json(&body).send().await.map_err(|e| {
             let code = if e.is_timeout() {
                 ErrorCode::Timeout
             } else if e.is_connect() {
@@ -106,14 +145,20 @@ impl IngestClient {
                 ErrorCode::DriverFailed
             };
             QuarryError::new(code, format!("ingest request failed: {e}"))
-        })?;
+        })
+    }
 
+    async fn decode_response(
+        &self,
+        resp: reqwest::Response,
+    ) -> QuarryResult<DataPlaneIngestResponse> {
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
             return Err(QuarryError::new(
                 if status.as_u16() == 429 {
                     ErrorCode::RateLimited
+                } else if status.as_u16() == 401 {
+                    ErrorCode::Forbidden
                 } else if status.as_u16() == 403 {
                     ErrorCode::Forbidden
                 } else if status.as_u16() >= 500 {
@@ -121,7 +166,7 @@ impl IngestClient {
                 } else {
                     ErrorCode::BadRequest
                 },
-                format!("data plane returned {}: {}", status.as_u16(), text),
+                format!("data plane returned status {}", status.as_u16()),
             ));
         }
 
@@ -145,14 +190,64 @@ impl IngestClient {
     }
 }
 
+/// Durable Data Plane endpoints are never a valid ZDR transport. Both HTTP and
+/// gRPC adapters call this exact guard before constructing a network request.
+pub(crate) fn ensure_durable_ingest_allowed(zdr_mode: ZdrMode) -> QuarryResult<()> {
+    zdr::guard(zdr_mode, WriteKind::Ingest)
+}
+
+/// Quarry is a forwarding client, not the token authority. It nevertheless
+/// rejects legacy shared-key shapes and unsigned JWT headers locally so only a
+/// compact RS256 bearer can reach Data Plane, where signature, issuer,
+/// audience, expiry, scope, and tenant are authoritatively verified.
+pub(crate) fn validate_data_plane_bearer(token: &str) -> QuarryResult<()> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let mut parts = token.split('.');
+    let (Some(header), Some(payload), Some(signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "data plane ingest requires a signed bearer token",
+        ));
+    };
+    if payload.is_empty() || signature.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "data plane ingest requires a signed bearer token",
+        ));
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(header).map_err(|_| {
+        QuarryError::new(
+            ErrorCode::Forbidden,
+            "data plane bearer has an invalid protected header",
+        )
+    })?;
+    let header: serde_json::Value = serde_json::from_slice(&decoded).map_err(|_| {
+        QuarryError::new(
+            ErrorCode::Forbidden,
+            "data plane bearer has an invalid protected header",
+        )
+    })?;
+    if header.get("alg").and_then(|value| value.as_str()) != Some("RS256") {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "data plane bearer must declare RS256",
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl DataPlaneIngest for IngestClient {
     async fn ingest(
         &self,
         request: &DataPlaneIngestRequest,
     ) -> QuarryResult<DataPlaneIngestResponse> {
-        // Delegate to the inherent method so the call site preserves
-        // every existing behavior (ZDR pre-check, error mapping, etc.).
+        // Delegate to the inherent method so the call site preserves every
+        // existing behavior (ZDR guards, bearer-only auth, error mapping).
         IngestClient::ingest(self, request).await
     }
 }
@@ -411,12 +506,69 @@ fn map_document_response(doc: CreateDocumentResponse, trace_id: String) -> DataP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service_tokens::{ServiceBearer, ServiceTokenProvider, ServiceTokenRequest};
+    use async_trait::async_trait;
     use quarry_core::contracts::{EmbeddingStatus, IndexStatus};
     use quarry_core::ids::Id;
     use quarry_core::zdr::ZdrMode;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEST_BEARER: &str =
+        "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzZXJ2aWNlOnF1YXJyeSJ9.c2lnbmF0dXJl";
+
+    struct RotatingProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ServiceTokenProvider for RotatingProvider {
+        async fn token_for_org(
+            &self,
+            _org_id: &str,
+            _request: &ServiceTokenRequest,
+            force_refresh: bool,
+        ) -> QuarryResult<ServiceBearer> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(force_refresh, call > 0);
+            let token = if call == 0 {
+                TEST_BEARER
+            } else {
+                "refreshed.token.signature"
+            };
+            Ok(ServiceBearer::from_test_token(token))
+        }
+
+        async fn invalidate(&self, _org_id: &str, _request: &ServiceTokenRequest) {}
+    }
+
+    #[derive(Clone)]
+    struct RejectThenAccept(Arc<AtomicUsize>);
+
+    impl wiremock::Respond for RejectThenAccept {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+            let authorization = request
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            if attempt == 0 {
+                assert_eq!(authorization, format!("Bearer {TEST_BEARER}"));
+                ResponseTemplate::new(401)
+            } else {
+                assert_eq!(authorization, "Bearer refreshed.token.signature");
+                ResponseTemplate::new(201).set_body_json(json!({
+                    "document_id": "doc_refreshed",
+                    "status": "pending"
+                }))
+            }
+        }
+    }
 
     fn make_request() -> DataPlaneIngestRequest {
         DataPlaneIngestRequest {
@@ -445,9 +597,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/documents"))
-            .and(header("authorization", "Bearer test-key"))
-            .and(header("x-internal-api-key", "test-key"))
-            .and(header("x-org-id", "org_test"))
+            .and(header("authorization", format!("Bearer {TEST_BEARER}")))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "document_id": "doc_1",
                 "org_id": "org_test",
@@ -464,13 +614,41 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = IngestClient::new(server.uri(), "test-key").unwrap();
+        let client = IngestClient::new(server.uri(), TEST_BEARER).unwrap();
         let resp = client.ingest(&make_request()).await.unwrap();
         assert_eq!(resp.document_id, "doc_1");
         // Indexing + embedding run async downstream of the document write.
         assert_eq!(resp.index_status, IndexStatus::Pending);
         assert_eq!(resp.embedding_status, EmbeddingStatus::Pending);
         assert_eq!(resp.knowledge_unit_count, 0);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let headers = &requests[0].headers;
+        assert!(!headers.contains_key("x-internal-api-key"));
+        assert!(!headers.contains_key("x-org-id"));
+        assert!(!headers.contains_key("x-user-id"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_ingest_refreshes_once_after_401() {
+        let server = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/documents"))
+            .respond_with(RejectThenAccept(requests.clone()))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let provider = Arc::new(RotatingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let client = IngestClient::with_token_provider(server.uri(), provider.clone()).unwrap();
+
+        let response = client.ingest(&make_request()).await.unwrap();
+
+        assert_eq!(response.document_id, "doc_refreshed");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -483,7 +661,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = IngestClient::new(server.uri(), "key").unwrap();
+        let client = IngestClient::new(server.uri(), TEST_BEARER).unwrap();
         let err = client.ingest(&make_request()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::RateLimited);
     }
@@ -498,7 +676,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = IngestClient::new(server.uri(), "key").unwrap();
+        let client = IngestClient::new(server.uri(), TEST_BEARER).unwrap();
         let err = client.ingest(&make_request()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::DriverFailed);
     }
@@ -508,28 +686,36 @@ mod tests {
         let mut req = make_request();
         req.zdr = ZdrMode::On;
 
-        let client = IngestClient::new("http://localhost:1", "key").unwrap();
+        let client = IngestClient::new("http://localhost:1", TEST_BEARER).unwrap();
         let err = client.ingest(&req).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Forbidden);
         assert!(err.message.contains("ZDR=on"));
     }
 
     #[tokio::test]
-    async fn ingest_zdr_no_payload_skips_durable_write() {
+    async fn ingest_zdr_no_payload_rejects_durable_write() {
         // ZDR=on with no durable payload: the client must NOT POST to the
-        // durable route (which mandates content) — it returns Skipped without
-        // any network call. Pointing at a dead address proves no request fires.
+        // durable route (which mandates content). Pointing at a dead address
+        // proves the rejection happens before any request can fire.
         let mut req = make_request();
         req.zdr = ZdrMode::On;
         req.markdown = None;
         req.html_ref = None;
         req.raw_ref = None;
 
-        let client = IngestClient::new("http://127.0.0.1:1", "key").unwrap();
-        let resp = client.ingest(&req).await.unwrap();
-        assert_eq!(resp.index_status, IndexStatus::Skipped);
-        assert_eq!(resp.embedding_status, EmbeddingStatus::Skipped);
-        assert!(resp.document_id.is_empty());
+        let client = IngestClient::new("http://127.0.0.1:1", TEST_BEARER).unwrap();
+        let err = client.ingest(&req).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        assert!(err.message.contains("ingest write denied"));
+    }
+
+    #[test]
+    fn ingest_client_rejects_shared_key_shape() {
+        let err = IngestClient::new("http://127.0.0.1:1", "shared-key")
+            .err()
+            .expect("legacy shared key must be rejected");
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        assert!(err.message.contains("signed bearer"));
     }
 
     #[tokio::test]
@@ -545,7 +731,7 @@ mod tests {
             text: "chunk content".into(),
         }];
 
-        let client = IngestClient::new("http://localhost:1", "key").unwrap();
+        let client = IngestClient::new("http://localhost:1", TEST_BEARER).unwrap();
         let err = client.ingest(&req).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Forbidden);
         assert!(err.message.contains("chunks"));
@@ -560,7 +746,7 @@ mod tests {
             "title": "Article",
             "body": "this is the article body smuggled into metadata",
         });
-        let client = IngestClient::new("http://localhost:1", "key").unwrap();
+        let client = IngestClient::new("http://localhost:1", TEST_BEARER).unwrap();
         let err = client.ingest(&req).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Forbidden);
         assert!(err.message.contains("smells like content"));
@@ -574,15 +760,15 @@ mod tests {
         req.metadata = json!({
             "summary": "x".repeat(2_000),
         });
-        let client = IngestClient::new("http://localhost:1", "key").unwrap();
+        let client = IngestClient::new("http://localhost:1", TEST_BEARER).unwrap();
         let err = client.ingest(&req).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Forbidden);
     }
 
     #[tokio::test]
-    async fn ingest_zdr_safe_metadata_passes_precheck_then_skips() {
-        // Safe (non-content) metadata clears the ZDR pre-check; the durable
-        // write is still skipped because ZDR=on means zero retention.
+    async fn ingest_zdr_safe_metadata_still_rejects_durable_route() {
+        // Safe (non-content) metadata clears the content-smuggling pre-check,
+        // but the durable endpoint itself remains forbidden under ZDR.
         let mut req = make_request();
         req.zdr = ZdrMode::On;
         req.markdown = None;
@@ -591,9 +777,10 @@ mod tests {
             "language": "en",
             "fetched_at": "2026-05-08T00:00:00Z",
         });
-        let client = IngestClient::new("http://127.0.0.1:1", "key").unwrap();
-        let resp = client.ingest(&req).await.unwrap();
-        assert_eq!(resp.index_status, IndexStatus::Skipped);
+        let client = IngestClient::new("http://127.0.0.1:1", TEST_BEARER).unwrap();
+        let err = client.ingest(&req).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        assert!(err.message.contains("ingest write denied"));
     }
 
     #[tokio::test]
@@ -606,7 +793,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = IngestClient::new(server.uri(), "key").unwrap();
+        let client = IngestClient::new(server.uri(), TEST_BEARER).unwrap();
         let err = client.ingest(&make_request()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::Forbidden);
     }

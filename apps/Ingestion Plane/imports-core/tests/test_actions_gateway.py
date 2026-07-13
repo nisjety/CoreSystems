@@ -26,7 +26,7 @@ def test_list_connections_parses_envelope_and_sends_auth():
     def handler(request: httpx.Request) -> httpx.Response:
         seen["path"] = request.url.path
         seen["query"] = dict(request.url.params)
-        seen["api_key"] = request.headers.get("x-internal-api-key")
+        seen["authorization"] = request.headers.get("authorization")
         seen["org"] = request.headers.get("x-org-id")
         return httpx.Response(
             200,
@@ -41,7 +41,7 @@ def test_list_connections_parses_envelope_and_sends_auth():
     assert conns == [{"id": "c1", "providerKey": "github"}]
     assert seen["path"] == "/api/v1/connections"
     assert seen["query"] == {"organizationId": "org-9", "providerKey": "github"}
-    assert seen["api_key"] == "secret"
+    assert seen["authorization"] == "Bearer secret"
     assert seen["org"] == "org-9"
 
 

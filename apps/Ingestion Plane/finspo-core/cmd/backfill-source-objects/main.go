@@ -44,7 +44,15 @@ func main() {
 		log.Fatal().Err(err).Msg("load sources")
 	}
 
-	client := dataplane.NewSourceObjectClient(dataPlaneURL, strings.TrimSpace(os.Getenv("DATA_PLANE_INTERNAL_API_KEY")))
+	tokens := dataplane.NewAuthCoreTokenProvider(dataplane.AuthCoreTokenConfig{
+		AuthCoreURL:   envOr("AUTH_CORE_URL", "http://auth-core:3011"),
+		ServiceID:     envOr("FINSPO_SERVICE_ID", "finspo-core"),
+		ServiceAPIKey: strings.TrimSpace(os.Getenv("FINSPO_SERVICE_API_KEY")),
+	})
+	if !tokens.Configured() {
+		log.Fatal().Msg("AUTH_CORE_URL, FINSPO_SERVICE_ID, and FINSPO_SERVICE_API_KEY are required")
+	}
+	client := dataplane.NewSourceObjectClient(dataPlaneURL, tokens)
 	batchSize := envInt("FINSPO_BACKFILL_BATCH_SIZE", 500)
 
 	var total int
@@ -123,4 +131,12 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func envOr(key, fallback string) string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	return raw
 }

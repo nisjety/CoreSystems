@@ -24,13 +24,13 @@ type shippingGuideRequest struct {
 // products. shippingDate is optional — omitted here, Bring defaults it to
 // now().
 type consignmentRequest struct {
-	ConsignmentID   string            `json:"id"`
-	FromPostalCode  string            `json:"fromPostalCode"`
-	FromCountryCode string            `json:"fromCountryCode"`
-	ToPostalCode    string            `json:"toPostalCode"`
-	ToCountryCode   string            `json:"toCountryCode"`
-	Packages        []packageRequest  `json:"packages"`
-	Products        []productRequest  `json:"products"`
+	ConsignmentID   string           `json:"id"`
+	FromPostalCode  string           `json:"fromPostalCode"`
+	FromCountryCode string           `json:"fromCountryCode"`
+	ToPostalCode    string           `json:"toPostalCode"`
+	ToCountryCode   string           `json:"toCountryCode"`
+	Packages        []packageRequest `json:"packages"`
+	Products        []productRequest `json:"products"`
 }
 
 // packageRequest — Height/Width/Length in centimeters, GrossWeight in
@@ -93,9 +93,39 @@ type priceResponse struct {
 	} `json:"listPrice"`
 }
 
+// expectedDeliveryResponse mirrors Bring's expectedDelivery object.
+//
+// Bring returns the PRIMARY promise at the top level of this object
+// (workingDays + formattedExpectedDeliveryDate + a structured
+// expectedDeliveryDate), and only populates alternativeDeliveryDates[] when a
+// product offers more than one delivery window. Confirmed against the live
+// Shipping Guide 2.0 response captured 2026-07-10 (Oslo 0150 -> Trondheim
+// 7010), where workingDays/formattedExpectedDeliveryDate were present at the
+// top level and alternativeDeliveryDates was EMPTY.
+//
+// The earlier struct modelled ONLY alternativeDeliveryDates[], so
+// toDomainQuote read [0] of an empty slice and shipping-core silently dropped
+// every Bring transit time (returning TransitDays:0 and a zero
+// EstimatedDelivery of 0001-01-01). That defect is the direct reason a
+// "shipping time Oslo -> Trondheim" query returned no Bring ETA even with a
+// live Bring connection. See docs/core-research/shipping-core.md (2026-07-11).
 type expectedDeliveryResponse struct {
-	AlternativeDeliveryDates []struct {
-		WorkingDays                   string `json:"workingDays"`
-		FormattedExpectedDeliveryDate string `json:"formattedExpectedDeliveryDate"`
-	} `json:"alternativeDeliveryDates"`
+	WorkingDays                   string                    `json:"workingDays"`
+	FormattedExpectedDeliveryDate string                    `json:"formattedExpectedDeliveryDate"`
+	ExpectedDeliveryDate          *bringStructuredDate      `json:"expectedDeliveryDate"`
+	AlternativeDeliveryDates      []alternativeDeliveryDate `json:"alternativeDeliveryDates"`
+}
+
+// bringStructuredDate mirrors Bring's structured expectedDeliveryDate object.
+// Used only as a fallback for resolving the delivery date when the formatted
+// "dd.MM.yyyy" string is localized or absent.
+type bringStructuredDate struct {
+	Year  string `json:"year"`
+	Month string `json:"month"`
+	Day   string `json:"day"`
+}
+
+type alternativeDeliveryDate struct {
+	WorkingDays                   string `json:"workingDays"`
+	FormattedExpectedDeliveryDate string `json:"formattedExpectedDeliveryDate"`
 }

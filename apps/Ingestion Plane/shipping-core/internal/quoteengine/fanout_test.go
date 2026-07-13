@@ -100,12 +100,13 @@ func toQuoters(adapters []carrier.Adapter) []Quoter {
 // without depending on mock.Adapter's own pricing logic.
 type mockQuoter struct {
 	code    string
+	mode    carrier.Mode
 	latency time.Duration
 	err     error
 }
 
 func (m *mockQuoter) Info() carrier.Info {
-	return carrier.Info{Code: m.code, Name: m.code, Segment: carrier.SegmentBoth}
+	return carrier.Info{Code: m.code, Name: m.code, Segment: carrier.SegmentBoth, Mode: m.mode}
 }
 
 func (m *mockQuoter) Quote(ctx context.Context, req carrier.QuoteRequest) ([]carrier.Quote, error) {

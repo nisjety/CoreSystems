@@ -130,15 +130,120 @@ func TestAdapter_Quote_UnexpectedStatusSurfacesDetail(t *testing.T) {
 	}
 }
 
-func TestAdapter_BookLabelTrack_NotImplemented(t *testing.T) {
-	a := New(Config{APIKey: "k", APISecret: "s", BaseURL: "http://unused.invalid"})
-	if _, err := a.Book(context.Background(), carrier.BookingRequest{}); err == nil {
-		t.Error("expected Book to return an error — not implemented yet")
+func testBookingRequest() carrier.BookingRequest {
+	return carrier.BookingRequest{
+		ServiceName: "P",
+		Price:       carrier.Money{AmountCents: 84550, Currency: "NOK"},
+		From:        carrier.Address{Name: "Velion AS", PostalCode: "0150", City: "Oslo", Country: "NO"},
+		To:          carrier.Address{Name: "Empfänger GmbH", PostalCode: "10115", City: "Berlin", Country: "DE"},
+		Package:     carrier.Package{WeightKg: 5, LengthCm: 30, WidthCm: 20, HeightCm: 15},
+		Customs: &carrier.CustomsInfo{
+			ContentsType: "goods",
+			Incoterms:    "DAP",
+			Items: []carrier.CustomsItem{
+				{Description: "Widgets", Quantity: 2, ValueCents: 5000, Currency: "NOK", WeightKg: 1, HSCode: "8471.30", OriginCountry: "NO"},
+			},
+		},
 	}
-	if _, err := a.Label(context.Background(), "ref"); err == nil {
-		t.Error("expected Label to return an error — not implemented yet")
+}
+
+func TestAdapter_Book_BlockedAgainstNonSandboxBaseURLByDefault(t *testing.T) {
+	a := New(Config{APIKey: "k", APISecret: "s", BaseURL: "https://express.api.dhl.com/mydhlapi"})
+	if _, err := a.Book(context.Background(), testBookingRequest()); err == nil {
+		t.Fatal("expected Book to refuse a non-sandbox BaseURL without LiveBooking")
 	}
-	if _, err := a.Track(context.Background(), "trackingno"); err == nil {
-		t.Error("expected Track to return an error — not implemented yet")
+}
+
+const exampleShipmentResponse = `{
+  "shipmentTrackingNumber": "3245880253",
+  "packages": [{"trackingNumber": "3245880253"}],
+  "documents": [{"typeCode": "label", "imageFormat": "PDF", "content": "JVBERi0xLjQK"}]
+}`
+
+func TestAdapter_Book_SandboxURLSucceedsAndCachesLabel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body shipmentRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body.ProductCode != "P" {
+			t.Errorf("productCode = %q, want %q", body.ProductCode, "P")
+		}
+		if !body.Content.IsCustomsDeclarable {
+			t.Error("isCustomsDeclarable = false for a cross-border NO->DE shipment, want true")
+		}
+		_, _ = w.Write([]byte(exampleShipmentResponse))
+	}))
+	defer server.Close()
+
+	a := New(Config{APIKey: "k", APISecret: "s", BaseURL: server.URL + "/test"})
+	booking, err := a.Book(context.Background(), testBookingRequest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if booking.BookingRef != "3245880253" || booking.TrackingNo != "3245880253" {
+		t.Errorf("unexpected booking: %+v", booking)
+	}
+
+	label, err := a.Label(context.Background(), booking.BookingRef)
+	if err != nil {
+		t.Fatalf("unexpected label error: %v", err)
+	}
+	if label.ContentType != "application/pdf" || len(label.Data) == 0 {
+		t.Errorf("unexpected label: %+v", label)
+	}
+}
+
+func TestAdapter_Book_LiveBookingAllowsProductionURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(exampleShipmentResponse))
+	}))
+	defer server.Close()
+
+	a := New(Config{APIKey: "k", APISecret: "s", BaseURL: server.URL, LiveBooking: true})
+	if _, err := a.Book(context.Background(), testBookingRequest()); err != nil {
+		t.Fatalf("unexpected error with LiveBooking=true: %v", err)
+	}
+}
+
+func TestAdapter_Label_NotCached(t *testing.T) {
+	a := New(Config{APIKey: "k", APISecret: "s", BaseURL: "http://unused.invalid/test"})
+	if _, err := a.Label(context.Background(), "never-booked"); err == nil {
+		t.Fatal("expected an error for an uncached booking ref")
+	}
+}
+
+const exampleTrackingResponse = `{
+  "shipments": [{
+    "status": {"status": "delivered", "description": "Delivered", "timestamp": "2026-07-08T14:00:00Z"},
+    "events": [
+      {"status": "delivered", "description": "Delivered", "timestamp": "2026-07-08T14:00:00Z"},
+      {"status": "transit", "description": "Departed facility", "timestamp": "2026-07-07T09:00:00Z"}
+    ]
+  }]
+}`
+
+func TestAdapter_Track_ParsesChronologicalEventsAndDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		_, _ = w.Write([]byte(exampleTrackingResponse))
+	}))
+	defer server.Close()
+
+	a := New(Config{APIKey: "k", APISecret: "s", BaseURL: server.URL + "/test"})
+	status, err := a.Track(context.Background(), "3245880253")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.CurrentStatus != "delivered" {
+		t.Errorf("CurrentStatus = %q, want delivered", status.CurrentStatus)
+	}
+	if len(status.Events) != 2 || status.Events[0].Description != "Departed facility" {
+		t.Errorf("events not chronological: %+v", status.Events)
+	}
+	if status.ActualDelivery == nil {
+		t.Error("expected ActualDelivery to be set for a delivered shipment")
 	}
 }

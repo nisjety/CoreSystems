@@ -78,6 +78,27 @@ impl AiFormatRunner {
         max_chars: Option<usize>,
         zdr: ZdrMode,
     ) -> QuarryResult<SummaryResult> {
+        self.summary_inner(markdown, max_chars, zdr, None).await
+    }
+
+    pub async fn summary_for_org(
+        &self,
+        org_id: &str,
+        markdown: &str,
+        max_chars: Option<usize>,
+        zdr: ZdrMode,
+    ) -> QuarryResult<SummaryResult> {
+        self.summary_inner(markdown, max_chars, zdr, Some(org_id))
+            .await
+    }
+
+    async fn summary_inner(
+        &self,
+        markdown: &str,
+        max_chars: Option<usize>,
+        zdr: ZdrMode,
+        org_id: Option<&str>,
+    ) -> QuarryResult<SummaryResult> {
         validate_input(markdown, zdr)?;
         let cap = max_chars.unwrap_or(DEFAULT_MAX_SUMMARY_CHARS);
 
@@ -87,7 +108,7 @@ impl AiFormatRunner {
              ===\n{markdown}\n==="
         );
 
-        let resp = self.invoke(&prompt).await?;
+        let resp = self.invoke(&prompt, org_id).await?;
         let summary = resp.content.trim().to_string();
         let mut summary = summary;
         if summary.chars().count() > cap {
@@ -111,6 +132,26 @@ impl AiFormatRunner {
         schema: serde_json::Value,
         zdr: ZdrMode,
     ) -> QuarryResult<JsonResult> {
+        self.json_inner(markdown, schema, zdr, None).await
+    }
+
+    pub async fn json_for_org(
+        &self,
+        org_id: &str,
+        markdown: &str,
+        schema: serde_json::Value,
+        zdr: ZdrMode,
+    ) -> QuarryResult<JsonResult> {
+        self.json_inner(markdown, schema, zdr, Some(org_id)).await
+    }
+
+    async fn json_inner(
+        &self,
+        markdown: &str,
+        schema: serde_json::Value,
+        zdr: ZdrMode,
+        org_id: Option<&str>,
+    ) -> QuarryResult<JsonResult> {
         validate_input(markdown, zdr)?;
         let schema_str = serde_json::to_string_pretty(&schema).map_err(|e| {
             QuarryError::new(
@@ -126,7 +167,7 @@ impl AiFormatRunner {
              Return ONLY a valid JSON document matching the schema. No prose."
         );
 
-        let resp = self.invoke(&prompt).await?;
+        let resp = self.invoke(&prompt, org_id).await?;
         let body = strip_code_fences(&resp.content);
         let data: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
             QuarryError::new(
@@ -152,6 +193,27 @@ impl AiFormatRunner {
         question: &str,
         zdr: ZdrMode,
     ) -> QuarryResult<QueryResult> {
+        self.query_inner(markdown, question, zdr, None).await
+    }
+
+    pub async fn query_for_org(
+        &self,
+        org_id: &str,
+        markdown: &str,
+        question: &str,
+        zdr: ZdrMode,
+    ) -> QuarryResult<QueryResult> {
+        self.query_inner(markdown, question, zdr, Some(org_id))
+            .await
+    }
+
+    async fn query_inner(
+        &self,
+        markdown: &str,
+        question: &str,
+        zdr: ZdrMode,
+        org_id: Option<&str>,
+    ) -> QuarryResult<QueryResult> {
         validate_input(markdown, zdr)?;
         if question.trim().is_empty() {
             return Err(QuarryError::new(ErrorCode::BadRequest, "question is empty"));
@@ -163,7 +225,7 @@ impl AiFormatRunner {
              Question: {question}\n\nMarkdown:\n===\n{markdown}\n==="
         );
 
-        let resp = self.invoke(&prompt).await?;
+        let resp = self.invoke(&prompt, org_id).await?;
         Ok(QueryResult {
             answer: resp.content.trim().to_string(),
             model: resp.model_used,
@@ -180,6 +242,27 @@ impl AiFormatRunner {
         question: &str,
         zdr: ZdrMode,
     ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
+        self.query_stream_inner(markdown, question, zdr, None).await
+    }
+
+    pub async fn query_stream_for_org(
+        &self,
+        org_id: &str,
+        markdown: &str,
+        question: &str,
+        zdr: ZdrMode,
+    ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
+        self.query_stream_inner(markdown, question, zdr, Some(org_id))
+            .await
+    }
+
+    async fn query_stream_inner(
+        &self,
+        markdown: &str,
+        question: &str,
+        zdr: ZdrMode,
+        org_id: Option<&str>,
+    ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
         validate_input(markdown, zdr)?;
         if question.trim().is_empty() {
             return Err(QuarryError::new(ErrorCode::BadRequest, "question is empty"));
@@ -195,12 +278,13 @@ impl AiFormatRunner {
             session_key: None,
             thread_id: None,
         };
-        self.client.invoke_stream(&req).await
+        self.client.invoke_stream_scoped(org_id, &req).await
     }
 
     async fn invoke(
         &self,
         content: &str,
+        org_id: Option<&str>,
     ) -> QuarryResult<crate::mp_client::ModelPlaneInvokeResponse> {
         let req = ModelPlaneInvokeRequest {
             content: content.to_string(),
@@ -208,7 +292,10 @@ impl AiFormatRunner {
             session_key: None,
             thread_id: None,
         };
-        self.client.invoke(&req).await
+        match org_id {
+            Some(org_id) => self.client.invoke_for_org(org_id, &req).await,
+            None => self.client.invoke(&req).await,
+        }
     }
 }
 

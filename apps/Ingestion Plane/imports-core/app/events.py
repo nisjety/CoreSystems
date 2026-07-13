@@ -31,5 +31,8 @@ class EventPublisher:
             await self.connect()
         await self._client.publish(subject, json.dumps(payload).encode("utf-8"))
 
+    def is_connected(self) -> bool:
+        return self._connected and self._client.is_connected
+
 
 event_publisher = EventPublisher()

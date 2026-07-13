@@ -162,6 +162,8 @@ mod tests {
             exp: i64::MAX,
             org_id: "org_a".into(),
             user_id: "u1".into(),
+            principal_type: None,
+            service_id: None,
             nbf: None,
             aud: None,
             scopes: Vec::new(),

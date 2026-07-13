@@ -21,6 +21,10 @@ use crate::mp_client::{ModelPlaneClient, ModelPlaneInvokeRequest};
 #[async_trait]
 pub trait QueryRewriter: Send + Sync {
     async fn rewrite(&self, query: &str) -> String;
+
+    async fn rewrite_for_org(&self, query: &str, _org_id: Option<&str>) -> String {
+        self.rewrite(query).await
+    }
 }
 
 /// Production rewriter backed by the Model Plane. Falls back to the original
@@ -51,6 +55,16 @@ const MAX_REWRITE_CHARS: usize = 400;
 #[async_trait]
 impl QueryRewriter for ModelPlaneQueryRewriter {
     async fn rewrite(&self, query: &str) -> String {
+        self.rewrite_inner(query, None).await
+    }
+
+    async fn rewrite_for_org(&self, query: &str, org_id: Option<&str>) -> String {
+        self.rewrite_inner(query, org_id).await
+    }
+}
+
+impl ModelPlaneQueryRewriter {
+    async fn rewrite_inner(&self, query: &str, org_id: Option<&str>) -> String {
         let original = query.trim();
         if original.is_empty() {
             return original.to_string();
@@ -61,7 +75,11 @@ impl QueryRewriter for ModelPlaneQueryRewriter {
             session_key: None,
             thread_id: None,
         };
-        match self.client.invoke(&req).await {
+        let response = match org_id {
+            Some(org_id) => self.client.invoke_for_org(org_id, &req).await,
+            None => self.client.invoke(&req).await,
+        };
+        match response {
             Ok(resp) => sanitize_rewrite(&resp.content, original),
             Err(e) => {
                 tracing::warn!(error = %e, "autoprompt: rewrite failed; using original query");

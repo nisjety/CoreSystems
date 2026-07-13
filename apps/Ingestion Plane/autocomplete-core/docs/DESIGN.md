@@ -76,7 +76,9 @@ position.
 ## Security
 
 - No direct browser access is required.
-- `AUTOCOMPLETE_INTERNAL_TOKEN` gates non-health routes when configured.
+- `AUTOCOMPLETE_INTERNAL_TOKEN` is required and gates non-health routes. An
+  unset token is accepted only with both `ALLOW_INSECURE_DEV_DEFAULTS=1` and
+  `ISOLATED_E2E=1`.
 - Tenant isolation uses explicit org buckets.
 - The Docker Compose service requires `SONIC_PASSWORD` and
   `AUTOCOMPLETE_INTERNAL_TOKEN`.

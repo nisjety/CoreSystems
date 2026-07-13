@@ -258,6 +258,9 @@ pub fn router(state: AppState) -> Router {
         // P7 — agentic browser loop (real chromiumoxide). No-op router when
         // the `browser-agent` feature is disabled. Inherits `require_auth`.
         .merge(crate::agent_routes::agent_router())
+        .layer(middleware::from_fn(
+            crate::auth::require_service_route_scope,
+        ))
         .layer(middleware::from_fn(crate::auth::require_auth));
 
     // Cap request bodies at 1 MB. Largest legit payload is /v1/batch
@@ -344,6 +347,16 @@ async fn scrape(
     Json(req): Json<ScrapeRequest>,
 ) -> Result<Json<Envelope<NormalizedOutput>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    if req.ingest.unwrap_or(false) && claims.is_service() && !claims.has_scope("scrape:write") {
+        let error = QuarryError::new(
+            ErrorCode::Forbidden,
+            "scrape ingest requires the scrape:write service scope",
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(Envelope::err(&request_id, error)),
+        ));
+    }
     let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
     let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant isolation: ignore any client-supplied org_id and use the
@@ -385,7 +398,7 @@ async fn scrape(
         zdr,
         ingest: ingest_client,
         org_id: Some(org_id.clone()),
-        user_id: Some(claims.user_id.clone()),
+        user_id: Some(claims.actor_id().to_owned()),
         privacy: privacy.clone(),
         cancel_token: None,
         local_index: state.local_index.clone(),
@@ -1127,6 +1140,7 @@ mod tests {
             searxng_url: None,
             model_plane_url: None,
             model_plane_token: None,
+            service_token_provider: None,
             answer_pipeline: None,
             local_index: None,
             usage: Arc::new(NoopUsageMeter),

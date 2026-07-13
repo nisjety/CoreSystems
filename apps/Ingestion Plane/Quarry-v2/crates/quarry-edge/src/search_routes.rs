@@ -34,6 +34,9 @@ const SIMILAR_SEED_MAX_CHARS: usize = 2_000;
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
+    /// Zero Data Retention: bypass caches and durable content-bearing events.
+    #[serde(default)]
+    pub zdr: bool,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -85,6 +88,10 @@ pub struct SearchRequest {
 
 fn default_safe_search() -> bool {
     true
+}
+
+const fn effective_zdr(requested: bool) -> bool {
+    requested
 }
 
 #[derive(Debug, Serialize)]
@@ -333,6 +340,7 @@ pub async fn search(
     };
 
     let effective_query = apply_exact_match(&req.query, req.exact_match);
+    let zdr = effective_zdr(req.zdr);
     let opts = SearchOptions {
         limit: req.limit.unwrap_or(10).min(50),
         country: req.country.clone(),
@@ -368,9 +376,13 @@ pub async fn search(
     );
     let cache_key = crate::cache::SearchCache::key(&claims.org_id, &effective_query, &params_sig);
     let scache = state.redis.clone().map(crate::cache::SearchCache::new);
-    let from_cache: Option<CachedSearch> = match &scache {
-        Some(c) => c.get(&cache_key).await,
-        None => None,
+    let from_cache: Option<CachedSearch> = if zdr {
+        None
+    } else {
+        match &scache {
+            Some(c) => c.get(&cache_key).await,
+            None => None,
+        }
     };
 
     let (results, answer, citations, provider_name, cache_hit) = match from_cache {
@@ -388,7 +400,7 @@ pub async fn search(
                                 top_k: Some(ANSWER_TOP_K),
                                 country: req.country.clone(),
                                 language: req.language.clone(),
-                                zdr: None,
+                                zdr: Some(zdr),
                                 org_id: Some(claims.org_id.clone()),
                             };
                             match p.answer(areq).await {
@@ -406,20 +418,22 @@ pub async fn search(
                 };
 
                 // Write-back (best-effort). Cache failures never fail the request.
-                if let Some(c) = &scache {
-                    let ttl = crate::cache::search_ttl_secs(
-                        req.topic.as_deref(),
-                        opts.time_range.as_deref(),
-                        SEARCH_CACHE_DEFAULT_TTL_SECS,
-                    );
-                    let payload = CachedSearch {
-                        provider: provider_name.clone(),
-                        results: results.clone(),
-                        answer: answer.clone(),
-                        citations: citations.clone(),
-                    };
-                    if let Err(e) = c.put_with_ttl(&cache_key, &payload, ttl).await {
-                        tracing::warn!(error = %e, "search cache: put failed");
+                if !zdr {
+                    if let Some(c) = &scache {
+                        let ttl = crate::cache::search_ttl_secs(
+                            req.topic.as_deref(),
+                            opts.time_range.as_deref(),
+                            SEARCH_CACHE_DEFAULT_TTL_SECS,
+                        );
+                        let payload = CachedSearch {
+                            provider: provider_name.clone(),
+                            results: results.clone(),
+                            answer: answer.clone(),
+                            citations: citations.clone(),
+                        };
+                        if let Err(e) = c.put_with_ttl(&cache_key, &payload, ttl).await {
+                            tracing::warn!(error = %e, "search cache: put failed");
+                        }
                     }
                 }
 
@@ -475,25 +489,27 @@ pub async fn search(
     let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
     let run_id_str = run_id.to_string();
     let idem = format!("search:{}", run_id);
-    state
-        .event_sink
-        .emit(
-            run_id,
-            quarry_core::event::EventType::SearchIssued,
-            serde_json::json!({
-                "query": req.query,
-                "provider": provider_name,
-                "result_count": count,
-                "limit": opts.limit,
-                "topic": req.topic,
-                "exact_match": req.exact_match,
-                "org_id": claims.org_id,
-                "user_id": claims.user_id,
-                "cache_hit": cache_hit,
-            }),
-            idem,
-        )
-        .await;
+    if !zdr {
+        state
+            .event_sink
+            .emit(
+                run_id,
+                quarry_core::event::EventType::SearchIssued,
+                serde_json::json!({
+                    "query": req.query,
+                    "provider": provider_name,
+                    "result_count": count,
+                    "limit": opts.limit,
+                    "topic": req.topic,
+                    "exact_match": req.exact_match,
+                    "org_id": claims.org_id,
+                    "user_id": claims.user_id,
+                    "cache_hit": cache_hit,
+                }),
+                idem,
+            )
+            .await;
+    }
 
     // P3 / billing — one unit per query (cache hits included: the query still
     // happened; only upstream compute was saved).
@@ -512,6 +528,7 @@ pub async fn search(
                 "include_answer": req.include_answer,
                 "format": req.format,
                 "cache_hit": cache_hit,
+                "zdr": zdr,
             }),
         ))
         .await;
@@ -893,7 +910,7 @@ struct RawSuggestions {
 /// the call/parse fails, so the search UX never breaks on suggestions.
 pub async fn suggest(
     State(state): State<AppState>,
-    Extension(_claims): Extension<crate::auth::Claims>,
+    Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<SuggestRequest>,
 ) -> impl IntoResponse {
     let query = req.query.trim();
@@ -903,15 +920,30 @@ pub async fn suggest(
     if query.is_empty() {
         return (StatusCode::OK, Json(SuggestResponse::default()));
     }
-    let suggestions = fetch_suggestions(mp_url, state.model_plane_token.as_deref(), query).await;
+    let suggestions = fetch_suggestions(
+        mp_url,
+        state.service_token_provider.clone(),
+        state.model_plane_token.as_deref(),
+        &claims.org_id,
+        query,
+    )
+    .await;
     (StatusCode::OK, Json(suggestions))
 }
 
-async fn fetch_suggestions(mp_url: &str, token: Option<&str>, query: &str) -> SuggestResponse {
+async fn fetch_suggestions(
+    mp_url: &str,
+    token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+    dev_token: Option<&str>,
+    org_id: &str,
+    query: &str,
+) -> SuggestResponse {
     let Ok(mut client) = ModelPlaneClient::new(mp_url) else {
         return SuggestResponse::default();
     };
-    if let Some(t) = token.filter(|t| !t.is_empty()) {
+    if let Some(provider) = token_provider {
+        client = client.with_token_provider(provider);
+    } else if let Some(t) = dev_token.filter(|t| !t.is_empty()) {
         client = client.with_bearer_token(t);
     }
     let prompt = format!(
@@ -927,7 +959,7 @@ entity: a compact knowledge panel for the query's PRIMARY entity (one specific p
         session_key: None,
         thread_id: None,
     };
-    match client.invoke(&req).await {
+    match client.invoke_for_org(org_id, &req).await {
         Ok(resp) => parse_suggestions(&resp.content, query),
         Err(e) => {
             tracing::warn!(error = %e, "suggest: model plane failed; returning no suggestions");

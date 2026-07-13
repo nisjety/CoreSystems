@@ -26,17 +26,29 @@ const (
 )
 
 type Config struct {
-	APIKey        string
-	APIKeyHeader  string
-	TokenVerifier TokenVerifier
+	APIKey               string
+	APIKeyHeader         string
+	TokenVerifier        TokenVerifier
+	AllowLegacyTenantKey bool
 }
 
 type Principal struct {
-	UserID         string `json:"userId"`
-	OrganizationID string `json:"organizationId"`
-	WorkspaceID    string `json:"workspaceId"`
-	Role           string `json:"role"`
-	Email          string `json:"email"`
+	UserID         string   `json:"userId"`
+	OrganizationID string   `json:"organizationId"`
+	WorkspaceID    string   `json:"workspaceId"`
+	Role           string   `json:"role"`
+	Email          string   `json:"email"`
+	PrincipalType  string   `json:"principalType"`
+	Scopes         []string `json:"scopes"`
+}
+
+func (p Principal) HasScope(scope string) bool {
+	for _, granted := range p.Scopes {
+		if granted == scope {
+			return true
+		}
+	}
+	return false
 }
 
 type TokenVerifier interface {
@@ -125,6 +137,9 @@ func InternalOrBearer(cfg Config) fiber.Handler {
 			if strings.TrimSpace(principal.Role) == "" {
 				principal.Role = defaultRole
 			}
+			if strings.TrimSpace(principal.PrincipalType) == "" {
+				principal.PrincipalType = "user"
+			}
 			c.Locals(internalLocal, false)
 			c.Locals(principalLocal, principal)
 			return c.Next()
@@ -136,6 +151,9 @@ func InternalOrBearer(cfg Config) fiber.Handler {
 		}
 		if cfg.APIKey == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(cfg.APIKey)) != 1 {
 			return writeError(c, fiber.StatusUnauthorized, "unauthorized", "Invalid internal API key")
+		}
+		if !cfg.AllowLegacyTenantKey {
+			return writeError(c, fiber.StatusForbidden, "scoped_service_token_required", "Tenant APIs require a verified user or audience-scoped service token")
 		}
 		c.Locals(internalLocal, true)
 		c.Locals(principalLocal, syntheticInternalPrincipal(c))
@@ -229,6 +247,8 @@ func syntheticInternalPrincipal(c *fiber.Ctx) Principal {
 		WorkspaceID:    requestValue(c, "workspaceId"),
 		Role:           internalRole,
 		Email:          requestValue(c, "userEmail"),
+		PrincipalType:  "service",
+		Scopes:         []string{"integration:read", "integration:write"},
 	}
 }
 

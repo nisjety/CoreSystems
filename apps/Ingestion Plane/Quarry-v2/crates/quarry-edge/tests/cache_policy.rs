@@ -56,6 +56,7 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
         searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
+        service_token_provider: None,
         answer_pipeline: None,
         local_index: None,
         policy: quarry_runtime::RunPolicy::default(),

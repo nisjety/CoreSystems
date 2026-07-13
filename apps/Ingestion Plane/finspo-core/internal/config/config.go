@@ -27,7 +27,9 @@ type Config struct {
 	OTELExporterEndpoint string
 
 	DataPlaneDocumentsURL string
-	DataPlaneAPIKey       string
+	AuthCoreURL           string
+	FinspoServiceID       string
+	FinspoServiceAPIKey   string
 
 	// Phase 3 — scheduler + permission capture knobs.
 	SyncInterval       time.Duration
@@ -37,7 +39,8 @@ type Config struct {
 	// forward a content-bearing document to Data Plane v2. Defaults OFF: it is a
 	// heavier operation (a download + extraction per file) with PII/cost
 	// implications, so a deployment opts in explicitly. Requires
-	// DataPlaneDocumentsURL + DataPlaneAPIKey to be set as well.
+	// DataPlaneDocumentsURL plus the Auth Core service-principal settings to be
+	// set as well.
 	CaptureContent           bool
 	ContentMaxBytes          int64
 	ContentZDRClassification string
@@ -75,6 +78,21 @@ func Load() (Config, error) {
 	if databaseURL == "" {
 		return Config{}, fmt.Errorf("FINSPO_DSN is required")
 	}
+	dataPlaneURL := strings.TrimSpace(os.Getenv("DATA_PLANE_DOCUMENTS_BASE_URL"))
+	authCoreURL := envOr("AUTH_CORE_URL", "http://auth-core:3011")
+	finspoServiceID := envOr("FINSPO_SERVICE_ID", "finspo-core")
+	finspoServiceAPIKey := strings.TrimSpace(os.Getenv("FINSPO_SERVICE_API_KEY"))
+	if dataPlaneURL != "" {
+		if authCoreURL == "" {
+			return Config{}, fmt.Errorf("AUTH_CORE_URL is required when DATA_PLANE_DOCUMENTS_BASE_URL is set")
+		}
+		if finspoServiceID == "" {
+			return Config{}, fmt.Errorf("FINSPO_SERVICE_ID is required when DATA_PLANE_DOCUMENTS_BASE_URL is set")
+		}
+		if finspoServiceAPIKey == "" {
+			return Config{}, fmt.Errorf("FINSPO_SERVICE_API_KEY is required when DATA_PLANE_DOCUMENTS_BASE_URL is set")
+		}
+	}
 
 	return Config{
 		Port:                     port,
@@ -89,8 +107,10 @@ func Load() (Config, error) {
 		NATSURL:                  strings.TrimSpace(os.Getenv("NATS_URL")),
 		NATSSubjectPrefix:        envOr("NATS_SUBJECT_PREFIX", "finspo"),
 		OTELExporterEndpoint:     strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
-		DataPlaneDocumentsURL:    strings.TrimSpace(os.Getenv("DATA_PLANE_DOCUMENTS_BASE_URL")),
-		DataPlaneAPIKey:          strings.TrimSpace(os.Getenv("DATA_PLANE_INTERNAL_API_KEY")),
+		DataPlaneDocumentsURL:    dataPlaneURL,
+		AuthCoreURL:              authCoreURL,
+		FinspoServiceID:          finspoServiceID,
+		FinspoServiceAPIKey:      finspoServiceAPIKey,
 		SyncInterval:             envDuration("FINSPO_SYNC_INTERVAL", 5*time.Minute),
 		CapturePermissions:       envBool("FINSPO_CAPTURE_PERMISSIONS", true),
 		CaptureContent:           envBool("FINSPO_CAPTURE_CONTENT", false),

@@ -23,6 +23,7 @@ use quarry_core::ids::Id;
 use quarry_core::zdr::ZdrMode;
 
 use crate::planner::{Planner, PlannerDecision};
+use crate::service_tokens::{ServiceTokenRequest, SharedServiceTokenProvider};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -49,14 +50,22 @@ pub struct ModelPlaneInvokeResponse {
 pub struct ModelPlaneClient {
     http: Client,
     base_url: String,
-    bearer_token: Option<String>,
+    auth: ModelPlaneAuth,
     default_model: String,
+}
+
+#[derive(Clone)]
+enum ModelPlaneAuth {
+    None,
+    StaticDev(String),
+    Dynamic(SharedServiceTokenProvider),
 }
 
 impl ModelPlaneClient {
     pub fn new(base_url: impl Into<String>) -> QuarryResult<Self> {
         let http = Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| {
                 QuarryError::new(
@@ -67,13 +76,20 @@ impl ModelPlaneClient {
         Ok(Self {
             http,
             base_url: base_url.into(),
-            bearer_token: None,
+            auth: ModelPlaneAuth::None,
             default_model: DEFAULT_MODEL.to_string(),
         })
     }
 
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.bearer_token = Some(token.into());
+        self.auth = ModelPlaneAuth::StaticDev(token.into());
+        self
+    }
+
+    /// Production authentication. Tokens are minted lazily for the verified
+    /// request org supplied to [`Self::invoke_for_org`].
+    pub fn with_token_provider(mut self, provider: SharedServiceTokenProvider) -> Self {
+        self.auth = ModelPlaneAuth::Dynamic(provider);
         self
     }
 
@@ -86,24 +102,94 @@ impl ModelPlaneClient {
         &self,
         req: &ModelPlaneInvokeRequest,
     ) -> QuarryResult<ModelPlaneInvokeResponse> {
+        self.invoke_with_org(None, req).await
+    }
+
+    pub async fn invoke_for_org(
+        &self,
+        org_id: &str,
+        req: &ModelPlaneInvokeRequest,
+    ) -> QuarryResult<ModelPlaneInvokeResponse> {
+        self.invoke_with_org(Some(org_id), req).await
+    }
+
+    async fn invoke_with_org(
+        &self,
+        org_id: Option<&str>,
+        req: &ModelPlaneInvokeRequest,
+    ) -> QuarryResult<ModelPlaneInvokeResponse> {
+        let token_request =
+            ServiceTokenRequest::model_plane(["models:invoke"], "invoke bounded model primitive");
+        let bearer = self.bearer_for_org(org_id, &token_request, false).await?;
+        let mut resp = self.send_invoke(req, bearer.as_deref()).await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if matches!(self.auth, ModelPlaneAuth::Dynamic(_)) {
+                let refreshed = self.bearer_for_org(org_id, &token_request, true).await?;
+                resp = self.send_invoke(req, refreshed.as_deref()).await?;
+            }
+        }
+
+        self.decode_invoke(resp).await
+    }
+
+    async fn bearer_for_org(
+        &self,
+        org_id: Option<&str>,
+        request: &ServiceTokenRequest,
+        force_refresh: bool,
+    ) -> QuarryResult<Option<String>> {
+        match &self.auth {
+            ModelPlaneAuth::None => Ok(None),
+            ModelPlaneAuth::StaticDev(token) => Ok(Some(token.clone())),
+            ModelPlaneAuth::Dynamic(provider) => {
+                let org_id = org_id.ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Forbidden,
+                        "verified org_id is required for Model Plane authentication",
+                    )
+                })?;
+                Ok(Some(
+                    provider
+                        .token_for_org(org_id, request, force_refresh)
+                        .await?
+                        .expose()
+                        .to_owned(),
+                ))
+            }
+        }
+    }
+
+    async fn send_invoke(
+        &self,
+        req: &ModelPlaneInvokeRequest,
+        bearer: Option<&str>,
+    ) -> QuarryResult<reqwest::Response> {
         let url = format!("{}/v1/invoke", self.base_url.trim_end_matches('/'));
         let mut builder = self.http.post(&url).json(req);
-        if let Some(token) = &self.bearer_token {
+        if let Some(token) = bearer {
             builder = builder.bearer_auth(token);
         }
-        let resp = builder.send().await.map_err(|e| {
+        builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
                 format!("model-plane invoke transport failure: {e}"),
             )
-        })?;
+        })
+    }
 
+    async fn decode_invoke(
+        &self,
+        resp: reqwest::Response,
+    ) -> QuarryResult<ModelPlaneInvokeResponse> {
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             return Err(QuarryError::new(
-                ErrorCode::DriverFailed,
-                format!("model-plane invoke returned {status}: {body}"),
+                if matches!(status.as_u16(), 401 | 403) {
+                    ErrorCode::Forbidden
+                } else {
+                    ErrorCode::DriverFailed
+                },
+                format!("model-plane invoke returned {status}"),
             ));
         }
 
@@ -124,27 +210,41 @@ impl ModelPlaneClient {
         &self,
         req: &ModelPlaneInvokeRequest,
     ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
-        let url = format!("{}/v1/invoke/stream", self.base_url.trim_end_matches('/'));
-        let mut builder = self
-            .http
-            .post(&url)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(req);
-        if let Some(token) = &self.bearer_token {
-            builder = builder.bearer_auth(token);
+        self.invoke_stream_scoped(None, req).await
+    }
+
+    pub async fn invoke_stream_for_org(
+        &self,
+        org_id: &str,
+        req: &ModelPlaneInvokeRequest,
+    ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
+        self.invoke_stream_scoped(Some(org_id), req).await
+    }
+
+    pub async fn invoke_stream_scoped(
+        &self,
+        org_id: Option<&str>,
+        req: &ModelPlaneInvokeRequest,
+    ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
+        let token_request =
+            ServiceTokenRequest::model_plane(["models:invoke"], "stream bounded model primitive");
+        let bearer = self.bearer_for_org(org_id, &token_request, false).await?;
+        let mut resp = self.send_invoke_stream(req, bearer.as_deref()).await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if matches!(self.auth, ModelPlaneAuth::Dynamic(_)) {
+                let refreshed = self.bearer_for_org(org_id, &token_request, true).await?;
+                resp = self.send_invoke_stream(req, refreshed.as_deref()).await?;
+            }
         }
-        let resp = builder.send().await.map_err(|e| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                format!("model-plane invoke/stream transport failure: {e}"),
-            )
-        })?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             return Err(QuarryError::new(
-                ErrorCode::DriverFailed,
-                format!("model-plane invoke/stream returned {status}: {body}"),
+                if matches!(status.as_u16(), 401 | 403) {
+                    ErrorCode::Forbidden
+                } else {
+                    ErrorCode::DriverFailed
+                },
+                format!("model-plane invoke/stream returned {status}"),
             ));
         }
 
@@ -163,7 +263,6 @@ impl ModelPlaneClient {
                         return;
                     }
                 }
-                // Emit the `delta` from each complete SSE frame (blank-line-delimited).
                 while let Some(idx) = buf.find("\n\n") {
                     let frame: String = buf.drain(..idx + 2).collect();
                     for line in frame.lines() {
@@ -184,6 +283,28 @@ impl ModelPlaneClient {
                     }
                 }
             }
+        })
+    }
+
+    async fn send_invoke_stream(
+        &self,
+        req: &ModelPlaneInvokeRequest,
+        bearer: Option<&str>,
+    ) -> QuarryResult<reqwest::Response> {
+        let url = format!("{}/v1/invoke/stream", self.base_url.trim_end_matches('/'));
+        let mut builder = self
+            .http
+            .post(&url)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(req);
+        if let Some(token) = bearer {
+            builder = builder.bearer_auth(token);
+        }
+        builder.send().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("model-plane invoke/stream transport failure: {e}"),
+            )
         })
     }
 }
@@ -337,8 +458,11 @@ impl Planner for ModelPlanePlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service_tokens::{ServiceBearer, ServiceTokenProvider, ServiceTokenRequest};
+    use async_trait::async_trait;
     use chrono::Utc;
     use quarry_core::ids::kinds::RunKind;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -366,6 +490,86 @@ mod tests {
             max_runtime_s: None,
             max_cost_usd: None,
         }
+    }
+
+    struct RotatingModelTokenProvider(AtomicUsize);
+
+    #[async_trait]
+    impl ServiceTokenProvider for RotatingModelTokenProvider {
+        async fn token_for_org(
+            &self,
+            org_id: &str,
+            _request: &ServiceTokenRequest,
+            force_refresh: bool,
+        ) -> QuarryResult<ServiceBearer> {
+            assert_eq!(org_id, "org_verified");
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(force_refresh, call > 0);
+            Ok(ServiceBearer::from_test_token(if call == 0 {
+                "first.model.token"
+            } else {
+                "fresh.model.token"
+            }))
+        }
+
+        async fn invalidate(&self, _org_id: &str, _request: &ServiceTokenRequest) {}
+    }
+
+    #[derive(Clone)]
+    struct ModelRejectThenAccept(Arc<AtomicUsize>);
+
+    impl wiremock::Respond for ModelRejectThenAccept {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+            let authorization = request
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            if attempt == 0 {
+                assert_eq!(authorization, "Bearer first.model.token");
+                ResponseTemplate::new(401)
+            } else {
+                assert_eq!(authorization, "Bearer fresh.model.token");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "request_id": "req_refreshed",
+                    "content": "ok",
+                    "model_used": "test-model"
+                }))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_model_client_refreshes_once_after_401() {
+        let server = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/invoke"))
+            .respond_with(ModelRejectThenAccept(requests.clone()))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let tokens = Arc::new(RotatingModelTokenProvider(AtomicUsize::new(0)));
+        let client = ModelPlaneClient::new(server.uri())
+            .unwrap()
+            .with_token_provider(tokens.clone());
+        let request = ModelPlaneInvokeRequest {
+            content: "hello".into(),
+            model: None,
+            session_key: None,
+            thread_id: None,
+        };
+
+        let response = client
+            .invoke_for_org("org_verified", &request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.request_id, "req_refreshed");
+        assert_eq!(tokens.0.load(Ordering::SeqCst), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[test]

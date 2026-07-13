@@ -1,23 +1,13 @@
 """
 M365 Provider Linked Event Handler for Ingestion Plane.
 
-When a user links their Microsoft 365 account via Control Plane,
-this handler automatically:
-1. Validates the tenant ID
-2. Creates an M365 connector instance
-3. Stores the connector configuration
-4. Initiates the OAuth token exchange
-5. Queues initial data sync jobs (calendar, emails, etc.)
+The current Control Plane event lacks a canonical organization ID, so this
+handler validates the signal and reports an explicit deferred outcome without
+creating an unowned durable job.
 """
 
-import json
 import logging
-from datetime import datetime, timezone
-from uuid import uuid4
 from typing import Optional
-
-from app.db import SessionLocal
-from app.models import ImportJob
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +16,7 @@ class M365ProviderLinkedHandler:
     """
     Handles the user.provider_linked event for Microsoft 365 accounts.
     
-    Creates M365 connectors and queues initial sync jobs automatically
-    when a user links their M365 account.
+    Defers M365 provisioning until the event includes canonical org ownership.
     """
 
     def __init__(self):
@@ -71,47 +60,12 @@ class M365ProviderLinkedHandler:
                 self.logger.info(f"Skipping non-Microsoft provider: {provider}")
                 return True
 
-            # Get database connection
-            async with SessionLocal() as session:
-                # Create M365 connector setup job
-                connector_job = ImportJob(
-                    id=uuid4(),
-                    org_id="",  # Will be retrieved from Control Plane in future
-                    user_id=user_id,
-                    source_type="m365",
-                    status="pending",  # pending → authenticating → connected → syncing
-                    metadata_json={
-                        "provider": provider,
-                        "tenant_id": tenant_id,
-                        "email": email,
-                        "type": "connector_setup",
-                        "created_by": "control_plane_event",
-                    },
-                )
-
-                session.add(connector_job)
-                await session.commit()
-                await session.refresh(connector_job)
-
-                self.logger.info(
-                    f"✅ Created M365 connector setup job: {connector_job.id}"
-                )
-
-                # In a real implementation, queue setup task:
-                # - Call M365 Graph API to verify tenant
-                # - Exchange OAuth codes
-                # - Start initial data ingestion
-                # For now, just log success
-                self.logger.info(
-                    f"📋 Next steps for M365 setup:\n"
-                    f"   1. Verify tenant {tenant_id} via Graph API\n"
-                    f"   2. Exchange OAuth tokens\n"
-                    f"   3. Create calendar sync job\n"
-                    f"   4. Create email sync job\n"
-                    f"   5. Create teams sync job"
-                )
-
-                return True
+            # This event currently has no canonical org_id. Persisting an empty
+            # tenant creates an unowned job and can never be authorized safely.
+            self.logger.warning(
+                "M365 provisioning deferred: provider_linked event has no canonical org_id"
+            )
+            return False
 
         except Exception as e:
             self.logger.error(

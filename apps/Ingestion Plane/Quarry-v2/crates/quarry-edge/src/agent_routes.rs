@@ -54,6 +54,8 @@ mod enabled {
     use quarry_core::zdr::ZdrMode;
     use quarry_core::QuarryResult;
     use quarry_runtime::observation::{ObservationContext, ObservationRunner};
+    use quarry_security::{Decision, SecurityEngine};
+    use url::Url;
 
     use crate::state::AppState;
 
@@ -73,6 +75,32 @@ mod enabled {
     /// get/insert/remove, never across an await); inner tokio-Mutex serializes
     /// steps within a single run across await points.
     pub type AgentRuns = Arc<StdMutex<HashMap<String, Arc<TokioMutex<RunEntry>>>>>;
+
+    async fn validate_navigation(
+        action: &AgentAction,
+        security: &dyn SecurityEngine,
+    ) -> QuarryResult<()> {
+        let AgentAction::Navigate { url } = action else {
+            return Ok(());
+        };
+        let parsed = Url::parse(url).map_err(|error| {
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                format!("invalid navigation URL: {error}"),
+            )
+        })?;
+        let verdict = security.preflight(&parsed).await;
+        if verdict.decision == Decision::Block {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                verdict.reasons.join("; "),
+            ));
+        }
+        if !security.allow_private_hosts() {
+            quarry_runtime::dns_guard::guard_url(&parsed).await?;
+        }
+        Ok(())
+    }
 
     #[must_use]
     pub fn new_runs() -> AgentRuns {
@@ -380,7 +408,8 @@ mod enabled {
 
         state
             .event_sink
-            .emit(
+            .emit_for_zdr(
+                zdr,
                 run_id.clone(),
                 EventType::AgentStarted,
                 serde_json::json!({ "org_id": org_id }),
@@ -466,6 +495,30 @@ mod enabled {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn agent_navigation_blocks_private_targets_at_edge_boundary() {
+            let action = AgentAction::Navigate {
+                url: "http://169.254.169.254/latest/meta-data".to_owned(),
+            };
+            let security = quarry_security::preflight::DefaultEngine::new();
+
+            let error = validate_navigation(&action, &security)
+                .await
+                .expect_err("metadata endpoint must be blocked");
+
+            assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        }
+
+        #[tokio::test]
+        async fn non_navigation_actions_do_not_trigger_network_validation() {
+            let action = AgentAction::Click {
+                selector: "#continue".to_owned(),
+            };
+            let security = quarry_security::preflight::DefaultEngine::new();
+
+            validate_navigation(&action, &security).await.unwrap();
+        }
 
         #[test]
         fn zdr_forbids_persistent_profile_when_profile_id_supplied() {
@@ -622,6 +675,10 @@ mod enabled {
                 "run belongs to another org",
             ));
         }
+
+        validate_navigation(&body.action, state.security.as_ref())
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
 
         let req = AgentActionRequest {
             run_id: entry.run_id.clone(),
@@ -971,6 +1028,7 @@ mod enabled {
         action: AgentAction,
         instruction: Option<String>,
     ) -> QuarryResult<BrowserObservation> {
+        validate_navigation(&action, state.security.as_ref()).await?;
         let mut entry = entry_arc.lock().await;
         let req = AgentActionRequest {
             run_id: entry.run_id.clone(),
@@ -1254,10 +1312,12 @@ mod enabled {
             Ok(mutex) => {
                 let entry = mutex.into_inner();
                 let rid = entry.run_id.clone();
+                let zdr = entry.zdr;
                 let _ = state.agent_driver.release(entry.session).await;
                 state
                     .event_sink
-                    .emit(
+                    .emit_for_zdr(
+                        zdr,
                         rid.clone(),
                         EventType::AgentCompleted,
                         serde_json::json!({}),

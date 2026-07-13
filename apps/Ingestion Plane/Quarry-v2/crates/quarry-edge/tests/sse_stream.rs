@@ -49,6 +49,7 @@ async fn sse_streams_page_fetched_and_artifact_written() {
         searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
+        service_token_provider: None,
         answer_pipeline: None,
         local_index: None,
         policy: quarry_runtime::RunPolicy::default(),

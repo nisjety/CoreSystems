@@ -232,15 +232,124 @@ func TestAdapter_Quote_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestAdapter_BookLabelTrack_NotImplemented(t *testing.T) {
-	a := New(Config{})
-	if _, err := a.Book(context.Background(), carrier.BookingRequest{}); err == nil {
-		t.Error("expected Book to return an error in this phase")
+func newBookingTestServer(t *testing.T, shipHandler, trackHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/security/v1/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"Bearer","expires_in":3600}`))
+	})
+	if shipHandler != nil {
+		mux.HandleFunc(shipPath, shipHandler)
 	}
-	if _, err := a.Label(context.Background(), "ref"); err == nil {
-		t.Error("expected Label to return an error in this phase")
+	if trackHandler != nil {
+		mux.HandleFunc(trackPath, trackHandler)
 	}
-	if _, err := a.Track(context.Background(), "no"); err == nil {
-		t.Error("expected Track to return an error in this phase")
+	return httptest.NewServer(mux)
+}
+
+func testBookingRequest() carrier.BookingRequest {
+	return carrier.BookingRequest{
+		ServiceName: "11",
+		Price:       carrier.Money{AmountCents: 41250, Currency: "NOK"},
+		From:        carrier.Address{Name: "Sender AS", PostalCode: "0150", City: "Oslo", Country: "NO"},
+		To:          carrier.Address{Name: "Mottaker AS", PostalCode: "20095", City: "Hamburg", Country: "DE"},
+		Package:     carrier.Package{WeightKg: 5, LengthCm: 30, WidthCm: 20, HeightCm: 15},
+	}
+}
+
+func TestAdapter_Book_BlockedAgainstNonCIEBaseURLByDefault(t *testing.T) {
+	a := New(Config{ClientID: "id", ClientSecret: "secret", BaseURL: "https://onlinetools.ups.com"})
+	if _, err := a.Book(context.Background(), testBookingRequest()); err == nil {
+		t.Fatal("expected Book to refuse a non-CIE BaseURL without LiveBooking")
+	}
+}
+
+const exampleShipmentResponse = `{
+  "ShipmentResponse": {
+    "ShipmentResults": {
+      "ShipmentIdentificationNumber": "1Z12345E0205271688",
+      "PackageResults": [{"TrackingNumber": "1Z12345E0205271688", "ShippingLabel": {"ImageFormat": {"Code": "GIF"}, "GraphicImage": "R0lGODlhAQABAAAAACw="}}]
+    }
+  }
+}`
+
+func TestAdapter_Book_CIEURLSucceedsAndCachesLabel(t *testing.T) {
+	server := newBookingTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body shipmentRequestEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if body.ShipmentRequest.Shipment.Service.Code != "11" {
+			t.Errorf("Service.Code = %q, want 11", body.ShipmentRequest.Shipment.Service.Code)
+		}
+		_, _ = w.Write([]byte(exampleShipmentResponse))
+	}, nil)
+	defer server.Close()
+
+	// substring "wwwcie" must appear in BaseURL for the default-safe gate;
+	// httptest gives us 127.0.0.1, so exercise the LiveBooking=true path
+	// here and the substring gate is covered by the Blocked test above.
+	a := New(Config{ClientID: "id", ClientSecret: "secret", BaseURL: server.URL, LiveBooking: true})
+	booking, err := a.Book(context.Background(), testBookingRequest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if booking.BookingRef != "1Z12345E0205271688" || booking.TrackingNo != "1Z12345E0205271688" {
+		t.Errorf("unexpected booking: %+v", booking)
+	}
+
+	label, err := a.Label(context.Background(), booking.TrackingNo)
+	if err != nil {
+		t.Fatalf("unexpected label error: %v", err)
+	}
+	if label.ContentType != "image/gif" || len(label.Data) == 0 {
+		t.Errorf("unexpected label: %+v", label)
+	}
+}
+
+func TestAdapter_Label_NotCached(t *testing.T) {
+	a := New(Config{ClientID: "id", ClientSecret: "secret", BaseURL: "http://unused.invalid"})
+	if _, err := a.Label(context.Background(), "never-booked"); err == nil {
+		t.Fatal("expected an error for an uncached booking ref")
+	}
+}
+
+const exampleTrackResponse = `{
+  "trackResponse": {
+    "shipment": [{
+      "package": [{
+        "trackingNumber": "1Z12345E0205271688",
+        "activity": [
+          {"status": {"type": "D", "description": "Delivered", "code": "KB"}, "date": "20260708", "time": "140000"},
+          {"status": {"type": "I", "description": "Departed facility"}, "date": "20260707", "time": "090000"}
+        ]
+      }]
+    }]
+  }
+}`
+
+func TestAdapter_Track_ParsesChronologicalEventsAndDelivery(t *testing.T) {
+	server := newBookingTestServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		_, _ = w.Write([]byte(exampleTrackResponse))
+	})
+	defer server.Close()
+
+	a := New(Config{ClientID: "id", ClientSecret: "secret", BaseURL: server.URL})
+	status, err := a.Track(context.Background(), "1Z12345E0205271688")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.CurrentStatus != "Delivered" {
+		t.Errorf("CurrentStatus = %q, want Delivered", status.CurrentStatus)
+	}
+	if len(status.Events) != 2 || status.Events[0].Description != "Departed facility" {
+		t.Errorf("events not chronological: %+v", status.Events)
+	}
+	if status.ActualDelivery == nil {
+		t.Error("expected ActualDelivery to be set for a delivered shipment")
 	}
 }

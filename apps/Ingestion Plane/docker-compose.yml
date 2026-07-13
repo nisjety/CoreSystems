@@ -16,7 +16,7 @@ services:
       QUARRY_EDGE__BROWSERLESS_BASE_URL: ${BROWSERLESS_URL:-}
       QUARRY_EDGE__BROWSERLESS_TOKEN: ${BROWSERLESS_TOKEN:-}
       QUARRY_EDGE__CONTROL_BASE_URL: http://quarry-control:8081
-      QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       # Phase 1 Track C / cluster #9 — durable change-monitoring store.
       # The edge image is built with `--features postgres-queue`; setting this
       # DSN activates PostgresBaselineStore + the `/v1/change/*` routes (which
@@ -25,7 +25,7 @@ services:
       # never collides with another service's. The config crate maps
       # QUARRY_EDGE__DATABASE_URL → EdgeConfig.database_url (prefix QUARRY_EDGE,
       # separator `__`); plain DATABASE_URL is NOT read.
-      QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_edge?sslmode=disable
+      QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/quarry_edge?sslmode=disable
       # Phase 6 compose-wiring fix — the edge is built with `postgres-queue`
       # and the `quarry_profiles`/`quarry_profile_metadata` migrations already
       # run automatically against QUARRY_EDGE__DATABASE_URL above (see
@@ -39,9 +39,10 @@ services:
       # failure). Redis (QUARRY_EDGE__REDIS_URL below) still layers a
       # read-through cache in front of either backend.
       QUARRY_EDGE__PROFILE_STORE_KIND: ${QUARRY_EDGE_PROFILE_STORE_KIND:-postgres}
-      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
+      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222
+      QUARRY_EDGE__NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
       QUARRY_EDGE__NATS_SUBJECT_PREFIX: ${QUARRY_EDGE_NATS_SUBJECT_PREFIX:-quarry}
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
       # SearXNG is owned by this Ingestion Plane stack so Quarry-v2 is
@@ -60,22 +61,23 @@ services:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-quarry}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      # Durable credential used only to mint short-lived, per-org Data and
+      # Model tokens. Static cross-plane JWTs are intentionally not injected.
+      QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:?QUARRY_SERVICE_API_KEY is required}
+      QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: "${QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS:-0}"
       # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
       QUARRY_BROWSER_NO_SANDBOX: "${QUARRY_BROWSER_NO_SANDBOX:-1}"
       ENVIRONMENT: ${ENVIRONMENT:-dev}
-      QUARRY_EDGE__DRAGONFLY_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/6
+      QUARRY_EDGE__DRAGONFLY_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
       # Compatibility for already-built Quarry Edge images and Redis-protocol clients.
-      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/6
+      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
       QUARRY_EDGE__ARTIFACT_BACKEND: ${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
       QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
       # Model Plane gateway. EdgeConfig field is `model_plane_url` (NOT *_base_url) —
       # the config crate maps QUARRY_EDGE__MODEL_PLANE_URL → model_plane_url. Serves
       # /v1/invoke for answer synthesis; the gateway chooses the model (no model id needed).
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-http://model-gateway:8080}
-      # Bearer the answer pipeline sends to model-gateway /v1/invoke. The gateway
-      # runs MODEL_GATEWAY_AUTH_DEV_BYPASS=1 (accepts any non-empty bearer in dev);
-      # an empty token omits the header → 401. `dev-token` is the shared dev value.
-      QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-dev-token}
       # Exa-style search-quality layers (all default OFF; need MODEL_PLANE_URL).
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
@@ -95,17 +97,12 @@ services:
       # documents-api (dpv2-documents-api:8010) via DATA_PLANE_INGEST_URL below.
       QUARRY_EDGE__DATA_PLANE_URL: ${DATA_PLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:8004}
       QUARRY_EDGE__DATA_PLANE_INGEST_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
-      QUARRY_EDGE__DATA_PLANE_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
-      # Phase-2 visual RAG producer — render ingested web pages to PNGs, write to
-      # the dpv2 MinIO CAS, and publish page_images.created to dpv2-nats (both on
-      # inter-plane-bus). All three set ⇒ producer active (browser-agent feature on).
-      QUARRY_EDGE__CAS_BUCKET: ${DATAPLANE_CAS_BUCKET:-dataplane-cas}
-      QUARRY_EDGE__DATAPLANE_NATS_URL: ${DATAPLANE_NATS_URL:-nats://dpv2-nats:4222}
-      QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: ${QUARRY_EDGE_INTERNAL_BASE_URL:-http://quarry-edge:8082}
-      AWS_ENDPOINT_URL: ${DATAPLANE_MINIO_ENDPOINT:-http://dpv2-minio:9000}
-      AWS_REGION: ${AWS_REGION:-us-east-1}
-      AWS_ACCESS_KEY_ID: ${DATAPLANE_MINIO_USER:-dataplane}
-      AWS_SECRET_ACCESS_KEY: ${DATAPLANE_MINIO_PASSWORD:-dataplane-dev-password}
+      # Phase-2 visual RAG persistence is disabled until Data Plane exposes
+      # scoped CAS/event-ingest APIs.
+      # Ingestion never receives MinIO root credentials or private NATS access.
+      QUARRY_EDGE__CAS_BUCKET: ""
+      QUARRY_EDGE__DATAPLANE_NATS_URL: ""
+      QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: ""
       QUARRY_EDGE__CANARY_PCT: ${QUARRY_CANARY_PCT:-100}
       QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
       QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}
@@ -142,9 +139,9 @@ services:
       # reaches it over the docker network); it must NOT be reachable from the
       # external/LAN interface. Bind the host publish to loopback only so the
       # internal routes (/v1/internal/run_page etc.) cannot be hit off-host.
-      - "127.0.0.1:8082:8082"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8082:8082"
     volumes:
-      - ./config/security-feeds:/app/data/security-feeds
+      - ./config/security-feeds:/app/data/security-feeds:ro
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -169,8 +166,8 @@ services:
     init: true
     environment:
       QUARRY_CONTROL_ADDR: ":8081"
-      QUARRY_CONTROL_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/quarry_v2?sslmode=disable
-      QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      QUARRY_CONTROL_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/quarry_v2?sslmode=disable
+      QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
       # W2: deliver the one in-product change notification to notification-core
@@ -194,10 +191,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      temporal:
-        condition: service_healthy
     ports:
-      - "8081:8081"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8081:8081"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -225,8 +220,8 @@ services:
       TEMPORAL_NAMESPACE: default
       RUNTIME_BASE_URL: http://quarry-edge:8082
       CONTROL_BASE_URL: http://quarry-control:8081
-      RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
-      CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       # Shared HMAC secret for the run_page org-binding (must equal the
       # edge's QUARRY_EDGE__INTERNAL_SECRET). Binds org_id+url on the
       # /v1/internal/run_page call so a leaked runtime bearer can't forge
@@ -272,10 +267,18 @@ services:
       - ./imports-core/.env
     environment:
       # Bruk ingestion_user siden det er den som finnes i Postgres her
-      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/imports
+      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/imports
 
       NATS_URL: nats://nats:4222
-      NATS_TOKEN:
+      NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
+      DOCUMENT_SERVICE_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
+      DOCUMENT_SERVICE_IMPORT_PATH: /v1/documents/
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      PLANE_TOKEN_ISSUER: ${PLANE_TOKEN_ISSUER:-http://auth-core:3011/api/convex-auth}
+      INGESTION_AUTH_AUDIENCE: ingestion
+      INGESTION_SERVICE_ID: imports-core
+      INGESTION_SERVICE_API_KEY: ${IMPORTS_SERVICE_API_KEY:?IMPORTS_SERVICE_API_KEY is required}
       DOCUMENT_PROCESSOR_ORDER: ${DOCUMENT_PROCESSOR_ORDER:-local}
       TIKA_ENABLED: ${TIKA_ENABLED:-false}
       TIKA_URL: ${TIKA_URL:-http://tika:9998}
@@ -294,10 +297,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      temporal:
-        condition: service_healthy
     ports:
-      - "3025:3025"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3025:3025"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -307,7 +308,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3025/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3025/ready')"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -318,6 +319,7 @@ services:
     build:
       context: ./integration-corev2
       dockerfile: Dockerfile
+      target: api
     container_name: integration-api
     restart: unless-stopped
     env_file:
@@ -330,7 +332,7 @@ services:
       PORT: "3026"
       SERVICE_NAME: integration-corev2
       ENVIRONMENT: ${ENVIRONMENT:-dev}
-      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/integration
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
@@ -339,13 +341,13 @@ services:
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:9091}
       BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
-      AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:3015}
+      AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:8187}
       FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
       FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}}
       FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
       DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
-      DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_INTERNAL_API_KEY:-${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}}
-      DATA_PLANE_INTERNAL_API_KEY_HEADER: ${DATA_PLANE_INTERNAL_API_KEY_HEADER:-X-Internal-Api-Key}
+      INTEGRATION_SERVICE_ID: ${INTEGRATION_SERVICE_ID:-integration-corev2}
+      INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
       DATA_PLANE_GRAPH_INDEX_URL: ${DATA_PLANE_GRAPH_INDEX_URL:-${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}}
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
@@ -364,7 +366,7 @@ services:
       NATS_TOKEN: ${NATS_TOKEN:-${VELION_NATS_TOKEN:-}}
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
       # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
       MICROSOFT_GRAPH_BASE_URL: ${MICROSOFT_GRAPH_BASE_URL:-https://graph.microsoft.com}
       NANGO_API_KEY: ""
@@ -396,7 +398,7 @@ services:
       integration-webhook-normalizer:
         condition: service_healthy
     ports:
-      - "3026:3026"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3026:3026"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -429,7 +431,16 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/shipping_core?sslmode=disable
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/shipping_core?sslmode=disable
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      PLANE_TOKEN_ISSUER: ${PLANE_TOKEN_ISSUER:-http://auth-core:3011/api/convex-auth}
+      INGESTION_AUTH_AUDIENCE: ingestion
+      INGESTION_SERVICE_ID: shipping-core
+      SHIPPING_SERVICE_API_KEY: ${SHIPPING_SERVICE_API_KEY:-}
+      DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
+      NATS_URL: nats://nats:4222
+      NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
       # Carrier credentials (vendor-supplied; Phase-0 tasks in the shipping
       # docs). Empty ⇒ that carrier stays on its mock adapter / is skipped.
       BRING_API_UID: ${BRING_API_UID:-}
@@ -472,7 +483,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3156:8080"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3156:8080"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -492,15 +503,15 @@ services:
     build:
       context: ./integration-corev2
       dockerfile: Dockerfile
+      target: finspo-worker
     container_name: integration-finspo-worker
-    entrypoint: ["/app/finspo-worker"]
     restart: unless-stopped
     env_file:
       - ./integration-corev2/.env
     environment:
       SERVICE_NAME: integration-finspo-worker
       ENVIRONMENT: ${ENVIRONMENT:-dev}
-      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/integration
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
@@ -508,9 +519,13 @@ services:
       FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
       FINSPO_API_KEY: ${FINSPO_API_KEY:-${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}}
       FINSPO_API_KEY_HEADER: ${FINSPO_API_KEY_HEADER:-X-API-Key}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
+      INTEGRATION_SERVICE_ID: ${INTEGRATION_SERVICE_ID:-integration-corev2}
+      INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
       # config.Load still initializes the shared vault even though this worker
       # never decrypts provider tokens.
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
     deploy:
       resources:
         limits:
@@ -536,15 +551,15 @@ services:
     build:
       context: ./integration-corev2
       dockerfile: Dockerfile
+      target: email-worker
     container_name: integration-email-worker
-    entrypoint: ["/app/email-worker"]
     restart: unless-stopped
     env_file:
       - ./integration-corev2/.env
     environment:
       SERVICE_NAME: integration-email-worker
       ENVIRONMENT: ${ENVIRONMENT:-dev}
-      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
+      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/integration
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       # This worker decrypts real provider OAuth tokens — the vault key is
       # load-bearing here (unlike finspo-worker) and has NO insecure default.
@@ -552,6 +567,7 @@ services:
       # conversation-ingest-rs lives on the Application Plane; both sides sit
       # on the shared inter-plane-bus network.
       CONVERSATION_INGEST_URL: ${CONVERSATION_INGEST_URL:-http://conversation-ingest-rs:3161}
+      CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN: ${CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN:?CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must match Application Plane conversation-ingest}
       EMAIL_SYNC_INTERVAL: ${EMAIL_SYNC_INTERVAL:-60s}
       EMAIL_SYNC_BACKFILL_WINDOW: ${EMAIL_SYNC_BACKFILL_WINDOW:-24h}
       EMAIL_SYNC_MAX_PER_CYCLE: ${EMAIL_SYNC_MAX_PER_CYCLE:-25}
@@ -591,7 +607,7 @@ services:
         reservations:
           memory: 32M
     ports:
-      - "3036:3036"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3036:3036"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -623,12 +639,14 @@ services:
       INTEGRATION_CORE_URL: http://integration-api:3026
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
       # Phase 1 — Postgres + NATS + Data Plane wiring.
-      FINSPO_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/finspo?sslmode=disable
-      NATS_URL: ${FINSPO_NATS_URL:-nats://nats:4222}
+      FINSPO_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/finspo?sslmode=disable
+      NATS_URL: ${FINSPO_NATS_URL:-nats://${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}@nats:4222}
       NATS_SUBJECT_PREFIX: ${FINSPO_NATS_SUBJECT_PREFIX:-finspo}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       DATA_PLANE_DOCUMENTS_BASE_URL: ${DATA_PLANE_URL:-http://dpv2-documents-api:8010}
-      DATA_PLANE_INTERNAL_API_KEY: ${DATA_PLANE_API_KEY:-${INTERNAL_API_KEY:-}}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      FINSPO_SERVICE_ID: ${FINSPO_SERVICE_ID:-finspo-core}
+      FINSPO_SERVICE_API_KEY: ${FINSPO_SERVICE_API_KEY:?FINSPO_SERVICE_API_KEY is required}
       # Phase 3 — background scheduler + ACL capture.
       FINSPO_SYNC_INTERVAL: ${FINSPO_SYNC_INTERVAL:-5m}
       FINSPO_CAPTURE_PERMISSIONS: ${FINSPO_CAPTURE_PERMISSIONS:-true}
@@ -645,7 +663,7 @@ services:
       nats:
         condition: service_healthy
     ports:
-      - "3130:3130"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3130:3130"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -661,178 +679,15 @@ services:
       retries: 3
       start_period: 30s
 
-  integration-worker:
-    profiles: ["legacy"]
-    build:
-      context: ./legacy/integration-core-py
-      dockerfile: Dockerfile
-    container_name: integration-worker
-    command: ["python", "-m", "app.worker_main"]
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      INTEGRATION_SERVICE_NAME: integration-worker
-      INTEGRATION_SERVICE_PORT: "3027"
-      LOG_LEVEL: INFO
-      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
-      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:3000}
-      FRONTEND_REDIRECT_URI: ${FRONTEND_REDIRECT_URI:-http://localhost:3000/onboarding/connect/callback}
-      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
-      MICROSOFT_FIRST_PARTY_AUTH_ENABLED: ${MICROSOFT_FIRST_PARTY_AUTH_ENABLED:-true}
-      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
-      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
-      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-}
-      INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
-      INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
-      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY must be set (no insecure default)}
-      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
-      CONNECTOR_RUNTIME_BASE_URL: ${CONNECTOR_RUNTIME_BASE_URL:-http://connector-runtime-engine:3003}
-      CONNECTOR_RUNTIME_SECRET: ${CONNECTOR_RUNTIME_SECRET:?CONNECTOR_RUNTIME_SECRET is required}
-      CONNECTOR_RUNTIME_WEBHOOK_SECRET: ${CONNECTOR_RUNTIME_WEBHOOK_SECRET:?CONNECTOR_RUNTIME_WEBHOOK_SECRET is required}
-      CONNECTOR_SYNC_TRIGGERS_ENABLED: ${CONNECTOR_SYNC_TRIGGERS_ENABLED:-false}
-      MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
-      GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
-      SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
-      MICROSOFT_SHAREPOINT_SYNC_KEY: ${MICROSOFT_SHAREPOINT_SYNC_KEY:-sharepoint-documents}
-      MICROSOFT_ONEDRIVE_SYNC_KEY: ${MICROSOFT_ONEDRIVE_SYNC_KEY:-onedrive-files}
-      MICROSOFT_TEAMS_SYNC_KEY: ${MICROSOFT_TEAMS_SYNC_KEY:-teams-messages}
-      MICROSOFT_OUTLOOK_SYNC_KEY: ${MICROSOFT_OUTLOOK_SYNC_KEY:-outlook-mail}
-      GOOGLE_CALENDAR_SYNC_KEY: ${GOOGLE_CALENDAR_SYNC_KEY:-google-calendar-events}
-      GOOGLE_GMAIL_SYNC_KEY: ${GOOGLE_GMAIL_SYNC_KEY:-gmail-messages}
-      SLACK_MESSAGES_SYNC_KEY: ${SLACK_MESSAGES_SYNC_KEY:-slack-messages}
-      NATS_URL: nats://nats:4222
-      NATS_TOKEN:
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-    networks:
-      - ingestion-net
-      - inter-plane-bus
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  # ==================== VELION INTEGRATION ENGINE (Go replacement path) ====================
-  integration-engine-go-api:
-    profiles: ["legacy"]
-    build:
-      context: ./legacy/integration-engine-go
-      dockerfile: Dockerfile
-    container_name: integration-engine-go-api
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      PORT: "3126"
-      SERVICE_NAME: integration-engine-go-api
-      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
-      NATS_URL: nats://nats:4222
-      NATS_TOKEN:
-      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_ENGINE_GO_PUBLIC_BASE_URL:-http://localhost:3126}
-      MICROSOFT_FIRST_PARTY_AUTH_ENABLED: ${MICROSOFT_FIRST_PARTY_AUTH_ENABLED:-true}
-      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
-      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
-      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
-      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY must be set (no insecure default)}
-      MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
-      GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
-      SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-}
-      INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
-      INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
-      CONNECTOR_RUNTIME_ENABLED: ${CONNECTOR_RUNTIME_ENABLED:-false}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-    ports:
-      - "3126:3126"
-    networks:
-      - ingestion-net
-      - inter-plane-bus
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3126/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  integration-engine-go-worker:
-    profiles: ["legacy"]
-    build:
-      context: ./legacy/integration-engine-go
-      dockerfile: Dockerfile
-    container_name: integration-engine-go-worker
-    command: ["./integration-engine-worker"]
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      PORT: "3127"
-      SERVICE_NAME: integration-engine-go-worker
-      DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}@ingestion-postgres:5432/integration
-      NATS_URL: nats://nats:4222
-      NATS_TOKEN:
-      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_ENGINE_GO_PUBLIC_BASE_URL:-http://localhost:3126}
-      MICROSOFT_FIRST_PARTY_AUTH_ENABLED: ${MICROSOFT_FIRST_PARTY_AUTH_ENABLED:-true}
-      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
-      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
-      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
-      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY must be set (no insecure default)}
-      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
-      MICROSOFT_INTEGRATION_KEY: ${MICROSOFT_INTEGRATION_KEY:-microsoft-graph}
-      GOOGLE_INTEGRATION_KEY: ${GOOGLE_INTEGRATION_KEY:-google-workspace}
-      SLACK_INTEGRATION_KEY: ${SLACK_INTEGRATION_KEY:-slack}
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:-}
-      INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS: ${INTEGRATION_WORKER_RETRY_INTERVAL_SECONDS:-15}
-      INTEGRATION_WEBHOOK_MAX_ATTEMPTS: ${INTEGRATION_WEBHOOK_MAX_ATTEMPTS:-6}
-      CONNECTOR_RUNTIME_ENABLED: ${CONNECTOR_RUNTIME_ENABLED:-false}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-    networks:
-      - ingestion-net
-      - inter-plane-bus
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   # ==================== CONNECTOR RUNTIME ENGINE ====================
   connector-runtime-db:
     profiles: ["legacy-nango"]
-    image: postgres:16.0-alpine
+    image: postgres:16.14-alpine3.24
     container_name: connector-runtime-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${CONNECTOR_RUNTIME_DB_USER:-connector_runtime}
-      POSTGRES_PASSWORD: ${CONNECTOR_RUNTIME_DB_PASSWORD:-connector_runtime}
+      POSTGRES_PASSWORD: ${CONNECTOR_RUNTIME_DB_PASSWORD:-}
       POSTGRES_DB: ${CONNECTOR_RUNTIME_DB_NAME:-connector_runtime}
     volumes:
       - connector-runtime-db-data:/var/lib/postgresql/data
@@ -867,15 +722,15 @@ services:
 
   connector-runtime-engine:
     profiles: ["legacy-nango"]
-    image: nangohq/nango-server:hosted
+    image: nangohq/nango-server:hosted-0.70.9
     container_name: connector-runtime-engine
     platform: linux/amd64
     restart: unless-stopped
     environment:
       # Development-only fallback. Override in real environments with `openssl rand -base64 32`.
-      NANGO_ENCRYPTION_KEY: ${CONNECTOR_RUNTIME_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      NANGO_ENCRYPTION_KEY: ${CONNECTOR_RUNTIME_ENCRYPTION_KEY:-}
       NANGO_DB_USER: ${CONNECTOR_RUNTIME_DB_USER:-connector_runtime}
-      NANGO_DB_PASSWORD: ${CONNECTOR_RUNTIME_DB_PASSWORD:-connector_runtime}
+      NANGO_DB_PASSWORD: ${CONNECTOR_RUNTIME_DB_PASSWORD:-}
       NANGO_DB_HOST: ${CONNECTOR_RUNTIME_DB_HOST:-connector-runtime-db}
       NANGO_DB_NAME: ${CONNECTOR_RUNTIME_DB_NAME:-connector_runtime}
       NANGO_DB_SSL: ${CONNECTOR_RUNTIME_DB_SSL:-false}
@@ -905,8 +760,8 @@ services:
       connector-runtime-dragonfly:
         condition: service_healthy
     ports:
-      - "3003:3003"
-      - "3009:3009"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3003:3003"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3009:3009"
     networks:
       - ingestion-net
     healthcheck:
@@ -920,41 +775,23 @@ services:
       retries: 10
       start_period: 30s
 
-  # One-shot seed: registers OAuth provider integrations in self-hosted Nango.
-  # Idempotent (PUT/upsert). Runs once then exits; no auto-restart.
-  nango-seed:
-    profiles: ["legacy-nango"]
-    build:
-      context: ./integration-corev2
-      dockerfile: Dockerfile
-    container_name: nango-seed
-    restart: "no"
-    command: ["node", "dist/scripts/seed-nango-providers.js"]
-    env_file:
-      - ./integration-corev2/.env
-    depends_on:
-      connector-runtime-engine:
-        condition: service_healthy
-    networks:
-      - ingestion-net
-
   # ==================== INFRA (kun ingestion-net) ====================
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.14-alpine3.24
     container_name: ingestion-postgres
     restart: unless-stopped
     networks:
       - ingestion-net
     environment:
       POSTGRES_USER: ingestion_user
-      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}
+      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}
       POSTGRES_DB: ingestion_plane_db
     ports:
       # Bind loopback only. Compose-network peers (quarry-control,
       # imports-api, etc.) reach Postgres via DNS as `ingestion-postgres`
       # and don't need a host port. Loopback binding still lets local
       # tools (`psql -h localhost`, `pgcli`) connect from the host.
-      - "127.0.0.1:5432:5432"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:5432:5432"
     volumes:
       - ingestion-postgres-data:/var/lib/postgresql/data
       # Viktig: må være en FIL, ikke mappe (ellers får du "Is a directory")
@@ -1004,7 +841,7 @@ services:
     volumes:
       - ingestion-dragonfly-data:/data
     command: >
-      --requirepass=${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}
+      --requirepass=${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}
       --cache_mode=true
       --maxmemory=256mb
       --proactor_threads=1
@@ -1017,7 +854,7 @@ services:
         reservations:
           memory: 128M
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -1034,14 +871,14 @@ services:
   # transfer_tasks, timer_tasks, executions, history_node across all
   # shards without thrashing.
   temporal-postgres:
-    image: postgres:16-alpine
+    image: postgres:16.14-alpine3.24
     container_name: ingestion-temporal-postgres
     restart: unless-stopped
     networks:
       - ingestion-net
     environment:
       POSTGRES_USER: ingestion_user
-      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}
+      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}
       POSTGRES_DB: temporal
     volumes:
       - ingestion-temporal-postgres-data:/var/lib/postgresql/data
@@ -1086,7 +923,7 @@ services:
       # at the dedicated `temporal-postgres` service above.
       POSTGRES_SEEDS: temporal-postgres
       POSTGRES_USER: ingestion_user
-      POSTGRES_PWD: ${INGESTION_PG_PASSWORD:-ingestion_secure_password_2026}
+      POSTGRES_PWD: ${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}
       DB_PORT: 5432
       DBNAME: temporal
       VISIBILITY_DBNAME: temporal_visibility
@@ -1104,7 +941,7 @@ services:
     ports:
       # Temporal frontend exposes admin gRPC with no built-in auth.
       # Loopback only — orchestrator reaches it via compose DNS.
-      - "127.0.0.1:7233:7233"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:7233:7233"
     networks:
       - ingestion-net
     healthcheck:
@@ -1115,7 +952,7 @@ services:
       start_period: 60s
 
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     container_name: ingestion-nats
     restart: unless-stopped
     command:
@@ -1123,10 +960,12 @@ services:
       - --store_dir=/data
       - -m
       - "8222"
+      - --auth
+      - ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
     volumes:
       - ingestion-nats-data:/data
     ports:
-      - "4224:4222"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:4224:4222"
     networks:
       - ingestion-net
     deploy:
@@ -1143,6 +982,79 @@ services:
       retries: 3
       start_period: 10s
 
+  # Sonic-backed, tenant-scoped typeahead. The HTTP service is internal-only;
+  # Velion reaches it through the gateway on inter-plane-bus.
+  autocomplete-sonic:
+    # Upstream publishes amd64 only; declare emulation explicitly on arm64
+    # instead of relying on an implicit, host-dependent platform choice.
+    image: valeriansaliou/sonic:v1.4.9@sha256:f6927a9a1136ad1958551861a1bbfdfac724da5ee3d540bfa1d85592a86dacb0
+    platform: linux/amd64
+    restart: unless-stopped
+    command: ["sonic", "-c", "/etc/sonic.cfg"]
+    configs:
+      - source: autocomplete-sonic-config
+        target: /etc/sonic.cfg
+    volumes:
+      - autocomplete-sonic-data:/var/lib/sonic/store
+    networks:
+      - ingestion-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  autocomplete-core:
+    build:
+      context: ./autocomplete-core
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      AUTOCOMPLETE_HTTP_ADDR: 0.0.0.0:3219
+      AUTOCOMPLETE_METADATA_DB: /data/autocomplete-core.sqlite3
+      AUTOCOMPLETE_INTERNAL_TOKEN: ${AUTOCOMPLETE_INTERNAL_TOKEN:?AUTOCOMPLETE_INTERNAL_TOKEN is required}
+      SONIC_ENABLED: "true"
+      SONIC_ADDR: autocomplete-sonic:1491
+      SONIC_PASSWORD: ${SONIC_PASSWORD:?SONIC_PASSWORD is required}
+      NATS_ENABLED: "true"
+      NATS_URL: nats://nats:4222
+      NATS_AUTH_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
+      NATS_STREAM: QUARRY_EVENTS
+      NATS_DURABLE: autocomplete-core
+      NATS_SUBJECT_FILTER: quarry.events.*
+      RUST_LOG: ${AUTOCOMPLETE_RUST_LOG:-autocomplete_core=info,tower_http=info}
+    volumes:
+      - autocomplete-core-data:/data
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    depends_on:
+      nats:
+        condition: service_healthy
+      autocomplete-sonic:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://127.0.0.1:3219/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   qdrant:
     image: qdrant/qdrant:v1.13.4
     container_name: ingestion-qdrant
@@ -1154,8 +1066,8 @@ services:
     volumes:
       - ingestion-qdrant-data:/qdrant/storage
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:6333:6333"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:6334:6334"
     networks:
       - ingestion-net
     deploy:
@@ -1178,18 +1090,22 @@ services:
       context: ./services/support-worker
       dockerfile: Dockerfile
     container_name: support-worker
+    # Dormant until Zammad produces velion.support.*, Model Plane auth is
+    # wired, and an authoritative Zammad-owner → Control user/org resolver exists.
+    profiles: ["support-automation"]
     restart: unless-stopped
     init: true
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       VELION_NATS_URL: nats://velion-nats:4222
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
-      ZAMMAD_API_URL: http://zammad-railsserver:3000
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      ZAMMAD_API_URL: ${ZAMMAD_API_URL:-}
       ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN:-}
-      AI_CORE_URL: http://ai-core:8001
-      NOTIFICATION_CORE_URL: http://notification-core:3140
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-notif-internal-key-change-me}
+      AI_CORE_URL: ${SUPPORT_MODEL_PLANE_URL:-}
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-}
+      SUPPORT_NOTIFICATION_MODE: ${SUPPORT_NOTIFICATION_MODE:-disabled}
+      NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -1206,7 +1122,7 @@ services:
   # Default-off profile. Enable with:
   #   docker compose --profile self-owned-docs up -d tika gotenberg stirling-pdf
   tika:
-    image: apache/tika:latest-full
+    image: apache/tika:3.3.1.0-full
     container_name: ingestion-tika
     profiles: ["self-owned-docs"]
     restart: unless-stopped
@@ -1230,7 +1146,7 @@ services:
       start_period: 30s
 
   gotenberg:
-    image: gotenberg/gotenberg:8
+    image: gotenberg/gotenberg:8.34.0
     container_name: ingestion-gotenberg
     profiles: ["self-owned-docs"]
     restart: unless-stopped
@@ -1254,7 +1170,7 @@ services:
       start_period: 30s
 
   stirling-pdf:
-    image: stirlingtools/stirling-pdf:latest
+    image: stirlingtools/stirling-pdf:2.14.2
     container_name: ingestion-stirling-pdf
     profiles: ["self-owned-docs"]
     restart: unless-stopped
@@ -1289,7 +1205,7 @@ services:
   # self-contained: bringing up only this stack gives quarry-edge a working
   # SearXNG over inter-plane-bus (reachable as `searxng:8080`).
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng:2026.7.12-c19d86faa
     container_name: ingestion-searxng
     restart: unless-stopped
     environment:
@@ -1297,7 +1213,7 @@ services:
       # Dragonfly is RESP-compatible — SearXNG's Redis client talks to it
       # unmodified. db 7 keeps it clear of quarry-edge's db 6. Password matches
       # the dragonfly service's --requirepass.
-      SEARXNG_REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:-ingestion_dragonfly_password_2026}@dragonfly:6379/7
+      SEARXNG_REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/7
       SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET must be set (no change-me default)}
     volumes:
       # Bundled settings enable the JSON output format SmartRouter requires.
@@ -1308,7 +1224,7 @@ services:
     expose:
       - "8080"
     ports:
-      - "127.0.0.1:8888:8080"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8888:8080"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -1324,6 +1240,56 @@ services:
       retries: 3
       start_period: 30s
 
+configs:
+  # The upstream Sonic image is intentionally shell-less. Compose renders this
+  # runtime config without persisting a populated secret file in the worktree.
+  autocomplete-sonic-config:
+    content: |
+      [server]
+      log_level = "error"
+
+      [channel]
+      inet = "0.0.0.0:1491"
+      tcp_timeout = 300
+      auth_password = "${SONIC_PASSWORD:?SONIC_PASSWORD is required}"
+
+      [channel.search]
+      query_limit_default = 10
+      query_limit_maximum = 100
+      query_alternates_try = 4
+      suggest_limit_default = 5
+      suggest_limit_maximum = 20
+
+      [store]
+
+      [store.kv]
+      path = "/var/lib/sonic/store/kv/"
+      retain_word_objects = 1000
+
+      [store.kv.pool]
+      inactive_after = 1800
+
+      [store.kv.database]
+      flush_after = 900
+      compress = true
+      parallelism = 2
+      max_files = 100
+      max_compactions = 1
+      max_flushes = 1
+      write_buffer = 16384
+      write_ahead_log = true
+
+      [store.fst]
+      path = "/var/lib/sonic/store/fst/"
+
+      [store.fst.pool]
+      inactive_after = 300
+
+      [store.fst.graph]
+      consolidate_after = 180
+      max_size = 2048
+      max_words = 250000
+
 volumes:
   ingestion-postgres-data:
     driver: local
@@ -1338,6 +1304,10 @@ volumes:
   ingestion-nats-data:
     driver: local
   ingestion-qdrant-data:
+    driver: local
+  autocomplete-sonic-data:
+    driver: local
+  autocomplete-core-data:
     driver: local
   connector-runtime-db-data:
     driver: local

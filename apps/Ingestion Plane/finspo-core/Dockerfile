@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.5-alpine3.24 AS builder
 
 WORKDIR /src
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
@@ -31,13 +31,22 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/finspo-api ./cmd/api
 
-FROM alpine:3.22
+FROM alpine:3.24.1
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem finspo-core" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 RUN --mount=type=cache,target=/var/cache/apk \
-    apk add wget
+    apk add --no-cache ca-certificates wget \
+    && addgroup -S app \
+    && adduser -S app -G app
 
 WORKDIR /app
 COPY --from=builder /out/finspo-api /usr/local/bin/finspo-api
+
+USER app
 
 EXPOSE 3130
 

@@ -10,14 +10,15 @@ import (
 )
 
 func TestDocumentsClient_Configured(t *testing.T) {
-	if NewDocumentsClient("", "k").Configured() {
+	tokens := &fakeOrgTokenProvider{configured: true, tokens: []string{"token"}}
+	if NewDocumentsClient("", tokens).Configured() {
 		t.Error("empty baseURL must be unconfigured")
 	}
-	if NewDocumentsClient("http://x", "").Configured() {
-		t.Error("empty apiKey must be unconfigured")
+	if NewDocumentsClient("http://x", nil).Configured() {
+		t.Error("nil token provider must be unconfigured")
 	}
-	if !NewDocumentsClient("http://x", "k").Configured() {
-		t.Error("baseURL+apiKey must be configured")
+	if !NewDocumentsClient("http://x", tokens).Configured() {
+		t.Error("baseURL+token provider must be configured")
 	}
 	var nilClient *DocumentsClient
 	if nilClient.Configured() {
@@ -28,14 +29,14 @@ func TestDocumentsClient_Configured(t *testing.T) {
 func TestDocumentsClient_UnconfiguredIsNoOp(t *testing.T) {
 	// An unconfigured client must be a silent no-op (nil), never an error, so it
 	// can be wired unconditionally.
-	c := NewDocumentsClient("", "")
+	c := NewDocumentsClient("", nil)
 	if err := c.CreateDocument(context.Background(), "org", CreateDocumentInput{Content: "x"}); err != nil {
 		t.Fatalf("unconfigured client should no-op, got %v", err)
 	}
 }
 
 func TestDocumentsClient_EmptyContentRejected(t *testing.T) {
-	c := NewDocumentsClient("http://example.invalid", "key")
+	c := NewDocumentsClient("http://example.invalid", &fakeOrgTokenProvider{configured: true, tokens: []string{"token"}})
 	err := c.CreateDocument(context.Background(), "org", CreateDocumentInput{Content: "   "})
 	if err == nil {
 		t.Fatal("empty content must be rejected before hitting the network")
@@ -44,15 +45,15 @@ func TestDocumentsClient_EmptyContentRejected(t *testing.T) {
 
 func TestDocumentsClient_CreateDocumentPostsExpectedRequest(t *testing.T) {
 	var (
-		gotPath    string
-		gotOrg     string
-		gotAPIKey  string
-		gotPayload map[string]any
+		gotPath          string
+		gotAuthorization string
+		gotIdentity      string
+		gotPayload       map[string]any
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotOrg = r.Header.Get("X-Org-ID")
-		gotAPIKey = r.Header.Get("X-Internal-Api-Key")
+		gotAuthorization = r.Header.Get("Authorization")
+		gotIdentity = r.Header.Get("X-Org-ID") + r.Header.Get("X-User-ID") + r.Header.Get("X-Internal-Api-Key")
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &gotPayload)
 		w.WriteHeader(http.StatusCreated)
@@ -60,7 +61,8 @@ func TestDocumentsClient_CreateDocumentPostsExpectedRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewDocumentsClient(srv.URL, "secret-key")
+	tokens := &fakeOrgTokenProvider{configured: true, tokens: []string{"service-token"}}
+	c := NewDocumentsClient(srv.URL, tokens)
 	err := c.CreateDocument(context.Background(), "org-42", CreateDocumentInput{
 		Source:            "sharepoint",
 		Type:              "sharepoint_file",
@@ -76,11 +78,14 @@ func TestDocumentsClient_CreateDocumentPostsExpectedRequest(t *testing.T) {
 	if gotPath != "/v1/documents" {
 		t.Errorf("path = %q, want /v1/documents", gotPath)
 	}
-	if gotOrg != "org-42" {
-		t.Errorf("X-Org-ID = %q", gotOrg)
+	if gotAuthorization != "Bearer service-token" {
+		t.Errorf("Authorization = %q", gotAuthorization)
 	}
-	if gotAPIKey != "secret-key" {
-		t.Errorf("X-Internal-Api-Key = %q", gotAPIKey)
+	if len(tokens.orgs) != 1 || tokens.orgs[0] != "org-42" {
+		t.Fatalf("token orgs = %#v, want verified org", tokens.orgs)
+	}
+	if gotIdentity != "" {
+		t.Errorf("caller-selected identity/shared-key headers must be absent: %q", gotIdentity)
 	}
 	if gotPayload["org_id"] != "org-42" || gotPayload["content"] != "the body" {
 		t.Errorf("payload org_id/content wrong: %+v", gotPayload)
@@ -100,9 +105,35 @@ func TestDocumentsClient_Non2xxIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewDocumentsClient(srv.URL, "key")
+	c := NewDocumentsClient(srv.URL, &fakeOrgTokenProvider{configured: true, tokens: []string{"token"}})
 	err := c.CreateDocument(context.Background(), "org", CreateDocumentInput{Content: "x"})
 	if err == nil {
 		t.Fatal("expected error on 400 response")
+	}
+}
+
+func TestDocumentsClient_RetriesOnceWithFreshTokenOn401(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer fresh-token" {
+			t.Fatalf("retry Authorization = %q", got)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	tokens := &fakeOrgTokenProvider{configured: true, tokens: []string{"stale-token", "fresh-token"}}
+	c := NewDocumentsClient(srv.URL, tokens)
+	err := c.CreateDocument(context.Background(), "org-1", CreateDocumentInput{Content: "real content"})
+	if err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	if requests != 2 || len(tokens.invalidated) != 1 || tokens.invalidated[0] != "org-1:stale-token" {
+		t.Fatalf("requests=%d invalidated=%#v", requests, tokens.invalidated)
 	}
 }

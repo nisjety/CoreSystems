@@ -4,10 +4,10 @@ Control Plane event subscriber for Ingestion Plane.
 Subscribes to Control Plane events via shared NATS and responds with
 Ingestion Plane-specific actions.
 
-- velion.controlplane.user.provider_linked → legacy setup hook, ignored for
+- aqencia.controlplane.user.provider_linked → legacy setup hook, ignored for
   identity-only OAuth sign-ins
-- velion.controlplane.org.plan_changed → (future: adjust sync resources)
-- velion.controlplane.billing.quota_exceeded → pauses imports for the org
+- aqencia.controlplane.org.plan_changed → (future: adjust sync resources)
+- aqencia.controlplane.billing.quota_exceeded → pauses imports for the org
 - velion.ingestion.quota.exceeded → cross-plane quota signal from Quarry
 """
 
@@ -25,6 +25,11 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 MICROSOFT_IDENTITY_SCOPES = {"openid", "profile", "email"}
+CONTROL_PLANE_SUBJECTS = {
+    "provider_linked": "aqencia.controlplane.user.provider_linked",
+    "plan_changed": "aqencia.controlplane.org.plan_changed",
+    "quota_exceeded": "aqencia.controlplane.billing.quota_exceeded",
+}
 
 
 class ControlPlaneSubscriber:
@@ -132,30 +137,30 @@ class ControlPlaneSubscriber:
 
                 # Subscribe to user.provider_linked (M365 setup trigger)
                 sub1 = await self.nc.subscribe(
-                    "velion.controlplane.user.provider_linked",
+                    CONTROL_PLANE_SUBJECTS["provider_linked"],
                     queue="ingestion-plane-m365",
                     cb=self._handle_user_provider_linked,
                 )
                 self._subscriptions.append(sub1)
-                logger.info("  ✅ Subscribed to: velion.controlplane.user.provider_linked")
+                logger.info("  ✅ Subscribed to: %s", CONTROL_PLANE_SUBJECTS["provider_linked"])
 
                 # Subscribe to org.plan_changed (future: adjust sync resources)
                 sub2 = await self.nc.subscribe(
-                    "velion.controlplane.org.plan_changed",
+                    CONTROL_PLANE_SUBJECTS["plan_changed"],
                     queue="ingestion-plane-plan",
                     cb=self._handle_org_plan_changed,
                 )
                 self._subscriptions.append(sub2)
-                logger.info("  ✅ Subscribed to: velion.controlplane.org.plan_changed")
+                logger.info("  ✅ Subscribed to: %s", CONTROL_PLANE_SUBJECTS["plan_changed"])
 
                 # Subscribe to billing.quota_exceeded (pauses imports for the org)
                 sub3 = await self.nc.subscribe(
-                    "velion.controlplane.billing.quota_exceeded",
+                    CONTROL_PLANE_SUBJECTS["quota_exceeded"],
                     queue="ingestion-plane-quota",
                     cb=self._handle_billing_quota_exceeded,
                 )
                 self._subscriptions.append(sub3)
-                logger.info("  ✅ Subscribed to: velion.controlplane.billing.quota_exceeded")
+                logger.info("  ✅ Subscribed to: %s", CONTROL_PLANE_SUBJECTS["quota_exceeded"])
 
                 # Subscribe to Quarry's ingestion-level quota exceeded signal
                 sub4 = await self.nc.subscribe(
@@ -176,7 +181,7 @@ class ControlPlaneSubscriber:
                 return False
 
     async def _handle_user_provider_linked(self, msg: Any) -> None:
-        """Handle velion.controlplane.user.provider_linked event."""
+        """Handle aqencia.controlplane.user.provider_linked event."""
         try:
             event = json.loads(msg.data.decode())
             user_id = event.get("user_id")
@@ -219,7 +224,7 @@ class ControlPlaneSubscriber:
             await self._nak_msg(msg)
 
     async def _handle_org_plan_changed(self, msg: Any) -> None:
-        """Handle velion.controlplane.org.plan_changed event."""
+        """Handle aqencia.controlplane.org.plan_changed event."""
         try:
             event = json.loads(msg.data.decode())
             org_id = event.get("org_id")
@@ -245,7 +250,7 @@ class ControlPlaneSubscriber:
             await self._nak_msg(msg)
 
     async def _handle_billing_quota_exceeded(self, msg: Any) -> None:
-        """Handle velion.controlplane.billing.quota_exceeded event.
+        """Handle aqencia.controlplane.billing.quota_exceeded event.
         
         Pauses imports for the affected org so no further credits are consumed
         until the billing window resets or the org tops up.

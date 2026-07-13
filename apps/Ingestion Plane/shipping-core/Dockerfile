@@ -2,7 +2,7 @@
 # Production image for shipping-core (migrated from Suplayer-System into the
 # Ingestion Plane). Mirrors integration-corev2's build pattern; Dockerfile.dev
 # (air hot-reload) remains for standalone development.
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.5-alpine3.24 AS build
 
 WORKDIR /src
 COPY go.mod go.sum* ./
@@ -20,9 +20,14 @@ ARG TARGETOS TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/shipping-core ./cmd/shipping-core
 
-FROM alpine:3.21
+FROM alpine:3.24.1
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem shipping-core" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 RUN --mount=type=cache,target=/var/cache/apk \
-    apk add --no-cache wget && \
+    apk add --no-cache ca-certificates wget && \
     addgroup -S app && adduser -S app -G app
 USER app
 WORKDIR /app

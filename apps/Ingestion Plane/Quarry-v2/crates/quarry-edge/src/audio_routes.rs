@@ -68,7 +68,7 @@ pub struct AudioErrorBody {
 
 pub async fn audio(
     State(state): State<AppState>,
-    axum::Extension(_claims): axum::Extension<crate::auth::Claims>,
+    axum::Extension(claims): axum::Extension<crate::auth::Claims>,
     Json(req): Json<AudioRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // /v1/audio currently proxies to Model Plane, which itself enforces
@@ -130,12 +130,50 @@ pub async fn audio(
     };
 
     let url = format!("{}{}", model_plane_url.trim_end_matches('/'), path);
-    let mut req_builder = client.post(&url).json(&body);
-    if let Some(token) = &state.model_plane_token {
-        req_builder = req_builder.bearer_auth(token);
+    let token_request = quarry_runtime::service_tokens::ServiceTokenRequest::model_plane(
+        ["models:invoke"],
+        "invoke bounded audio primitive",
+    );
+    let bearer = if let Some(provider) = &state.service_token_provider {
+        match provider
+            .token_for_org(&claims.org_id, &token_request, false)
+            .await
+        {
+            Ok(token) => Some(token.expose().to_owned()),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "Model Plane authentication unavailable",
+                        "code": "UPSTREAM_BLOCKED",
+                    })),
+                );
+            }
+        }
+    } else {
+        state.model_plane_token.clone()
+    };
+    let send = |bearer: Option<&str>| {
+        let mut request = client.post(&url).json(&body);
+        if let Some(token) = bearer {
+            request = request.bearer_auth(token);
+        }
+        request.send()
+    };
+    let mut response = send(bearer.as_deref()).await;
+    if matches!(&response, Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED) {
+        if let Some(provider) = &state.service_token_provider {
+            response = match provider
+                .token_for_org(&claims.org_id, &token_request, true)
+                .await
+            {
+                Ok(token) => send(Some(token.expose())).await,
+                Err(_) => response,
+            };
+        }
     }
 
-    match req_builder.send().await {
+    match response {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();

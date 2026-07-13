@@ -5,7 +5,7 @@
 # (CONTROL_BASE_URL), and a quarry-edge runtime (RUNTIME_BASE_URL).
 # Pulls quarrycontracts + quarryotel from local pkg/ via go.mod replace.
 
-FROM golang:1.22-bookworm AS build
+FROM golang:1.26.5-bookworm AS build
 WORKDIR /src
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
@@ -34,7 +34,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ---- Runtime image -----------------------------------------------------------
 # Orchestrator is a Temporal worker — no public HTTP listener. Healthcheck
 # proves the process is up via /proc; bookworm-slim is enough.
-FROM debian:bookworm-slim
+FROM debian:bookworm-20260623-slim
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry orchestrator" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -e; \
@@ -55,6 +60,5 @@ COPY --from=build --chown=quarry:quarry /out/orchestrator /app/orchestrator
 
 USER quarry
 WORKDIR /app
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD pgrep -f orchestrator >/dev/null 2>&1 || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD pgrep -f orchestrator >/dev/null 2>&1 || exit 1
 ENTRYPOINT ["/app/orchestrator"]

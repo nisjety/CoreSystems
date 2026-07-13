@@ -207,8 +207,10 @@ go run ./cmd/api
   signature hash, body hash, replay key, stable webhook ID, and parsed payload.
 - Action execution is named and provider-specific. There is no unbounded
   external API proxy endpoint. Write actions such as mail send, Slack post, and
-  Okta lifecycle actions require human approval metadata (`approvalId` or
-  `approvalRef`) before token lookup or provider calls.
+  Okta lifecycle actions require both an org-bound `integration:write` service
+  bearer and a signed conversation-core provider-write attestation before token
+  lookup or provider calls. Caller-provided `approvalId`/`approvalRef` markers
+  are not authorization.
 - SCIM supports durable per-org bearer tokens through `/api/v1/scim/tokens`.
   Tokens are stored only as SHA-256 hashes and short prefixes; the raw bearer is
   returned once on create. Legacy global `SCIM_BEARER_TOKEN` and env-scoped
@@ -241,11 +243,75 @@ Supported operation families:
 - Stripe: `account`, `customers`, `subscriptions`, `invoices`
 - Okta: `org`, `users`, `groups`, `user.suspend`, `user.activate`
 
+### Provider-write attestation v1
+
+Effectful operations use a top-level `writeAttestation` compact JWS. The JWS
+header is exactly `alg=EdDSA`,
+`typ=velion.provider-write-attestation+jwt`, and a configured nonempty `kid`.
+The service trusts only standard-base64, 32-byte Ed25519 public keys from
+`INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON`; startup rejects missing,
+placeholder, duplicate, malformed, symmetric, or non-conversation issuers.
+
+Required claims are `v=1`, `iss=conversation-core`,
+`aud=integration-corev2`, `presenter_service`, `authorization_kind`,
+`authorization_id`, `action_id`, `org_id`, `connection_id`, `provider_key`,
+`operation`, `actor_id`, `payload_sha256`, `idempotency_key`, `jti`, `iat`,
+`nbf`, and `exp`. `authorization_kind` is `human_intent` or
+`human_approved_ai_action`; `approval_id` must be absent for a human intent and
+its `action_id` must equal `authorization_id`. For approved AI actions,
+`approval_id` must equal `action_id`. `iat` must equal `nbf`, and `exp-iat`
+must be between one and sixty seconds. Every claim is checked against the
+verified bearer and exact request before OAuth token resolution.
+
+`payload_sha256` is lowercase SHA-256 over Go `encoding/json` output for this
+field order and spelling (maps are key-sorted by `encoding/json`):
+
+```json
+{
+  "org_id": "org_123",
+  "connection_id": "conn_123",
+  "provider_key": "slack",
+  "operation": "message.send",
+  "params": {},
+  "body": { "channel": "C123", "text": "Approved reply" }
+}
+```
+
+The idempotency key and attestation identifiers are separate signed bindings.
+Migration `0008_action_receipt_attestations.sql` stores hashes and identifiers,
+never params, message bodies, or provider response payloads. Relationship
+constraints are strengthened by the forward-only
+`0009_action_receipt_authorization_relationships.sql` migration. It blocks
+receipt writes, audits pre-existing attested rows using only an aggregate
+mismatch count, and fails before replacing the old constraint if a human
+intent has `action_id != authorization_id` or an approved AI action has
+`approval_id != action_id`. The failed migration is rolled back and must not be
+marked applied; operators must audit the affected receipts rather than
+automatically rewriting completed or unknown provider effects.
+
+Receipts are
+`pending` until token resolution succeeds, atomically become `executing`
+immediately before the provider call, then become `completed` or `unknown`.
+An exact `pending` request can retry after a pre-provider token failure;
+the API returns `503 action_pre_provider_retryable` so the caller can mint a
+fresh short-lived attestation. A fresh `jti` and a rotated trusted `kid` are
+allowed for the same pending authorization/effect while the receipt retains
+the first-seen signer metadata. `executing` and `unknown` never retransmit
+blindly. The same `(issuer, org_id, authorization_id)` cannot move to another
+authorization kind, action, actor, payload, connection, provider operation, or
+idempotency key. A cross-language WhatsApp `PrepareSend` fixture with the exact
+send request, canonical JSON, digest, deterministic seed/random/time inputs,
+public test key, claims, and regenerated full JWS is in
+`testdata/provider_write_attestation_v1.json`.
+
 ## NestJS compatibility routes
 
 The old ID-Knuten integration-service exposed provider-shaped routes. Go keeps
-the useful route names for migration, but every route still requires internal
+read-only route names for migration, but every route still requires internal
 auth and resolves a Velion connection before calling a whitelisted action.
+Legacy write routes fail closed because an internal key cannot satisfy the
+service-bearer plus signed-attestation contract; callers must migrate to
+`POST /api/v1/connections/{id}/actions` or `POST /api/v1/actions/execute`.
 
 Pass either:
 
@@ -323,8 +389,10 @@ first safe orchestration boundary:
   - `FinspoClient.SyncSource` calls Finspo
     `POST /api/v1/sources/{id}/sync`.
   - `DataPlaneDocumentsClient.CreateDocument` calls Data Plane
-    `POST /internal/v1/documents` with `DATA_PLANE_INTERNAL_API_KEY_HEADER`
-    (default `X-Internal-Api-Key`) and `X-Org-Id`.
+    `POST /v1/documents` with a short-lived `aud=data-plane`,
+    `documents:write` bearer minted from Auth Core for the verified handoff
+    organization. The durable `INTEGRATION_SERVICE_API_KEY` is sent only to
+    Auth Core; identity/shared-key headers are never forwarded to Data Plane.
   - `IntegrationClient.ClaimSyncJob` and `UpdateSyncProgress` call the
     internal integration-corev2 worker endpoints using `INTERNAL_API_KEY`.
   These clients do not store source content in integration-corev2 and return

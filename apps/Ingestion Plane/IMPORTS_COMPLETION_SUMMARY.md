@@ -8,6 +8,24 @@
 
 ---
 
+> ## ⚠️ Verified 2026-07-11 — point-in-time snapshot, superseded in parts
+>
+> This is a **Feb-19-2026 completion report**, not current runtime truth. For the authoritative current state use `apps/Ingestion Plane/INGESTION_PLANE_DEEP_DIVE.md` and `apps/Ingestion Plane/docs/core-research/`. Live re-verification of imports-core (source last modified 2026-07-07) found:
+>
+> **Still accurate (confirmed):**
+> - `GET /health` on port **3025** returns `{"status":"ok","service":"import-service"}` — [live-curl, HTTP 200].
+> - Parsers for PDF, DOCX, CSV, JSON, HTML, TXT, Markdown all present in `app/parsers.py` — [source]. (A Tika HTTP fallback processor now also exists and is not documented below.)
+> - Connectors Notion, HubSpot, Salesforce, Odoo, and Generic REST (`cms`) all present in `app/connectors.py` `import_from_source` — [source].
+> - The four documented job endpoints exist; `GET /` lists them — [live-curl].
+>
+> **Stale / materially changed (do not trust the sections below on these):**
+> - **API contract changed.** Write endpoints now require service auth (`require_internal_auth`, `X-Internal-Api-Key` header) and read `org_id` from the **`X-Org-Id` header**, not from form/JSON body. `POST /api/v1/import/jobs/source` without auth returns **HTTP 401** — [live-curl]. The "File Upload" (form `org_id`/`user_id`) and "Source Import" (JSON `org_id`) request shapes documented below are obsolete.
+> - **Undocumented endpoint:** `POST /api/v1/import/jobs/knowledge-sync` (GitHub/Slack → import pipeline) now exists — [source]. Note read endpoints `GET /jobs/{job_id}` and `/jobs/{job_id}/events` still have **no auth dependency**.
+> - **~7 new modules** exist that this "Files Implemented" table omits: `auth_middleware.py`, `actions_gateway.py`, `control_plane_subscriber.py`, `knowledge_sync.py`, `m365_provider_handler.py`, `notion_import.py`, `shared_nats.py` — [source].
+> - **PDF library** is `pypdf==4.3.1` (`from pypdf import PdfReader`), **not PyPDF2** — [source]. `requirements.txt` also adds `alembic` + `python-dotenv` and drops `mypy`/dev extras.
+> - **"Testing Ready ✅" is aspirational/false.** The proposed `tests/test_parsers.py`, `test_connectors.py`, `test_service.py` and `tests/integration/` do **not** exist. Actual tests are `test_actions_gateway.py`, `test_knowledge_sync.py`, `test_notion_import.py`; there are no load-test scripts — [source].
+> - "Complete & Production Ready" framing reflects Feb-19 scope only.
+
 ## Overview
 
 The imports-core service is now fully implemented and ready for production deployment. It provides:

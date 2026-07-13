@@ -42,7 +42,6 @@ pub struct AgentLoopResult {
 pub struct AgentLoop {
     runner: ObservationRunner,
     constraints: AgentConstraints,
-    #[allow(dead_code)]
     zdr: ZdrMode,
     run_id: RunKind,
     events: Option<EventSink>,
@@ -107,7 +106,8 @@ impl AgentLoop {
     ) {
         if let Some(events) = &self.events {
             events
-                .emit(
+                .emit_for_zdr(
+                    self.zdr,
                     self.run_id.clone(),
                     event_type,
                     payload.clone(),
@@ -115,7 +115,10 @@ impl AgentLoop {
                 )
                 .await;
         }
-        if let Some(bus) = &self.bus {
+        if !self.zdr.is_active() {
+            let Some(bus) = &self.bus else {
+                return;
+            };
             if let Err(e) = bus
                 .publish(self.run_id.clone(), event_type, payload, idempotency_key)
                 .await
@@ -265,7 +268,15 @@ impl AgentLoop {
                 }
             }
 
-            match self.runner.execute(request, session, &mut ctx).await {
+            let mut effective_request = request.clone();
+            if self.zdr.is_active() {
+                effective_request.zdr = ZdrMode::On;
+            }
+            match self
+                .runner
+                .execute(&effective_request, session, &mut ctx)
+                .await
+            {
                 Ok(obs) => observations.push(obs),
                 Err(e) => {
                     self.emit_event(
@@ -536,6 +547,58 @@ mod tests {
             events.len(),
             "duplicate idempotency keys leaked"
         );
+    }
+
+    #[tokio::test]
+    async fn zdr_agent_lifecycle_never_enters_event_bus() {
+        use crate::event_bus::{EventBus, EventReceiver};
+        use async_trait::async_trait;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct CapturingBus(Arc<Mutex<Vec<EventType>>>);
+
+        #[async_trait]
+        impl EventBus for CapturingBus {
+            async fn publish(
+                &self,
+                _run_id: RunKind,
+                event_type: EventType,
+                _payload: serde_json::Value,
+                _idempotency_key: String,
+            ) -> QuarryResult<()> {
+                self.0.lock().unwrap().push(event_type);
+                Ok(())
+            }
+
+            async fn subscribe(&self, _run_id: &RunKind) -> QuarryResult<Box<dyn EventReceiver>> {
+                unimplemented!("subscribe not used in this test")
+            }
+
+            async fn unsubscribe(&self, _run_id: &RunKind) -> QuarryResult<()> {
+                Ok(())
+            }
+        }
+
+        let bus = Arc::new(CapturingBus::default());
+        let captured = bus.0.clone();
+        let agent = AgentLoop::new(
+            Arc::new(crate::tests::MockBrowserDriver),
+            make_constraints(1),
+            ZdrMode::On,
+            Id::new(),
+        )
+        .with_event_bus(bus);
+
+        agent
+            .emit_event(
+                EventType::AgentStarted,
+                json!({"sensitive": "must-not-persist"}),
+                "zdr-agent-start".into(),
+            )
+            .await;
+
+        assert!(captured.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

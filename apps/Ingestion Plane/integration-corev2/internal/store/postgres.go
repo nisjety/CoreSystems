@@ -5,15 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type postgresPool interface {
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Close()
+}
+
 type PostgresRepository struct {
-	pool *pgxpool.Pool
+	pool postgresPool
 }
 
 func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
@@ -222,6 +232,151 @@ func (r *PostgresRepository) InsertAuditEvent(ctx context.Context, event AuditEv
 		return fmt.Errorf("insert audit event: %w", err)
 	}
 	return nil
+}
+
+func (r *PostgresRepository) ClaimActionReceipt(ctx context.Context, receipt ActionReceipt) (ActionReceipt, bool, error) {
+	row := r.pool.QueryRow(ctx, `
+		INSERT INTO integration_action_receipts (
+			organization_id, idempotency_key, request_sha256, connection_id,
+			provider_key, operation, attestation_issuer, attestation_kid,
+			authorization_kind, authorization_id, approval_id, action_id,
+			actor_id, attestation_jti, payload_sha256,
+			status, provider_message_id, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending','',now(),now())
+		ON CONFLICT DO NOTHING
+		RETURNING organization_id, idempotency_key, request_sha256, connection_id,
+			provider_key, operation, attestation_issuer, attestation_kid,
+			authorization_kind, authorization_id, approval_id, action_id,
+			actor_id, attestation_jti, payload_sha256,
+			status, provider_message_id, created_at, updated_at
+	`, receipt.OrganizationID, receipt.IdempotencyKey, receipt.RequestSHA256,
+		receipt.ConnectionID, receipt.ProviderKey, receipt.Operation,
+		receipt.AttestationIssuer, receipt.AttestationKeyID, receipt.AuthorizationKind,
+		receipt.AuthorizationID, receipt.ApprovalID, receipt.ActionID, receipt.ActorID,
+		receipt.AttestationJTI, receipt.PayloadSHA256)
+	created, err := scanActionReceipt(row)
+	if err == nil {
+		return created, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return ActionReceipt{}, false, fmt.Errorf("claim action receipt: %w", err)
+	}
+	existing, err := scanActionReceipt(r.pool.QueryRow(ctx, `
+		SELECT organization_id, idempotency_key, request_sha256, connection_id,
+			provider_key, operation, attestation_issuer, attestation_kid,
+			authorization_kind, authorization_id, approval_id, action_id,
+			actor_id, attestation_jti, payload_sha256,
+			status, provider_message_id, created_at, updated_at
+		FROM integration_action_receipts
+		WHERE (organization_id = $1 AND idempotency_key = $2)
+		   OR (organization_id = $1 AND attestation_issuer = $3 AND authorization_id = $4)
+		ORDER BY CASE WHEN idempotency_key = $2 THEN 0 ELSE 1 END
+		LIMIT 1
+	`, receipt.OrganizationID, receipt.IdempotencyKey, receipt.AttestationIssuer, receipt.AuthorizationID))
+	if err != nil {
+		return ActionReceipt{}, false, fmt.Errorf("load action receipt after conflict: %w", err)
+	}
+	if !sameActionReceiptBinding(existing, receipt) {
+		return ActionReceipt{}, false, ErrConflict
+	}
+	return existing, false, nil
+}
+
+func (r *PostgresRepository) BeginActionReceiptExecution(ctx context.Context, organizationID, idempotencyKey string) (ActionReceipt, error) {
+	receipt, err := scanActionReceipt(r.pool.QueryRow(ctx, `
+		UPDATE integration_action_receipts
+		SET status = 'executing', updated_at = now()
+		WHERE organization_id = $1 AND idempotency_key = $2 AND status = 'pending'
+		RETURNING organization_id, idempotency_key, request_sha256, connection_id,
+			provider_key, operation, attestation_issuer, attestation_kid,
+			authorization_kind, authorization_id, approval_id, action_id,
+			actor_id, attestation_jti, payload_sha256,
+			status, provider_message_id, created_at, updated_at
+	`, organizationID, idempotencyKey))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ActionReceipt{}, r.actionReceiptTransitionError(ctx, organizationID, idempotencyKey)
+	}
+	if err != nil {
+		return ActionReceipt{}, fmt.Errorf("begin action receipt execution: %w", err)
+	}
+	return receipt, nil
+}
+
+func (r *PostgresRepository) CompleteActionReceipt(ctx context.Context, organizationID, idempotencyKey, providerMessageID string) (ActionReceipt, error) {
+	receipt, err := scanActionReceipt(r.pool.QueryRow(ctx, `
+		UPDATE integration_action_receipts
+		SET status = 'completed', provider_message_id = $3, updated_at = now()
+		WHERE organization_id = $1 AND idempotency_key = $2 AND status = 'executing'
+		RETURNING organization_id, idempotency_key, request_sha256, connection_id,
+			provider_key, operation, attestation_issuer, attestation_kid,
+			authorization_kind, authorization_id, approval_id, action_id,
+			actor_id, attestation_jti, payload_sha256,
+			status, provider_message_id, created_at, updated_at
+	`, organizationID, idempotencyKey, strings.TrimSpace(providerMessageID)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ActionReceipt{}, r.actionReceiptTransitionError(ctx, organizationID, idempotencyKey)
+	}
+	if err != nil {
+		return ActionReceipt{}, fmt.Errorf("complete action receipt: %w", err)
+	}
+	return receipt, nil
+}
+
+func (r *PostgresRepository) MarkActionReceiptUnknown(ctx context.Context, organizationID, idempotencyKey string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE integration_action_receipts
+		SET status = 'unknown', updated_at = now()
+		WHERE organization_id = $1 AND idempotency_key = $2 AND status = 'executing'
+	`, organizationID, idempotencyKey)
+	if err != nil {
+		return fmt.Errorf("mark action receipt unknown: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return r.actionReceiptTransitionError(ctx, organizationID, idempotencyKey)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) actionReceiptTransitionError(ctx context.Context, organizationID, idempotencyKey string) error {
+	var status string
+	err := r.pool.QueryRow(ctx, `
+		SELECT status
+		FROM integration_action_receipts
+		WHERE organization_id = $1 AND idempotency_key = $2
+	`, organizationID, idempotencyKey).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("resolve action receipt transition: %w", err)
+	}
+	return ErrConflict
+}
+
+func scanActionReceipt(row pgx.Row) (ActionReceipt, error) {
+	var receipt ActionReceipt
+	err := row.Scan(
+		&receipt.OrganizationID,
+		&receipt.IdempotencyKey,
+		&receipt.RequestSHA256,
+		&receipt.ConnectionID,
+		&receipt.ProviderKey,
+		&receipt.Operation,
+		&receipt.AttestationIssuer,
+		&receipt.AttestationKeyID,
+		&receipt.AuthorizationKind,
+		&receipt.AuthorizationID,
+		&receipt.ApprovalID,
+		&receipt.ActionID,
+		&receipt.ActorID,
+		&receipt.AttestationJTI,
+		&receipt.PayloadSHA256,
+		&receipt.Status,
+		&receipt.ProviderMessageID,
+		&receipt.CreatedAt,
+		&receipt.UpdatedAt,
+	)
+	return receipt, err
 }
 
 func (r *PostgresRepository) Close() {

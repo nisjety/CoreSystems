@@ -1,11 +1,17 @@
+# Standalone Quarry development stack. It is intentionally host-loopback only;
+# production uses the Ingestion Plane Compose + production override.
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.14-alpine3.24
     environment:
       POSTGRES_USER: quarry
-      POSTGRES_PASSWORD: quarry
+      POSTGRES_PASSWORD: ${QUARRY_POSTGRES_PASSWORD:?QUARRY_POSTGRES_PASSWORD is required}
       POSTGRES_DB: quarry
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - quarry_pg:/var/lib/postgresql/data
     healthcheck:
@@ -22,33 +28,34 @@ services:
       - "--maxmemory=256mb"
       - "--proactor_threads=1"
       - "--dir=/data"
+      - "--requirepass=${QUARRY_DRAGONFLY_PASSWORD:?QUARRY_DRAGONFLY_PASSWORD is required}"
     # No host port binding — quarry-control reaches it via the compose
     # network as `dragonfly:6379`.
     # Keeps the stack from clashing with any cache you already run on the host.
     expose: ["6379"]
     healthcheck:
       # Dragonfly ships redis-cli; PING returns PONG once it is serving.
-      test: ["CMD-SHELL", "redis-cli -p 6379 ping | grep -q PONG"]
+      test: ["CMD-SHELL", "redis-cli -a \"${QUARRY_DRAGONFLY_PASSWORD:?QUARRY_DRAGONFLY_PASSWORD is required}\" -p 6379 ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
   temporal:
-    image: temporalio/auto-setup:1.24
+    image: temporalio/auto-setup:1.27.2
     environment:
       - DB=postgres12
       - DB_PORT=5432
       - POSTGRES_USER=quarry
-      - POSTGRES_PWD=quarry
+      - POSTGRES_PWD=${QUARRY_POSTGRES_PASSWORD:?QUARRY_POSTGRES_PASSWORD is required}
       - POSTGRES_SEEDS=postgres
     depends_on:
       postgres:
         condition: service_healthy
-    ports: ["7233:7233"]
+    ports: ["127.0.0.1:7233:7233"]
     healthcheck:
       # tctl ships in the auto-setup image; cluster health gates dependents.
-      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health 2>/dev/null | grep -q SERVING"]
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -58,21 +65,28 @@ services:
     build:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.edge
+      args: *build-metadata
     environment:
-      QUARRY_EDGE__PORT: "8080"
+      QUARRY_EDGE__PORT: "8082"
       QUARRY_EDGE__CONTROL_BASE_URL: "http://quarry-control:8081"
+      QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:-}
+      QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: ${QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS:-0}
+      # Read only when the explicit cross-plane development bypass is enabled.
+      QUARRY_EDGE__DATA_PLANE_SERVICE_TOKEN: ${DATA_PLANE_SERVICE_TOKEN:-}
+      QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-}
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined
       # below) so this dev stack does web search self-contained — no reliance
       # on a searxng started by another plane / the root mega-stack.
       QUARRY_EDGE__SEARXNG_URL: "http://searxng:8080"
-      # Dev-mode: accept any non-empty Authorization: Bearer. Production
-      # MUST leave this unset so JWTs are verified against the
-      # auth-core JWKS. Required here so the orchestrator's
-      # /v1/internal/run_page calls succeed without an auth-core
-      # round-trip during onboarding-style flows.
-      QUARRY_EDGE_AUTH_DEV_BYPASS: "1"
-      # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
-      QUARRY_BROWSER_NO_SANDBOX: "1"
+      # Explicit development-only bypass. It defaults off; enable it only for
+      # a deliberately isolated stack without Auth Core.
+      QUARRY_EDGE_AUTH_DEV_BYPASS: ${QUARRY_EDGE_AUTH_DEV_BYPASS:-0}
+      # Chromium sandboxing also defaults on. Disabling it is an explicit
+      # local compatibility escape hatch, never a production setting.
+      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-0}
+      QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
+      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       # Isolated OpenCV sidecar for deterministic visual evidence artifacts.
       QUARRY_EDGE__VISION_ENABLED: "1"
       QUARRY_EDGE__VISION_BACKEND: "sidecar"
@@ -84,7 +98,7 @@ services:
       QUARRY_EDGE__OCR_PRECONDITIONING_ENABLED: "1"
       QUARRY_EDGE__RENDERED_BRANDING_VISUAL_ENABLED: "1"
       QUARRY_EDGE__VISUAL_MAX_REGIONS: "32"
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8082"]
     depends_on:
       quarry-control:
         condition: service_healthy
@@ -97,6 +111,7 @@ services:
     build:
       context: ../..
       dockerfile: services/quarry-vision-sidecar/Dockerfile
+      args: *build-metadata
     environment:
       QUARRY_VISION_MAX_IMAGE_BYTES: "26214400"
       QUARRY_VISION_MAX_LONG_EDGE: "2048"
@@ -104,7 +119,7 @@ services:
       QUARRY_VISION_TILE_SIZE: "512"
       QUARRY_VISION_CV_THREADS: "1"
     expose: ["8091"]
-    ports: ["8091:8091"]
+    ports: ["127.0.0.1:8091:8091"]
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8091/health || exit 1"]
       interval: 15s
@@ -116,13 +131,16 @@ services:
     build:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.control
+      args: *build-metadata
     environment:
       QUARRY_CONTROL_ADDR: ":8081"
       # Dev token shared with the orchestrator's CONTROL_AUTH_TOKEN so
       # POST /v1/runs/{id}/events (bearer-protected) accepts the events
       # the workflow emits.
-      QUARRY_CONTROL_API_KEY: "devsecret"
-    ports: ["8081:8081"]
+      QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
+      QUARRY_INTERNAL_HMAC_REQUIRED: "1"
+    ports: ["127.0.0.1:8081:8081"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,7 +148,7 @@ services:
         condition: service_healthy
     healthcheck:
       # Control serves HTTP on :8081; the listing endpoint gates dependents.
-      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8081/v1/runs || exit 1"]
+      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8081/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -140,18 +158,18 @@ services:
     build:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.orchestrator
+      args: *build-metadata
     environment:
       TEMPORAL_ADDR: "temporal:7233"
-      RUNTIME_BASE_URL: "http://quarry-edge:8080"
+      RUNTIME_BASE_URL: "http://quarry-edge:8082"
       CONTROL_BASE_URL: "http://quarry-control:8081"
       # Must match QUARRY_CONTROL_API_KEY on quarry-control. The
       # orchestrator sends this as the Authorization: Bearer header
       # on every event/checkpoint POST to control.
-      CONTROL_AUTH_TOKEN: "devsecret"
-      # Sent as Bearer on /v1/internal/run_page calls to edge. Any
-      # non-empty value is accepted when QUARRY_EDGE_AUTH_DEV_BYPASS is
-      # on (dev compose default).
-      RUNTIME_AUTH_TOKEN: "devsecret"
+      CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      # Sent as Bearer on /v1/internal/run_page calls to edge.
+      RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
     depends_on:
       temporal:
         condition: service_healthy
@@ -171,19 +189,19 @@ services:
   # Quarry-v2 stack owns its search dependency end-to-end. Reachable on the
   # compose network as `searxng:8080`; published on 8888 for host debugging.
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng:2026.7.12-c19d86faa
     environment:
       SEARXNG_BASE_URL: "http://searxng:8080/"
       # Dragonfly is RESP-compatible — SearXNG's Redis client talks to it
       # unmodified (db 7). The dev dragonfly has no password (see service
       # above), so no credentials in the URL.
-      SEARXNG_REDIS_URL: "redis://dragonfly:6379/7"
-      SEARXNG_SECRET: "${SEARXNG_SECRET:-change-me-searxng-secret-32chars!!}"
+      SEARXNG_REDIS_URL: "redis://:${QUARRY_DRAGONFLY_PASSWORD:?QUARRY_DRAGONFLY_PASSWORD is required}@dragonfly:6379/7"
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is required}
     volumes:
       # Bundled settings enable the JSON output format SmartRouter requires.
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     expose: ["8080"]
-    ports: ["8888:8080"]
+    ports: ["127.0.0.1:8888:8080"]
     depends_on: [dragonfly]
     restart: unless-stopped
     healthcheck:

@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.12-slim-bookworm
+FROM python:3.12.13-slim-bookworm
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry vision sidecar" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -26,8 +31,6 @@ COPY services/quarry-vision-sidecar/app ./app
 
 USER quarry
 EXPOSE 8091
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD wget --quiet --tries=1 -O /dev/null http://localhost:8091/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD wget --quiet --tries=1 -O /dev/null http://localhost:8091/health || exit 1
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8091"]
-

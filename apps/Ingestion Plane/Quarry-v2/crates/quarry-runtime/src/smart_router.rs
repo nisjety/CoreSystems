@@ -326,8 +326,12 @@ impl SmartSearchRouter {
     /// this method's behavior matches `classify()` for obvious queries
     /// even when an LLM classifier is plugged in.
     pub async fn classify_async(&self, query: &str) -> QueryIntent {
+        self.classify_async_for_org(query, None).await
+    }
+
+    pub async fn classify_async_for_org(&self, query: &str, org_id: Option<&str>) -> QueryIntent {
         match &self.intent_classifier {
-            Some(c) => c.classify(query).await,
+            Some(c) => c.classify_for_org(query, org_id).await,
             None => classify_intent(query),
         }
     }
@@ -800,7 +804,7 @@ impl SearchProvider for SmartSearchRouter {
             return Ok(hit);
         }
 
-        let intent = self.classify_async(q).await;
+        let intent = self.classify_async_for_org(q, opts.org_id.as_deref()).await;
         let results = match intent {
             QueryIntent::Fresh => self.fresh_path(q, opts).await?,
             // Research / Comparative always fan out to every free engine
@@ -811,7 +815,7 @@ impl SearchProvider for SmartSearchRouter {
             QueryIntent::Research | QueryIntent::Comparative => {
                 let dispatch: Cow<'_, str> = match &self.query_rewriter {
                     Some(rw) => {
-                        let rewritten = rw.rewrite(q).await;
+                        let rewritten = rw.rewrite_for_org(q, opts.org_id.as_deref()).await;
                         if rewritten != q {
                             tracing::debug!(original = q, rewritten = %rewritten, "autoprompt: query rewritten");
                         }

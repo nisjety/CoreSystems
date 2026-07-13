@@ -89,7 +89,24 @@ pub struct PageRunner {
     pub page_renderer: Option<Arc<crate::page_renderer::PageRenderer>>,
 }
 
+#[cfg(test)]
+fn page_event_persistence_allowed(zdr_mode: ZdrMode) -> bool {
+    zdr::guard(zdr_mode, WriteKind::Event).is_ok()
+}
+
 impl PageRunner {
+    async fn emit_page_event(
+        &self,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+    ) {
+        self.event_sink
+            .emit_for_zdr(self.zdr, run_id, event_type, payload, idempotency_key)
+            .await;
+    }
+
     pub async fn run(
         &self,
         run_id: &RunKind,
@@ -102,17 +119,16 @@ impl PageRunner {
         {
             Ok(out) => Ok(out),
             Err(e) => {
-                self.event_sink
-                    .emit(
-                        run_id.clone(),
-                        EventType::PageFailed,
-                        json!({
-                            "url": requested_url.to_string(),
-                            "error": e.to_string(),
-                        }),
-                        format!("{}:{}:failed", run_id, requested_url),
-                    )
-                    .await;
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::PageFailed,
+                    json!({
+                        "url": requested_url.to_string(),
+                        "error": e.to_string(),
+                    }),
+                    format!("{}:{}:failed", run_id, requested_url),
+                )
+                .await;
                 Err(e)
             }
         }
@@ -127,17 +143,16 @@ impl PageRunner {
         // Preflight
         let verdict = self.security.preflight(requested_url).await;
         if verdict.decision == quarry_security::Decision::Block {
-            self.event_sink
-                .emit(
-                    run_id.clone(),
-                    EventType::PageBlocked,
-                    json!({
-                        "url": requested_url.to_string(),
-                        "reasons": verdict.reasons.clone(),
-                    }),
-                    format!("{}:{}:blocked", run_id, requested_url),
-                )
-                .await;
+            self.emit_page_event(
+                run_id.clone(),
+                EventType::PageBlocked,
+                json!({
+                    "url": requested_url.to_string(),
+                    "reasons": verdict.reasons.clone(),
+                }),
+                format!("{}:{}:blocked", run_id, requested_url),
+            )
+            .await;
             return Err(quarry_core::error::QuarryError::new(
                 quarry_core::error::ErrorCode::SecurityBlocked,
                 verdict.reasons.join("; "),
@@ -239,19 +254,18 @@ impl PageRunner {
         // observed is ~5 MB on a JS-rendered single-page-app).
         const MAX_HTML_BYTES: usize = 16 * 1024 * 1024;
         if resp.body.len() > MAX_HTML_BYTES {
-            self.event_sink
-                .emit(
-                    run_id.clone(),
-                    EventType::PageBlocked,
-                    json!({
-                        "url": resp.final_url.to_string(),
-                        "reason": "body_too_large",
-                        "bytes": resp.body.len(),
-                        "max_bytes": MAX_HTML_BYTES,
-                    }),
-                    format!("{}:{}:body_too_large", run_id, resp.final_url),
-                )
-                .await;
+            self.emit_page_event(
+                run_id.clone(),
+                EventType::PageBlocked,
+                json!({
+                    "url": resp.final_url.to_string(),
+                    "reason": "body_too_large",
+                    "bytes": resp.body.len(),
+                    "max_bytes": MAX_HTML_BYTES,
+                }),
+                format!("{}:{}:body_too_large", run_id, resp.final_url),
+            )
+            .await;
             return Err(QuarryError::new(
                 ErrorCode::Forbidden,
                 format!(
@@ -269,19 +283,18 @@ impl PageRunner {
         // PageFetched payload includes `content_type` so downstream
         // consumers (e.g. the onboarding wizard) can pick the right
         // card style without re-parsing the HTML.
-        self.event_sink
-            .emit(
-                run_id.clone(),
-                EventType::PageFetched,
-                json!({
-                    "url": resp.final_url.to_string(),
-                    "status": resp.status,
-                    "duration_ms": resp.duration_ms,
-                    "content_type": ct.clone(),
-                }),
-                format!("{}:{}:fetched", run_id, resp.final_url),
-            )
-            .await;
+        self.emit_page_event(
+            run_id.clone(),
+            EventType::PageFetched,
+            json!({
+                "url": resp.final_url.to_string(),
+                "status": resp.status,
+                "duration_ms": resp.duration_ms,
+                "content_type": ct.clone(),
+            }),
+            format!("{}:{}:fetched", run_id, resp.final_url),
+        )
+        .await;
 
         // Transform
         //
@@ -311,18 +324,17 @@ impl PageRunner {
         if let Some(reason) =
             quarry_transform::soft_404::detect(resp.status, resp.body.len(), &body_text)
         {
-            self.event_sink
-                .emit(
-                    run_id.clone(),
-                    EventType::PageBlocked,
-                    json!({
-                        "url": resp.final_url.to_string(),
-                        "reason": "soft_404",
-                        "matched": reason,
-                    }),
-                    format!("{}:{}:soft_404", run_id, resp.final_url),
-                )
-                .await;
+            self.emit_page_event(
+                run_id.clone(),
+                EventType::PageBlocked,
+                json!({
+                    "url": resp.final_url.to_string(),
+                    "reason": "soft_404",
+                    "matched": reason,
+                }),
+                format!("{}:{}:soft_404", run_id, resp.final_url),
+            )
+            .await;
         }
 
         let md = html_to_readable_markdown(&body_text);
@@ -355,19 +367,18 @@ impl PageRunner {
                 }
                 ChangeStatus::Unchanged => (EventType::ChangeUnchanged, "change_unchanged"),
             };
-            self.event_sink
-                .emit(
-                    run_id.clone(),
-                    evt,
-                    json!({
-                        "url": resp.final_url.to_string(),
-                        "fingerprint": fp.0,
-                        "text_fingerprint": text_fp.0,
-                        "prev": prev_fp.as_ref().map(|p| p.0.clone()),
-                    }),
-                    format!("{}:{}:{}", run_id, resp.final_url, key_suffix),
-                )
-                .await;
+            self.emit_page_event(
+                run_id.clone(),
+                evt,
+                json!({
+                    "url": resp.final_url.to_string(),
+                    "fingerprint": fp.0,
+                    "text_fingerprint": text_fp.0,
+                    "prev": prev_fp.as_ref().map(|p| p.0.clone()),
+                }),
+                format!("{}:{}:{}", run_id, resp.final_url, key_suffix),
+            )
+            .await;
         }
 
         // Per-page branding signals (favicon, theme color, palette, logo
@@ -383,17 +394,16 @@ impl PageRunner {
             Ok(html_str) => {
                 let branding =
                     quarry_transform::branding_rendered::extract(html_str, &resp.final_url);
-                self.event_sink
-                    .emit(
-                        run_id.clone(),
-                        EventType::BrandingExtracted,
-                        json!({
-                            "url": resp.final_url.to_string(),
-                            "branding": branding,
-                        }),
-                        format!("{}:{}:branding", run_id, resp.final_url),
-                    )
-                    .await;
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::BrandingExtracted,
+                    json!({
+                        "url": resp.final_url.to_string(),
+                        "branding": branding,
+                    }),
+                    format!("{}:{}:branding", run_id, resp.final_url),
+                )
+                .await;
                 // The emit above and the NormalizedOutput.branding
                 // field below should always agree; if to_value
                 // ever fails (it shouldn't for our derived
@@ -719,5 +729,16 @@ impl PageRunner {
         }
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod zdr_event_tests {
+    use super::*;
+
+    #[test]
+    fn zdr_page_events_are_ephemeral_only() {
+        assert!(!page_event_persistence_allowed(ZdrMode::On));
+        assert!(page_event_persistence_allowed(ZdrMode::Off));
     }
 }

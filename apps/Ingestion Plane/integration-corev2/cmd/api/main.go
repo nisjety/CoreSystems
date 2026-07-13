@@ -14,6 +14,7 @@ import (
 
 	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/api"
+	"github.com/triodelab/integration-corev2/internal/attestation"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
@@ -37,6 +38,11 @@ func main() {
 	if err := cfg.ValidateRuntime(); err != nil {
 		logger.Fatal().Err(err).Msg("validate config")
 	}
+	writeAttestationKeys, err := attestation.ParseTrustedKeysJSON(cfg.ProviderWriteAttestationKeysJSON)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("initialize provider-write attestation verifier")
+	}
+	writeAttestations := attestation.NewVerifier(writeAttestationKeys, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -81,17 +87,18 @@ func main() {
 	controlPlaneClient := &http.Client{Timeout: 5 * time.Second}
 	hotPathClient := &http.Client{Timeout: 2 * time.Second}
 	app := api.NewServer(api.ServerConfig{
-		Config:    cfg,
-		Repo:      repo,
-		OAuth:     service,
-		Auth:      controlplane.NewAuthClient(cfg, controlPlaneClient),
-		Org:       controlplane.NewOrgClient(cfg, controlPlaneClient),
-		Billing:   controlplane.NewBillingClient(cfg, controlPlaneClient),
-		Audit:     controlplane.NewAuditClient(cfg, controlPlaneClient),
-		Events:    publisher,
-		Discovery: discovery.NewService(cfg, &http.Client{Timeout: 8 * time.Second}),
-		Actions:   actions.NewService(cfg, &http.Client{Timeout: 15 * time.Second}),
-		HotPath:   hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
+		Config:            cfg,
+		Repo:              repo,
+		OAuth:             service,
+		Auth:              controlplane.NewAuthClient(cfg, controlPlaneClient),
+		Org:               controlplane.NewOrgClient(cfg, controlPlaneClient),
+		Billing:           controlplane.NewBillingClient(cfg, controlPlaneClient),
+		Audit:             controlplane.NewAuditClient(cfg, controlPlaneClient),
+		Events:            publisher,
+		Discovery:         discovery.NewService(cfg, &http.Client{Timeout: 8 * time.Second}),
+		Actions:           actions.NewService(cfg, &http.Client{Timeout: 15 * time.Second}),
+		WriteAttestations: writeAttestations,
+		HotPath:           hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
 		WebhookOrg: &webhookorg.Resolver{
 			Store: repo,
 			Meta: &webhookorg.GraphAssetLister{
