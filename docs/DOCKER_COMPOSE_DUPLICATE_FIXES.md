@@ -1,8 +1,36 @@
 # Docker Compose Duplicate & Conflict Fixes
 
-> **Scope:** All 8 compose files across the CoreSystem workspace.
-> **Date:** 2025-07-08
-> **Status:** Analysis complete — fixes pending implementation.
+> **Scope:** Canonical plane stacks, production overrides, and deprecated root overlays.
+> **Updated:** 2026-07-12
+> **Status:** Source cleanup implemented and statically validated; live rebuild awaits Docker content-store recovery.
+
+## 2026-07-12 implementation update
+
+- The six canonical runtime stacks are now the plane-level Compose files for
+  Data v2, Control, Ingestion, Model, Application, and Frontend Velion v3.
+- The root monolith is quarantined behind the explicit `legacy-monolith`
+  profile. Its floating images and embedded development credentials were
+  removed; it is not part of the production bootstrap path.
+- Root Zammad and unverified Nohu duplicates were removed. Zammad is owned by
+  the Application Plane overlay; active connector ownership is Ingestion
+  `integration-corev2`.
+- Shared NATS ownership is Frontend Plane Velion v3. The broker and every
+  canonical plane-local NATS instance require authentication.
+- Production overrides remove internal host publications and harden first-party
+  processes with non-root users, dropped capabilities, immutable roots where
+  compatible, bounded scratch space, init handling, and graceful shutdowns.
+- Velion v3 now has separate `dev` and `production` image targets. Production
+  serves a prebuilt SPA through digest-pinned unprivileged nginx; the Rust BFF
+  remains internal.
+- Compose dependency order is Data → Control → Ingestion → Model → Application
+  → Frontend, avoiding Auth/JWKS readiness deadlocks.
+- All canonical base and production overlays render with synthetic required
+  values. Real promotion still requires operator-provisioned secrets and the
+  already-approved Docker Desktop content-store recovery.
+
+The remainder of this document is the historical conflict inventory that led
+to the implemented cleanup. Names and port examples below may describe the
+pre-cleanup layout.
 
 ---
 
@@ -311,6 +339,12 @@ REDIS_URL: "redis://aquatiq-redis-local:6379"
 ## 6. Root Compose Deprecation Plan
 
 The root `docker-compose.yml` is a **legacy monolith** that predates the plane-based architecture. It uses the `aquatiq-local` network (not `velion-net`) and duplicates services from Control, Application, and Frontend planes with **different port mappings and configurations**.
+
+**2026-07-12 safety update:** every root service is quarantined behind the
+explicit `legacy-monolith` profile. A normal root-level `docker compose up`
+can no longer start duplicate plane services. The definitions remain available
+temporarily for compatibility with `--profile legacy-monolith`; all normal
+builds and deployments must use the six canonical plane-level Compose files.
 
 ### Unique Services in Root Compose
 

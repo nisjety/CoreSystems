@@ -1,5 +1,37 @@
 # CoreSystem Audit Backlog
 
+Updated: 2026-07-12 (six-plane audit)
+
+## 2026-07-11/12 — Six-plane audit: consolidated open items
+
+A full pyramid audit (Control → Data → Ingestion → Model → Application → Frontend/velionv3) completed with per-plane `docs/core-research/plane-audit-2026-07-11.md` (Data Plane: `-07-10`) + `<Plane>_STATUS.md` + `<Plane>_ROADMAP.md`. Detail and fix specs live in those; this is the cross-plane rollup.
+
+**#0 — INFRASTRUCTURE, now blocking everything (operator/host):** Docker's containerd content store is corrupted (blob I/O errors) and the `application-postgres` data volume is corrupted (SQLSTATE 58030). The approved restart was **attempted and failed** — the 278 GiB Docker data image would not mount on a **99%-full host disk**; Docker Desktop is stopped. Until host disk space is freed and Docker recovers, `docker exec`/build/logs are unavailable, DB-backed services are down, and **no source fix from Phases 2–6 can be deployed or live-verified**. This is the single gating item; it needs an operator decision on freeing host space (non-destructive) vs a destructive Docker reset/restore.
+
+**Fixed in source this audit** (build/test-verified; only session-core is deployed — the rest await #0):
+- Control Plane `session-core`: forged-bearer auth-bypass → validates via auth-core round-trip (DEPLOYED + live-verified).
+- Ingestion `shipping-core`: Bring delivery-time parsing (top-level `expectedDelivery`) + 2 production-shaped tests.
+- velionv3 `McpServersSection.tsx`: MCP-add transport/URL-scheme validation (typecheck green; hot-reloads).
+- Data Plane v2: the parallel "Secure-MVP" remediation across graph-index/data-quality/data-orchestrator/quickwit/documents-api (see `apps/Data Plane v2/DATA_PLANE_ROADMAP.md`).
+
+**P0 / HIGH open items (by plane):**
+- **Model Plane — deploy landmine:** an uncommitted secure-MVP WIP removes the gRPC surfaces of `model-gateway`/`inference-core`/`execution-core` (`#[cfg(test)]`); rebuilding as-is breaks the whole chat/inference/tool loop. Split the change before any rebuild. (`MODEL_PLANE_ROADMAP.md` Phase A.)
+- **velionv3 — new cross-tenant IDOR:** `GET /api/v1/onboarding/graph-preview` trusts a client `org_id` query param → reads any org's knowledge graph. Fix: derive org from session. (`FRONTEND_PLANE_ROADMAP.md` Phase A.)
+- **velionv3 — chat tool-surfacing + HITL bypass:** plain chat sends no tools (the "features don't work" cause); composer-selected writes run un-gated without Plan mode. Ship both fixes together. (`FRONTEND_PLANE_ROADMAP.md` Phase B.)
+- **Model Plane — `cost-core`:** no inbound auth (IDOR read + write); DB-DSN leak in 500s; budget fails open.
+- **Application — `convex-core`:** `onOrganizationMemberRemoved` called-but-undefined → org member removals never mirror (Phase-1 finding still open).
+- **Control Plane — org/membership sync:** auth-core→org-core/user-core org sync still broken (org creates don't propagate); the in-flight outbox fix has its own GUC-name + billing-port bugs to fix before deploy. (`CONTROL_PLANE_ROADMAP.md`.)
+- **Data Plane v2 — do NOT flip enforce prematurely:** strict mode denies all real users until Control Plane org-sync lands.
+- **Application — `information-core`:** relays FNV-hash-fabricated traffic volume/speed as real measurements (honesty bug); velionv3 settings has 2 residual fabricated rows.
+
+**MCP-in-chat (user headline):** the add-MCP-via-UI pipe is real; needs (a) the transport-trap fix (done), (b) discovery/health feedback surfaced in Settings, (c) an OAuth remote-MCP client in model-gateway for connector-style servers like Visma Net. Visma is not wired in the runtime anywhere today.
+
+**Doc hygiene:** `apps/STALE_DOC_DELETION_REGISTER.md` gained ~15 new candidates this audit (Control Plane README/TEST_FLOW/DEPLOYMENT/QUICK_REFERENCE/CONVEX_INTEGRATION_SUMMARY; Ingestion QUICKSTART + 7 Feb-cluster test docs; Data migration-v1-to-v2; velionv3 mock-backed-surfaces.md → delete). The `docs/` directory has 150+ files with heavy completion-report sprawl — a dedicated consolidation pass is warranted but out of scope here.
+
+---
+
+<details><summary>2026-07-02 backlog (prior pass, retained)</summary>
+
 Updated: 2026-07-02
 
 Scope: documentation refresh, validation evidence, and low-risk smoke-script maintenance.

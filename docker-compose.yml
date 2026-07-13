@@ -1,9 +1,15 @@
+# LEGACY COMPATIBILITY STACK ONLY.
+# Canonical services are owned by the plane-level Compose files under apps/.
+# Nothing in this file starts unless `--profile legacy-monolith` is explicit.
+x-legacy-service: &legacy-service
+  profiles: ["legacy-monolith"]
 
 services:
   # ==============================================
   # Frontend - Next.js Application
   # ==============================================
   frontend:
+    <<: *legacy-service
     build:
       context: ./apps/Frontend Plane/velion
       dockerfile: Dockerfile
@@ -19,7 +25,9 @@ services:
       - NODE_ENV=production
       # Better Auth
       - BETTER_AUTH_URL=http://localhost:3000
-      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set in .env}
+      # Empty by default so the quarantined stack remains inspectable. The
+      # legacy application must reject startup until an operator provides it.
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
       - MODEL_PLANE_RUST_ENABLED=${MODEL_PLANE_RUST_ENABLED:-true}
       # Model Plane (Rust+Go) — supersedes legacy v2 ai-core/agent-core-v2 services.
       # The Rust model-gateway is now the single ingress for chat/completions,
@@ -61,6 +69,7 @@ services:
   # Organization Core Service
   # ==============================================
   org-core:
+    <<: *legacy-service
     build:
       context: ./apps/Control Plane/org-core
       dockerfile: Dockerfile
@@ -99,6 +108,7 @@ services:
   # User Service
   # ==============================================
   user-service:
+    <<: *legacy-service
     build:
       context: ./apps/Control Plane/user-core
       dockerfile: Dockerfile
@@ -107,7 +117,7 @@ services:
       # Database - using env vars instead of hardcoded
       - DATABASE_URL=postgres://${DB_USER:-aquatiq}:${DB_PASSWORD}@${DB_HOST:-aquatiq-postgres-local}:${DB_PORT:-5432}/user_service?sslmode=disable
       # Redis - normalized URL pattern
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/2
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/2
       # Redis cache config (individual vars used by user-core Go client)
       - REDIS_ENABLED=true
       - REDIS_HOST=${REDIS_HOST:-aquatiq-redis-local}
@@ -121,8 +131,8 @@ services:
       - GRPC_PORT=50012
       - HTTP_PORT=3012
       # Security - using env vars instead of hardcoded
-      - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-local}
-      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-dev-service-secret-local}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-}
       # Internal service URLs - normalized to use service names
       - BETTER_AUTH_URL=http://auth-service:3011
     ports:
@@ -143,6 +153,7 @@ services:
   # Auth Service
   # ==============================================
   auth-service:
+    <<: *legacy-service
     build:
       context: ./apps/Control Plane/auth-core
       dockerfile: Dockerfile
@@ -155,13 +166,13 @@ services:
       # Database - using env vars
       - DATABASE_URL=postgres://${DB_USER:-aquatiq}:${DB_PASSWORD}@${DB_HOST:-aquatiq-postgres-local}:${DB_PORT:-5432}/auth_service?sslmode=disable
       # Redis - normalized URL
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/3
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/3
       # NATS - using env vars
       - NATS_URL=nats://${NATS_HOST:-aquatiq-nats-local}:${NATS_PORT:-4222}
       - NATS_TOKEN=${NATS_TOKEN:-nats}
       # Security - using env vars
-      - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-local}
-      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-dev-service-secret-local}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-}
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       # Internal service URLs - normalized to use service names
       - USER_SERVICE_GRPC_URL=user-service:50012
@@ -227,6 +238,7 @@ services:
   # --- MP infrastructure ---
 
   mp-postgres:
+    <<: *legacy-service
     image: postgres:16-alpine
     container_name: mp-postgres
     environment:
@@ -244,6 +256,7 @@ services:
     restart: unless-stopped
 
   mp-temporal-postgres:
+    <<: *legacy-service
     image: postgres:16-alpine
     container_name: mp-temporal-postgres
     environment:
@@ -261,6 +274,7 @@ services:
     restart: unless-stopped
 
   mp-nats:
+    <<: *legacy-service
     image: nats:2.10-alpine
     container_name: mp-nats
     command: ["-js", "-m", "8222"]
@@ -273,12 +287,13 @@ services:
     restart: unless-stopped
 
   mp-minio:
-    image: minio/minio:latest
+    <<: *legacy-service
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: mp-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
     volumes:
       - mp-minio-data:/data
     networks:
@@ -290,6 +305,7 @@ services:
     restart: unless-stopped
 
   mp-dragonfly:
+    <<: *legacy-service
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
     container_name: mp-dragonfly
     networks:
@@ -301,6 +317,7 @@ services:
     restart: unless-stopped
 
   mp-temporal:
+    <<: *legacy-service
     image: temporalio/auto-setup:1.24
     container_name: mp-temporal
     environment:
@@ -317,6 +334,7 @@ services:
     restart: unless-stopped
 
   mp-temporal-ui:
+    <<: *legacy-service
     image: temporalio/ui:2.30
     container_name: mp-temporal-ui
     environment:
@@ -330,6 +348,7 @@ services:
     restart: unless-stopped
 
   mp-otel-collector:
+    <<: *legacy-service
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: mp-otel-collector
     command: ["--config=/etc/otel-collector-config.yaml"]
@@ -344,6 +363,7 @@ services:
   # --- MP Rust services ---
 
   mp-model-gateway:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane
       dockerfile: rust/services/model-gateway/Dockerfile
@@ -359,7 +379,7 @@ services:
       DEFAULT_MODEL: ${MP_DEFAULT_MODEL:-claude-sonnet-4-20250514}
       RATE_LIMIT_RPM: ${MP_RATE_LIMIT_RPM:-100}
       JWT_AUDIENCE: ${MP_JWT_AUDIENCE:-mp-gateway}
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-local}
+      JWT_SECRET: ${JWT_SECRET:-}
       # Local semantic-response cache (Dragonfly exact-match) → mp-dragonfly.
       # Empty to disable; managed LANGCACHE_URL (if set) takes precedence.
       SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://mp-dragonfly:6379}
@@ -379,6 +399,7 @@ services:
     restart: unless-stopped
 
   mp-session-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane
       dockerfile: rust/services/session-core/Dockerfile
@@ -409,6 +430,7 @@ services:
     restart: unless-stopped
 
   mp-inference-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane
       dockerfile: rust/services/inference-core/Dockerfile
@@ -435,6 +457,7 @@ services:
     restart: unless-stopped
 
   mp-execution-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane
       dockerfile: rust/services/execution-core/Dockerfile
@@ -444,8 +467,8 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@mp-postgres:5432/session_core
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
       MINIO_ENDPOINT: http://mp-minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}
       MINIO_BUCKET: model-plane-artifacts
       OTEL_EXPORTER_OTLP_ENDPOINT: http://mp-otel-collector:4317
       OTEL_SERVICE_NAME: mp-execution-core
@@ -472,6 +495,7 @@ services:
   # --- MP Go services ---
 
   mp-orchestrator-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go
       dockerfile: services/orchestrator-core/Dockerfile
@@ -491,6 +515,7 @@ services:
     restart: unless-stopped
 
   mp-capability-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go
       dockerfile: services/capability-core/Dockerfile
@@ -509,6 +534,7 @@ services:
     restart: unless-stopped
 
   mp-sandbox-manager:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go
       dockerfile: services/sandbox-manager/Dockerfile
@@ -516,8 +542,8 @@ services:
     environment:
       REDIS_URL: redis://mp-dragonfly:6379
       MINIO_ENDPOINT: mp-minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}
     depends_on:
       mp-dragonfly:
         condition: service_healthy
@@ -526,6 +552,7 @@ services:
     restart: unless-stopped
 
   mp-browser-broker:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go
       dockerfile: services/browser-broker/Dockerfile
@@ -535,6 +562,7 @@ services:
     restart: unless-stopped
 
   mp-letta-bridge:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go
       dockerfile: services/letta-bridge/Dockerfile
@@ -550,6 +578,7 @@ services:
     restart: unless-stopped
 
   mp-cost-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go/services/cost-core
       dockerfile: Dockerfile
@@ -569,6 +598,7 @@ services:
     restart: unless-stopped
 
   mp-task-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go
       dockerfile: services/task-core/Dockerfile
@@ -594,6 +624,7 @@ services:
     restart: unless-stopped
 
   mp-bridge-core:
+    <<: *legacy-service
     build:
       context: ./apps/Model Plane/go/services/bridge-core
       dockerfile: Dockerfile
@@ -606,7 +637,7 @@ services:
       SESSION_CORE_ADDR: mp-session-core:9091
       MODEL_GATEWAY_ADDR: mp-model-gateway:9090
       JWT_AUDIENCE: ${MP_JWT_AUDIENCE:-mp-bridge}
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-local}
+      JWT_SECRET: ${JWT_SECRET:-}
     networks:
       - aquatiq-local
     healthcheck:
@@ -619,21 +650,22 @@ services:
   # Convex Core - Realtime Application Plane
   # ==============================================
   convex-backend:
-    image: ghcr.io/get-convex/convex-backend:latest
+    <<: *legacy-service
+    image: ghcr.io/get-convex/convex-backend@sha256:104b8bc70e29b31fa4a57551596090bfc9eedc3d1f27fd4b8cd8d0e782b9b070
     container_name: convex-backend
     env_file:
       - ./apps/Application Plane/convex-core/.env.local
     environment:
       - CONVEX_INSTANCE_NAME=coresystem-local
-      - CONVEX_INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
-      - INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      - CONVEX_INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-}
+      - INSTANCE_SECRET=${CONVEX_INSTANCE_SECRET:-}
       - CONVEX_STORAGE_TYPE=sqlite
       - CONVEX_SQLITE_PATH=/data/convex.db
       - AI_CORE_URL=${AI_CORE_URL:-http://mp-model-gateway:8080}
       - MODEL_GATEWAY_URL=${MODEL_GATEWAY_URL:-http://mp-model-gateway:8080}
       - ORG_CORE_URL=${ORG_CORE_URL:-http://org-core:8080}
       - AUTH_SERVER_URL=${AUTH_SERVER_URL:-http://auth-core:3011}
-      - JWT_SECRET=${JWT_SECRET:-a2db5549b35903f6d9210f0eb2578fec95fc3802e2b7947bb8e5711bc7ae4a55}
+      - JWT_SECRET=${JWT_SECRET:-}
       - JWT_ISSUER=auth.coresystem.local
       - RUST_LOG=info
       - CONVEX_LOG_FORMAT=json
@@ -659,7 +691,8 @@ services:
 
   # Convex Dashboard - Web UI
   convex-dashboard:
-    image: ghcr.io/get-convex/convex-dashboard:latest
+    <<: *legacy-service
+    image: ghcr.io/get-convex/convex-dashboard@sha256:60b04b339d6cd6623057b03e5275329a20011051907ec5e689a38a401cfdc409
     container_name: convex-dashboard
     environment:
       - CONVEX_BACKEND_URL=http://convex-backend:3210
@@ -676,12 +709,13 @@ services:
   # Letta Server - Stateful AI Agents with Memory
   # ==============================================
   letta-server:
-    image: letta/letta:latest
+    <<: *legacy-service
+    image: letta/letta:0.16.8@sha256:aa66c3eeee13d2dfc40c650d709b550237ee31bfc91942a52fa488a13fa8c102
     container_name: mp-letta-server
     environment:
       # Using internal SQLite - PostgreSQL requires pgvector extension
       # - LETTA_PG_URI=postgresql://aquatiq:${DB_PASSWORD}@aquatiq-postgres-local:5432/letta_db
-      - LETTA_REDIS_URL=redis://:${DRAGONFLY_PASSWORD:-change-me-dragonfly-password}@controlplane-dragonfly:6379/5
+      - LETTA_REDIS_URL=redis://:${DRAGONFLY_PASSWORD:-}@controlplane-dragonfly:6379/5
       - LETTA_SERVER_PORT=8283
       - LETTA_SERVER_HOST=0.0.0.0
     ports:
@@ -702,6 +736,7 @@ services:
   # Temporal PostgreSQL - Workflow State Storage
   # ==============================================
   org-core-temporal-postgres:
+    <<: *legacy-service
     image: postgres:15-alpine
     container_name: org-core-temporal-postgres
     environment:
@@ -725,6 +760,7 @@ services:
   # Temporal Server - Workflow Orchestration
   # ==============================================
   org-core-temporal:
+    <<: *legacy-service
     image: temporalio/auto-setup:1.24.2
     container_name: org-core-temporal
     depends_on:
@@ -752,6 +788,7 @@ services:
   # Temporal UI - Workflow Monitoring
   # ==============================================
   org-core-temporal-ui:
+    <<: *legacy-service
     image: temporalio/ui:2.26.2
     container_name: org-core-temporal-ui
     depends_on:
@@ -774,6 +811,7 @@ services:
   # ============================================================
 
   notification-core:
+    <<: *legacy-service
     build:
       context: ./apps/Application Plane/notification-core
       dockerfile: Dockerfile
@@ -797,7 +835,7 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-notifications@aqencia.com}
       RESEND_FROM_NAME: ${RESEND_FROM_NAME:-Aqencia}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-internal-api-key-local}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
     ports:
       - "3140:3140"   # REST API + WebSocket
@@ -832,6 +870,7 @@ services:
   # quarry-edge (Rust) — public REST + SSE + cache
   # ----------------------------------------------
   quarry-edge:
+    <<: *legacy-service
     build:
       context: ./apps/Ingestion Plane/Quarry-v2
       dockerfile: deploy/compose/Dockerfile.edge
@@ -846,9 +885,9 @@ services:
       - QUARRY_EDGE__BROWSERLESS_BASE_URL=${BROWSERLESS_URL:-}
       - QUARRY_EDGE__BROWSERLESS_TOKEN=${BROWSERLESS_TOKEN:-}
       - QUARRY_EDGE__CONTROL_BASE_URL=http://quarry-control:8081
-      - QUARRY_EDGE__CONTROL_API_KEY=${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
-      - QUARRY_EDGE__RUNTIME_AUTH_TOKEN=${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
-      - QUARRY_EDGE__REDIS_URL=${QUARRY_EDGE_REDIS_URL:-redis://:${DRAGONFLY_PASSWORD:-change-me-dragonfly-password}@${REDIS_HOST:-controlplane-dragonfly}:${REDIS_PORT:-6379}/6}
+      - QUARRY_EDGE__CONTROL_API_KEY=${QUARRY_CONTROL_API_KEY:-}
+      - QUARRY_EDGE__RUNTIME_AUTH_TOKEN=${QUARRY_RUNTIME_AUTH_TOKEN:-}
+      - QUARRY_EDGE__REDIS_URL=${QUARRY_EDGE_REDIS_URL:-redis://:${DRAGONFLY_PASSWORD:-}@${REDIS_HOST:-controlplane-dragonfly}:${REDIS_PORT:-6379}/6}
       - QUARRY_EDGE__ARTIFACT_BACKEND=${QUARRY_EDGE_ARTIFACT_BACKEND:-memory}
       - QUARRY_EDGE__ARTIFACT_ROOT=/app/data/artifacts
       - QUARRY_EDGE__S3_BUCKET=${QUARRY_S3_BUCKET:-}
@@ -908,7 +947,7 @@ services:
       - QUARRY_EDGE__DATA_PLANE_TRANSPORT=${QUARRY_DATA_PLANE_TRANSPORT:-http}
       # D2 / cluster #14 — HMAC shared secret for cross-plane forwards.
       # MUST match QUARRY_INTERNAL_SECRET on quarry-control.
-      - QUARRY_EDGE__INTERNAL_SECRET=${QUARRY_INTERNAL_SECRET:-dev-internal-secret-0123456789abcdef-do-not-use-in-prod}
+      - QUARRY_EDGE__INTERNAL_SECRET=${QUARRY_INTERNAL_SECRET:-}
       # Telemetry (read directly via env, not via config struct)
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - RUST_LOG=${RUST_LOG:-info}
@@ -933,6 +972,7 @@ services:
   # quarry-control (Go) — durable plane (Postgres)
   # ----------------------------------------------
   quarry-control:
+    <<: *legacy-service
     build:
       context: ./apps/Ingestion Plane/Quarry-v2
       dockerfile: deploy/compose/Dockerfile.control
@@ -940,12 +980,12 @@ services:
     environment:
       - QUARRY_CONTROL_ADDR=:8081
       - QUARRY_CONTROL_DSN=postgres://${DB_USER:-aquatiq}:${DB_PASSWORD}@${DB_HOST:-aquatiq-postgres-local}:${DB_PORT:-5432}/quarry_v2?sslmode=disable
-      - QUARRY_CONTROL_API_KEY=${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      - QUARRY_CONTROL_API_KEY=${QUARRY_CONTROL_API_KEY:-}
       # D2 / cluster #14 — HMAC shared secret. MUST match
       # QUARRY_EDGE__INTERNAL_SECRET on the edge side. ≥32 chars.
       # When unset, control plane runs in "trust the network" mode
       # (private-network deploys only).
-      - QUARRY_INTERNAL_SECRET=${QUARRY_INTERNAL_SECRET:-dev-internal-secret-0123456789abcdef-do-not-use-in-prod}
+      - QUARRY_INTERNAL_SECRET=${QUARRY_INTERNAL_SECRET:-}
       # Flip to "1" once every edge instance is signing.
       - QUARRY_INTERNAL_HMAC_REQUIRED=${QUARRY_INTERNAL_HMAC_REQUIRED:-}
       # D5 / cluster #5 — Temporal frontend. Today the SDK isn't
@@ -995,6 +1035,7 @@ services:
   # --- DP v2 infrastructure ---
 
   dpv2-postgres:
+    <<: *legacy-service
     image: postgres:16-alpine
     container_name: dpv2-postgres
     restart: unless-stopped
@@ -1033,6 +1074,7 @@ services:
       retries: 10
 
   dpv2-dragonfly:
+    <<: *legacy-service
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
     container_name: dpv2-dragonfly
     restart: unless-stopped
@@ -1058,6 +1100,7 @@ services:
       retries: 10
 
   dpv2-qdrant:
+    <<: *legacy-service
     image: qdrant/qdrant:v1.17.0
     container_name: dpv2-qdrant
     restart: unless-stopped
@@ -1081,6 +1124,7 @@ services:
       interval: 10s
 
   dpv2-nats:
+    <<: *legacy-service
     image: nats:2-alpine
     container_name: dpv2-nats
     restart: unless-stopped
@@ -1105,6 +1149,7 @@ services:
   # --- DP v2 Rust services ---
 
   retrieval-engine:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2
       dockerfile: services/retrieval-engine-rs/Dockerfile
@@ -1158,6 +1203,7 @@ services:
       retries: 5
 
   index-engine:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2
       dockerfile: services/index-engine-rs/Dockerfile
@@ -1189,6 +1235,7 @@ services:
       retries: 5
 
   embedding-engine:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2
       dockerfile: services/embedding-engine-rs/Dockerfile
@@ -1226,6 +1273,7 @@ services:
       retries: 5
 
   graph-index:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2
       dockerfile: services/graph-index-rs/Dockerfile
@@ -1259,6 +1307,7 @@ services:
   # --- DP v2 Go services ---
 
   documents-api:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2/services/documents-api-go
       dockerfile: Dockerfile
@@ -1290,6 +1339,7 @@ services:
       retries: 5
 
   wiki-store:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2/services/wiki-store-go
       dockerfile: Dockerfile
@@ -1313,6 +1363,7 @@ services:
       retries: 5
 
   data-orchestrator:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2/services/data-orchestrator-go
       dockerfile: Dockerfile
@@ -1339,6 +1390,7 @@ services:
       retries: 5
 
   data-quality:
+    <<: *legacy-service
     build:
       context: ./apps/Data Plane v2/services/data-quality-go
       dockerfile: Dockerfile
@@ -1366,6 +1418,7 @@ services:
   # ============================================================
 
   quarry-orchestrator:
+    <<: *legacy-service
     build:
       context: ./apps/Ingestion Plane/Quarry-v2
       dockerfile: deploy/compose/Dockerfile.orchestrator
@@ -1376,8 +1429,8 @@ services:
       - TEMPORAL_NAMESPACE=default
       - RUNTIME_BASE_URL=http://quarry-edge:8082
       - CONTROL_BASE_URL=http://quarry-control:8081
-      - RUNTIME_AUTH_TOKEN=${QUARRY_RUNTIME_AUTH_TOKEN:-dev-quarry-runtime-token}
-      - CONTROL_AUTH_TOKEN=${QUARRY_CONTROL_API_KEY:-dev-quarry-control-key}
+      - RUNTIME_AUTH_TOKEN=${QUARRY_RUNTIME_AUTH_TOKEN:-}
+      - CONTROL_AUTH_TOKEN=${QUARRY_CONTROL_API_KEY:-}
       # OTEL
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - ENVIRONMENT=${ENVIRONMENT:-dev}
@@ -1396,48 +1449,24 @@ services:
       start_period: 30s
 
   # ==============================================
-  # Search depth — Stract + SearXNG (cycle 19)
+  # Search depth — legacy SearXNG compatibility (cycle 19)
   # ==============================================
-  # Tantivy is embedded in quarry-edge (no external service). Stract and
-  # SearXNG live here as standalone OSS engines wired into quarry-edge's
-  # FallbackSearchProvider chain. Both reuse the shared aquatiq-local
-  # network. Disable either by removing it from the chain via env vars
-  # on quarry-edge (set the URL to empty string).
-
-  # ----------------------------------------------
-  # Stract — independent Rust SERP (own crawler + index)
-  # ----------------------------------------------
-  stract:
-    image: stractorg/stract:latest
-    container_name: stract
-    environment:
-      - STRACT_DATA_PATH=/data
-      - STRACT_HTTP_ADDR=0.0.0.0:3000
-    ports:
-      - "3000:3000"
-    volumes:
-      - stract-data:/data
-    networks:
-      - aquatiq-local
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:3000/ || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+  # Tantivy is embedded in quarry-edge. Stract was removed because this file
+  # had no verified immutable image or maintained runtime contract. Canonical
+  # SearXNG ownership is now the Ingestion Plane Compose stack.
 
   # ----------------------------------------------
   # SearXNG — meta-search aggregator (Google/Bing/DDG/etc.)
   # ----------------------------------------------
   searxng:
-    image: searxng/searxng:latest
+    <<: *legacy-service
+    image: searxng/searxng:2026.7.12-c19d86faa
     container_name: searxng
     environment:
       - SEARXNG_BASE_URL=http://searxng:8080/
-      - SEARXNG_REDIS_URL=redis://:${REDIS_PASSWORD:-redis}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/7
+      - SEARXNG_REDIS_URL=redis://:${REDIS_PASSWORD:-}@${REDIS_HOST:-aquatiq-redis-local}:${REDIS_PORT:-6379}/7
       # Secret used to sign SearXNG's internal cookies / HMAC. Set in .env (or override).
-      - SEARXNG_SECRET=${SEARXNG_SECRET:-change-me-searxng-secret-32chars!!}
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-}
     ports:
       - "8888:8080"
     volumes:
@@ -1467,6 +1496,7 @@ services:
   # Stream `QUARRY_EVENTS` is auto-created by quarry-edge on boot.
   # ----------------------------------------------
   quarry-nats:
+    <<: *legacy-service
     image: nats:2.10-alpine
     container_name: quarry-nats
     # `-js` enables JetStream; `-m 8222` exposes the monitoring/HTTP
@@ -1492,6 +1522,7 @@ services:
   # tenant-scoped suggestions for Velion's search box.
   # ----------------------------------------------
   quarry-sonic:
+    <<: *legacy-service
     image: valeriansaliou/sonic:v1.4.9
     container_name: quarry-sonic
     command:
@@ -1502,7 +1533,7 @@ services:
         sed "s#__SONIC_PASSWORD__#$${SONIC_PASSWORD}#g" /etc/sonic.template.cfg > /tmp/sonic.cfg
         sonic -c /tmp/sonic.cfg
     environment:
-      - SONIC_PASSWORD=${SONIC_PASSWORD:?SONIC_PASSWORD is required}
+      - SONIC_PASSWORD=${SONIC_PASSWORD:-}
     volumes:
       - ./apps/Ingestion Plane/autocomplete-core/deploy/sonic.template.cfg:/etc/sonic.template.cfg:ro
       - autocomplete-sonic-data:/var/lib/sonic/store
@@ -1511,6 +1542,7 @@ services:
     restart: unless-stopped
 
   autocomplete-core:
+    <<: *legacy-service
     build:
       context: ./apps/Ingestion Plane/autocomplete-core
       dockerfile: Dockerfile
@@ -1518,10 +1550,10 @@ services:
     environment:
       - AUTOCOMPLETE_HTTP_ADDR=0.0.0.0:3219
       - AUTOCOMPLETE_METADATA_DB=/data/autocomplete-core.sqlite3
-      - AUTOCOMPLETE_INTERNAL_TOKEN=${AUTOCOMPLETE_INTERNAL_TOKEN:?AUTOCOMPLETE_INTERNAL_TOKEN is required}
+      - AUTOCOMPLETE_INTERNAL_TOKEN=${AUTOCOMPLETE_INTERNAL_TOKEN:-}
       - SONIC_ENABLED=${SONIC_ENABLED:-true}
       - SONIC_ADDR=quarry-sonic:1491
-      - SONIC_PASSWORD=${SONIC_PASSWORD:?SONIC_PASSWORD is required}
+      - SONIC_PASSWORD=${SONIC_PASSWORD:-}
       - NATS_ENABLED=${AUTOCOMPLETE_NATS_ENABLED:-true}
       - NATS_URL=${QUARRY_EDGE_NATS_URL:-nats://quarry-nats:4222}
       - NATS_STREAM=QUARRY_EVENTS
@@ -1562,9 +1594,6 @@ volumes:
   temporal-postgres-data:
     driver: local
   convex-data:
-    driver: local
-  # Cycle 19 — search depth
-  stract-data:
     driver: local
   # searxng-data removed: replaced by bind-mount ./config/searxng/settings.yml
   # P1 / cluster #nats — Quarry NATS JetStream durable storage

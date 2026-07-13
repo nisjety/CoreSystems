@@ -1,6 +1,20 @@
 # CoreSystem Codebase Information System
 
-Updated: 2026-07-02
+Updated: 2026-07-13
+
+> **Model Plane runtime correction (2026-07-13):** ownership and target
+> architecture below remain valid, but the running `model-gateway:9090` and
+> `inference-core:9092` listeners are absent despite green HTTP health. Current
+> source restores authenticated additive contracts, exact target-audience
+> issuance/callers, terminal-safe approval replay, and the ordinary invoke
+> graph. It is not deployed and still lacks approval outbox/cache recovery,
+> durable browser ownership, complete background callers, unavoidable
+> capability dispatch authority, a verified ZDR-eligible provider route,
+> immutable rollback, release-database proof, and live security evidence.
+> See [MODEL_PLANE_STATUS.md](Model%20Plane/MODEL_PLANE_STATUS.md), the
+> [2026-07-13 audit](Model%20Plane/docs/core-research/plane-audit-2026-07-13.md),
+> [safe-rebuild decision](Model%20Plane/docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md),
+> and [MVP/enterprise-next roadmap](Model%20Plane/MODEL_PLANE_ROADMAP.md).
 
 Scope:
 - `apps/Application Plane`
@@ -206,6 +220,18 @@ Primary docs:
 ### Application Plane
 
 Purpose: collaborative workspace and realtime synchronization layer. It may mirror or project state from lower planes, but it does not own identity, billing, durable knowledge, ingestion, or reasoning.
+
+Current authority contract (verified in changed source on 2026-07-13): Control Plane
+owns exact user/organization membership. Application projections may only narrow that
+decision and must revoke stale local membership after a canonical denial. The
+Application Plane owns `POST /api/v1/notification-requests`; Frontend gateway and
+Ingestion support-worker are authenticated clients of that contract. These source
+changes are not deployed. Conversation owns its durable human/approved-AI send
+authorization, while Ingestion `integration-corev2` owns provider execution and the
+single-use receipt; effectful writes require both a tenant-bound service bearer and an
+exact short-lived Ed25519 attestation. Model-originated writes intentionally fail closed
+until Model persists and issues an equivalent authority contract. Consult
+`APPLICATION_PLANE_STATUS.md` and the dated audit before treating this as runtime behavior.
 
 Primary services:
 - `convex-core` - Convex backend/dashboard/gateway/subscriber package.
@@ -419,9 +445,10 @@ High-signal confirmed items from this refresh:
 - `pnpm test` in Velion v3 fails because Vitest catches unhandled rejections from `loadStudioWorkspace` when session context lacks `orgs`.
 - Quarry-v2 workspace tests fail to compile where `DataPlaneIngestRequest` constructors have not been updated for `initiator_user_id` and `visibility`.
 - Data Plane Rust check passes with a cleanup warning for unused `RerankClient::new`.
-- Model Plane Rust workspace tests pass; Model Plane Go still has failing gates in `orchestrator-core/internal/orchestration` and `letta-bridge/internal/memstore`.
+- This dated test snapshot is superseded for Model Plane release status. On 2026-07-13 the changed Go auth/cost/capability/Letta modules pass; the prior Letta memstore equality-boundary failure is fixed. Full Model Plane workspace/orchestrator/Rust release gates and live authenticated E2E remain incomplete; use `apps/Model Plane/MODEL_PLANE_STATUS.md`.
 - Control Plane checked Go services and `auth-core` Jest pass in this worktree.
 - Application Plane checked Go services pass; Convex direct TypeScript/ESLint checks pass, but pnpm script wrappers are blocked by ignored-build approval for `esbuild@0.27.0`.
+- The 2026-07-13 Application Plane secure-MVP pass supersedes that narrow snapshot: canonical membership, messaging idempotency, notification ownership, Convex removal/reconciliation, and information provenance are hardened in source and tested, but migrations/functions/images remain undeployed and the plane is not release-ready. See `apps/Application Plane/docs/core-research/plane-audit-2026-07-13.md`.
 - Ingestion top-level Makefile still points some dev/test targets at legacy `Quarry`, while active architecture is `Quarry-v2`.
 - Nested `.claude/worktrees`, generated artifacts, build output, and package caches can pollute naive repository discovery and CodeGraph/static inventory.
 

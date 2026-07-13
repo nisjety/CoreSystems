@@ -1,14 +1,74 @@
 # CoreSystem — System Status & Achievements
 
-**Date:** 1 March 2026 (Updated 09:30)  
-**Phase Status:** Phase 6 Complete — Cross-Plane Event Consumption ✅  
-**Result:** All 5 planes operational and interconnected. Real-time event-driven architecture fully functional. Control Plane publishing to shared NATS broker; Ingestion, Data, and Reasoning planes subscribing and reacting. 54/54 backend tests passing. All services listening and authenticated.
+> **⚠️ Superseded in part by [SYSTEM_PRODUCTION_READINESS_2026-07-13.md](SYSTEM_PRODUCTION_READINESS_2026-07-13.md) (2026-07-13).**
+> A read-only production-readiness pass on 2026-07-13 found the Model Plane deploy landmine **has detonated for `model-gateway` and `inference-core`**: their HTTP health is green while required gRPC `:9090`/`:9092` refuse connections, so general inference/chat and Data-Plane query embedding are down. `execution-core` still serves authenticated gRPC. Current source restores additive authenticated contracts, exact target-audience issuance/callers, terminal-safe approval replay, and the ordinary invoke graph, but it is not deployed and has no immutable rollback artifact. Release blockers still include approval outbox/cache recovery, durable browser ownership, background callers, unavoidable capability dispatch authority, release-database migrations, and a verified ZDR-eligible provider route. See the Model Plane 2026-07-13 [status](apps/Model%20Plane/MODEL_PLANE_STATUS.md), [audit](apps/Model%20Plane/docs/core-research/plane-audit-2026-07-13.md), [safe-rebuild decision](apps/Model%20Plane/docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md), and [MVP/enterprise-next roadmap](apps/Model%20Plane/MODEL_PLANE_ROADMAP.md). The rest of this document is historical context.
+
+> **Application Plane correction — 2026-07-13:** the fleet-wide Docker/content-store
+> and `application-postgres` corruption narrative retained below is not true of the
+> runtime inspected today. Application Postgres and the active Application services
+> were running, and native-arm64 `leads-core` reached real Brreg successfully from its
+> container. Security-critical membership, messaging, notification, Convex, and
+> information fixes exist only in the dirty source tree and have not been deployed;
+> the plane is therefore **not a production-ready MVP**. Use the dated Application
+> Plane [status](apps/Application%20Plane/APPLICATION_PLANE_STATUS.md),
+> [audit](apps/Application%20Plane/docs/core-research/plane-audit-2026-07-13.md), and
+> [safe deployment runbook](apps/Application%20Plane/docs/runbooks/application-plane-safe-deployment-2026-07-13.md)
+> as the current evidence.
+
+**Date:** 11–12 July 2026 (six-plane audit complete)
+**Phase Status:** All 6 focused planes audited; substantial source fixes landed; live deployment gated on Docker maintenance.
+
+## Six-plane audit — complete (2026-07-11/12)
+
+A full pyramid audit ran Control → Data → Ingestion → Model → Application → Frontend/velionv3, each with parallel live-verification + source review, per-service `docs/core-research/*.md` rewrites, and a dated `plane-audit-2026-07-11.md` + `*_STATUS.md` + `*_ROADMAP.md` per plane.
+
+**The user's two headline questions, answered:**
+- **"Chat can't reach its tools (shipping, etc.)"** — the Model Plane tool loop is REAL and non-mocked. Plain chat is intentionally tool-free; explicit selected tools, Browse, Plan, and Agent Run Console are different modes owned by Frontend presentation policy. The current universal blocker is the absent live inference gRPC listener. Catalog semantics still diverge and need one machine-readable capability contract; this is not accurately described as an accidental composer omission.
+- **"Add the Visma MCP via the UI and it did nothing"** — no Velion Visma runtime integration exists. The lone live record is malformed (`stdio` + HTTPS + empty allowlist), discovers nothing, and the MCP bridge is not deployed. Current source rejects that shape and quarantines unowned legacy records, but a real outcome still requires a separately deployable Visma MCP server, secret-reference/auth onboarding, exact allowlist, health/discovery, and end-to-end invocation. The operator's Codex/Claude connector is a separate system.
+
+**Fixes landed in source this audit** (verified via build/test; most NOT yet deployed — Docker rebuild gated):
+- Control Plane session-core: forged-bearer auth bypass **fixed + live-verified** (this one deployed).
+- Ingestion shipping-core: Bring delivery-time parsing **fixed** (+ 2 production-shaped tests).
+- velionv3: MCP-add transport/URL validation **fixed** (typecheck green, hot-reloads live).
+- Data Plane v2: the parallel "Secure-MVP" remediation hardened the zero-credential data-exposure findings across graph-index/data-quality/data-orchestrator/quickwit/documents-api.
+
+**The dominant operational blocker:** Docker's **containerd content store is corrupted** (blob I/O errors) — it breaks `docker exec`, image rebuild, and `docker logs` fleet-wide, and has now **corrupted the `application-postgres` data volume** (SQLSTATE 58030), so every DB-backed Application service (Inbox, notifications, insights, social, leads) returns 500 on real reads despite healthy `/health`. Their code is correct; they recover once the volume is restored. An operator-approved Docker maintenance window (restart + clean rebuilds + volume restore) is what lets essentially every source fix above go live. **Almost nothing from Phases 2–6 can be deployed until that maintenance runs.**
+
+**Top open items across planes** (see each plane's `*_ROADMAP.md`):
+1. CRITICAL live incident — Model Plane gateway/inference gRPC listeners are already absent while health is green. Additive authenticated source restoration is not deployment authorization; **do not rebuild/cut over** until all callers, contracts, readiness, immutable artifacts, and rollback gates pass.
+2. HIGH — new velionv3 `onboarding/graph-preview` cross-tenant IDOR (client query-param `org_id`).
+3. HIGH — capability states diverge across plain chat, selected tools, Browse, Plan, gateway, capability-core, and execution; live session approval RPCs permit HITL bypass. Inline MCP bypass is fixed in source only.
+4. HIGH — live cost-core has no inbound auth (IDOR); convex-core `onOrganizationMemberRemoved` is called-but-undefined. The prior “session compaction 100% failing” claim is withdrawn: current metrics show 479 successes, 0 observed errors, and 24 checkpoints.
+5. MEDIUM — information-core relays fabricated traffic metrics as real; residual fabricated settings rows in velionv3.
+
+Everything below the line is retained as prior/historical context. The dated plane audits under `apps/*/docs/core-research/plane-audit-2026-07-11.md` (Data Plane: `-07-10`) plus each plane's `*_STATUS.md`/`*_ROADMAP.md` are the current source of truth.
+
+---
+
+## Prior "Current verified status — 2026-07-10" (retained)
+
+**Date:** 10 July 2026 (live Docker verification)
+**Phase Status:** Runtime healthy, production readiness not certified
+**Result:** 91 Docker containers were running and none were unhealthy. Representative HTTP health/readiness probes returned 200 across Frontend, Gateway, Model, Control, Data, Ingestion, and Application services. Authenticated v3 cross-plane Playwright smoke passed 6/6. This is a liveness result, not proof that every capability is live, non-mock, tenant-safe, or ZDR-safe.
+
+## Current verified status — 2026-07-10
+
+The current stack has real functionality, but it is mixed and has release blockers:
+
+- Live Azure GPT-4o-mini inference returned token, latency, and cost telemetry. Normal chat sent zero tools and zero citations; Browse mode used live web search/fetch and emitted five citations; knowledge search returned an honest empty result for the seeded organization.
+- Shipping returned real Bring production rates, DHL/UPS test rates, and FedEx sandbox authorization failure. PostNord, DSV, Helthjem, and Porterbuddy are explicit mocks. Bring’s upstream promised two-to-four working days for the sampled Oslo→Trondheim services, but shipping-core returned zero transit time because its parser reads the wrong field.
+- Integration discovery succeeded for 8 of 11 active connections; 3 active records failed token resolution. The live catalog contains no Visma provider. One enabled `visma mcp` record exists but is configured as `stdio` with an HTTPS URL and was not executed.
+- Quarry search and a ZDR/no-ingest scrape worked, but the running Edge accepts arbitrary non-empty bearer tokens and Quarry Control exposes jobs with HMAC enforcement disabled. Data graph/quality/orchestrator host routes also accepted caller-selected organization scope without a credential.
+- Critical blockers remain: unauthenticated shipping/import/Data routes, MCP command/SSRF and gRPC exposure, ZDR persistence gaps, source/image deployment drift, and inconsistent agent/run observability.
+
+The sections below are retained as a historical March 2026 achievement snapshot. They must not be used as the current production-readiness certificate. See the dated plane audits under `apps/*/docs/core-research/` for current evidence.
 
 ---
 
 ## Table of Contents
 
-1. [Phase 6 Summary — Cross-Plane Event Consumption](#phase-6-summary)
+0. [Current verified status — 2026-07-10](#current-verified-status--2026-07-10)
+1. [Historical Phase 6 Summary — Cross-Plane Event Consumption](#historical-march-2026-snapshot--phase-6-summary)
 2. [Architecture Overview](#architecture-overview)
 3. [Plane-by-Plane Breakdown](#plane-by-plane-breakdown)
 4. [Shared NATS Event Broker](#shared-nats-event-broker)
@@ -21,7 +81,7 @@
 
 ---
 
-## Phase 6 Summary — Cross-Plane Event Consumption
+## Historical March 2026 snapshot — Phase 6 Summary
 
 **Status:** 🟢 **COMPLETE & PRODUCTION READY** (1 March 2026)
 
@@ -301,7 +361,7 @@ Storage Type:       File-based (/data/nats/streams)
 ### Authentication
 
 - **Mechanism**: Token-based NATS auth (configured in nats-shared.conf)
-- **Token**: `aqencia-shared-nats-token-2026` (shared across all planes)
+- **Token**: removed from this status document; rotate any credential that appeared in the historical documentation and keep secrets in the runtime secret manager only.
 - **Status**: ✅ All planes authenticated and connected
 
 ### Monitoring & Management

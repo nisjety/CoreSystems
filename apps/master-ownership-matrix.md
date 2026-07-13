@@ -1,5 +1,20 @@
 # CoreSystem Master Ownership Matrix
 
+> **Runtime note — 2026-07-13:** the ownership rules below remain canonical,
+> but they do not certify current availability. Model Plane gateway/inference
+> gRPC is absent in the running stack. Authenticated additive source contracts
+> and the ordinary invoke caller graph pass tests but are not deployed; the safe
+> rebuild gate is documented in
+> [Model Plane status](Model%20Plane/MODEL_PLANE_STATUS.md).
+
+> **Application authority note — 2026-07-13:** Control Plane is the source of truth
+> for identity and exact organization membership. Application Plane may maintain
+> revocable projections, owns the canonical notification request API and application
+> delivery ledgers, and must fail closed when Control authority is unavailable.
+> Frontend/gateway and Ingestion workers are clients; neither caller-supplied scope
+> nor a local projection can grant access. See the dated Application Plane
+> [audit](Application%20Plane/docs/core-research/plane-audit-2026-07-13.md).
+
 > Generated: 2026-05-06  
 > Scope: Quarry v2, Data Plane, Model Plane, App/Shell, and future reference tooling.  
 > Rule: **Quarry captures evidence. Data Plane knows. Model Plane reasons. App Shell presents.**
@@ -111,6 +126,10 @@
 6. **Knowledge assets are Data Plane-owned.** Graphs, wiki pages, embeddings, chunks, source logs, contradiction indexes live in Data Plane.
 7. **Reasoning is Model Plane-owned.** Autoresearch, graph-aware synthesis, wiki maintenance agents, browser-agent planning live in Model Plane.
 8. **UX is App/Shell-owned.** Logseq-like page/graph editing, CLI/TUI, IDE bridge, channel inbox, voice/canvas surfaces live above the core planes.
+9. **Identity and membership are Control Plane-owned.** Sensitive callers resolve the exact user/organization decision through the canonical Control authority; active-organization headers, session hints, and Application projections are not grants.
+10. **Application projections only narrow access.** Convex, notification, conversation, and other Application services may cache or mirror membership for availability, but a denial/removal must revoke the projection and an authority outage must never create or widen access.
+11. **Notification intake is Application Plane-owned.** The canonical contract is `POST /api/v1/notification-requests`; Ingestion support workers and the Frontend gateway own their client calls and must propagate authentication, tenant, retention, and delivery failures honestly.
+12. **Provider execution never invents approval authority.** Conversation owns its durable human intent or approved-AI action; Ingestion Integration owns provider execution and the single-use receipt. An effectful call requires a tenant-bound service bearer plus a short-lived signature over the exact durable authorization, actor, tenant, provider effect, payload digest, and idempotency key. Every other issuer, including Model Plane, fails closed until it implements an equivalent durable contract.
 
 ## 4. Research Notes Used
 

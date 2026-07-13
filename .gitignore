@@ -81,6 +81,10 @@ Thumbs.db
 **/.env.docker
 **/*.env.docker
 
+# Generated runtime key material. Public keys are derived locally alongside
+# private keys so the complete trust bundle remains deployment-owned.
+**/.secrets/
+
 # ──────────────────────────────────────────────────────────────────────
 # Compiled Go service binaries (build artifacts — large, non-reproducible,
 # may embed baked-in config). A stray `git add -A` committed these; they are

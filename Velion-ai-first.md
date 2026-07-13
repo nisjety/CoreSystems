@@ -1,5 +1,11 @@
 # Velion — AI-First Audit & Roadmap
 
+> **Current correction — 2026-07-13.** The historical verification below is superseded for Model Plane runtime claims. Gateway/inference gRPC are absent in the running stack despite green HTTP health; live cost/session/capability auth, semantic memory, MCP/Visma, ZDR, and rollback gates fail secure-MVP acceptance. The guarded agentic approval path is real and durable through session-core, but the live approval RPC boundary is unauthenticated. Source now passes exact-audience ordinary invoke-chain tests, yet approval/browser/Letta callers and every live gate remain open; source containment is not deployment proof. See [MODEL_PLANE_STATUS.md](apps/Model%20Plane/MODEL_PLANE_STATUS.md).
+
+> **Live verification update 2026-07-10.** Docker health is green (91 running containers, no unhealthy containers) and the authenticated v3 cross-plane Playwright smoke suite passes 6/6. This does **not** mean the AI-first contract is complete: normal chat sends zero tools and zero grounding features; Browse mode can search/fetch live web sources; Plan mode exposes a separate execution catalog. A live organization MCP record named `visma mcp` is enabled but is misconfigured as `stdio` with an HTTPS URL and was not executed. Shipping quotes are mixed live/demo, and Bring’s live delivery-time fields are currently dropped by the adapter.
+>
+> **Reopened blockers from live tests:** unauthenticated shipping/import/Data routes; MCP stdio/HTTP SSRF and unauthenticated gRPC exposure; Quarry bearer bypass and disabled control HMAC in the running stack; ZDR persistence gaps; direct chat tool-loop approval bypass; and source/image deployment drift. The previous “remediation landed and verified” statement below is now historical and must not be treated as a current release certificate.
+
 > **Update 2026-07-07 — remediation LANDED on main.** The follow-up audits of 2026-07-05
 > (integration surfacing; isolation/KB/boundaries) and the five-stream remediation program
 > they triggered are merged and verified: Stream 1 Model Plane trust chain (server-pinned
@@ -60,7 +66,7 @@ CoreSystem is a 6-plane monorepo. Velion v3 is the only product surface; it reac
 | **Control Plane** | auth-core, user-core, org-core, billing-core, session-core, audit-core | `mostly-real` | Production-grade identity/billing/audit. Better Auth (2FA/SSO/OAuth, RS256 tokens), Stripe+Lago billing, Brreg, cross-plane tool_action audit. **Gap: tenant isolation is single-perimeter (RLS inert).** |
 | **Data Plane v2** | data-orchestrator-go, data-quality-go, documents-api-go, embedding/graph/index/quickwit/retrieval engines (rs), wiki-store-go, retrieval-eval-py | `mostly-real` | 9/10 services real (Postgres+Qdrant+Quickwit+MinIO+NATS). **Doc-lifecycle freshness gap is now CLOSED.** `retrieval-eval-py` is empty. **Gap: documents-api JWT enforce-mode unimplemented (503).** |
 | **Ingestion Plane** | Quarry-v2 (4-process), imports-core, integration-corev2, autocomplete-core, finspo-core, support-worker | `mostly-real` | Quarry-v2 real: crawl/scrape/map/batch/search/find-similar/**change**, SSRF-guarded, Exa/Tavily parity. **Gap: durable request-queue is in-memory only; `/v1/sources` empty (schema unbuilt); anti-bot walls.** |
-| **Model Plane** | model-gateway, inference-core, execution-core, session-core, orchestrator/cost/capability/sandbox/browser-broker/letta/bridge, lsp/mcp bridges, python labs | `mostly-real` | Hot path real e2e: chat invoke+SSE, observable agentic runs, **Budget/Balance/Genius intent layer**, Azure fine-tuning. **Gap: HITL approval store is in-memory (DashMap), not durably authoritative.** |
+| **Model Plane** | model-gateway, inference-core, execution-core, session-core, orchestrator/cost/capability/sandbox/browser-broker/letta/bridge, lsp/mcp bridges, python labs | `real code / live-broken` | The provider/tool/run code and durable session approval store are real. Current gateway/inference gRPC outage breaks the hot path; live approval/cost/capability boundaries are unauthenticated, and source fixes await compatible caller credentials and rollback gates. |
 | **Application Plane** | conversation-core (go+rs), convex-core, information-core, notification-core, **insight-core**, **social-core**, zammad-foundation | mixed | conversation-core-go = real inbox+ticketing (`:3160`, replaced Zammad). social-core = real publishing. insight-core = real but unwired. **convex-core entirely unwired + webhook HMAC is a placeholder.** |
 | **Channel Plane** | — | `empty / future` | Docs-only; zero runtime. The deep-dive's "deferred placeholder" verdict is accurate. Where the embed-widget gap will eventually close. |
 
@@ -184,7 +190,7 @@ Five advisors (Pragmatic Eng Lead, Security/Compliance Hawk, GTM/Commercial, Pro
 - Convert agents **WorkflowBuilder/WorkflowCanvas** to real persistence/execution (orchestration.rs + agents_runs.rs exist) — or explicitly label it a design preview.
 - Finish the **Data Plane→Model Plane gRPC embedding hop** + freshness-chain & ZDR regression tests (embeddings still on a direct-Azure workaround).
 - Land **Quarry durable backends** (Redis/Postgres request queue, `quarry_sources` schema, Temporal schedule trigger/backfill) — gates monitoring at scale.
-- Make **Model Plane HITL approval durable** (read through session-core / block on durable write; today in-memory DashMap).
+- Finish **Model Plane HITL boundary hardening**: durable session-core approval already exists and the guarded path blocks before execution; deploy authenticated tenant/actor pinning, requested-state CAS, caller migration, and live bypass regression tests.
 - Convert **Tailwind no-op classes** to semantic CSS + remove the 3 blanket `eslint-disable solid/*` (fix the 99 hidden Solid issues).
 
 ### ✗ FIX → see §3 (IDOR, fabricated trust, RLS depth, documents-api JWT, GDPR reachability, convex HMAC, config ports/DB drift, dev-bypass).

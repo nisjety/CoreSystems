@@ -1,8 +1,23 @@
 # Velion
 
+> **Production-readiness correction — 2026-07-13.** The 2026-07-10 “live” sections below are historical, not a current release certificate. Model Plane `model-gateway:9090` and `inference-core:9092` are absent while HTTP health remains green, so default inference/chat, tools that depend on inference, and Data Plane query embedding are currently unavailable. Live cost/session/capability boundaries remain unauthenticated, semantic memory search is down, and no Velion Visma runtime integration exists. Significant authenticated/tenant-scoped source fixes, exact audience issuance, and the ordinary invoke caller graph pass source tests but are not deployed; approval/browser/Letta/background callers, a verified ZDR provider route, compatibility, and rollback gates remain incomplete. See [MODEL_PLANE_STATUS.md](apps/Model%20Plane/MODEL_PLANE_STATUS.md) and the [2026-07-13 audit](apps/Model%20Plane/docs/core-research/plane-audit-2026-07-13.md).
+
 **The Norwegian AI workbench that turns grounded intelligence into approved action.**
 
-Velion is both a product and the AI worker at its center: an EU/Norway-first, source-grounded, observable, and governed autonomous agent for customer support and knowledge work. It does not just answer questions — it extracts data, monitors change, builds briefs, routes work through an inbox, and publishes, with a human approving every consequential step. Every answer is grounded in real sources and every action is auditable; every byte is kept in-region by default; and nothing is published, sent, or stored without a human yes. Velion is delivered as a single workbench — chat, search, knowledge, inbox, agent runs, insights, and a trust center — built on the **CoreSystem** multi-plane platform, with a Norwegian-native spine (Brreg/Enhetsregisteret resolution, Bokmål, EU model routing) at its core.
+Velion is both a product and the AI worker at its center: an EU/Norway-first, source-grounded, observable, and governed autonomous agent for customer support and knowledge work. It is designed to extract data, monitor change, build briefs, route work through an inbox, and publish, with a human approving every consequential step. Grounding, approvals, residency, and retention are runtime properties that must be verified per request; they are not implied by the presence of a backend service. Velion is delivered as a single workbench — chat, search, knowledge, inbox, agent runs, insights, and a trust center — built on the **CoreSystem** multi-plane platform, with a Norwegian-native spine (Brreg/Enhetsregisteret resolution, Bokmål, EU model routing) at its core.
+
+## Historical live status — 2026-07-10
+
+The Dockerized CoreSystem stack had 91 running containers and no unhealthy containers during the live verification. The authenticated Velion v3 cross-plane Playwright smoke suite passed 6/6. The following distinctions are authoritative over older “live” wording in this document:
+
+- Normal chat is live model inference, but it does not request tools, RAG, or knowledge grounding by default. It cannot discover shipping-core, MCP, Control, or Data capabilities unless Browse, an explicit action, or Plan mode is selected.
+- Browse mode successfully used live web search/fetch and emitted citations. Knowledge search was reachable but returned an honest empty result for the seeded organization.
+- Shipping is mixed live/demo. Bring production rating returned real prices, but shipping-core dropped Bring delivery-time fields and returned zero transit time. Four carriers are explicit mocks; DHL/UPS/FedEx are configured for test/sandbox environments, not production proof.
+- One organization-scoped “visma mcp” record exists, but it is configured as `stdio` with an HTTPS URL and no tool allowlist. It was not executed. No in-repository Visma adapter was found.
+- The frontend action registry, direct Model Gateway tools, and execution-core Plan tools are separate runtime catalogs. The same human/AI action contract is a target, not yet an end-to-end guarantee.
+- Critical blockers remain: unauthenticated shipping/import/Data routes, MCP command/SSRF exposure, Quarry bearer bypass in the running environment, and incomplete ZDR propagation.
+
+The detailed live evidence is recorded in the 2026-07-10 addenda in each plane’s core-research audit.
 
 ---
 
@@ -50,7 +65,7 @@ Capabilities are modeled as a **typed action registry** (`velionv3/src/shared/ac
 
 ### Grounded answers — chat & inbox
 
-- **Source-grounded chat** *(live)* — durable threads/transcripts over the Model Plane (`/v1/invoke`, streaming, resume, cancel), backed by live Anthropic/OpenAI inference and `knowledge_search` grounding.
+- **Source-grounded chat** *(opt-in / partially verified)* — durable threads/transcripts over the Model Plane (`/v1/invoke`, streaming, resume, cancel), with live provider inference. Grounding is available through Browse/tools/knowledge paths; normal chat does not request it and must not be described as automatically source-grounded.
 - **Shared / team inbox** *(live)* — conversation-core-go powers inboxes, conversations, messages, internal notes, status, and assignment, plus an `ai-actions` **HITL review queue** where the agent drafts replies for human approval. *(Backend is conversation-core-go, not Zendesk.)*
 - **Ticketing** *(live)* — create, classify, update, assign, link-resource, resolve.
 
@@ -67,8 +82,8 @@ Capabilities are modeled as a **typed action registry** (`velionv3/src/shared/ac
 
 ### Autonomous agent runs — with HITL approval & cost-awareness
 
-- **Multi-tool agent loop** *(live engine)* — tools: `web_search`, `web_fetch`, `knowledge_search`, `browser_agent`, `shell`, plus `company_lookup` (Brreg), `yr_weather`, `traffic`, `news`, `track_shipment`, and MCP tools. Read-only tools run un-gated; risky tools (deploy/payment/refund/shell/post/purge/revoke/exec, all `mcp__*`) hit the HITL gate.
-- **Observable + approvable runs** *(live)* — the Agent Run Console reads session-core RunService; `PermissionMode::Ask` + risky tool → `AwaitApproval`, with run events streamed over SSE. *(MVP no-tool dispatch is live; the deeper multi-step engine is progressively being wired.)*
+- **Multi-tool agent loop** *(historically verified Plan-mode engine; currently blocked by inference)* — execution-core contains real web, knowledge, shipping, provider, social, Brreg, weather, traffic, news, tracking, and MCP paths. Catalogs differ across modes, and no current live end-to-end success may be inferred from the catalog.
+- **Observable + approvable runs** *(real guarded path; current boundary unsafe)* — `PermissionMode::Ask` pauses before a risky tool and persists approval. The running session-core gRPC approval surface is unauthenticated, so HITL is not globally safe. Tenant/CAS containment and inline MCP denial are source-only fixes.
 - **Smart model selection** *(live)* — `VelionMode::Budget/Balance/Genius` blends heuristic task complexity with the org's cost-core budget posture, downgrading a tier when constrained and falling back to Azure model-router when exhausted.
 
 ### Onboarding intelligence
@@ -161,9 +176,9 @@ This is the strongest part of the story, and the one held to the strictest hones
 - **Residency Tier 2 (Norway East)** *(roadmap)* — documented but conditional. **Honesty bound:** we do **not** claim "data stays in Norway" until a norwayeast deployment is evaluated.
 - **Sovereignty caveat (disclosed):** EU residency is **not** data sovereignty. A US-headquartered subprocessor (including Microsoft Azure) remains reachable under the US CLOUD Act regardless of physical location. This is logged as a disclosed residual risk in the Schrems II transfer assessment with supplementary measures — never claimed as immunity.
 
-### Zero Data Retention (live at model layer)
+### Zero Data Retention (partial at model layer)
 
-ZDR is real and enforced in code: the inference cache (`inference-core/src/cache.rs`) short-circuits both reads and writes when `req.zdr` is set — `get` returns a miss and `put` skips insertion — so a ZDR request never touches the durable prompt cache, even when an identical non-ZDR entry already exists (the `zdr` flag is deliberately excluded from the cache key). This is covered by the `zdr_request_never_persists_or_reads_durable_state` regression test, and the flag threads end-to-end as a proto field through session-core/inference-core. **Honest scope:** ZDR binds the *model vendor* (no training/retention on prompts); Velion still retains its own run-history/conversations/audit under its retention schedule. Only the Azure OpenAI Sweden Central path is confirmed ZDR+EEA today — other vendors are TBC.
+The inference cache correctly skips reads and writes for `req.zdr`, and current gateway/inference source makes issuer-required ZDR monotonic for unary/SSE infer/embed. That is not end-to-end ZDR: session replay classification, compaction, memory, traces, tool I/O, Data Plane grounding, external bridges, provider eligibility, and non-infer/embed modality contracts remain unproved or incomplete. A request whose issuer requires ZDR must not be described as ZDR if Velion retains run history/content under ordinary retention. Only the Azure OpenAI Sweden Central path is presently classified ZDR+EEA; no compliant live end-to-end proof exists.
 
 ### In-infra / 0-SaaS search (partial)
 

@@ -1,24 +1,33 @@
 name: shared-infra
 
+# Legacy compatibility only. The canonical shared Velion NATS server is owned
+# by apps/Frontend Plane/velionv3/docker-compose.yml. Enable this profile only
+# when deliberately running an older frontend stack, never alongside v3.
+
 services:
   velion-nats:
-    image: nats:2.10-alpine
+    profiles: ["legacy-shared-nats"]
+    image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     container_name: velion-nats
-    command: ["-c", "/etc/nats/nats.conf"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test -n "$${VELION_NATS_TOKEN}" || { echo "VELION_NATS_TOKEN is required" >&2; exit 78; }
+        exec nats-server -c /etc/nats/nats.conf
     ports:
-      - "4222:4222"
-      - "8222:8222"
-      - "6222:6222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+      - "127.0.0.1:6222:6222"
     volumes:
       - ./apps/Frontend Plane/velion/nats-shared.conf:/etc/nats/nats.conf:ro
       - velion_nats_data:/data
     environment:
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
     networks:
       - velion-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "nc -zv localhost 4222 > /dev/null 2>&1"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

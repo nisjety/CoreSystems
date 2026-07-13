@@ -1,120 +1,49 @@
 name: external-services
 
-# External integration services: Zammad (ticketing), Nango (API connectors), Nohu (workflow engine)
-# All configured API-only (no web UIs) to be consumed as backend services
+# Deprecated root-level integration overlay.
+#
+# Canonical Zammad ownership is Application Plane/docker-compose.zammad.yml.
+# Nohu was removed because this repository has no verified runtime image or
+# maintained contract. Nango remains available only for controlled migration;
+# active integrations are owned by Ingestion Plane/integration-corev2.
 
 services:
-  # ==============================================
-  # Zammad - Ticketing System (API Only)
-  # ==============================================
-  zammad-postgres:
-    image: postgres:15-alpine
-    container_name: zammad-postgres
-    environment:
-      POSTGRES_DB: zammad
-      POSTGRES_USER: ${ZAMMAD_DB_USER:-zammad}
-      POSTGRES_PASSWORD: ${ZAMMAD_DB_PASSWORD:-zammad_secure_password}
-    volumes:
-      - zammad_postgres_data:/var/lib/postgresql/data
-    networks:
-      - external-services-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${ZAMMAD_DB_USER:-zammad}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  zammad-redis:
-    image: redis:7-alpine
-    container_name: zammad-redis
-    command: redis-server --appendonly yes --requirepass ${ZAMMAD_REDIS_PASSWORD:-zammad_redis_password}
-    volumes:
-      - zammad_redis_data:/data
-    networks:
-      - external-services-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${ZAMMAD_REDIS_PASSWORD:-zammad_redis_password}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  zammad:
-    image: zammad/zammad:latest
-    container_name: zammad-api
-    environment:
-      RAILS_ENV: production
-      RAILS_LOG_TO_STDOUT: "true"
-      ZAMMAD_DB_ADAPTER: postgresql
-      ZAMMAD_DB_HOST: zammad-postgres
-      ZAMMAD_DB_PORT: 5432
-      ZAMMAD_DB_NAME: zammad
-      ZAMMAD_DB_USER: ${ZAMMAD_DB_USER:-zammad}
-      ZAMMAD_DB_PASSWORD: ${ZAMMAD_DB_PASSWORD:-zammad_secure_password}
-      ZAMMAD_REDIS_URL: redis://:${ZAMMAD_REDIS_PASSWORD:-zammad_redis_password}@zammad-redis:6379
-      # Disable web UI—API only
-      ZAMMAD_HTTP_TYPE: http
-      # API token for programmatic access
-      ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN:-zammad_api_token_$(openssl rand -hex 16)}
-    ports:
-      - "3012:3000"  # API port (no web UI)
-    volumes:
-      - zammad_data:/opt/zammad
-    networks:
-      - external-services-net
-    depends_on:
-      zammad-postgres:
-        condition: service_healthy
-      zammad-redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/tickets"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # ==============================================
-  # Nango - legacy API connector platform. Use only with
-  # `--profile legacy-nango`; active Velion services use integration-corev2.
-  # ==============================================
   nango-postgres:
     profiles: ["legacy-nango"]
-    image: postgres:15-alpine
-    container_name: nango-postgres
+    image: postgres:15.18-alpine3.24
+    container_name: legacy-nango-postgres
     environment:
       POSTGRES_DB: nango
       POSTGRES_USER: ${NANGO_DB_USER:-nango}
-      POSTGRES_PASSWORD: ${NANGO_DB_PASSWORD:-nango_secure_password}
+      # Empty by default so `docker compose config` remains inspectable. The
+      # official image refuses to initialize until an operator supplies it.
+      POSTGRES_PASSWORD: ${NANGO_DB_PASSWORD:-}
     volumes:
       - nango_postgres_data:/var/lib/postgresql/data
     networks:
       - external-services-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${NANGO_DB_USER:-nango}"]
+      test: ["CMD-SHELL", "pg_isready -U ${NANGO_DB_USER:-nango} -d nango"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
   nango:
     profiles: ["legacy-nango"]
-    image: nangohq/nango:latest
-    container_name: nango-api
+    image: nangohq/nango:214d010e7c4da819fdb4c8e4f8303c9d07bb6904
+    container_name: legacy-nango-api
     environment:
-      DATABASE_URL: postgres://${NANGO_DB_USER:-nango}:${NANGO_DB_PASSWORD:-nango_secure_password}@nango-postgres:5432/nango?sslmode=disable
-      # API configuration
-      NANGO_API_KEY: ${NANGO_API_KEY:-nango_api_key_$(openssl rand -hex 32)}
-      NANGO_SECRET_KEY: ${NANGO_SECRET_KEY:-nango_secret_key_$(openssl rand -hex 32)}
-      NANGO_ENCRYPTOR_KEY: ${NANGO_ENCRYPTOR_KEY:-nango_encryptor_key_$(openssl rand -hex 32)}
-      # No web UI
-      PORT: 3013
+      DATABASE_URL: postgres://${NANGO_DB_USER:-nango}:${NANGO_DB_PASSWORD:-}@nango-postgres:5432/nango?sslmode=disable
+      NANGO_API_KEY: ${NANGO_API_KEY:-}
+      NANGO_SECRET_KEY: ${NANGO_SECRET_KEY:-}
+      NANGO_ENCRYPTOR_KEY: ${NANGO_ENCRYPTOR_KEY:-}
+      PORT: "3013"
       NODE_ENV: production
       LOG_LEVEL: info
     ports:
-      - "3013:3013"  # API port
+      - "127.0.0.1:3013:3013"
     networks:
       - external-services-net
     depends_on:
@@ -122,75 +51,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3013/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # ==============================================
-  # Nohu - Workflow Engine (API Only)
-  # ==============================================
-  nohu-postgres:
-    image: postgres:15-alpine
-    container_name: nohu-postgres
-    environment:
-      POSTGRES_DB: nohu
-      POSTGRES_USER: ${NOHU_DB_USER:-nohu}
-      POSTGRES_PASSWORD: ${NOHU_DB_PASSWORD:-nohu_secure_password}
-    volumes:
-      - nohu_postgres_data:/var/lib/postgresql/data
-    networks:
-      - external-services-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${NOHU_DB_USER:-nohu}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  nohu-redis:
-    image: redis:7-alpine
-    container_name: nohu-redis
-    command: redis-server --appendonly yes --requirepass ${NOHU_REDIS_PASSWORD:-nohu_redis_password}
-    volumes:
-      - nohu_redis_data:/data
-    networks:
-      - external-services-net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${NOHU_REDIS_PASSWORD:-nohu_redis_password}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  nohu:
-    image: nohu/nohu:latest
-    container_name: nohu-api
-    environment:
-      # Database
-      DATABASE_URL: postgres://${NOHU_DB_USER:-nohu}:${NOHU_DB_PASSWORD:-nohu_secure_password}@nohu-postgres:5432/nohu?sslmode=disable
-      # Redis for job queue
-      REDIS_URL: redis://:${NOHU_REDIS_PASSWORD:-nohu_redis_password}@nohu-redis:6379
-      # API configuration
-      NOHU_API_KEY: ${NOHU_API_KEY:-nohu_api_key_$(openssl rand -hex 32)}
-      NOHU_SECRET_KEY: ${NOHU_SECRET_KEY:-nohu_secret_key_$(openssl rand -hex 32)}
-      # No web UI
-      PORT: 3014
-      NODE_ENV: production
-      LOG_LEVEL: info
-    ports:
-      - "3014:3014"  # API port
-    networks:
-      - external-services-net
-    depends_on:
-      nohu-postgres:
-        condition: service_healthy
-      nohu-redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3014/health"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3013/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -202,9 +63,4 @@ networks:
     driver: bridge
 
 volumes:
-  zammad_postgres_data:
-  zammad_redis_data:
-  zammad_data:
   nango_postgres_data:
-  nohu_postgres_data:
-  nohu_redis_data:
