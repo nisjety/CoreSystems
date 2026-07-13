@@ -79,7 +79,7 @@ Current relationships:
 
 Three layers stack on every guarded route, in this exact order (`cmd/main.go:152-181`):
 
-1. **`internalAuthMiddleware(cfg.InternalAPIKey)`** — constant-time compare against a single `INTERNAL_API_KEY` shared across every internal caller in the fleet (confirmed identical value on `dpv2-documents-api` and `auth-service` in this pass: `7647e1c6...943e0db`). No caller-specific identity here at all — it is a fleet membership card, not a credential tied to a tenant, user, or even a specific calling service.
+1. **`internalAuthMiddleware(cfg.InternalAPIKey)`** — constant-time compare against a single `INTERNAL_API_KEY` shared across every internal caller in the fleet (confirmed identical value on `dpv2-documents-api` and `auth-service` in this pass: `<INTERNAL_API_KEY-redacted>...redacted`). No caller-specific identity here at all — it is a fleet membership card, not a credential tied to a tenant, user, or even a specific calling service.
 2. **`authctx.Middleware`** — observe mode by default (`AUTHCTX_ENFORCE=0`). Decodes `Authorization: Bearer <jwt>` **without verifying the signature**, logs a warning if the decoded (unverified) `org_id` disagrees with `X-Org-ID`, and always calls `next.ServeHTTP` regardless of what it found (or didn't find).
 3. **`handler.OrgIDMiddleware`** — pulls `X-Org-ID` straight off the header (400 if absent) and stamps it into context. This is what every downstream repo query actually scopes on.
 

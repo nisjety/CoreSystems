@@ -7,6 +7,20 @@
 
 ---
 
+## ⚠️ Operator verification corrections (2026-07-13, evening) — read first
+
+These two system docs were written ~09:18; authoritative **plane** docs were updated 13:44–19:14 and materially supersede parts of them. A full reconcile (classifying every finding as **source-tested / deployed / live-effective / blocked** and recomputing active totals) is still **pending**. Operator-verified corrections to apply on top of everything below:
+
+- **"Everything else confirmed live" is obsolete.** Convex member-removal, information provenance, graph-preview authorization, ZDR propagation, and several auth boundaries are now **source-fixed but mostly UNDEPLOYED** — so their *live* behavior is unchanged until a deploy. Treat the "CONFIRMED-LIVE" list below as a morning snapshot, not current live state.
+- **The ZDR "zero references in Data/Ingestion" claim is FALSE.** Current source has ZDR coverage across **dozens** of Data and Ingestion files (source-fixed; deploy pending). The roadmap's ZDR finding is corrected accordingly.
+- **Data "all five release contracts green" no longer holds.** On re-run, **3 pass, 2 FAIL**: `compose-security-contract-test.sh` and `image-provenance-contract-test.sh`. Current compose permits **empty self-owned credentials** and **unverified/unknown image provenance**. Both must be fixed **before any image build**.
+- **Compaction is healthy** (correct) — but the counter is **cumulative and resets on restart**: it read 163 successes / 0 errors after the latest restart. The 384/479 figures were valid historical snapshots, not permanent totals.
+- **Docker currently works:** 97 containers / 93 running / 80 explicitly healthy / none unhealthy; `exec`, `logs`, `inspect`, `system df` all succeed. Disk remains risky at ~98% (~10–11 GiB free).
+- **Still true live (undeployed fixes notwithstanding):** inference `:9092` closed; cost-core returns 200 with no auth; shipping uses the July-4 unlabelled image and exposes mock carriers without auth; Quarry runs `ENVIRONMENT=dev` with bearer-bypass on and Control HMAC disabled (both ports loopback-bound).
+- A **partial internal-key fragment** that appeared in an earlier revision of these docs has been **redacted**. (It persists in local intermediate commit history; scrub before any first push.)
+
+---
+
 ## Live re-verification addendum (2026-07-13, all six planes running)
 
 After the first pass, the whole fleet was confirmed up (**93 containers, all healthy**) and every headline finding was re-tested by **hitting the running service directly** (`curl`/`docker exec`), not by reading source. Result: **15 claims CONFIRMED-LIVE, 3 retracted/stale, 2 corrected.** The load-bearing conclusion held; three findings did not survive live testing and are withdrawn below.
@@ -104,7 +118,7 @@ These are patterns, not one-offs — each spans multiple services/planes and is 
    - Where consumers *are* durable, several **ack (drop) on transient errors** with no DLQ: DP's 3-service indexing family (`index/embedding/graph-engine`) drops genuine events on a `ReplayCacheUnavailable` blip; autocomplete-core drops on a Sonic outage *and* dies on a stream error with no reconnect loop while `/ready` stays green.
    - Model Plane's `natsx` wrapper keeps an **unbounded** in-memory dedup map (memory leak + double-apply on restart).
 
-2. **Secret scoping has fleet-wide blast radius.** One static `INTERNAL_API_KEY` (`7647e1c6…`) is shared across **Control + Data + Ingestion** planes (auth/user/org/billing/imports/integration/notification/support-worker); one Azure key backs ~10 Azure AI services across two planes; Anthropic/Google keys are shared 3–4×; two disjoint **symmetric HS256** `JWT_SECRET`s (user-core, convex) are token-*mint* capability at rest. A leak in the lowest-trust plane (Data Plane v2, historically no-cred readable) compromises paid inference and internal impersonation everywhere.
+2. **Secret scoping has fleet-wide blast radius.** One static `INTERNAL_API_KEY` (`<INTERNAL_API_KEY-redacted>…`) is shared across **Control + Data + Ingestion** planes (auth/user/org/billing/imports/integration/notification/support-worker); one Azure key backs ~10 Azure AI services across two planes; Anthropic/Google keys are shared 3–4×; two disjoint **symmetric HS256** `JWT_SECRET`s (user-core, convex) are token-*mint* capability at rest. A leak in the lowest-trust plane (Data Plane v2, historically no-cred readable) compromises paid inference and internal impersonation everywhere.
 
 3. **Unauthenticated / IDOR surfaces remain live.** `cost-core` (no inbound auth; ledger read+write IDOR; budget check **fails open** on DB error → unlimited spend), `bridge-core` (attacker-controlled `org_id`), `quarry-edge` (dev-bypass shipped ON with no `ENVIRONMENT` guard → accepts any bearer), velion-gateway `graph_preview` (client `?org_id=` cross-tenant read), `finspo-core` (trusts client `X-Org-ID` behind only the shared key), and HITL that only engages in Plan mode (composer writes un-gated on a normal turn).
 
